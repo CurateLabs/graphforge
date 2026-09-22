@@ -1,0 +1,4098 @@
+{
+  "failed_phase": null,
+  "phases": [
+    {
+      "duration_ms": 10,
+      "exit_code": 0,
+      "peak_rss_bytes": 303104,
+      "phase": "admission",
+      "status": "passed"
+    },
+    {
+      "duration_ms": 7242,
+      "exit_code": 0,
+      "peak_rss_bytes": 73940992,
+      "phase": "generate",
+      "status": "passed"
+    },
+    {
+      "duration_ms": 128818,
+      "exit_code": 0,
+      "peak_rss_bytes": 323059712,
+      "phase": "ingest",
+      "receipts": [
+        {
+          "contract": "graphforge-import-session/1",
+          "outcome": "begun",
+          "region_diagnostics": {
+            "complete": true,
+            "contract": "graphforge-region-diagnostics/1",
+            "cpu_scope": "shared_process_inclusive_do_not_sum",
+            "regions": {
+              "import_command": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 103592,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 333840,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 193869,
+                  "wall_ns": 527709
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 173543,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 111910,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 8411,
+                  "wall_ns": 120321
+                },
+                "work": {}
+              },
+              "import_command/begin_import": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 69951,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 221930,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 185458,
+                  "wall_ns": 407388
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 69951,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 221930,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 185458,
+                  "wall_ns": 407388
+                },
+                "work": {}
+              }
+            },
+            "scheduler_scope": "calling_thread_only_unknown_is_not_blocked_or_psi"
+          }
+        },
+        {
+          "contract": "graphforge-import-session/1",
+          "outcome": "registered",
+          "region_diagnostics": {
+            "complete": true,
+            "contract": "graphforge-region-diagnostics/1",
+            "cpu_scope": "shared_process_inclusive_do_not_sum",
+            "regions": {
+              "import_command": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 10000000,
+                  "sampling_uncertainty_ns": 98942,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 10925646,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 13778992,
+                  "wall_ns": 24704638
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 212044,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 108510,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 40374,
+                  "wall_ns": 148884
+                },
+                "work": {}
+              },
+              "import_command/register_parquet": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 10000000,
+                  "sampling_uncertainty_ns": 53911,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 10734526,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 13719577,
+                  "wall_ns": 24454103
+                },
+                "residual": {
+                  "process_cpu_ns": 10000000,
+                  "sampling_uncertainty_ns": 136793,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 10548796,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 13603562,
+                  "wall_ns": 24152358
+                },
+                "work": {
+                  "bytes": 16784923
+                }
+              },
+              "import_command/register_parquet/checkpoint": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 82882,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 185730,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 116015,
+                  "wall_ns": 301745
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 82882,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 185730,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 116015,
+                  "wall_ns": 301745
+                },
+                "work": {}
+              },
+              "import_command/resume_import": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 59191,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 82610,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 19041,
+                  "wall_ns": 101651
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 59191,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 82610,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 19041,
+                  "wall_ns": 101651
+                },
+                "work": {}
+              }
+            },
+            "scheduler_scope": "calling_thread_only_unknown_is_not_blocked_or_psi"
+          }
+        },
+        {
+          "contract": "graphforge-import-session/1",
+          "outcome": "registered",
+          "region_diagnostics": {
+            "complete": true,
+            "contract": "graphforge-region-diagnostics/1",
+            "cpu_scope": "shared_process_inclusive_do_not_sum",
+            "regions": {
+              "import_command": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 450000000,
+                  "sampling_uncertainty_ns": 78122,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 447596101,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 1919778672,
+                  "wall_ns": 2367374773
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 193375,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 119650,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 7162,
+                  "wall_ns": 126812
+                },
+                "work": {}
+              },
+              "import_command/register_parquet": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 450000000,
+                  "sampling_uncertainty_ns": 55092,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 447376381,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 1919731687,
+                  "wall_ns": 2367108068
+                },
+                "residual": {
+                  "process_cpu_ns": 450000000,
+                  "sampling_uncertainty_ns": 143543,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 447151321,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 1919587200,
+                  "wall_ns": 2366738521
+                },
+                "work": {
+                  "bytes": 805552757
+                }
+              },
+              "import_command/register_parquet/checkpoint": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 88451,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 225060,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 144487,
+                  "wall_ns": 369547
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 88451,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 225060,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 144487,
+                  "wall_ns": 369547
+                },
+                "work": {}
+              },
+              "import_command/resume_import": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 60161,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 100070,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 39823,
+                  "wall_ns": 139893
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 60161,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 100070,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 39823,
+                  "wall_ns": 139893
+                },
+                "work": {}
+              }
+            },
+            "scheduler_scope": "calling_thread_only_unknown_is_not_blocked_or_psi"
+          }
+        },
+        {
+          "bytes_accepted": 822337680,
+          "construction": {
+            "accepted_chunks": 272,
+            "application_io": {
+              "phases": {
+                "append_merge": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 272,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 3126373984,
+                  "write_calls": 8016
+                },
+                "cas_install_read_write": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "encode_write_postwrite_authentication": {
+                  "block_count": 0,
+                  "fsync_calls": 585,
+                  "object_count": 0,
+                  "read_bytes": 3477085199,
+                  "read_calls": 3795,
+                  "write_bytes": 1105949593,
+                  "write_calls": 40878
+                },
+                "fsync_synchronization": {
+                  "block_count": 0,
+                  "fsync_calls": 33007,
+                  "object_count": 0,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "hydration_verification": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "publication_preauthentication": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "recovery_reauthentication": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "seal_authentication": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "shape_consume_reauthentication": {
+                  "block_count": 114754,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 11258350664,
+                  "read_calls": 21739,
+                  "write_bytes": 7105153358,
+                  "write_calls": 198074
+                }
+              },
+              "totals": {
+                "block_count": 114754,
+                "fsync_calls": 33592,
+                "object_count": 272,
+                "read_bytes": 14735435863,
+                "read_calls": 25534,
+                "write_bytes": 11337476935,
+                "write_calls": 246968
+              }
+            },
+            "cache_release_operations": 31484,
+            "cache_release_unsupported_operations": 0,
+            "cache_released_bytes": 25145904546,
+            "configured_batch_rows": 65536,
+            "construction_staging": {
+              "allocated_bytes": 1106837504,
+              "logical_bytes": 1105946845,
+              "logical_references": 357,
+              "physical_logical_bytes": 1105946845,
+              "physical_objects": 357
+            },
+            "construction_staging_transient_peak_allocated_bytes": 5834706944,
+            "fsync_operations": 3488,
+            "immutable_artifacts": 1072,
+            "input_batches": 272,
+            "input_rows": 17825792,
+            "peak_batch_bytes": 3670536,
+            "peak_batch_rows": 65536,
+            "peak_cache_release_window_bytes": 694506837,
+            "publication_committed": false,
+            "publication_work": {
+              "cas_install_read_write": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "contract": "graphforge-publication-work/1",
+              "encode_write_postwrite_authentication": {
+                "block_count": 0,
+                "fsync_calls": 585,
+                "object_count": 0,
+                "read_bytes": 3477085199,
+                "read_calls": 3795,
+                "write_bytes": 1105949593,
+                "write_calls": 40878
+              },
+              "fsync_synchronization": {
+                "block_count": 0,
+                "fsync_calls": 33007,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "hydration_verification": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "publication_preauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "semantic_total_operations": 78265
+            },
+            "transient_peak_allocated_bytes": 5834706944,
+            "write_bytes": 3126373984,
+            "write_operations": 8016
+          },
+          "contract": "graphforge-import-session/1",
+          "operation_timings": {
+            "append": {
+              "calls": 272,
+              "cpu_ns": 13890000000,
+              "cpu_unmeasured_calls": 0,
+              "elapsed_ns": 15809744567,
+              "errors": 0
+            },
+            "begin": {
+              "calls": 1,
+              "cpu_ns": 0,
+              "cpu_unmeasured_calls": 0,
+              "elapsed_ns": 1202501,
+              "errors": 0
+            },
+            "publish": {
+              "calls": 0,
+              "cpu_ns": 0,
+              "cpu_unmeasured_calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "resume": {
+              "calls": 0,
+              "cpu_ns": 0,
+              "cpu_unmeasured_calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "seal": {
+              "calls": 1,
+              "cpu_ns": 84040000000,
+              "cpu_unmeasured_calls": 0,
+              "elapsed_ns": 93234399495,
+              "errors": 0
+            }
+          },
+          "outcome": "validated",
+          "region_diagnostics": {
+            "complete": true,
+            "contract": "graphforge-region-diagnostics/1",
+            "cpu_scope": "shared_process_inclusive_do_not_sum",
+            "regions": {
+              "import_command": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 110780000000,
+                  "sampling_uncertainty_ns": 90761,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 85372536861,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 29748016599,
+                  "wall_ns": 115120553460
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 246635,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 368120,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 31018,
+                  "wall_ns": 399138
+                },
+                "work": {}
+              },
+              "import_command/resume_import": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 59352,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 90330,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 70003,
+                  "wall_ns": 160333
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 59352,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 90330,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 70003,
+                  "wall_ns": 160333
+                },
+                "work": {}
+              },
+              "import_command/validate": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 110780000000,
+                  "sampling_uncertainty_ns": 96522,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 85372078411,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 29747915578,
+                  "wall_ns": 115119993989
+                },
+                "residual": {
+                  "process_cpu_ns": 600000000,
+                  "sampling_uncertainty_ns": 28697916,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 559613583,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 1249942987,
+                  "wall_ns": 1809556570
+                },
+                "work": {}
+              },
+              "import_command/validate/append": {
+                "calls": 272,
+                "inclusive": {
+                  "process_cpu_ns": 13890000000,
+                  "sampling_uncertainty_ns": 16782659,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 13879478853,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 1943861030,
+                  "wall_ns": 15823339883
+                },
+                "residual": {
+                  "process_cpu_ns": 13520000000,
+                  "sampling_uncertainty_ns": 590244928,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 13461982106,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 14955723523
+                },
+                "work": {
+                  "rows": 17825792
+                }
+              },
+              "import_command/validate/append/fsync": {
+                "calls": 9424,
+                "inclusive": {
+                  "process_cpu_ns": 370000000,
+                  "sampling_uncertainty_ns": 573462269,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 417496747,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 867616360
+                },
+                "residual": {
+                  "process_cpu_ns": 370000000,
+                  "sampling_uncertainty_ns": 573462269,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 417496747,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 867616360
+                },
+                "work": {}
+              },
+              "import_command/validate/normalization": {
+                "calls": 90,
+                "inclusive": {
+                  "process_cpu_ns": 12240000000,
+                  "sampling_uncertainty_ns": 11697442,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 8248254,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 4234923948,
+                  "wall_ns": 4243172202
+                },
+                "residual": {
+                  "process_cpu_ns": 12240000000,
+                  "sampling_uncertainty_ns": 11697442,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 8248254,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 4234923948,
+                  "wall_ns": 4243172202
+                },
+                "work": {
+                  "rows": 17825792
+                }
+              },
+              "import_command/validate/open_construction": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 59022,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 1103701,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 373505,
+                  "wall_ns": 1477206
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 289977,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 957031,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 285599,
+                  "wall_ns": 1242630
+                },
+                "work": {}
+              },
+              "import_command/validate/open_construction/fsync": {
+                "calls": 2,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 118813,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 87840,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 86104,
+                  "wall_ns": 173944
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 118813,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 87840,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 86104,
+                  "wall_ns": 173944
+                },
+                "work": {}
+              },
+              "import_command/validate/open_construction/lock_wait": {
+                "calls": 2,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 112142,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 58830,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 1802,
+                  "wall_ns": 60632
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 112142,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 58830,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 1802,
+                  "wall_ns": 60632
+                },
+                "work": {}
+              },
+              "import_command/validate/seal": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 84050000000,
+                  "sampling_uncertainty_ns": 62271,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 70923634020,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 22318814108,
+                  "wall_ns": 93242448128
+                },
+                "residual": {
+                  "process_cpu_ns": 230000000,
+                  "sampling_uncertainty_ns": 1538907,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 210931320,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 1493437,
+                  "wall_ns": 212424757
+                },
+                "work": {}
+              },
+              "import_command/validate/seal/canonical_encoding": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 30740000000,
+                  "sampling_uncertainty_ns": 57941,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 30754768643,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 2308622977,
+                  "wall_ns": 33063391620
+                },
+                "residual": {
+                  "process_cpu_ns": 15770000000,
+                  "sampling_uncertainty_ns": 23806020,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 15759644001,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 16834314603
+                },
+                "work": {
+                  "edges": 16777216,
+                  "nodes": 1048576
+                }
+              },
+              "import_command/validate/seal/canonical_encoding/adjacency_encoding": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 14970000000,
+                  "sampling_uncertainty_ns": 98741,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 14977157833,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 1208112814,
+                  "wall_ns": 16185270647
+                },
+                "residual": {
+                  "process_cpu_ns": 14970000000,
+                  "sampling_uncertainty_ns": 98741,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 14977157833,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 1208112814,
+                  "wall_ns": 16185270647
+                },
+                "work": {}
+              },
+              "import_command/validate/seal/canonical_encoding/fsync": {
+                "calls": 290,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 23649338,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 17966809,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 43806370
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 23649338,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 17966809,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 43806370
+                },
+                "work": {}
+              },
+              "import_command/validate/seal/checkpoint": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 146143,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 399300,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 158040,
+                  "wall_ns": 557340
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 146143,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 399300,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 158040,
+                  "wall_ns": 557340
+                },
+                "work": {}
+              },
+              "import_command/validate/seal/fsync": {
+                "calls": 15,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 1075429,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 775411,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 5024137,
+                  "wall_ns": 5799548
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 1075429,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 775411,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 5024137,
+                  "wall_ns": 5799548
+                },
+                "work": {}
+              },
+              "import_command/validate/seal/lock_wait": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 65311,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 36340,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 6470,
+                  "wall_ns": 42810
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 65311,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 36340,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 6470,
+                  "wall_ns": 42810
+                },
+                "work": {}
+              },
+              "import_command/validate/seal/seal_authentication": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 20000000,
+                  "sampling_uncertainty_ns": 54520,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 11485275,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 1421804,
+                  "wall_ns": 12907079
+                },
+                "residual": {
+                  "process_cpu_ns": 20000000,
+                  "sampling_uncertainty_ns": 176601,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 11395135,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 1300161,
+                  "wall_ns": 12695296
+                },
+                "work": {}
+              },
+              "import_command/validate/seal/seal_authentication/fsync": {
+                "calls": 2,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 122081,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 90140,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 121643,
+                  "wall_ns": 211783
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 122081,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 90140,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 121643,
+                  "wall_ns": 211783
+                },
+                "work": {}
+              },
+              "import_command/validate/seal/shaping": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 53060000000,
+                  "sampling_uncertainty_ns": 77292,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 39945237731,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 20002087243,
+                  "wall_ns": 59947324974
+                },
+                "residual": {
+                  "process_cpu_ns": 50860000000,
+                  "sampling_uncertainty_ns": 1633614013,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 37983968671,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 54611718652
+                },
+                "work": {
+                  "edges": 16777216,
+                  "nodes": 1048576
+                }
+              },
+              "import_command/validate/seal/shaping/artifact_authentication": {
+                "calls": 272,
+                "inclusive": {
+                  "process_cpu_ns": 750000000,
+                  "sampling_uncertainty_ns": 21810063,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 711056973,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 281492389,
+                  "wall_ns": 992549362
+                },
+                "residual": {
+                  "process_cpu_ns": 750000000,
+                  "sampling_uncertainty_ns": 21810063,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 711056973,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 281492389,
+                  "wall_ns": 992549362
+                },
+                "work": {}
+              },
+              "import_command/validate/seal/shaping/fsync": {
+                "calls": 27127,
+                "inclusive": {
+                  "process_cpu_ns": 1450000000,
+                  "sampling_uncertainty_ns": 1611726658,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 1250212087,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 4343056960
+                },
+                "residual": {
+                  "process_cpu_ns": 1450000000,
+                  "sampling_uncertainty_ns": 1611726658,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 1250212087,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 4343056960
+                },
+                "work": {}
+              }
+            },
+            "scheduler_scope": "calling_thread_only_unknown_is_not_blocked_or_psi"
+          },
+          "rows_accepted": 17825792,
+          "rows_rejected": 0
+        },
+        {
+          "construction": {
+            "accepted_chunks": 272,
+            "application_io": {
+              "phases": {
+                "append_merge": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 272,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 3126373984,
+                  "write_calls": 8016
+                },
+                "cas_install_read_write": {
+                  "block_count": 0,
+                  "fsync_calls": 4077,
+                  "object_count": 0,
+                  "read_bytes": 1107822061,
+                  "read_calls": 18902,
+                  "write_bytes": 892841464,
+                  "write_calls": 14785
+                },
+                "encode_write_postwrite_authentication": {
+                  "block_count": 0,
+                  "fsync_calls": 585,
+                  "object_count": 0,
+                  "read_bytes": 3477085199,
+                  "read_calls": 3795,
+                  "write_bytes": 1105949593,
+                  "write_calls": 40878
+                },
+                "fsync_synchronization": {
+                  "block_count": 0,
+                  "fsync_calls": 33019,
+                  "object_count": 0,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "hydration_verification": {
+                  "block_count": 0,
+                  "fsync_calls": 16,
+                  "object_count": 0,
+                  "read_bytes": 84076105,
+                  "read_calls": 1291,
+                  "write_bytes": 42037964,
+                  "write_calls": 645
+                },
+                "publication_preauthentication": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 112967,
+                  "read_calls": 3,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "recovery_reauthentication": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 1106088454,
+                  "read_calls": 17243,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "seal_authentication": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "shape_consume_reauthentication": {
+                  "block_count": 114754,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 11258350664,
+                  "read_calls": 21739,
+                  "write_bytes": 7105153358,
+                  "write_calls": 198074
+                }
+              },
+              "totals": {
+                "block_count": 114754,
+                "fsync_calls": 37697,
+                "object_count": 272,
+                "read_bytes": 17033535450,
+                "read_calls": 62973,
+                "write_bytes": 12272356363,
+                "write_calls": 262398
+              }
+            },
+            "cache_release_operations": 31837,
+            "cache_release_unsupported_operations": 0,
+            "cache_released_bytes": 26251851391,
+            "configured_batch_rows": 65536,
+            "construction_staging": {
+              "allocated_bytes": 1106837504,
+              "logical_bytes": 1105946845,
+              "logical_references": 357,
+              "physical_logical_bytes": 1105946845,
+              "physical_objects": 357
+            },
+            "construction_staging_transient_peak_allocated_bytes": 5834706944,
+            "fsync_operations": 3488,
+            "immutable_artifacts": 1072,
+            "input_batches": 272,
+            "input_rows": 17825792,
+            "peak_batch_bytes": 3670536,
+            "peak_batch_rows": 65536,
+            "peak_cache_release_window_bytes": 694506837,
+            "publication_committed": true,
+            "publication_work": {
+              "cas_install_read_write": {
+                "block_count": 0,
+                "fsync_calls": 4077,
+                "object_count": 0,
+                "read_bytes": 1107822061,
+                "read_calls": 18902,
+                "write_bytes": 892841464,
+                "write_calls": 14785
+              },
+              "contract": "graphforge-publication-work/1",
+              "encode_write_postwrite_authentication": {
+                "block_count": 0,
+                "fsync_calls": 585,
+                "object_count": 0,
+                "read_bytes": 3477085199,
+                "read_calls": 3795,
+                "write_bytes": 1105949593,
+                "write_calls": 40878
+              },
+              "fsync_synchronization": {
+                "block_count": 0,
+                "fsync_calls": 33019,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "hydration_verification": {
+                "block_count": 0,
+                "fsync_calls": 16,
+                "object_count": 0,
+                "read_bytes": 84076105,
+                "read_calls": 1291,
+                "write_bytes": 42037964,
+                "write_calls": 645
+              },
+              "publication_preauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 112967,
+                "read_calls": 3,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "semantic_total_operations": 117996
+            },
+            "transient_peak_allocated_bytes": 5834706944,
+            "write_bytes": 3126373984,
+            "write_operations": 8016
+          },
+          "contract": "graphforge-import-session/1",
+          "operation_timings": {
+            "append": {
+              "calls": 0,
+              "cpu_ns": 0,
+              "cpu_unmeasured_calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "begin": {
+              "calls": 0,
+              "cpu_ns": 0,
+              "cpu_unmeasured_calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "publish": {
+              "calls": 1,
+              "cpu_ns": 5370000000,
+              "cpu_unmeasured_calls": 0,
+              "elapsed_ns": 10567487758,
+              "errors": 0
+            },
+            "resume": {
+              "calls": 1,
+              "cpu_ns": 120000000,
+              "cpu_unmeasured_calls": 0,
+              "elapsed_ns": 219311314,
+              "errors": 0
+            },
+            "seal": {
+              "calls": 0,
+              "cpu_ns": 0,
+              "cpu_unmeasured_calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            }
+          },
+          "outcome": "committed",
+          "region_diagnostics": {
+            "complete": true,
+            "contract": "graphforge-region-diagnostics/1",
+            "cpu_scope": "shared_process_inclusive_do_not_sum",
+            "regions": {
+              "import_command": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 5490000000,
+                  "sampling_uncertainty_ns": 99621,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 5491003684,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 5296893278,
+                  "wall_ns": 10787896962
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 217432,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 165590,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 44505,
+                  "wall_ns": 210095
+                },
+                "work": {}
+              },
+              "import_command/commit": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 5490000000,
+                  "sampling_uncertainty_ns": 56630,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 5490702474,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 5296823061,
+                  "wall_ns": 10787525535
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 224485,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 293580,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 292866
+                },
+                "work": {}
+              },
+              "import_command/commit/checkpoint": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 60071,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 162570,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 224026,
+                  "wall_ns": 386596
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 60071,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 162570,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 224026,
+                  "wall_ns": 386596
+                },
+                "work": {}
+              },
+              "import_command/commit/open_construction": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 120000000,
+                  "sampling_uncertainty_ns": 56312,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 117722548,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 101634767,
+                  "wall_ns": 219357315
+                },
+                "residual": {
+                  "process_cpu_ns": 120000000,
+                  "sampling_uncertainty_ns": 433837,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 117469628,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 101376789,
+                  "wall_ns": 218846417
+                },
+                "work": {}
+              },
+              "import_command/commit/open_construction/fsync": {
+                "calls": 4,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 261863,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 192330,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 254817,
+                  "wall_ns": 447147
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 261863,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 192330,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 254817,
+                  "wall_ns": 447147
+                },
+                "work": {}
+              },
+              "import_command/commit/open_construction/lock_wait": {
+                "calls": 2,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 115662,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 60590,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 3161,
+                  "wall_ns": 63751
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 115662,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 60590,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 3161,
+                  "wall_ns": 63751
+                },
+                "work": {}
+              },
+              "import_command/commit/publish": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 5370000000,
+                  "sampling_uncertainty_ns": 51472,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 5372523776,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 5194964982,
+                  "wall_ns": 10567488758
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 531791,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 584440,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 81201,
+                  "wall_ns": 665641
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/cas_install": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 1540000000,
+                  "sampling_uncertainty_ns": 80541,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 1541309665,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 2562144164,
+                  "wall_ns": 4103453829
+                },
+                "residual": {
+                  "process_cpu_ns": 1540000000,
+                  "sampling_uncertainty_ns": 80541,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 1541309665,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 2562144164,
+                  "wall_ns": 4103453829
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/generation_commit": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 1740000000,
+                  "sampling_uncertainty_ns": 56751,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 1744817124,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 1270215424,
+                  "wall_ns": 3015032548
+                },
+                "residual": {
+                  "process_cpu_ns": 1740000000,
+                  "sampling_uncertainty_ns": 34563103,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 1726656325,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 2993799894
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/generation_commit/fsync": {
+                "calls": 23,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 1353303,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 870960,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 3294127
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 1353303,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 870960,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 3294127
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/generation_commit/lock_wait": {
+                "calls": 575,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 33153049,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 17289839,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 17938527
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 33153049,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 17289839,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 17938527
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/hydration": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 970000000,
+                  "sampling_uncertainty_ns": 60801,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 974418481,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 730252509,
+                  "wall_ns": 1704670990
+                },
+                "residual": {
+                  "process_cpu_ns": 930000000,
+                  "sampling_uncertainty_ns": 30169976,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 958729065,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 1688204667
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/hydration/fsync": {
+                "calls": 2,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 130362,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 91930,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 128085,
+                  "wall_ns": 220015
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 130362,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 91930,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 128085,
+                  "wall_ns": 220015
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/hydration/lock_wait": {
+                "calls": 570,
+                "inclusive": {
+                  "process_cpu_ns": 40000000,
+                  "sampling_uncertainty_ns": 29978813,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 15597486,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 16246308
+                },
+                "residual": {
+                  "process_cpu_ns": 40000000,
+                  "sampling_uncertainty_ns": 29978813,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 15597486,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 16246308
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/prepare_encoding": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 90000000,
+                  "sampling_uncertainty_ns": 56980,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 90601227,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 511217,
+                  "wall_ns": 91112444
+                },
+                "residual": {
+                  "process_cpu_ns": 90000000,
+                  "sampling_uncertainty_ns": 298046,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 90414287,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 271689,
+                  "wall_ns": 90685976
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/prepare_encoding/fsync": {
+                "calls": 4,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 241066,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 186940,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 239528,
+                  "wall_ns": 426468
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 241066,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 186940,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 239528,
+                  "wall_ns": 426468
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/publication_authentication": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 10000000,
+                  "sampling_uncertainty_ns": 58882,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 3885263,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 1601824,
+                  "wall_ns": 5487087
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 518900,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 3654842,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 1576591,
+                  "wall_ns": 5231433
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/publication_authentication/lock_wait": {
+                "calls": 8,
+                "inclusive": {
+                  "process_cpu_ns": 10000000,
+                  "sampling_uncertainty_ns": 460018,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 230421,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 25233,
+                  "wall_ns": 255654
+                },
+                "residual": {
+                  "process_cpu_ns": 10000000,
+                  "sampling_uncertainty_ns": 460018,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 230421,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 25233,
+                  "wall_ns": 255654
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/publication_intent": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 55831,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 967310,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 428955,
+                  "wall_ns": 1396265
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 300447,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 788080,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 231599,
+                  "wall_ns": 1019679
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/publication_intent/fsync": {
+                "calls": 4,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 244616,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 179230,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 197356,
+                  "wall_ns": 376586
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 244616,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 179230,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 197356,
+                  "wall_ns": 376586
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/publication_receipt": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 870000000,
+                  "sampling_uncertainty_ns": 52382,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 869966571,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 625329910,
+                  "wall_ns": 1495296481
+                },
+                "residual": {
+                  "process_cpu_ns": 860000000,
+                  "sampling_uncertainty_ns": 11731900,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 863852266,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 1488933845
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/publication_receipt/fsync": {
+                "calls": 4,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 237554,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 173001,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 201886,
+                  "wall_ns": 374887
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 237554,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 173001,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 201886,
+                  "wall_ns": 374887
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/publication_receipt/lock_wait": {
+                "calls": 211,
+                "inclusive": {
+                  "process_cpu_ns": 10000000,
+                  "sampling_uncertainty_ns": 11441964,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 5941304,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 5987749
+                },
+                "residual": {
+                  "process_cpu_ns": 10000000,
+                  "sampling_uncertainty_ns": 11441964,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 5941304,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": null,
+                  "wall_ns": 5987749
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/read_authority": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 150000000,
+                  "sampling_uncertainty_ns": 58151,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 145973695,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 4399778,
+                  "wall_ns": 150373473
+                },
+                "residual": {
+                  "process_cpu_ns": 150000000,
+                  "sampling_uncertainty_ns": 614840,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 145687454,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 4386363,
+                  "wall_ns": 150073817
+                },
+                "work": {}
+              },
+              "import_command/commit/publish/read_authority/lock_wait": {
+                "calls": 11,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 556689,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 286241,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 13415,
+                  "wall_ns": 299656
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 556689,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 286241,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 13415,
+                  "wall_ns": 299656
+                },
+                "work": {}
+              },
+              "import_command/resume_import": {
+                "calls": 1,
+                "inclusive": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 61181,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 135620,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 25712,
+                  "wall_ns": 161332
+                },
+                "residual": {
+                  "process_cpu_ns": 0,
+                  "sampling_uncertainty_ns": 61181,
+                  "thread_iowait_ns": null,
+                  "thread_runnable_ns": null,
+                  "thread_running_ns": 135620,
+                  "thread_sleeping_ns": null,
+                  "thread_uninterruptible_ns": null,
+                  "thread_unknown_ns": 25712,
+                  "wall_ns": 161332
+                },
+                "work": {}
+              }
+            },
+            "scheduler_scope": "calling_thread_only_unknown_is_not_blocked_or_psi"
+          }
+        },
+        {
+          "children_cpu_ns": 116820000000,
+          "contract": "graphforge-workflow-timing/1",
+          "cpu_scope": "runner_and_waited_children_shared",
+          "runner_cpu_ns": 900000000,
+          "sampling_uncertainty_ns": 68672,
+          "wall_ns": 128818225580
+        }
+      ],
+      "status": "passed"
+    },
+    {
+      "duration_ms": 4178,
+      "exit_code": 0,
+      "peak_rss_bytes": 40333312,
+      "phase": "reopen",
+      "receipts": [
+        {
+          "aborted_journals": 0,
+          "deferred": null,
+          "elapsed_ms": 0,
+          "kind": "project_open",
+          "preserved_unknown_entries": 0,
+          "removed_generations": 0,
+          "repaired_journals": 0,
+          "selected_generation_class": "committed_current",
+          "work_detected": false
+        },
+        {
+          "application_io": {
+            "phases": {
+              "append_merge": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "cas_install_read_write": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "encode_write_postwrite_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "fsync_synchronization": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "hydration_verification": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 1588,
+                "read_bytes": 2296605950,
+                "read_calls": 36216,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "publication_preauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 19344,
+                "read_calls": 50,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "read_path_scan": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "recovery_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "seal_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "shape_consume_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              }
+            },
+            "totals": {
+              "block_count": 0,
+              "fsync_calls": 0,
+              "object_count": 1588,
+              "read_bytes": 2296625294,
+              "read_calls": 36266,
+              "write_bytes": 0,
+              "write_calls": 0
+            }
+          },
+          "contract": "graphforge-storage-attribution-command/1",
+          "reopen_agrees": true,
+          "storage": {
+            "allocated_physical_bytes": 893542400,
+            "categories": {
+              "adjacency": {
+                "allocated_bytes": 214204416,
+                "logical_bytes": 428248075,
+                "logical_references": 69,
+                "physical_logical_bytes": 214134731,
+                "physical_objects": 37
+              },
+              "catalog_and_manifests": {
+                "allocated_bytes": 888832,
+                "logical_bytes": 147171,
+                "logical_references": 217,
+                "physical_logical_bytes": 147171,
+                "physical_objects": 217
+              },
+              "clean_imported_project": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "construction_staging": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "other": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "portable_package": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "properties": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "topology_edges": {
+                "allocated_bytes": 295608320,
+                "logical_bytes": 294904942,
+                "logical_references": 256,
+                "physical_logical_bytes": 294904942,
+                "physical_objects": 256
+              },
+              "topology_nodes": {
+                "allocated_bytes": 4194304,
+                "logical_bytes": 4159623,
+                "logical_references": 16,
+                "physical_logical_bytes": 4159623,
+                "physical_objects": 16
+              },
+              "uuid_and_surrogates": {
+                "allocated_bytes": 378646528,
+                "logical_bytes": 378631500,
+                "logical_references": 12,
+                "physical_logical_bytes": 378631500,
+                "physical_objects": 9
+              }
+            },
+            "contract": "graphforge-storage-attribution/1",
+            "logical_bytes": 1106091311,
+            "logical_references": 570,
+            "physical_objects": 535,
+            "retained_logical_eof_bytes": 891977967
+          }
+        },
+        {
+          "children_cpu_ns": 2440000000,
+          "contract": "graphforge-workflow-timing/1",
+          "cpu_scope": "runner_and_waited_children_shared",
+          "runner_cpu_ns": 310000000,
+          "sampling_uncertainty_ns": 72531,
+          "wall_ns": 4178545782
+        }
+      ],
+      "status": "passed"
+    },
+    {
+      "duration_ms": 2262,
+      "exit_code": 0,
+      "peak_rss_bytes": 89509888,
+      "phase": "recount",
+      "receipts": [
+        {
+          "application_io": {
+            "phases": {
+              "append_merge": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "cas_install_read_write": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "encode_write_postwrite_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "fsync_synchronization": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "hydration_verification": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 586,
+                "read_bytes": 1148161543,
+                "read_calls": 17900,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "publication_preauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 6004,
+                "read_calls": 16,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "read_path_scan": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 4172919,
+                "read_calls": 9424,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "recovery_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "seal_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "shape_consume_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              }
+            },
+            "totals": {
+              "block_count": 0,
+              "fsync_calls": 0,
+              "object_count": 586,
+              "read_bytes": 1152340466,
+              "read_calls": 27340,
+              "write_bytes": 0,
+              "write_calls": 0
+            }
+          },
+          "batches": 1,
+          "bytes": 917,
+          "complete": true,
+          "contract": "graphforge-result-sink/2",
+          "format": "Parquet",
+          "query_evidence": {
+            "contract": "graphforge-query-evidence/1",
+            "execution_batch_rows": 8192,
+            "hops": [],
+            "max_in_flight_reads": 0,
+            "memory_reserved_after": 0,
+            "memory_reserved_before": 0,
+            "operator_rss": [],
+            "peak_rss_bytes": 0,
+            "returned_batch_bytes": 104,
+            "rss_after_release_bytes": 0,
+            "sorts": []
+          },
+          "result_sha256": "d41814e11f492a8c36191b100c805a370de2b4bdbe6ca88c7eef41360ef53066",
+          "rows": 1,
+          "scalar_u64": 1048576
+        },
+        {
+          "application_io": {
+            "phases": {
+              "append_merge": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "cas_install_read_write": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "encode_write_postwrite_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "fsync_synchronization": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "hydration_verification": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "publication_preauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "read_path_scan": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 33788,
+                "read_calls": 233,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "recovery_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "seal_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "shape_consume_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              }
+            },
+            "totals": {
+              "block_count": 0,
+              "fsync_calls": 0,
+              "object_count": 0,
+              "read_bytes": 33788,
+              "read_calls": 233,
+              "write_bytes": 0,
+              "write_calls": 0
+            }
+          },
+          "batches": 1,
+          "bytes": 917,
+          "complete": true,
+          "contract": "graphforge-result-sink/2",
+          "format": "Parquet",
+          "query_evidence": {
+            "contract": "graphforge-query-evidence/1",
+            "execution_batch_rows": 8192,
+            "hops": [
+              {
+                "adjacency_rows_examined": 0,
+                "candidates_generated": 0,
+                "edge_full_reads": 0,
+                "edge_logical_rows_scanned": 0,
+                "edge_projected_columns": 0,
+                "edge_reader_calls": 0,
+                "edge_rows_returned": 0,
+                "identity_logical_bytes": 0,
+                "identity_peak_buffer_bytes": 0,
+                "identity_per_record_seeks": 0,
+                "identity_ranges_selected": 0,
+                "identity_reader_calls": 0,
+                "identity_revalidation_bytes": 0,
+                "identity_revalidation_calls": 0,
+                "input_batches": 0,
+                "input_rows": 0,
+                "node_full_reads": 0,
+                "node_logical_rows_scanned": 0,
+                "node_projected_columns": 0,
+                "node_reader_calls": 0,
+                "node_rows_returned": 0,
+                "ordinal": 0,
+                "projected_chunks": 0,
+                "projected_columns": 0,
+                "projected_rows": 0,
+                "rows_emitted": 1
+              }
+            ],
+            "max_in_flight_reads": 0,
+            "memory_reserved_after": 0,
+            "memory_reserved_before": 0,
+            "operator_rss": [
+              {
+                "after_bytes": 89509888,
+                "before_bytes": 89444352,
+                "operator": "edge_count",
+                "ordinal": 0,
+                "peak_bytes": 89509888
+              }
+            ],
+            "peak_rss_bytes": 89509888,
+            "returned_batch_bytes": 104,
+            "rss_after_release_bytes": 89509888,
+            "sorts": []
+          },
+          "result_sha256": "3daeda0e54a362622ffdc547a631479e3f18cd0f7fa1b28c3b1fce9b7e88a150",
+          "rows": 1,
+          "scalar_u64": 16777216
+        },
+        {
+          "children_cpu_ns": 1240000000,
+          "contract": "graphforge-workflow-timing/1",
+          "cpu_scope": "runner_and_waited_children_shared",
+          "runner_cpu_ns": 310000000,
+          "sampling_uncertainty_ns": 68591,
+          "wall_ns": 2262642490
+        }
+      ],
+      "status": "passed"
+    },
+    {
+      "duration_ms": 2355,
+      "exit_code": 0,
+      "peak_rss_bytes": 144609280,
+      "phase": "query",
+      "receipts": [
+        {
+          "application_io": {
+            "phases": {
+              "append_merge": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "cas_install_read_write": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "encode_write_postwrite_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "fsync_synchronization": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "hydration_verification": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 586,
+                "read_bytes": 1148161543,
+                "read_calls": 17900,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "publication_preauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 6004,
+                "read_calls": 16,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "read_path_scan": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 6752005,
+                "read_calls": 234,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "recovery_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "seal_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "shape_consume_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              }
+            },
+            "totals": {
+              "block_count": 0,
+              "fsync_calls": 0,
+              "object_count": 586,
+              "read_bytes": 1154919552,
+              "read_calls": 18150,
+              "write_bytes": 0,
+              "write_calls": 0
+            }
+          },
+          "batches": 1,
+          "bytes": 16890,
+          "complete": true,
+          "contract": "graphforge-result-sink/2",
+          "format": "Parquet",
+          "query_evidence": {
+            "contract": "graphforge-query-evidence/1",
+            "execution_batch_rows": 8192,
+            "hops": [
+              {
+                "adjacency_rows_examined": 78,
+                "candidates_generated": 1000,
+                "edge_full_reads": 0,
+                "edge_logical_rows_scanned": 0,
+                "edge_projected_columns": 0,
+                "edge_reader_calls": 0,
+                "edge_rows_returned": 0,
+                "identity_logical_bytes": 65536,
+                "identity_peak_buffer_bytes": 71104,
+                "identity_per_record_seeks": 0,
+                "identity_ranges_selected": 1,
+                "identity_reader_calls": 1,
+                "identity_revalidation_bytes": 0,
+                "identity_revalidation_calls": 11,
+                "input_batches": 0,
+                "input_rows": 0,
+                "node_full_reads": 0,
+                "node_logical_rows_scanned": 0,
+                "node_projected_columns": 0,
+                "node_reader_calls": 0,
+                "node_rows_returned": 0,
+                "ordinal": 0,
+                "projected_chunks": 1,
+                "projected_columns": 1,
+                "projected_rows": 43,
+                "rows_emitted": 1000
+              }
+            ],
+            "max_in_flight_reads": 0,
+            "memory_reserved_after": 0,
+            "memory_reserved_before": 0,
+            "operator_rss": [
+              {
+                "after_bytes": 89763840,
+                "before_bytes": 71172096,
+                "operator": "ordered_one_hop",
+                "ordinal": 0,
+                "peak_bytes": 89763840
+              }
+            ],
+            "peak_rss_bytes": 89763840,
+            "returned_batch_bytes": 16112,
+            "rss_after_release_bytes": 89763840,
+            "sorts": []
+          },
+          "result_sha256": "da48cf8bd82d136635cba999906d07a783deabf66427e13128f645d756adb116",
+          "rows": 1000,
+          "scalar_u64": null
+        },
+        {
+          "application_io": {
+            "phases": {
+              "append_merge": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "cas_install_read_write": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "encode_write_postwrite_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "fsync_synchronization": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "hydration_verification": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "publication_preauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "read_path_scan": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 20097006,
+                "read_calls": 35,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "recovery_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "seal_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "shape_consume_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              }
+            },
+            "totals": {
+              "block_count": 0,
+              "fsync_calls": 0,
+              "object_count": 0,
+              "read_bytes": 20097006,
+              "read_calls": 35,
+              "write_bytes": 0,
+              "write_calls": 0
+            }
+          },
+          "batches": 1,
+          "bytes": 16890,
+          "complete": true,
+          "contract": "graphforge-result-sink/2",
+          "format": "Parquet",
+          "query_evidence": {
+            "contract": "graphforge-query-evidence/1",
+            "execution_batch_rows": 8192,
+            "hops": [
+              {
+                "adjacency_rows_examined": 6,
+                "candidates_generated": 1000,
+                "edge_full_reads": 0,
+                "edge_logical_rows_scanned": 0,
+                "edge_projected_columns": 0,
+                "edge_reader_calls": 0,
+                "edge_rows_returned": 0,
+                "identity_logical_bytes": 131072,
+                "identity_peak_buffer_bytes": 65728,
+                "identity_per_record_seeks": 0,
+                "identity_ranges_selected": 2,
+                "identity_reader_calls": 2,
+                "identity_revalidation_bytes": 0,
+                "identity_revalidation_calls": 11,
+                "input_batches": 0,
+                "input_rows": 0,
+                "node_full_reads": 0,
+                "node_logical_rows_scanned": 0,
+                "node_projected_columns": 0,
+                "node_reader_calls": 0,
+                "node_rows_returned": 0,
+                "ordinal": 0,
+                "projected_chunks": 2,
+                "projected_columns": 1,
+                "projected_rows": 2,
+                "rows_emitted": 1000
+              }
+            ],
+            "max_in_flight_reads": 0,
+            "memory_reserved_after": 0,
+            "memory_reserved_before": 0,
+            "operator_rss": [
+              {
+                "after_bytes": 98222080,
+                "before_bytes": 91738112,
+                "operator": "ordered_two_hop",
+                "ordinal": 0,
+                "peak_bytes": 98222080
+              }
+            ],
+            "peak_rss_bytes": 98222080,
+            "returned_batch_bytes": 16112,
+            "rss_after_release_bytes": 98222080,
+            "sorts": []
+          },
+          "result_sha256": "404560fda0d6c2f6988aa4cee9c8d1d465c7254181b8c760e659e00b3f1bd255",
+          "rows": 1000,
+          "scalar_u64": null
+        },
+        {
+          "children_cpu_ns": 1320000000,
+          "contract": "graphforge-workflow-timing/1",
+          "cpu_scope": "runner_and_waited_children_shared",
+          "runner_cpu_ns": 300000000,
+          "sampling_uncertainty_ns": 73611,
+          "wall_ns": 2355785831
+        }
+      ],
+      "status": "passed"
+    },
+    {
+      "duration_ms": 10393,
+      "exit_code": 0,
+      "peak_rss_bytes": 41332736,
+      "phase": "export",
+      "receipts": [
+        {
+          "allocation_allocated_bytes": 1106501632,
+          "allocation_logical_bytes": 1106494464,
+          "allocation_physical_objects": 1,
+          "application_io": {
+            "phases": {
+              "append_merge": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "cas_install_read_write": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "encode_write_postwrite_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "fsync_synchronization": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "hydration_verification": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 1866,
+                "read_bytes": 4466143687,
+                "read_calls": 37843,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "publication_preauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 8691,
+                "read_calls": 22,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "read_path_scan": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "recovery_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "seal_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "shape_consume_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              }
+            },
+            "totals": {
+              "block_count": 0,
+              "fsync_calls": 0,
+              "object_count": 1866,
+              "read_bytes": 4466152378,
+              "read_calls": 37865,
+              "write_bytes": 0,
+              "write_calls": 0
+            }
+          },
+          "contract": "graphforge-portable-export/2",
+          "entry_count": 367,
+          "package_digest": "sha256:fd1d1fbb30a62af7caec83018c28ffdbb1e318d5823d822e3131e89e6aba1d5f",
+          "payload_bytes": 1105949421,
+          "representation": "bundle",
+          "selection_fingerprint": "sha256:10e1dca707d8cc817be2850a493ef6f1064bc152fa9b8c0de863678fea791367",
+          "transport_digest": "sha256:2dc4fd8119089757ed36c1e2bc9bbe245d2e8719b76cbe8792f6cb41ab23e91c"
+        }
+      ],
+      "status": "passed"
+    },
+    {
+      "duration_ms": 1523,
+      "exit_code": 0,
+      "peak_rss_bytes": 25604096,
+      "phase": "verify",
+      "receipts": [
+        {
+          "compatibility": "supported",
+          "contract": "graphforge-portable-verify/2",
+          "entry_count": 367,
+          "integrity": "verified",
+          "package_digest": "sha256:fd1d1fbb30a62af7caec83018c28ffdbb1e318d5823d822e3131e89e6aba1d5f",
+          "payload_bytes": 1106148346,
+          "representation": "bundle",
+          "transport_digest": "sha256:2dc4fd8119089757ed36c1e2bc9bbe245d2e8719b76cbe8792f6cb41ab23e91c"
+        }
+      ],
+      "status": "passed"
+    },
+    {
+      "duration_ms": 13965,
+      "exit_code": 0,
+      "peak_rss_bytes": 41402368,
+      "phase": "clean_import",
+      "receipts": [
+        {
+          "application_io": {
+            "phases": {
+              "append_merge": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "cas_install_read_write": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "encode_write_postwrite_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "fsync_synchronization": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "hydration_verification": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 3829,
+                "read_bytes": 3576468443,
+                "read_calls": 57748,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "publication_preauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 25269,
+                "read_calls": 50,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "read_path_scan": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 4147863,
+                "read_calls": 9625,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "recovery_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "seal_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "shape_consume_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              }
+            },
+            "totals": {
+              "block_count": 0,
+              "fsync_calls": 0,
+              "object_count": 3829,
+              "read_bytes": 3580641575,
+              "read_calls": 67423,
+              "write_bytes": 0,
+              "write_calls": 0
+            }
+          },
+          "contract": "graphforge-portable-import/2",
+          "idempotent_replay": false,
+          "package_digest": "sha256:fd1d1fbb30a62af7caec83018c28ffdbb1e318d5823d822e3131e89e6aba1d5f",
+          "transient_peak_allocated_bytes": 2003828736,
+          "transport_digest": "sha256:2dc4fd8119089757ed36c1e2bc9bbe245d2e8719b76cbe8792f6cb41ab23e91c"
+        }
+      ],
+      "status": "passed"
+    },
+    {
+      "duration_ms": 6754,
+      "exit_code": 0,
+      "peak_rss_bytes": 162340864,
+      "phase": "reopen_proof",
+      "receipts": [
+        {
+          "application_io": {
+            "phases": {
+              "append_merge": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "cas_install_read_write": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "encode_write_postwrite_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "fsync_synchronization": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "hydration_verification": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 586,
+                "read_bytes": 1148161543,
+                "read_calls": 17900,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "publication_preauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 6004,
+                "read_calls": 16,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "read_path_scan": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 4172919,
+                "read_calls": 9424,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "recovery_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "seal_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "shape_consume_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              }
+            },
+            "totals": {
+              "block_count": 0,
+              "fsync_calls": 0,
+              "object_count": 586,
+              "read_bytes": 1152340466,
+              "read_calls": 27340,
+              "write_bytes": 0,
+              "write_calls": 0
+            }
+          },
+          "batches": 1,
+          "bytes": 917,
+          "complete": true,
+          "contract": "graphforge-result-sink/2",
+          "format": "Parquet",
+          "query_evidence": {
+            "contract": "graphforge-query-evidence/1",
+            "execution_batch_rows": 8192,
+            "hops": [],
+            "max_in_flight_reads": 0,
+            "memory_reserved_after": 0,
+            "memory_reserved_before": 0,
+            "operator_rss": [],
+            "peak_rss_bytes": 0,
+            "returned_batch_bytes": 104,
+            "rss_after_release_bytes": 0,
+            "sorts": []
+          },
+          "result_sha256": "d41814e11f492a8c36191b100c805a370de2b4bdbe6ca88c7eef41360ef53066",
+          "rows": 1,
+          "scalar_u64": 1048576
+        },
+        {
+          "application_io": {
+            "phases": {
+              "append_merge": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "cas_install_read_write": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "encode_write_postwrite_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "fsync_synchronization": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "hydration_verification": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "publication_preauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "read_path_scan": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 33788,
+                "read_calls": 233,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "recovery_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "seal_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "shape_consume_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              }
+            },
+            "totals": {
+              "block_count": 0,
+              "fsync_calls": 0,
+              "object_count": 0,
+              "read_bytes": 33788,
+              "read_calls": 233,
+              "write_bytes": 0,
+              "write_calls": 0
+            }
+          },
+          "batches": 1,
+          "bytes": 917,
+          "complete": true,
+          "contract": "graphforge-result-sink/2",
+          "format": "Parquet",
+          "query_evidence": {
+            "contract": "graphforge-query-evidence/1",
+            "execution_batch_rows": 8192,
+            "hops": [
+              {
+                "adjacency_rows_examined": 0,
+                "candidates_generated": 0,
+                "edge_full_reads": 0,
+                "edge_logical_rows_scanned": 0,
+                "edge_projected_columns": 0,
+                "edge_reader_calls": 0,
+                "edge_rows_returned": 0,
+                "identity_logical_bytes": 0,
+                "identity_peak_buffer_bytes": 0,
+                "identity_per_record_seeks": 0,
+                "identity_ranges_selected": 0,
+                "identity_reader_calls": 0,
+                "identity_revalidation_bytes": 0,
+                "identity_revalidation_calls": 0,
+                "input_batches": 0,
+                "input_rows": 0,
+                "node_full_reads": 0,
+                "node_logical_rows_scanned": 0,
+                "node_projected_columns": 0,
+                "node_reader_calls": 0,
+                "node_rows_returned": 0,
+                "ordinal": 0,
+                "projected_chunks": 0,
+                "projected_columns": 0,
+                "projected_rows": 0,
+                "rows_emitted": 1
+              }
+            ],
+            "max_in_flight_reads": 0,
+            "memory_reserved_after": 0,
+            "memory_reserved_before": 0,
+            "operator_rss": [
+              {
+                "after_bytes": 90730496,
+                "before_bytes": 90599424,
+                "operator": "edge_count",
+                "ordinal": 0,
+                "peak_bytes": 90730496
+              }
+            ],
+            "peak_rss_bytes": 90730496,
+            "returned_batch_bytes": 104,
+            "rss_after_release_bytes": 90730496,
+            "sorts": []
+          },
+          "result_sha256": "3daeda0e54a362622ffdc547a631479e3f18cd0f7fa1b28c3b1fce9b7e88a150",
+          "rows": 1,
+          "scalar_u64": 16777216
+        },
+        {
+          "application_io": {
+            "phases": {
+              "append_merge": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "cas_install_read_write": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "encode_write_postwrite_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "fsync_synchronization": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "hydration_verification": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "publication_preauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "read_path_scan": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 6750206,
+                "read_calls": 34,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "recovery_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "seal_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "shape_consume_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              }
+            },
+            "totals": {
+              "block_count": 0,
+              "fsync_calls": 0,
+              "object_count": 0,
+              "read_bytes": 6750206,
+              "read_calls": 34,
+              "write_bytes": 0,
+              "write_calls": 0
+            }
+          },
+          "batches": 1,
+          "bytes": 16890,
+          "complete": true,
+          "contract": "graphforge-result-sink/2",
+          "format": "Parquet",
+          "query_evidence": {
+            "contract": "graphforge-query-evidence/1",
+            "execution_batch_rows": 8192,
+            "hops": [
+              {
+                "adjacency_rows_examined": 78,
+                "candidates_generated": 1000,
+                "edge_full_reads": 0,
+                "edge_logical_rows_scanned": 0,
+                "edge_projected_columns": 0,
+                "edge_reader_calls": 0,
+                "edge_rows_returned": 0,
+                "identity_logical_bytes": 65536,
+                "identity_peak_buffer_bytes": 71104,
+                "identity_per_record_seeks": 0,
+                "identity_ranges_selected": 1,
+                "identity_reader_calls": 1,
+                "identity_revalidation_bytes": 0,
+                "identity_revalidation_calls": 11,
+                "input_batches": 0,
+                "input_rows": 0,
+                "node_full_reads": 0,
+                "node_logical_rows_scanned": 0,
+                "node_projected_columns": 0,
+                "node_reader_calls": 0,
+                "node_rows_returned": 0,
+                "ordinal": 0,
+                "projected_chunks": 1,
+                "projected_columns": 1,
+                "projected_rows": 43,
+                "rows_emitted": 1000
+              }
+            ],
+            "max_in_flight_reads": 0,
+            "memory_reserved_after": 0,
+            "memory_reserved_before": 0,
+            "operator_rss": [
+              {
+                "after_bytes": 109346816,
+                "before_bytes": 91975680,
+                "operator": "ordered_one_hop",
+                "ordinal": 0,
+                "peak_bytes": 109346816
+              }
+            ],
+            "peak_rss_bytes": 109346816,
+            "returned_batch_bytes": 16112,
+            "rss_after_release_bytes": 109346816,
+            "sorts": []
+          },
+          "result_sha256": "da48cf8bd82d136635cba999906d07a783deabf66427e13128f645d756adb116",
+          "rows": 1000,
+          "scalar_u64": null
+        },
+        {
+          "application_io": {
+            "phases": {
+              "append_merge": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "cas_install_read_write": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "encode_write_postwrite_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "fsync_synchronization": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "hydration_verification": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "publication_preauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "read_path_scan": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 20097006,
+                "read_calls": 35,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "recovery_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "seal_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "shape_consume_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              }
+            },
+            "totals": {
+              "block_count": 0,
+              "fsync_calls": 0,
+              "object_count": 0,
+              "read_bytes": 20097006,
+              "read_calls": 35,
+              "write_bytes": 0,
+              "write_calls": 0
+            }
+          },
+          "batches": 1,
+          "bytes": 16890,
+          "complete": true,
+          "contract": "graphforge-result-sink/2",
+          "format": "Parquet",
+          "query_evidence": {
+            "contract": "graphforge-query-evidence/1",
+            "execution_batch_rows": 8192,
+            "hops": [
+              {
+                "adjacency_rows_examined": 6,
+                "candidates_generated": 1000,
+                "edge_full_reads": 0,
+                "edge_logical_rows_scanned": 0,
+                "edge_projected_columns": 0,
+                "edge_reader_calls": 0,
+                "edge_rows_returned": 0,
+                "identity_logical_bytes": 131072,
+                "identity_peak_buffer_bytes": 65728,
+                "identity_per_record_seeks": 0,
+                "identity_ranges_selected": 2,
+                "identity_reader_calls": 2,
+                "identity_revalidation_bytes": 0,
+                "identity_revalidation_calls": 11,
+                "input_batches": 0,
+                "input_rows": 0,
+                "node_full_reads": 0,
+                "node_logical_rows_scanned": 0,
+                "node_projected_columns": 0,
+                "node_reader_calls": 0,
+                "node_rows_returned": 0,
+                "ordinal": 0,
+                "projected_chunks": 2,
+                "projected_columns": 1,
+                "projected_rows": 2,
+                "rows_emitted": 1000
+              }
+            ],
+            "max_in_flight_reads": 0,
+            "memory_reserved_after": 0,
+            "memory_reserved_before": 0,
+            "operator_rss": [
+              {
+                "after_bytes": 116416512,
+                "before_bytes": 109944832,
+                "operator": "ordered_two_hop",
+                "ordinal": 0,
+                "peak_bytes": 116416512
+              }
+            ],
+            "peak_rss_bytes": 116416512,
+            "returned_batch_bytes": 16112,
+            "rss_after_release_bytes": 116416512,
+            "sorts": []
+          },
+          "result_sha256": "404560fda0d6c2f6988aa4cee9c8d1d465c7254181b8c760e659e00b3f1bd255",
+          "rows": 1000,
+          "scalar_u64": null
+        },
+        {
+          "application_io": {
+            "phases": {
+              "append_merge": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "cas_install_read_write": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "encode_write_postwrite_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "fsync_synchronization": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "hydration_verification": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 1588,
+                "read_bytes": 2296605950,
+                "read_calls": 36216,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "publication_preauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 19344,
+                "read_calls": 50,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "read_path_scan": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "recovery_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "seal_authentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "shape_consume_reauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              }
+            },
+            "totals": {
+              "block_count": 0,
+              "fsync_calls": 0,
+              "object_count": 1588,
+              "read_bytes": 2296625294,
+              "read_calls": 36266,
+              "write_bytes": 0,
+              "write_calls": 0
+            }
+          },
+          "contract": "graphforge-storage-attribution-command/1",
+          "reopen_agrees": true,
+          "storage": {
+            "allocated_physical_bytes": 893542400,
+            "categories": {
+              "adjacency": {
+                "allocated_bytes": 214204416,
+                "logical_bytes": 428248075,
+                "logical_references": 69,
+                "physical_logical_bytes": 214134731,
+                "physical_objects": 37
+              },
+              "catalog_and_manifests": {
+                "allocated_bytes": 888832,
+                "logical_bytes": 147171,
+                "logical_references": 217,
+                "physical_logical_bytes": 147171,
+                "physical_objects": 217
+              },
+              "clean_imported_project": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "construction_staging": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "other": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "portable_package": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "properties": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "topology_edges": {
+                "allocated_bytes": 295608320,
+                "logical_bytes": 294904942,
+                "logical_references": 256,
+                "physical_logical_bytes": 294904942,
+                "physical_objects": 256
+              },
+              "topology_nodes": {
+                "allocated_bytes": 4194304,
+                "logical_bytes": 4159623,
+                "logical_references": 16,
+                "physical_logical_bytes": 4159623,
+                "physical_objects": 16
+              },
+              "uuid_and_surrogates": {
+                "allocated_bytes": 378646528,
+                "logical_bytes": 378631500,
+                "logical_references": 12,
+                "physical_logical_bytes": 378631500,
+                "physical_objects": 9
+              }
+            },
+            "contract": "graphforge-storage-attribution/1",
+            "logical_bytes": 1106091311,
+            "logical_references": 570,
+            "physical_objects": 535,
+            "retained_logical_eof_bytes": 891977967
+          }
+        },
+        {
+          "children_cpu_ns": 3880000000,
+          "contract": "graphforge-workflow-timing/1",
+          "cpu_scope": "runner_and_waited_children_shared",
+          "runner_cpu_ns": 750000000,
+          "sampling_uncertainty_ns": 83202,
+          "wall_ns": 6754240687
+        },
+        {
+          "contract": "graphforge-lifecycle-storage/2",
+          "retained_owners": {
+            "generated-inputs": {
+              "totals": {
+                "allocated_bytes": 822345728,
+                "logical_bytes": 822337680,
+                "logical_references": 2,
+                "physical_logical_bytes": 822337680,
+                "physical_objects": 2
+              }
+            },
+            "imported-project-admission_lock": {
+              "totals": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 1,
+                "physical_logical_bytes": 0,
+                "physical_objects": 1
+              }
+            },
+            "imported-project-construction": {
+              "totals": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              }
+            },
+            "imported-project-import": {
+              "totals": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              }
+            },
+            "imported-project-locks": {
+              "totals": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 3,
+                "physical_logical_bytes": 0,
+                "physical_objects": 3
+              }
+            },
+            "imported-project-published": {
+              "totals": {
+                "allocated_bytes": 896962560,
+                "logical_bytes": 892847166,
+                "logical_references": 1371,
+                "physical_logical_bytes": 892847166,
+                "physical_objects": 1371
+              }
+            },
+            "imported-project-transactions": {
+              "totals": {
+                "allocated_bytes": 4096,
+                "logical_bytes": 663,
+                "logical_references": 1,
+                "physical_logical_bytes": 663,
+                "physical_objects": 1
+              }
+            },
+            "portable-package": {
+              "totals": {
+                "allocated_bytes": 1106501632,
+                "logical_bytes": 1106494464,
+                "logical_references": 1,
+                "physical_logical_bytes": 1106494464,
+                "physical_objects": 1
+              }
+            },
+            "query-results": {
+              "totals": {
+                "allocated_bytes": 98304,
+                "logical_bytes": 71228,
+                "logical_references": 8,
+                "physical_logical_bytes": 71228,
+                "physical_objects": 8
+              }
+            },
+            "source-project-admission_lock": {
+              "totals": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 1,
+                "physical_logical_bytes": 0,
+                "physical_objects": 1
+              }
+            },
+            "source-project-construction": {
+              "totals": {
+                "allocated_bytes": 1113743360,
+                "logical_bytes": 1107200135,
+                "logical_references": 1984,
+                "physical_logical_bytes": 1107200135,
+                "physical_objects": 1984
+              }
+            },
+            "source-project-import": {
+              "totals": {
+                "allocated_bytes": 822353920,
+                "logical_bytes": 822341853,
+                "logical_references": 3,
+                "physical_logical_bytes": 822341853,
+                "physical_objects": 3
+              }
+            },
+            "source-project-locks": {
+              "totals": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 3,
+                "physical_logical_bytes": 0,
+                "physical_objects": 3
+              }
+            },
+            "source-project-published": {
+              "totals": {
+                "allocated_bytes": 896962560,
+                "logical_bytes": 892847166,
+                "logical_references": 1371,
+                "physical_logical_bytes": 892847166,
+                "physical_objects": 1371
+              }
+            },
+            "source-project-transactions": {
+              "totals": {
+                "allocated_bytes": 4096,
+                "logical_bytes": 663,
+                "logical_references": 1,
+                "physical_logical_bytes": 663,
+                "physical_objects": 1
+              }
+            }
+          },
+          "retained_storage_bytes": 5658976256,
+          "source_project_current_allocated_bytes": 896962560,
+          "transient_peak_storage_bytes": 7539552256
+        }
+      ],
+      "status": "passed"
+    }
+  ],
+  "profile_id": "graph500-s20-provider",
+  "schema": "graphforge-public-certification/1",
+  "status": "passed"
+}
