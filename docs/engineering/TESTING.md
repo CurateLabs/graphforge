@@ -310,6 +310,25 @@ uses the same-build binary in `crates/graphforge-cli/tests/research_versions.rs`
 These are native Version tests; future Branch/Proposal fixtures do not certify
 their unimplemented product lifecycles.
 
+### Reproducible Slice evidence (#1351)
+
+`crates/graphforge-api/tests/slices.rs` uses real native graph execution for
+search/filter/query/direct selection agreement, a character shared across
+stories, deterministic expansion/contraction, separate evidence dependencies,
+page cancellation and resource refusal. Frozen membership survives parent edits
+and payload release; changed selectors cannot exchange page cursors. A projected
+Version fixture survives compaction, ancestor deletion, cleanup and reopen;
+explicit outside expansion works only while its separately retained source
+exists. Live outside objects remain present to prove there is no current fallback.
+
+The 2,048-object case verifies bounded one-row IPC output and refusal of a smaller
+active-selection ceiling. Final response size includes schema/cursor/context
+metadata. The JSON contract is checked against native Arrow fields and defaults.
+Python `tests/slices.py`, Node `tests/slices.test.mjs`, and same-build CLI
+`tests/slices.rs` exercise the actual Rust facade, including frozen inspection,
+revision and safe malformed-input diagnostics. These tests certify Slice
+membership/context, not future Branch retention ownership or export packaging.
+
 ## What counts as proof
 
 | Claim | Acceptable evidence | Not enough alone |

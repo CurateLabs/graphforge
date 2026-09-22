@@ -161,11 +161,16 @@ mod query_execution;
 mod repository;
 mod research_project;
 mod research_versions;
+mod slices;
 pub use graphforge_storage::research_versions::{
     ResearchMutation, ResearchOperation, ResearchOperationReceipt, ResearchRegistry,
     ResearchRetentionRoot, ResearchRootKind, ResearchVersionRecord,
 };
 pub use research_versions::{PrepareResearchVersionRequest, ResearchVersionView};
+pub use slices::{
+    SliceDirection, SliceLimits, SliceMembers, SlicePageKind, SliceRequest, SliceRevisionRequest,
+    SliceSelector, SliceSource,
+};
 mod resource_policy;
 mod runtime_ownership;
 pub use runtime_ownership::RuntimeGuard;

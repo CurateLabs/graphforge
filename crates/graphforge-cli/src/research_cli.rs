@@ -16,6 +16,11 @@ use crate::{canonical_uuid, write_execution_result};
 
 #[derive(Subcommand)]
 pub(crate) enum ResearchCommand {
+    /// Preview or freeze reproducible research selections.
+    Slice {
+        #[command(subcommand)]
+        command: crate::slices_cli::SliceCommand,
+    },
     /// Capture, inspect, retain or explicitly restore immutable research.
     Version {
         #[command(subcommand)]
@@ -89,6 +94,7 @@ pub(crate) fn run_research(
     output: &mut dyn Write,
 ) -> Result<(), graphforge_api::GfError> {
     match command {
+        ResearchCommand::Slice { command } => crate::slices_cli::run(graph, command, json, output)?,
         ResearchCommand::Version { command } => {
             crate::research_versions_cli::run(graph, command, json, output)?;
         }

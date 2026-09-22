@@ -51,6 +51,62 @@ generation numbers for analyst Version identities.
 
 ## Selection and boundary closure
 
+### Implemented Slice facade (#1351)
+
+`preview_slice(request, kind, page)` accepts `current` or an explicit immutable
+`version` source and a `direct`, `filter`, `query`, `search` or `traverse` selector.
+The separate Arrow page kinds are `included`, `boundary`, `explanations`,
+`dependencies` and `counts`. Graph selection queries return canonical
+`node_uuid` and/or `edge_uuid` columns. Filters bind scalar values independently
+of identifiers. Text search is local native retrieval, without provider calls.
+Traversal has a maximum of 64 hops and canonical UUID ordering, with one root,
+predecessor and edge per included object rather than duplicated full paths.
+
+`include` and `exclude` revise active membership. Required endpoints, evidence,
+Sources, Artifact derivation inputs and ontology context remain separate; missing
+required local objects fail explicitly. Boundary references disclose outside
+relationships and source-Version genealogy without importing content.
+`ontology_context` identifies the chosen source context; it is not an ontology
+ID. Counts distinguish object families and active graph labels such as Passage.
+
+`freeze_slice` requires an explicitly retained Version and returns an Arrow
+membership capsule. Serialize the returned Python table with `pyarrow.ipc`;
+Node already returns IPC bytes. `inspect_frozen_slice` reads exact membership
+without rerunning its selector, even after the Version payload is released.
+`revise_frozen_slice` accepts exact additions/removals and an optional explicit
+`source_version` for outside-history expansion. An unavailable original or
+outside Version returns `GF_RESULT_NOT_RETAINED`; current parent bytes are never
+substituted. Capsules bind Version, selector, ontology and Artifact commitments,
+but establish no new retention root. They are not self-contained graph packages
+or signed authorization. Future Branch creation must retain and validate its
+chosen source. See [ADR 0040](../../adr/0040-frozen-slice-membership.md).
+
+Limits bound decoded source/selector rows, active objects, required references,
+boundaries, collection bytes and final IPC bytes including schema metadata.
+The query memory pool uses the requested working budget; its budget and Slice
+collections are separate bounded allocations. `scanned_rows` does not count
+physical query-operator work. Cancellation is cooperative during query streaming,
+search, traversal and closure processing. Query response pages never return a
+partial selection after a bound is exceeded. Page tokens bind source, request,
+selection, page kind and frozen context; changed current heads, mismatched
+selectors and malformed tokens are rejected.
+
+Python uses the four snake-case facade names; Node uses their camel-case names
+and promises with optional `AbortSignal`. CLI parity is:
+
+```sh
+gf --project ./research research slice preview --file selection.json --kind boundary
+gf --project ./research research slice freeze --file version-selection.json > slice.arrow
+gf --project ./research research slice inspect --capsule slice.arrow --kind included
+gf --project ./research research slice revise --capsule slice.arrow --file revision.json > revised.arrow
+```
+
+Freeze/revise write Arrow IPC and reject `--json`; previews and inspections may
+use the existing JSON display option. Input contracts and ceilings are pinned
+in `tests/contracts/slice-api-v1.json`. Selection alone creates no independent
+research state. The remaining Branch, comparison, update and Proposal lifecycle
+below remains designed work.
+
 Dynamic Slices evaluate explicit search, filter, query, traversal, or direct
 selection against current state. Frozen Slices resolve membership against one
 Version. Return included objects, boundary references, inclusion explanations,

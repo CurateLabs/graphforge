@@ -734,6 +734,34 @@ class GraphForge:
         document: dict[str, Any] | None = None,
     ) -> None: ...
     def workspace_ontology(self) -> dict[str, Any]: ...
+    def preview_slice(
+        self,
+        request: dict[str, Any],
+        kind: str = "included",
+        *,
+        limit: int = 100,
+        after: str | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> pyarrow.Table: ...
+    def freeze_slice(
+        self, request: dict[str, Any], *, cancellation: CancellationToken | None = None
+    ) -> pyarrow.Table: ...
+    def inspect_frozen_slice(
+        self,
+        capsule: bytes,
+        kind: str = "included",
+        *,
+        limit: int = 100,
+        after: str | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> pyarrow.Table: ...
+    def revise_frozen_slice(
+        self,
+        capsule: bytes,
+        revision: dict[str, Any],
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> pyarrow.Table: ...
     def prepare_research_version(self, request: dict[str, Any]) -> dict[str, Any]: ...
     def commit_research_version_operation(
         self, operation: dict[str, Any], *, cancellation: CancellationToken | None = None

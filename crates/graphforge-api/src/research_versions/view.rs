@@ -13,6 +13,11 @@ pub struct ResearchVersionView {
 }
 
 impl ResearchVersionView {
+    pub(crate) fn into_slice_graph(self) -> Result<GraphForge, GfError> {
+        self.require_retained("graph", &["files", "snapshot"])?;
+        Ok(self.graph)
+    }
+
     /// Frozen citation and content identity; never replaced with current metadata.
     pub fn version(&self) -> &ResearchVersionRecord {
         &self.version

@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "f062ce2679356c6857fad28aee421ae7aac614d57120e10d8822cff340faf2a4",
+  "public_method_digest": "32c55ba453bb675306caf525aa9f30090f0f1c175479d9ac2393b74f8c1579b3",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -1112,6 +1112,36 @@
         {
           "path": "crates/graphforge-api/tests/research_versions.rs",
           "symbol": "in_memory_capture_empty_graph_and_cancelled_commit_are_real_native_operations"
+        }
+      ]
+    },
+    "slices": {
+      "ids": [
+        "GraphForge.freeze_slice",
+        "GraphForge.inspect_frozen_slice",
+        "GraphForge.preview_slice",
+        "GraphForge.revise_frozen_slice"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/tests/slices.rs",
+          "symbol": "shared_character_has_separate_boundary_and_deterministic_explanations"
+        },
+        {
+          "path": "crates/graphforge-api/tests/slices.rs",
+          "symbol": "frozen_membership_ignores_parent_edits_and_rejects_forged_capsules"
+        },
+        {
+          "path": "crates/graphforge-api/tests/slices.rs",
+          "symbol": "selected_history_never_falls_back_to_current_or_retains_its_ancestor"
+        },
+        {
+          "path": "crates/graphforge-api/tests/slices.rs",
+          "symbol": "source_artifact_evidence_closure_stays_separate_from_membership"
+        },
+        {
+          "path": "crates/graphforge-api/tests/slices.rs",
+          "symbol": "selectors_page_bounds_and_cancellation_use_real_execution"
         }
       ]
     }

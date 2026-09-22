@@ -1,0 +1,15 @@
+{
+  "contract_version": 1,
+  "data_format": "Arrow IPC",
+  "methods": ["preview_slice", "freeze_slice", "inspect_frozen_slice", "revise_frozen_slice"],
+  "row_fields": ["object_kind", "object_uuid", "reason", "root_uuid", "predecessor_uuid", "via_edge_uuid", "depth"],
+  "count_fields": ["role", "object_type", "count"],
+  "source_kinds": ["current", "version"],
+  "selector_kinds": ["direct", "filter", "query", "search", "traverse"],
+  "page_kinds": ["included", "boundary", "explanations", "dependencies", "counts"],
+  "limits": {"scanned_rows": 1000000, "selected_objects": 100000, "boundary_references": 100000, "dependencies": 100000, "working_bytes": 67108864, "response_bytes": 16777216},
+  "freeze_requires_retained_version": true,
+  "membership_is_retention": false,
+  "outside_history_requires_explicit_source_version": true,
+  "query_work": "scanned_rows bounds decoded source and emitted selector rows; native query memory and cooperative cancellation bound execution, not a physical operator work count"
+}

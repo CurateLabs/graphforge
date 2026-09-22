@@ -30,6 +30,7 @@ mod ontology_cli;
 mod portable_cli;
 mod research_cli;
 mod research_versions_cli;
+mod slices_cli;
 mod source_artifact_cli;
 mod storage_attribution_cli;
 mod verify_cli;
