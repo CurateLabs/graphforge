@@ -854,7 +854,8 @@ pub fn inspect_research_version(
     root: &Path,
     version: &ResearchVersionRecord,
 ) -> Result<Vec<crate::ProjectParticipantSnapshot>, GfError> {
-    let registry = read_research_registry(&crate::resolve_project_generation(root)?)?;
+    let current = crate::resolve_project_generation(root)?;
+    let registry = read_research_registry(&current)?;
     if !registry.versions.contains_key(&version.version_uuid) {
         return Err(GfError::Api {
             code: ApiErrorCode::ResultNotRetained,
