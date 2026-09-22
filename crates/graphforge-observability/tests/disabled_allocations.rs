@@ -1,4 +1,7 @@
-//! Disabled hot-path allocation proof in an isolated test process.
+//! Disabled hot-path allocation proof in a harness-free test process.
+//!
+//! Libtest's runner can allocate concurrently with a test even when there is
+//! only one test. Keep this proof process-wide and remove that unrelated runner.
 use graphforge_observability::{Attributes, RecordStatus, Signal, TelemetryRuntime};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,7 +22,6 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-#[test]
 fn disabled_recording_performs_no_allocations() {
     let runtime = TelemetryRuntime::default();
     let before = ALLOCATIONS.load(Ordering::Relaxed);
@@ -30,4 +32,15 @@ fn disabled_recording_performs_no_allocations() {
         );
     }
     assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), before);
+}
+
+fn main() {
+    // Prove the global counter observes a real allocation before measuring the
+    // disabled path. The allocation remains observable in optimized builds.
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    let allocation = std::hint::black_box(Box::new(std::hint::black_box(42_u64)));
+    assert!(ALLOCATIONS.load(Ordering::Relaxed) > before);
+    drop(allocation);
+
+    disabled_recording_performs_no_allocations();
 }
