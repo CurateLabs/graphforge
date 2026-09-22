@@ -303,3 +303,15 @@ supersession is not proof of a research Branch, Slice, or Proposal.
 [Testing](TESTING.md#analyst-ux-acceptance) maps both supplied specifications to
 implementation acceptance scenarios. M11 completion requires those outcomes;
 documentation alone does not satisfy them.
+
+### Core Proposal walkthrough evidence
+
+The native `research_proposals::tests::two_stories` scenario starts two independent
+story Branches with the same Character UUID. Mystery changes Ada's age and ending;
+Voyage keeps a separate alternative. Native comparison shows Mystery's two local
+fields. A Proposal freezes that Version, accepts age, and defers ending: the
+Project age changes, its ending stays undecided, and Voyage's Version stays fixed.
+Mystery then changes age again. Proposal history remains tied to the submitted
+Version, comparison cites the prior accepted contribution, and the new exact value
+can form a second Proposal. This bounded Rust facade example is prerequisite
+proof for interchange; #1358 still owns the complete cross-surface consumer journey.

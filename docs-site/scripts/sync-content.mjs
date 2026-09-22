@@ -163,6 +163,7 @@ const PAGES = [
   'adr/0040-frozen-slice-membership.md',
   'adr/0041-branch-current-publication.md',
   'adr/0042-contextual-research-claims.md',
+  'adr/0043-atomic-research-proposal-acceptance.md',
   // END generated ADR records
   'releases/roadmap.md',
   'legal/licensing.md',

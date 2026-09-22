@@ -146,6 +146,16 @@ impl GraphForge {
         operation: ResearchOperation,
         cancellation: &CancellationToken,
     ) -> Result<ResearchOperationReceipt, GfError> {
+        if matches!(
+            &operation.mutation,
+            ResearchMutation::SubmitProposal { .. }
+                | ResearchMutation::ReviewProposal { .. }
+                | ResearchMutation::ReleaseProposal { .. }
+        ) {
+            return Err(GfError::Validation(
+                "Proposal publication requires the native review and selected-content owner".into(),
+            ));
+        }
         if self.read_only {
             return Err(GfError::Project {
                 code: graphforge_core::ProjectErrorCode::ReadOnlyView,

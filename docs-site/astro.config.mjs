@@ -383,6 +383,10 @@ export default defineConfig({
                   label: '0042 — Contextual research decisions extend immutable knowledge',
                   slug: 'adr/0042-contextual-research-claims',
                 },
+                {
+                  label: '0043 — Proposal acceptance shares the Project publication owner',
+                  slug: 'adr/0043-atomic-research-proposal-acceptance',
+                },
                 // END generated ADR records
               ],
             },

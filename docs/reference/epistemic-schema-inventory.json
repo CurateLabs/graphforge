@@ -326,7 +326,7 @@
     },
     {
       "capability_id": "research",
-      "capability_version": 3,
+      "capability_version": 4,
       "enum_registry_versions": {
         "research_decision_kind": 1,
         "research_subject_kind": 1

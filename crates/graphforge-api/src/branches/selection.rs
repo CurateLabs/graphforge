@@ -6,7 +6,7 @@ use graphforge_storage::research_versions::{
 };
 use std::collections::BTreeSet;
 
-pub(super) fn prepare(
+pub(crate) fn prepare(
     command: &publication::Command,
     mut selected: branch::BranchSelection,
     spec: &mut RegisterResearchVersion,

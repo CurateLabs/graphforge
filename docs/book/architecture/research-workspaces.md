@@ -232,7 +232,7 @@ create|relate|change-branch|decide|inspect|history|decisions|canonical --file RE
 Mutations require an operation UUID and expected CURRENT generation. Exact retry
 returns the original result; changed requests or stale first publications fail.
 The concrete limits and transport contract are in
-`tests/contracts/research-claims-api-v1.json`. Proposal review remains #1356 work.
+`tests/contracts/research-claims-api-v1.json`. Proposal review is described below.
 
 Local operations are add, modify, suppress, replace, reclassify, and challenge.
 Suppressing inherited graph content removes it from the active Branch graph
@@ -284,8 +284,8 @@ inputs validated against exact retained source/destination content and native
 contribution identity; they do not replace the Proposal acceptance ledger.
 Several fields may cite different accepted Versions. Canonical comparisons require
 explicit context/community and optional decision-sequence cutoffs; frozen Version
-timestamps never imply canonical promotion. Update/Proposal application remains
-the responsibility of the following implementation issues.
+timestamps never imply canonical promotion. Native Proposal review applies
+explicit acceptance; upstream update application remains #1355 work.
 
 `max_fields`, `max_bytes`, and `page_size` bound admitted semantic state and output;
 native domain decoding additionally uses its existing hard bounds. Cancellation
@@ -374,13 +374,12 @@ Parent publication never follows the live Branch automatically.
 
 ## Versions, retention, restoration, and interchange
 
-[ADR 0039](../../adr/0039-research-version-publication.md) defines the
-`research@1` storage foundation (#1535): authenticated Version records, context
-heads, explicit dependency roots and permanent bounded receipts under the same
-`CURRENT`. Its tests use storage context/root fixtures, including real Parquet
-objects and local Artifact bytes. They are not Branch/Proposal or public-facade
-proof. Source-generation retention is conservative until #1536; #1537 owns the
-public Version surface. #1350 remains open until all original outcomes pass.
+[ADR 0039](../../adr/0039-research-version-publication.md) defines authenticated
+Version records, context heads, explicit dependency roots and permanent bounded
+receipts under the same CURRENT. #1350's merged work supplies selected CAS
+retention and the public Version facade. Proposal lifecycle proof adds actual
+submission/review/root-release/compaction/reopen measurements; storage-root
+fixtures alone do not establish those outcomes.
 
 Retained Versions preserve graph, local changes, Sources/references, local
 Artifact bytes, ontology composition, assertions, and research metadata.
@@ -562,6 +561,84 @@ historical = graph.query_research_version(
 )
 ```
 
-These APIs establish the Version foundation. They do not implement Branch edits,
-Proposal acceptance, or interchange lifecycle. Their real composition remains
-owned by #1352, #1356 and #1357; #1350 remains subject to its full acceptance audit.
+These APIs establish the Version foundation used by native Branch edits and
+Proposal acceptance. Portable interchange lifecycle remains #1357 work.
+
+### Native selective Proposal contract (#1356)
+
+`submit_research_proposal` takes an authenticated frozen Slice from an exact
+Branch Version and up to 256 explicit native field identities. The immediate
+parent is derived from Branch genealogy. Its selected payload has a separate,
+headless Version and a `FrozenProposal` retention root. Submission does not
+advance the Branch. Node and edge properties are filtered individually;
+immutable domain records require all their native fields explicitly selected.
+Structural graph and ontology context is inspectable dependency evidence, not
+implicit permission to accept another contribution.
+
+`preview_research_proposal` returns Arrow rows containing frozen source identity,
+item/contribution identities, baseline/proposed/destination commitments,
+motivation, conflicts, required items, unavailable dependencies and evidence
+gaps. A review supplies the exact generation and preview digest, one decision
+per item, explicit use-proposed conflict resolutions, and exact acknowledgement
+of external/unverifiable evidence context. It cannot accept an item while
+rejecting or deferring its required unavailable dependency. A stale generation
+requires a new preview. Preview does not modify authority.
+
+`review_research_proposal` publishes selected parent changes, ordered immutable
+review history, exact contribution mappings, accepted proof roots and its
+receipt through one CURRENT. Integration records are distinct from optional
+explicit canonical promotions. Parent authority determines promotion scope;
+source canonical status grants no destination authority. The stable Branch
+remains active. `research_proposal_history` returns bounded Arrow item,
+ordered-review or accepted-mapping views; continuations bind the exact CURRENT.
+A later Branch edit is visible as superseded proposal content.
+
+Deduplication keys include tagged Project/Branch destination, native field,
+contribution UUID and exact typed value or deletion. A new value may be accepted;
+a new operation identity cannot reapply an already accepted value. Nested
+Child→Branch acceptance preserves the contribution for its first Branch→Project
+acceptance. Live Branch comparisons use the latest accepted mapping for the
+current destination, authenticated by retained selected proof. Exact historical
+Version comparisons do not inherit later decisions automatically; explicit
+accepted mappings remain available for that purpose.
+
+`release_research_proposal` releases an obsolete frozen payload root. Explicit
+Version deletion and compaction/cleanup can then reclaim its selected bytes.
+Unreleased deferred or rejected content remains rooted until the caller releases
+it. Accepted selected proof has an independent `AcceptedProvenance` root and
+retains required evidence even when original source and proposal payload Versions
+are deleted. Original source/destination Version citations remain immutable
+identity commitments. Releasing a payload ends its preview/review availability;
+exact operation replay and history inspection remain supported.
+
+The `research@4` registry bounds all history to 8 MiB, 1,024 retained Versions,
+4,096 receipts/identity commitments, 4,096 roots, and 16,384 accepted mappings.
+It refuses capacity overflow rather than expiring receipts or deduplication
+history. Receipt replay and duplicate prevention are separate permanent bounded
+obligations. Restore never rewinds either. Preview dependency working data is
+bounded to 8 MiB and rendered output to 16 MiB; history uses pages of 1–1,000 rows.
+
+Python exposes the same snake-case methods and native request dictionaries;
+Node exposes their camel-case asynchronous equivalents with AbortSignal; CLI
+uses `gf research proposal submit|preview|review|release|history --file request.json`.
+Preview/history are Arrow; mutation results are control receipts. No binding
+implements review policy. See [ADR 0043](../../adr/0043-atomic-research-proposal-acceptance.md)
+for the publication and provenance boundaries.
+
+Analytical results must have an explicit retained representation before submission:
+selected graph properties or an owned Artifact containing result Arrow IPC with
+its media type and recorded provenance. A transient query/algorithm result is not
+implicitly archived or proposed. The result regression executes a query, persists
+its exact Arrow output as `ArtifactKind::Other`, selects that Artifact and Source,
+and verifies accepted bytes after reopen while excluding a private result. An
+independently selected external reference requires explicit acknowledgement;
+acknowledgement never invents an analytical derivation or a retained remote payload.
+
+Requests reject unknown fields. Invalid selection, incomplete decisions, unresolved
+conflicts, missing dependencies, and unacknowledged evidence fail before publication.
+Stale generation or preview commitments require a fresh preview; changed requests
+under an existing operation UUID return `GF_IDEMPOTENCY_CONFLICT`. Cancellation
+returns `GF_CANCELLED`. Publication errors retain the native `committed:false` /
+`committed:true` distinction around CURRENT replacement. After an ambiguous response,
+reopen and retry the exact operation to recover its durable receipt. Native tests
+exercise both sides of that boundary without rolling back committed parent content.

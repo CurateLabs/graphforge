@@ -26,7 +26,9 @@
 //! as [`LogicalPlan::Extension`]; their physical execution is deferred to physical execution.
 
 mod nested_queries;
+mod primary_property_value;
 mod scans;
+mod semantic_node_properties;
 mod traversal;
 mod writes;
 

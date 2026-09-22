@@ -268,6 +268,9 @@ impl GraphForge {
             &binding_catalog,
             self.ontology_mode,
             self.procedure_snapshot(),
+            composition
+                .as_ref()
+                .map(|(context, _, _)| Arc::clone(context)),
         )?;
 
         // Bind against the shared runtime catalog so newly observed types/props
@@ -569,6 +572,9 @@ impl GraphForge {
             &self.runtime_catalog,
             self.ontology_mode,
             self.procedure_snapshot(),
+            composition
+                .as_ref()
+                .map(|(context, _, _)| Arc::clone(context)),
         )?;
         let plan = {
             let mut binder = Binder::new(
@@ -585,22 +591,7 @@ impl GraphForge {
                 .map_err(|errs| bind_errors_to_gferror(&errs))?
         };
         validate_call_params(&plan, params)?;
-        if plan.ops.iter().any(|op| {
-            matches!(
-                op,
-                GraphOp::Create { .. }
-                    | GraphOp::Merge { .. }
-                    | GraphOp::Delete { .. }
-                    | GraphOp::Set { .. }
-                    | GraphOp::Remove { .. }
-            )
-        }) {
-            return Err(GfError::Validation(
-                "execute_stream does not support writes; \
-                 use execute for CREATE/MERGE/DELETE/SET/REMOVE"
-                    .into(),
-            ));
-        }
+        validate_stream_read_only(&plan)?;
 
         // Pin every generation-coupled session participant while publication is
         // excluded. `install_property_generation` replaces the authenticated
@@ -962,6 +953,26 @@ fn bind_errors_to_gferror(errs: &[BindError]) -> GfError {
     GfError::from_bind_errors(errs)
 }
 
+fn validate_stream_read_only(plan: &GraphPlan) -> Result<(), GfError> {
+    if plan.ops.iter().any(|op| {
+        matches!(
+            op,
+            GraphOp::Create { .. }
+                | GraphOp::Merge { .. }
+                | GraphOp::Delete { .. }
+                | GraphOp::Set { .. }
+                | GraphOp::Remove { .. }
+        )
+    }) {
+        return Err(GfError::Validation(
+            "execute_stream does not support writes; \
+                 use execute for CREATE/MERGE/DELETE/SET/REMOVE"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_typed_parameter_binding(
     query: &graphforge_cypher::AstQuery,
     params: &HashMap<String, IrLiteral>,
@@ -969,6 +980,7 @@ fn validate_typed_parameter_binding(
     runtime_catalog: &Arc<Mutex<RuntimeCatalog>>,
     mode: OntologyMode,
     procedures: Arc<ProcedureRegistry>,
+    composition: Option<Arc<CompositionBindingContext>>,
 ) -> Result<(), GfError> {
     if !params.values().any(ir_literal_contains_uuid) {
         return Ok(());
@@ -979,9 +991,13 @@ fn validate_typed_parameter_binding(
             .expect("runtime catalog poisoned")
             .clone(),
     ));
-    Binder::new(ontology, catalog, mode)
+    let mut binder = Binder::new(ontology, catalog, mode)
         .with_procedures(procedures)
-        .with_parameter_literals(params)
+        .with_parameter_literals(params);
+    if let Some(context) = composition {
+        binder = binder.with_composition(context);
+    }
+    binder
         .bind(query)
         .map(|_| ())
         .map_err(|errors| bind_errors_to_gferror(&errors))

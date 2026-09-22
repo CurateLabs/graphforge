@@ -2543,6 +2543,7 @@ use property_codec::col_type_from_field;
 use property_codec::decode_edge_property_rows;
 pub(crate) use property_codec::decode_property_batch;
 use property_codec::decode_property_rows;
+pub use property_codec::decode_property_value;
 pub use property_codec::decode_spatial_property_value;
 pub(crate) use property_codec::heterogeneous_scalar_fields;
 use property_codec::property_rows_batch_with_schema;

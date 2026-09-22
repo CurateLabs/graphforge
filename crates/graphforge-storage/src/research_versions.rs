@@ -15,9 +15,20 @@ use uuid::Uuid;
 
 mod branch_content;
 pub use branch_content::{
-    PreparedBranchContent, materialize_prepared_branch, prepare_branch_content,
+    PreparedBranchContent, PreparedResearchContent, materialize_prepared_branch,
+    prepare_branch_content,
+};
+mod project_content;
+pub use project_content::{PreparedProjectDraft, prepare_project_draft};
+mod proposals;
+pub use proposals::{
+    ResearchAcceptedMapping, ResearchDecisionPublication, ResearchProposalDecision,
+    ResearchProposalDestination, ResearchProposalHistory, ResearchProposalItem,
+    ResearchProposalRecord, ResearchProposalReview, ResearchProposalUnit,
 };
 mod branch_selection;
+mod proposal_publication;
+mod proposal_validation;
 pub use branch_selection::{prepare_branch_selection, replace_prepared_branch_domains};
 mod branches;
 pub use branches::ResearchBranchRecord;
@@ -36,7 +47,7 @@ use crate::{
 /// Required research capability; unsupported readers must refuse it.
 pub const RESEARCH_CAPABILITY: &str = "research";
 /// Frozen research capability and registry record version.
-pub const RESEARCH_VERSION: u32 = 3;
+pub const RESEARCH_VERSION: u32 = 4;
 /// Authenticated registry record family.
 pub const RESEARCH_REGISTRY: &str = "registry";
 /// Maximum canonical registry payload; no unbounded history growth.
@@ -52,7 +63,7 @@ pub const MAX_ROOTS: usize = 4_096;
 const PRODUCER: &str = concat!(
     "graphforge-storage/",
     env!("CARGO_PKG_VERSION"),
-    ";research/3"
+    ";research/4"
 );
 
 /// Exact participant identity, never a filesystem path.
@@ -201,6 +212,8 @@ pub struct ResearchOperationReceipt {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchRegistry {
+    /// Restore-independent frozen submissions and permanent accepted mappings.
+    pub proposals: ResearchProposalHistory,
     /// Immutable Branch creation and genealogy; heads are stored separately below.
     pub branches: BTreeMap<Uuid, ResearchBranchRecord>,
     /// Immutable records still retained explicitly or by required dependencies.
@@ -247,6 +260,37 @@ pub struct RegisterResearchVersion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResearchMutation {
+    /// Freeze exact selected research and root it without advancing any head.
+    SubmitProposal {
+        /// Native public request commitment.
+        intent_sha256: [u8; 32],
+        /// Immutable review metadata, validated by the native research owner.
+        proposal: Box<ResearchProposalRecord>,
+        /// Authenticated independently selected payload.
+        payload: Box<ResearchVersionRecord>,
+    },
+    /// Publish reviewed destination content and acceptance history atomically.
+    ReviewProposal {
+        /// Native public request commitment.
+        intent_sha256: [u8; 32],
+        /// Exact reviewed item decisions.
+        review: Box<ResearchProposalReview>,
+        /// Complete resulting destination, absent for a no-content review.
+        destination: Option<Box<ResearchVersionRecord>>,
+        /// Selected accepted source proof, independent of deferred content.
+        proof: Option<Box<ResearchVersionRecord>>,
+        /// Newly accepted exact contribution revisions.
+        mappings: Vec<ResearchAcceptedMapping>,
+        /// Optional native integration and explicit promotion history.
+        decisions: Option<Box<ResearchDecisionPublication>>,
+    },
+    /// Explicitly release obsolete proposal payload; immutable history remains.
+    ReleaseProposal {
+        /// Native public request commitment.
+        intent_sha256: [u8; 32],
+        /// Proposal whose pending payload is withdrawn or terminal.
+        proposal_uuid: Uuid,
+    },
     /// Atomically publish domain-owner prepared Branch content and creation metadata.
     /// All committed content must already be authenticated in this Project CAS.
     PublishBranch {
@@ -416,6 +460,7 @@ impl ResearchRegistry {
             return Err(invalid("materialized research identity is unavailable"));
         }
         branches::validate(self)?;
+        proposal_validation::validate(self)?;
         self.validate_dependency_cycles()?;
         for (context, version) in &self.heads {
             if self
@@ -506,7 +551,7 @@ impl ResearchRegistry {
             record_family_id: RESEARCH_REGISTRY.into(),
             record_version: RESEARCH_VERSION,
             encoding: ProjectParticipantEncoding::Json,
-            schema_fingerprint: Sha256::digest(b"graphforge-research-registry/3").into(),
+            schema_fingerprint: Sha256::digest(b"graphforge-research-registry/4").into(),
             row_count: 1,
             bytes: json(self)?,
         })
@@ -568,7 +613,7 @@ pub fn read_research_registry(
         || snapshot.row_count != 1
         || snapshot.encoding != "json"
         || snapshot.schema_fingerprint
-            != <[u8; 32]>::from(Sha256::digest(b"graphforge-research-registry/3"))
+            != <[u8; 32]>::from(Sha256::digest(b"graphforge-research-registry/4"))
         || snapshot.bytes.len() > MAX_REGISTRY_BYTES
     {
         return Err(invalid(
@@ -682,6 +727,16 @@ fn insert_version(
     registry: &mut ResearchRegistry,
     version: ResearchVersionRecord,
 ) -> Result<Uuid, GfError> {
+    let context = version.context_uuid;
+    let id = insert_content(registry, version)?;
+    registry.heads.insert(context, id);
+    Ok(id)
+}
+
+fn insert_content(
+    registry: &mut ResearchRegistry,
+    version: ResearchVersionRecord,
+) -> Result<Uuid, GfError> {
     let id = version.version_uuid;
     let digest = identity_digest(&version)?;
     if registry
@@ -694,7 +749,6 @@ fn insert_version(
             "immutable research Version identity has conflicting content",
         ));
     }
-    registry.heads.insert(version.context_uuid, id);
     registry.identities.insert(id, digest);
     registry.versions.insert(id, version);
     Ok(id)
@@ -745,10 +799,16 @@ fn restore_context(
 
 fn apply_mutation(
     root: &Path,
+    operation_uuid: Uuid,
     mutation: &ResearchMutation,
     registry: &mut ResearchRegistry,
 ) -> Result<Option<Uuid>, GfError> {
     let version_uuid = match mutation {
+        ResearchMutation::SubmitProposal { .. }
+        | ResearchMutation::ReviewProposal { .. }
+        | ResearchMutation::ReleaseProposal { .. } => {
+            proposal_publication::apply(root, registry, operation_uuid, mutation)?
+        }
         ResearchMutation::PublishBranch {
             origin_capture,
             creation,
@@ -826,24 +886,47 @@ fn apply_mutation(
             None
         }
         ResearchMutation::DeleteVersion { version_uuid } => {
-            let blockers = registry.deletion_blockers(*version_uuid);
-            if !blockers.is_empty() {
-                return Err(error(
-                    ProjectErrorCode::TransactionFailed,
-                    &format!(
-                        "research Version deletion blocked by {}",
-                        blockers.join(",")
-                    ),
-                ));
-            }
-            registry.materialized.remove(version_uuid);
-            if registry.versions.remove(version_uuid).is_none() {
-                return Err(invalid("research Version is unavailable"));
-            }
+            delete_version(registry, *version_uuid)?;
             None
         }
     };
     Ok(version_uuid)
+}
+
+fn delete_version(registry: &mut ResearchRegistry, version_uuid: Uuid) -> Result<(), GfError> {
+    let blockers = registry.deletion_blockers(version_uuid);
+    if !blockers.is_empty() {
+        return Err(error(
+            ProjectErrorCode::TransactionFailed,
+            &format!(
+                "research Version deletion blocked by {}",
+                blockers.join(",")
+            ),
+        ));
+    }
+    registry.materialized.remove(&version_uuid);
+    if registry.versions.remove(&version_uuid).is_none() {
+        return Err(invalid("research Version is unavailable"));
+    }
+    Ok(())
+}
+
+fn pin_unmaterialized_versions(
+    root: &Path,
+    registry: &ResearchRegistry,
+) -> Result<Vec<ResolvedProjectGeneration>, GfError> {
+    registry
+        .versions
+        .values()
+        .filter(|version| !registry.materialized.contains(&version.version_uuid))
+        .map(|version| {
+            let source = crate::resolve_generation_by_uuid(root, version.content.generation_uuid)?;
+            if source.manifest_sha256() != version.content.manifest_sha256 {
+                return Err(invalid("research source manifest identity changed"));
+            }
+            Ok(source)
+        })
+        .collect::<Result<Vec<_>, GfError>>()
 }
 
 fn publication_request(
@@ -953,8 +1036,14 @@ pub fn publish_research_operation_with_mode(
         ));
     }
     let operation_fingerprint = branches::publication_fingerprint(request);
+    proposal_publication::validate_preview_generation(request)?;
     let graph_objects = crate::begin_graph_object_publication(root)?;
-    let version_uuid = apply_mutation(root, &request.mutation, &mut registry)?;
+    let version_uuid = apply_mutation(
+        root,
+        request.operation_uuid,
+        &request.mutation,
+        &mut registry,
+    )?;
     let mut identity = Sha256::new();
     identity.update(b"graphforge-research-publication/1");
     identity.update(request.operation_uuid.as_bytes());
@@ -962,7 +1051,10 @@ pub fn publish_research_operation_with_mode(
     let generation_uuid = graphforge_core::canonical::uuid_v8(identity.finalize().into());
     let receipt = ResearchOperationReceipt {
         intent_sha256: match &request.mutation {
-            ResearchMutation::PublishBranch { intent_sha256, .. } => Some(*intent_sha256),
+            ResearchMutation::PublishBranch { intent_sha256, .. }
+            | ResearchMutation::SubmitProposal { intent_sha256, .. }
+            | ResearchMutation::ReviewProposal { intent_sha256, .. }
+            | ResearchMutation::ReleaseProposal { intent_sha256, .. } => Some(*intent_sha256),
             _ => None,
         },
         operation_uuid: request.operation_uuid,
@@ -976,24 +1068,14 @@ pub fn publish_research_operation_with_mode(
     let research = registry.participant()?;
     // Keep exact source leases through publication. A source reclaimed while
     // preparing the request fails here before any authoritative mutation.
-    let source_pins = registry
-        .versions
-        .values()
-        .filter(|version| !registry.materialized.contains(&version.version_uuid))
-        .map(|version| {
-            let source = crate::resolve_generation_by_uuid(root, version.content.generation_uuid)?;
-            if source.manifest_sha256() != version.content.manifest_sha256 {
-                return Err(invalid("research source manifest identity changed"));
-            }
-            Ok(source)
-        })
-        .collect::<Result<Vec<_>, GfError>>()?;
+    let source_pins = pin_unmaterialized_versions(root, &registry)?;
     let mut publication = publication_request(&parent, request, generation_uuid, research)?;
     let restored_graph = project_restore::prepare(root, request, &registry, &mut publication)?;
+    proposal_publication::decisions(&request.mutation, &mut publication)?;
     cancelled(cancellation)?;
     let graph_tree = if let Some(directory) = &restored_graph {
         Some(directory.path().to_path_buf())
-    } else if matches!(request.mutation, ResearchMutation::RestoreProject { .. }) {
+    } else if project_restore::replaces_project(&request.mutation) {
         None
     } else {
         let tree = parent.graph_tree_root();
@@ -1174,7 +1256,7 @@ pub(crate) fn validate_publication_transition(
         || candidate.encoding != "json"
         || candidate.byte_length > MAX_REGISTRY_BYTES as u64
         || candidate.schema_fingerprint
-            != hex(&Sha256::digest(b"graphforge-research-registry/3").into())
+            != hex(&Sha256::digest(b"graphforge-research-registry/4").into())
     {
         return Err(invalid("unsupported research registry publication"));
     }
@@ -1183,6 +1265,7 @@ pub(crate) fn validate_publication_transition(
     let after: ResearchRegistry = serde_json::from_slice(&bytes)
         .map_err(|_| invalid("malformed research registry publication"))?;
     after.validate()?;
+    proposals::preserve(&before, &after)?;
     if json(&after)? != bytes {
         return Err(invalid("research registry publication is not canonical"));
     }

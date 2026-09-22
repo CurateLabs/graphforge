@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 322,
-  "releaseSurfaceDigest": "727663dd45e4846a19adb36df707b0adddff38998aa6809217e6e910b4a55bac",
+  "releaseSurfaceCount": 327,
+  "releaseSurfaceDigest": "020e8aff3db274caf8fa5567115e0f86a1f12ae2b67f659853f71b8dd983b320",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -38,7 +38,8 @@
     "slices": "slices",
     "branches": "branches",
     "research-claims": "researchClaims",
-    "research-comparison": "researchComparison"
+    "research-comparison": "researchComparison",
+    "research-proposals": "researchProposals"
   },
   "classification": {
     "equivalent": [
@@ -649,6 +650,11 @@
     "researchComparison": {
       "research-comparison.test.mjs": [
         "native comparison preserves local/upstream semantics and refuses stale pages"
+      ]
+    },
+    "researchProposals": {
+      "research-proposals.test.mjs": [
+        "native proposals preserve selected review replay and history"
       ]
     }
   }

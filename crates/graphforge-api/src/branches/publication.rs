@@ -85,9 +85,24 @@ impl Command {
             return Ok(None);
         };
         let outcome = Ok(receipt.clone());
-        if let Err(error) =
-            owner.refresh_research_authority(&self.root, &outcome, None, self.expected, true)
-        {
+        let metadata_only =
+            !self
+                .registry
+                .proposals
+                .reviews
+                .get(&receipt.operation_uuid)
+                .and_then(|review| self.registry.proposals.proposals.get(&review.proposal_uuid))
+                .is_some_and(|proposal| {
+                    matches!(proposal.destination,
+                graphforge_storage::research_versions::ResearchProposalDestination::Project { .. })
+                });
+        if let Err(error) = owner.refresh_research_authority(
+            &self.root,
+            &outcome,
+            None,
+            self.expected,
+            metadata_only,
+        ) {
             owner.graph_visibility.health.fail(&error);
             return Err(error);
         }
@@ -100,6 +115,9 @@ impl Command {
         mutation: ResearchMutation,
         cancellation: &CancellationToken,
     ) -> Result<ResearchOperationReceipt, GfError> {
+        let metadata_only = !matches!(&mutation,
+            ResearchMutation::ReviewProposal { destination: Some(version), .. }
+                if version.content.source_version.is_none());
         let operation = ResearchOperation {
             operation_uuid: self.operation_uuid,
             expected_generation_uuid: self.expected,
@@ -111,9 +129,13 @@ impl Command {
             cancellation.flag(),
             owner.lifecycle_mode,
         );
-        if let Err(error) =
-            owner.refresh_research_authority(&self.root, &outcome, None, self.expected, true)
-        {
+        if let Err(error) = owner.refresh_research_authority(
+            &self.root,
+            &outcome,
+            None,
+            self.expected,
+            metadata_only,
+        ) {
             owner.graph_visibility.health.fail(&error);
             return Err(outcome.err().unwrap_or(error));
         }

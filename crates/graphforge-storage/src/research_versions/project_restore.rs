@@ -13,17 +13,21 @@ pub(super) fn prepare(
     registry: &ResearchRegistry,
     publication: &mut ProjectGenerationRequest,
 ) -> Result<Option<tempfile::TempDir>, GfError> {
-    let ResearchMutation::RestoreProject { source_version, .. } = &operation.mutation else {
-        return Ok(None);
+    let version = match &operation.mutation {
+        ResearchMutation::RestoreProject { source_version, .. } => registry
+            .versions
+            .get(source_version)
+            .ok_or_else(|| invalid("Project restore source is unavailable"))?,
+        ResearchMutation::ReviewProposal {
+            destination: Some(version),
+            ..
+        } if version.content.source_version.is_none() => version,
+        _ => return Ok(None),
     };
-    let version = registry
-        .versions
-        .get(source_version)
-        .ok_or_else(|| invalid("Project restore source is unavailable"))?;
     if version.content.source_version.is_some() {
         return Err(invalid("Project restore requires a complete Version"));
     }
-    let snapshots = inspect_research_version(root, version)?;
+    let snapshots = super::inspect_with_registry(root, version, registry)?;
     publication.participants.retain(|p| {
         history(&ResearchParticipantKey {
             capability: p.capability_id.clone(),
@@ -85,6 +89,12 @@ pub(super) fn prepare(
         tempfile::tempdir().map_err(|_| invalid("cannot allocate historical graph workspace"))?;
     materialize_research_graph(root, version, graph.path())?;
     Ok(Some(graph))
+}
+
+pub(super) fn replaces_project(mutation: &ResearchMutation) -> bool {
+    matches!(mutation, ResearchMutation::RestoreProject { .. })
+        || matches!(mutation, ResearchMutation::ReviewProposal { destination: Some(version), .. }
+            if version.content.source_version.is_none())
 }
 
 /// Materialize exact retained research in an empty process-owned temporary Project.

@@ -169,7 +169,10 @@ fn request_fingerprint(request: &RecordResearchDecisionsRequest) -> Result<[u8; 
     digest.update(bytes);
     Ok(digest.finalize().into())
 }
-fn validate_subject(graph: &GraphForge, input: &ResearchDecisionInput) -> Result<(), GfError> {
+pub(crate) fn validate_subject(
+    graph: &GraphForge,
+    input: &ResearchDecisionInput,
+) -> Result<(), GfError> {
     match input.subject_kind {
         ResearchSubjectKind::Assertion => {
             let assertions = crate::knowledge::read_ledger(&graph.generation_for_read()?)?;

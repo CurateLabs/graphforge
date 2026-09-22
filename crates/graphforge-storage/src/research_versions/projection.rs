@@ -210,12 +210,15 @@ fn source_graph(
                 && !e.relative_path.starts_with("topology/uuid-membership/")
         })
         .collect();
-    let version =
-        if graph.record_version == crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION {
-            3
-        } else {
-            1
-        };
+    let version = if matches!(
+        graph.record_version,
+        crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+            | crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
+    ) {
+        3
+    } else {
+        1
+    };
     let inventory = crate::graph_files::inventory_from_entries_with_version(files, version)?;
     let evidence = crate::materialize_graph_objects(root, &inventory, target)?;
     Ok((

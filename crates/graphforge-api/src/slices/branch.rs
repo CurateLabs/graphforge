@@ -18,6 +18,46 @@ pub(crate) struct BranchSelection {
     pub selector_sha256: [u8; 32],
 }
 
+/// Exact native structural/evidence closure for an already pinned private view.
+pub(crate) fn dependency_objects(
+    view: &GraphForge,
+    objects: &BTreeSet<(String, Uuid)>,
+    cancellation: &CancellationToken,
+) -> Result<BTreeSet<(String, Uuid)>, GfError> {
+    let mut members = SliceMembers::default();
+    for (kind, id) in objects {
+        match kind.as_str() {
+            "node" => &mut members.nodes,
+            "edge" => &mut members.edges,
+            "assertion" => &mut members.assertions,
+            "source" => &mut members.sources,
+            "artifact" => &mut members.artifacts,
+            _ => continue,
+        }
+        .insert(*id);
+    }
+    let request = SliceRequest {
+        request_uuid: Uuid::now_v7(),
+        source: SliceSource::Current,
+        selector: SliceSelector::Direct { members },
+        include: SliceMembers::default(),
+        exclude: SliceMembers::default(),
+        limits: crate::SliceLimits::default(),
+    };
+    let selection = engine::evaluate(view, &request, Some(cancellation))?;
+    Ok(objects
+        .iter()
+        .cloned()
+        .chain(
+            selection
+                .active
+                .into_keys()
+                .chain(selection.required.into_keys())
+                .map(|object| (object.kind, object.uuid)),
+        )
+        .collect())
+}
+
 pub(crate) fn authenticate(
     owner: &GraphForge,
     ipc: &[u8],

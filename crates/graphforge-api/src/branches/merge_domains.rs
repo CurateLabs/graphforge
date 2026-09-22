@@ -5,7 +5,7 @@ use crate::{
 };
 use graphforge_storage::ProjectParticipant;
 
-pub(super) fn merge(
+pub(crate) fn merge(
     destination: &GraphForge,
     source: &GraphForge,
 ) -> Result<Vec<ProjectParticipant>, GfError> {

@@ -109,15 +109,18 @@ fn record(
             "ontology comparison exceeds byte bound".into(),
         ));
     }
-    let id = graphforge_core::canonical::uuid_v8(
-        Sha256::digest(format!("graphforge-research-context-field/1:{kind}:{identity}").as_bytes())
-            .into(),
-    );
+    let id = context_identity(kind, identity);
     insert(
         fields,
         bytes,
         (kind.into(), id, field.into()),
         Sha256::digest(&encoded).into(),
+    )
+}
+pub(crate) fn context_identity(kind: &str, identity: &str) -> Uuid {
+    graphforge_core::canonical::uuid_v8(
+        Sha256::digest(format!("graphforge-research-context-field/1:{kind}:{identity}").as_bytes())
+            .into(),
     )
 }
 fn invalid() -> GfError {

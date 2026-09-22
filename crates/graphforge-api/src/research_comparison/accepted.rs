@@ -8,7 +8,7 @@ use crate::{
     branches::fields::{Key, Objects},
 };
 use graphforge_storage::{ResolvedProjectGeneration, research_versions::ResearchRegistry};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 #[derive(Clone)]
 pub(super) struct Accepted {
@@ -26,7 +26,9 @@ pub(super) fn verify(
     right: &State,
     cancel: &CancellationToken,
 ) -> Result<BTreeMap<Key, Accepted>, GfError> {
-    let mut accepted = BTreeMap::new();
+    let mut accepted =
+        super::accepted_history::verify(owner, current, registry, request, left, right, cancel)?;
+    let mut explicit_keys = BTreeSet::new();
     for mapping in &request.accepted {
         cancel.checkpoint()?;
         let key = (
@@ -34,10 +36,17 @@ pub(super) fn verify(
             mapping.unit.object_uuid,
             mapping.unit.field.clone(),
         );
-        if accepted.contains_key(&key) {
+        if !explicit_keys.insert(key.clone()) {
             return Err(super::invalid(
                 "supply one current accepted mapping per field and destination",
             ));
+        }
+        if accepted.get(&key).is_some_and(|a| {
+            a.source == mapping.source_version_uuid
+                && a.destination == mapping.destination_version_uuid
+                && a.contribution == mapping.contribution_uuid
+        }) {
+            continue;
         }
         let objects = Objects::from([(key.0.clone(), key.1)]);
         let source = state::load(

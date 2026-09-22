@@ -1,7 +1,7 @@
 //! Follow only explicit evidence dependencies of already selected assertions.
 use crate::{CancellationToken, GfError, GraphForge, branches::fields::Objects};
 use graphforge_knowledge::EvidenceSourceKind;
-pub(super) fn dependencies(
+pub(crate) fn dependencies(
     graph: &GraphForge,
     selected: &Objects,
     cancel: &CancellationToken,

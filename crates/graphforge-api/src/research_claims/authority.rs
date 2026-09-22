@@ -94,7 +94,7 @@ pub(super) fn with_context<T>(
     }
 }
 
-pub(super) fn require_owner(owner: &GraphForge) -> Result<(), GfError> {
+pub(crate) fn require_owner(owner: &GraphForge) -> Result<(), GfError> {
     if owner.read_only && owner.research_materialization.is_some() {
         return Err(GfError::Validation("contextual research inspection requires the owning Project facade and an explicit Branch context".into()));
     }

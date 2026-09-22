@@ -162,6 +162,7 @@ mod query_execution;
 mod repository;
 mod research_claims;
 mod research_comparison;
+mod research_proposals;
 pub use research_claims::{
     ChangeResearchBranchClaimRequest, CreateResearchClaimRequest, InspectResearchClaimsRequest,
     RecordResearchDecisionsRequest, RelateResearchClaimsRequest, ResearchAuthorityQuery,
@@ -169,6 +170,7 @@ pub use research_claims::{
     ResearchContext, ResearchDecisionInput,
 };
 pub use research_comparison::*;
+pub use research_proposals::*;
 mod research_project;
 mod research_versions;
 pub use branches::{

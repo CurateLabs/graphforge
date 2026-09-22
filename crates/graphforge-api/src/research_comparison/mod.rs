@@ -1,9 +1,10 @@
 //! Native semantic comparison over existing research fields and incorporated baselines.
 mod accepted;
+mod accepted_history;
 mod delta;
 mod model;
 mod output;
-mod scope;
+pub(crate) mod scope;
 mod state;
 #[cfg(test)]
 mod tests;
