@@ -781,3 +781,38 @@ mod tests {
         assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
     }
 }
+
+/// Union independently selected historical rows. Complete-operation replay rules
+/// do not apply to projections that intentionally omit unrelated subjects.
+pub(crate) fn union_selected(
+    left: &ProvenanceLedger,
+    right: &ProvenanceLedger,
+) -> Result<ProvenanceLedger, GfError> {
+    let mut events = std::collections::BTreeMap::new();
+    for row in left.events.iter().chain(&right.events) {
+        if events
+            .insert(row.provenance_uuid, row.clone())
+            .is_some_and(|old| old != *row)
+        {
+            return Err(GfError::Validation(
+                "selected provenance event identity conflicts".into(),
+            ));
+        }
+    }
+    let mut lineage = std::collections::BTreeMap::new();
+    for row in left.lineage.iter().chain(&right.lineage) {
+        if lineage
+            .insert(row.lineage_uuid, row.clone())
+            .is_some_and(|old| old != *row)
+        {
+            return Err(GfError::Validation(
+                "selected provenance lineage identity conflicts".into(),
+            ));
+        }
+    }
+    ProvenanceLedger::new(
+        events.into_values().collect(),
+        lineage.into_values().collect(),
+    )
+    .map_err(provenance_error)
+}

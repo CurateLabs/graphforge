@@ -593,3 +593,90 @@ fn object_root_project_restore_and_private_materialization_do_not_attach_a_graph
     );
     assert!(!restored.graph_tree_root().exists());
 }
+
+#[test]
+fn branch_selection_is_prepared_without_an_intermediate_authoritative_head() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let generation = publish_graph(root, 32);
+    let origin_id = execute(root, &register(root, Uuid::now_v7()))
+        .version_uuid
+        .unwrap();
+    let origin = state(root).versions[&origin_id].clone();
+    let before = current(root);
+    let branch_uuid = Uuid::now_v7();
+    let version_uuid = Uuid::now_v7();
+    let spec = RegisterResearchVersion {
+        version_uuid,
+        context_uuid: branch_uuid,
+        source_generation_uuid: generation,
+        source_version: Some(origin_id),
+        selection: Some(
+            origin
+                .content
+                .participants
+                .iter()
+                .map(|p| p.key.clone())
+                .collect(),
+        ),
+        required_versions: BTreeSet::new(),
+        label: Some("prepared selected Branch".into()),
+        description: None,
+        created_at: 11,
+        evidence: Vec::new(),
+    };
+    let selection = ResearchGraphSelection {
+        nodes: BTreeSet::from([Uuid::from_u128(1)]),
+        edges: BTreeSet::new(),
+        induced_edges: false,
+        exclude_properties: BTreeSet::new(),
+    };
+    let prepared = prepare_branch_selection(
+        root,
+        &spec,
+        None,
+        Some(&selection),
+        &[],
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(current(root), before);
+    assert!(!state(root).heads.contains_key(&branch_uuid));
+    assert!(!state(root).versions.contains_key(&version_uuid));
+    let projection = prepared.version.content.graph_projection.as_ref().unwrap();
+    assert!(projection.selected_payload_bytes < projection.source_payload_bytes);
+    assert_eq!(projection.selection, selection);
+    let private = tempfile::tempdir().unwrap();
+    let selected = materialize_prepared_branch(root, &prepared, private.path()).unwrap();
+    assert!(
+        selected
+            .graph_files_inventory()
+            .unwrap()
+            .unwrap()
+            .total_byte_length
+            < projection.source_payload_bytes
+    );
+    assert_eq!(current(root), before);
+    let creation = ResearchBranchRecord {
+        branch_uuid,
+        project_uuid: Uuid::now_v7(),
+        parent_branch_uuid: None,
+        origin_version_uuid: origin_id,
+        base_version_uuid: version_uuid,
+        creator_uuid: Uuid::now_v7(),
+        created_at: 11,
+        label: "selected".into(),
+        selection_sha256: [7; 32],
+    };
+    mutate(
+        root,
+        ResearchMutation::PublishBranch {
+            intent_sha256: [0; 32],
+            origin_capture: None,
+            creation: Some(creation),
+            version: Box::new(prepared.version.clone()),
+        },
+    );
+    assert_eq!(state(root).heads[&branch_uuid], version_uuid);
+    assert_eq!(state(root).versions[&origin_id], origin);
+}

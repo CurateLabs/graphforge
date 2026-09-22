@@ -60,3 +60,18 @@ weaken exact replay or later destination-scoped contribution deduplication.
 
 This decision precedes implementation. Real Branch acceptance tests, including
 two-Branch restoration and reopen, are required before #1352 closes.
+
+Creating directly from current Project research prepares an authenticated origin
+Version identity without an intermediate publication. The one Branch publication
+records that permanent identity commitment and the selected Branch Version. It
+does not retain the complete origin payload implicitly: the creation record is
+genealogy, and the selected base is the retention root. Historical expansion
+requires a separately retained complete Version. The prepared current-origin
+capture is bound into the same operation identity and expected-CURRENT check;
+cancellation cannot leave a separately published capture behind.
+
+Branch receipts additionally retain a canonical public-request commitment. Native
+facades can recognize an exact request before repeating private preparation,
+even if CURRENT has advanced. This is separate from the complete prepared
+operation digest: raw operation replay still checks every prepared commitment,
+and a changed public request under the same operation identity conflicts.

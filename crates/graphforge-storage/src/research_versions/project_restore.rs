@@ -94,9 +94,22 @@ pub fn materialize_research_project(
     version: &ResearchVersionRecord,
     target: &Path,
 ) -> Result<ResolvedProjectGeneration, GfError> {
+    materialize(root, version, target, false)
+}
+
+pub(super) fn materialize(
+    root: &Path,
+    version: &ResearchVersionRecord,
+    target: &Path,
+    prepared: bool,
+) -> Result<ResolvedProjectGeneration, GfError> {
     let source_pin = crate::resolve_project_generation(root)?;
     validate_private_target(root, target)?;
-    let snapshots = inspect_research_version(root, version)?;
+    let snapshots = if prepared {
+        super::retained_content::inspect(root, version, None)?
+    } else {
+        inspect_research_version(root, version)?
+    };
     crate::open_or_initialize_ephemeral_project(target)?;
     let lease = crate::begin_graph_object_publication(target)?;
     let graph =
@@ -131,7 +144,11 @@ pub fn materialize_research_project(
                 }
             } else {
                 needs_graph_tree = true;
-                materialize_research_graph(root, version, graph.path())?;
+                if prepared {
+                    super::retained_content::materialize_graph_snapshot(root, p, graph.path())?;
+                } else {
+                    materialize_research_graph(root, version, graph.path())?;
+                }
             }
         }
     }

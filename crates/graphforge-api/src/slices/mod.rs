@@ -1,4 +1,5 @@
 //! Bounded native selection; membership is distinct from research ownership.
+pub(crate) mod branch;
 mod engine;
 mod frozen;
 mod graph;
@@ -112,4 +113,32 @@ fn genealogy(
         }
     }
     Ok(())
+}
+
+/// Shared bounded native read path for Branch preparation, without collecting a
+/// complete query result before cancellation and allocation accounting.
+pub(crate) fn stream_branch(
+    view: &GraphForge,
+    query: &str,
+    cancellation: &CancellationToken,
+    consume: impl FnMut(&arrow::record_batch::RecordBatch) -> Result<(), GfError>,
+) -> Result<(), GfError> {
+    let request = SliceRequest {
+        request_uuid: Uuid::now_v7(),
+        source: SliceSource::Current,
+        selector: SliceSelector::Direct {
+            members: SliceMembers::default(),
+        },
+        include: SliceMembers::default(),
+        exclude: SliceMembers::default(),
+        limits: SliceLimits::default(),
+    };
+    let mut budget = graph::Budget::new(&request, Some(cancellation));
+    graph::stream(
+        view,
+        query,
+        &std::collections::HashMap::new(),
+        &mut budget,
+        consume,
+    )
 }

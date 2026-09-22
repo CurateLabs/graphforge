@@ -10,7 +10,10 @@ fn contract<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<
         ))
     })
 }
-fn cancellation(env: Env, signal: Option<crate::Object<'_>>) -> Result<CancellationToken> {
+pub(crate) fn cancellation(
+    env: Env,
+    signal: Option<crate::Object<'_>>,
+) -> Result<CancellationToken> {
     use napi::bindgen_prelude::JsObjectValue;
     let token = CancellationToken::new();
     if let Some(signal) = signal {

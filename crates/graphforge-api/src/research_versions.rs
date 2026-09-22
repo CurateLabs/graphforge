@@ -1,6 +1,7 @@
 //! Immutable research Versions, owner-derived capture and exact historical views.
 mod view;
 pub use view::ResearchVersionView;
+pub(crate) use view::materialize as materialize_version;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -177,7 +178,8 @@ impl GraphForge {
                     }
                     None
                 }
-                ResearchMutation::RegisterGraphProjection { .. } => {
+                ResearchMutation::RegisterGraphProjection { .. }
+                | ResearchMutation::PublishBranch { .. } => {
                     return Err(GfError::Validation("raw graph projection requires domain-owner closure; use a complete Project capture".into()));
                 }
                 ResearchMutation::RestoreProject { source_version, .. } => {
@@ -213,7 +215,7 @@ impl GraphForge {
         outcome
     }
 
-    fn refresh_research_authority(
+    pub(crate) fn refresh_research_authority(
         &mut self,
         root: &std::path::Path,
         outcome: &Result<ResearchOperationReceipt, GfError>,
@@ -298,7 +300,7 @@ fn not_retained() -> GfError {
     }
 }
 
-fn complete_evidence(
+pub(crate) fn complete_evidence(
     generation: &graphforge_storage::ResolvedProjectGeneration,
 ) -> Result<Vec<ResearchEvidenceReference>, GfError> {
     if generation.capability("knowledge")?.is_none() {

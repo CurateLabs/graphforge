@@ -25,16 +25,16 @@ const MAX_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Context {
-    contract: u32,
-    request_uuid: Uuid,
-    version_uuid: Uuid,
-    generation_uuid: Uuid,
-    version_sha256: [u8; 32],
-    selector_sha256: [u8; 32],
-    ontology: Vec<ResearchParticipantCommitment>,
-    evidence: Vec<ResearchEvidenceReference>,
-    limits: SliceLimits,
+pub(super) struct Context {
+    pub(super) contract: u32,
+    pub(super) request_uuid: Uuid,
+    pub(super) version_uuid: Uuid,
+    pub(super) generation_uuid: Uuid,
+    pub(super) version_sha256: [u8; 32],
+    pub(super) selector_sha256: [u8; 32],
+    pub(super) ontology: Vec<ResearchParticipantCommitment>,
+    pub(super) evidence: Vec<ResearchEvidenceReference>,
+    pub(super) limits: SliceLimits,
 }
 impl GraphForge {
     /// Freeze exact membership and evidence/ontology commitments at an explicitly
@@ -318,7 +318,7 @@ fn capsule(
         mutation_receipt: None,
     })
 }
-fn decode(
+pub(super) fn decode(
     ipc: &[u8],
     cancellation: Option<&CancellationToken>,
 ) -> Result<(Selection, Context), GfError> {

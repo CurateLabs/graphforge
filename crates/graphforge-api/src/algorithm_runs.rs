@@ -589,7 +589,12 @@ fn publication_participants(
 }
 
 pub(crate) fn empty_participants() -> Result<Vec<ProjectParticipant>, GfError> {
-    let ledger = AlgorithmRunLedger::default();
+    encode_ledger(&AlgorithmRunLedger::default())
+}
+
+pub(crate) fn encode_ledger(
+    ledger: &AlgorithmRunLedger,
+) -> Result<Vec<ProjectParticipant>, GfError> {
     let registry = schema_registry();
     let runs = registry
         .iter()

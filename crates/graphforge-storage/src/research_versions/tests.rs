@@ -764,3 +764,253 @@ fn project_restore_replaces_research_in_one_publication_and_replay_keeps_later_s
     );
     assert_eq!(current(root.path()), newest);
 }
+
+#[test]
+fn branch_registry_and_selected_base_publish_with_one_receipt() {
+    // Storage contract fixture only; the facade must separately prove real
+    // two-Branch graph edits, isolation and restoration before #1352 closes.
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fixture(root, "selected research");
+    let origin = execute(root, &register(root, Uuid::now_v7()))
+        .version_uuid
+        .unwrap();
+    execute(
+        root,
+        &ResearchOperation {
+            operation_uuid: Uuid::now_v7(),
+            expected_generation_uuid: current(root),
+            mutation: ResearchMutation::Compact {
+                versions: BTreeSet::from([origin]),
+            },
+        },
+    );
+    let mut version = state(root).versions[&origin].clone();
+    let branch_uuid = Uuid::now_v7();
+    version.version_uuid = Uuid::now_v7();
+    version.context_uuid = branch_uuid;
+    version.content.source_version = Some(origin);
+    let base = version.version_uuid;
+    let creation = ResearchBranchRecord {
+        branch_uuid,
+        project_uuid: Uuid::now_v7(),
+        parent_branch_uuid: None,
+        origin_version_uuid: origin,
+        base_version_uuid: base,
+        creator_uuid: Uuid::now_v7(),
+        created_at: 7,
+        label: "selected branch".into(),
+        selection_sha256: [9; 32],
+    };
+    let operation = ResearchOperation {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(root),
+        mutation: ResearchMutation::PublishBranch {
+            intent_sha256: [0; 32],
+            origin_capture: None,
+            creation: Some(creation.clone()),
+            version: Box::new(version.clone()),
+        },
+    };
+    let receipt = execute(root, &operation);
+    let before = state(root);
+    assert_eq!(before.branches[&branch_uuid], creation);
+    assert_eq!(before.heads[&branch_uuid], base);
+    assert!(before.materialized.contains(&base));
+    assert_eq!(before.receipts[&operation.operation_uuid], receipt);
+    // A child cannot name A as its parent while capturing a Project Version.
+    let mut false_parent = creation.clone();
+    false_parent.branch_uuid = Uuid::now_v7();
+    false_parent.parent_branch_uuid = Some(branch_uuid);
+    false_parent.base_version_uuid = Uuid::now_v7();
+    let mut child_version = version.clone();
+    child_version.version_uuid = false_parent.base_version_uuid;
+    child_version.context_uuid = false_parent.branch_uuid;
+    let false_lineage = ResearchOperation {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(root),
+        mutation: ResearchMutation::PublishBranch {
+            intent_sha256: [0; 32],
+            origin_capture: None,
+            creation: Some(false_parent),
+            version: Box::new(child_version),
+        },
+    };
+    let before_rejection = current(root);
+    let error =
+        publish_research_operation(root, &false_lineage, &AtomicBool::new(false)).unwrap_err();
+    assert!(error.to_string().contains("immediate parent"));
+    assert_eq!(current(root), before_rejection);
+    assert_eq!(state(root), before);
+    assert_eq!(execute(root, &operation), receipt);
+    let project_capture = register(root, branch_uuid);
+    let current_before = current(root);
+    assert!(publish_research_operation(root, &project_capture, &AtomicBool::new(false)).is_err());
+    assert_eq!(current(root), current_before);
+    assert_eq!(state(root), before);
+    let mut changed = operation.clone();
+    let ResearchMutation::PublishBranch { version, .. } = &mut changed.mutation else {
+        unreachable!()
+    };
+    version.label = Some("changed request".into());
+    assert!(publish_research_operation(root, &changed, &AtomicBool::new(false)).is_err());
+    assert_eq!(state(root), before);
+    let next = Uuid::now_v7();
+    execute(
+        root,
+        &ResearchOperation {
+            operation_uuid: Uuid::now_v7(),
+            expected_generation_uuid: current(root),
+            mutation: ResearchMutation::Restore {
+                context_uuid: branch_uuid,
+                source_version: base,
+                version_uuid: next,
+                created_at: 8,
+            },
+        },
+    );
+    assert!(
+        state(root)
+            .deletion_blockers(base)
+            .contains(&format!("branch_base:{branch_uuid}"))
+    );
+    crate::project_recovery::recover_project_on_open(root).unwrap();
+    let reopened = state(root);
+    assert_eq!(reopened.branches[&branch_uuid], creation);
+    assert_eq!(reopened.heads[&branch_uuid], next);
+    assert_eq!(reopened.receipts[&operation.operation_uuid], receipt);
+}
+
+#[test]
+fn prepared_branch_content_outlives_private_source_without_changing_parent_research() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    fixture(root, "parent remains unchanged");
+    let origin_id = execute(root, &register(root, Uuid::now_v7()))
+        .version_uuid
+        .unwrap();
+    let origin = state(root).versions[&origin_id].clone();
+    let private = tempfile::tempdir().unwrap();
+    fixture(private.path(), "prepared Branch research");
+    let source = crate::resolve_project_generation(private.path()).unwrap();
+    let branch_uuid = Uuid::now_v7();
+    let mut version = origin.clone();
+    version.version_uuid = Uuid::now_v7();
+    version.context_uuid = branch_uuid;
+    version.content.source_version = Some(origin_id);
+    let prepared = prepare_branch_content(root, &source, version, &AtomicBool::new(false)).unwrap();
+    let base = prepared.version.version_uuid;
+    let parent_before = crate::resolve_project_generation(root).unwrap();
+    let before_bytes = parent_before
+        .participant_snapshot("workspace", "research_fixture")
+        .unwrap()
+        .unwrap()
+        .bytes;
+    assert!(!state(root).versions.contains_key(&base));
+    let creation = ResearchBranchRecord {
+        branch_uuid,
+        project_uuid: Uuid::now_v7(),
+        parent_branch_uuid: None,
+        origin_version_uuid: origin_id,
+        base_version_uuid: base,
+        creator_uuid: Uuid::now_v7(),
+        created_at: 9,
+        label: "prepared branch".into(),
+        selection_sha256: [8; 32],
+    };
+    execute(
+        root,
+        &ResearchOperation {
+            operation_uuid: Uuid::now_v7(),
+            expected_generation_uuid: current(root),
+            mutation: ResearchMutation::PublishBranch {
+                intent_sha256: [0; 32],
+                origin_capture: None,
+                creation: Some(creation),
+                version: Box::new(prepared.version.clone()),
+            },
+        },
+    );
+    drop(prepared);
+    drop(source);
+    drop(private);
+    crate::project_recovery::recover_project_on_open(root).unwrap();
+    let after = crate::resolve_project_generation(root).unwrap();
+    assert_eq!(
+        after
+            .participant_snapshot("workspace", "research_fixture")
+            .unwrap()
+            .unwrap()
+            .bytes,
+        before_bytes
+    );
+    let stored = state(root).versions[&base].clone();
+    let snapshots = inspect_research_version(root, &stored).unwrap();
+    assert_eq!(
+        snapshots[0].bytes,
+        json(&"prepared Branch research").unwrap()
+    );
+    assert!(state(root).materialized.contains(&base));
+}
+
+#[test]
+fn current_branch_origin_is_atomic_genealogy_without_an_implicit_whole_parent_pin() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    fixture(root, "current parent");
+    let parent_context = Uuid::now_v7();
+    let capture = register(root, parent_context);
+    let ResearchMutation::Register(origin) = capture.mutation else {
+        unreachable!()
+    };
+    let origin_uuid = origin.version_uuid;
+    let branch_uuid = Uuid::now_v7();
+    let mut spec = origin.clone();
+    spec.version_uuid = Uuid::now_v7();
+    spec.context_uuid = branch_uuid;
+    spec.source_version = Some(origin_uuid);
+    let before = current(root);
+    let prepared = prepare_branch_selection(
+        root,
+        &spec,
+        Some(&origin),
+        None,
+        &[],
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(current(root), before);
+    assert!(state(root).identities.is_empty());
+    let creation = ResearchBranchRecord {
+        branch_uuid,
+        project_uuid: Uuid::now_v7(),
+        parent_branch_uuid: None,
+        origin_version_uuid: origin_uuid,
+        base_version_uuid: spec.version_uuid,
+        creator_uuid: Uuid::now_v7(),
+        created_at: 13,
+        label: "current source".into(),
+        selection_sha256: [6; 32],
+    };
+    let operation = ResearchOperation {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: before,
+        mutation: ResearchMutation::PublishBranch {
+            intent_sha256: [0; 32],
+            origin_capture: Some(Box::new(origin)),
+            creation: Some(creation),
+            version: Box::new(prepared.version.clone()),
+        },
+    };
+    assert!(publish_research_operation(root, &operation, &AtomicBool::new(true)).is_err());
+    assert_eq!(current(root), before);
+    assert!(state(root).identities.is_empty());
+    let receipt = execute(root, &operation);
+    let registry = state(root);
+    assert!(registry.identities.contains_key(&origin_uuid));
+    assert!(!registry.versions.contains_key(&origin_uuid));
+    assert!(!registry.heads.contains_key(&parent_context));
+    assert_eq!(registry.heads[&branch_uuid], spec.version_uuid);
+    assert_eq!(execute(root, &operation), receipt);
+    assert_eq!(registry.versions.len(), 1);
+}
