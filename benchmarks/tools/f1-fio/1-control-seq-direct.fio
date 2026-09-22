@@ -1,0 +1,35 @@
+# F1 job 1 — known-positive device ceiling. Sequential, O_DIRECT, page cache bypassed.
+# libaio qd32 1 MiB is the device ceiling; psync qd1 1 MiB is what a plain synchronous
+# program (one thread, one outstanding request) gets from the same device.
+[global]
+directory=${F1_DIR}
+direct=1
+bs=1M
+ioengine=libaio
+iodepth=32
+group_reporting=1
+filename=ctrl.bin
+size=64g
+stonewall
+
+[c1-seq-write-libaio-qd32]
+rw=write
+
+[c2-seq-read-libaio-qd32]
+rw=read
+time_based=1
+runtime=45
+
+[c3-seq-write-psync-qd1]
+ioengine=psync
+iodepth=1
+rw=write
+time_based=1
+runtime=30
+
+[c4-seq-read-psync-qd1]
+ioengine=psync
+iodepth=1
+rw=read
+time_based=1
+runtime=30
