@@ -449,7 +449,7 @@ recorded on the citing issues:
 ```bash
 make -C benchmarks retain-ladder-evidence \
   EVIDENCE_DIR=$OUTPUT_DIR SUMMARY_LOG=/home/ubuntu/gf-clean-ladder-<sha>.log \
-  DESTINATION=docs/development/evidence/ladder/<full-sha> [INCLUDE_BENCHEXEC=1]
+  DESTINATION=../docs/development/evidence/ladder/<full-sha> [INCLUDE_BENCHEXEC=1]
 ```
 
 Every rung receipt is verified against the digests in its `s<scale>-result.json`

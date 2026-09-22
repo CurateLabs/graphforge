@@ -1,0 +1,317 @@
+=== clean ladder ab1a713e79af875d7fc66cce18a87bd63b7681fb  2026-09-21T16:53:19Z
+per-rung stop: reference /home/ubuntu/graphforge-ladder/clean-1955f17d-evidence margin 0.10 (4 h cap)
+available 110.0 GB  reserve 16.5 GB (15% of available)
+=== build 2026-09-21T16:53:19Z
+CARGO_TARGET_DIR="/home/ubuntu/gf-ladder-target-ab1a713e79af875d7fc66cce18a87bd63b7681fb" cargo build --locked --release --manifest-path ../Cargo.toml -p graphforge-cli
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-search/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-core/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-ontology/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-filesystem/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-observability/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-cypher/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-bindings-node/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-portable-oci/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-ir/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-bindings-py/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-ast/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-value/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-knowledge/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-cli/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-exec/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-provenance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-storage/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-rel/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-plan/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-discovery/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-api/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+    Finished `release` profile [optimized] target(s) in 0.40s
+CARGO_TARGET_DIR="/home/ubuntu/gf-ladder-target-ab1a713e79af875d7fc66cce18a87bd63b7681fb" cargo build --locked --release --manifest-path Cargo.toml --bin graphforge-benchmark-certify --bin graphforge-benchmark-graph500-generator
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-api/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-filesystem/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-storage/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+    Finished `release` profile [optimized] target(s) in 0.24s
+OK gf 37f676827746fd8c
+OK graphforge-benchmark-certify f0c66f72e94132ac
+OK graphforge-benchmark-graph500-generator 0c56078a4b8944ad
+=== admission dry run 2026-09-21T16:53:21Z
+uv sync --locked
+Resolved 24 packages in 0.84ms
+Audited 23 packages in 2ms
+test -n "/home/ubuntu/graphforge-ladder/clean-ab1a713e-evidence" && test -n "/home/ubuntu/graphforge-ladder/clean-ab1a713e-work"
+PYTHONPATH=/home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/benchmarks/harness uv run --locked python -m graphforge_bench.progressive_host_run \
+	--maximum-scale "22" --output-dir "/home/ubuntu/graphforge-ladder/clean-ab1a713e-evidence" --work-root "/home/ubuntu/graphforge-ladder/clean-ab1a713e-work" --gf "/home/ubuntu/gf-ladder-target-ab1a713e79af875d7fc66cce18a87bd63b7681fb/release/gf" --certify "/home/ubuntu/gf-ladder-target-ab1a713e79af875d7fc66cce18a87bd63b7681fb/release/graphforge-benchmark-certify" --generator "/home/ubuntu/gf-ladder-target-ab1a713e79af875d7fc66cce18a87bd63b7681fb/release/graphforge-benchmark-graph500-generator" --benchexec-python "/usr/bin/python3" --reserved-headroom-bytes "16503478887" --wall-margin "0.10" --reference-evidence-dir "/home/ubuntu/graphforge-ladder/clean-1955f17d-evidence" --dry-run
+{"maximum_scale": 22, "plans": [{"claim": "engineering_evidence_only", "execution": "native_linux_benchexec_host", "identities": {"benchexec_python_sha256": "52e0a13e60a981d8c4b6478be2ba5176f69da07948a056bf49cf6f077e30cb41", "benchexec_version": "3.35", "certify_sha256": "f0c66f72e94132ac82c56a90d223b5e969a669047a516bd00e727a4b1449af15", "commit": "ab1a713e79af875d7fc66cce18a87bd63b7681fb", "generator": "sha256:a7cd8397ce191c48094d8812eb43dfc894084645dd439e76fb8704b35bb61fdc", "generator_executable_sha256": "0c56078a4b8944ad187153c516306f5a1c4552b95aa95300e788ca1e32ada792", "gf_sha256": "37f676827746fd8cc4b6656e3fe4321f81beeadadde9f347e8ffa875d2968345", "host_profile_id": "local-linux-cgroups-v2", "host_profile_sha256": "21cbcd01a0896ad8ed9d4aae1ab933cb143d41636fdf66297ead9bb89c3681bf", "producer_sha256": "2ab7248aa85c1d8d3d85f0e182c7bdd10ceaed23c4f3a90b4ac9b95e235dcec4", "profile_id": "graph500-s18-local", "profile_sha256": "762fdac3d4ad790eaf1aa75348ccca692c709dcf578f91e1363f720afebc368b"}, "limits": {"cores": 16, "memory_bytes": 4294967296, "wall_seconds": 103}, "outputs": ["s18-plan.json", "s18-benchexec.json", "s18-graphforge.json", "s18-rung.json", "s18-result.json"], "rung": "S18", "schema": "graphforge-progressive-host-run-plan/1", "wall_policy": {"margin": 0.1, "maximum_wall_seconds": 14400, "reference_wall_seconds": 93}, "work_root_capacity": {"free_bytes": 110023061504, "reserved_headroom_bytes": 16503478887}}]}
+=== LADDER START 2026-09-21T16:53:21Z
+uv sync --locked
+Resolved 24 packages in 0.81ms
+Audited 23 packages in 0.23ms
+CARGO_TARGET_DIR="/home/ubuntu/gf-ladder-target-ab1a713e79af875d7fc66cce18a87bd63b7681fb" cargo build --locked --release --manifest-path ../Cargo.toml -p graphforge-cli
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-bindings-py/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-search/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-filesystem/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-exec/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-knowledge/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-portable-oci/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-plan/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-core/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-storage/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-ir/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-value/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-ast/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-rel/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-cypher/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-discovery/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-provenance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-ontology/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-bindings-node/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-observability/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-api/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-cli/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+    Finished `release` profile [optimized] target(s) in 0.21s
+CARGO_TARGET_DIR="/home/ubuntu/gf-ladder-target-ab1a713e79af875d7fc66cce18a87bd63b7681fb" cargo build --locked --release --manifest-path Cargo.toml --bin graphforge-benchmark-certify --bin graphforge-benchmark-graph500-generator
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-filesystem/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-storage/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/crates/graphforge-api/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+    Finished `release` profile [optimized] target(s) in 0.18s
+test -n "/home/ubuntu/graphforge-ladder/clean-ab1a713e-evidence" && test -n "/home/ubuntu/graphforge-ladder/clean-ab1a713e-work"
+PYTHONPATH=/home/ubuntu/gf-ladder-src-ab1a713e79af875d7fc66cce18a87bd63b7681fb/benchmarks/harness uv run --locked python -m graphforge_bench.progressive_host_run \
+	--maximum-scale "22" --output-dir "/home/ubuntu/graphforge-ladder/clean-ab1a713e-evidence" --work-root "/home/ubuntu/graphforge-ladder/clean-ab1a713e-work" --gf "/home/ubuntu/gf-ladder-target-ab1a713e79af875d7fc66cce18a87bd63b7681fb/release/gf" --certify "/home/ubuntu/gf-ladder-target-ab1a713e79af875d7fc66cce18a87bd63b7681fb/release/graphforge-benchmark-certify" --generator "/home/ubuntu/gf-ladder-target-ab1a713e79af875d7fc66cce18a87bd63b7681fb/release/graphforge-benchmark-graph500-generator" --benchexec-python "/usr/bin/python3" --reserved-headroom-bytes "16503478887" --wall-margin "0.10" --reference-evidence-dir "/home/ubuntu/graphforge-ladder/clean-1955f17d-evidence"
+WARNING:root:Home directory in container should be /home/benchexec but this directory cannot be created due to directory mode of parent directory. It is recommended to use '--overlay-dir /home' or '--hidden-dir /home' and overwrite directory modes for subdirectories where necessary.
+2026-09-21 16:53:25,590 - WARNING - No propertyfile specified. Score computation will ignore the results.
+2026-09-21 16:53:25,621 - INFO - Unable to find pqos_wrapper, please install it for cache allocation and monitoring if your CPU supports Intel RDT (cf. https://gitlab.com/sosy-lab/software/pqos-wrapper).
+
+executing run set 'graphforge-progressive-qualification-v1.profile'     (1 file)
+16:53:25   profile.json            2026-09-21 16:53:25,632 - WARNING - Home directory in container should be /home/benchexec but this directory cannot be created due to directory mode of parent directory. It is recommended to use '--overlay-dir /home' or '--hidden-dir /home' and overwrite directory modes for subdirectories where necessary.
+DONE                        35.68   36.70
+
+Statistics:              1 Files
+  correct:               0
+    correct true:        0
+    correct false:       0
+  incorrect:             0
+    incorrect true:      0
+    incorrect false:     0
+  unknown:               1
+
+In order to get HTML and CSV tables, run
+table-generator /home/ubuntu/graphforge-ladder/clean-ab1a713e-work/.gf-host-authority-5aa7wagb/gf-host-progressive-_vft0r05/raw/benchmark.2026-09-21_16-53-25.results.graphforge-progressive-qualification-v1.profile.xml
+WARNING:root:Home directory in container should be /home/benchexec but this directory cannot be created due to directory mode of parent directory. It is recommended to use '--overlay-dir /home' or '--hidden-dir /home' and overwrite directory modes for subdirectories where necessary.
+2026-09-21 16:54:06,089 - WARNING - No propertyfile specified. Score computation will ignore the results.
+2026-09-21 16:54:06,122 - INFO - Unable to find pqos_wrapper, please install it for cache allocation and monitoring if your CPU supports Intel RDT (cf. https://gitlab.com/sosy-lab/software/pqos-wrapper).
+
+executing run set 'graphforge-progressive-qualification-v1.profile'     (1 file)
+16:54:06   profile.json            2026-09-21 16:54:06,133 - WARNING - Home directory in container should be /home/benchexec but this directory cannot be created due to directory mode of parent directory. It is recommended to use '--overlay-dir /home' or '--hidden-dir /home' and overwrite directory modes for subdirectories where necessary.
+DONE                        70.87   72.25
+
+Statistics:              1 Files
+  correct:               0
+    correct true:        0
+    correct false:       0
+  incorrect:             0
+    incorrect true:      0
+    incorrect false:     0
+  unknown:               1
+
+In order to get HTML and CSV tables, run
+table-generator /home/ubuntu/graphforge-ladder/clean-ab1a713e-work/.gf-host-authority-pq7190zi/gf-host-progressive-s4uznq_9/raw/benchmark.2026-09-21_16-54-05.results.graphforge-progressive-qualification-v1.profile.xml
+WARNING:root:Home directory in container should be /home/benchexec but this directory cannot be created due to directory mode of parent directory. It is recommended to use '--overlay-dir /home' or '--hidden-dir /home' and overwrite directory modes for subdirectories where necessary.
+2026-09-21 16:55:22,395 - WARNING - No propertyfile specified. Score computation will ignore the results.
+2026-09-21 16:55:22,429 - INFO - Unable to find pqos_wrapper, please install it for cache allocation and monitoring if your CPU supports Intel RDT (cf. https://gitlab.com/sosy-lab/software/pqos-wrapper).
+
+executing run set 'graphforge-progressive-qualification-v1.profile'     (1 file)
+16:55:22   profile.json            2026-09-21 16:55:22,440 - WARNING - Home directory in container should be /home/benchexec but this directory cannot be created due to directory mode of parent directory. It is recommended to use '--overlay-dir /home' or '--hidden-dir /home' and overwrite directory modes for subdirectories where necessary.
+DONE                       164.97  189.54
+
+Statistics:              1 Files
+  correct:               0
+    correct true:        0
+    correct false:       0
+  incorrect:             0
+    incorrect true:      0
+    incorrect false:     0
+  unknown:               1
+
+In order to get HTML and CSV tables, run
+table-generator /home/ubuntu/graphforge-ladder/clean-ab1a713e-work/.gf-host-authority-qf78ys48/gf-host-progressive-2ay_9jhg/raw/benchmark.2026-09-21_16-55-22.results.graphforge-progressive-qualification-v1.profile.xml
+WARNING:root:Home directory in container should be /home/benchexec but this directory cannot be created due to directory mode of parent directory. It is recommended to use '--overlay-dir /home' or '--hidden-dir /home' and overwrite directory modes for subdirectories where necessary.
+2026-09-21 16:58:36,154 - WARNING - No propertyfile specified. Score computation will ignore the results.
+2026-09-21 16:58:36,187 - INFO - Unable to find pqos_wrapper, please install it for cache allocation and monitoring if your CPU supports Intel RDT (cf. https://gitlab.com/sosy-lab/software/pqos-wrapper).
+
+executing run set 'graphforge-progressive-qualification-v1.profile'     (1 file)
+16:58:36   profile.json            2026-09-21 16:58:36,199 - WARNING - Home directory in container should be /home/benchexec but this directory cannot be created due to directory mode of parent directory. It is recommended to use '--overlay-dir /home' or '--hidden-dir /home' and overwrite directory modes for subdirectories where necessary.
+DONE                       586.25  591.87
+
+Statistics:              1 Files
+  correct:               0
+    correct true:        0
+    correct false:       0
+  incorrect:             0
+    incorrect true:      0
+    incorrect false:     0
+  unknown:               1
+
+In order to get HTML and CSV tables, run
+table-generator /home/ubuntu/graphforge-ladder/clean-ab1a713e-work/.gf-host-authority-_c7muwmi/gf-host-progressive-2l1bzdax/raw/benchmark.2026-09-21_16-58-36.results.graphforge-progressive-qualification-v1.profile.xml
+=== LADDER EXIT 0 2026-09-21T17:08:28Z
+=== rung results
+S18 passed 
+S19 passed 
+S20 passed 
+S22 passed 
+=== ingest throughput
+S18:    4,194,304 edges  ingest     26.0s     161,121 edges/s  cores 0.97
+S19:    8,388,608 edges  ingest     51.4s     163,047 edges/s  cores 0.98
+S20:   16,777,216 edges  ingest    149.0s     112,624 edges/s  cores 0.87
+S22:   67,108,864 edges  ingest    432.7s     155,093 edges/s  cores 0.99

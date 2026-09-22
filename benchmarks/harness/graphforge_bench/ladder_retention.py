@@ -89,10 +89,11 @@ def _commit_from_plan(evidence_dir: Path, scales: list[int]) -> str | None:
 
 def _commit_from_summary(summary_log: Path) -> str | None:
     try:
-        for line in summary_log.open(encoding="utf-8", errors="replace"):
-            match = SUMMARY_HEADER.match(line)
-            if match is not None:
-                return match.group(1)
+        with summary_log.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                match = SUMMARY_HEADER.match(line)
+                if match is not None:
+                    return match.group(1)
     except OSError as error:
         raise LadderEvidenceRetentionError(
             f"controller summary {summary_log} is unreadable"
@@ -117,6 +118,7 @@ def _resolve_commit(
             None if summary_log is None else _commit_from_summary(summary_log),
         ),
     ]
+    resolved: str | None = None
     for source, value in candidates:
         if value is None:
             continue
@@ -124,7 +126,13 @@ def _resolve_commit(
             raise LadderEvidenceRetentionError(
                 f"ladder commit from {source} must be a lowercase 40-hex Git object ID"
             )
-        return value
+        if resolved is not None and value != resolved:
+            raise LadderEvidenceRetentionError(
+                f"ladder commit from {source} disagrees with {resolved}"
+            )
+        resolved = value
+    if resolved is not None:
+        return resolved
     raise LadderEvidenceRetentionError(
         "cannot resolve the ladder commit; pass --sha with the full 40-hex commit"
     )
@@ -153,6 +161,22 @@ def _verify_receipts(evidence_dir: Path, scales: list[int], include_benchexec: b
             if _sha256(path) != recorded:
                 raise LadderEvidenceRetentionError(
                     f"{path.name} does not match {result_path.name} artifacts.{key}"
+                )
+        plan_path = evidence_dir / f"s{scale}-plan.json"
+        plan = _read_json(plan_path, f"{plan_path.name} is malformed")
+        identities = plan.get("identities") if isinstance(plan, dict) else None
+        projection = evidence_dir / f"s{scale}-projection.json"
+        projection_digest = (
+            identities.get("admitted_projection_sha256") if isinstance(identities, dict) else None
+        )
+        if projection_digest is not None or projection.exists():
+            if not isinstance(projection_digest, str) or not projection.is_file():
+                raise LadderEvidenceRetentionError(
+                    f"{projection.name} requires the plan's admitted projection digest and payload"
+                )
+            if _sha256(projection) != projection_digest:
+                raise LadderEvidenceRetentionError(
+                    f"{projection.name} does not match the plan's admitted projection digest"
                 )
 
 

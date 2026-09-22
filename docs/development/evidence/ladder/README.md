@@ -16,7 +16,7 @@ Run the retention step with:
 make -C benchmarks retain-ladder-evidence \
   EVIDENCE_DIR=/home/ubuntu/graphforge-ladder/clean-<sha>-evidence \
   SUMMARY_LOG=/home/ubuntu/gf-clean-ladder-<sha>.log \
-  DESTINATION=docs/development/evidence/ladder/<full-sha> [INCLUDE_BENCHEXEC=1]
+  DESTINATION=../docs/development/evidence/ladder/<full-sha> [INCLUDE_BENCHEXEC=1]
 ```
 
 Each rung receipt is verified against the digests recorded in its

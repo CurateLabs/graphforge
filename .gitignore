@@ -184,6 +184,8 @@ profile_*
 # Checked-in certify stream fixtures keep the real *.log artifact name the
 # controller globs for (benchmarks/tests/test_progressive_host_run.py).
 !benchmarks/tests/fixtures/**/*.log
+# Retained benchmark evidence is part of the archive, not disposable logging.
+!/docs/development/evidence/ladder/*/controller-summary.log
 .temp/
 tmp/
 

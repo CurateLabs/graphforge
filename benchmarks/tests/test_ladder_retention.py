@@ -52,6 +52,12 @@ def write_rung(source: Path, scale: int, *, projection: bool = False) -> None:
     )
     if projection:
         (source / f"s{scale}-projection.json").write_text("{}\n", encoding="utf-8")
+        plan_path = source / f"s{scale}-plan.json"
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["identities"]["admitted_projection_sha256"] = sha256(
+            source / f"s{scale}-projection.json"
+        )
+        plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
     # Record the real digests once every receipt exists.
     result_path = source / f"s{scale}-result.json"
     result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -149,6 +155,20 @@ class LadderRetentionTests(unittest.TestCase):
             retain_ladder_evidence(destination, evidence_dir=source, summary_log=summary)
         self.assertEqual((destination / MANIFEST_NAME).read_bytes(), before)
 
+    def test_missing_or_corrupt_projection_is_refused_before_copy(self) -> None:
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                source = write_evidence(self.root / f"evidence-{missing}", projection=True)
+                projection = source / "s20-projection.json"
+                if missing:
+                    projection.unlink()
+                else:
+                    projection.write_text('{"corrupted":true}\n', encoding="utf-8")
+                destination = self.root / f"retained-{missing}"
+                with self.assertRaisesRegex(LadderEvidenceRetentionError, "projection"):
+                    retain_ladder_evidence(destination, evidence_dir=source)
+                self.assertFalse(destination.exists())
+
     def test_rungs_must_agree_on_the_ladder_commit(self) -> None:
         source = write_evidence(self.root / "clean-ab12-evidence")
         plan = json.loads((source / "s20-plan.json").read_text(encoding="utf-8"))
@@ -172,6 +192,22 @@ class LadderRetentionTests(unittest.TestCase):
         self.assertEqual(report["commit"], COMMIT)
         self.assertEqual(report["retained_files"], [SUMMARY_NAME])
         self.assertEqual(report["archive_digest"], sha256(destination / MANIFEST_NAME))
+
+    def test_conflicting_summary_or_explicit_commit_is_refused_before_copy(self) -> None:
+        source = write_evidence(self.root / "evidence")
+        summary = write_summary(self.root)
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit):
+                summary.write_text(f"=== clean ladder {OTHER_COMMIT}\n", encoding="utf-8")
+                destination = self.root / f"retained-{explicit}"
+                with self.assertRaisesRegex(LadderEvidenceRetentionError, "disagrees"):
+                    retain_ladder_evidence(
+                        destination,
+                        evidence_dir=source,
+                        summary_log=None if explicit else summary,
+                        sha=OTHER_COMMIT if explicit else None,
+                    )
+                self.assertFalse(destination.exists())
 
     def test_commit_must_resolve(self) -> None:
         summary = self.root / "headerless.log"
@@ -211,6 +247,18 @@ class LadderRetentionTests(unittest.TestCase):
         with mock.patch("sys.stdout", new=io.StringIO()) as stdout:
             self.assertEqual(main(["--destination", str(self.root / "retained")]), 2)
         self.assertIn("ladder evidence retention refused", stdout.getvalue())
+
+    def test_repository_archives_contain_every_manifest_payload(self) -> None:
+        archives = Path(__file__).resolve().parents[2] / "docs/development/evidence/ladder"
+        manifests = sorted(archives.glob("*/MANIFEST.sha256"))
+        self.assertTrue(manifests)
+        for manifest in manifests:
+            for line in manifest.read_text(encoding="utf-8").splitlines():
+                digest, name = line.split("  ", 1)
+                with self.subTest(archive=manifest.parent.name, payload=name):
+                    payload = manifest.parent / name
+                    self.assertTrue(payload.is_file(), f"missing retained payload: {payload}")
+                    self.assertEqual(sha256(payload), digest)
 
 
 if __name__ == "__main__":
