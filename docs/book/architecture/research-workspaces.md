@@ -234,7 +234,6 @@ returns the original result; changed requests or stale first publications fail.
 The concrete limits and transport contract are in
 `tests/contracts/research-claims-api-v1.json`. Proposal review remains #1356 work.
 
-
 Local operations are add, modify, suppress, replace, reclassify, and challenge.
 Suppressing inherited graph content removes it from the active Branch graph
 while preserving origin and historical state. Suppressing a knowledge assertion
@@ -263,6 +262,37 @@ when representable under the selected ontology policy; otherwise explain the
 required extension or unresolved validation conflict.
 
 ## Evolution and comparison
+
+**Implemented (#1354):** `GraphForge::compare_research` returns native Arrow
+changes or summary indicators for Project, Branch, and exact retained Version
+endpoints. Python `compare_research`, Node `compareResearch`, and
+`gf research compare --file request.json` transport the same closed
+[request contract](../../../tests/contracts/research-comparison-api-v1.json).
+The left endpoint is local/earlier research; the right is upstream/later research.
+
+Rows identify the native object and field, local/upstream/conflict disposition,
+value commitments, immutable origin, incorporated Version, contribution UUID,
+and any explicitly accepted source/destination Versions. Annotation and challenge
+history uses the existing assertion owners. Ontology rows use semantic identities,
+not runtime catalog IDs. Missing evidence and unretained citations are explicit
+`dependency_unavailable` rows. Immediate-parent reads select the Branch's known
+objects and citations; unrelated corpus additions do not become Branch updates.
+Workspace ontology remains shared context authority.
+
+Comparisons never publish research. Accepted mappings are explicit per-field
+inputs validated against exact retained source/destination content and native
+contribution identity; they do not replace the Proposal acceptance ledger.
+Several fields may cite different accepted Versions. Canonical comparisons require
+explicit context/community and optional decision-sequence cutoffs; frozen Version
+timestamps never imply canonical promotion. Update/Proposal application remains
+the responsibility of the following implementation issues.
+
+`max_fields`, `max_bytes`, and `page_size` bound admitted semantic state and output;
+native domain decoding additionally uses its existing hard bounds. Cancellation
+returns `GF_CANCELLED`. Cursors bind request, pinned endpoints and deterministic
+semantic rows, including dependency availability. A changed live endpoint or
+released referenced payload returns `GF_PAGE_SNAPSHOT_GONE`; unrelated current
+publications do not invalidate an otherwise unchanged exact-Version comparison.
 
 Opening an existing Branch or Version never advances its inherited state.
 Discover changes that affect selected objects and their evidence/ontology

@@ -762,6 +762,9 @@ class GraphForge:
         *,
         cancellation: CancellationToken | None = None,
     ) -> pyarrow.Table: ...
+    def compare_research(
+        self, request: Any, *, cancellation: CancellationToken | None = None
+    ) -> Any: ...
     def create_research_claim(
         self, request: dict[str, Any], *, cancellation: CancellationToken | None = None
     ) -> pyarrow.Table: ...

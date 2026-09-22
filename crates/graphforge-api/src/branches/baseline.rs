@@ -37,15 +37,15 @@ const COLUMNS: [&str; 12] = [
     "contract",
 ];
 #[derive(Clone)]
-struct Row {
-    key: Key,
-    origin: Uuid,
-    incorporated: Option<Uuid>,
-    original: String,
-    baseline: String,
-    current: String,
-    contribution: Uuid,
-    role: String,
+pub(crate) struct Row {
+    pub(crate) key: Key,
+    pub(crate) origin: Uuid,
+    pub(crate) incorporated: Option<Uuid>,
+    pub(crate) original: String,
+    pub(crate) baseline: String,
+    pub(crate) current: String,
+    pub(crate) contribution: Uuid,
+    pub(crate) role: String,
 }
 impl Row {
     fn status(&self) -> &'static str {
@@ -76,7 +76,7 @@ fn hash(bytes: &[u8; 32]) -> String {
         out
     })
 }
-fn contribution(branch: Uuid, operation: Uuid, key: &Key) -> Uuid {
+pub(super) fn contribution(branch: Uuid, operation: Uuid, key: &Key) -> Uuid {
     let mut digest = Sha256::new();
     digest.update(b"graphforge-branch-contribution/1");
     digest.update(branch.as_bytes());
@@ -128,7 +128,7 @@ fn batch(rows: &BTreeMap<Key, Row>) -> Result<RecordBatch, GfError> {
     )
     .map_err(|_| invalid())
 }
-fn read(graph: &GraphForge) -> Result<BTreeMap<Key, Row>, GfError> {
+pub(crate) fn read(graph: &GraphForge) -> Result<BTreeMap<Key, Row>, GfError> {
     let generation = graph.generation_for_read()?;
     super::domain_bounds::preflight(&generation)?;
     let Some(snapshot) = generation.participant_snapshot("workspace", FAMILY)? else {
@@ -206,7 +206,7 @@ fn read(graph: &GraphForge) -> Result<BTreeMap<Key, Row>, GfError> {
 fn fingerprint() -> [u8; 32] {
     Sha256::digest(b"graphforge-branch-fields/1").into()
 }
-fn install(
+pub(super) fn install(
     root: &std::path::Path,
     prepared: &mut PreparedBranchContent,
     rows: &BTreeMap<Key, Row>,
@@ -294,7 +294,17 @@ pub(super) fn update(
     operation: Uuid,
     cancellation: &CancellationToken,
 ) -> Result<(), GfError> {
-    let mut rows = read(graph)?;
+    let registry = graphforge_storage::research_versions::read_research_registry(
+        &owner.generation_for_read()?,
+    )?;
+    let mut rows = super::baseline_context::read(
+        owner,
+        graph,
+        prepared.version.context_uuid,
+        prepared.version.version_uuid,
+        &registry,
+        cancellation,
+    )?;
     let current: Fields = fields::read(graph, cancellation)?;
     for row in rows.values_mut() {
         row.current = current.get(&row.key).map(hash).unwrap_or_default();
@@ -346,7 +356,23 @@ pub(super) fn incorporate(
     cancellation: &CancellationToken,
 ) -> Result<(), GfError> {
     let graph = private_view::open(owner, prepared)?;
-    let mut rows = read(&graph)?;
+    let registry = graphforge_storage::research_versions::read_research_registry(
+        &owner.generation_for_read()?,
+    )?;
+    let head = registry
+        .heads
+        .get(&prepared.version.context_uuid)
+        .ok_or_else(invalid)?;
+    let prior = registry.versions.get(head).ok_or_else(invalid)?;
+    let previous = crate::research_versions::materialize_version(owner, prior)?;
+    let mut rows = super::baseline_context::read(
+        owner,
+        &previous,
+        prepared.version.context_uuid,
+        *head,
+        &registry,
+        cancellation,
+    )?;
     let incoming = read(source)?;
     let current = fields::read(&graph, cancellation)?;
     for row in rows.values_mut() {

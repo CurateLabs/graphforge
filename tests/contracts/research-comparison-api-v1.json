@@ -1,0 +1,46 @@
+{
+  "contract_version": 1,
+  "method": "GraphForge.compare_research",
+  "endpoints": ["project", "branch", "version"],
+  "details": ["changes", "summary"],
+  "change_values": [
+    "local",
+    "upstream",
+    "conflict",
+    "changed",
+    "accepted",
+    "equivalent",
+    "dependency_unavailable"
+  ],
+  "local_states": [
+    "accepted",
+    "inherited",
+    "suppressed",
+    "local",
+    "modified",
+    "unavailable"
+  ],
+  "limits": {
+    "max_fields": 40000,
+    "max_bytes": 67108864,
+    "page_size": 1000,
+    "accepted_units": 256,
+    "request_bytes": 1048576
+  },
+  "baseline": "Per-field incorporated values; immutable origin remains separate. Explicit accepted mappings are exact source contribution, destination context and field-value proofs, not a production acceptance ledger.",
+  "authority": "Canonical decisions require explicit context/community and optional inclusive sequence; Version capture never infers promotion.",
+  "paging": "Request, resolved endpoints, optional current canonical authority, and full semantic rows bind every continuation. Changed dependency retention refuses stale continuation. Unrelated publications preserve immutable Version paging.",
+  "scope": "Immediate-parent comparisons select existing left object/baseline identities; workspace ontology is context authority, references require selected citation identity. Other endpoint pairs compare their bounded complete selected content.",
+  "errors": [
+    "GF_CANCELLED",
+    "GF_RESOURCE_LIMIT",
+    "GF_RESULT_NOT_RETAINED",
+    "GF_PAGE_SNAPSHOT_GONE"
+  ],
+  "mutation": "None",
+  "bindings": {
+    "python": "compare_research(request, cancellation=token) -> Arrow",
+    "node": "compareResearch(request, signal) -> Promise<Arrow IPC>",
+    "cli": "gf research compare --file request.json -> Arrow IPC"
+  }
+}

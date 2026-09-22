@@ -123,6 +123,21 @@ pub(crate) fn stream_branch(
     cancellation: &CancellationToken,
     consume: impl FnMut(&arrow::record_batch::RecordBatch) -> Result<(), GfError>,
 ) -> Result<(), GfError> {
+    stream_branch_params(
+        view,
+        query,
+        &std::collections::HashMap::new(),
+        cancellation,
+        consume,
+    )
+}
+pub(crate) fn stream_branch_params(
+    view: &GraphForge,
+    query: &str,
+    params: &std::collections::HashMap<String, graphforge_ir::IrLiteral>,
+    cancellation: &CancellationToken,
+    consume: impl FnMut(&arrow::record_batch::RecordBatch) -> Result<(), GfError>,
+) -> Result<(), GfError> {
     let request = SliceRequest {
         request_uuid: Uuid::now_v7(),
         source: SliceSource::Current,
@@ -134,11 +149,5 @@ pub(crate) fn stream_branch(
         limits: SliceLimits::default(),
     };
     let mut budget = graph::Budget::new(&request, Some(cancellation));
-    graph::stream(
-        view,
-        query,
-        &std::collections::HashMap::new(),
-        &mut budget,
-        consume,
-    )
+    graph::stream(view, query, params, &mut budget, consume)
 }

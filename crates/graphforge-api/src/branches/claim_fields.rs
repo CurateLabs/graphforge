@@ -8,11 +8,15 @@ pub(super) fn read(
     graph: &GraphForge,
     fields: &mut Fields,
     bytes: &mut usize,
+    selected: Option<&super::fields::Objects>,
     cancellation: &CancellationToken,
 ) -> Result<(), GfError> {
     let generation = graph.generation_for_read()?;
     let claims = crate::research_claims::ledger::read_claims(&generation)?;
     for row in claims.claims() {
+        if selected.is_some_and(|set| !set.contains(&("assertion".into(), row.assertion_uuid))) {
+            continue;
+        }
         insert(
             fields,
             bytes,
@@ -25,6 +29,11 @@ pub(super) fn read(
         )?;
     }
     for row in claims.relations() {
+        if selected
+            .is_some_and(|set| !set.contains(&("assertion".into(), row.source_assertion_uuid)))
+        {
+            continue;
+        }
         insert(
             fields,
             bytes,
@@ -79,6 +88,9 @@ pub(super) fn read(
             for row in 0..batch.num_rows() {
                 cancellation.checkpoint()?;
                 let id = Uuid::from_slice(ids.value(row)).map_err(|_| invalid())?;
+                if selected.is_some_and(|set| !set.contains(&("assertion".into(), id))) {
+                    continue;
+                }
                 let event = Uuid::from_slice(events.value(row)).map_err(|_| invalid())?;
                 let digest = crate::canonical_arrow::result_fingerprint(&[batch.slice(row, 1)])
                     .map_err(|e| GfError::Validation(e.to_string()))?;

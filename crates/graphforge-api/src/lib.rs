@@ -161,12 +161,14 @@ mod query_evidence;
 mod query_execution;
 mod repository;
 mod research_claims;
+mod research_comparison;
 pub use research_claims::{
     ChangeResearchBranchClaimRequest, CreateResearchClaimRequest, InspectResearchClaimsRequest,
     RecordResearchDecisionsRequest, RelateResearchClaimsRequest, ResearchAuthorityQuery,
     ResearchClaimChange, ResearchClaimDraft, ResearchClaimHistoryKind, ResearchClaimHistoryRequest,
     ResearchContext, ResearchDecisionInput,
 };
+pub use research_comparison::*;
 mod research_project;
 mod research_versions;
 pub use branches::{

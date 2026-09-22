@@ -43,7 +43,7 @@ pub(crate) fn project_uuid(g: &ResolvedProjectGeneration) -> Result<Uuid, GfErro
     }
     Ok(id)
 }
-pub(super) fn resolve(
+pub(crate) fn resolve(
     g: &ResolvedProjectGeneration,
     context: &ResearchContext,
     community_uuid: Option<Uuid>,

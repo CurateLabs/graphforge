@@ -485,6 +485,14 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "research_comparison",
+    srcs = ["tests/research_comparison.rs"] + glob(["tests/research_comparison/**/*.rs"]),
+    crate = ":graphforge_api",
+    compile_data = ["//tests/contracts:research-comparison-api-v1.json"],
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "research_claims",
     srcs = ["tests/research_claims.rs"],
     crate = ":graphforge_api",
@@ -665,6 +673,7 @@ test_suite(
         ":research_versions",
         ":branches",
         ":research_claims",
+        ":research_comparison",
         ":branch_faults",
         ":branch_projection_provenance",
         ":slices",

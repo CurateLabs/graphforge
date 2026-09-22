@@ -2,6 +2,7 @@
 
 mod branches;
 mod claims;
+mod comparison;
 mod slices;
 
 use std::fs;
@@ -20,6 +21,8 @@ use crate::{canonical_uuid, write_execution_result};
 
 #[derive(Subcommand)]
 pub(crate) enum ResearchCommand {
+    /// Compare exact research endpoints without changing authoritative state.
+    Compare(comparison::Request),
     /// Inspect and publish contextual knowledge and explicit canonical decisions.
     Claim {
         #[command(subcommand)]
@@ -108,6 +111,7 @@ pub(crate) fn run_research(
     output: &mut dyn Write,
 ) -> Result<(), graphforge_api::GfError> {
     match command {
+        ResearchCommand::Compare(args) => comparison::run(graph, args, json, output)?,
         ResearchCommand::Claim { command } => claims::run(graph, command, json, output)?,
         ResearchCommand::Branch { command } => branches::run(graph, command, json, output)?,
         ResearchCommand::Slice { command } => slices::run(graph, command, json, output)?,
