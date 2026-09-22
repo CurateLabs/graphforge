@@ -259,7 +259,10 @@
       "GraphForge.research_proposal_history",
       "GraphForge.preview_research_upstream",
       "GraphForge.update_research_branch",
-      "GraphForge.research_upstream_history"
+      "GraphForge.research_upstream_history",
+      "GraphForge.research_reference",
+      "GraphForge.export_research",
+      "GraphForge.fork_research"
     ],
     "languageSpecific": {
       "GraphForge.import_session_status": {
