@@ -1,0 +1,82 @@
+{
+  "checks": {
+    "correctness": true,
+    "io_reader_publication_capacity_measured": true,
+    "io_reader_publication_headroom": true,
+    "retained_storage_headroom": true,
+    "rss_headroom": true,
+    "storage_headroom": true,
+    "time_headroom": true,
+    "transient_storage_headroom": true
+  },
+  "claim": "engineering_evidence_only",
+  "decision": "admitted",
+  "headroom": {
+    "rss_fraction": 0.2,
+    "storage_fraction": 0.1505269185087802,
+    "time_fraction": 0.2
+  },
+  "limits": {
+    "rss_bytes": 4294967296,
+    "volume_bytes": 834365304832,
+    "wall_seconds": 14400
+  },
+  "native_capacity": {
+    "free_bytes": 834365304832,
+    "observed_rates": {
+      "physical_read_bytes_per_second": {
+        "wall_seconds": 90,
+        "work_units": 39441235968
+      },
+      "physical_write_bytes_per_second": {
+        "wall_seconds": 90,
+        "work_units": 26079735808
+      },
+      "publication_work_per_second": {
+        "wall_seconds": 90,
+        "work_units": 57580
+      },
+      "reader_calls_per_second": {
+        "wall_seconds": 90,
+        "work_units": 31258
+      }
+    },
+    "rate_source": "completed_adjacent_rungs",
+    "reserved_headroom_bytes": 125594438247
+  },
+  "projected": {
+    "logical_read_bytes": 68310609876,
+    "logical_write_bytes": 49242268951,
+    "peak_rss_bytes": 371712000,
+    "physical_read_bytes": 323549102080,
+    "physical_write_bytes": 211716485120,
+    "publication_work_units": 480492,
+    "reader_calls": 253263,
+    "retained_storage_bytes": 22939836416,
+    "storage_peak_bytes": 30158209024,
+    "transient_peak_storage_bytes": 30158209024,
+    "wall_seconds": 727
+  },
+  "provider_capacity": null,
+  "required_rates": {
+    "physical_read_bytes_per_second": 28085860,
+    "physical_write_bytes_per_second": 18378168,
+    "publication_work_per_second": 42,
+    "reader_calls_per_second": 22
+  },
+  "rss_growth_fraction": 0.17729945965310326,
+  "schema": "graphforge-progressive-qualification-evidence/1",
+  "slopes_observed": {
+    "logical_read_bytes": 8546179071,
+    "logical_write_bytes": 6161652098,
+    "physical_read_bytes": 40586838016,
+    "physical_write_bytes": 26519535616,
+    "publication_work_units": 60416,
+    "reader_calls": 31715
+  },
+  "source_scales": [
+    19,
+    20
+  ],
+  "target": "S22"
+}
