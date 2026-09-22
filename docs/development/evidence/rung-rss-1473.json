@@ -1,0 +1,50 @@
+{
+  "claim": "diagnostic_only_not_admission",
+  "purpose": "settle #1473: attribute the g500-ladder rung-level peak RSS figure",
+  "source_commit": "4f0604dd748fbf763ffd321cac158ad4cf85d28b",
+  "profile_id": "graph500-s18-local",
+  "method": "One delegated systemd user scope per ladder attempt under a shared benchexec slice; 200 ms cgroup-v2 sampling of hierarchical memory.stat, memory.peak, per-child cgroup memory facts, and summed descendant /proc VmHWM, alongside the rung's own certify VmHWM phase authority and BenchExec resource authority. Two complete passed S18 rungs on the same source, binaries, host, and work root.",
+  "identities": {
+    "gf_sha256": "19ee329957f4a7fe0245de376f2b83a066fd3b0677bbedb3712bb3f52621190d",
+    "certify_sha256": "fd82766d237975f561086fa3419ced50a3c6326bb4a2d258bca4243ee9fd0262",
+    "generator_executable_sha256": "b339429541716f1ee4a22d367406afeef172c5d5690ca557ce1ebb0b45d67953",
+    "benchexec_version": "3.35",
+    "profile_sha256": "762fdac3d4ad790eaf1aa75348ccca692c709dcf578f91e1363f720afebc368b"
+  },
+  "runs": [
+    {
+      "run": 1,
+      "outcome": "passed",
+      "wall_seconds": 46.695,
+      "benchexec_authority_peak_rss_bytes": 796008448,
+      "process_peak_rss_bytes": 258408448,
+      "physical_read_bytes": 19358007296,
+      "physical_write_bytes": 12917350400
+    },
+    {
+      "run": 2,
+      "outcome": "passed",
+      "wall_seconds": 46.349,
+      "benchexec_authority_peak_rss_bytes": 791302144,
+      "tool_scope_memory_peak_bytes": 797982720,
+      "tool_scope_at_peak_sample": {
+        "anon_bytes": 174657536,
+        "file_bytes": 595562496,
+        "sampled_current_bytes": 791691264
+      },
+      "launcher_scope_memory_peak_bytes": 305926144,
+      "process_peak_rss_bytes": 251518976,
+      "physical_read_bytes": 19358007296,
+      "physical_write_bytes": 12918206464
+    }
+  ],
+  "derived": {
+    "file_fraction_of_tool_scope_peak": 0.746,
+    "anon_fraction_of_tool_scope_peak": 0.219,
+    "file_to_anon_ratio_at_peak": 3.41,
+    "process_vmhwm_to_cgroup_peak_ratio": 0.315,
+    "authority_peak_reproducibility_delta_bytes": 4706304
+  },
+  "verdict": "The rung-level peak figure is cgroup memory usage, not resident process memory: at the tool scope's peak, file (page cache) is 74.6% and anon 21.9%. The cgroup peak tracks bytes moved; certify's per-phase VmHWM stays 3.2x below it and measures the anonymous working set the 4 GiB envelope governs. The two figures disagree by construction, not by defect; since the #1278 repair the admission gate consumes the process VmHWM authority.",
+  "limitations": "Point-in-time observations on one host; the launcher scope's own page cache is excluded from tool-scope figures by cgroup separation; sampler resolution is 200 ms while memory.peak is kernel-authoritative."
+}

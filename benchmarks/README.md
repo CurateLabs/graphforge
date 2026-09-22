@@ -703,7 +703,11 @@ that provenance the rung schema requires the lifecycle receipt's authoritative
 `source_project_current_allocated_bytes` and the complete closed
 `storage_attribution` payload. Process `peak_rss_bytes` comes from GraphForge
 certify VmHWM phase observations (`graphforge_process`), not BenchExec cgroup
-`memory.peak` (which includes durable page cache on host NVMe mounts). That
+`memory.peak` (which includes durable page cache on host NVMe mounts). A
+two-run instrumented attribution of that figure at the S18 rung
+([evidence](../docs/development/evidence/rung-rss-1473.md)) measured the tool
+scope's peak as 74.6% page cache and 21.9% anonymous, with process VmHWM 3.2x
+below the cgroup peak. That
 payload copies the source and imported ten-category snapshots, committed
 construction application-I/O phases, portable-writer allocation, lifecycle
 unions, and reopened counts from the ordinary sanitized receipts. Historical
