@@ -160,6 +160,8 @@ mod provider_session;
 mod query_evidence;
 mod query_execution;
 mod repository;
+mod research_claims;
+pub use research_claims::{RecordResearchDecisionsRequest, ResearchContext, ResearchDecisionInput};
 mod research_project;
 mod research_versions;
 pub use branches::{

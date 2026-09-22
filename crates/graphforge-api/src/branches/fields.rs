@@ -78,6 +78,33 @@ pub(super) fn read(
         })?;
     }
     domain_objects(graph, &mut fields, &mut field_bytes, cancellation)?;
+    let claims = crate::research_claims::ledger::read_claims(&graph.generation_for_read()?)?;
+    for row in claims.claims() {
+        insert(
+            &mut fields,
+            &mut field_bytes,
+            (
+                "assertion".into(),
+                row.assertion_uuid,
+                "$research_classification".into(),
+            ),
+            row.fingerprint()
+                .map_err(crate::knowledge::knowledge_error)?,
+        )?;
+    }
+    for row in claims.relations() {
+        insert(
+            &mut fields,
+            &mut field_bytes,
+            (
+                "assertion".into(),
+                row.source_assertion_uuid,
+                format!("$claim_relation:{}", row.relation_uuid),
+            ),
+            row.fingerprint()
+                .map_err(crate::knowledge::knowledge_error)?,
+        )?;
+    }
     Ok(fields)
 }
 fn fingerprint(array: arrow::array::ArrayRef) -> Result<[u8; 32], GfError> {

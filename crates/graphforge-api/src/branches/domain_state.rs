@@ -24,6 +24,7 @@ pub(super) fn selected(
     }
     if g.capability("epistemic")?.is_some() {
         result.extend(epistemic(g, ids)?);
+        result.extend(research_claims(g, ids)?);
     }
     if g.capability("valid_time")?.is_some() {
         let rows = crate::valid_time::read_ledger(g)?
@@ -42,6 +43,42 @@ pub(super) fn selected(
         )?);
     }
     Ok(result)
+}
+
+fn research_claims(
+    g: &ResolvedProjectGeneration,
+    ids: &mut Ids,
+) -> Result<Vec<ProjectParticipant>, GfError> {
+    let original = crate::research_claims::ledger::read_claims(g)?;
+    let claims = original
+        .claims()
+        .iter()
+        .filter(|r| has(ids, "assertion", r.assertion_uuid))
+        .cloned()
+        .collect::<Vec<_>>();
+    let relations = original
+        .relations()
+        .iter()
+        .filter(|r| {
+            has(ids, "assertion", r.source_assertion_uuid)
+                || has(ids, "assertion", r.target_assertion_uuid)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for row in &claims {
+        ids.insert(("provenance".into(), row.provenance_uuid));
+    }
+    for row in &relations {
+        require(
+            has(ids, "assertion", row.source_assertion_uuid)
+                && has(ids, "assertion", row.target_assertion_uuid),
+        )?;
+        ids.insert(("provenance".into(), row.provenance_uuid));
+    }
+    crate::research_claims::ledger::encode_claims(
+        &graphforge_knowledge::research::ResearchClaimLedger::new(claims, relations)
+            .map_err(knowledge_error)?,
+    )
 }
 fn require(present: bool) -> Result<(), GfError> {
     if present {

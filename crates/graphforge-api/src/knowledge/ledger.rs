@@ -43,6 +43,9 @@ pub(crate) fn empty_epistemic_participants() -> Result<Vec<ProjectParticipant>, 
     )?);
     participants.extend(crate::hypotheses::empty_participants()?);
     participants.extend(crate::belief_projection::empty_participants()?);
+    participants.extend(crate::research_claims::ledger::encode_claims(
+        &graphforge_knowledge::research::ResearchClaimLedger::default(),
+    )?);
     Ok(participants)
 }
 

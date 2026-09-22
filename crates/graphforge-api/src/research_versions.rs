@@ -223,6 +223,23 @@ impl GraphForge {
         expected_parent: Uuid,
         metadata_only: bool,
     ) -> Result<(), GfError> {
+        self.refresh_current_authority(
+            root,
+            outcome.as_ref().ok().map(|r| r.generation_uuid),
+            replacement,
+            expected_parent,
+            metadata_only,
+        )
+    }
+
+    pub(crate) fn refresh_current_authority(
+        &mut self,
+        root: &std::path::Path,
+        published_generation: Option<Uuid>,
+        replacement: Option<GraphForge>,
+        expected_parent: Uuid,
+        metadata_only: bool,
+    ) -> Result<(), GfError> {
         let resolved = graphforge_storage::resolve_project_generation(root)?;
         let current = resolved.generation_uuid();
         let cached = *self
@@ -234,10 +251,7 @@ impl GraphForge {
         }
         // A concurrently advanced CURRENT must be opened as its own complete
         // authority, never attached to a graph prepared from another generation.
-        let exact_prepared = outcome
-            .as_ref()
-            .ok()
-            .is_some_and(|receipt| receipt.generation_uuid == current);
+        let exact_prepared = published_generation == Some(current);
         if exact_prepared && metadata_only && cached == expected_parent {
             // Metadata-only publication leaves the already-bound graph untouched.
             self.resolved_generation = resolved;

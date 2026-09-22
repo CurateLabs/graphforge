@@ -351,7 +351,10 @@ fn staged_assertion(
     AssertionLedger::new(vec![assertion], refs).map_err(knowledge_error)
 }
 
-fn validate_graph_refs(graph: &GraphForge, refs: &[AssertionGraphRefInput]) -> Result<(), GfError> {
+pub(crate) fn validate_graph_refs(
+    graph: &GraphForge,
+    refs: &[AssertionGraphRefInput],
+) -> Result<(), GfError> {
     if refs.is_empty() {
         return Err(GfError::Validation(
             "assertion requires at least one graph reference".into(),

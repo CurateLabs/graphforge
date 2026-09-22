@@ -13,6 +13,7 @@ mod confidence;
 mod derivation;
 mod hypothesis;
 mod reasoning;
+pub mod research;
 mod retention_dependency;
 mod source;
 mod status;
@@ -914,6 +915,7 @@ pub fn schema_registry() -> Vec<SchemaRegistryEntry> {
     entries.push(derivation::schema_registry_entry());
     entries.push(artifact_preference::schema_registry_entry());
     entries.push(retention_dependency::schema_registry_entry());
+    entries.extend(research::schema_registry_entries());
     entries
 }
 
