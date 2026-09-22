@@ -4,7 +4,7 @@ Measured 2026-09-22 on OVHC-AGENCY at `ed273d2b` (contains the #1384 redesign
 through PR #1552), stock release, quiet host, native ladder S18 → S19 → S20
 under a delegated cgroup scope. Evidence archived with verified receipts:
 [`ladder/ed273d2b2558c4137a398e4980471ca3bfcac613/`](ladder/ed273d2b2558c4137a398e4980471ca3bfcac613/).
-The decision of record is [ADR 0044](../adr/0044-ingest-authentication-regime.md).
+The decision of record is [ADR 0045](../adr/0045-ingest-authentication-regime.md).
 
 ## Throughput (rung wall, edges per second)
 
@@ -45,7 +45,7 @@ re-hash bytes the process had just written. On the integrated tree:
   hydration (5.1 B/edge, charged at read, not ingest). #1552 removed the CSR
   shard write read-back (0.906 GB at S22, 13.5 B/edge); with it the figure
   was 5.85 GB.
-- Every removed pass is listed with its disposition in ADR 0044; every
+- Every removed pass is listed with its disposition in ADR 0045; every
   surviving boundary names the failure it uniquely catches and its measured
   cost.
 

@@ -1,12 +1,12 @@
 ---
-title: "ADR 0044: Ingest authentication regime — hash once on write, verify at trust boundaries"
-adr: "0044"
+title: "ADR 0045: Ingest authentication regime — hash once on write, verify at trust boundaries"
+adr: "0045"
 status: "Accepted"
 date: "2026-09-22"
 superseded_by: null
 ---
 
-# ADR 0044: Ingest authentication regime — hash once on write, verify at trust boundaries
+# ADR 0045: Ingest authentication regime — hash once on write, verify at trust boundaries
 
 **Build target:** v0.6.0
 

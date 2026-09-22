@@ -1,7 +1,7 @@
 {
   "claim": "engineering_evidence_only",
   "purpose": "#1384 closeout: the ingest authentication regime on the integrated tree",
-  "adr": "docs/adr/0044-ingest-authentication-regime.md",
+  "adr": "docs/adr/0045-ingest-authentication-regime.md",
   "source_commit": "ed273d2b2558c4137a398e4980471ca3bfcac613",
   "measured": "2026-09-22, OVHC-AGENCY, quiet host, stock release, native ladder S18-S19-S20 under delegated cgroup scope; archived with verified receipts under docs/development/evidence/ladder/ed273d2b2558c4137a398e4980471ca3bfcac613/",
   "baseline_archive": "docs/development/evidence/ladder/b6ffb088405150afc117ba7180c876659cec729f/",
@@ -30,16 +30,16 @@
     "owners": "Device writes are a consistent 4.3-4.7x application writes, owned by the shaping region's spill/merge write-back pattern and fsync writeback; publication is separately attributed by publication-attribution-1481.md and is not a write sink; the transient peak is attributed by the lifecycle owner-union receipt (#1415, #1481)."
   },
   "acceptance_criteria_map": {
-    "AC1": "310.1 GB to 68.5 GB ingest reads at S22; remaining authentication read-backs 74 B/edge, each named and justified in ADR 0044's boundary table",
+    "AC1": "310.1 GB to 68.5 GB ingest reads at S22; remaining authentication read-backs 74 B/edge, each named and justified in ADR 0045's boundary table",
     "AC2": "completed_shape_boundary_refuses_same_inode_payload_corruption and shaping_recovery_refuses_same_inode_payload_corruption pass in the 1,277-test storage suite",
-    "AC3": "ADR 0044 surviving-boundary table with mechanism, refusal and measured cost per edge",
+    "AC3": "ADR 0045 surviving-boundary table with mechanism, refusal and measured cost per edge",
     "AC4": "Resume-boundary reauthentication is the #1269 class, measured 68.6 B/edge at S22; the earlier mis-attribution to #1269's fix is corrected in issue comments and the ADR accounting note",
     "AC5": "Write volume attributed: consistent 4.3-4.7x application-to-device ratio with named owners; publication and transient peak attributed by #1481/#1415",
     "AC6": "corruption_checksum.rs: SHA-256 names, XXH64 detects corruption",
-    "AC7": "Both assumptions recorded in corruption_checksum.rs and ADR 0044",
+    "AC7": "Both assumptions recorded in corruption_checksum.rs and ADR 0045",
     "AC8": "graphforge verify (crates/graphforge-cli/src/verify_cli.rs) reachable out of band; runs in no ingest path",
     "AC9": "This document: edges/s and per-edge reads at three scales",
     "AC10": "Corruption, cancellation, crash-boundary and recovery suites pass unweakened; digests and application-I/O counters reproduce byte-identically",
-    "AC11": "docs/adr/0044-ingest-authentication-regime.md"
+    "AC11": "docs/adr/0045-ingest-authentication-regime.md"
   }
 }
