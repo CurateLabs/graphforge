@@ -273,6 +273,7 @@ impl GraphForge {
             open_io_attribution: self.open_io_attribution.clone(),
             project_open_recovery: self.project_open_recovery.clone(),
             tempdir: self.tempdir.clone(),
+            research_materialization: self.research_materialization.clone(),
             ontology: self.ontology.clone(),
             ontology_document: self.ontology_document.clone(),
             runtime_catalog: Arc::clone(&self.runtime_catalog),

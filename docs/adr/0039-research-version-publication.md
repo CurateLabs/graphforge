@@ -127,3 +127,21 @@ Exact inspection pins the registry generation until participant bytes and
 local evidence are authenticated. Historical graph materialization uses only
 that retained inventory and cannot expand through a live ancestor. Corrupt or
 missing required CAS objects refuse cleanup before destructive work.
+
+
+## Public Project restoration (#1537)
+
+Project restoration explicitly replaces all frozen non-history Project research
+participants (graph, ontology/configuration, research metadata and domain
+ledgers) from a complete retained Version. It preserves the current research
+registry, other context heads, roots, permanent identities/receipts and the
+workspace restoration-transition history. A projection is not a complete
+Project restore source. The context-only restoration primitive remains separate
+for future Branch owners. Both publish the new Version and receipt atomically
+through CURRENT; an exact replay never reinstalls historical current state.
+
+Public preparation freezes source selection and owner-derived Artifact closure
+before commit. Committing that exact prepared request preserves stable retry
+content after later Project changes or payload release. Historical native views
+materialize retained participants and graph/evidence into private temporary
+containers; their temporary storage identity is not the immutable citation.

@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 283,
-  "releaseSurfaceDigest": "b40eaf0f6dead9d403fdf54b2f54c57dfbfb4f5133480e3ce91135ca14f262b4",
+  "releaseSurfaceCount": 295,
+  "releaseSurfaceDigest": "a97f6ec15b957d01a59ea874afe819dc9d36da3b932fc5e283179d119984853c",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -33,7 +33,8 @@
     "resumable-import": "importSession",
     "resumable-construction": "resumableConstruction",
     "semantic-generation-diff": "semanticGenerationDiff",
-    "portable-v2-facade": "portableV2"
+    "portable-v2-facade": "portableV2",
+    "research-versions": "researchVersions"
   },
   "classification": {
     "equivalent": [
@@ -217,7 +218,12 @@
       "GraphImportSession.commit",
       "GraphImportSession.register_parquet",
       "GraphImportSession.status",
-      "GraphImportSession.validate"
+      "GraphImportSession.validate",
+      "GraphForge.prepare_research_version",
+      "GraphForge.commit_research_version_operation",
+      "GraphForge.research_version",
+      "GraphForge.list_research_versions",
+      "GraphForge.research_version_retention"
     ],
     "languageSpecific": {
       "GraphForge.import_session_status": {
@@ -300,6 +306,48 @@
           "GraphImportSession.validate"
         ],
         "reason": "Node validate accepts an optional AbortSignal instead of a second method."
+      },
+      "GraphForge.open_research_version": {
+        "nodeMembers": [
+          "GraphForge.queryResearchVersion"
+        ],
+        "reason": "Node takes an explicit immutable Version UUID and delegates to the Rust historical view without exposing a mutable view handle."
+      },
+      "ResearchVersionView.execute": {
+        "nodeMembers": [
+          "GraphForge.queryResearchVersion"
+        ],
+        "reason": "Node takes an explicit immutable Version UUID and delegates to the Rust historical view without exposing a mutable view handle."
+      },
+      "ResearchVersionView.version": {
+        "nodeMembers": [
+          "GraphForge.researchVersion"
+        ],
+        "reason": "Node takes an explicit immutable Version UUID and delegates to the Rust historical view without exposing a mutable view handle."
+      },
+      "ResearchVersionView.workspace_ontology": {
+        "nodeMembers": [
+          "GraphForge.researchVersionOntology"
+        ],
+        "reason": "Node takes an explicit immutable Version UUID and delegates to the Rust historical view without exposing a mutable view handle."
+      },
+      "ResearchVersionView.research_project_metadata": {
+        "nodeMembers": [
+          "GraphForge.researchVersionMetadata"
+        ],
+        "reason": "Node takes an explicit immutable Version UUID and delegates to the Rust historical view without exposing a mutable view handle."
+      },
+      "ResearchVersionView.artifact": {
+        "nodeMembers": [
+          "GraphForge.researchVersionArtifact"
+        ],
+        "reason": "Node takes an explicit immutable Version UUID and delegates to the Rust historical view without exposing a mutable view handle."
+      },
+      "ResearchVersionView.artifact_payload": {
+        "nodeMembers": [
+          "GraphForge.researchVersionArtifactPayload"
+        ],
+        "reason": "Node takes an explicit immutable Version UUID and delegates to the Rust historical view without exposing a mutable view handle."
       }
     },
     "nodeOnly": {
@@ -319,7 +367,12 @@
       "PlanHandle.explain": "Node-only plan introspection for the asynchronous execution adapter.",
       "PlanHandle.sinkParquet": "Asynchronous Parquet sink adapter classified above.",
       "PlanHandle.sinkArrowIpc": "Asynchronous Arrow IPC sink adapter classified above.",
-      "GraphImportSession.sessionUuid": "Node getter for the Rust session_uuid value object accessor."
+      "GraphImportSession.sessionUuid": "Node getter for the Rust session_uuid value object accessor.",
+      "GraphForge.queryResearchVersion": "Explicit immutable Version UUID adapter for Rust ResearchVersionView.",
+      "GraphForge.researchVersionOntology": "Explicit immutable Version UUID adapter for Rust ResearchVersionView.",
+      "GraphForge.researchVersionMetadata": "Explicit immutable Version UUID adapter for Rust ResearchVersionView.",
+      "GraphForge.researchVersionArtifact": "Explicit immutable Version UUID adapter for Rust ResearchVersionView.",
+      "GraphForge.researchVersionArtifactPayload": "Explicit immutable Version UUID adapter for Rust ResearchVersionView."
     },
     "notExposedDefaults": {
       "crate": "Rust discovery/repack orchestration remains a CLI/facade workflow; existing Node portable operations use their explicit adapters.",
@@ -505,6 +558,12 @@
     "resumableConstruction": {
       "non-cypher-release-parity.test.mjs": [
         "the Node classification is total, frozen, and backed by non-skipped native tests"
+      ]
+    },
+    "researchVersions": {
+      "research-versions.test.mjs": [
+        "historical graph ontology and Artifact bytes survive compaction, reopen and restore",
+        "malformed Version requests do not echo private values or field names"
       ]
     }
   }

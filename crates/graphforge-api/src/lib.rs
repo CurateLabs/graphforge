@@ -160,6 +160,12 @@ mod query_evidence;
 mod query_execution;
 mod repository;
 mod research_project;
+mod research_versions;
+pub use graphforge_storage::research_versions::{
+    ResearchMutation, ResearchOperation, ResearchOperationReceipt, ResearchRegistry,
+    ResearchRetentionRoot, ResearchRootKind, ResearchVersionRecord,
+};
+pub use research_versions::{PrepareResearchVersionRequest, ResearchVersionView};
 mod resource_policy;
 mod runtime_ownership;
 pub use runtime_ownership::RuntimeGuard;
@@ -510,6 +516,8 @@ pub struct GraphForge {
     project_open_recovery: graphforge_storage::ProjectOpenRecoveryEvidence,
     /// Keeps an in-memory instance's temp directory alive for the engine's life.
     tempdir: Option<Arc<tempfile::TempDir>>,
+    // Keeps private historical CAS alive when a prepared view becomes live state.
+    research_materialization: Option<Arc<tempfile::TempDir>>,
     /// Compiled ontology, present in advisory/strict mode.
     ontology: Option<OntologyHandle>,
     /// Source document backing the live, session-scoped compiled ontology.
@@ -757,6 +765,7 @@ impl GraphForge {
                 .since(&open_io_before)?,
             project_open_recovery,
             tempdir: Some(Arc::new(tmp)),
+            research_materialization: None,
             ontology,
             ontology_document,
             runtime_catalog: Arc::new(Mutex::new(RuntimeCatalog::new())),
@@ -988,6 +997,7 @@ impl GraphForge {
                 .since(&open_io_before)?,
             project_open_recovery,
             tempdir: None,
+            research_materialization: None,
             ontology,
             ontology_document,
             runtime_catalog: Arc::new(Mutex::new(runtime_catalog)),

@@ -273,8 +273,8 @@ each owner implements and tests them before #1358's integrated certification.
 | Early consumer boundary — #1346 definitions; #1358 composition | Given the two-story fixture, inspect live and immutable references, shared-character boundaries, evidence limitations, and a partial review without unselected private annotations; consumers can render context and decisions from Core results. | Each implementation issue owns real Rust/Python/Node/CLI fixtures for its projections and errors. #1356 proves a bounded Branch-to-acceptance journey before dependent #1357 interchange; #1358 certifies the full workflow. No application deployment or access-enforcement implementation required. |
 
 Durability scenarios require an admitted filesystem and actual reopen/recovery;
-this VM's overlay-root admission failure is an environment limitation, not a
-passing test or permission to skip the acceptance outcome. Reproducibility uses
+an unsupported filesystem's admission refusal is an environment limitation,
+not a passing test or permission to skip the acceptance outcome. Reproducibility uses
 a compatible reader; reject unsupported formats without mutation instead of
 claiming perpetual latest-reader compatibility or adding pre-v1 migration.
 Diagnostics expose bounded identity, phase, and commitment information, never
@@ -291,6 +291,24 @@ Six labeled frozen-Proposal root fixtures share graph bytes; releasing four
 dependencies and original receipts. Corruption, legacy paths, busy CAS and
 pre/post-CURRENT crash/error tests cover safe cleanup. These remain storage
 consumer fixtures, not actual Branch/Proposal acceptance proof.
+
+### Immutable Version facade evidence (#1537)
+
+`crates/graphforge-api/tests/research_versions.rs` exercises real graph,
+ontology and local Artifact equality after compaction, source-generation cleanup
+and reopen, independent checkpoint deletion, root-blocked deletion, receipt
+survival after payload release, complete Project restoration, and stale-facade
+replay. Subprocess failpoints cover pre- and post-CURRENT errors on the same
+facade. An empty snapshot restored over a file-backed graph is a separate
+regression. A storage projection fixture refuses omitted graph/metadata instead
+of inventing empty historical state. The registered contract is checked against
+native Arrow fields and retention limits; malformed-request sentinel tests on
+all thin surfaces reject disclosure of private values or field names.
+Binding parity lives in `crates/graphforge-bindings-py/tests/research_versions.py`
+and `crates/graphforge-bindings-node/tests/research-versions.test.mjs`; CLI evidence
+uses the same-build binary in `crates/graphforge-cli/tests/research_versions.rs`.
+These are native Version tests; future Branch/Proposal fixtures do not certify
+their unimplemented product lifecycles.
 
 ## What counts as proof
 

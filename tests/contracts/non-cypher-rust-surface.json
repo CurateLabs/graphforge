@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "6999993bece2dc7895fa25af4a0c66850171091712dfce15540ff115de955e0e",
+  "public_method_digest": "f062ce2679356c6857fad28aee421ae7aac614d57120e10d8822cff340faf2a4",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -32,7 +32,8 @@
       "ResolvedBeliefProjection": "introspection",
       "SearchIndexOptions": "introspection",
       "ExecutionResourcePolicy": "introspection",
-      "ImportCallTiming": "introspection"
+      "ImportCallTiming": "introspection",
+      "ResearchVersionView": "release-tested"
     },
     "overrides": {
       "GraphForge.index": "release-tested",
@@ -1081,6 +1082,32 @@
         {
           "path": "crates/graphforge-api/tests/discovery_portable_v2.rs",
           "symbol": "valid_discovery_maps_to_the_storage_verified_package"
+        }
+      ]
+    },
+    "research-versions": {
+      "ids": [
+        "GraphForge.commit_research_version_operation",
+        "GraphForge.list_research_versions",
+        "GraphForge.open_research_version",
+        "GraphForge.prepare_research_version",
+        "GraphForge.research_version",
+        "GraphForge.research_version_retention",
+        "ResearchVersionView.artifact",
+        "ResearchVersionView.artifact_payload",
+        "ResearchVersionView.execute",
+        "ResearchVersionView.research_project_metadata",
+        "ResearchVersionView.version",
+        "ResearchVersionView.workspace_ontology"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/tests/research_versions.rs",
+          "symbol": "historical_graph_ontology_and_artifact_survive_cleanup_restore_and_replay"
+        },
+        {
+          "path": "crates/graphforge-api/tests/research_versions.rs",
+          "symbol": "in_memory_capture_empty_graph_and_cancelled_commit_are_real_native_operations"
         }
       ]
     }

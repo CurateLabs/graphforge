@@ -461,6 +461,14 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "research_versions",
+    srcs = ["tests/research_versions.rs"],
+    crate = ":graphforge_api",
+    compile_data = ["//tests/contracts:research-version-api-v1.json"],
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "research_project",
     srcs = ["tests/research_project.rs"],
     crate = ":graphforge_api",
@@ -613,6 +621,7 @@ test_suite(
         ":lifecycle_io_attribution",
         ":release_load_construction",
         ":research_project",
+        ":research_versions",
         ":resumable_construction_surface",
         ":ontology_adoption_retry",
         ":permanent_storage_budgets",

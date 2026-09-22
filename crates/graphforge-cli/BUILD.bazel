@@ -221,6 +221,15 @@ gf_rust_integration_test(
     deps = _CLI_DEPS,
 )
 
+gf_rust_integration_test(
+    name = "research_versions",
+    srcs = ["tests/research_versions.rs"],
+    crate = ":graphforge_cli",
+    data = _CLI_TEST_DATA,
+    rustc_env = _CLI_BIN_ENV,
+    deps = _CLI_DEPS + ["//crates/graphforge-storage:graphforge_storage"],
+)
+
 test_suite(
     name = "cli_tests",
     tests = [
@@ -231,6 +240,7 @@ test_suite(
         ":portable",
         ":query_sink",
         ":repository",
+        ":research_versions",
         ":source_artifact",
         ":verify",
     ],

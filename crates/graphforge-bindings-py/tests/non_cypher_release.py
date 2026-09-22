@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "6999993bece2dc7895fa25af4a0c66850171091712dfce15540ff115de955e0e"
-EXPECTED_RELEASE_DIGEST = "b40eaf0f6dead9d403fdf54b2f54c57dfbfb4f5133480e3ce91135ca14f262b4"
+EXPECTED_RUST_DIGEST = "f062ce2679356c6857fad28aee421ae7aac614d57120e10d8822cff340faf2a4"
+EXPECTED_RELEASE_DIGEST = "a97f6ec15b957d01a59ea874afe819dc9d36da3b932fc5e283179d119984853c"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -85,6 +85,9 @@ EVIDENCE = {
     },
     "lifecycle-construction": {
         "non_cypher_release.py": ["check_lifecycle_checkpoint_errors_and_reopen"],
+    },
+    "research-versions": {
+        "research_versions.py": ["check_research_versions"],
     },
     "research-project": {
         "research_project.py": ["check_research_metadata_and_discovery"],
@@ -271,7 +274,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 283
+    assert len(release_methods) == 295
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -324,10 +327,23 @@ def _classification_report() -> dict[str, object]:
             "GraphForge.execute_to_arrow_ipc_stream"
         ),
     }
+    research_adapters = {
+        "GraphForge.open_research_version": "GraphForge.query_research_version",
+        "ResearchVersionView.execute": "GraphForge.query_research_version",
+        "ResearchVersionView.version": "GraphForge.research_version",
+        "ResearchVersionView.workspace_ontology": "GraphForge.research_version_ontology",
+        "ResearchVersionView.research_project_metadata": "GraphForge.research_version_metadata",
+        "ResearchVersionView.artifact": "GraphForge.research_version_artifact",
+        "ResearchVersionView.artifact_payload": "GraphForge.research_version_artifact_payload",
+    }
+    assert set(research_adapters.values()) <= python_methods
     classifications: dict[str, dict[str, str]] = {}
     for rust_id in sorted(rust_methods):
-        python_id = aliases.get(rust_id, rust_id)
-        if python_id in python_methods:
+        python_id = research_adapters.get(rust_id, aliases.get(rust_id, rust_id))
+        if rust_id in research_adapters:
+            classification = "intentionally-language-specific"
+            reason = "explicit immutable Version UUID adapter delegates to the Rust historical view"
+        elif python_id in python_methods:
             classification = "equivalent"
             reason = "same receiver operation delegates through the compiled PyO3 extension"
         elif rust_id == "GraphImportSession.operation_timings":
@@ -360,7 +376,9 @@ def _classification_report() -> dict[str, object]:
             reason = "no compiled Python method with the same public identity"
         classifications[rust_id] = {
             "classification": classification,
-            "python_id": python_id if classification == "equivalent" else "",
+            "python_id": python_id
+            if classification == "equivalent" or rust_id in research_adapters
+            else "",
             "reason": reason,
         }
 

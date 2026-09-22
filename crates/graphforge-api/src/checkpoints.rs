@@ -320,25 +320,21 @@ fn validate_revert_source(
     generation: &graphforge_storage::ResolvedProjectGeneration,
     lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<(), GfError> {
-    generation.validate_complete_participant_inventory()?;
-    // The workspace tree walk (including any graph-delta replay
-    // materialization) and the ontology/configuration snapshot reads are not
-    // repeated here: `revert_to_checkpoint`'s caller runs
-    // `GraphForge::open_resolved_with_options` on this exact `generation`
-    // with the same `read_only = true` immediately after this function
-    // returns Ok, still inside the same pre-commit closure. That call
-    // performs `hydrate_graph_workspace` and `load_workspace_ontology`
-    // (which itself reads and parses both the ontology and configuration
-    // participants) against identical inputs, so it fails closed on the same
-    // corruption this would have caught, with the same error, before the
-    // revert can commit. Duplicating those reads here would recompile a
-    // value already about to be independently re-derived and verified.
     let _records = logical_records(
         generation,
         CheckpointDiffScope::All,
         &PageRequest::default(),
         lifecycle_mode,
     )?;
+    validate_research_source(generation)
+}
+
+/// Domain-owner validation shared by checkpoint and immutable research reads.
+/// Graph/ontology hydration is separately performed before restoration commits.
+pub(super) fn validate_research_source(
+    generation: &graphforge_storage::ResolvedProjectGeneration,
+) -> Result<(), GfError> {
+    generation.validate_complete_participant_inventory()?;
     // Run each domain owner's decoder as well as the generic checkpoint adapters.
     // These readers enforce each ledger's schema and ledger-local invariants.
     let provenance = generation
