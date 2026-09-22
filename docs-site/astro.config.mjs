@@ -379,6 +379,10 @@ export default defineConfig({
                   label: '0041 — Branch state publishes through Project CURRENT',
                   slug: 'adr/0041-branch-current-publication',
                 },
+                {
+                  label: '0042 — Contextual research decisions extend immutable knowledge',
+                  slug: 'adr/0042-contextual-research-claims',
+                },
                 // END generated ADR records
               ],
             },

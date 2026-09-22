@@ -145,3 +145,21 @@ pub struct ResearchDecisionRecord {
     /// UTC microseconds recorded with the decision.
     pub recorded_at: i64,
 }
+
+/// Immutable scoped knowledge suppression; referenced graph objects remain present.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResearchSuppressionRecord {
+    /// Stable append-only event identity, UUIDv7.
+    pub suppression_uuid: Uuid,
+    /// Existing immutable assertion retained for history and evidence joins.
+    pub assertion_uuid: Uuid,
+    /// Branch whose scoped knowledge view hides this assertion.
+    pub context_uuid: Uuid,
+    /// Creating analyst/agent metadata.
+    pub creator_uuid: Uuid,
+    /// Existing producing provenance event.
+    pub provenance_uuid: Uuid,
+    /// UTC microseconds recorded with the event.
+    pub recorded_at: i64,
+}

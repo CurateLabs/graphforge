@@ -79,7 +79,8 @@ use uuid::Uuid;
 use crate::{CancellationToken, GraphForge, OperationId, PageRequest, PageToken, WriteContext};
 
 /// One public graph UUID attached to an assertion.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AssertionGraphRefInput {
     /// Referenced node or edge UUID.
     pub graph_uuid: Uuid,
@@ -316,7 +317,7 @@ impl CreateAssertionRequest {
     }
 }
 
-fn staged_assertion(
+pub(crate) fn staged_assertion(
     request: &CreateAssertionRequest,
     recorded_at_micros: i64,
 ) -> Result<AssertionLedger, GfError> {

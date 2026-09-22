@@ -325,6 +325,239 @@
       ]
     },
     {
+      "capability_id": "research",
+      "capability_version": 3,
+      "enum_registry_versions": {
+        "research_decision_kind": 1,
+        "research_subject_kind": 1
+      },
+      "fields": [
+        {
+          "data_type": "UInt64",
+          "metadata": {},
+          "name": "sequence",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "decision_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "operation_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(32)",
+          "metadata": {},
+          "name": "request_sha256",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "project_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "community_uuid",
+          "nullable": true
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "context_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "Utf8",
+          "metadata": {},
+          "name": "subject_kind",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "subject_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "Utf8",
+          "metadata": {},
+          "name": "kind",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "creator_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "source_version_uuid",
+          "nullable": true
+        },
+        {
+          "data_type": "Timestamp(Microsecond,UTC)",
+          "metadata": {},
+          "name": "recorded_at",
+          "nullable": false
+        },
+        {
+          "data_type": "UInt32",
+          "metadata": {},
+          "name": "contract_version",
+          "nullable": false
+        }
+      ],
+      "fingerprint_domain": "graphforge/research-decision",
+      "implementation_issue": 1353,
+      "max_rows": 65536,
+      "owner": "graphforge-knowledge",
+      "record_family": "canonical_decisions",
+      "record_version": 1,
+      "schema_fingerprint_sha256": "ad46b40073e41318a3ba7ee48165ef57ff5203b364b624e35cdf0a1066af5e28",
+      "schema_metadata": {},
+      "sort_key": [
+        "sequence"
+      ]
+    },
+    {
+      "capability_id": "epistemic",
+      "capability_version": 1,
+      "enum_registry_versions": {
+        "claim_relation_kind": 1
+      },
+      "fields": [
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "relation_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "source_assertion_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "target_assertion_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "Utf8",
+          "metadata": {},
+          "name": "kind",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "creator_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "provenance_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "Timestamp(Microsecond,UTC)",
+          "metadata": {},
+          "name": "recorded_at",
+          "nullable": false
+        },
+        {
+          "data_type": "UInt32",
+          "metadata": {},
+          "name": "contract_version",
+          "nullable": false
+        }
+      ],
+      "fingerprint_domain": "graphforge/research-claim-relation",
+      "implementation_issue": 1353,
+      "max_rows": 65536,
+      "owner": "graphforge-knowledge",
+      "record_family": "claim_relations",
+      "record_version": 1,
+      "schema_fingerprint_sha256": "a605c68a9c74c674d373034345461fb3fbac4a300ddc164790a9db2a0db84dea",
+      "schema_metadata": {},
+      "sort_key": [
+        "relation_uuid"
+      ]
+    },
+    {
+      "capability_id": "epistemic",
+      "capability_version": 1,
+      "enum_registry_versions": {},
+      "fields": [
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "suppression_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "assertion_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "context_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "creator_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "provenance_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "Timestamp(Microsecond,UTC)",
+          "metadata": {},
+          "name": "recorded_at",
+          "nullable": false
+        },
+        {
+          "data_type": "UInt32",
+          "metadata": {},
+          "name": "contract_version",
+          "nullable": false
+        }
+      ],
+      "fingerprint_domain": "graphforge/research-claim-suppression",
+      "implementation_issue": 1353,
+      "max_rows": 65536,
+      "owner": "graphforge-knowledge",
+      "record_family": "claim_suppressions",
+      "record_version": 1,
+      "schema_fingerprint_sha256": "0472a3293b09d34fa563940ac97511f147c3fddf53374b46dcbd895dc72485e9",
+      "schema_metadata": {},
+      "sort_key": [
+        "suppression_uuid"
+      ]
+    },
+    {
       "capability_id": "epistemic",
       "capability_version": 1,
       "enum_registry_versions": {
@@ -594,6 +827,86 @@
       "sort_key": [
         "recorded_at",
         "reasoning_uuid"
+      ]
+    },
+    {
+      "capability_id": "epistemic",
+      "capability_version": 1,
+      "enum_registry_versions": {
+        "research_category": 1
+      },
+      "fields": [
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "assertion_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "conceptual_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "Utf8",
+          "metadata": {},
+          "name": "category",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "creator_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "run_uuid",
+          "nullable": true
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "origin_branch_uuid",
+          "nullable": true
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "origin_version_uuid",
+          "nullable": true
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "provenance_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "Timestamp(Microsecond,UTC)",
+          "metadata": {},
+          "name": "recorded_at",
+          "nullable": false
+        },
+        {
+          "data_type": "UInt32",
+          "metadata": {},
+          "name": "contract_version",
+          "nullable": false
+        }
+      ],
+      "fingerprint_domain": "graphforge/research-claim",
+      "implementation_issue": 1353,
+      "max_rows": 65536,
+      "owner": "graphforge-knowledge",
+      "record_family": "research_claims",
+      "record_version": 1,
+      "schema_fingerprint_sha256": "5fb0861b241641205a69ad5b4ed9ba1a07f549f34a6a670e3c9ef17a55625972",
+      "schema_metadata": {},
+      "sort_key": [
+        "assertion_uuid"
       ]
     }
   ]

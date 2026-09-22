@@ -47,7 +47,7 @@ fn inventory_json() -> Vec<u8> {
     entries.extend(
         graphforge_knowledge::schema_registry()
             .into_iter()
-            .filter(|entry| !matches!(entry.capability_id, "epistemic" | "valid_time"))
+            .filter(|entry| !matches!(entry.capability_id, "epistemic" | "valid_time" | "research"))
             .map(|entry| InventoryEntry {
                 capability_id: entry.capability_id,
                 capability_version: entry.capability_version,
@@ -85,7 +85,7 @@ fn inventory_json() -> Vec<u8> {
 fn epistemic_inventory_json() -> Vec<u8> {
     let mut entries = graphforge_knowledge::schema_registry()
         .into_iter()
-        .filter(|entry| matches!(entry.capability_id, "epistemic" | "valid_time"))
+        .filter(|entry| matches!(entry.capability_id, "epistemic" | "valid_time" | "research"))
         .map(|entry| InventoryEntry {
             capability_id: entry.capability_id,
             capability_version: entry.capability_version,

@@ -11,6 +11,13 @@ pub(super) fn validate(
     if concepts.is_empty() {
         return Ok(());
     }
+    resolve(concepts, owner).map(|_| ())
+}
+
+pub(super) fn resolve(
+    concepts: &HashMap<Uuid, Uuid>,
+    owner: &AssertionSupersessionLedger,
+) -> Result<HashMap<Uuid, Option<Uuid>>, KnowledgeError> {
     if owner.relations().len() > MAX_RESEARCH_ROWS {
         return Err(KnowledgeError::Limit {
             participant: "research_supersession_closure",
@@ -34,6 +41,10 @@ pub(super) fn validate(
         .collect();
     // None denotes incompatible ancestral concepts, never an inferred winner.
     let mut inherited: HashMap<Uuid, Option<Uuid>> = HashMap::new();
+    let mut resolved: HashMap<_, _> = concepts
+        .iter()
+        .map(|(id, concept)| (*id, Some(*concept)))
+        .collect();
     let mut visited = 0;
     while let Some(id) = queue.pop_front() {
         visited += 1;
@@ -49,6 +60,7 @@ pub(super) fn validate(
         } else {
             ancestor.unwrap_or(Some(id))
         };
+        resolved.insert(id, concept);
         for next in outgoing.get(&id).into_iter().flatten() {
             inherited
                 .entry(*next)
@@ -71,5 +83,5 @@ pub(super) fn validate(
             "cyclic supersession ancestry",
         ));
     }
-    Ok(())
+    Ok(resolved)
 }

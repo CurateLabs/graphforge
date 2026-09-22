@@ -77,3 +77,22 @@ fn finish(domain: CanonicalDomain, w: CanonicalWriter) -> Result<[u8; 32], Knowl
         &w.finish(),
     )?)
 }
+
+impl super::ResearchSuppressionRecord {
+    /// Commit exact scoped suppression without changing assertion or graph bytes.
+    pub fn fingerprint(&self) -> Result<[u8; 32], KnowledgeError> {
+        let mut w = CanonicalWriter::new();
+        w.u32(RESEARCH_RECORD_VERSION)?;
+        for id in [
+            self.suppression_uuid,
+            self.assertion_uuid,
+            self.context_uuid,
+            self.creator_uuid,
+            self.provenance_uuid,
+        ] {
+            w.raw(id.as_bytes())?;
+        }
+        w.i64(self.recorded_at)?;
+        finish(CanonicalDomain::ResearchClaimSuppression, w)
+    }
+}

@@ -197,6 +197,44 @@ report unavailability and allow explicit selection of another available Version.
 
 ## Local changes and interpretation
 
+The native contextual claim contract is implemented by the Rust facade and thin
+Python, Node and CLI transports. `create_research_claim` creates an immutable
+assertion with a research category; evidence stays in the existing Source,
+Artifact and evidence-link owners. `relate_research_claims` records alternatives,
+contradictions, disputes, refinements, supersession or support. Neither operation
+promotes a claim. Machine extraction requires an existing producer run.
+
+`change_research_branch_claim` publishes one Branch Version for creation,
+challenge, revision or knowledge suppression. Revision appends a successor and
+native supersession history; prior claim bytes and parent state remain unchanged.
+`inspect_research_claims` selects an explicit Project or Branch context and
+community, returning Arrow rows with category, creator/run, origin Branch/Version,
+canonical status, suppression and local/inherited/modified state. Statusless
+assertions remain visible. Set `include_suppressed` to inspect hidden claims;
+`research_claim_history` returns their classification, relation, suppression,
+status, reasoning or evidence owner history.
+
+`record_research_decisions` records explicit `integrate`, `promote` or `revoke`
+decisions for typed node, edge or assertion subjects. A bounded batch can record
+integration and promotion together, but neither implies the other. Current
+choices and append-only history are available through `research_canonical_choices`
+and `research_decision_history`. Decisions belong to current Project authority
+and survive restoration; frozen claim content belongs to the selected Version.
+A restored Project can revoke a historical decision even if its subject is absent.
+Community identity is scope metadata, not an access-control mechanism.
+
+Python accepts native request dictionaries and returns Arrow tables. Node accepts
+the same snake-case request objects and asynchronously returns Arrow IPC for data
+and a durable receipt for Branch changes. Python Branch changes also return
+receipts. CLI
+commands use `gf --project PATH research claim
+create|relate|change-branch|decide|inspect|history|decisions|canonical --file REQUEST.json`.
+Mutations require an operation UUID and expected CURRENT generation. Exact retry
+returns the original result; changed requests or stale first publications fail.
+The concrete limits and transport contract are in
+`tests/contracts/research-claims-api-v1.json`. Proposal review remains #1356 work.
+
+
 Local operations are add, modify, suppress, replace, reclassify, and challenge.
 Suppressing inherited graph content removes it from the active Branch graph
 while preserving origin and historical state. Suppressing a knowledge assertion

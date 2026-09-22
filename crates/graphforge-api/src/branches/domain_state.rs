@@ -75,10 +75,24 @@ fn research_claims(
         )?;
         ids.insert(("provenance".into(), row.provenance_uuid));
     }
-    crate::research_claims::ledger::encode_claims(
+    let mut result = crate::research_claims::ledger::encode_claims(
         &graphforge_knowledge::research::ResearchClaimLedger::new(claims, relations)
             .map_err(knowledge_error)?,
-    )
+    )?;
+    let suppressions = crate::research_claims::ledger::read_suppressions(g)?
+        .events()
+        .iter()
+        .filter(|r| has(ids, "assertion", r.assertion_uuid))
+        .cloned()
+        .collect::<Vec<_>>();
+    for row in &suppressions {
+        ids.insert(("provenance".into(), row.provenance_uuid));
+    }
+    result.extend(crate::research_claims::ledger::encode_suppressions(
+        &graphforge_knowledge::research::ResearchSuppressionLedger::new(suppressions)
+            .map_err(knowledge_error)?,
+    )?);
+    Ok(result)
 }
 fn require(present: bool) -> Result<(), GfError> {
     if present {

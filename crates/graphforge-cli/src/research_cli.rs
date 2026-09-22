@@ -1,6 +1,7 @@
 //! Thin CLI projection for research Project metadata and local discovery (#1348).
 
 mod branches;
+mod claims;
 mod slices;
 
 use std::fs;
@@ -19,6 +20,11 @@ use crate::{canonical_uuid, write_execution_result};
 
 #[derive(Subcommand)]
 pub(crate) enum ResearchCommand {
+    /// Inspect and publish contextual knowledge and explicit canonical decisions.
+    Claim {
+        #[command(subcommand)]
+        command: claims::ClaimCommand,
+    },
     /// Create and evolve independent native research Branches.
     Branch {
         #[command(subcommand)]
@@ -102,6 +108,7 @@ pub(crate) fn run_research(
     output: &mut dyn Write,
 ) -> Result<(), graphforge_api::GfError> {
     match command {
+        ResearchCommand::Claim { command } => claims::run(graph, command, json, output)?,
         ResearchCommand::Branch { command } => branches::run(graph, command, json, output)?,
         ResearchCommand::Slice { command } => slices::run(graph, command, json, output)?,
         ResearchCommand::Version { command } => {

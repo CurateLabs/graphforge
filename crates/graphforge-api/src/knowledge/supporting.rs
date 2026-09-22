@@ -44,6 +44,9 @@ fn publish_reasoning(
         capabilities,
         participants,
     };
+    let graph_objects = graphforge_storage::begin_graph_object_publication(
+        graph.resolved_generation.container_root(),
+    )?;
     let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => staged
@@ -58,7 +61,7 @@ fn publish_reasoning(
                     Ok(())
                 },
             )?
-            .publish()?,
+            .publish_with_graph_objects(&graph_objects)?,
     };
     *graph
         .current_generation_uuid

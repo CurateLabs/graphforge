@@ -2,6 +2,7 @@
 use crate::{Buffer, Env, GraphForge, Result, Task, napi};
 use graphforge_api::CancellationToken;
 enum Mutation {
+    Claim(graphforge_api::ChangeResearchBranchClaimRequest),
     Create(graphforge_api::CreateResearchBranchRequest),
     Execute(graphforge_api::ExecuteResearchBranchRequest),
     Restore(graphforge_api::RestoreResearchBranchRequest),
@@ -26,6 +27,26 @@ impl GraphForge {
         }))
     }
 
+    /// Execute the native ChangeResearchBranchClaimRequest contract.
+    #[napi]
+    pub fn change_research_branch_claim(
+        &self,
+        request: serde_json::Value,
+        env: Env,
+        #[napi(ts_arg_type = "AbortSignal | null | undefined")] signal: Option<crate::Object>,
+    ) -> Result<crate::AsyncTask<BranchMutationTask>> {
+        self.ensure_open()?;
+        let request = serde_json::from_value(request).map_err(|_| {
+            crate::to_napi_err(&graphforge_api::GfError::Validation(
+                "invalid Branch JSON contract".into(),
+            ))
+        })?;
+        Ok(crate::AsyncTask::new(BranchMutationTask {
+            engine: std::sync::Arc::clone(&self.inner),
+            operation: Mutation::Claim(request),
+            cancellation: crate::slices::cancellation(env, signal)?,
+        }))
+    }
     /// Execute the native CreateResearchBranchRequest contract.
     #[napi]
     pub fn create_research_branch(
@@ -230,6 +251,9 @@ impl Task for BranchMutationTask {
                 graphforge_api::GfError::Execution("GraphForge lock poisoned".into())
             })?;
             let receipt = match &self.operation {
+                Mutation::Claim(request) => {
+                    graph.change_research_branch_claim(request, &self.cancellation)
+                }
                 Mutation::Create(request) => {
                     graph.create_research_branch(request, &self.cancellation)
                 }

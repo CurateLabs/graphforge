@@ -80,6 +80,8 @@ pub enum CanonicalDomain {
     ResearchClaimRelation,
     /// Scoped integration and canonical authority decision.
     ResearchDecision,
+    /// Immutable scoped knowledge suppression event.
+    ResearchClaimSuppression,
 }
 
 impl CanonicalDomain {
@@ -115,6 +117,7 @@ impl CanonicalDomain {
             Self::ResearchClaim => "graphforge/research-claim",
             Self::ResearchClaimRelation => "graphforge/research-claim-relation",
             Self::ResearchDecision => "graphforge/research-decision",
+            Self::ResearchClaimSuppression => "graphforge/research-claim-suppression",
         }
     }
 }
@@ -512,6 +515,10 @@ mod tests {
     fn every_domain_and_error_code_has_a_frozen_external_spelling() {
         let domains = [
             (CanonicalDomain::ResearchClaim, "graphforge/research-claim"),
+            (
+                CanonicalDomain::ResearchClaimSuppression,
+                "graphforge/research-claim-suppression",
+            ),
             (
                 CanonicalDomain::ResearchClaimRelation,
                 "graphforge/research-claim-relation",

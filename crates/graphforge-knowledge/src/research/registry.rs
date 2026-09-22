@@ -1,7 +1,7 @@
 //! Registered storage families owned by immutable knowledge.
 use super::{
-    CLAIM_RELATION_SCHEMA, MAX_RESEARCH_ROWS, RESEARCH_CLAIM_SCHEMA, RESEARCH_DECISION_SCHEMA,
-    RESEARCH_RECORD_VERSION,
+    CLAIM_RELATION_SCHEMA, CLAIM_SUPPRESSION_SCHEMA, MAX_RESEARCH_ROWS, RESEARCH_CLAIM_SCHEMA,
+    RESEARCH_DECISION_SCHEMA, RESEARCH_RECORD_VERSION,
 };
 use crate::{EPISTEMIC_CAPABILITY_VERSION, SchemaRegistryEntry};
 use graphforge_core::canonical::{CANONICAL_CONTRACT_VERSION, CanonicalDomain, fingerprint};
@@ -20,6 +20,11 @@ static RELATION_SCHEMA_FINGERPRINT: LazyLock<[u8; 32]> = LazyLock::new(|| {
 static DECISION_SCHEMA_FINGERPRINT: LazyLock<[u8; 32]> = LazyLock::new(|| {
     fingerprint(
     CanonicalDomain::Schema, CANONICAL_CONTRACT_VERSION, b"research_decision/1|sequence:u64:required|decision_uuid:fixed[16]:required|operation_uuid:fixed[16]:required|request_sha256:fixed[32]:required|project_uuid:fixed[16]:required|community_uuid:fixed[16]:nullable|context_uuid:fixed[16]:required|subject_kind:utf8:required|subject_uuid:fixed[16]:required|kind:utf8:required|creator_uuid:fixed[16]:required|source_version_uuid:fixed[16]:nullable|recorded_at:timestamp_us_utc:required|contract_version:u32:required").expect("bounded registered research schema")
+});
+
+static SUPPRESSION_SCHEMA_FINGERPRINT: LazyLock<[u8; 32]> = LazyLock::new(|| {
+    fingerprint(
+    CanonicalDomain::Schema, CANONICAL_CONTRACT_VERSION, b"research_suppression/1|suppression_uuid:fixed[16]:required|assertion_uuid:fixed[16]:required|context_uuid:fixed[16]:required|creator_uuid:fixed[16]:required|provenance_uuid:fixed[16]:required|recorded_at:timestamp_us_utc:required|contract_version:u32:required").expect("bounded registered research schema")
 });
 
 pub(crate) fn schema_registry_entries() -> Vec<SchemaRegistryEntry> {
@@ -68,6 +73,22 @@ pub(crate) fn schema_registry_entries() -> Vec<SchemaRegistryEntry> {
             diff_identity_fields: &["decision_uuid"],
             diff_record_uuid_field: Some("decision_uuid"),
             fingerprint_domain: CanonicalDomain::ResearchDecision,
+            owner: "graphforge-knowledge",
+            implementation_issue: 1353,
+            max_rows: MAX_RESEARCH_ROWS,
+        },
+        SchemaRegistryEntry {
+            capability_id: "epistemic",
+            capability_version: EPISTEMIC_CAPABILITY_VERSION,
+            record_family: "claim_suppressions",
+            record_version: RESEARCH_RECORD_VERSION,
+            schema: Arc::clone(&CLAIM_SUPPRESSION_SCHEMA),
+            schema_fingerprint: *SUPPRESSION_SCHEMA_FINGERPRINT,
+            enum_registry_versions: &[],
+            sort_key: &["suppression_uuid"],
+            diff_identity_fields: &["suppression_uuid"],
+            diff_record_uuid_field: Some("suppression_uuid"),
+            fingerprint_domain: CanonicalDomain::ResearchClaimSuppression,
             owner: "graphforge-knowledge",
             implementation_issue: 1353,
             max_rows: MAX_RESEARCH_ROWS,

@@ -4,12 +4,28 @@ use crate::{
     knowledge::{knowledge_error, ledger as k},
 };
 use arrow::record_batch::RecordBatch;
+use graphforge_knowledge::research::ResearchSuppressionLedger;
 use graphforge_knowledge::{
     research::{MAX_RESEARCH_ROWS, ResearchClaimLedger, ResearchDecisionLedger},
     schema_registry,
 };
 use graphforge_storage::{ProjectParticipant, ResolvedProjectGeneration};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+pub(crate) fn read_suppressions(
+    g: &ResolvedProjectGeneration,
+) -> Result<ResearchSuppressionLedger, GfError> {
+    ResearchSuppressionLedger::from_batches(&read(g, "epistemic", "claim_suppressions")?)
+        .map_err(knowledge_error)
+}
+pub(crate) fn encode_suppressions(
+    ledger: &ResearchSuppressionLedger,
+) -> Result<Vec<ProjectParticipant>, GfError> {
+    Ok(vec![encode(
+        "claim_suppressions",
+        &ledger.batch().map_err(knowledge_error)?,
+    )?])
+}
 
 pub(crate) fn read_claims(g: &ResolvedProjectGeneration) -> Result<ResearchClaimLedger, GfError> {
     ResearchClaimLedger::from_batches(

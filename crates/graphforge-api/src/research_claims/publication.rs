@@ -19,6 +19,7 @@ pub(super) fn publish(
     let expected = parent.generation_uuid();
     let outcome = (|| {
         cancellation.checkpoint()?;
+        let graph_objects = graphforge_storage::begin_graph_object_publication(&root)?;
         let mut participants = parent
             .participant_snapshots()?
             .into_iter()
@@ -71,7 +72,9 @@ pub(super) fn publish(
                         Ok(())
                     },
                 )?
-                .publish()?,
+                .publish_with_graph_objects_cancellable(&graph_objects, &mut || {
+                    cancellation.is_cancelled()
+                })?,
         };
         Ok(receipt.generation_uuid)
     })();
@@ -87,5 +90,66 @@ pub(super) fn conflict() -> GfError {
     GfError::Project {
         code: ProjectErrorCode::WriteConflict,
         message: "research publication CURRENT precondition changed".into(),
+    }
+}
+
+/// Current-history receipt prevents immutable row replay from bypassing operation identity.
+pub(super) struct Attempt {
+    registry: graphforge_storage::research_versions::ResearchRegistry,
+    fingerprint: [u8; 32],
+    operation: Uuid,
+    pub replay: bool,
+}
+impl Attempt {
+    pub(super) fn begin(
+        parent: &ResolvedProjectGeneration,
+        operation: Uuid,
+        domain: &[u8],
+        request: &impl serde::Serialize,
+    ) -> Result<Self, GfError> {
+        use sha2::{Digest, Sha256};
+        let registry = graphforge_storage::research_versions::read_research_registry(parent)?;
+        let bytes = serde_json::to_vec(request)
+            .map_err(|_| GfError::Validation("invalid research request".into()))?;
+        if bytes.len() > 2 * 1024 * 1024 {
+            return Err(GfError::Project {
+                code: ProjectErrorCode::ResourceLimit,
+                message: "research request exceeds byte bound".into(),
+            });
+        }
+        let mut digest = Sha256::new();
+        digest.update(domain);
+        digest.update(bytes);
+        let fingerprint = digest.finalize().into();
+        let replay = if let Some(receipt) = registry.receipts.get(&operation) {
+            if receipt.request_sha256 != fingerprint || receipt.intent_sha256 != Some(fingerprint) {
+                return Err(GfError::Project {
+                    code: ProjectErrorCode::TransactionConflict,
+                    message: "research operation identity has conflicting request content".into(),
+                });
+            }
+            true
+        } else {
+            false
+        };
+        Ok(Self {
+            registry,
+            fingerprint,
+            operation,
+            replay,
+        })
+    }
+    pub(super) fn receipt(mut self, generation: Uuid) -> Result<ProjectParticipant, GfError> {
+        self.registry.receipts.insert(
+            self.operation,
+            graphforge_storage::research_versions::ResearchOperationReceipt {
+                intent_sha256: Some(self.fingerprint),
+                operation_uuid: self.operation,
+                request_sha256: self.fingerprint,
+                generation_uuid: generation,
+                version_uuid: None,
+            },
+        );
+        self.registry.participant()
     }
 }

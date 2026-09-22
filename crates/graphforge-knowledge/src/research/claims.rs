@@ -16,6 +16,19 @@ pub struct ResearchClaimLedger {
     relations: Vec<ClaimRelationRecord>,
 }
 impl ResearchClaimLedger {
+    /// Resolve stable conceptual origin through classified and legacy successors.
+    pub fn conceptual_origin(
+        &self,
+        assertion: Uuid,
+        supersessions: &AssertionSupersessionLedger,
+    ) -> Result<Uuid, KnowledgeError> {
+        let concepts = self
+            .claims
+            .iter()
+            .map(|row| (row.assertion_uuid, row.conceptual_uuid))
+            .collect();
+        super::lineage::resolve(&concepts, supersessions)?.get(&assertion).copied().unwrap_or(Some(assertion)).ok_or_else(|| invalid("research_claim.conceptual_uuid", "multiple incompatible conceptual ancestors require an explicit alternative, not revision"))
+    }
     /// Encode frozen classifications as native Arrow.
     pub fn claim_batch(&self) -> Result<arrow::record_batch::RecordBatch, KnowledgeError> {
         super::encoding::claim_batch(&self.claims)

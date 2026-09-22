@@ -24,6 +24,7 @@ impl GraphForge {
         community_uuid: Option<Uuid>,
     ) -> Result<ExecutionResult, GfError> {
         use graphforge_knowledge::research::ResearchDecisionKind;
+        authority::require_owner(self)?;
         let generation = self.generation_for_read()?;
         let authority = authority::resolve(&generation, context, community_uuid)?;
         let history = ledger::read_decisions(&generation)?;
@@ -90,23 +91,7 @@ impl GraphForge {
             return Err(publication::conflict());
         }
         let authority = authority::resolve(&parent, &request.context, request.community_uuid)?;
-        authority::with_context(self, &request.context, |graph| {
-            for input in &request.decisions {
-                cancellation.checkpoint()?;
-                validate_subject(graph, input)?;
-            }
-            Ok(())
-        })?;
-        for input in &request.decisions {
-            if let Some(id) = input.source_version_uuid {
-                cancellation.checkpoint()?;
-                let source = self.research_version(id)?;
-                validate_subject(
-                    &crate::research_versions::materialize_version(self, &source)?,
-                    input,
-                )?;
-            }
-        }
+        validate_decisions(self, &parent, request, &authority, &history, cancellation)?;
         let events = request
             .decisions
             .iter()
@@ -155,6 +140,7 @@ impl GraphForge {
         community_uuid: Option<Uuid>,
     ) -> Result<ExecutionResult, GfError> {
         self.graph_visibility.health.check()?;
+        authority::require_owner(self)?;
         let generation = self.generation_for_read()?;
         let authority = authority::resolve(&generation, context, community_uuid)?;
         let history = ledger::read_decisions(&generation)?;
@@ -229,4 +215,46 @@ fn selected(
     let batch = arrow::compute::filter_record_batch(&batch, &mask)
         .map_err(|e| GfError::Execution(e.to_string()))?;
     Ok(assertion_result(batch))
+}
+
+fn validate_decisions(
+    owner: &GraphForge,
+    parent: &graphforge_storage::ResolvedProjectGeneration,
+    request: &RecordResearchDecisionsRequest,
+    authority: &graphforge_knowledge::research::ResearchAuthority,
+    history: &ResearchDecisionLedger,
+    cancellation: &CancellationToken,
+) -> Result<(), GfError> {
+    authority::with_context(owner, parent, &request.context, |graph, _| {
+        for input in &request.decisions {
+            cancellation.checkpoint()?;
+            if input.kind == graphforge_knowledge::research::ResearchDecisionKind::Revoke {
+                let prior = history.canonical_decision(authority, input.subject_kind, input.subject_uuid).ok_or_else(|| GfError::Validation("revocation requires an existing decision in this exact authority scope".into()))?;
+                if input.source_version_uuid.is_some()
+                    && input.source_version_uuid != prior.source_version_uuid
+                {
+                    return Err(GfError::Validation(
+                        "revocation source must match existing decision provenance".into(),
+                    ));
+                }
+            } else {
+                validate_subject(graph, input)?;
+            }
+        }
+        Ok(())
+    })?;
+    for input in &request.decisions {
+        if input.kind == graphforge_knowledge::research::ResearchDecisionKind::Revoke {
+            continue;
+        }
+        if let Some(id) = input.source_version_uuid {
+            cancellation.checkpoint()?;
+            let source = owner.research_version(id)?;
+            validate_subject(
+                &crate::research_versions::materialize_version(owner, &source)?,
+                input,
+            )?;
+        }
+    }
+    Ok(())
 }

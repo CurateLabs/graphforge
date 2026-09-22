@@ -41,6 +41,10 @@ REQUIRED_CASES = {
     "search-knowledge-isolation",
 }
 REQUIRED_FAMILIES = {
+    "research_claims",
+    "claim_relations",
+    "claim_suppressions",
+    "canonical_decisions",
     "algorithm_interpretation_attachments",
     "assertion_status_events",
     "assertion_supersessions",

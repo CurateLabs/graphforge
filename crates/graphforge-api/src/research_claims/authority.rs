@@ -74,13 +74,29 @@ pub(super) fn resolve(
 }
 pub(super) fn with_context<T>(
     owner: &GraphForge,
+    generation: &ResolvedProjectGeneration,
     context: &ResearchContext,
-    f: impl FnOnce(&GraphForge) -> Result<T, GfError>,
+    f: impl FnOnce(&GraphForge, &ResolvedProjectGeneration) -> Result<T, GfError>,
 ) -> Result<T, GfError> {
     match context {
-        ResearchContext::Project => f(owner),
+        ResearchContext::Project => f(owner, generation),
         ResearchContext::Branch { branch_uuid } => {
-            f(owner.open_research_branch(*branch_uuid)?.graph())
+            let registry = read_research_registry(generation)?;
+            let head = registry
+                .heads
+                .get(branch_uuid)
+                .and_then(|id| registry.versions.get(id))
+                .ok_or_else(|| GfError::Validation("research Branch head is unavailable".into()))?;
+            let graph = crate::research_versions::materialize_version(owner, head)?;
+            let generation = graph.generation_for_read()?;
+            f(&graph, &generation)
         }
     }
+}
+
+pub(super) fn require_owner(owner: &GraphForge) -> Result<(), GfError> {
+    if owner.read_only && owner.research_materialization.is_some() {
+        return Err(GfError::Validation("contextual research inspection requires the owning Project facade and an explicit Branch context".into()));
+    }
+    Ok(())
 }

@@ -267,3 +267,33 @@ fn conceptual_origin_crosses_unclassified_intermediate_revisions() {
             .is_err()
     );
 }
+
+#[test]
+fn suppression_is_scoped_immutable_and_round_trips_without_touching_assertions() {
+    use std::collections::HashSet;
+    let assertion = Uuid::now_v7();
+    let branch = Uuid::now_v7();
+    let event = ResearchSuppressionRecord {
+        suppression_uuid: Uuid::now_v7(),
+        assertion_uuid: assertion,
+        context_uuid: branch,
+        creator_uuid: Uuid::now_v7(),
+        provenance_uuid: Uuid::now_v7(),
+        recorded_at: 12,
+    };
+    let ledger = ResearchSuppressionLedger::new(vec![event.clone()]).unwrap();
+    assert!(ledger.is_suppressed(assertion, &HashSet::from([branch])));
+    assert!(!ledger.is_suppressed(assertion, &HashSet::from([Uuid::now_v7()])));
+    assert_eq!(
+        ResearchSuppressionLedger::from_batches(&[ledger.batch().unwrap()]).unwrap(),
+        ledger
+    );
+    assert_eq!(ledger.merge(&ledger).unwrap(), ledger);
+    let mut changed = event;
+    changed.context_uuid = Uuid::now_v7();
+    assert!(
+        ledger
+            .merge(&ResearchSuppressionLedger::new(vec![changed]).unwrap())
+            .is_err()
+    );
+}

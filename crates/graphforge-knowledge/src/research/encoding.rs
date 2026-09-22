@@ -2,6 +2,7 @@
 use super::{
     ClaimRelationKind, ClaimRelationRecord, MAX_RESEARCH_ROWS, ResearchAuthority, ResearchCategory,
     ResearchClaimRecord, ResearchDecisionKind, ResearchDecisionRecord, ResearchSubjectKind,
+    ResearchSuppressionRecord,
 };
 use crate::{
     KnowledgeError, fixed_32_at, fixed_column, invalid, optional_fixed_16, require_schema,
@@ -298,6 +299,79 @@ pub(super) fn decision_rows(
                     row,
                     "source_version_uuid",
                 )?,
+                recorded_at: required_i64(recorded_at, row, "recorded_at")?,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+/// Authoritative typed suppression record schema.
+pub static CLAIM_SUPPRESSION_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
+    Arc::new(Schema::new(vec![
+        uuid_field("suppression_uuid", false),
+        uuid_field("assertion_uuid", false),
+        uuid_field("context_uuid", false),
+        uuid_field("creator_uuid", false),
+        uuid_field("provenance_uuid", false),
+        Field::new(
+            "recorded_at",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            false,
+        ),
+        Field::new("contract_version", DataType::UInt32, false),
+    ]))
+});
+
+pub(super) fn suppression_batch(
+    rows: &[ResearchSuppressionRecord],
+) -> Result<RecordBatch, KnowledgeError> {
+    RecordBatch::try_new(
+        Arc::clone(&CLAIM_SUPPRESSION_SCHEMA),
+        vec![
+            uuid_array(rows.iter().map(|row| Some(row.suppression_uuid)))?,
+            uuid_array(rows.iter().map(|row| Some(row.assertion_uuid)))?,
+            uuid_array(rows.iter().map(|row| Some(row.context_uuid)))?,
+            uuid_array(rows.iter().map(|row| Some(row.creator_uuid)))?,
+            uuid_array(rows.iter().map(|row| Some(row.provenance_uuid)))?,
+            Arc::new(
+                TimestampMicrosecondArray::from_iter_values(rows.iter().map(|row| row.recorded_at))
+                    .with_timezone("UTC"),
+            ),
+            Arc::new(UInt32Array::from(vec![RESEARCH_RECORD_VERSION; rows.len()])),
+        ],
+    )
+    .map_err(Into::into)
+}
+
+pub(super) fn suppression_rows(
+    batches: &[RecordBatch],
+) -> Result<Vec<ResearchSuppressionRecord>, KnowledgeError> {
+    let mut rows = Vec::new();
+    for batch in batches {
+        require_schema(
+            batch,
+            &CLAIM_SUPPRESSION_SCHEMA,
+            "research.suppression.schema",
+        )?;
+        bound_batch(rows.len(), batch.num_rows())?;
+        let suppression_uuid = fixed_column(batch, "suppression_uuid")?;
+        let assertion_uuid = fixed_column(batch, "assertion_uuid")?;
+        let context_uuid = fixed_column(batch, "context_uuid")?;
+        let creator_uuid = fixed_column(batch, "creator_uuid")?;
+        let provenance_uuid = fixed_column(batch, "provenance_uuid")?;
+        let recorded_at = timestamp_column(batch, "recorded_at")?;
+        let contract_version = u32_column(batch, "contract_version")?;
+        for row in 0..batch.num_rows() {
+            if required_u32(contract_version, row, "contract_version")? != RESEARCH_RECORD_VERSION {
+                return Err(invalid("research.contract_version", "unsupported version"));
+            }
+            rows.push(ResearchSuppressionRecord {
+                suppression_uuid: uuid_at(suppression_uuid, row, "suppression_uuid")?,
+                assertion_uuid: uuid_at(assertion_uuid, row, "assertion_uuid")?,
+                context_uuid: uuid_at(context_uuid, row, "context_uuid")?,
+                creator_uuid: uuid_at(creator_uuid, row, "creator_uuid")?,
+                provenance_uuid: uuid_at(provenance_uuid, row, "provenance_uuid")?,
                 recorded_at: required_i64(recorded_at, row, "recorded_at")?,
             });
         }

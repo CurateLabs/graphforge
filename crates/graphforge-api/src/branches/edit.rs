@@ -44,7 +44,7 @@ impl GraphForge {
     }
 }
 
-pub(super) fn prepare(
+pub(crate) fn prepare(
     owner: &GraphForge,
     command: &publication::Command,
     branch_uuid: uuid::Uuid,
@@ -76,7 +76,7 @@ pub(super) fn prepare(
     Ok((graph, version))
 }
 
-pub(super) fn finish(
+pub(crate) fn finish(
     owner: &mut GraphForge,
     command: publication::Command,
     graph: &GraphForge,
