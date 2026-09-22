@@ -249,7 +249,12 @@
       "GraphForge.research_canonical_choices",
       "GraphForge.research_claim_history",
       "GraphForge.research_decision_history",
-      "GraphForge.compare_research"
+      "GraphForge.compare_research",
+      "GraphForge.submit_research_proposal",
+      "GraphForge.preview_research_proposal",
+      "GraphForge.review_research_proposal",
+      "GraphForge.release_research_proposal",
+      "GraphForge.research_proposal_history"
     ],
     "languageSpecific": {
       "GraphForge.import_session_status": {
