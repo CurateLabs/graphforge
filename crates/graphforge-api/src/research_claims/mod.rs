@@ -2,7 +2,7 @@
 pub(crate) mod authority;
 mod branch;
 mod create;
-mod decisions;
+pub(crate) mod decisions;
 mod history;
 mod inspect;
 pub(crate) mod ledger;

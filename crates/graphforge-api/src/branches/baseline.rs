@@ -206,7 +206,7 @@ pub(crate) fn read(graph: &GraphForge) -> Result<BTreeMap<Key, Row>, GfError> {
 fn fingerprint() -> [u8; 32] {
     Sha256::digest(b"graphforge-branch-fields/1").into()
 }
-pub(super) fn install(
+pub(crate) fn install(
     root: &std::path::Path,
     prepared: &mut PreparedBranchContent,
     rows: &BTreeMap<Key, Row>,

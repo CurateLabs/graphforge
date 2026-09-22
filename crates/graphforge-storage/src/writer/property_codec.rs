@@ -1283,6 +1283,51 @@ fn decode_value(
     })
 }
 
+/// Decode one exact native property value for reviewed mutation parameters.
+/// Uses the same typed codec as persisted graph properties, including native
+/// heterogeneous and temporal values. Bounds and nulls are checked before access.
+pub fn decode_property_value(
+    column: &arrow::array::ArrayRef,
+    field: &arrow::datatypes::Field,
+    row: usize,
+) -> Result<IrLiteral, GfError> {
+    if row >= column.len() || column.data_type() != field.data_type() {
+        return Err(GfError::Validation(
+            "invalid native property row or type".into(),
+        ));
+    }
+    graphforge_value::heterogeneous::validate_array(column.as_ref())
+        .map_err(|error| GfError::Storage(error.to_string()))?;
+    if column.is_null(row) {
+        return Ok(IrLiteral::Null);
+    }
+    if let Some(values) = column.as_any().downcast_ref::<arrow::array::StructArray>()
+        && graphforge_value::heterogeneous::recognize(values.data_type())
+            .map_err(|error| GfError::Storage(error.to_string()))?
+            .is_some()
+    {
+        return match graphforge_value::heterogeneous::decode_row(values, row)
+            .map_err(|error| GfError::Storage(error.to_string()))?
+        {
+            graphforge_value::heterogeneous::Decoded::Null => Ok(IrLiteral::Null),
+            graphforge_value::heterogeneous::Decoded::Payload(payload) => {
+                let index = values
+                    .columns()
+                    .iter()
+                    .position(|column| std::sync::Arc::ptr_eq(column, payload))
+                    .ok_or_else(|| {
+                        GfError::Storage("native property payload field is unavailable".into())
+                    })?;
+                decode_property_value(payload, &values.fields()[index], row)
+            }
+            graphforge_value::heterogeneous::Decoded::Map(_) => Err(GfError::Storage(
+                "maps are not stored graph properties".into(),
+            )),
+        };
+    }
+    decode_value(column, field, row)
+}
+
 fn decode_spatial_value(col: &ArrayRef, field: &Field, row: usize) -> Result<IrLiteral, GfError> {
     decode_spatial_property_value(col.as_ref(), field, row).map(IrLiteral::Spatial)
 }

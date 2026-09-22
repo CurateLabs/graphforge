@@ -1501,6 +1501,16 @@
       "bazel_label": "//crates/graphforge-cli:research_comparison",
       "exception_id": null,
       "notes": "#1354 native semantic comparison"
+    },
+    {
+      "package": "graphforge-cli",
+      "target": "research_proposals",
+      "class": "integration-test",
+      "source": "crates/graphforge-cli/tests/research_proposals.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cli:research_proposals",
+      "exception_id": null,
+      "notes": "#1356 native selective proposals"
     }
   ],
   "exceptions": [

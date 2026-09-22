@@ -38,6 +38,9 @@ impl GraphPlanLowerer {
     /// schema-only lowering or when no single property table applies (see
     /// [`prop_table_stem`](Self::prop_table_stem)).
     pub(super) fn node_prop_cols(&self, ty: Option<EntityTypeId>) -> Vec<String> {
+        if let Some(columns) = self.semantic_node_property_columns() {
+            return columns;
+        }
         let Some(dir) = self.read_snapshot() else {
             return Vec::new();
         };
@@ -87,6 +90,10 @@ impl GraphPlanLowerer {
     ) -> Result<LogicalPlan, LoweringError> {
         use datafusion::common::Column;
         use datafusion::logical_expr::col;
+
+        if self.semantic_node_property_columns().is_some() {
+            return self.join_semantic_node_properties(var, ty, scan);
+        }
 
         let Some(dir) = self.read_snapshot() else {
             return Ok(scan); // schema-only lowering: no real provider to join

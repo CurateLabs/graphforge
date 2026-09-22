@@ -89,6 +89,7 @@ the Repository Policy job (#1390).
 | 0040 | Frozen Slices reference retained Version context | Accepted | [`../../adr/0040-frozen-slice-membership.md`](../../adr/0040-frozen-slice-membership.md) |
 | 0041 | Branch state publishes through Project CURRENT | Accepted | [`../../adr/0041-branch-current-publication.md`](../../adr/0041-branch-current-publication.md) |
 | 0042 | Contextual research decisions extend immutable knowledge | Accepted | [`../../adr/0042-contextual-research-claims.md`](../../adr/0042-contextual-research-claims.md) |
+| 0043 | Proposal acceptance shares the Project publication owner | Accepted | [`../../adr/0043-atomic-research-proposal-acceptance.md`](../../adr/0043-atomic-research-proposal-acceptance.md) |
 
 ### Superseded
 

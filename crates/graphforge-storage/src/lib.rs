@@ -488,13 +488,13 @@ pub use schemas::{
 pub mod writer;
 pub use writer::{
     GraphWriter, GraphWriterLimits, NodePropertySetCounts, count_entity_properties,
-    count_entity_properties_from_inventory, decode_spatial_property_value, read_entity_properties,
-    read_entity_property_keys, read_node_property_rows, read_node_property_rows_from_inventory,
-    remove_edge_properties, remove_node_properties, set_edge_properties_rewrite,
-    set_node_properties, stage_property_tombstones_authenticated, stage_remove_edge_properties,
-    stage_remove_edge_properties_authenticated, stage_remove_node_properties,
-    stage_remove_node_properties_authenticated, stage_set_edge_properties,
-    stage_set_edge_properties_authenticated, stage_set_node_properties,
+    count_entity_properties_from_inventory, decode_property_value, decode_spatial_property_value,
+    read_entity_properties, read_entity_property_keys, read_node_property_rows,
+    read_node_property_rows_from_inventory, remove_edge_properties, remove_node_properties,
+    set_edge_properties_rewrite, set_node_properties, stage_property_tombstones_authenticated,
+    stage_remove_edge_properties, stage_remove_edge_properties_authenticated,
+    stage_remove_node_properties, stage_remove_node_properties_authenticated,
+    stage_set_edge_properties, stage_set_edge_properties_authenticated, stage_set_node_properties,
     stage_set_node_properties_authenticated, stage_set_node_properties_authenticated_with_counts,
 };
 

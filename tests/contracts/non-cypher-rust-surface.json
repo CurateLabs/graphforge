@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "d6b988611345e62eae607e16d09c5733de42c60acd5ac50cfcea48e76a7ee31e",
+  "public_method_digest": "0618e557318ffc5b89b13f08b83463c9fdb5b84527c482cc423649b83fa068a2",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -1284,6 +1284,29 @@
         {
           "path": "crates/graphforge-api/tests/research_comparison.rs",
           "symbol": "public_comparison_contract_is_closed_and_bounded"
+        }
+      ]
+    },
+    "research-proposals": {
+      "ids": [
+        "GraphForge.submit_research_proposal",
+        "GraphForge.preview_research_proposal",
+        "GraphForge.review_research_proposal",
+        "GraphForge.release_research_proposal",
+        "GraphForge.research_proposal_history"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/src/research_proposals/tests.rs",
+          "symbol": "frozen_submission_survives_continued_branch_edits_and_retains_only_selected_fields"
+        },
+        {
+          "path": "crates/graphforge-api/src/research_proposals/tests/nested.rs",
+          "symbol": "nested_acceptance_deduplicates_per_destination_and_preserves_contribution"
+        },
+        {
+          "path": "crates/graphforge-api/src/research_proposals/tests/retention.rs",
+          "symbol": "fixed_parent_proposal_history_releases_obsolete_payloads_but_preserves_accepted_proof_and_replay"
         }
       ]
     }

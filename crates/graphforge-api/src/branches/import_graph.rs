@@ -17,13 +17,32 @@ pub(super) fn incorporate(
     source: &GraphForge,
     cancellation: &CancellationToken,
 ) -> Result<(), GfError> {
+    incorporate_with_policy(destination, source, cancellation, true)
+}
+
+/// The Proposal owner has separately reviewed existing field updates and proves
+/// dependency availability. This step only adds absent identities.
+pub(crate) fn incorporate_new(
+    destination: &GraphForge,
+    source: &GraphForge,
+    cancellation: &CancellationToken,
+) -> Result<(), GfError> {
+    incorporate_with_policy(destination, source, cancellation, false)
+}
+
+fn incorporate_with_policy(
+    destination: &GraphForge,
+    source: &GraphForge,
+    cancellation: &CancellationToken,
+    require_identical: bool,
+) -> Result<(), GfError> {
     let before = fields::read(destination, cancellation)?;
     let incoming = fields::read(source, cancellation)?;
     let mut existing = BTreeSet::new();
     for ((kind, id, field), value) in &incoming {
         if before.contains_key(&(kind.clone(), *id, "$object".into())) {
             existing.insert((kind.clone(), *id));
-            if before.get(&(kind.clone(), *id, field.clone())) != Some(value) {
+            if require_identical && before.get(&(kind.clone(), *id, field.clone())) != Some(value) {
                 return Err(conflict());
             }
         }
@@ -32,7 +51,7 @@ pub(super) fn incorporate(
         .iter()
         .filter(|(key, _)| existing.contains(&(key.0.clone(), key.1)))
     {
-        if !incoming.contains_key(key) {
+        if require_identical && !incoming.contains_key(key) {
             return Err(conflict());
         }
     }
@@ -67,6 +86,16 @@ pub(super) fn incorporate(
                 cancellation.checkpoint()?;
                 let id = Uuid::from_slice(ids.value(row)).map_err(|_| invalid())?;
                 if existing.contains(&(kind.into(), id)) {
+                    continue;
+                }
+                if super::import_semantic::incorporate(
+                    destination,
+                    source,
+                    batch,
+                    row,
+                    (kind, id),
+                    cancellation,
+                )? {
                     continue;
                 }
                 let input = input(batch, row, kind, id, &mut labels)?;

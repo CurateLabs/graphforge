@@ -7,11 +7,14 @@ use std::sync::atomic::AtomicBool;
 
 /// Authenticated immutable content protected from cleanup until publication.
 /// Keep this value alive through the owning Project's CURRENT transition.
-pub struct PreparedBranchContent {
-    /// Canonical effective Branch Version ready for one publication.
+pub struct PreparedResearchContent {
+    /// Canonical research Version ready for one publication.
     pub version: ResearchVersionRecord,
     pub(super) _lease: crate::GraphObjectPublicationLease,
 }
+
+/// Selected Branch content prepared by the Branch domain owner.
+pub type PreparedBranchContent = PreparedResearchContent;
 
 /// Install a selected, domain-validated private preparation into Project CAS.
 /// This does not publish authority. The caller must use `PublishBranch` while
@@ -19,7 +22,7 @@ pub struct PreparedBranchContent {
 pub fn prepare_branch_content(
     root: &Path,
     source: &ResolvedProjectGeneration,
-    mut version: ResearchVersionRecord,
+    version: ResearchVersionRecord,
     cancellation: &AtomicBool,
 ) -> Result<PreparedBranchContent, GfError> {
     cancelled(cancellation)?;
@@ -28,6 +31,16 @@ pub fn prepare_branch_content(
             "prepared Branch content requires exact origin lineage",
         ));
     }
+    prepare_content(root, source, version, cancellation)
+}
+
+pub(super) fn prepare_content(
+    root: &Path,
+    source: &ResolvedProjectGeneration,
+    mut version: ResearchVersionRecord,
+    cancellation: &AtomicBool,
+) -> Result<PreparedResearchContent, GfError> {
+    cancelled(cancellation)?;
     source.validate_complete_participant_inventory()?;
     let lease = crate::begin_graph_object_publication(root)?;
     let source_root = source.container_root();
@@ -86,7 +99,7 @@ pub fn prepare_branch_content(
     version.content.producer = super::PRODUCER.into();
     retained_content::inspect(root, &version, None)?;
     cancelled(cancellation)?;
-    Ok(PreparedBranchContent {
+    Ok(PreparedResearchContent {
         version,
         _lease: lease,
     })

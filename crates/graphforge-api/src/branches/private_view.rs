@@ -3,7 +3,7 @@ use crate::{GfError, GraphForge};
 use graphforge_storage::research_versions::{PreparedBranchContent, materialize_prepared_branch};
 use std::sync::Arc;
 
-pub(super) fn open(
+pub(crate) fn open(
     owner: &GraphForge,
     prepared: &PreparedBranchContent,
 ) -> Result<GraphForge, GfError> {

@@ -83,6 +83,7 @@ pub(crate) fn read_selected(
             )?;
         }
     }
+    super::semantic_fields::read(graph, selected, &mut fields, &mut bytes, cancellation)?;
     domain_objects(graph, &mut fields, &mut bytes, selected, cancellation)?;
     super::claim_fields::read(graph, &mut fields, &mut bytes, selected, cancellation)?;
     super::context_fields::read(graph, &mut fields, &mut bytes, cancellation)?;
@@ -186,7 +187,10 @@ fn fingerprint(array: arrow::array::ArrayRef) -> Result<[u8; 32], GfError> {
     crate::canonical_arrow::result_fingerprint(&[batch])
         .map_err(|error| GfError::Validation(format!("Branch field fingerprint: {error}")))
 }
-fn properties(array: &dyn Array, row: usize) -> Result<BTreeMap<String, [u8; 32]>, GfError> {
+pub(super) fn properties(
+    array: &dyn Array,
+    row: usize,
+) -> Result<BTreeMap<String, [u8; 32]>, GfError> {
     let values = array
         .as_any()
         .downcast_ref::<StructArray>()
@@ -235,7 +239,7 @@ fn properties(array: &dyn Array, row: usize) -> Result<BTreeMap<String, [u8; 32]
 fn invalid() -> GfError {
     GfError::Validation("invalid native Branch semantic field".into())
 }
-fn limit() -> GfError {
+pub(super) fn limit() -> GfError {
     GfError::Project {
         code: graphforge_core::ProjectErrorCode::ResourceLimit,
         message: "Branch semantic fields exceed creation limits".into(),

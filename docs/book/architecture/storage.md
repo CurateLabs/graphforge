@@ -27,13 +27,19 @@ The unused `StorageProvider`, `StorageRow`, and `ParquetProvider` stubs were rem
 
 ## Lifecycle implementation ownership
 
-Research Version publication uses the same Project authority, under the
-`research@1` capability and `registry@1` participant. The storage foundation
-and its conservative generation retention are specified in
-[ADR 0039](../../adr/0039-research-version-publication.md). Context restoration
-preserves unrelated heads and permanent receipt/identity history. Explicit
-root release cannot delete accepted provenance. Selected physical reclamation
-and public integration remain #1536/#1537 work under #1350.
+Research Version and Proposal publication use the same Project authority under
+`research@4` and `registry@4`. [ADR 0039](../../adr/0039-research-version-publication.md)
+records the Version foundation; [ADR 0043](../../adr/0043-atomic-research-proposal-acceptance.md)
+extends its single CURRENT publication to accepted parent content, review history,
+selected proof, exact contribution mappings and receipts. Context restoration
+preserves unrelated heads and permanent receipt/identity/acceptance history.
+Selected CAS content can outlive its source generation; an origin Version citation
+does not itself retain that Version's entire payload. Frozen Proposal root release
+permits explicit obsolete-payload deletion and cleanup, while independent accepted
+proof roots retain required content. The registry admits only its exact current
+contract version; incompatible older records fail closed, without an implicit
+upgrade or lossy history conversion. See the research workspace contract for
+capacity limits and the separate receipt and deduplication lifetimes.
 
 Object-store manifest updates, materialization, installation, and garbage collection
 have private modules under `graph_object_store`. Read/publication leases and shared
