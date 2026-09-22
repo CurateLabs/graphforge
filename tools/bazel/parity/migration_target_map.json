@@ -833,6 +833,16 @@
       "notes": "#1384 explicit out-of-band project verify command"
     },
     {
+      "package": "graphforge-cli",
+      "target": "research_versions",
+      "class": "integration-test",
+      "source": "crates/graphforge-cli/tests/research_versions.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cli:research_versions",
+      "exception_id": null,
+      "notes": "#1537 native immutable research Version lifecycle"
+    },
+    {
       "package": "graphforge-core",
       "target": "graphforge_core",
       "class": "lib",
@@ -1381,6 +1391,16 @@
       "bazel_label": "//crates/graphforge-api:ontology_adoption_retry",
       "exception_id": null,
       "notes": "#1229 atomic ontology promotion retry and type identity refusal"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "research_versions",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/research_versions.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:research_versions",
+      "exception_id": null,
+      "notes": "#1537 native immutable research Version lifecycle"
     }
   ],
   "exceptions": [

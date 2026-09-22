@@ -107,8 +107,9 @@ impl GraphForge {
             .map_err(|error| to_pyerr(py, &error))?
             .0;
         let graph = self.ensure_open()?;
+        let query = query.to_owned();
         let result = py
-            .detach(|| graph.open_research_version(id)?.execute(query))
+            .detach(|| graph.open_research_version(id)?.execute(&query))
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
     }

@@ -1,4 +1,5 @@
 //! Thin projections of Rust-owned immutable research Version contracts.
+use crate::Task;
 use crate::{Buffer, GraphForge, Result, canonical_operation_id, napi, result_to_ipc, to_napi_err};
 use napi::JsValue;
 use napi::bindgen_prelude::{FromNapiValue, JsObjectValue};
@@ -172,7 +173,7 @@ pub struct CommitResearchVersionTask {
     cancellation: graphforge_api::CancellationToken,
 }
 
-impl crate::Task for CommitResearchVersionTask {
+impl Task for CommitResearchVersionTask {
     type Output =
         std::result::Result<graphforge_api::ResearchOperationReceipt, graphforge_api::GfError>;
     type JsValue = ResearchOperationReceiptOutput;
