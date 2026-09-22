@@ -1473,6 +1473,16 @@
       "notes": "#1353 native contextual claims and authority acceptance"
     },
     {
+      "package": "graphforge-api",
+      "target": "research_comparison",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/research_comparison.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:research_comparison",
+      "exception_id": null,
+      "notes": "#1354 native semantic comparison"
+    },
+    {
       "package": "graphforge-cli",
       "target": "research_claims",
       "class": "integration-test",
@@ -1481,6 +1491,16 @@
       "bazel_label": "//crates/graphforge-cli:research_claims",
       "exception_id": null,
       "notes": "#1353 native contextual claims and authority acceptance"
+    },
+    {
+      "package": "graphforge-cli",
+      "target": "research_comparison",
+      "class": "integration-test",
+      "source": "crates/graphforge-cli/tests/research_comparison.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cli:research_comparison",
+      "exception_id": null,
+      "notes": "#1354 native semantic comparison"
     }
   ],
   "exceptions": [

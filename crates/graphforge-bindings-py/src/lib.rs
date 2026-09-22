@@ -17,6 +17,7 @@ mod providers;
 mod query;
 mod recorded;
 mod research_claims;
+mod research_comparison;
 mod research_project;
 mod research_versions;
 mod slices;

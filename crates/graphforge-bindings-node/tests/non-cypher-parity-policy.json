@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 321,
-  "releaseSurfaceDigest": "1bbf87d0b9e0f50ee8f8bb083e93bbebf5c23dd2e1544c4ecec545382b246b42",
+  "releaseSurfaceCount": 322,
+  "releaseSurfaceDigest": "727663dd45e4846a19adb36df707b0adddff38998aa6809217e6e910b4a55bac",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -37,7 +37,8 @@
     "research-versions": "researchVersions",
     "slices": "slices",
     "branches": "branches",
-    "research-claims": "researchClaims"
+    "research-claims": "researchClaims",
+    "research-comparison": "researchComparison"
   },
   "classification": {
     "equivalent": [
@@ -246,27 +247,42 @@
       "GraphForge.relate_research_claims",
       "GraphForge.research_canonical_choices",
       "GraphForge.research_claim_history",
-      "GraphForge.research_decision_history"
+      "GraphForge.research_decision_history",
+      "GraphForge.compare_research"
     ],
     "languageSpecific": {
       "GraphForge.import_session_status": {
-        "nodeMembers": ["GraphImportSession.status"],
+        "nodeMembers": [
+          "GraphImportSession.status"
+        ],
         "reason": "Node reads live session status from its owned handle; terminal receipt reopening is a Rust and CLI lifecycle operation."
       },
       "GraphForge.execute_stream": {
-        "nodeMembers": ["GraphForge.plan", "PlanHandle.collectIpc"],
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.collectIpc"
+        ],
         "reason": "Node uses Promise-delivered IPC instead of exposing Rust streams."
       },
       "GraphForge.execute_stream_owned": {
-        "nodeMembers": ["GraphForge.plan", "PlanHandle.collectIpc"],
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.collectIpc"
+        ],
         "reason": "Node uses Promise-delivered IPC instead of exposing Rust streams."
       },
       "GraphForge.execute_stream_with_params": {
-        "nodeMembers": ["GraphForge.plan", "PlanHandle.collectIpc"],
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.collectIpc"
+        ],
         "reason": "Node binds parameters on PlanHandle before Promise-delivered IPC."
       },
       "GraphForge.execute_to_arrow_ipc_stream_with_params": {
-        "nodeMembers": ["GraphForge.plan", "PlanHandle.sinkArrowIpc"],
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.sinkArrowIpc"
+        ],
         "reason": "Node binds parameters on PlanHandle before the asynchronous Arrow IPC sink."
       },
       "GraphForge.execute_to_parquet": {
@@ -278,79 +294,120 @@
         "reason": "Node uses the asynchronous PlanHandle Parquet sink."
       },
       "GraphForge.execute_to_parquet_with_params": {
-        "nodeMembers": ["GraphForge.plan", "PlanHandle.sinkParquet"],
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.sinkParquet"
+        ],
         "reason": "Node binds parameters on PlanHandle before the asynchronous Parquet sink."
       },
       "GraphForge.execute_to_parquet_stream_with_params": {
-        "nodeMembers": ["GraphForge.plan", "PlanHandle.sinkParquet"],
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.sinkParquet"
+        ],
         "reason": "Node binds parameters on PlanHandle before the asynchronous bounded Parquet sink."
       },
       "GraphForge.execute_to_result_sink_with_evidence": {
-        "nodeMembers": ["GraphForge.plan", "PlanHandle.sinkParquet"],
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.sinkParquet"
+        ],
         "reason": "The aggregate qualification receipt is currently a Rust facade and gf CLI certification surface; Node retains its asynchronous result sink without the certification envelope."
       },
       "GraphForge.configure_provider_find_runtime": {
-        "nodeMembers": ["GraphForge.configureOpenrouter"],
+        "nodeMembers": [
+          "GraphForge.configureOpenrouter"
+        ],
         "reason": "Node exposes a bounded OpenRouter adapter instead of Rust runtime injection."
       },
       "crate.algorithm_descriptor_contracts": {
-        "nodeMembers": ["GraphForge.algorithmDescriptorContracts"],
+        "nodeMembers": [
+          "GraphForge.algorithmDescriptorContracts"
+        ],
         "reason": "Node projects the live Rust registry as a thin GraphForge method without opening knowledge or epistemic storage."
       },
       "GraphImportSession.validate_with_cancellation": {
-        "nodeMembers": ["GraphImportSession.validate"],
+        "nodeMembers": [
+          "GraphImportSession.validate"
+        ],
         "reason": "Node validate accepts an optional AbortSignal instead of a second method."
       },
       "GraphForge.open_research_version": {
-        "nodeMembers": ["GraphForge.queryResearchVersion"],
+        "nodeMembers": [
+          "GraphForge.queryResearchVersion"
+        ],
         "reason": "Node takes an explicit immutable Version UUID and delegates to the Rust historical view without exposing a mutable view handle."
       },
       "ResearchVersionView.execute": {
-        "nodeMembers": ["GraphForge.queryResearchVersion"],
+        "nodeMembers": [
+          "GraphForge.queryResearchVersion"
+        ],
         "reason": "Node takes an explicit immutable Version UUID and delegates to the Rust historical view without exposing a mutable view handle."
       },
       "ResearchVersionView.version": {
-        "nodeMembers": ["GraphForge.researchVersion"],
+        "nodeMembers": [
+          "GraphForge.researchVersion"
+        ],
         "reason": "Node takes an explicit immutable Version UUID and delegates to the Rust historical view without exposing a mutable view handle."
       },
       "ResearchVersionView.workspace_ontology": {
-        "nodeMembers": ["GraphForge.researchVersionOntology"],
+        "nodeMembers": [
+          "GraphForge.researchVersionOntology"
+        ],
         "reason": "Node takes an explicit immutable Version UUID and delegates to the Rust historical view without exposing a mutable view handle."
       },
       "ResearchVersionView.research_project_metadata": {
-        "nodeMembers": ["GraphForge.researchVersionMetadata"],
+        "nodeMembers": [
+          "GraphForge.researchVersionMetadata"
+        ],
         "reason": "Node takes an explicit immutable Version UUID and delegates to the Rust historical view without exposing a mutable view handle."
       },
       "ResearchVersionView.artifact": {
-        "nodeMembers": ["GraphForge.researchVersionArtifact"],
+        "nodeMembers": [
+          "GraphForge.researchVersionArtifact"
+        ],
         "reason": "Node takes an explicit immutable Version UUID and delegates to the Rust historical view without exposing a mutable view handle."
       },
       "ResearchVersionView.artifact_payload": {
-        "nodeMembers": ["GraphForge.researchVersionArtifactPayload"],
+        "nodeMembers": [
+          "GraphForge.researchVersionArtifactPayload"
+        ],
         "reason": "Node takes an explicit immutable Version UUID and delegates to the Rust historical view without exposing a mutable view handle."
       },
       "GraphForge.open_research_branch": {
-        "nodeMembers": ["GraphForge.researchBranch"],
+        "nodeMembers": [
+          "GraphForge.researchBranch"
+        ],
         "reason": "Explicit Branch UUID transport opens the native immutable Branch view and returns metadata or Arrow IPC."
       },
       "ResearchBranchView.fields": {
-        "nodeMembers": ["GraphForge.researchBranchFields"],
+        "nodeMembers": [
+          "GraphForge.researchBranchFields"
+        ],
         "reason": "Explicit Branch UUID transport opens the native immutable Branch view and returns metadata or Arrow IPC."
       },
       "ResearchBranchView.graph": {
-        "nodeMembers": ["GraphForge.queryResearchBranch"],
+        "nodeMembers": [
+          "GraphForge.queryResearchBranch"
+        ],
         "reason": "Explicit Branch UUID transport opens the native immutable Branch view and returns metadata or Arrow IPC."
       },
       "ResearchBranchView.record": {
-        "nodeMembers": ["GraphForge.researchBranch"],
+        "nodeMembers": [
+          "GraphForge.researchBranch"
+        ],
         "reason": "Explicit Branch UUID transport opens the native immutable Branch view and returns metadata or Arrow IPC."
       },
       "ResearchBranchView.references": {
-        "nodeMembers": ["GraphForge.researchBranchReferences"],
+        "nodeMembers": [
+          "GraphForge.researchBranchReferences"
+        ],
         "reason": "Explicit Branch UUID transport opens the native immutable Branch view and returns metadata or Arrow IPC."
       },
       "ResearchBranchView.version_uuid": {
-        "nodeMembers": ["GraphForge.researchBranch"],
+        "nodeMembers": [
+          "GraphForge.researchBranch"
+        ],
         "reason": "Explicit Branch UUID transport opens the native immutable Branch view and returns metadata or Arrow IPC."
       }
     },
@@ -418,8 +475,13 @@
       ]
     },
     "lifecycleConstruction": {
-      "core.test.mjs": ["add node", "graph inspection surface"],
-      "smoke.test.mjs": ["lifecycle"]
+      "core.test.mjs": [
+        "add node",
+        "graph inspection surface"
+      ],
+      "smoke.test.mjs": [
+        "lifecycle"
+      ]
     },
     "researchProject": {
       "research-project.test.mjs": [
@@ -452,11 +514,21 @@
         "live registry contracts are catalog-exhaustive and descriptor reachable",
         "registry discovery and descriptor preparation stay knowledge isolated"
       ],
-      "rank-centrality.test.mjs": ["degree rank"],
-      "cluster-connectivity.test.mjs": ["components cluster"],
-      "paths-shortest.test.mjs": ["dijkstra paths"],
-      "analyze.test.mjs": ["is dag"],
-      "similar-knn.test.mjs": ["knn"]
+      "rank-centrality.test.mjs": [
+        "degree rank"
+      ],
+      "cluster-connectivity.test.mjs": [
+        "components cluster"
+      ],
+      "paths-shortest.test.mjs": [
+        "dijkstra paths"
+      ],
+      "analyze.test.mjs": [
+        "is dag"
+      ],
+      "similar-knn.test.mjs": [
+        "knn"
+      ]
     },
     "m19ProviderRerank": {
       "search-index.test.mjs": [
@@ -524,7 +596,9 @@
       "checkpoints.test.mjs": [
         "checkpoint pagination and diff cancellation use the shared adapter"
       ],
-      "cluster-vector.test.mjs": ["k means cluster"],
+      "cluster-vector.test.mjs": [
+        "k means cluster"
+      ],
       "result_sink.test.mjs": [
         "result sinks stream parquet and arrow ipc with BigInt receipts"
       ]
@@ -570,6 +644,11 @@
     "researchClaims": {
       "research-claims.test.mjs": [
         "contextual claims preserve native authority and durable Branch isolation"
+      ]
+    },
+    "researchComparison": {
+      "research-comparison.test.mjs": [
+        "native comparison preserves local/upstream semantics and refuses stale pages"
       ]
     }
   }

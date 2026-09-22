@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "d4268de9919781a7da3eed1d87c87fb2a0be3933932628e2bba5f9c734d0304d",
+  "public_method_digest": "d6b988611345e62eae607e16d09c5733de42c60acd5ac50cfcea48e76a7ee31e",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -1261,6 +1261,29 @@
         {
           "path": "crates/graphforge-api/tests/research_claims.rs",
           "symbol": "bring_selected_claim_keeps_classification_without_importing_source_authority"
+        }
+      ]
+    },
+    "research-comparison": {
+      "ids": [
+        "GraphForge.compare_research"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/tests/research_comparison.rs",
+          "symbol": "independent_local_upstream_and_conflicting_fields_ignore_unrelated_parent_content"
+        },
+        {
+          "path": "crates/graphforge-api/tests/research_comparison.rs",
+          "symbol": "accepted_subsets_from_distinct_versions_do_not_hide_later_local_edits"
+        },
+        {
+          "path": "crates/graphforge-api/tests/research_comparison.rs",
+          "symbol": "pinned_cursor_rejects_changed_reference_retention"
+        },
+        {
+          "path": "crates/graphforge-api/tests/research_comparison.rs",
+          "symbol": "public_comparison_contract_is_closed_and_bounded"
         }
       ]
     }

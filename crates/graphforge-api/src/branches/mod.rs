@@ -1,13 +1,15 @@
 //! Native independent Branch contexts inside the owning Project CURRENT.
-mod baseline;
+pub(crate) mod baseline;
+pub(crate) mod baseline_context;
 mod bring;
 mod claim_fields;
+mod context_fields;
 mod create;
 pub(crate) mod domain_bounds;
 mod domain_state;
 mod domains;
 pub(crate) mod edit;
-mod fields;
+pub(crate) mod fields;
 mod import_graph;
 mod merge_domains;
 mod model;

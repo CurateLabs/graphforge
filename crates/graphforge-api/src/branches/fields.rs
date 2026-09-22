@@ -8,79 +8,139 @@ use arrow::{
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::Arc};
 use uuid::Uuid;
-pub(super) type Key = (String, Uuid, String);
-pub(super) type Fields = BTreeMap<Key, [u8; 32]>;
+pub(crate) type Key = (String, Uuid, String);
+pub(crate) type Fields = BTreeMap<Key, [u8; 32]>;
 
-pub(super) fn read(
+pub(crate) fn read(
     graph: &GraphForge,
     cancellation: &CancellationToken,
 ) -> Result<Fields, GfError> {
-    let mut fields = BTreeMap::new();
-    let mut field_bytes = 0;
-    for (kind, query) in [
+    read_selected(graph, None, cancellation)
+}
+pub(crate) type Objects = std::collections::BTreeSet<(String, Uuid)>;
+pub(crate) fn read_selected(
+    graph: &GraphForge,
+    selected: Option<&Objects>,
+    cancellation: &CancellationToken,
+) -> Result<Fields, GfError> {
+    let mut fields = Fields::new();
+    let mut bytes = 0;
+    let mut scanned = 0_usize;
+    for (kind, pattern, identity, returns) in [
         (
             "node",
-            "MATCH (n) RETURN n.node_uuid AS object_uuid, labels(n) AS labels, properties(n) AS properties",
+            "(n)",
+            "n.node_uuid",
+            "n.node_uuid AS object_uuid, labels(n) AS labels, properties(n) AS properties",
         ),
         (
             "edge",
-            "MATCH (s)-[r]->(t) RETURN r.edge_uuid AS object_uuid, s.node_uuid AS source_uuid, t.node_uuid AS target_uuid, type(r) AS relationship_type, properties(r) AS properties",
+            "(s)-[r]->(t)",
+            "r.edge_uuid",
+            "r.edge_uuid AS object_uuid, type(r) AS relationship_type, s.node_uuid AS source_uuid, t.node_uuid AS target_uuid, properties(r) AS properties",
         ),
     ] {
-        cancellation.checkpoint()?;
-        let mut bytes = 0_usize;
-        crate::slices::stream_branch(graph, query, cancellation, |batch| {
-            bytes = bytes.saturating_add(batch.get_array_memory_size());
-            if bytes > 64 * 1024 * 1024 {
-                return Err(limit());
-            }
-            let ids = batch
-                .column_by_name("object_uuid")
-                .and_then(|a| a.as_any().downcast_ref::<FixedSizeBinaryArray>())
-                .ok_or_else(invalid)?;
-            for row in 0..batch.num_rows() {
+        if let Some(selected) = selected {
+            for (_, id) in selected.iter().filter(|(k, _)| k == kind) {
                 cancellation.checkpoint()?;
-                let id = Uuid::from_slice(ids.value(row)).map_err(|_| invalid())?;
-                insert(
-                    &mut fields,
-                    &mut field_bytes,
-                    (kind.into(), id, "$object".into()),
-                    Sha256::digest(b"present").into(),
+                let params = std::collections::HashMap::from([(
+                    "id".into(),
+                    graphforge_ir::IrLiteral::Uuid(*id.as_bytes()),
+                )]);
+                let query = format!("MATCH {pattern} WHERE {identity} = $id RETURN {returns}");
+                crate::slices::stream_branch_params(
+                    graph,
+                    &query,
+                    &params,
+                    cancellation,
+                    |batch| {
+                        collect(
+                            batch,
+                            kind,
+                            &mut fields,
+                            &mut bytes,
+                            &mut scanned,
+                            cancellation,
+                        )
+                    },
                 )?;
-                for (field, array) in batch.schema().fields().iter().zip(batch.columns()) {
-                    match field.name().as_str() {
-                        "object_uuid" => {}
-                        "properties" => {
-                            for (name, digest) in properties(array.as_ref(), row)? {
-                                insert(
-                                    &mut fields,
-                                    &mut field_bytes,
-                                    (kind.into(), id, format!("property:{name}")),
-                                    digest,
-                                )?;
-                            }
-                        }
-                        name => {
-                            insert(
-                                &mut fields,
-                                &mut field_bytes,
-                                (kind.into(), id, format!("${name}")),
-                                fingerprint(array.slice(row, 1))?,
-                            )?;
-                        }
-                    }
-                }
-                if fields.len().saturating_mul(256) > 64 * 1024 * 1024 {
-                    return Err(limit());
-                }
             }
-            Ok(())
-        })?;
+        } else {
+            crate::slices::stream_branch(
+                graph,
+                &format!("MATCH {pattern} RETURN {returns}"),
+                cancellation,
+                |batch| {
+                    collect(
+                        batch,
+                        kind,
+                        &mut fields,
+                        &mut bytes,
+                        &mut scanned,
+                        cancellation,
+                    )
+                },
+            )?;
+        }
     }
-    domain_objects(graph, &mut fields, &mut field_bytes, cancellation)?;
-    super::claim_fields::read(graph, &mut fields, &mut field_bytes, cancellation)?;
+    domain_objects(graph, &mut fields, &mut bytes, selected, cancellation)?;
+    super::claim_fields::read(graph, &mut fields, &mut bytes, selected, cancellation)?;
+    super::context_fields::read(graph, &mut fields, &mut bytes, cancellation)?;
+    if let Some(selected) = selected {
+        fields.retain(|key, _| key.0 != "reference" || selected.contains(&(key.0.clone(), key.1)));
+    }
     Ok(fields)
 }
+fn collect(
+    batch: &RecordBatch,
+    kind: &str,
+    fields: &mut Fields,
+    bytes: &mut usize,
+    scanned: &mut usize,
+    cancellation: &CancellationToken,
+) -> Result<(), GfError> {
+    *scanned = scanned.saturating_add(batch.get_array_memory_size());
+    if *scanned > 64 * 1024 * 1024 {
+        return Err(limit());
+    }
+    let ids = batch
+        .column_by_name("object_uuid")
+        .and_then(|a| a.as_any().downcast_ref::<FixedSizeBinaryArray>())
+        .ok_or_else(invalid)?;
+    for row in 0..batch.num_rows() {
+        cancellation.checkpoint()?;
+        let id = Uuid::from_slice(ids.value(row)).map_err(|_| invalid())?;
+        insert(
+            fields,
+            bytes,
+            (kind.into(), id, "$object".into()),
+            Sha256::digest(b"present").into(),
+        )?;
+        for (field, array) in batch.schema().fields().iter().zip(batch.columns()) {
+            match field.name().as_str() {
+                "object_uuid" => {}
+                "properties" => {
+                    for (name, digest) in properties(array.as_ref(), row)? {
+                        insert(
+                            fields,
+                            bytes,
+                            (kind.into(), id, format!("property:{name}")),
+                            digest,
+                        )?;
+                    }
+                }
+                name => insert(
+                    fields,
+                    bytes,
+                    (kind.into(), id, format!("${name}")),
+                    fingerprint(array.slice(row, 1))?,
+                )?,
+            }
+        }
+    }
+    Ok(())
+}
+
 fn fingerprint(array: arrow::array::ArrayRef) -> Result<[u8; 32], GfError> {
     if array.is_null(0) {
         return Ok(Sha256::digest(b"graphforge-branch-null/1").into());
@@ -186,6 +246,7 @@ fn domain_objects(
     graph: &GraphForge,
     fields: &mut Fields,
     field_bytes: &mut usize,
+    selected: Option<&Objects>,
     cancellation: &CancellationToken,
 ) -> Result<(), GfError> {
     let generation = graph.generation_for_read()?;
@@ -206,6 +267,9 @@ fn domain_objects(
             for row in 0..batch.num_rows() {
                 cancellation.checkpoint()?;
                 let id = Uuid::from_slice(ids.value(row)).map_err(|_| invalid())?;
+                if selected.is_some_and(|set| !set.contains(&(kind.into(), id))) {
+                    continue;
+                }
                 insert(
                     fields,
                     field_bytes,
