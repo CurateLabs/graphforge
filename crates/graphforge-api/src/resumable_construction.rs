@@ -725,7 +725,10 @@ mod tests {
 
     #[test]
     fn pre_publication_reader_preparation_failure_fails_closed() {
-        for boundary in [RefreshBoundary::BeforeHydrate, RefreshBoundary::AfterHydrate] {
+        for boundary in [
+            RefreshBoundary::BeforeHydrate,
+            RefreshBoundary::AfterHydrate,
+        ] {
             let directory = tempfile::TempDir::new().unwrap();
             let path = directory.path().to_str().unwrap().to_owned();
             let graph = GraphForge::new(Some(&path)).unwrap();
@@ -767,9 +770,9 @@ mod tests {
             drop(graph);
             let reopened = GraphForge::new(Some(&path)).unwrap();
             assert_eq!(
-                graphforge_storage::resolve_project_generation(&reopened
-                    .resolved_generation
-                    .container_root())
+                graphforge_storage::resolve_project_generation(
+                    &reopened.resolved_generation.container_root()
+                )
                 .unwrap()
                 .generation_uuid(),
                 parent
@@ -781,7 +784,10 @@ mod tests {
             assert!(!retry.idempotent_replay);
             assert_ne!(retry.generation_uuid, parent);
             assert_eq!(reopened.node_count("Person").unwrap(), 1);
-            assert_ne!(old_workspace.path(), reopened.workspace_for_session().path());
+            assert_ne!(
+                old_workspace.path(),
+                reopened.workspace_for_session().path()
+            );
         }
     }
 

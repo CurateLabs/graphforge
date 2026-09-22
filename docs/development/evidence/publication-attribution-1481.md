@@ -100,6 +100,34 @@ These runs completed correctly but the quiet guard saw other agents' cargo/rustc
 | `commit/publish/publication_authentication` | 0.01 | 0.02 | 0% of publish |
 | `commit/publish/publication_intent` | 0.00 | 0.00 | 0% of publish |
 
+## Current integrated-tree baseline (2026-09-22, `main` `aaf20d83`)
+
+`main` moved after the S18 section above (the Source/Artifact lifecycle #1502 and the shape-end fix #1531 landed), so the current tree was re-baselined before the repair A/B. Same inputs (SHA-256 verified identical), same limits, quiet guard before/during/after; every observation below was accepted by the guard. Medians of complete-ingest wall (five-command boundary).
+
+| Rung | Variant | n | Ingest wall s (median) | Ingest µs/edge | ÷ allowance | Publish wall s (median) | Publish µs/edge | Publish share of allowance |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| S18 | base | 3 | 31.818 | 7.586 | 7.59× | 2.394 | 0.571 | 57.1% |
+| S22 | base | 3 | 547.803 | 8.163 | 8.16× | 42.014 | 0.626 | 62.6% |
+
+Clean S22 publication decomposition (base-s22-1-a1, publish 42.014 s wall / 22.66 s CPU): `cas_install` 16.296 s (6.85 CPU), `generation_commit` 11.637 s (7.10 CPU), `hydration` 7.318 s (4.23 CPU), `publication_receipt` 5.723 s (3.45 CPU), `read_authority` 0.715 s (0.71 CPU), `prepare_encoding` 0.313 s, `publication_authentication` 0.008 s, `publication_intent` 0.002 s. The four large regions carry the same structure the contended run showed (39/28/17/14%), now on quiet timings; each runs at 0.4–0.65 effective cores. Adjacency CSR encoding remains inside `validate/seal/canonical_encoding` on the current tree. Per-observation walls: 547.80 / 582.47 / 536.86 s; block I/O ≈ 185–192 GB read / 180 GB write per run; every run reached the enforced 4 GB RSS ceiling.
+
+Publication alone (0.571–0.626 µs/edge) still exceeds half of the 1.00 µs/edge total allowance while complete ingest is 7.6–8.2 µs/edge, so no publication-side allocation can fit the floor without the parallel-ingest work owned by #1387's other children.
+
+## Reader-preparation repair and A/B (2026-09-22)
+
+**Repair (one commit on top of `aaf20d83`).** Construction reader preparation (`hydration` + `read_authority`) moves from after `CURRENT` to against the durable, lease-verified candidate immediately before `CURRENT`, using the publisher's pre-`CURRENT` preparation seam with cancellation still pollable to the commit point. Effect: a candidate that cannot be hydrated or authorized fails closed — `CURRENT` stays on the parent — instead of committing a generation whose reader workspace must be recovered afterward. Receipts nest `hydration`/`read_authority` under `generation_commit` for fresh publications; replay keeps the sibling shape. `BeforeInstall` keeps the committed-authority recovery contract; an interrupted attempt still recovers through the standard transaction-recovery entrypoint. Correctness evidence: new storage tests (preparation observes `CURRENT` unchanged; preparation failure leaves `CURRENT` unchanged and the session recovers), the split API refresh-failure tests, and the unmodified recovery/corruption/cancellation suites (graphforge-storage lib 1235 passed; graphforge-api construction suites green; CLI receipt test asserts the new nesting).
+
+**A/B.** Binaries differ only by the repair commit (`aaf20d83` vs `aaf20d83`+repair; SHA-256 in the machine-readable companion). Alternating quiet pairs, same inputs, same limits. S18 n=3/arm; S22 n=2/arm candidate against the n=3 baseline above.
+
+| Rung | Variant | n | Ingest wall s (median) | Ingest µs/edge | Publish wall s (median) | Publish µs/edge |
+|---|---|---:|---:|---:|---:|---:|
+| S18 | base | 3 | 31.818 | 7.586 | 2.394 | 0.571 |
+| S18 | cand | 3 | 31.045 | 7.402 | 2.398 | 0.572 |
+| S22 | base | 3 | 547.803 | 8.163 | 42.014 | 0.626 |
+| S22 | cand | 2 | 534.653 | 7.967 | 41.737 | 0.622 |
+
+**Criterion outcome.** Publish wall is unchanged within noise (S18 2.394 vs 2.398 s; S22 42.0 vs 41.7 s median): the repair moved work inside the same publish region and did not remove it, as predicted. Whole-ingest medians improved by 0.77 s at S18 and 13.2 s at S22, both **below** the predeclared benefit thresholds (9.2 s and 91.3 s from `max(3% of baseline median, 2× baseline spread)`), so **no whole-ingest throughput gain is demonstrated or claimed**. The repair is justified and kept for its fail-closed publication semantics (issue completion scenario 2): corruption or failure during reader preparation now leaves the acknowledged generation unchanged. Publication's remaining budget deficit is not addressed by this repair and remains owned by the parallel-ingest workstreams under #1387; attribution and this repair must not be read as progress toward the 1M edges/s floor.
+
 ## Provenance
 
 ```json

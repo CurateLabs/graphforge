@@ -2385,10 +2385,16 @@ fn canonical_publication_cancels_at_named_immediate_pre_current_boundary() {
     let transaction = Uuid::from_u128(9_467);
     let mut checkpoints = 0_u8;
     let error = session
-        .publish_canonical_with_cancellation(&encoding, target, transaction, || {
-            checkpoints += 1;
-            checkpoints == 2
-        }, None)
+        .publish_canonical_with_cancellation(
+            &encoding,
+            target,
+            transaction,
+            || {
+                checkpoints += 1;
+                checkpoints == 2
+            },
+            None,
+        )
         .unwrap_err();
     assert_eq!(error.code(), "GF_CANCELLED");
     assert!(error.to_string().contains("before_current_replace"));

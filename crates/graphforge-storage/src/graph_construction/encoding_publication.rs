@@ -654,7 +654,9 @@ impl GraphConstructionSession {
                                 &mut cancelled,
                                 prepare,
                             )?,
-                        None => staged.publish_with_graph_objects_cancellable(&lease, &mut cancelled)?,
+                        None => {
+                            staged.publish_with_graph_objects_cancellable(&lease, &mut cancelled)?
+                        }
                     }
                 }
                 crate::ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
