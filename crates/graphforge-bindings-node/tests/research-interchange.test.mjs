@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { randomUUID as identity } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { createHash, randomUUID as identity } from "node:crypto";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -48,6 +48,30 @@ test("native research interchange preserves citations exports and independent Fo
     const exported = await graph.exportResearch(exportRequest);
     const verified = await GraphForge.verifyPortableV2({ input, mode: "full" });
     assert.equal(verified.packageDigest, exported.package_digest);
+    assert.equal(verified.researchInterchange, true);
+    assert.ok(verified.researchEntries.length > 0);
+    const manifest = JSON.parse(
+      readFileSync(join(input, "data/graphforge-project.json"), "utf8"),
+    );
+    const expectedEntries = manifest.components
+      .filter((component) => component.kind === "research")
+      .flatMap((component) =>
+        component.files.map((file) => ({
+          componentId: component.participant_id,
+          path: file.path,
+          length: BigInt(file.length),
+          sha256: file.sha256,
+        })),
+      );
+    assert.deepEqual(verified.researchEntries, expectedEntries);
+    for (const entry of verified.researchEntries) {
+      const bytes = readFileSync(join(input, entry.path));
+      assert.equal(entry.length, BigInt(bytes.length));
+      assert.equal(
+        entry.sha256,
+        createHash("sha256").update(bytes).digest("hex"),
+      );
+    }
     const projectRoot = join(root, "imported");
     await GraphForge.importPortableV2({
       projectRoot,

@@ -98,6 +98,13 @@ function exactNumber(value) {
 
 export function canonicalVerification(report) {
   return {
+    research_interchange: report.researchInterchange,
+    research_entries: report.researchEntries.map((entry) => ({
+      component_id: entry.componentId,
+      path: entry.path,
+      length: exactNumber(entry.length),
+      sha256: entry.sha256,
+    })),
     contract: report.contract,
     representation: report.representation,
     package_digest: report.packageDigest,

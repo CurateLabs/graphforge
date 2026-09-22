@@ -12,7 +12,9 @@
     "authenticity": "unsigned",
     "transport_digest": "sha256:f11322419e4c10c33365f07b28f24d6a348a105e61a152f6e5fcd6750daaea35",
     "ontology_composition": null,
-    "ontology_composition_entries": []
+    "ontology_composition_entries": [],
+    "research_interchange": false,
+    "research_entries": []
   },
   "structure_only": {
     "contract": "graphforge-portable-verify/2",
@@ -27,6 +29,8 @@
     "authenticity": "unsigned",
     "transport_digest": "sha256:f11322419e4c10c33365f07b28f24d6a348a105e61a152f6e5fcd6750daaea35",
     "ontology_composition": null,
-    "ontology_composition_entries": []
+    "ontology_composition_entries": [],
+    "research_interchange": false,
+    "research_entries": []
   }
 }

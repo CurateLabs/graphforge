@@ -258,6 +258,17 @@ fn signature_state_token(value: PortableV2OciSignatureState) -> String {
 
 fn verify_report_output(report: graphforge_api::PortableVerifyResult) -> PortableVerifyOutput {
     PortableVerifyOutput {
+        research_interchange: report.research_interchange,
+        research_entries: report
+            .research_entries
+            .into_iter()
+            .map(|entry| PortableResearchEntryOutput {
+                component_id: entry.component_id,
+                path: entry.path,
+                length: BigInt::from(entry.length),
+                sha256: entry.sha256,
+            })
+            .collect(),
         contract: report.contract.to_owned(),
         representation: match report.representation {
             graphforge_api::PortableV2Representation::Expanded => "expanded".into(),
@@ -458,6 +469,10 @@ pub struct PortableExportOutput {
 
 #[napi(object)]
 pub struct PortableVerifyOutput {
+    /// Whether the registered native research interchange component was found.
+    pub research_interchange: bool,
+    /// Manifest-authenticated research files, preserving exact integer lengths.
+    pub research_entries: Vec<PortableResearchEntryOutput>,
     pub contract: String,
     pub representation: String,
     pub package_digest: String,
@@ -473,6 +488,14 @@ pub struct PortableVerifyOutput {
     pub ontology_composition: serde_json::Value,
     /// Authenticated entries; lengths preserve the binding's bigint contract.
     pub ontology_composition_entries: Vec<PortableCompositionEntryOutput>,
+}
+
+#[napi(object)]
+pub struct PortableResearchEntryOutput {
+    pub component_id: String,
+    pub path: String,
+    pub length: BigInt,
+    pub sha256: String,
 }
 
 #[napi(object)]
