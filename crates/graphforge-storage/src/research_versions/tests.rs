@@ -39,7 +39,7 @@ fn fixture(root: &Path, value: &str) -> Uuid {
         participants.push(old_registry.participant().unwrap());
         capabilities.push(ProjectCapability {
             capability_id: RESEARCH_CAPABILITY.into(),
-            capability_version: 1,
+            capability_version: RESEARCH_VERSION,
         });
     }
     let request = ProjectGenerationRequest {
@@ -259,6 +259,10 @@ fn projection_cannot_replace_frozen_evidence_digest_or_availability() {
 }
 
 fn compact_fixture(root: &Path, value: &str) -> String {
+    compact_fixture_path(root, value, "fixture.parquet")
+}
+
+fn compact_fixture_path(root: &Path, value: &str, legacy_path: &str) -> String {
     use arrow::array::StringArray;
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
@@ -273,7 +277,9 @@ fn compact_fixture(root: &Path, value: &str) -> String {
     let mut writer = ArrowWriter::try_new(Vec::new(), batch.schema(), None).unwrap();
     writer.write(&batch).unwrap();
     let bytes = writer.into_inner().unwrap();
-    std::fs::write(workspace.path().join("fixture.parquet"), &bytes).unwrap();
+    let path = workspace.path().join(legacy_path.replace('\\', "/"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, &bytes).unwrap();
     let digest = hex(&Sha256::digest(&bytes).into());
     let inventory = crate::GraphFilesInventory {
         format: "graphforge-graph-files".into(),
@@ -281,7 +287,7 @@ fn compact_fixture(root: &Path, value: &str) -> String {
         file_count: 1,
         total_byte_length: bytes.len() as u64,
         files: vec![crate::GraphFileEntry {
-            relative_path: "fixture.parquet".into(),
+            relative_path: legacy_path.into(),
             byte_length: bytes.len() as u64,
             content_sha256: digest.clone(),
             role: crate::GraphFileRole::Other,
@@ -304,7 +310,7 @@ fn compact_fixture(root: &Path, value: &str) -> String {
         participants.push(registry.participant().unwrap());
         capabilities.push(ProjectCapability {
             capability_id: RESEARCH_CAPABILITY.into(),
-            capability_version: 1,
+            capability_version: RESEARCH_VERSION,
         });
     }
     let request = ProjectGenerationRequest {
@@ -460,7 +466,7 @@ fn ordinary_publication_cannot_drop_or_rewrite_research_receipts() {
                 },
                 ProjectCapability {
                     capability_id: RESEARCH_CAPABILITY.into(),
-                    capability_version: 1,
+                    capability_version: RESEARCH_VERSION,
                 },
             ],
             participants: vec![participant],
@@ -702,3 +708,5 @@ fn pre_and_post_linearization_faults_preserve_truthful_reopen_and_replay() {
         }
     }
 }
+
+mod retention;

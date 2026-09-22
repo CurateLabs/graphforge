@@ -2024,7 +2024,7 @@ mod tests {
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
         manifest.capabilities.push(CapabilityDescriptor {
             capability_id: "research".into(),
-            capability_version: 2,
+            capability_version: crate::research_versions::RESEARCH_VERSION + 1,
         });
         let bytes = canonical_line(&manifest);
         fs::write(manifest_path, &bytes).unwrap();

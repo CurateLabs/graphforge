@@ -97,3 +97,33 @@ The bounded registry adds metadata publication cost. Explicit capacity refusal
 is preferable to silently losing replay or accepted provenance. Later storage
 representation changes must be versioned and must not weaken authentication,
 root closure or truthful commit reporting.
+
+## Selected content amendment (#1536)
+
+Research capability and registry revision 2 add authenticated per-Version CAS
+materialization markers and optional graph selection commitments. Revision 1
+readers must refuse revision 2. No migration command or compatibility promise
+is added. New publications use revision 2.
+
+A materialized Version keeps its immutable identity and exact participant
+commitments. Its source generation identifies origin but no longer grants
+physical retention: the registry now roots the committed participant CAS
+objects, their graph manifest closure, and local evidence objects. This map is
+physical placement metadata outside the Version identity. Complete Versions
+retain complete content; projected Versions retain only their selected content.
+Compaction publishes placement changes and its receipt through CURRENT before
+cleanup can reclaim an ancestor. Checkpoints and configured ancestor windows
+continue to retain their expressly selected whole generations.
+
+A graph projection has a separate Version identity and records its selector,
+closure and logical graph fingerprint. Native graph projection rewrites shared
+Parquet units to selected rows, preserving required endpoint and catalog
+closure. Non-graph participant and evidence selection stays explicit and must
+be owner-validated. Genealogy alone never becomes a required-content edge.
+Creation evidence distinguishes read/scanning work from copied and retained
+payload bytes; reading a shared parent does not claim constant-time selection.
+
+Exact inspection pins the registry generation until participant bytes and
+local evidence are authenticated. Historical graph materialization uses only
+that retained inventory and cannot expand through a live ancestor. Corrupt or
+missing required CAS objects refuse cleanup before destructive work.
