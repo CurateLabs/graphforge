@@ -66,7 +66,7 @@ class SliceTests(unittest.TestCase):
         token.cancel()
         with self.assertRaises(Exception) as cancelled:
             graph.preview_slice(request, cancellation=token)
-        self.assertIn("GF_CANCELLED", str(cancelled.exception))
+        self.assertEqual(getattr(cancelled.exception, "code", None), "GF_CANCELLED")
         with self.assertRaises(Exception) as invalid:
             graph.freeze_slice({"private_sentinel": "private-secret-value"})
         self.assertNotIn("private_sentinel", str(invalid.exception))
