@@ -371,6 +371,10 @@ export default defineConfig({
                   label: '0039 — Research Versions share Project publication authority',
                   slug: 'adr/0039-research-version-publication',
                 },
+                {
+                  label: '0040 — Frozen Slices reference retained Version context',
+                  slug: 'adr/0040-frozen-slice-membership',
+                },
                 // END generated ADR records
               ],
             },
