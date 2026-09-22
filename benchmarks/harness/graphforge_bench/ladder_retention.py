@@ -1,7 +1,7 @@
 """Retain completed clean-ladder evidence before the run is reported (#1530).
 
-The scratch ladder root is disposable; every number a decision rests on must
-survive it. This module copies a completed clean ladder's rung JSON, result
+Every number a decision rests on must survive loss of the ladder work root.
+This module copies a completed clean ladder's rung JSON, result
 JSON, receipts, and the controller summary into a retained directory — either
 `docs/development/evidence/ladder/<commit>/` in a PR or an out-of-tree archive
 whose path and digest are recorded on the citing issues — and writes a

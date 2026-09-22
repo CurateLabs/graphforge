@@ -1,8 +1,9 @@
 # Retained clean-ladder evidence
 
-Ladder evidence is archived here before a run is reported. The scratch root
-`/home/ubuntu/graphforge-ladder` on OVHC-AGENCY is disposable; every number a
-decision rests on has to survive it. The retained copy of a completed clean
+Ladder evidence is archived here before a run is reported. The work root
+`/home/ubuntu/graphforge-ladder` on OVHC-AGENCY remains protected from tests
+and cleanup tooling; the archive also preserves evidence if that root is lost.
+The retained copy of a completed clean
 ladder is its rung JSON, result JSON, receipts (plan, graphforge, projection),
 the controller summary, and a `MANIFEST.sha256`; the archive digest is the
 SHA-256 of that manifest. Raw BenchExec output is optional and is retained for
