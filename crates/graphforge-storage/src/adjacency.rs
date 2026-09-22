@@ -748,7 +748,9 @@ pub struct AdjacencyManifestRow {
     /// Project topology generation the CSR was built from.
     pub topology_generation: u64,
     /// Build wall-clock time, microseconds since the Unix epoch (UTC).
-    /// Caller-supplied; excluded from the determinism guarantee.
+    /// Caller-supplied; excluded from the determinism guarantee. Zero denotes
+    /// an unknown observation time for deterministic portable reconstruction;
+    /// freshness is determined solely by `topology_generation`.
     pub built_at_micros: i64,
     /// Number of source nodes covered (CSR row count).
     pub node_count: u64,

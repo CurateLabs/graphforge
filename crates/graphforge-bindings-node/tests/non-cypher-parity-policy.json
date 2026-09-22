@@ -500,11 +500,17 @@
     "researchProject": {
       "research-project.test.mjs": [
         "research metadata and discovery stay metadata-only across reopen"
+      ],
+      "research-journey.test.mjs": [
+        "native two-story journey preserves evidence scope review restore and interchange"
       ]
     },
     "sourceArtifactLifecycle": {
       "source-artifact-lifecycle.test.mjs": [
         "source and artifact lifecycle survives reopen through the Node surface"
+      ],
+      "research-journey.test.mjs": [
+        "native two-story journey preserves evidence scope review restore and interchange"
       ]
     },
     "gsiProfiler": {
@@ -643,41 +649,65 @@
       "research-versions.test.mjs": [
         "historical graph ontology and Artifact bytes survive compaction, reopen and restore",
         "malformed Version requests do not echo private values or field names"
+      ],
+      "research-journey.test.mjs": [
+        "native two-story journey preserves evidence scope review restore and interchange"
       ]
     },
     "slices": {
       "slices.test.mjs": [
         "native Slice boundary, freeze, revision and cancellation"
+      ],
+      "research-journey.test.mjs": [
+        "native two-story journey preserves evidence scope review restore and interchange"
       ]
     },
     "branches": {
       "branches.test.mjs": [
         "native Branch isolation, exact retry, scoped restore and durable reopen"
+      ],
+      "research-journey.test.mjs": [
+        "native two-story journey preserves evidence scope review restore and interchange"
       ]
     },
     "researchClaims": {
       "research-claims.test.mjs": [
         "contextual claims preserve native authority and durable Branch isolation"
+      ],
+      "research-journey.test.mjs": [
+        "native two-story journey preserves evidence scope review restore and interchange"
       ]
     },
     "researchComparison": {
       "research-comparison.test.mjs": [
         "native comparison preserves local/upstream semantics and refuses stale pages"
+      ],
+      "research-journey.test.mjs": [
+        "native two-story journey preserves evidence scope review restore and interchange"
       ]
     },
     "researchProposals": {
       "research-proposals.test.mjs": [
         "native proposals preserve selected review replay and history"
+      ],
+      "research-journey.test.mjs": [
+        "native two-story journey preserves evidence scope review restore and interchange"
       ]
     },
     "researchUpstream": {
       "research-upstream.test.mjs": [
         "native upstream review advances only the selected baseline and replays its receipt"
+      ],
+      "research-journey.test.mjs": [
+        "native two-story journey preserves evidence scope review restore and interchange"
       ]
     },
     "researchInterchange": {
       "research-interchange.test.mjs": [
         "native research interchange preserves citations exports and independent Fork replay"
+      ],
+      "research-journey.test.mjs": [
+        "native two-story journey preserves evidence scope review restore and interchange"
       ]
     }
   }

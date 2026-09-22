@@ -387,7 +387,7 @@ fn branch_challenge_revision_and_suppression_preserve_parent_and_shared_graph() 
                 assertion_uuid: next,
                 claim: "Revised local interpretation".into(),
                 graph_refs: first.graph_refs.clone(),
-                category: first.category,
+                category: graphforge_knowledge::research::ResearchCategory::Hypothesis,
                 run_uuid: None,
             },
             supersession_uuid: Uuid::now_v7(),
@@ -401,6 +401,97 @@ fn branch_challenge_revision_and_suppression_preserve_parent_and_shared_graph() 
     g.change_research_branch_claim(&revision, &CancellationToken::new())
         .unwrap();
     assert_eq!(rows(g.inspect_research_claims(&view).unwrap()), 2);
+    // Reclassification creates an immutable successor within this Branch only.
+    let assert_classification = |g: &GraphForge| {
+        let result = g
+            .inspect_research_claims(&InspectResearchClaimsRequest {
+                include_suppressed: true,
+                ..view.clone()
+            })
+            .unwrap();
+        assert_eq!(
+            result
+                .batches
+                .iter()
+                .map(|batch| batch.num_rows())
+                .sum::<usize>(),
+            2
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        for batch in &result.batches {
+            let uuid = |name: &str, row: usize| {
+                Uuid::from_slice(
+                    batch
+                        .column_by_name(name)
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<FixedSizeBinaryArray>()
+                        .unwrap()
+                        .value(row),
+                )
+                .unwrap()
+            };
+            let categories = batch
+                .column_by_name("category")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                let id = uuid("assertion_uuid", row);
+                assert!(seen.insert(id));
+                assert_eq!(uuid("conceptual_uuid", row), first.assertion_uuid);
+                if id == first.assertion_uuid {
+                    assert_eq!(categories.value(row), "interpretation");
+                } else {
+                    assert_eq!(id, next);
+                    assert_eq!(categories.value(row), "hypothesis");
+                    assert_eq!(uuid("origin_branch_uuid", row), branch);
+                    assert_eq!(uuid("origin_version_uuid", row), revision.version_uuid);
+                }
+            }
+        }
+        assert_eq!(
+            g.assertion(first.assertion_uuid, None).unwrap().batches,
+            original
+        );
+        assert!(g.assertion(next, None).is_err());
+        assert_eq!(
+            g.open_research_branch(branch)
+                .unwrap()
+                .graph()
+                .assertion(first.assertion_uuid, None)
+                .unwrap()
+                .batches,
+            original
+        );
+        let parent = g
+            .inspect_research_claims(&InspectResearchClaimsRequest {
+                context: ResearchContext::Project,
+                community_uuid: None,
+                include_suppressed: true,
+            })
+            .unwrap();
+        assert_eq!(
+            parent
+                .batches
+                .iter()
+                .map(|batch| batch.num_rows())
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(
+            parent.batches[0]
+                .column_by_name("category")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+                .unwrap()
+                .value(0),
+            "interpretation"
+        );
+    };
+    assert_classification(&g);
     let suppress = change(
         &g,
         branch,
@@ -476,6 +567,7 @@ fn branch_challenge_revision_and_suppression_preserve_parent_and_shared_graph() 
     drop(branch_view);
     drop(g);
     let mut g = GraphForge::new(root.to_str()).unwrap();
+    assert_classification(&g);
     assert_eq!(rows(g.inspect_research_claims(&view).unwrap()), 1);
     let before = current(&g);
     g.change_research_branch_claim(&suppress, &CancellationToken::new())

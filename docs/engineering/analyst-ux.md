@@ -1,10 +1,12 @@
 # Analyst research experience
 
-**Status: Designed — M11 requirements for v0.6.0.** This page integrates the
-maintainer's Core Analyst UX and Branch and Slice Semantics specifications.
-It defines intended product behavior; it does not certify implementation.
-The [architecture summary](ARCHITECTURE.md) distinguishes existing foundations
-from the work required here.
+**Status: Implemented Core capabilities with native journey evidence.**
+This page integrates the maintainer's Core Analyst UX and Branch and Slice
+Semantics specifications. The [acceptance evidence](TESTING.md#analyst-ux-acceptance)
+maps requirements to native owner tests and the composed four-surface journey.
+The [research journey guide](../guide/research-journey.md) connects consumer
+questions to captured Core results. Application rendering and observed human
+comprehension have separate owners and evidence.
 
 M11 delivers Rust-owned capabilities through the public facade and thin Python,
 Node, and CLI surfaces, plus a consumer UX contract. Associated projects such as

@@ -1521,6 +1521,26 @@
       "bazel_label": "//crates/graphforge-cli:research_upstream",
       "exception_id": null,
       "notes": "#1355 native selective upstream review"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "research_journey",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/research_journey.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:research_journey",
+      "exception_id": null,
+      "notes": "#1358 composed native two-story analyst journey"
+    },
+    {
+      "package": "graphforge-cli",
+      "target": "research_journey",
+      "class": "integration-test",
+      "source": "crates/graphforge-cli/tests/research_journey.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cli:research_journey",
+      "exception_id": null,
+      "notes": "#1358 composed native two-story analyst journey"
     }
   ],
   "exceptions": [

@@ -129,7 +129,7 @@ pub struct AttachEvidenceInput {
     pub assertion_uuid: String,
     /// Caller-managed source UUID.
     pub source_uuid: String,
-    /// `document`, `observation`, `graph_node`, or `graph_edge`.
+    /// `document`, `observation`, `graph_node`, `graph_edge`, `source`, or `artifact`.
     pub source_kind: String,
     /// `supports`, `contradicts`, or `context`.
     pub role: String,

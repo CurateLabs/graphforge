@@ -1,0 +1,39 @@
+{
+  "contract_version": 1,
+  "title": "Two stories, one shared character",
+  "description": null,
+  "authors": [],
+  "subjects": [],
+  "languages": [],
+  "geographic_coverage": null,
+  "temporal_coverage": null,
+  "source_types": [],
+  "corpus_size": null,
+  "ontologies": [],
+  "license": null,
+  "access": {
+    "visibility": null,
+    "access_policy": null,
+    "collaborators": []
+  },
+  "tags": [],
+  "originating_projects": [],
+  "related_projects": [],
+  "canonical_identifiers": [],
+  "external_identifiers": [],
+  "created_at": null,
+  "updated_at": null,
+  "extensions": {},
+  "discovery_facets": {
+    "text_entry_points": 0,
+    "source_entry_points": 0,
+    "entity_entry_points": 0,
+    "relationship_entry_points": 0,
+    "story_document_entry_points": 0,
+    "event_location_entry_points": 0,
+    "ontology_type_entry_points": 0,
+    "linguistic_property_entry_points": 0,
+    "traversal_query_entry_points": 0,
+    "branch_entry_points": 0
+  }
+}

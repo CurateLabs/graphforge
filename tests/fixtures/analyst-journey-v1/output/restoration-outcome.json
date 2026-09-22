@@ -1,0 +1,8 @@
+{
+  "branch_a_score": 1,
+  "branch_b_score": 73,
+  "changed_request_error": "GF_IDEMPOTENCY_CONFLICT",
+  "parent_score": 99,
+  "reproposal_created_destination_version": false,
+  "review_replay_preserved": true
+}

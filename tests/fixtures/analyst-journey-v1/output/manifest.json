@@ -1,0 +1,182 @@
+{
+  "contract": "graphforge-analyst-journey-output/1",
+  "files": [
+    {
+      "bytes": 962,
+      "file": "project-metadata.json",
+      "sha256": "a26e31c76f0c835f7ecedaaa622c848c7ed9cd77247234b0b2f22c6397c00712"
+    },
+    {
+      "bytes": 5064,
+      "file": "discovery.arrow",
+      "sha256": "3bb939849021487416019149051b6bbad6e25cd428a8290313c3c69dc86feb22"
+    },
+    {
+      "bytes": 2056,
+      "file": "source.arrow",
+      "sha256": "b61d83feaba551fdb23a093d7aefd1de26e144af15cdbcc60f93c0e487b60a60"
+    },
+    {
+      "bytes": 3848,
+      "file": "ocr-artifact.arrow",
+      "sha256": "5d4769954cc2e4d236ad1d75cc572d5ddd988fc21122ea04401a6c29524e90c1"
+    },
+    {
+      "bytes": 1480,
+      "file": "assertion.arrow",
+      "sha256": "0868e06e4444b525d0c8d5d667d0fc9eb762017a380a05fccdbed86536a76270"
+    },
+    {
+      "bytes": 4488,
+      "file": "claim-context.arrow",
+      "sha256": "aee1277aff3b28b2b621d3f087fdd04208f497212e2dd1c2a70f9b9996582e15"
+    },
+    {
+      "bytes": 2504,
+      "file": "claim-evidence.arrow",
+      "sha256": "8da6ec1970e7f496e2bb65a77b123dc164c0e0cac3c522d5d7df2a40fb79f25d"
+    },
+    {
+      "bytes": 3080,
+      "file": "included.arrow",
+      "sha256": "c57b5ab4ba97675a30ee1cae039eab4b9db97509ed3a34672772c00f26923ce8"
+    },
+    {
+      "bytes": 2952,
+      "file": "boundary.arrow",
+      "sha256": "07b38b30408864e30b37b9f4f5595404005927748f8da353109491d1ef92db8e"
+    },
+    {
+      "bytes": 4040,
+      "file": "dependencies.arrow",
+      "sha256": "31cf2db0d41d536bde6eaabe901b5293abde82517ac72a29630be2f1f82b96a3"
+    },
+    {
+      "bytes": 3080,
+      "file": "explanations.arrow",
+      "sha256": "c57b5ab4ba97675a30ee1cae039eab4b9db97509ed3a34672772c00f26923ce8"
+    },
+    {
+      "bytes": 3912,
+      "file": "external-artifact.arrow",
+      "sha256": "06ba8485719182f1b8b50c258da73bcaa075c5834853732c23524d9f07048991"
+    },
+    {
+      "bytes": 74,
+      "file": "cancelled-reference.json",
+      "sha256": "0fbb7c35aceffd17065de62dace0a30fde50d76101a266d394d98c9076dca625"
+    },
+    {
+      "bytes": 6344,
+      "file": "upstream-preview.arrow",
+      "sha256": "21645f8c0420eec555765f5a50243a37fbb0c6b91a13c19a5c2c20b1def822c6"
+    },
+    {
+      "bytes": 780,
+      "file": "upstream-receipt.json",
+      "sha256": "9273d6b94ec48cdf164d189f8d3ca9da4550750f09dc755001e88de3f4366075"
+    },
+    {
+      "bytes": 1160,
+      "file": "branch-analysis.arrow",
+      "sha256": "008151201c7097bca9db23d78168fcf17b7851c365980d5a869f7d540c100e51"
+    },
+    {
+      "bytes": 5640,
+      "file": "comparison.arrow",
+      "sha256": "688de3a3afdee212e15231bead4e0c1b677e4530d739b576ea9eaf423b235ac2"
+    },
+    {
+      "bytes": 37624,
+      "file": "immutable-reference.json",
+      "sha256": "a044731d69d7fa4eb305567259ece820f6d186046d8b4ee9564effdfacd2f844"
+    },
+    {
+      "bytes": 7304,
+      "file": "proposal-preview.arrow",
+      "sha256": "ff4f410253edfa901c08c3f33037773c2fff46a96a2b0d530642bd8f3d0bd621"
+    },
+    {
+      "bytes": 786,
+      "file": "acceptance-receipt.json",
+      "sha256": "597960a4ef74a90630d843f7887718c060a5bb7a4f5a5235f6a97f1fbfcf5d43"
+    },
+    {
+      "bytes": 1928,
+      "file": "canonical-choices-after-acceptance.arrow",
+      "sha256": "af4bfcdf09e866f40513b6167060337d1639e0a44efb36f542ab422da9f303a9"
+    },
+    {
+      "bytes": 3720,
+      "file": "decision-history.arrow",
+      "sha256": "d4452f107a6ecef23434ffccc039323a017f22a78aa816763aec22e66f9a0078"
+    },
+    {
+      "bytes": 6856,
+      "file": "accepted-history.arrow",
+      "sha256": "fdbf9f79e565ebda224e0bef65bdae6d40ba3621c38dd8b265c9d21ead9768f5"
+    },
+    {
+      "bytes": 37614,
+      "file": "continued-live-reference.json",
+      "sha256": "3bd2115d342dcaa26d0fc12ca70145bc166e2c9b476160f54daf7af323a9d863"
+    },
+    {
+      "bytes": 6536,
+      "file": "reproposal-preview.arrow",
+      "sha256": "7b8ac20c8a7267f5e78f194b109a8f3af8bd385ebe0782b917c401380a085ee5"
+    },
+    {
+      "bytes": 211,
+      "file": "restoration-outcome.json",
+      "sha256": "92c76361859486e893f8e16d7eb06304c1ecae3f22ab24ce0615da8f50bf5095"
+    },
+    {
+      "bytes": 37626,
+      "file": "export-source-reference.json",
+      "sha256": "97fd76df38c624633d160f9512d618d0ff5636f85f28e84722a693c3487510c3"
+    },
+    {
+      "bytes": 19006,
+      "file": "complete-verification.json",
+      "sha256": "f3eb7f24854217337560bf8c3e474b4f65b0255f55bf84d3d6fd6a73623d0e62"
+    },
+    {
+      "bytes": 3912,
+      "file": "imported-external-artifact.arrow",
+      "sha256": "06ba8485719182f1b8b50c258da73bcaa075c5834853732c23524d9f07048991"
+    },
+    {
+      "bytes": 37626,
+      "file": "imported-reference.json",
+      "sha256": "740a0ed36497ba56068d343a35694e7378823e603b7b64e7c00d9687719c3850"
+    },
+    {
+      "bytes": 36038,
+      "file": "selected-reference.json",
+      "sha256": "d4ff0f5902e8db14cb06ae9811ba200093359ed9bf507f31c85cf852c3778977"
+    },
+    {
+      "bytes": 37626,
+      "file": "fork-reference.json",
+      "sha256": "8967a19627c4542a4f3b052ccb5f8708a562fed381456c912d1947cd4dbdd958"
+    }
+  ],
+  "identities": {
+    "character": "01a0cace-d52f-763c-b45e-978f3b29ae3d",
+    "claim": "01a0cace-d589-7721-bb24-b20a0ed40424",
+    "external": "01a0cace-d589-7721-bb24-b20919a316e7",
+    "mystery_branch": "01a0cace-d589-7721-bb24-b203a69a0bde",
+    "ocr": "01a0cace-d589-7721-bb24-b208486f9920",
+    "scan": "01a0cace-d589-7721-bb24-b20776166e9f",
+    "source": "01a0cace-d589-7721-bb24-b206c21065c3",
+    "voyage_branch": "01a0cace-d589-7721-bb24-b204cb279a6d"
+  },
+  "qualification": "Native Arrow IPC and serialized control outputs; cancelled-reference and restoration-outcome are derived assertion summaries, not native response schemas. Generated identities are preserved; the identity map names fixture roles. Synthetic scan/OCR inputs do not claim OCR execution or human comprehension.",
+  "reader": {
+    "crate_version": "0.5.2",
+    "interchange": 1,
+    "portable": 2,
+    "research_registry": 6
+  }
+}

@@ -1,9 +1,12 @@
 # Research workspace semantics
 
-**Status: Designed — M11.** This is the implementation-facing contract for the
-[analyst research experience](../../engineering/analyst-ux.md). Existing
-checkpoints, knowledge records, and portable selection provide foundations;
-they do not already implement this lifecycle.
+**Status: Implemented Core capabilities with native journey evidence.**
+This is the implementation-facing contract for the
+[analyst research experience](../../engineering/analyst-ux.md). The
+[acceptance evidence](../../engineering/TESTING.md#analyst-ux-acceptance) maps the
+native lifecycle, recovery, retention and thin-surface regressions. The
+[research journey guide](../../guide/research-journey.md) explains captured
+consumer outputs and their reader qualification.
 
 ## Ownership and authority
 
@@ -171,8 +174,9 @@ gf --project ./research research slice revise --capsule slice.arrow --file revis
 Freeze/revise write Arrow IPC and reject `--json`; previews and inspections may
 use the existing JSON display option. Input contracts and ceilings are pinned
 in `tests/contracts/slice-api-v1.json`. Selection alone creates no independent
-research state. The remaining Branch, comparison, update and Proposal lifecycle
-below remains designed work.
+research state. The Branch, comparison, update and Proposal lifecycle
+below is implemented by its native owners; their direct tests and the integrated
+journey are listed in the acceptance evidence.
 
 Dynamic Slices evaluate explicit search, filter, query, traversal, or direct
 selection against current state. Frozen Slices resolve membership against one
@@ -572,7 +576,7 @@ their own implementation issues.
 Version under the source's owner context. It retains current research receipts,
 identity tombstones, retention roots, other context heads and restoration
 history. It rejects a projection as a complete Project source. `Restore` is the
-separate context-only primitive for future Branch consumers; it does not replace
+separate context-only primitive used for Branch restoration; it does not replace
 Project graph state. Both use the same CURRENT publication as their receipt.
 After a committed error or replay on a stale facade, graph and metadata authority
 are refreshed consistently; an unrecoverable refresh makes that facade unusable

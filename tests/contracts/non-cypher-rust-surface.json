@@ -268,6 +268,14 @@
         {
           "path": "crates/graphforge-api/tests/research_project.rs",
           "symbol": "metadata_survives_reopen_and_discovery_filters_without_graph_open"
+        },
+        {
+          "path": "crates/graphforge-api/tests/research_journey.rs",
+          "symbol": "two_story_journey_preserves_scope_evidence_review_and_continued_research"
+        },
+        {
+          "path": "crates/graphforge-cli/tests/research_journey.rs",
+          "symbol": "two_story_cli_research_survives_partial_review_restore_and_interchange"
         }
       ]
     },
@@ -292,6 +300,14 @@
         {
           "path": "crates/graphforge-api/tests/source_artifact_lifecycle.rs",
           "symbol": "scan_to_ocr_lineage_preference_and_impact_survive_reopen"
+        },
+        {
+          "path": "crates/graphforge-api/tests/research_journey.rs",
+          "symbol": "two_story_journey_preserves_scope_evidence_review_and_continued_research"
+        },
+        {
+          "path": "crates/graphforge-cli/tests/research_journey.rs",
+          "symbol": "two_story_cli_research_survives_partial_review_restore_and_interchange"
         }
       ]
     },
@@ -1113,6 +1129,14 @@
         {
           "path": "crates/graphforge-api/tests/research_versions.rs",
           "symbol": "in_memory_capture_empty_graph_and_cancelled_commit_are_real_native_operations"
+        },
+        {
+          "path": "crates/graphforge-api/tests/research_journey.rs",
+          "symbol": "two_story_journey_preserves_scope_evidence_review_and_continued_research"
+        },
+        {
+          "path": "crates/graphforge-cli/tests/research_journey.rs",
+          "symbol": "two_story_cli_research_survives_partial_review_restore_and_interchange"
         }
       ]
     },
@@ -1143,6 +1167,14 @@
         {
           "path": "crates/graphforge-api/tests/slices.rs",
           "symbol": "selectors_page_bounds_and_cancellation_use_real_execution"
+        },
+        {
+          "path": "crates/graphforge-api/tests/research_journey.rs",
+          "symbol": "two_story_journey_preserves_scope_evidence_review_and_continued_research"
+        },
+        {
+          "path": "crates/graphforge-cli/tests/research_journey.rs",
+          "symbol": "two_story_cli_research_survives_partial_review_restore_and_interchange"
         }
       ]
     },
@@ -1207,6 +1239,14 @@
         {
           "path": "crates/graphforge-api/tests/branches.rs",
           "symbol": "branch_cancel_stale_current_and_conflicting_retry_preserve_authority"
+        },
+        {
+          "path": "crates/graphforge-api/tests/research_journey.rs",
+          "symbol": "two_story_journey_preserves_scope_evidence_review_and_continued_research"
+        },
+        {
+          "path": "crates/graphforge-cli/tests/research_journey.rs",
+          "symbol": "two_story_cli_research_survives_partial_review_restore_and_interchange"
         }
       ]
     },
@@ -1261,6 +1301,14 @@
         {
           "path": "crates/graphforge-api/tests/research_claims.rs",
           "symbol": "bring_selected_claim_keeps_classification_without_importing_source_authority"
+        },
+        {
+          "path": "crates/graphforge-api/tests/research_journey.rs",
+          "symbol": "two_story_journey_preserves_scope_evidence_review_and_continued_research"
+        },
+        {
+          "path": "crates/graphforge-cli/tests/research_journey.rs",
+          "symbol": "two_story_cli_research_survives_partial_review_restore_and_interchange"
         }
       ]
     },
@@ -1284,6 +1332,14 @@
         {
           "path": "crates/graphforge-api/tests/research_comparison.rs",
           "symbol": "public_comparison_contract_is_closed_and_bounded"
+        },
+        {
+          "path": "crates/graphforge-api/tests/research_journey.rs",
+          "symbol": "two_story_journey_preserves_scope_evidence_review_and_continued_research"
+        },
+        {
+          "path": "crates/graphforge-cli/tests/research_journey.rs",
+          "symbol": "two_story_cli_research_survives_partial_review_restore_and_interchange"
         }
       ]
     },
@@ -1307,6 +1363,14 @@
         {
           "path": "crates/graphforge-api/src/research_proposals/tests/retention.rs",
           "symbol": "fixed_parent_proposal_history_releases_obsolete_payloads_but_preserves_accepted_proof_and_replay"
+        },
+        {
+          "path": "crates/graphforge-api/tests/research_journey.rs",
+          "symbol": "two_story_journey_preserves_scope_evidence_review_and_continued_research"
+        },
+        {
+          "path": "crates/graphforge-cli/tests/research_journey.rs",
+          "symbol": "two_story_cli_research_survives_partial_review_restore_and_interchange"
         }
       ]
     },
@@ -1324,6 +1388,14 @@
         {
           "path": "crates/graphforge-api/src/research_upstream/tests/recovery.rs",
           "symbol": "both_current_boundaries_preserve_atomic_baseline_history_and_exact_replay"
+        },
+        {
+          "path": "crates/graphforge-api/tests/research_journey.rs",
+          "symbol": "two_story_journey_preserves_scope_evidence_review_and_continued_research"
+        },
+        {
+          "path": "crates/graphforge-cli/tests/research_journey.rs",
+          "symbol": "two_story_cli_research_survives_partial_review_restore_and_interchange"
         }
       ]
     },
@@ -1345,6 +1417,14 @@
         {
           "path": "crates/graphforge-api/src/research_interchange/tests.rs",
           "symbol": "disjoint_and_redacted_exports_have_distinct_content_and_stable_transport_identity"
+        },
+        {
+          "path": "crates/graphforge-api/tests/research_journey.rs",
+          "symbol": "two_story_journey_preserves_scope_evidence_review_and_continued_research"
+        },
+        {
+          "path": "crates/graphforge-cli/tests/research_journey.rs",
+          "symbol": "two_story_cli_research_survives_partial_review_restore_and_interchange"
         }
       ]
     }

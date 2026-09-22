@@ -98,6 +98,23 @@ fn restored_branch_reproposal_cannot_repeat_acceptance_after_cleanup_and_reopen(
         graph.open_research_branch(second).unwrap().version_uuid(),
         unrelated
     );
+    for (branch_uuid, expected_score) in [(first, 1), (second, 73)] {
+        let branch = graph.open_research_branch(branch_uuid).unwrap();
+        let values = branch
+            .graph()
+            .execute("MATCH (n:Character) RETURN n.score AS score")
+            .unwrap();
+        assert_eq!(values.batches[0].num_rows(), 1);
+        assert_eq!(
+            values.batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            expected_score
+        );
+    }
     let reproposal = submit(&mut graph, first, restored, node, &["property:score"]);
     let re_review = decision(&graph, reproposal.proposal_uuid, |_| Accept);
     assert!(
