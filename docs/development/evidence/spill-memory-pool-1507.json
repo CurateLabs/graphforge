@@ -2521,5 +2521,7 @@
    "external-tight": "4da3b4fa99fe051d"
   },
   "ordered_digests_differ_even_between_baselines": true
- }
+ },
+ "driver_note": "driver_sha256 is the measure.py that ran (commit 39c6abcf). The committed file was later changed for ruff only (Path.open, explicit check=False, helpers instead of lambdas); an S12 smoke run reproduced the same external/spilling partition counts.",
+ "post_measurement_source_changes": "95fefaa8 is a clippy refactor of the spike (boxed variant, checked casts, split setup helpers); the storage suite passed unchanged after it. Measurements used the binary built from 01460cc0."
 }

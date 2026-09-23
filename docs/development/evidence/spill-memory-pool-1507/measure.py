@@ -14,15 +14,16 @@ Usage:
 """
 
 import argparse
+import functools
 import hashlib
 import json
 import os
+from pathlib import Path
 import shutil
 import statistics
 import subprocess
 import threading
 import time
-from pathlib import Path
 
 SEED = "13907095936298285200"
 TIGHT_POOL_BYTES = "65536"
@@ -34,19 +35,20 @@ MODES = {
         "GF_SHAPE_SPILL_POOL_BYTES": TIGHT_POOL_BYTES,
     },
 }
-QUIET = os.environ.get("QUIET_HELPER", os.path.expanduser("~/.claude/gf-quiet-host.sh"))
+QUIET = os.environ.get("QUIET_HELPER", str(Path("~/.claude/gf-quiet-host.sh").expanduser()))
 
 
 def sha256(path):
     digest = hashlib.sha256()
-    with open(path, "rb") as stream:
+    with Path(path).open("rb") as stream:
         for block in iter(lambda: stream.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
 
 
 def quiet():
-    return subprocess.run([QUIET], capture_output=True, text=True).stdout.startswith("QUIET")
+    report = subprocess.run([QUIET], capture_output=True, text=True, check=False)
+    return report.stdout.startswith("QUIET")
 
 
 def wait_quiet(samples, interval=5):
@@ -59,7 +61,7 @@ def wait_quiet(samples, interval=5):
 
 def vmstat():
     values = {}
-    with open("/proc/vmstat") as stream:
+    with Path("/proc/vmstat").open() as stream:
         for line in stream:
             key, value = line.split()
             if key in ("nr_dirtied", "nr_written"):
@@ -114,18 +116,34 @@ def ingest(gf, scale, workspace, run_dir, mode_env, extra_env=None):
     inputs = workspace / f"s{scale}"
     commands = [
         ["begin", "--operation-uuid", uuid],
-        ["register-parquet", "--session-uuid", uuid, "--path", str(inputs / "nodes.parquet"), "--kind", "nodes"],
-        ["register-parquet", "--session-uuid", uuid, "--path", str(inputs / "edges.parquet"), "--kind", "edges"],
+        [
+            "register-parquet",
+            "--session-uuid",
+            uuid,
+            "--path",
+            str(inputs / "nodes.parquet"),
+            "--kind",
+            "nodes",
+        ],
+        [
+            "register-parquet",
+            "--session-uuid",
+            uuid,
+            "--path",
+            str(inputs / "edges.parquet"),
+            "--kind",
+            "edges",
+        ],
         ["validate", "--session-uuid", uuid],
         ["commit", "--session-uuid", uuid],
     ]
     steps = []
     before = vmstat()
     started = time.monotonic()
-    with open(run_dir / "stderr.txt", "wb") as stderr:
+    with (run_dir / "stderr.txt").open("wb") as stderr:
         for index, command in enumerate(commands):
             argv = [gf, "--json", "--project", str(project), "import-session", *command]
-            with open(run_dir / f"receipt-{index}-{command[0]}.json", "wb") as stdout:
+            with (run_dir / f"receipt-{index}-{command[0]}.json").open("wb") as stdout:
                 step = run_command(argv, env, stdout, stderr)
             steps.append(step)
             if step["exit"] != 0:
@@ -149,13 +167,23 @@ def ingest(gf, scale, workspace, run_dir, mode_env, extra_env=None):
     }
 
 
+def append_jsonl(path, record):
+    with path.open("a") as stream:
+        stream.write(json.dumps(record) + "\n")
+
+
+def sum_of(partitions, key):
+    return sum(partition[key] for partition in partitions)
+
+
+def max_of(partitions, key):
+    return max((partition[key] for partition in partitions), default=0)
+
+
 def receipts_summary(run_dir):
     summary = {}
     for path in sorted(run_dir.glob("receipt-*.json")):
-        try:
-            summary[path.name] = sha256(path)
-        except OSError:
-            pass
+        summary[path.name] = sha256(path)
     commit = run_dir / "receipt-4-commit.json"
     if commit.exists():
         text = commit.read_text()
@@ -196,20 +224,31 @@ def main():
         inputs = workspace / f"s{scale}"
         if not (inputs / "edges.parquet").exists():
             inputs.mkdir(parents=True, exist_ok=True)
-            subprocess.run([
-                args.generator, "--scale", str(scale), "--edge-factor", "16", "--seed", SEED,
-                "--nodes", str(inputs / "nodes.parquet"), "--edges", str(inputs / "edges.parquet"),
-            ], check=True)
+            subprocess.run(
+                [
+                    args.generator,
+                    "--scale",
+                    str(scale),
+                    "--edge-factor",
+                    "16",
+                    "--seed",
+                    SEED,
+                    "--nodes",
+                    str(inputs / "nodes.parquet"),
+                    "--edges",
+                    str(inputs / "edges.parquet"),
+                ],
+                check=True,
+            )
         manifest[f"s{scale}_inputs"] = {
             name: sha256(inputs / name) for name in ("nodes.parquet", "edges.parquet")
         }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1))
     observations = []
-    log = open(out / "observations.jsonl", "a")
     for scale in args.scales:
         if not args.instrumented_only:
             for pair in range(args.pairs):
-                order = args.modes[pair % len(args.modes):] + args.modes[: pair % len(args.modes)]
+                order = args.modes[pair % len(args.modes) :] + args.modes[: pair % len(args.modes)]
                 for mode in order:
                     for attempt in range(1, 6):
                         name = f"s{scale}-p{pair + 1}-{mode}-a{attempt}"
@@ -220,15 +259,21 @@ def main():
                         result = ingest(args.gf, scale, workspace, run_dir, MODES[mode])
                         sampler.stop.set()
                         sampler.join()
-                        result.update({
-                            "name": name, "scale": scale, "pair": pair + 1, "mode": mode,
-                            "attempt": attempt, "busy_samples": sampler.busy,
-                            "samples": sampler.samples, "receipts": receipts_summary(run_dir),
-                        })
+                        result.update(
+                            {
+                                "name": name,
+                                "scale": scale,
+                                "pair": pair + 1,
+                                "mode": mode,
+                                "attempt": attempt,
+                                "busy_samples": sampler.busy,
+                                "samples": sampler.samples,
+                                "receipts": receipts_summary(run_dir),
+                            }
+                        )
                         contended = sampler.busy > 0 or not quiet()
                         result["accepted"] = result["ok"] and not contended
-                        log.write(json.dumps(result) + "\n")
-                        log.flush()
+                        append_jsonl(out / "observations.jsonl", result)
                         shutil.rmtree(run_dir / "project", ignore_errors=True)
                         if result["accepted"]:
                             observations.append(result)
@@ -243,17 +288,24 @@ def main():
             run_dir = out / "runs" / name
             if run_dir.exists():
                 shutil.rmtree(run_dir)
-            result = ingest(args.gf, scale, workspace, run_dir, MODES[mode], {"GF_SHAPE_SPILL_METRICS": "1"})
+            result = ingest(
+                args.gf, scale, workspace, run_dir, MODES[mode], {"GF_SHAPE_SPILL_METRICS": "1"}
+            )
             partitions = []
             for line in (run_dir / "stderr.txt").read_text().splitlines():
                 if line.startswith("SHAPE_SPILL "):
-                    partitions.append(json.loads(line[len("SHAPE_SPILL "):]))
-            total = lambda key: sum(partition[key] for partition in partitions)
-            peak = lambda key: max((partition[key] for partition in partitions), default=0)
+                    partitions.append(json.loads(line[len("SHAPE_SPILL ") :]))
+            total = functools.partial(sum_of, partitions)
+            peak = functools.partial(max_of, partitions)
             instrumented = {
-                "name": name, "scale": scale, "mode": mode, "ok": result["ok"],
+                "name": name,
+                "scale": scale,
+                "mode": mode,
+                "ok": result["ok"],
                 "external_partitions": len(partitions),
-                "spilling_partitions": sum(1 for partition in partitions if partition["spill_count"] > 0),
+                "spilling_partitions": sum(
+                    1 for partition in partitions if partition["spill_count"] > 0
+                ),
                 "records": total("records"),
                 "input_wire_bytes": total("input_wire_bytes"),
                 "spill_count": total("spill_count"),
@@ -274,8 +326,7 @@ def main():
                 raise SystemExit(f"{name}: no partition took the external path; see {run_dir}")
             (run_dir / "stderr.txt").unlink()
             shutil.rmtree(run_dir / "project", ignore_errors=True)
-            with open(out / "instrumented.jsonl", "a") as stream:
-                stream.write(json.dumps(instrumented) + "\n")
+            append_jsonl(out / "instrumented.jsonl", instrumented)
     summary = {}
     for scale in args.scales:
         for mode in args.modes:
@@ -288,9 +339,17 @@ def main():
                     "min": min(o[key] for o in accepted),
                     "max": max(o[key] for o in accepted),
                 }
-                for key in ("wall_s", "cpu_s", "max_rss_kib", "validate_wall_s", "validate_cpu_s",
-                            "validate_max_rss_kib",
-                            "oublock_512", "host_pages_dirtied", "host_pages_written")
+                for key in (
+                    "wall_s",
+                    "cpu_s",
+                    "max_rss_kib",
+                    "validate_wall_s",
+                    "validate_cpu_s",
+                    "validate_max_rss_kib",
+                    "oublock_512",
+                    "host_pages_dirtied",
+                    "host_pages_written",
+                )
             } | {"n": len(accepted)}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
 
