@@ -1,0 +1,28 @@
+{
+  "claim": "engineering_evidence_only",
+  "peak_allocated_bytes": 769888256,
+  "peak_component_allocated_bytes": {
+    "construction_control": 4108288,
+    "content_addressed_staging": 0,
+    "content_addressed_store": 0,
+    "encoded_workspace": 0,
+    "external_artifact": 0,
+    "import_session_control": 4096,
+    "merge_source_copy": 0,
+    "merge_tree_level": 0,
+    "project_control": 8192,
+    "published_generation": 16384,
+    "registered_source_copy": 102801408,
+    "shaped_output": 0,
+    "shaped_partition_rows": 0,
+    "shaped_partition_run": 169287680,
+    "source_parquet": 102797312,
+    "staged_chunk_parquet": 102899712,
+    "staged_chunk_run": 287965184,
+    "staged_domain_run": 0,
+    "unclassified": 0
+  },
+  "scale": 17,
+  "schema": "transient-peak-composition/1",
+  "step": "validate"
+}

@@ -418,7 +418,10 @@ fn drop_live_evidence(intent: &mut ShapeIntent) {
 }
 
 fn control_limit(target: &str) -> u64 {
-    if target == SHAPE_INTENT || target.starts_with(super::progress::SHAPE_PROGRESS_PREFIX) {
+    if target == SHAPE_INTENT
+        || target.starts_with(super::progress::SHAPE_PROGRESS_PREFIX)
+        || target.starts_with(super::finish_stages::SHAPE_STAGE_PREFIX)
+    {
         MAX_SHAPE_CONTROL_BYTES
     } else {
         MAX_CONTROL_BYTES

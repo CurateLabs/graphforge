@@ -2038,4 +2038,379 @@ mod group_boundary {
         assert_eq!(session.evidence().current_merge_temporary_allocated_bytes, 0);
         assert_eq!(published_edge_count(root.path()), 8 * 8192);
     }
+
+    /// Content of every completed shape output, by name: identical bytes are
+    /// the same graph, whatever inode or write history produced them.
+    fn shape_output_content(session: &GraphConstructionSession) -> BTreeMap<String, (u64, String)> {
+        read_completed_shape_outputs(&session.root, &session.checkpoint)
+            .unwrap()
+            .into_iter()
+            .map(|receipt| (receipt.name, (receipt.bytes, receipt.sha256)))
+            .collect()
+    }
+
+    fn stage_control_names(session_path: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(session_path)
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                name.starts_with("shape-stage-").then_some(name)
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn finish_stage_crash_child() {
+        let Ok(path) = std::env::var("GF_SUPERSESSION_CRASH_ROOT") else {
+            return;
+        };
+        let mut session = boundary_session(Path::new(&path), 156_200);
+        complete_boundary(&mut session);
+    }
+
+    fn crash_at_finish_stage(failpoint: &str) -> TempDir {
+        let root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let prior = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "graph_construction::tests::group_boundary::finish_stage_crash_child",
+            ])
+            .env("GF_SUPERSESSION_CRASH_ROOT", root.path())
+            .env(
+                "GF_CONSTRUCTION_FAILPOINT_COOKIE",
+                "graphforge-construction-test-v1",
+            )
+            .env("GF_CONSTRUCTION_FAILPOINT", failpoint)
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(86), "{failpoint}");
+        assert_eq!(
+            std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
+            prior,
+            "{failpoint}"
+        );
+        root
+    }
+
+    /// #1562. Every crash window the finish stages introduce resumes to the
+    /// same graph: before a stage is durable the family re-finishes from its
+    /// segments, after it the recorded successor is adopted, and in between
+    /// a stranded copy on either side is discarded. The families a stage
+    /// retired are really gone from disk while later stages run.
+    #[test]
+    #[allow(clippy::too_many_lines)] // One crash matrix; each row is a window.
+    fn finish_stage_crashes_resume_with_the_same_graph() {
+        let clean_root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(clean_root.path()).unwrap();
+        let mut clean = boundary_session(clean_root.path(), 156_200);
+        stage_boundary_chunks(&mut clean);
+        clean.shape_canonical_with_cancellation(|| false).unwrap();
+        let clean_outputs = shape_output_content(&clean);
+        complete_boundary(&mut clean);
+        let clean_current = clean.evidence().storage_current.clone();
+        drop(clean);
+
+        // (failpoint, stage controls durable at the crash, segment families
+        // that must already be gone from disk at the crash).
+        for (failpoint, stages, retired) in [
+            ("shape.partition_output.after_install", 0, &[][..]),
+            ("shape.stage.identities.after_install", 1, &[][..]),
+            ("shape.after_derived_unlink", 1, &[][..]),
+            ("shape.stage.identities.after_retire", 1, &["identities"][..]),
+            ("shape.stage.node-details.after_install", 2, &["identities"][..]),
+            (
+                "shape.stage.node-details.after_retire",
+                2,
+                &["identities", "node-details"][..],
+            ),
+            (
+                "shape.stage.edge-details.after_retire",
+                3,
+                &["identities", "node-details", "edge-details"][..],
+            ),
+            (
+                "shape.stage.endpoints.after_install",
+                4,
+                &["identities", "node-details", "edge-details"][..],
+            ),
+            (
+                "shape.stage.endpoints.after_retire",
+                4,
+                &["identities", "node-details", "edge-details", "endpoints"][..],
+            ),
+            (
+                "shape.stage.assigned.after_install",
+                5,
+                &["identities", "node-details", "edge-details", "endpoints"][..],
+            ),
+            (
+                "shape.after_identity_retirement",
+                5,
+                &["identities", "node-details", "edge-details", "endpoints"][..],
+            ),
+            (
+                "shape.stage.resolved-routed.after_install",
+                6,
+                &["identities", "node-details", "edge-details", "endpoints"][..],
+            ),
+            (
+                "shape.after_endpoint_retirement",
+                6,
+                &["identities", "node-details", "edge-details", "endpoints"][..],
+            ),
+            (
+                "shape.stage.resolved.after_install",
+                7,
+                &["identities", "node-details", "edge-details", "endpoints"][..],
+            ),
+            (
+                "shape.stage.resolved.after_retire",
+                7,
+                &[
+                    "identities",
+                    "node-details",
+                    "edge-details",
+                    "endpoints",
+                    "resolved",
+                ][..],
+            ),
+        ] {
+            let root = crash_at_finish_stage(failpoint);
+            let session_path = session_directory(root.path(), 156_200);
+            assert_eq!(
+                stage_control_names(&session_path).len(),
+                stages,
+                "{failpoint}: durable stages"
+            );
+            let segments = segment_names(&session_path);
+            for family in retired {
+                let prefix = format!("part-{family}-g");
+                assert!(
+                    !segments.iter().any(|name| name.starts_with(&prefix)),
+                    "{failpoint}: retired {family} segments survived: {segments:?}"
+                );
+            }
+            // At the resolution instant — the #1393 peak — only the resolved
+            // family and the row groups may hold segments.
+            if failpoint == "shape.stage.resolved-routed.after_install" {
+                assert!(
+                    segments
+                        .iter()
+                        .all(|name| name.starts_with("part-resolved-g")
+                            || name.starts_with("part-rows-")),
+                    "{failpoint}: {segments:?}"
+                );
+                assert!(
+                    segments.iter().any(|name| name.starts_with("part-resolved-g")),
+                    "{failpoint}: resolved segments are the stage's successor"
+                );
+            }
+
+            let mut recovered = boundary_session(root.path(), 156_200);
+            recovered.shape_canonical_with_cancellation(|| false).unwrap();
+            assert_eq!(
+                shape_output_content(&recovered),
+                clean_outputs,
+                "{failpoint}: resumed shape differs from the uninterrupted one"
+            );
+            complete_boundary(&mut recovered);
+            assert_eq!(
+                recovered.evidence().current_merge_temporary_allocated_bytes,
+                0,
+                "{failpoint}"
+            );
+            assert_eq!(
+                recovered.evidence().storage_current,
+                clean_current,
+                "{failpoint}: resumed run must reconcile every allocation"
+            );
+            assert_eq!(published_edge_count(root.path()), 8 * 8192, "{failpoint}");
+            drop(recovered);
+            assert!(
+                stage_control_names(&session_path).is_empty(),
+                "{failpoint}: stage controls outlived supersession"
+            );
+        }
+    }
+
+    /// #1562, the #1269 class. Once a stage has retired the inputs its
+    /// successor replaces, nothing can reproduce the successor's rows, so a
+    /// successor or stage control mutated in place is refused rather than
+    /// consumed, and the project's current generation never moves.
+    #[test]
+    fn finish_stage_resume_refuses_mutated_successors() {
+        fn flip_last_byte(path: &Path) {
+            use std::io::{Seek, SeekFrom};
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .unwrap();
+            let length = file.metadata().unwrap().len();
+            file.seek(SeekFrom::Start(length - 1)).unwrap();
+            let mut byte = [0_u8];
+            std::io::Read::read_exact(&mut file, &mut byte).unwrap();
+            file.seek(SeekFrom::Start(length - 1)).unwrap();
+            file.write_all(&[byte[0] ^ 0x5a]).unwrap();
+            file.sync_all().unwrap();
+        }
+        /// Change the first digit of `key`'s numeric value, in place.
+        fn bump_number(path: &Path, key: &str) {
+            let body = std::fs::read_to_string(path).unwrap();
+            let at = body.find(key).unwrap() + key.len();
+            let digit = &body[at..=at];
+            let replacement = if digit == "1" { "2" } else { "1" };
+            rewrite(
+                path,
+                &format!("{key}{digit}"),
+                &format!("{key}{replacement}"),
+            );
+        }
+        fn rewrite(path: &Path, from: &str, to: &str) {
+            let body = std::fs::read_to_string(path).unwrap();
+            assert!(body.contains(from), "{from} not in {}", path.display());
+            let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            // Same inode, same length: an in-place rewrite.
+            assert_eq!(from.len(), to.len());
+            file.write_all(body.replacen(from, to, 1).as_bytes()).unwrap();
+            file.sync_all().unwrap();
+        }
+        type Mutation<'a> = (&'a str, &'a str, &'a dyn Fn(&Path));
+        let cases: [Mutation; 4] = [
+            // A family output adopted in place of its retired segments.
+            ("shape.stage.edge-details.after_retire",
+                "supersession payload digest changed",
+                &|session: &Path| {
+                flip_last_byte(&session.join("shaped-edge-details.run"));
+            }),
+            // Resolved segments adopted in place of the retired staged
+            // endpoint domain.
+            ("shape.after_endpoint_retirement",
+                "supersession payload digest changed",
+                &|session: &Path| {
+                let segment = segment_names(session)
+                    .into_iter()
+                    .find(|name| name.starts_with("part-resolved-g"))
+                    .unwrap();
+                flip_last_byte(&session.join(segment));
+            }),
+            // A stage inside the chain: its successor's prior digest breaks.
+            ("shape.stage.node-details.after_retire",
+                "construction shape stage chain changed",
+                &|session: &Path| {
+                bump_number(&session.join("shape-stage-00.json"), "\"write_operations\":");
+            }),
+            // The head stage: its recorded receipt no longer names the bytes
+            // its writer installed.
+            ("shape.stage.edge-details.after_retire",
+                "construction shape stage output receipt changed",
+                &|session: &Path| {
+                let path = session.join("shape-stage-02.json");
+                let body = std::fs::read_to_string(&path).unwrap();
+                let at = body.find("\"sha256\":\"").unwrap() + "\"sha256\":\"".len();
+                let digit = &body[at..=at];
+                let replacement = if digit == "0" { "1" } else { "0" };
+                rewrite(
+                    &path,
+                    &format!("\"sha256\":\"{digit}"),
+                    &format!("\"sha256\":\"{replacement}"),
+                );
+            }),
+        ];
+        for (failpoint, refusal, mutate) in cases {
+            let root = crash_at_finish_stage(failpoint);
+            let prior = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
+            let session_path = session_directory(root.path(), 156_200);
+            mutate(&session_path);
+            let refused = GraphConstructionSession::open_with_mode(
+                root.path(),
+                Uuid::from_u128(156_200),
+                0,
+                graphforge_core::OntologyMode::Exploratory,
+                boundary_budgets(),
+            )
+            .and_then(|mut session| session.prepare_canonical_encoding(1).map(|_| ()));
+            let error = refused
+                .err()
+                .unwrap_or_else(|| panic!("{failpoint}: mutated successor was consumed"));
+            assert!(
+                error.to_string().contains(refusal),
+                "{failpoint}: refused for the wrong reason: {error}"
+            );
+            assert_eq!(
+                std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
+                prior,
+                "{failpoint}"
+            );
+        }
+    }
+
+    /// #1562. A returned error inside a staged finish is recovered the way
+    /// every interrupted shape is: the live facade refuses reuse without
+    /// touching its evidence, and a reopen resumes to the same graph.
+    #[test]
+    fn finish_stage_returned_errors_refuse_reuse_until_reopen() {
+        let clean_root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(clean_root.path()).unwrap();
+        let mut clean = boundary_session(clean_root.path(), 156_201);
+        stage_boundary_chunks(&mut clean);
+        clean.shape_canonical_with_cancellation(|| false).unwrap();
+        let clean_outputs = shape_output_content(&clean);
+        drop(clean);
+        for point in [
+            "shape.before_identity_retirement",
+            "shape.after_identity_retirement",
+            "shape.before_endpoint_retirement",
+            "shape.after_endpoint_retirement",
+        ] {
+            let root = TempDir::new().unwrap();
+            crate::open_or_initialize_project(root.path()).unwrap();
+            let prior = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
+            let mut session = boundary_session(root.path(), 156_201);
+            stage_boundary_chunks(&mut session);
+            inject_shape_publication_failure(point);
+            let error = session.prepare_canonical_encoding(1).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("injected shape publication failure"),
+                "{point}: {error}"
+            );
+            // The failure landed inside the staged finish, not before it.
+            assert!(
+                !stage_control_names(session.root.path()).is_empty(),
+                "{point}"
+            );
+            let before_retry = session.evidence().clone();
+            assert!(
+                session
+                    .prepare_canonical_encoding(1)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("incomplete construction shape was not recovered"),
+                "{point}"
+            );
+            assert_eq!(session.evidence(), &before_retry, "{point}");
+            drop(session);
+            let mut resumed = boundary_session(root.path(), 156_201);
+            resumed.shape_canonical_with_cancellation(|| false).unwrap();
+            assert_eq!(shape_output_content(&resumed), clean_outputs, "{point}");
+            complete_boundary(&mut resumed);
+            assert_eq!(
+                resumed.evidence().current_merge_temporary_allocated_bytes,
+                0,
+                "{point}"
+            );
+            assert_ne!(
+                std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
+                prior,
+                "{point}: the resumed run did not publish"
+            );
+            assert_eq!(published_edge_count(root.path()), 8 * 8192, "{point}");
+        }
+    }
 }

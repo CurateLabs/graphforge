@@ -1,9 +1,11 @@
 //! Shape for graph construction.
 
+use super::finish_stages::{ShapeStageKind, ShapeStages, StageResult};
 use super::partition::PartitionBalance;
 use super::partition::{IdentitySampler, PartitionPlan};
 use super::partition_shaping::{
     FixedRangePartitioner, PartitionFamily, RowRangePartitioner, is_partition_artifact_name,
+    parse_segment_name,
 };
 use super::progress::{
     LoadedShapeProgress, ShapeProgressPartition, authenticate_shape_segments,
@@ -250,6 +252,9 @@ impl GraphConstructionSession {
                 self.reclaim_superseded_payloads_cancellable(&mut cancelled)?;
                 return Ok(shape);
             }
+            return Err(storage("incomplete construction shape was not recovered"));
+        }
+        if self.shape_finish_interrupted {
             return Err(storage("incomplete construction shape was not recovered"));
         }
         // An incomplete shape resumes: sealed segment groups survive behind the
@@ -604,7 +609,14 @@ impl GraphConstructionSession {
                     .values()
                     .map(RowRangePartitioner::open_spill_count)
                     .sum::<usize>();
-            if routed_since_boundary < boundary_threshold(open_spills) {
+            // Once any boundary has retired staged input, the last chunk
+            // always closes one (#1562): every routed row is then held by a
+            // claimed segment before a finish stage may retire a family, so a
+            // resumed shape never has to re-route into a family whose
+            // segments are already gone.
+            let completes_routing = sealed_through > 0
+                && sequence.checked_add(1) == Some(self.checkpoint.next_sequence);
+            if !completes_routing && routed_since_boundary < boundary_threshold(open_spills) {
                 continue;
             }
             let boundary = sequence
@@ -708,35 +720,65 @@ impl GraphConstructionSession {
         // retired behind a progress boundary; a boundary-less shape frees
         // them at finish exactly as the per-family finish always did (#1418).
         let retain_segments = sealed_through > 0;
-        let staged_identities = identities
-            .finish_optional(
-                STAGED_IDENTITIES,
-                final_boundary,
-                retain_segments,
-                &mut cancelled,
-                &mut self.checkpoint.evidence,
-            )?
-            .ok_or_else(|| storage("construction contains no identities"))?;
-        let node_details = node_details.finish_optional(
+        // Finish stages hand each family's authority from its segments to its
+        // installed output as soon as that output exists (#1562). Only a
+        // shape that retired staged input needs them; a boundary-less shape
+        // frees its segments at each finish, as it always did.
+        let mut stages = if retain_segments {
+            let resumed = resume.map(|state| state.stages).unwrap_or_default();
+            Some(if resumed.has_stages() {
+                resumed
+            } else {
+                ShapeStages::after_progress(
+                    last_progress_sha256
+                        .clone()
+                        .ok_or_else(|| storage("retained shape segments lack a progress head"))?,
+                )
+            })
+        } else {
+            None
+        };
+        self.shape_finish_interrupted = stages.is_some();
+        let staged_identities = finish_family_stage(
+            &self.root,
+            &mut self.checkpoint,
+            stages.as_mut(),
+            ShapeStageKind::Identities,
+            identities,
+            STAGED_IDENTITIES,
+            final_boundary,
+            &mut cancelled,
+        )?
+        .ok_or_else(|| storage("construction contains no identities"))?;
+        let node_details = finish_family_stage(
+            &self.root,
+            &mut self.checkpoint,
+            stages.as_mut(),
+            ShapeStageKind::NodeDetails,
+            node_details,
             SHAPED_NODE_DETAILS,
             final_boundary,
-            retain_segments,
             &mut cancelled,
-            &mut self.checkpoint.evidence,
         )?;
-        let edge_details = edge_details.finish_optional(
+        let edge_details = finish_family_stage(
+            &self.root,
+            &mut self.checkpoint,
+            stages.as_mut(),
+            ShapeStageKind::EdgeDetails,
+            edge_details,
             SHAPED_EDGE_DETAILS,
             final_boundary,
-            retain_segments,
             &mut cancelled,
-            &mut self.checkpoint.evidence,
         )?;
-        let endpoints = endpoints.finish_optional(
+        let endpoints = finish_family_stage(
+            &self.root,
+            &mut self.checkpoint,
+            stages.as_mut(),
+            ShapeStageKind::Endpoints,
+            endpoints,
             STAGED_ENDPOINTS,
             final_boundary,
-            retain_segments,
             &mut cancelled,
-            &mut self.checkpoint.evidence,
         )?;
         let (base_max_node, base_max_edge) = match self.checkpoint.parent_topology_generation {
             0 => (0, 0),
@@ -754,56 +796,81 @@ impl GraphConstructionSession {
         if base_max_node != self.checkpoint.base_work.max_node_surrogate {
             return Err(storage("UUID snapshot and surrogate tails disagree"));
         }
-        let (new_nodes, new_edges) = validate_staged_details(
-            &self.root,
-            &staged_identities,
-            node_details.as_deref(),
-            edge_details.as_deref(),
-            detail_codec,
-            &mut cancelled,
-            &mut self.checkpoint.evidence,
-        )?;
-        if let Some(base) = self.base_snapshot.as_mut() {
-            reject_staged_base_conflicts(
+        let assigned = stages
+            .as_ref()
+            .and_then(|stages| stages.completed(ShapeStageKind::Assigned))
+            .map(|stage| (stage.new_nodes, stage.new_edges));
+        let (identities, new_nodes, new_edges) = if let Some((new_nodes, new_edges)) = assigned {
+            // Validation, base-conflict rejection and assignment all ran
+            // before the interruption; the recorded successor carries them.
+            (SHAPED_IDENTITIES.to_owned(), new_nodes, new_edges)
+        } else {
+            let (new_nodes, new_edges) = validate_staged_details(
                 &self.root,
                 &staged_identities,
-                base,
-                self.checkpoint.budgets.max_batch_rows,
+                node_details.as_deref(),
+                edge_details.as_deref(),
+                detail_codec,
                 &mut cancelled,
                 &mut self.checkpoint.evidence,
             )?;
-        }
-        let identities = assign_surrogates(
-            &self.root,
-            &staged_identities,
-            base_max_node,
-            base_max_edge,
-            &mut cancelled,
-            &mut self.checkpoint.evidence,
-        )?;
-        // Original chunks remain recovery authority until shaping completes. The
-        // assigned identity successor now owns every later identity consumer.
-        shape_publication_failure("shape.before_identity_retirement")?;
-        unlink_shape_artifact(
-            &self.root,
-            &staged_identities,
-            &mut self.checkpoint.evidence,
-        )?;
-        construction_failpoint("shape.after_identity_retirement");
-        shape_publication_failure("shape.after_identity_retirement")?;
+            if let Some(base) = self.base_snapshot.as_mut() {
+                reject_staged_base_conflicts(
+                    &self.root,
+                    &staged_identities,
+                    base,
+                    self.checkpoint.budgets.max_batch_rows,
+                    &mut cancelled,
+                    &mut self.checkpoint.evidence,
+                )?;
+            }
+            let identities = assign_surrogates(
+                &self.root,
+                &staged_identities,
+                base_max_node,
+                base_max_edge,
+                &mut cancelled,
+                &mut self.checkpoint.evidence,
+            )?;
+            if let Some(stages) = stages.as_mut() {
+                stages.record(
+                    &self.root,
+                    &self.checkpoint,
+                    ShapeStageKind::Assigned,
+                    StageResult {
+                        outputs: vec![receipt_for_existing(&self.root, &identities)?],
+                        new_nodes,
+                        new_edges,
+                        ..StageResult::default()
+                    },
+                )?;
+                construction_failpoint("shape.stage.assigned.after_install");
+            }
+            // Original chunks remain recovery authority until shaping
+            // completes. The assigned identity successor now owns every later
+            // identity consumer.
+            shape_publication_failure("shape.before_identity_retirement")?;
+            unlink_shape_artifact(
+                &self.root,
+                &staged_identities,
+                &mut self.checkpoint.evidence,
+            )?;
+            construction_failpoint("shape.after_identity_retirement");
+            shape_publication_failure("shape.after_identity_retirement")?;
+            (identities, new_nodes, new_edges)
+        };
         reject_cancelled(&mut cancelled)?;
-        let edge_endpoints = resolve_endpoint_surrogates(
+        let edge_endpoints = resolve_endpoint_stages(
             &self.root,
+            &mut self.checkpoint,
+            stages.as_mut(),
             &plan,
             &identities,
             endpoints.as_deref(),
             self.base_snapshot.as_mut(),
-            self.checkpoint.budgets.max_batch_rows,
-            self.checkpoint.budgets.max_partition_bytes,
             final_boundary,
             retain_segments,
             &mut cancelled,
-            &mut self.checkpoint.evidence,
         )?;
         let node_count = self
             .checkpoint
@@ -972,6 +1039,7 @@ impl GraphConstructionSession {
         construction_failpoint("shape.after_segment_discard");
         replace_checkpoint_control(&self.root, &self.checkpoint)?;
         construction_failpoint("shape.after_evidence_checkpoint");
+        self.shape_finish_interrupted = false;
         self.reclaim_superseded_payloads_cancellable(&mut cancelled)?;
         crate::concurrency_attribution::RegionScope::record_work("nodes", shape.node_count);
         crate::concurrency_attribution::RegionScope::record_work("edges", shape.edge_count);
@@ -1007,10 +1075,13 @@ impl GraphConstructionSession {
             ));
         };
         let retired_through = head.retired_through();
+        let last_progress_sha256 = head.body_sha256.clone();
         self.shape_boundary_retired_through = retired_through;
+        let stages = super::finish_stages::load_shape_stages(&self.root, &self.checkpoint, &chain)?;
         let mut segments = scan_shape_segments(
             &self.root,
             retired_through,
+            &stages,
             &mut self.checkpoint.evidence,
             cancelled,
         )?;
@@ -1037,11 +1108,12 @@ impl GraphConstructionSession {
                 )?;
             }
         }
-        let claimed_names: std::collections::BTreeSet<String> = segments
+        let mut claimed_names: std::collections::BTreeSet<String> = segments
             .values()
             .flatten()
             .flat_map(|partition| partition.iter().map(|receipt| receipt.name.clone()))
             .collect();
+        claimed_names.extend(stages.live_output_names());
         // A resumed shape tolerates exactly its claimed segments. Any other
         // shape-scoped artifact — a derived domain from an interrupted finish,
         // an unexpected spill — has no producer on the resumed path and would
@@ -1060,6 +1132,12 @@ impl GraphConstructionSession {
             &mut self.checkpoint.evidence,
             cancelled,
         )?;
+        super::finish_stages::authenticate_stage_outputs(
+            &self.root,
+            &stages,
+            &mut self.checkpoint.evidence,
+            cancelled,
+        )?;
         // Once authenticated and ledger-installed, the claimed receipts are
         // the restored state; drop the empties so restore sees only families
         // with real segments.
@@ -1072,7 +1150,8 @@ impl GraphConstructionSession {
             segments,
             segment_rows,
             row_schemas,
-            last_progress_sha256: Some(head.body_sha256.clone()),
+            last_progress_sha256: Some(last_progress_sha256),
+            stages,
         }))
     }
 }
@@ -2033,7 +2112,7 @@ pub(super) fn resolve_endpoint_surrogates(
     plan: &PartitionPlan,
     identities_name: &str,
     endpoints_name: Option<&str>,
-    mut base: Option<&mut AuthenticatedUuidIndexSnapshot>,
+    base: Option<&mut AuthenticatedUuidIndexSnapshot>,
     window_rows: usize,
     max_partition_bytes: u64,
     boundary: u64,
@@ -2044,11 +2123,6 @@ pub(super) fn resolve_endpoint_surrogates(
     let Some(endpoints_name) = endpoints_name else {
         return Ok(None);
     };
-    let (mut identities, identities_counter) =
-        open_counted_fixed_reader(root, identities_name, evidence)?;
-    let (mut endpoints, endpoints_counter) =
-        open_counted_fixed_reader(root, endpoints_name, evidence)?;
-    let mut identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
     let mut resolved = FixedRangePartitioner::<RESOLVED_ENDPOINT_WIDTH>::new(
         root,
         PartitionFamily::Resolved,
@@ -2057,6 +2131,52 @@ pub(super) fn resolve_endpoint_surrogates(
         false,
     )?
     .with_materialization_limit(max_partition_bytes);
+    route_resolved_endpoints(
+        root,
+        plan,
+        identities_name,
+        endpoints_name,
+        base,
+        window_rows,
+        &mut resolved,
+        cancelled,
+        evidence,
+    )?;
+    // Every routed record is durable before the endpoint domain is retired.
+    resolved.seal(boundary, evidence)?;
+    shape_publication_failure("shape.before_endpoint_retirement")?;
+    unlink_shape_artifact(root, endpoints_name, evidence)?;
+    construction_failpoint("shape.after_endpoint_retirement");
+    shape_publication_failure("shape.after_endpoint_retirement")?;
+    reject_cancelled(cancelled)?;
+    resolved.finish_optional(
+        SHAPED_EDGE_ENDPOINTS,
+        boundary,
+        retain_segments,
+        cancelled,
+        evidence,
+    )
+}
+
+/// Route every staged endpoint, resolved to its node surrogate and re-keyed
+/// by edge UUID, into `resolved`. Nothing is sealed here.
+#[allow(clippy::too_many_arguments)]
+fn route_resolved_endpoints(
+    root: &StableDirectory,
+    plan: &PartitionPlan,
+    identities_name: &str,
+    endpoints_name: &str,
+    mut base: Option<&mut AuthenticatedUuidIndexSnapshot>,
+    window_rows: usize,
+    resolved: &mut FixedRangePartitioner<'_, RESOLVED_ENDPOINT_WIDTH>,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    let (mut identities, identities_counter) =
+        open_counted_fixed_reader(root, identities_name, evidence)?;
+    let (mut endpoints, endpoints_counter) =
+        open_counted_fixed_reader(root, endpoints_name, evidence)?;
+    let mut identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
     loop {
         let mut endpoint_window = Vec::with_capacity(window_rows);
         for _ in 0..window_rows {
@@ -2123,22 +2243,195 @@ pub(super) fn resolve_endpoint_surrogates(
     account_fixed_read_operations(&endpoints_counter, evidence)?;
     release_counted_reader_cache(&mut identities, evidence)?;
     release_counted_reader_cache(&mut endpoints, evidence)?;
-    drop(identities);
-    drop(endpoints);
-    // Every routed record is durable before the endpoint domain is retired.
-    resolved.seal(boundary, evidence)?;
-    shape_publication_failure("shape.before_endpoint_retirement")?;
-    unlink_shape_artifact(root, endpoints_name, evidence)?;
-    construction_failpoint("shape.after_endpoint_retirement");
-    shape_publication_failure("shape.after_endpoint_retirement")?;
-    reject_cancelled(cancelled)?;
-    resolved.finish_optional(
+    Ok(())
+}
+
+/// Finish one fixed-width family. Under finish stages (#1562) the family's
+/// segments are retired as soon as a stage records the installed output as
+/// their successor; a family a resumed shape already finished is adopted
+/// from its stage instead of re-derived.
+#[allow(clippy::too_many_arguments)]
+fn finish_family_stage<const N: usize>(
+    root: &StableDirectory,
+    checkpoint: &mut Checkpoint,
+    stages: Option<&mut ShapeStages>,
+    kind: ShapeStageKind,
+    partitioner: FixedRangePartitioner<'_, N>,
+    output: &str,
+    boundary: u64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Option<String>, GfError> {
+    let Some(stages) = stages else {
+        return partitioner.finish_optional(
+            output,
+            boundary,
+            false,
+            cancelled,
+            &mut checkpoint.evidence,
+        );
+    };
+    if let Some(stage) = stages.completed(kind) {
+        return Ok(stage.outputs.first().map(|receipt| receipt.name.clone()));
+    }
+    let (installed, segments) =
+        partitioner.finish_retaining(output, boundary, cancelled, &mut checkpoint.evidence)?;
+    retire_behind_stage(
+        root,
+        checkpoint,
+        stages,
+        kind,
+        StageResult {
+            outputs: installed
+                .as_deref()
+                .map(|name| receipt_for_existing(root, name))
+                .transpose()?
+                .into_iter()
+                .collect(),
+            ..StageResult::default()
+        },
+        &segments,
+    )?;
+    Ok(installed)
+}
+
+/// Install `kind`'s stage, then unlink the segments its successor replaces.
+///
+/// The order is the whole invariant: until the stage is durable the segments
+/// are the only authority for their rows, and once it is durable they are
+/// garbage that recovery discards if a crash strands them.
+fn retire_behind_stage(
+    root: &StableDirectory,
+    checkpoint: &mut Checkpoint,
+    stages: &mut ShapeStages,
+    kind: ShapeStageKind,
+    result: StageResult,
+    segments: &[ArtifactReceipt],
+) -> Result<(), GfError> {
+    stages.record(root, checkpoint, kind, result)?;
+    construction_failpoint(&format!("shape.stage.{}.after_install", kind.tag()));
+    for segment in segments {
+        unlink_shape_artifact(root, &segment.name, &mut checkpoint.evidence)?;
+    }
+    construction_failpoint(&format!("shape.stage.{}.after_retire", kind.tag()));
+    Ok(())
+}
+
+/// Resolve endpoints under finish stages (#1562): the resolved segments are
+/// recorded before the staged endpoint domain is retired, and are themselves
+/// retired once the sorted resolved output is recorded. Without stages this
+/// is [`resolve_endpoint_surrogates`].
+#[allow(clippy::too_many_arguments)]
+fn resolve_endpoint_stages(
+    root: &StableDirectory,
+    checkpoint: &mut Checkpoint,
+    stages: Option<&mut ShapeStages>,
+    plan: &PartitionPlan,
+    identities_name: &str,
+    endpoints_name: Option<&str>,
+    base: Option<&mut AuthenticatedUuidIndexSnapshot>,
+    boundary: u64,
+    retain_segments: bool,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Option<String>, GfError> {
+    let window_rows = checkpoint.budgets.max_batch_rows;
+    let max_partition_bytes = checkpoint.budgets.max_partition_bytes;
+    let Some(stages) = stages else {
+        return resolve_endpoint_surrogates(
+            root,
+            plan,
+            identities_name,
+            endpoints_name,
+            base,
+            window_rows,
+            max_partition_bytes,
+            boundary,
+            retain_segments,
+            cancelled,
+            &mut checkpoint.evidence,
+        );
+    };
+    if let Some(stage) = stages.completed(ShapeStageKind::Resolved) {
+        return Ok(stage.outputs.first().map(|receipt| receipt.name.clone()));
+    }
+    let mut resolved = FixedRangePartitioner::<RESOLVED_ENDPOINT_WIDTH>::new(
+        root,
+        PartitionFamily::Resolved,
+        plan.partitions(),
+        None,
+        false,
+    )?
+    .with_materialization_limit(max_partition_bytes);
+    if let Some(stage) = stages.completed(ShapeStageKind::ResolvedRouted) {
+        let mut segments = vec![Vec::new(); plan.partitions()];
+        for receipt in &stage.outputs {
+            let partition = parse_segment_name(&receipt.name)
+                .map(|segment| segment.partition)
+                .ok_or_else(|| storage("resolved stage segment name is invalid"))?;
+            segments
+                .get_mut(partition)
+                .ok_or_else(|| storage("resolved stage segment is outside the plan"))?
+                .push(receipt.clone());
+        }
+        resolved.restore(&segments, &stage.rows)?;
+    } else {
+        if let Some(endpoints_name) = endpoints_name {
+            route_resolved_endpoints(
+                root,
+                plan,
+                identities_name,
+                endpoints_name,
+                base,
+                window_rows,
+                &mut resolved,
+                cancelled,
+                &mut checkpoint.evidence,
+            )?;
+            // Every routed record is durable before the endpoint domain is
+            // retired.
+            resolved.seal(boundary, &mut checkpoint.evidence)?;
+        }
+        stages.record(
+            root,
+            checkpoint,
+            ShapeStageKind::ResolvedRouted,
+            StageResult {
+                outputs: resolved.sealed_segments(),
+                rows: resolved.balance().rows().to_vec(),
+                ..StageResult::default()
+            },
+        )?;
+        construction_failpoint("shape.stage.resolved-routed.after_install");
+        if let Some(endpoints_name) = endpoints_name {
+            shape_publication_failure("shape.before_endpoint_retirement")?;
+            unlink_shape_artifact(root, endpoints_name, &mut checkpoint.evidence)?;
+            construction_failpoint("shape.after_endpoint_retirement");
+            shape_publication_failure("shape.after_endpoint_retirement")?;
+        }
+        reject_cancelled(cancelled)?;
+    }
+    let (installed, segments) = resolved.finish_retaining(
         SHAPED_EDGE_ENDPOINTS,
         boundary,
-        retain_segments,
         cancelled,
-        evidence,
-    )
+        &mut checkpoint.evidence,
+    )?;
+    retire_behind_stage(
+        root,
+        checkpoint,
+        stages,
+        ShapeStageKind::Resolved,
+        StageResult {
+            outputs: installed
+                .as_deref()
+                .map(|name| receipt_for_existing(root, name))
+                .transpose()?
+                .into_iter()
+                .collect(),
+            ..StageResult::default()
+        },
+        &segments,
+    )?;
+    Ok(installed)
 }
 
 pub(super) fn validate_sorted_run(

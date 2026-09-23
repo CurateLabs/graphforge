@@ -373,17 +373,23 @@ pub(super) fn recover_shape_intent(
     // boundaryless state below is a full discard-and-replay.
     let chain = load_shape_progress_chain(root, checkpoint)?;
     let head_boundary = chain.last().map(LoadedShapeProgress::retired_through);
+    // Finish stages (#1562) hand their successors forward: those are resume
+    // state exactly like claimed segments, and are authenticated at the
+    // resume boundary with them.
+    let stages = super::finish_stages::load_shape_stages(root, checkpoint, &chain)?;
     let claimed = scan_shape_segments(
         root,
         head_boundary.unwrap_or(0),
+        &stages,
         &mut checkpoint.evidence,
         &mut || false,
     )?;
-    let claimed_names: BTreeSet<String> = claimed
+    let mut claimed_names: BTreeSet<String> = claimed
         .values()
         .flatten()
         .flat_map(|partition| partition.iter().map(|receipt| receipt.name.clone()))
         .collect();
+    claimed_names.extend(stages.live_output_names());
     let work = cleanup_incomplete_shape_capabilities(root, &claimed_names)?;
     for child in root.child_names().map_err(storage)? {
         let Some(name) = child.to_str() else { continue };
