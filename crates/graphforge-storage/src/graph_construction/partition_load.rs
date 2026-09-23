@@ -43,6 +43,7 @@ use super::{GraphConstructionEvidence, account_cache_release, account_sequential
 use graphforge_core::GfError;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
@@ -181,6 +182,19 @@ impl<T> Shared<T> {
     }
 }
 
+/// Stops the pool however the coordinator leaves it, including by unwinding
+/// out of `consume`. Without it a panicking `consume` never sets `stop`, the
+/// workers wait for window capacity forever, and the scope never joins
+/// (#1564).
+struct StopOnExit<'a, T>(&'a Shared<T>);
+
+impl<T> Drop for StopOnExit<'_, T> {
+    fn drop(&mut self) {
+        self.0.stop.store(true, Ordering::Release);
+        self.0.changed.notify_all();
+    }
+}
+
 /// Decrements the live-worker count however the worker exits.
 struct LiveWorker<'a, T>(&'a Shared<T>);
 
@@ -219,7 +233,11 @@ where
             state.next += 1;
             index
         };
-        let result = load(index, &shared.stop);
+        // A panicking load is this partition's error. Unwinding instead would
+        // leave `index` undelivered while the other workers stay live, and the
+        // coordinator would wait for it forever (#1564).
+        let result = catch_unwind(AssertUnwindSafe(|| load(index, &shared.stop)))
+            .unwrap_or_else(|_| Err(storage("partition load panicked")));
         let mut state = shared.lock();
         state.ready.insert(index, result);
         drop(state);
@@ -244,7 +262,9 @@ where
 /// The first error, in partition order for loads or immediately for
 /// `consume`, stops dispatch, sets `stop`, and is returned after every worker
 /// has exited. A load that fails after an earlier partition already failed is
-/// never observed.
+/// never observed. A panicking load is that partition's error; a panicking
+/// `consume` stops the pool and resumes on the caller once every worker has
+/// exited.
 pub(super) fn consume_in_partition_order<T, L, C>(
     partitions: usize,
     workers: NonZeroUsize,
@@ -274,7 +294,8 @@ where
         for _ in 0..window {
             scope.spawn(|| worker(&shared, partitions, window, &load));
         }
-        let outcome = (|| -> Result<(), GfError> {
+        let _stop = StopOnExit(&shared);
+        (|| -> Result<(), GfError> {
             for index in 0..partitions {
                 let loaded = {
                     let mut state = shared.lock();
@@ -293,10 +314,7 @@ where
                 shared.release_consumed(consume(index, loaded?))?;
             }
             Ok(())
-        })();
-        shared.stop.store(true, Ordering::Release);
-        shared.changed.notify_all();
-        outcome
+        })()
     })
 }
 

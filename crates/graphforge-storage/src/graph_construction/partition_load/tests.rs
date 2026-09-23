@@ -483,3 +483,92 @@ fn failed_consume_cannot_admit_a_replacement_partition() {
         "successful consumption admits the next partition"
     );
 }
+
+/// Run `consume_in_partition_order` on a detached thread and wait at most
+/// `SPIN_LIMIT` for it: a regression to the #1564 hang fails the test rather
+/// than hanging the suite. `None` means it never returned; `Some(Err(_))` means
+/// it panicked on the caller.
+fn bounded<R: Send + 'static>(
+    run: impl FnOnce() -> R + Send + 'static,
+) -> Option<std::thread::Result<R>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+        let _ = sender.send(outcome);
+    });
+    receiver.recv_timeout(SPIN_LIMIT).ok()
+}
+
+/// Loads running now and values not yet dropped, shared with a detached pool.
+#[derive(Default)]
+struct Joined {
+    running: AtomicUsize,
+    live: AtomicUsize,
+}
+
+struct Held(std::sync::Arc<Joined>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.live.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn a_panicking_load_fails_the_pool_instead_of_hanging_it() {
+    const PARTITIONS: usize = 8;
+    for count in [1, 2, 3] {
+        let joined = std::sync::Arc::new(Joined::default());
+        let pool = std::sync::Arc::clone(&joined);
+        let outcome = bounded(move || {
+            let load = |index: usize, _stop: &AtomicBool| {
+                pool.running.fetch_add(1, Ordering::SeqCst);
+                pool.live.fetch_add(1, Ordering::SeqCst);
+                let held = Held(std::sync::Arc::clone(&pool));
+                // Hold the panic until the other workers are genuinely in
+                // flight, which is the state that used to hang.
+                std::thread::sleep(Duration::from_millis(20));
+                pool.running.fetch_sub(1, Ordering::SeqCst);
+                assert!(index != 0, "injected partition load panic");
+                Ok(held)
+            };
+            consume_in_partition_order(PARTITIONS, workers(count), load, |_, _| Ok(()))
+                .map_err(|error| error.to_string())
+        });
+        let Some(Ok(Err(error))) = outcome else {
+            panic!("workers={count}: expected a structured error, got {outcome:?}");
+        };
+        assert!(
+            error.contains("partition load panicked"),
+            "workers={count}: {error}"
+        );
+        // Joined: every worker exited and every loaded value was dropped
+        // before the pool returned.
+        assert_eq!(joined.running.load(Ordering::SeqCst), 0, "workers={count}");
+        assert_eq!(joined.live.load(Ordering::SeqCst), 0, "workers={count}");
+    }
+}
+
+#[test]
+fn a_panicking_consume_resumes_on_the_caller_after_the_workers_exit() {
+    let joined = std::sync::Arc::new(Joined::default());
+    let pool = std::sync::Arc::clone(&joined);
+    let outcome = bounded(move || {
+        let load = |_index: usize, _stop: &AtomicBool| {
+            pool.running.fetch_add(1, Ordering::SeqCst);
+            pool.live.fetch_add(1, Ordering::SeqCst);
+            let held = Held(std::sync::Arc::clone(&pool));
+            pool.running.fetch_sub(1, Ordering::SeqCst);
+            Ok(held)
+        };
+        let consume = |index: usize, _held: Held| {
+            assert!(index != 1, "injected consume panic");
+            Ok(())
+        };
+        consume_in_partition_order(8, workers(3), load, consume)
+    });
+    // The caller's panic is the caller's to see, not a hang and not an error.
+    assert!(matches!(outcome, Some(Err(_))), "{outcome:?}");
+    assert_eq!(joined.running.load(Ordering::SeqCst), 0);
+    assert_eq!(joined.live.load(Ordering::SeqCst), 0);
+}
