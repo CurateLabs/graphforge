@@ -369,7 +369,7 @@ mod tests {
         assert!(reader.row(0).is_err());
         assert!(reader.row_len(0).is_err());
         assert!(reader.row_chunk(0, 0, 1).is_err());
-        assert!(reader.cache.lock().unwrap().is_none());
+        assert!(reader.cache.lock().unwrap().entries.is_empty());
         assert!(!shard_set_matches(&reader.root, &reader.manifest.shards));
     }
 

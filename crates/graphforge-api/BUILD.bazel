@@ -444,6 +444,13 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "multishard_two_hop",
+    srcs = ["tests/multishard_two_hop.rs"],
+    crate = ":graphforge_api",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "lifecycle_io_attribution",
     srcs = ["tests/lifecycle_io_attribution.rs"],
     crate = ":graphforge_api",
@@ -669,6 +676,7 @@ test_suite(
         ":modularity",
         ":multi_label_scaling",
         ":multi_ontology_certification",
+        ":multishard_two_hop",
         ":pattern_comprehension",
         ":percentile_aggregates",
         ":provider_session",

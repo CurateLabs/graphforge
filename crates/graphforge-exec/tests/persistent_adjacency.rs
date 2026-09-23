@@ -1010,3 +1010,71 @@ fn cardinality_rejects_same_generation_wrong_manifest_counts() {
         }
     }
 }
+
+/// #1518: an alternating (unordered) frontier over a genuinely multi-shard
+/// index — the S18 two-hop shape — must serve correct rows for every node.
+/// The bounded-decode guarantee itself is proven at the storage layer
+/// (`alternating_shard_frontier_decodes_each_shard_once`); this proves the
+/// provider-served view stays correct over the multi-shard layout.
+#[test]
+fn alternating_frontier_serves_correct_rows_over_multi_shard_index() {
+    let dir = TempDir::new().unwrap();
+    let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+    let uuids: Vec<Uuid> = (0..60).map(|_| new_v7()).collect();
+    for uuid in &uuids {
+        w.create_node(*uuid, PERSON).unwrap();
+    }
+    for index in 0..60_usize {
+        for offset in [1_usize, 7, 31] {
+            let source = &uuids[index];
+            let target = &uuids[(index + offset) % 60];
+            w.create_edge(new_v7(), "KNOWS", source, target).unwrap();
+        }
+    }
+    w.flush().unwrap();
+
+    // Deliberately tiny shard caps so the published layout is multi-shard.
+    let mut options = graphforge_storage::adjacency::AdjacencyBuildOptions::default();
+    options.shard_max_edges = 2;
+    options.shard_max_nodes = 8;
+    graphforge_storage::adjacency::build_adjacency_index_into_with_options(
+        dir.path(),
+        dir.path(),
+        TS,
+        &options,
+        &mut || Ok(()),
+    )
+    .unwrap();
+
+    let csr_path = graphforge_storage::adjacency::csr_path(
+        dir.path(),
+        "KNOWS",
+        graphforge_storage::adjacency::Direction::Out,
+    );
+    let csr = graphforge_storage::adjacency::ShardedCsrIndex::open(&csr_path).unwrap();
+    assert!(
+        csr.shard_count() > 1,
+        "fixture must publish a multi-shard index"
+    );
+
+    let provider = persistent(dir.path(), OntologyMode::Strict);
+    assert_eq!(
+        provider.status("KNOWS", Direction::Out),
+        AdjacencyStatus::Hit
+    );
+    let view = provider.adjacency("KNOWS", Direction::Out).unwrap();
+
+    // An interleave order that alternates shards on every step, several rounds.
+    let nodes = csr.node_count();
+    for round in 0..3 {
+        for offset in 0..nodes {
+            let node = (offset * 17 + round) % nodes;
+            let expected = csr.row(node).unwrap();
+            assert_eq!(
+                view.neighbors(node).unwrap().iter().collect::<Vec<_>>(),
+                expected,
+                "node {node} round {round}"
+            );
+        }
+    }
+}

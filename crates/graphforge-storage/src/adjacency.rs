@@ -103,15 +103,93 @@ struct CsrShardManifest {
     shards: Vec<CsrShardRecord>,
 }
 
+/// Default byte budget for decoded shards retained by one [`ShardedCsrIndex`].
+/// Mirrors the 1 GiB `DEFAULT_CACHE_RELEASE_WINDOW_BYTES` operation scale: a
+/// hard-capped shard decodes to at most `8*(N+1) + 16*E + bitmaps` bytes with
+/// `N, E <= 1_048_576` (under 24 MiB), so the budget always retains dozens of
+/// shards while never scaling with the graph (`#1094`).
+pub const DEFAULT_DECODED_SHARD_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// One decoded shard retained by [`DecodedShardCache`].
+#[derive(Debug)]
+struct CachedShard {
+    file: String,
+    csr: CsrIndex,
+    decoded_bytes: u64,
+    last_used: u64,
+}
+
+/// Byte-budgeted least-recently-used cache of decoded shards. Random-access
+/// frontiers (for example a two-hop `ExpandExec` frontier in neighbour order)
+/// otherwise re-decode one shard per row; retaining several decoded shards
+/// bounds the decodes by the shard count while keeping reader memory bounded
+/// by the configured budget, not by the graph (#1518). Entries survive until a
+/// replacement fully authenticates, so a failed read never evicts the usable
+/// state.
+#[derive(Debug, Default)]
+struct DecodedShardCache {
+    entries: Vec<CachedShard>,
+    retained_bytes: u64,
+    budget_bytes: u64,
+    tick: u64,
+    decodes: u64,
+}
+
+impl DecodedShardCache {
+    fn new(budget_bytes: u64) -> Self {
+        Self {
+            budget_bytes: budget_bytes.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn position(&self, file: &str) -> Option<usize> {
+        self.entries.iter().position(|entry| entry.file == file)
+    }
+
+    fn note_hit(&mut self, index: usize) {
+        self.tick += 1;
+        self.entries[index].last_used = self.tick;
+    }
+
+    /// Insert a fully authenticated shard, evicting least-recently-used
+    /// entries first. A shard larger than the whole budget (impossible under
+    /// the hard shard caps) still caches alone instead of being dropped, so
+    /// the retained total never exceeds `max(budget, one shard)`.
+    fn insert(&mut self, file: String, csr: CsrIndex, decoded_bytes: u64) {
+        self.tick += 1;
+        while !self.entries.is_empty() && self.retained_bytes + decoded_bytes > self.budget_bytes {
+            let victim = self
+                .entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(index, _)| index)
+                .expect("non-empty entries");
+            let removed = self.entries.remove(victim);
+            self.retained_bytes -= removed.decoded_bytes;
+        }
+        self.retained_bytes += decoded_bytes;
+        self.entries.push(CachedShard {
+            file,
+            csr,
+            decoded_bytes,
+            last_used: self.tick,
+        });
+    }
+}
+
 /// Bounded reader for a versioned sharded CSR. Opening validates the small
 /// manifest; row access reads and authenticates only the containing shard.
 #[derive(Clone, Debug)]
 pub struct ShardedCsrIndex {
     root: PathBuf,
     manifest: CsrShardManifest,
-    // One decoded shard is enough to make sequential row traversal O(shards)
-    // while keeping reader memory bounded by the configured shard limit.
-    cache: std::sync::Arc<std::sync::Mutex<Option<(String, CsrIndex)>>>,
+    // Decoded shards are retained least-recently-used within a byte budget:
+    // sequential traversal still pays O(shards) decodes, while random-access
+    // frontiers stop paying one decode per row (#1518). Reader memory stays
+    // bounded by the budget, never by the graph (#1094).
+    cache: std::sync::Arc<std::sync::Mutex<DecodedShardCache>>,
 }
 
 impl ShardedCsrIndex {
@@ -188,7 +266,9 @@ impl ShardedCsrIndex {
         Ok(Self {
             root,
             manifest,
-            cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            cache: std::sync::Arc::new(std::sync::Mutex::new(DecodedShardCache::new(
+                DEFAULT_DECODED_SHARD_CACHE_BYTES,
+            ))),
         })
     }
 
@@ -306,16 +386,47 @@ impl ShardedCsrIndex {
             .cache
             .lock()
             .map_err(|_| GfError::Storage("CSR shard cache lock poisoned".into()))?;
-        if let Some((file, csr)) = cache.as_ref()
-            && file == &record.file
-        {
-            return Ok(map(csr.row(node_id - record.first_node)));
+        if let Some(index) = cache.position(&record.file) {
+            cache.note_hit(index);
+            return Ok(map(cache.entries[index]
+                .csr
+                .row(node_id - record.first_node)));
         }
+        // The decode holds the lock so concurrent readers cannot duplicate the
+        // read-authenticate-decode work; retained entries survive a failed
+        // decode unchanged.
         let path = self.root.join(&record.file);
         let csr = read_authenticated_shard(&path, record)?;
         let output = map(csr.row(node_id - record.first_node));
-        *cache = Some((record.file.clone(), csr));
+        cache.decodes += 1;
+        cache.insert(record.file.clone(), csr, record.decoded_bytes);
         Ok(output)
+    }
+
+    /// Number of shard reads this index authenticated and decoded. Diagnostics
+    /// for the bounded-decode guarantee of `#1518`: random-access frontiers
+    /// must not drive this toward the frontier length.
+    #[must_use]
+    pub fn shard_decode_count(&self) -> u64 {
+        self.cache
+            .lock()
+            .map(|cache| cache.decodes)
+            .unwrap_or_default()
+    }
+
+    /// Number of shards in the opened manifest.
+    #[must_use]
+    pub fn shard_count(&self) -> usize {
+        self.manifest.shards.len()
+    }
+
+    /// Decoded shard bytes currently retained by the byte-budgeted cache.
+    #[must_use]
+    pub fn retained_decoded_bytes(&self) -> u64 {
+        self.cache
+            .lock()
+            .map(|cache| cache.retained_bytes)
+            .unwrap_or_default()
     }
 }
 
@@ -1885,39 +1996,43 @@ mod tests {
         let mut corrupt = original.clone();
         corrupt[0] ^= 1;
         std::fs::write(&first, corrupt).unwrap();
-        assert!(reader.row(0).unwrap_err().to_string().contains("checksum"));
+        // The warm reader legitimately serves shard 0 from its authenticated
+        // decoded cache; a fresh session (cold cache) must re-touch the file.
+        let fresh = ShardedCsrIndex::open(&path).unwrap();
+        assert!(fresh.row(0).unwrap_err().to_string().contains("checksum"));
         assert!(
-            reader
+            fresh
                 .row_len(0)
                 .unwrap_err()
                 .to_string()
                 .contains("checksum")
         );
         assert!(
-            reader
+            fresh
                 .row_chunk(0, 0, 1)
                 .unwrap_err()
                 .to_string()
                 .contains("checksum")
         );
         std::fs::write(&first, original).unwrap();
+        let fresh = ShardedCsrIndex::open(&path).unwrap();
         std::fs::remove_file(&first).unwrap();
         assert!(
-            reader
+            fresh
                 .row(0)
                 .unwrap_err()
                 .to_string()
                 .contains("missing CSR shard")
         );
         assert!(
-            reader
+            fresh
                 .row_len(0)
                 .unwrap_err()
                 .to_string()
                 .contains("missing CSR shard")
         );
         assert!(
-            reader
+            fresh
                 .row_chunk(0, 0, 1)
                 .unwrap_err()
                 .to_string()
@@ -2057,10 +2172,255 @@ mod tests {
             assert!(chunk.len() <= 3);
             chunks.extend(chunk);
             let cache = reader.cache.lock().unwrap();
-            assert!(cache.as_ref().unwrap().1.edge_count() <= 2);
+            assert!(
+                cache
+                    .entries
+                    .iter()
+                    .all(|entry| entry.csr.edge_count() <= 2)
+            );
         }
         assert_eq!(chunks, expected.row(0).iter().collect::<Vec<_>>());
         assert!(reader.row_chunk(0, 7, 3).unwrap().is_empty());
+    }
+
+    /// A three-shard index whose frontier alternates shards every row — the
+    /// S18 two-hop shape (#1518). Shard decodes must be bounded by the shard
+    /// count, not by the frontier length.
+    #[test]
+    fn alternating_shard_frontier_decodes_each_shard_once() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        let expected = CsrIndex {
+            offsets: vec![0, 1, 2, 3, 4, 5, 6],
+            edge_ids: (100..106).collect(),
+            neighbor_ids: (200..206).collect(),
+        };
+        write_sharded_csr(&path, &expected, 2).unwrap();
+        let reader = ShardedCsrIndex::open(&path).unwrap();
+        let shard_count = reader.manifest.shards.len();
+        assert_eq!(shard_count, 3);
+
+        // Neighbour-ordered frontiers interleave shards every row; several
+        // rounds prove the cache retains the decoded shards across passes.
+        let frontier = [0_u64, 3, 1, 4, 2, 5];
+        for _ in 0..4 {
+            for node in frontier {
+                assert_eq!(
+                    reader.row(node).unwrap(),
+                    expected.row(node).iter().collect::<Vec<_>>()
+                );
+                assert_eq!(reader.row_len(node).unwrap(), 1);
+                assert_eq!(
+                    reader.row_chunk(node, 0, usize::MAX).unwrap(),
+                    expected.row(node).iter().collect::<Vec<_>>()
+                );
+            }
+        }
+        assert_eq!(
+            reader.shard_decode_count(),
+            u64::try_from(shard_count).unwrap(),
+            "an alternating frontier must not re-decode per row"
+        );
+    }
+
+    /// S18-shaped measurement for #1518: four default-capped shards (the S18
+    /// four-shard adjacency) probed by an alternating frontier. Manual/scale:
+    /// run explicitly, before and after a candidate change, e.g.
+    /// `cargo test -p graphforge-storage --release --lib s18_shape -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "manual/scale: S18 four-shard alternating-frontier cost; run explicitly for #1518 evidence"]
+    fn s18_shape_alternating_frontier_measurement() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        let shards = 4_usize;
+        let rows = shards * DEFAULT_CSR_SHARD_EDGES;
+        let frontier_rows = 4_096_usize;
+        let expected = CsrIndex {
+            offsets: (0..=rows as u64).collect(),
+            edge_ids: (0..rows as u64).collect(),
+            neighbor_ids: (0..rows as u64).collect(),
+        };
+        let started = std::time::Instant::now();
+        write_sharded_csr(&path, &expected, DEFAULT_CSR_SHARD_EDGES).unwrap();
+        let reader = ShardedCsrIndex::open(&path).unwrap();
+        assert_eq!(reader.manifest.shards.len(), shards);
+        let encoded: u64 = reader
+            .manifest
+            .shards
+            .iter()
+            .map(|shard| shard.encoded_bytes)
+            .sum();
+        // Neighbour-ordered frontier: consecutive rows land in different
+        // shards, the shape the S18 two-hop run paid 741 GB of re-reads for.
+        for index in 0..frontier_rows {
+            let node = ((index * 1_000_003) % rows) as u64;
+            assert_eq!(reader.row(node).unwrap().len(), 1);
+        }
+        println!(
+            "S18_ALTERNATING_FRONTIER {}",
+            serde_json::json!({
+                "shards": shards,
+                "edges": rows,
+                "frontier_rows": frontier_rows,
+                "encoded_bytes": encoded,
+                "shard_decodes": reader.shard_decode_count(),
+                "retained_decoded_bytes": reader.retained_decoded_bytes(),
+                "build_and_probe_ms": started.elapsed().as_millis() as u64,
+            })
+        );
+    }
+
+    /// Sequential traversal still pays exactly one decode per shard.
+    #[test]
+    fn sequential_traversal_decodes_each_shard_once() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        let expected = CsrIndex {
+            offsets: vec![0, 1, 2, 3, 4, 5, 6],
+            edge_ids: (100..106).collect(),
+            neighbor_ids: (200..206).collect(),
+        };
+        write_sharded_csr(&path, &expected, 2).unwrap();
+        let reader = ShardedCsrIndex::open(&path).unwrap();
+        for node in 0..reader.node_count() {
+            assert_eq!(
+                reader.row(node).unwrap(),
+                expected.row(node).iter().collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(reader.shard_decode_count(), 3);
+    }
+
+    /// The byte-budgeted cache evicts least-recently-used shards and never
+    /// retains more than `max(budget, one shard)` decoded bytes.
+    #[test]
+    fn decoded_shard_cache_evicts_by_bytes_and_serves_correct_rows() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        let expected = CsrIndex {
+            offsets: vec![0, 1, 2, 3, 4, 5, 6],
+            edge_ids: (100..106).collect(),
+            neighbor_ids: (200..206).collect(),
+        };
+        write_sharded_csr(&path, &expected, 2).unwrap();
+        let manifest_bytes = std::fs::read(path.with_extension("csr.json")).unwrap();
+        let manifest: CsrShardManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        let one_shard = manifest.shards[0].decoded_bytes;
+        let reader = open_with_budget(&path, one_shard.saturating_mul(3) / 2).unwrap();
+        assert_eq!(reader.manifest.shards.len(), 3);
+
+        // Every read stays correct while the cache churns: the budget holds
+        // one shard, so an alternating frontier degenerates to one decode per
+        // access — bounded memory, honest cost.
+        for _ in 0..3 {
+            for node in [0_u64, 3, 1, 4, 2, 5] {
+                assert_eq!(
+                    reader.row(node).unwrap(),
+                    expected.row(node).iter().collect::<Vec<_>>()
+                );
+            }
+        }
+        let cache = reader.cache.lock().unwrap();
+        assert!(
+            cache.retained_bytes <= one_shard,
+            "retained {} exceeds the one-shard bound",
+            cache.retained_bytes
+        );
+        assert_eq!(cache.entries.len(), 1);
+    }
+
+    /// A budget that fits every shard retains them all: the S18 shape.
+    #[test]
+    fn decoded_shard_cache_holds_every_shard_within_budget() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        let expected = CsrIndex {
+            offsets: vec![0, 1, 2, 3, 4, 5, 6],
+            edge_ids: (100..106).collect(),
+            neighbor_ids: (200..206).collect(),
+        };
+        write_sharded_csr(&path, &expected, 2).unwrap();
+        let manifest_bytes = std::fs::read(path.with_extension("csr.json")).unwrap();
+        let manifest: CsrShardManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        let total: u64 = manifest
+            .shards
+            .iter()
+            .map(|shard| shard.decoded_bytes)
+            .sum();
+        let reader = open_with_budget(&path, total).unwrap();
+        for node in [0_u64, 3, 1, 4, 2, 5, 0, 5, 1, 4, 2, 3] {
+            reader.row(node).unwrap();
+        }
+        let cache = reader.cache.lock().unwrap();
+        assert_eq!(cache.entries.len(), 3);
+        assert_eq!(cache.retained_bytes, total);
+        assert!(cache.retained_bytes <= cache.budget_bytes);
+    }
+
+    /// Opening with the default budget wires the documented 1 GiB bound.
+    #[test]
+    fn default_cache_budget_matches_documented_bytes() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        write_sharded_csr(&path, &sample_csr(), 2).unwrap();
+        let reader = ShardedCsrIndex::open(&path).unwrap();
+        assert_eq!(
+            reader.cache.lock().unwrap().budget_bytes,
+            DEFAULT_DECODED_SHARD_CACHE_BYTES
+        );
+        assert_eq!(DEFAULT_DECODED_SHARD_CACHE_BYTES, 1024 * 1024 * 1024);
+    }
+
+    /// A failed shard authentication leaves every retained entry in place:
+    /// eviction only happens for a fully validated replacement.
+    #[test]
+    fn failed_decode_evicts_nothing() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        let expected = CsrIndex {
+            offsets: vec![0, 1, 2, 3, 4, 5, 6],
+            edge_ids: (100..106).collect(),
+            neighbor_ids: (200..206).collect(),
+        };
+        write_sharded_csr(&path, &expected, 2).unwrap();
+        let manifest_bytes = std::fs::read(path.with_extension("csr.json")).unwrap();
+        let manifest: CsrShardManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        let total: u64 = manifest
+            .shards
+            .iter()
+            .map(|shard| shard.decoded_bytes)
+            .sum();
+        let mut reader = open_with_budget(&path, total).unwrap();
+
+        // Retain the first two shards, then corrupt the third shard payload.
+        reader.row(0).unwrap();
+        reader.row(3).unwrap();
+        let victim = &mut reader.manifest.shards[2];
+        let victim_path = reader.root.join(&victim.file);
+        let mut bytes = std::fs::read(&victim_path).unwrap();
+        bytes[0] ^= 0xFF;
+        victim.sha256 = sha256_hex(&bytes);
+        std::fs::write(&victim_path, bytes).unwrap();
+
+        assert!(reader.row(5).is_err());
+        let cache = reader.cache.lock().unwrap();
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.decodes, 2);
+        assert_eq!(
+            cache.retained_bytes,
+            total - manifest.shards[2].decoded_bytes
+        );
+    }
+
+    #[cfg(test)]
+    fn open_with_budget(path: &Path, budget_bytes: u64) -> Result<ShardedCsrIndex, GfError> {
+        let reader = ShardedCsrIndex::open(path)?;
+        let manifest = reader.manifest.clone();
+        Ok(ShardedCsrIndex {
+            root: reader.root.clone(),
+            manifest,
+            cache: std::sync::Arc::new(std::sync::Mutex::new(DecodedShardCache::new(budget_bytes))),
+        })
     }
 
     #[test]
