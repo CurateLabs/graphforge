@@ -1,0 +1,2525 @@
+{
+ "schema": "graphforge-spill-memory-pool-1507/1",
+ "source_commit": "01460cc0 (spike) measured with driver 39c6abcf",
+ "build": "CARGO_TARGET_DIR=<dir> cargo build --release -p graphforge-cli -p graphforge-storage --features graphforge-storage/test-support",
+ "manifest": {
+  "gf": "/home/ubuntu/gf-1507-evidence/bin/gf",
+  "gf_sha256": "ccc23c62843fa43034ace1c82979e1c0116db62c13fea0085995616d564df790",
+  "generator_sha256": "2637a10636ac4ceafadca2c52d2c60542824782102d6ac9e277cfb280296a11e",
+  "seed": "13907095936298285200",
+  "edge_factor": 16,
+  "modes": {
+   "baseline": {},
+   "external": {
+    "GF_SHAPE_SPILL_SPIKE": "datafusion-always"
+   },
+   "external-tight": {
+    "GF_SHAPE_SPILL_SPIKE": "datafusion-always",
+    "GF_SHAPE_SPILL_POOL_BYTES": "65536"
+   }
+  },
+  "quiet_samples_before_start": 12,
+  "uname": "7.0.0-30-generic",
+  "s18_inputs": {
+   "nodes.parquet": "44c9dfd9325013d0f6ea2f03bd86b00d2bea01265254cb28f70f0881a6478075",
+   "edges.parquet": "f112ccbec94875f36f113e9bdf3e6e7d88e3105bafbaeeb3a7cb42ac4883e9c4"
+  },
+  "s20_inputs": {
+   "nodes.parquet": "5792da943d39a3ec0cfe48c375fef1b078ae31f2c086af5d9bcfd417c74f24aa",
+   "edges.parquet": "3fb656aa9af568f12359c51fcb6a337460d0521ac07bd05def3a7e98f2e51086"
+  }
+ },
+ "driver_sha256": "5a5e9e9b0adff5f70dc7e0099aa130fcf96910b9eb4d31d71e957d1935704fc0",
+ "host": {
+  "name": "OVHC-AGENCY",
+  "cpu": "AMD Ryzen 7 3800X 8-Core Processor (16 logical)",
+  "filesystem": "ext4 on mdadm RAID 1"
+ },
+ "summary": {
+  "s18/baseline": {
+   "wall_s": {
+    "median": 31.597270296886563,
+    "min": 31.22175237396732,
+    "max": 32.02329640905373
+   },
+   "cpu_s": {
+    "median": 28.697969000000004,
+    "min": 28.590932000000002,
+    "max": 28.950675
+   },
+   "max_rss_kib": {
+    "median": 249892,
+    "min": 244644,
+    "max": 251664
+   },
+   "validate_wall_s": {
+    "median": 28.560645041055977,
+    "min": 28.19889019499533,
+    "max": 28.848693172913045
+   },
+   "validate_cpu_s": {
+    "median": 27.170883000000003,
+    "min": 27.040033,
+    "max": 27.406381
+   },
+   "validate_max_rss_kib": {
+    "median": 249892,
+    "min": 244644,
+    "max": 251664
+   },
+   "oublock_512": {
+    "median": 7177960,
+    "min": 7177960,
+    "max": 7177960
+   },
+   "host_pages_dirtied": {
+    "median": 899704,
+    "min": 899390,
+    "max": 900894
+   },
+   "host_pages_written": {
+    "median": 800294,
+    "min": 800062,
+    "max": 801486
+   },
+   "n": 3
+  },
+  "s18/external": {
+   "wall_s": {
+    "median": 33.48700306098908,
+    "min": 33.39345303992741,
+    "max": 34.48795533995144
+   },
+   "cpu_s": {
+    "median": 32.414549,
+    "min": 32.39806,
+    "max": 32.590832
+   },
+   "max_rss_kib": {
+    "median": 274900,
+    "min": 260936,
+    "max": 276472
+   },
+   "validate_wall_s": {
+    "median": 30.40371345798485,
+    "min": 30.24707989790477,
+    "max": 31.3888674560003
+   },
+   "validate_cpu_s": {
+    "median": 30.883928,
+    "min": 30.876537,
+    "max": 31.067137000000002
+   },
+   "validate_max_rss_kib": {
+    "median": 274900,
+    "min": 260936,
+    "max": 276472
+   },
+   "oublock_512": {
+    "median": 7177960,
+    "min": 7177960,
+    "max": 7177960
+   },
+   "host_pages_dirtied": {
+    "median": 901097,
+    "min": 899082,
+    "max": 902689
+   },
+   "host_pages_written": {
+    "median": 802456,
+    "min": 800228,
+    "max": 935810
+   },
+   "n": 3
+  },
+  "s18/external-tight": {
+   "wall_s": {
+    "median": 49.69819669285789,
+    "min": 49.33040217706002,
+    "max": 50.30898249289021
+   },
+   "cpu_s": {
+    "median": 66.246818,
+    "min": 65.69413,
+    "max": 66.791704
+   },
+   "max_rss_kib": {
+    "median": 283192,
+    "min": 265508,
+    "max": 292492
+   },
+   "validate_wall_s": {
+    "median": 46.64181005093269,
+    "min": 46.05990964616649,
+    "max": 47.17944992519915
+   },
+   "validate_cpu_s": {
+    "median": 64.710784,
+    "min": 64.156083,
+    "max": 65.273611
+   },
+   "validate_max_rss_kib": {
+    "median": 283192,
+    "min": 265508,
+    "max": 292492
+   },
+   "oublock_512": {
+    "median": 15146000,
+    "min": 15146000,
+    "max": 15146000
+   },
+   "host_pages_dirtied": {
+    "median": 1901175,
+    "min": 1896635,
+    "max": 1901942
+   },
+   "host_pages_written": {
+    "median": 1801165,
+    "min": 1796972,
+    "max": 1801473
+   },
+   "n": 3
+  },
+  "s20/baseline": {
+   "wall_s": {
+    "median": 126.82426543789916,
+    "min": 126.77741234493442,
+    "max": 128.04808911588043
+   },
+   "cpu_s": {
+    "median": 117.89111400000002,
+    "min": 117.17646900000001,
+    "max": 118.000962
+   },
+   "max_rss_kib": {
+    "median": 311960,
+    "min": 309324,
+    "max": 321420
+   },
+   "validate_wall_s": {
+    "median": 114.66558215511031,
+    "min": 114.33327432186343,
+    "max": 116.13978467299603
+   },
+   "validate_cpu_s": {
+    "median": 111.82934300000001,
+    "min": 111.210587,
+    "max": 112.034745
+   },
+   "validate_max_rss_kib": {
+    "median": 311960,
+    "min": 309324,
+    "max": 321420
+   },
+   "oublock_512": {
+    "median": 28950528,
+    "min": 28950528,
+    "max": 28950528
+   },
+   "host_pages_dirtied": {
+    "median": 3627834,
+    "min": 3627816,
+    "max": 3628020
+   },
+   "host_pages_written": {
+    "median": 3234636,
+    "min": 3234531,
+    "max": 3234664
+   },
+   "n": 3
+  },
+  "s20/external": {
+   "wall_s": {
+    "median": 135.29870909801684,
+    "min": 135.21464330004528,
+    "max": 136.46165674109943
+   },
+   "cpu_s": {
+    "median": 133.922209,
+    "min": 133.77694599999998,
+    "max": 134.713504
+   },
+   "max_rss_kib": {
+    "median": 386420,
+    "min": 347232,
+    "max": 388720
+   },
+   "validate_wall_s": {
+    "median": 123.10034616990015,
+    "min": 122.97323974594474,
+    "max": 124.27380012883805
+   },
+   "validate_cpu_s": {
+    "median": 127.94441699999999,
+    "min": 127.843119,
+    "max": 128.656966
+   },
+   "validate_max_rss_kib": {
+    "median": 386420,
+    "min": 347232,
+    "max": 388720
+   },
+   "oublock_512": {
+    "median": 28950528,
+    "min": 28950528,
+    "max": 28950528
+   },
+   "host_pages_dirtied": {
+    "median": 3628247,
+    "min": 3628158,
+    "max": 3629505
+   },
+   "host_pages_written": {
+    "median": 3234723,
+    "min": 3234213,
+    "max": 3235982
+   },
+   "n": 3
+  },
+  "s20/external-tight": {
+   "wall_s": {
+    "median": 203.95319000002928,
+    "min": 203.38784312596545,
+    "max": 204.02709150197916
+   },
+   "cpu_s": {
+    "median": 278.87242399999997,
+    "min": 278.808363,
+    "max": 279.314435
+   },
+   "max_rss_kib": {
+    "median": 373412,
+    "min": 372772,
+    "max": 375700
+   },
+   "validate_wall_s": {
+    "median": 191.93330084206536,
+    "min": 191.39005807694048,
+    "max": 191.96753407502547
+   },
+   "validate_cpu_s": {
+    "median": 272.94008199999996,
+    "min": 272.774101,
+    "max": 273.218251
+   },
+   "validate_max_rss_kib": {
+    "median": 373412,
+    "min": 372772,
+    "max": 375700
+   },
+   "oublock_512": {
+    "median": 65188696,
+    "min": 65188696,
+    "max": 65188696
+   },
+   "host_pages_dirtied": {
+    "median": 8162547,
+    "min": 8161288,
+    "max": 8166768
+   },
+   "host_pages_written": {
+    "median": 7768390,
+    "min": 7767452,
+    "max": 7773807
+   },
+   "n": 3
+  }
+ },
+ "instrumented": [
+  {
+   "name": "s18-instrumented-external",
+   "scale": 18,
+   "mode": "external",
+   "ok": true,
+   "external_partitions": 1298,
+   "spilling_partitions": 0,
+   "records": 25690112,
+   "input_wire_bytes": 830210048,
+   "spill_count": 0,
+   "spilled_bytes": 0,
+   "spilled_rows": 0,
+   "peak_pool_bytes": 16348276,
+   "pool_limit_bytes": 268435456,
+   "peak_spill_disk_bytes": 0,
+   "peak_spill_files": 0,
+   "sort_wall_s": 6.605863707,
+   "merge_wall_s": 3.145695396,
+   "wall_s": 32.6133964699693,
+   "max_rss_kib": 266592,
+   "validate_max_rss_kib": 266592,
+   "scratch_leftovers": []
+  },
+  {
+   "name": "s18-instrumented-external-tight",
+   "scale": 18,
+   "mode": "external-tight",
+   "ok": true,
+   "external_partitions": 1298,
+   "spilling_partitions": 1296,
+   "records": 25690112,
+   "input_wire_bytes": 830210048,
+   "spill_count": 63287,
+   "spilled_bytes": 3907265712,
+   "spilled_rows": 120803740,
+   "peak_pool_bytes": 65524,
+   "pool_limit_bytes": 65536,
+   "peak_spill_disk_bytes": 2950272,
+   "peak_spill_files": 117,
+   "sort_wall_s": 35.116334647,
+   "merge_wall_s": 6.649180282,
+   "wall_s": 49.32765337196179,
+   "max_rss_kib": 299008,
+   "validate_max_rss_kib": 299008,
+   "scratch_leftovers": []
+  },
+  {
+   "name": "s20-instrumented-external",
+   "scale": 20,
+   "mode": "external",
+   "ok": true,
+   "external_partitions": 3650,
+   "spilling_partitions": 0,
+   "records": 102760448,
+   "input_wire_bytes": 3320840192,
+   "spill_count": 0,
+   "spilled_bytes": 0,
+   "spilled_rows": 0,
+   "peak_pool_bytes": 27585832,
+   "pool_limit_bytes": 268435456,
+   "peak_spill_disk_bytes": 0,
+   "peak_spill_files": 0,
+   "sort_wall_s": 25.74988327,
+   "merge_wall_s": 14.347035795,
+   "wall_s": 134.20041477796622,
+   "max_rss_kib": 372868,
+   "validate_max_rss_kib": 372868,
+   "scratch_leftovers": []
+  },
+  {
+   "name": "s20-instrumented-external-tight",
+   "scale": 20,
+   "mode": "external-tight",
+   "ok": true,
+   "external_partitions": 3650,
+   "spilling_partitions": 3648,
+   "records": 102760448,
+   "input_wire_bytes": 3320840192,
+   "spill_count": 253913,
+   "spilled_bytes": 17861677544,
+   "spilled_rows": 549450472,
+   "peak_pool_bytes": 65524,
+   "pool_limit_bytes": 65536,
+   "peak_spill_disk_bytes": 8674304,
+   "peak_spill_files": 344,
+   "sort_wall_s": 151.805244064,
+   "merge_wall_s": 26.730262962,
+   "wall_s": 202.50595380296,
+   "max_rss_kib": 348124,
+   "validate_max_rss_kib": 348124,
+   "scratch_leftovers": []
+  }
+ ],
+ "commit_receipts": {
+  "18": [
+   {
+    "name": "s18-p1-baseline-a1",
+    "input_rows": 4456448,
+    "fsync_operations": 872,
+    "write_bytes": 781593496,
+    "accepted_chunks": 68
+   },
+   {
+    "name": "s18-p1-external-a2",
+    "input_rows": 4456448,
+    "fsync_operations": 872,
+    "write_bytes": 781593496,
+    "accepted_chunks": 68
+   },
+   {
+    "name": "s18-p1-external-tight-a2",
+    "input_rows": 4456448,
+    "fsync_operations": 872,
+    "write_bytes": 781593496,
+    "accepted_chunks": 68
+   },
+   {
+    "name": "s18-p2-external-a1",
+    "input_rows": 4456448,
+    "fsync_operations": 872,
+    "write_bytes": 781593496,
+    "accepted_chunks": 68
+   },
+   {
+    "name": "s18-p2-external-tight-a2",
+    "input_rows": 4456448,
+    "fsync_operations": 872,
+    "write_bytes": 781593496,
+    "accepted_chunks": 68
+   },
+   {
+    "name": "s18-p2-baseline-a1",
+    "input_rows": 4456448,
+    "fsync_operations": 872,
+    "write_bytes": 781593496,
+    "accepted_chunks": 68
+   },
+   {
+    "name": "s18-p3-external-tight-a1",
+    "input_rows": 4456448,
+    "fsync_operations": 872,
+    "write_bytes": 781593496,
+    "accepted_chunks": 68
+   },
+   {
+    "name": "s18-p3-baseline-a1",
+    "input_rows": 4456448,
+    "fsync_operations": 872,
+    "write_bytes": 781593496,
+    "accepted_chunks": 68
+   },
+   {
+    "name": "s18-p3-external-a1",
+    "input_rows": 4456448,
+    "fsync_operations": 872,
+    "write_bytes": 781593496,
+    "accepted_chunks": 68
+   }
+  ],
+  "20": [
+   {
+    "name": "s20-p1-baseline-a1",
+    "input_rows": 17825792,
+    "fsync_operations": 3488,
+    "write_bytes": 3126373984,
+    "accepted_chunks": 272
+   },
+   {
+    "name": "s20-p1-external-a1",
+    "input_rows": 17825792,
+    "fsync_operations": 3488,
+    "write_bytes": 3126373984,
+    "accepted_chunks": 272
+   },
+   {
+    "name": "s20-p1-external-tight-a1",
+    "input_rows": 17825792,
+    "fsync_operations": 3488,
+    "write_bytes": 3126373984,
+    "accepted_chunks": 272
+   },
+   {
+    "name": "s20-p2-external-a1",
+    "input_rows": 17825792,
+    "fsync_operations": 3488,
+    "write_bytes": 3126373984,
+    "accepted_chunks": 272
+   },
+   {
+    "name": "s20-p2-external-tight-a1",
+    "input_rows": 17825792,
+    "fsync_operations": 3488,
+    "write_bytes": 3126373984,
+    "accepted_chunks": 272
+   },
+   {
+    "name": "s20-p2-baseline-a1",
+    "input_rows": 17825792,
+    "fsync_operations": 3488,
+    "write_bytes": 3126373984,
+    "accepted_chunks": 272
+   },
+   {
+    "name": "s20-p3-external-tight-a1",
+    "input_rows": 17825792,
+    "fsync_operations": 3488,
+    "write_bytes": 3126373984,
+    "accepted_chunks": 272
+   },
+   {
+    "name": "s20-p3-baseline-a1",
+    "input_rows": 17825792,
+    "fsync_operations": 3488,
+    "write_bytes": 3126373984,
+    "accepted_chunks": 272
+   },
+   {
+    "name": "s20-p3-external-a1",
+    "input_rows": 17825792,
+    "fsync_operations": 3488,
+    "write_bytes": 3126373984,
+    "accepted_chunks": 272
+   }
+  ]
+ },
+ "observations": [
+  {
+   "ok": true,
+   "wall_s": 32.02329640905373,
+   "cpu_s": 28.950675,
+   "max_rss_kib": 249892,
+   "validate_wall_s": 28.848693172913045,
+   "validate_cpu_s": 27.406381,
+   "validate_max_rss_kib": 249892,
+   "oublock_512": 7177960,
+   "host_pages_dirtied": 900894,
+   "host_pages_written": 801486,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-baseline-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.07705222885124385,
+     "user_s": 0.0,
+     "sys_s": 0.023783,
+     "max_rss_kib": 216204,
+     "inblock": 51872,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-baseline-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.018679060973227024,
+     "user_s": 0.001194,
+     "sys_s": 0.014334,
+     "max_rss_kib": 216204,
+     "inblock": 8520,
+     "oublock": 8248
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-baseline-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.5745858398731798,
+     "user_s": 0.003062,
+     "sys_s": 0.126577,
+     "max_rss_kib": 216204,
+     "inblock": 393344,
+     "oublock": 393392
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-baseline-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 28.848693172913045,
+     "user_s": 19.885803,
+     "sys_s": 7.520578,
+     "max_rss_kib": 249892,
+     "inblock": 7704536,
+     "oublock": 6340752
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-baseline-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 2.5037777440156788,
+     "user_s": 0.7800779999999999,
+     "sys_s": 0.595266,
+     "max_rss_kib": 216204,
+     "inblock": 2432296,
+     "oublock": 435472
+    }
+   ],
+   "name": "s18-p1-baseline-a1",
+   "scale": 18,
+   "pair": 1,
+   "mode": "baseline",
+   "attempt": 1,
+   "busy_samples": 0,
+   "samples": 29,
+   "accepted": true
+  },
+  {
+   "ok": true,
+   "wall_s": 33.01994746085256,
+   "cpu_s": 32.282709,
+   "max_rss_kib": 275596,
+   "validate_wall_s": 29.972773351008072,
+   "validate_cpu_s": 30.755332,
+   "validate_max_rss_kib": 275596,
+   "oublock_512": 7177960,
+   "host_pages_dirtied": 1038095,
+   "host_pages_written": 803172,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.011986352968961,
+     "user_s": 0.0012599999999999998,
+     "sys_s": 0.010636999999999999,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.01672455482184887,
+     "user_s": 0.002554,
+     "sys_s": 0.012497999999999999,
+     "max_rss_kib": 216204,
+     "inblock": 8200,
+     "oublock": 8248
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.5871351780369878,
+     "user_s": 0.00207,
+     "sys_s": 0.128362,
+     "max_rss_kib": 216204,
+     "inblock": 393352,
+     "oublock": 393392
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 29.972773351008072,
+     "user_s": 23.096308,
+     "sys_s": 7.659024,
+     "max_rss_kib": 275596,
+     "inblock": 7694040,
+     "oublock": 6340752
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 2.430747031001374,
+     "user_s": 0.806719,
+     "sys_s": 0.563277,
+     "max_rss_kib": 216204,
+     "inblock": 2429336,
+     "oublock": 435472
+    }
+   ],
+   "name": "s18-p1-external-a1",
+   "scale": 18,
+   "pair": 1,
+   "mode": "external",
+   "attempt": 1,
+   "busy_samples": 3,
+   "samples": 30,
+   "accepted": false
+  },
+  {
+   "ok": true,
+   "wall_s": 34.48795533995144,
+   "cpu_s": 32.590832,
+   "max_rss_kib": 276472,
+   "validate_wall_s": 31.3888674560003,
+   "validate_cpu_s": 31.067137000000002,
+   "validate_max_rss_kib": 276472,
+   "oublock_512": 7177960,
+   "host_pages_dirtied": 901097,
+   "host_pages_written": 935810,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-a2/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.012048883829265833,
+     "user_s": 0.002398,
+     "sys_s": 0.009592999999999999,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-a2/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.01707988395355642,
+     "user_s": 0.0039689999999999994,
+     "sys_s": 0.010916,
+     "max_rss_kib": 216204,
+     "inblock": 8200,
+     "oublock": 8248
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-a2/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.6158078340813518,
+     "user_s": 0.0020239999999999998,
+     "sys_s": 0.128582,
+     "max_rss_kib": 216204,
+     "inblock": 393344,
+     "oublock": 393392
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-a2/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 31.3888674560003,
+     "user_s": 23.39395,
+     "sys_s": 7.673187,
+     "max_rss_kib": 276472,
+     "inblock": 7676144,
+     "oublock": 6340752
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-a2/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 2.453663890948519,
+     "user_s": 0.738845,
+     "sys_s": 0.6273679999999999,
+     "max_rss_kib": 216204,
+     "inblock": 2429336,
+     "oublock": 435472
+    }
+   ],
+   "name": "s18-p1-external-a2",
+   "scale": 18,
+   "pair": 1,
+   "mode": "external",
+   "attempt": 2,
+   "busy_samples": 0,
+   "samples": 31,
+   "accepted": true
+  },
+  {
+   "ok": true,
+   "wall_s": 51.00665908702649,
+   "cpu_s": 66.58445999999999,
+   "max_rss_kib": 294440,
+   "validate_wall_s": 47.983354582916945,
+   "validate_cpu_s": 65.048592,
+   "validate_max_rss_kib": 294440,
+   "oublock_512": 15146000,
+   "host_pages_dirtied": 2036719,
+   "host_pages_written": 1937441,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-tight-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.011701275827363133,
+     "user_s": 0.0,
+     "sys_s": 0.011678,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-tight-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.016935179010033607,
+     "user_s": 0.003443,
+     "sys_s": 0.011526999999999999,
+     "max_rss_kib": 216204,
+     "inblock": 8200,
+     "oublock": 8248
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-tight-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.5573311829939485,
+     "user_s": 0.002114,
+     "sys_s": 0.127916,
+     "max_rss_kib": 216204,
+     "inblock": 393344,
+     "oublock": 393392
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-tight-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 47.983354582916945,
+     "user_s": 37.184156,
+     "sys_s": 27.864436,
+     "max_rss_kib": 294440,
+     "inblock": 7676952,
+     "oublock": 14308792
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-tight-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 2.436859254958108,
+     "user_s": 0.7882549999999999,
+     "sys_s": 0.590935,
+     "max_rss_kib": 216204,
+     "inblock": 2429344,
+     "oublock": 435472
+    }
+   ],
+   "name": "s18-p1-external-tight-a1",
+   "scale": 18,
+   "pair": 1,
+   "mode": "external-tight",
+   "attempt": 1,
+   "busy_samples": 3,
+   "samples": 46,
+   "accepted": false
+  },
+  {
+   "ok": true,
+   "wall_s": 49.33040217706002,
+   "cpu_s": 65.69413,
+   "max_rss_kib": 283192,
+   "validate_wall_s": 46.05990964616649,
+   "validate_cpu_s": 64.156083,
+   "validate_max_rss_kib": 283192,
+   "oublock_512": 15146000,
+   "host_pages_dirtied": 1896635,
+   "host_pages_written": 1796972,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-tight-a2/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.012060954933986068,
+     "user_s": 0.001078,
+     "sys_s": 0.010785999999999999,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-tight-a2/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.016996790887787938,
+     "user_s": 0.003882,
+     "sys_s": 0.011647999999999999,
+     "max_rss_kib": 216204,
+     "inblock": 8200,
+     "oublock": 8248
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-tight-a2/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.7509669060818851,
+     "user_s": 0.004908,
+     "sys_s": 0.12467099999999999,
+     "max_rss_kib": 216204,
+     "inblock": 393344,
+     "oublock": 393392
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-tight-a2/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 46.05990964616649,
+     "user_s": 36.656454,
+     "sys_s": 27.499629,
+     "max_rss_kib": 283192,
+     "inblock": 7676128,
+     "oublock": 14308792
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p1-external-tight-a2/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 2.490003848914057,
+     "user_s": 0.7746999999999999,
+     "sys_s": 0.606374,
+     "max_rss_kib": 216204,
+     "inblock": 2429336,
+     "oublock": 435472
+    }
+   ],
+   "name": "s18-p1-external-tight-a2",
+   "scale": 18,
+   "pair": 1,
+   "mode": "external-tight",
+   "attempt": 2,
+   "busy_samples": 0,
+   "samples": 44,
+   "accepted": true
+  },
+  {
+   "ok": true,
+   "wall_s": 33.39345303992741,
+   "cpu_s": 32.414549,
+   "max_rss_kib": 274900,
+   "validate_wall_s": 30.24707989790477,
+   "validate_cpu_s": 30.883928,
+   "validate_max_rss_kib": 274900,
+   "oublock_512": 7177960,
+   "host_pages_dirtied": 902689,
+   "host_pages_written": 802456,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-external-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.012237078044563532,
+     "user_s": 0.0021609999999999997,
+     "sys_s": 0.009727999999999999,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-external-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.016793546034023166,
+     "user_s": 0.00104,
+     "sys_s": 0.013994,
+     "max_rss_kib": 216204,
+     "inblock": 8200,
+     "oublock": 8248
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-external-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.585817966144532,
+     "user_s": 0.005161,
+     "sys_s": 0.1249,
+     "max_rss_kib": 216204,
+     "inblock": 393344,
+     "oublock": 393392
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-external-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 30.24707989790477,
+     "user_s": 23.519276,
+     "sys_s": 7.3646519999999995,
+     "max_rss_kib": 274900,
+     "inblock": 7676144,
+     "oublock": 6340752
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-external-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 2.53100596787408,
+     "user_s": 0.762107,
+     "sys_s": 0.61153,
+     "max_rss_kib": 216204,
+     "inblock": 2429336,
+     "oublock": 435472
+    }
+   ],
+   "name": "s18-p2-external-a1",
+   "scale": 18,
+   "pair": 2,
+   "mode": "external",
+   "attempt": 1,
+   "busy_samples": 0,
+   "samples": 30,
+   "accepted": true
+  },
+  {
+   "ok": true,
+   "wall_s": 50.26505855214782,
+   "cpu_s": 67.027637,
+   "max_rss_kib": 277072,
+   "validate_wall_s": 47.29817299498245,
+   "validate_cpu_s": 65.55765099999999,
+   "validate_max_rss_kib": 277072,
+   "oublock_512": 15146000,
+   "host_pages_dirtied": 2068430,
+   "host_pages_written": 1827754,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-external-tight-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.011753343045711517,
+     "user_s": 0.002433,
+     "sys_s": 0.00932,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-external-tight-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.016709486953914165,
+     "user_s": 0.002163,
+     "sys_s": 0.012981999999999999,
+     "max_rss_kib": 216204,
+     "inblock": 8200,
+     "oublock": 8248
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-external-tight-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.5017621668521315,
+     "user_s": 0.002868,
+     "sys_s": 0.12814599999999998,
+     "max_rss_kib": 216204,
+     "inblock": 393344,
+     "oublock": 393392
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-external-tight-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 47.29817299498245,
+     "user_s": 37.389403,
+     "sys_s": 28.168248,
+     "max_rss_kib": 277072,
+     "inblock": 7676144,
+     "oublock": 14308792
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-external-tight-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 2.4361834600567818,
+     "user_s": 0.745474,
+     "sys_s": 0.5666,
+     "max_rss_kib": 216204,
+     "inblock": 2429336,
+     "oublock": 435472
+    }
+   ],
+   "name": "s18-p2-external-tight-a1",
+   "scale": 18,
+   "pair": 2,
+   "mode": "external-tight",
+   "attempt": 1,
+   "busy_samples": 8,
+   "samples": 45,
+   "accepted": false
+  },
+  {
+   "ok": true,
+   "wall_s": 50.30898249289021,
+   "cpu_s": 66.791704,
+   "max_rss_kib": 292492,
+   "validate_wall_s": 47.17944992519915,
+   "validate_cpu_s": 65.273611,
+   "validate_max_rss_kib": 292492,
+   "oublock_512": 15146000,
+   "host_pages_dirtied": 1901942,
+   "host_pages_written": 1801165,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-external-tight-a2/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.012104768073186278,
+     "user_s": 0.0008629999999999999,
+     "sys_s": 0.011223,
+     "max_rss_kib": 216204,
+     "inblock": 72,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-external-tight-a2/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.017080371966585517,
+     "user_s": 0.0028439999999999997,
+     "sys_s": 0.012325,
+     "max_rss_kib": 216204,
+     "inblock": 8200,
+     "oublock": 8248
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-external-tight-a2/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.6421325670089573,
+     "user_s": 0.002106,
+     "sys_s": 0.126406,
+     "max_rss_kib": 216204,
+     "inblock": 393352,
+     "oublock": 393392
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-external-tight-a2/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 47.17944992519915,
+     "user_s": 37.09381,
+     "sys_s": 28.179801,
+     "max_rss_kib": 292492,
+     "inblock": 7676136,
+     "oublock": 14308792
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-external-tight-a2/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 2.4577259509824216,
+     "user_s": 0.787802,
+     "sys_s": 0.5745239999999999,
+     "max_rss_kib": 216204,
+     "inblock": 2429592,
+     "oublock": 435472
+    }
+   ],
+   "name": "s18-p2-external-tight-a2",
+   "scale": 18,
+   "pair": 2,
+   "mode": "external-tight",
+   "attempt": 2,
+   "busy_samples": 0,
+   "samples": 45,
+   "accepted": true
+  },
+  {
+   "ok": true,
+   "wall_s": 31.22175237396732,
+   "cpu_s": 28.590932000000002,
+   "max_rss_kib": 244644,
+   "validate_wall_s": 28.19889019499533,
+   "validate_cpu_s": 27.040033,
+   "validate_max_rss_kib": 244644,
+   "oublock_512": 7177960,
+   "host_pages_dirtied": 899390,
+   "host_pages_written": 800294,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-baseline-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.012160229030996561,
+     "user_s": 0.001986,
+     "sys_s": 0.00993,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-baseline-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.017593641066923738,
+     "user_s": 0.001034,
+     "sys_s": 0.014421999999999999,
+     "max_rss_kib": 216204,
+     "inblock": 8200,
+     "oublock": 8248
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-baseline-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.5027676408644766,
+     "user_s": 0.002049,
+     "sys_s": 0.13017,
+     "max_rss_kib": 216204,
+     "inblock": 393352,
+     "oublock": 393392
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-baseline-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 28.19889019499533,
+     "user_s": 19.850549,
+     "sys_s": 7.189484,
+     "max_rss_kib": 244644,
+     "inblock": 7676128,
+     "oublock": 6340752
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p2-baseline-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 2.4898946590255946,
+     "user_s": 0.743578,
+     "sys_s": 0.6477299999999999,
+     "max_rss_kib": 216204,
+     "inblock": 2429336,
+     "oublock": 435472
+    }
+   ],
+   "name": "s18-p2-baseline-a1",
+   "scale": 18,
+   "pair": 2,
+   "mode": "baseline",
+   "attempt": 1,
+   "busy_samples": 0,
+   "samples": 28,
+   "accepted": true
+  },
+  {
+   "ok": true,
+   "wall_s": 49.69819669285789,
+   "cpu_s": 66.246818,
+   "max_rss_kib": 265508,
+   "validate_wall_s": 46.64181005093269,
+   "validate_cpu_s": 64.710784,
+   "validate_max_rss_kib": 265508,
+   "oublock_512": 15146000,
+   "host_pages_dirtied": 1901175,
+   "host_pages_written": 1801473,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p3-external-tight-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.01230406598187983,
+     "user_s": 0.0,
+     "sys_s": 0.012645,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p3-external-tight-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.017359188990667462,
+     "user_s": 0.0023279999999999998,
+     "sys_s": 0.013203999999999999,
+     "max_rss_kib": 216204,
+     "inblock": 8200,
+     "oublock": 8248
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p3-external-tight-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.5742767148185521,
+     "user_s": 0.003701,
+     "sys_s": 0.125857,
+     "max_rss_kib": 216204,
+     "inblock": 393344,
+     "oublock": 393392
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p3-external-tight-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 46.64181005093269,
+     "user_s": 36.930556,
+     "sys_s": 27.780228,
+     "max_rss_kib": 265508,
+     "inblock": 7676168,
+     "oublock": 14308792
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p3-external-tight-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 2.4519451519008726,
+     "user_s": 0.7991309999999999,
+     "sys_s": 0.579168,
+     "max_rss_kib": 216204,
+     "inblock": 2429336,
+     "oublock": 435472
+    }
+   ],
+   "name": "s18-p3-external-tight-a1",
+   "scale": 18,
+   "pair": 3,
+   "mode": "external-tight",
+   "attempt": 1,
+   "busy_samples": 0,
+   "samples": 44,
+   "accepted": true
+  },
+  {
+   "ok": true,
+   "wall_s": 31.597270296886563,
+   "cpu_s": 28.697969000000004,
+   "max_rss_kib": 251664,
+   "validate_wall_s": 28.560645041055977,
+   "validate_cpu_s": 27.170883000000003,
+   "validate_max_rss_kib": 251664,
+   "oublock_512": 7177960,
+   "host_pages_dirtied": 899704,
+   "host_pages_written": 800062,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p3-baseline-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.012024110881611705,
+     "user_s": 0.001333,
+     "sys_s": 0.010667,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p3-baseline-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.016927821096032858,
+     "user_s": 0.0037689999999999998,
+     "sys_s": 0.011309,
+     "max_rss_kib": 216204,
+     "inblock": 8200,
+     "oublock": 8248
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p3-baseline-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.6095189210027456,
+     "user_s": 0.003212,
+     "sys_s": 0.127391,
+     "max_rss_kib": 216204,
+     "inblock": 393344,
+     "oublock": 393392
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p3-baseline-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 28.560645041055977,
+     "user_s": 19.689596,
+     "sys_s": 7.481287,
+     "max_rss_kib": 251664,
+     "inblock": 7676152,
+     "oublock": 6340752
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p3-baseline-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 2.3976540330331773,
+     "user_s": 0.740463,
+     "sys_s": 0.628942,
+     "max_rss_kib": 216204,
+     "inblock": 2429208,
+     "oublock": 435472
+    }
+   ],
+   "name": "s18-p3-baseline-a1",
+   "scale": 18,
+   "pair": 3,
+   "mode": "baseline",
+   "attempt": 1,
+   "busy_samples": 0,
+   "samples": 28,
+   "accepted": true
+  },
+  {
+   "ok": true,
+   "wall_s": 33.48700306098908,
+   "cpu_s": 32.39806,
+   "max_rss_kib": 260936,
+   "validate_wall_s": 30.40371345798485,
+   "validate_cpu_s": 30.876537,
+   "validate_max_rss_kib": 260936,
+   "oublock_512": 7177960,
+   "host_pages_dirtied": 899082,
+   "host_pages_written": 800228,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p3-external-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.01224605506286025,
+     "user_s": 0.001126,
+     "sys_s": 0.010853999999999999,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p3-external-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.0169964621309191,
+     "user_s": 0.003081,
+     "sys_s": 0.012039,
+     "max_rss_kib": 216204,
+     "inblock": 8200,
+     "oublock": 8248
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p3-external-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.6117385909892619,
+     "user_s": 0.003849,
+     "sys_s": 0.130873,
+     "max_rss_kib": 216204,
+     "inblock": 393344,
+     "oublock": 393392
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p3-external-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 30.40371345798485,
+     "user_s": 23.292897,
+     "sys_s": 7.58364,
+     "max_rss_kib": 260936,
+     "inblock": 7676160,
+     "oublock": 6340752
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s18-p3-external-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 2.441793096018955,
+     "user_s": 0.7752319999999999,
+     "sys_s": 0.584469,
+     "max_rss_kib": 216204,
+     "inblock": 2429336,
+     "oublock": 435472
+    }
+   ],
+   "name": "s18-p3-external-a1",
+   "scale": 18,
+   "pair": 3,
+   "mode": "external",
+   "attempt": 1,
+   "busy_samples": 0,
+   "samples": 30,
+   "accepted": true
+  },
+  {
+   "ok": true,
+   "wall_s": 128.04808911588043,
+   "cpu_s": 117.89111400000002,
+   "max_rss_kib": 311960,
+   "validate_wall_s": 116.13978467299603,
+   "validate_cpu_s": 111.82934300000001,
+   "validate_max_rss_kib": 311960,
+   "oublock_512": 28950528,
+   "host_pages_dirtied": 3628020,
+   "host_pages_written": 3234664,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p1-baseline-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.012039801105856895,
+     "user_s": 0.003083,
+     "sys_s": 0.009249,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p1-baseline-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.03723913291469216,
+     "user_s": 0.0035949999999999997,
+     "sys_s": 0.018741,
+     "max_rss_kib": 216204,
+     "inblock": 32784,
+     "oublock": 32832
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p1-baseline-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 2.0019912889692932,
+     "user_s": 0.002088,
+     "sys_s": 0.471338,
+     "max_rss_kib": 216204,
+     "inblock": 1278472,
+     "oublock": 1573400
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p1-baseline-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 116.13978467299603,
+     "user_s": 82.85299,
+     "sys_s": 28.976353,
+     "max_rss_kib": 311960,
+     "inblock": 30728728,
+     "oublock": 25509624
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p1-baseline-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 9.856569002149627,
+     "user_s": 3.241422,
+     "sys_s": 2.312255,
+     "max_rss_kib": 216204,
+     "inblock": 10290848,
+     "oublock": 1834576
+    }
+   ],
+   "name": "s20-p1-baseline-a1",
+   "scale": 20,
+   "pair": 1,
+   "mode": "baseline",
+   "attempt": 1,
+   "busy_samples": 0,
+   "samples": 115,
+   "accepted": true
+  },
+  {
+   "ok": true,
+   "wall_s": 136.46165674109943,
+   "cpu_s": 134.713504,
+   "max_rss_kib": 347232,
+   "validate_wall_s": 124.27380012883805,
+   "validate_cpu_s": 128.656966,
+   "validate_max_rss_kib": 347232,
+   "oublock_512": 28950528,
+   "host_pages_dirtied": 3629505,
+   "host_pages_written": 3235982,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p1-external-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.011930079199373722,
+     "user_s": 0.0035889999999999997,
+     "sys_s": 0.008374,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p1-external-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.03641937905922532,
+     "user_s": 0.0022299999999999998,
+     "sys_s": 0.021193,
+     "max_rss_kib": 216204,
+     "inblock": 32784,
+     "oublock": 32832
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p1-external-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 2.5654674428515136,
+     "user_s": 0.0,
+     "sys_s": 0.48198199999999997,
+     "max_rss_kib": 216204,
+     "inblock": 1573360,
+     "oublock": 1573400
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p1-external-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 124.27380012883805,
+     "user_s": 97.913633,
+     "sys_s": 30.743333,
+     "max_rss_kib": 347232,
+     "inblock": 30728480,
+     "oublock": 25509624
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p1-external-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 9.573544922983274,
+     "user_s": 3.268272,
+     "sys_s": 2.270898,
+     "max_rss_kib": 216204,
+     "inblock": 10290752,
+     "oublock": 1834576
+    }
+   ],
+   "name": "s20-p1-external-a1",
+   "scale": 20,
+   "pair": 1,
+   "mode": "external",
+   "attempt": 1,
+   "busy_samples": 0,
+   "samples": 123,
+   "accepted": true
+  },
+  {
+   "ok": true,
+   "wall_s": 203.95319000002928,
+   "cpu_s": 278.808363,
+   "max_rss_kib": 372772,
+   "validate_wall_s": 191.93330084206536,
+   "validate_cpu_s": 272.94008199999996,
+   "validate_max_rss_kib": 372772,
+   "oublock_512": 65188696,
+   "host_pages_dirtied": 8162547,
+   "host_pages_written": 7768390,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p1-external-tight-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.011843204963952303,
+     "user_s": 0.001174,
+     "sys_s": 0.010572999999999999,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p1-external-tight-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.035505815874785185,
+     "user_s": 0.000986,
+     "sys_s": 0.021373,
+     "max_rss_kib": 216204,
+     "inblock": 32784,
+     "oublock": 32832
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p1-external-tight-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 2.4907433530315757,
+     "user_s": 0.0021449999999999998,
+     "sys_s": 0.48181399999999996,
+     "max_rss_kib": 216204,
+     "inblock": 1573376,
+     "oublock": 1573400
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p1-external-tight-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 191.93330084206536,
+     "user_s": 155.267563,
+     "sys_s": 117.672519,
+     "max_rss_kib": 372772,
+     "inblock": 30728768,
+     "oublock": 61747792
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p1-external-tight-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 9.481260406086221,
+     "user_s": 3.116572,
+     "sys_s": 2.233644,
+     "max_rss_kib": 216204,
+     "inblock": 10290752,
+     "oublock": 1834576
+    }
+   ],
+   "name": "s20-p1-external-tight-a1",
+   "scale": 20,
+   "pair": 1,
+   "mode": "external-tight",
+   "attempt": 1,
+   "busy_samples": 0,
+   "samples": 183,
+   "accepted": true
+  },
+  {
+   "ok": true,
+   "wall_s": 135.21464330004528,
+   "cpu_s": 133.922209,
+   "max_rss_kib": 386420,
+   "validate_wall_s": 122.97323974594474,
+   "validate_cpu_s": 127.843119,
+   "validate_max_rss_kib": 386420,
+   "oublock_512": 28950528,
+   "host_pages_dirtied": 3628247,
+   "host_pages_written": 3234213,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p2-external-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.012006437871605158,
+     "user_s": 0.001872,
+     "sys_s": 0.010298,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p2-external-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.03793602995574474,
+     "user_s": 0.001454,
+     "sys_s": 0.022543,
+     "max_rss_kib": 216204,
+     "inblock": 32784,
+     "oublock": 32832
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p2-external-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 2.5613145830575377,
+     "user_s": 0.0020499999999999997,
+     "sys_s": 0.48800699999999997,
+     "max_rss_kib": 216204,
+     "inblock": 1573352,
+     "oublock": 1573400
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p2-external-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 122.97323974594474,
+     "user_s": 97.333768,
+     "sys_s": 30.509351,
+     "max_rss_kib": 386420,
+     "inblock": 30728424,
+     "oublock": 25509624
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p2-external-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 9.62968129501678,
+     "user_s": 3.200757,
+     "sys_s": 2.352109,
+     "max_rss_kib": 216204,
+     "inblock": 10290720,
+     "oublock": 1834576
+    }
+   ],
+   "name": "s20-p2-external-a1",
+   "scale": 20,
+   "pair": 2,
+   "mode": "external",
+   "attempt": 1,
+   "busy_samples": 0,
+   "samples": 122,
+   "accepted": true
+  },
+  {
+   "ok": true,
+   "wall_s": 204.02709150197916,
+   "cpu_s": 279.314435,
+   "max_rss_kib": 375700,
+   "validate_wall_s": 191.96753407502547,
+   "validate_cpu_s": 273.218251,
+   "validate_max_rss_kib": 375700,
+   "oublock_512": 65188696,
+   "host_pages_dirtied": 8166768,
+   "host_pages_written": 7773807,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p2-external-tight-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.012468525907024741,
+     "user_s": 0.0037099999999999998,
+     "sys_s": 0.008291999999999999,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p2-external-tight-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.03490399499423802,
+     "user_s": 0.004978,
+     "sys_s": 0.017922999999999998,
+     "max_rss_kib": 216204,
+     "inblock": 32784,
+     "oublock": 32832
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p2-external-tight-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 2.36809525010176,
+     "user_s": 0.001078,
+     "sys_s": 0.482033,
+     "max_rss_kib": 216204,
+     "inblock": 1573352,
+     "oublock": 1573400
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p2-external-tight-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 191.96753407502547,
+     "user_s": 155.413312,
+     "sys_s": 117.804939,
+     "max_rss_kib": 375700,
+     "inblock": 30728488,
+     "oublock": 61747792
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p2-external-tight-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 9.643575057853013,
+     "user_s": 3.249302,
+     "sys_s": 2.328868,
+     "max_rss_kib": 216204,
+     "inblock": 10290744,
+     "oublock": 1834576
+    }
+   ],
+   "name": "s20-p2-external-tight-a1",
+   "scale": 20,
+   "pair": 2,
+   "mode": "external-tight",
+   "attempt": 1,
+   "busy_samples": 0,
+   "samples": 183,
+   "accepted": true
+  },
+  {
+   "ok": true,
+   "wall_s": 126.77741234493442,
+   "cpu_s": 117.17646900000001,
+   "max_rss_kib": 309324,
+   "validate_wall_s": 114.33327432186343,
+   "validate_cpu_s": 111.210587,
+   "validate_max_rss_kib": 309324,
+   "oublock_512": 28950528,
+   "host_pages_dirtied": 3627834,
+   "host_pages_written": 3234636,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p2-baseline-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.011897725984454155,
+     "user_s": 0.002265,
+     "sys_s": 0.009818,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p2-baseline-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.036593365017324686,
+     "user_s": 0.003209,
+     "sys_s": 0.02155,
+     "max_rss_kib": 216204,
+     "inblock": 32784,
+     "oublock": 32832
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p2-baseline-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 2.6472415779717267,
+     "user_s": 0.0030919999999999997,
+     "sys_s": 0.488539,
+     "max_rss_kib": 216204,
+     "inblock": 1573352,
+     "oublock": 1573400
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p2-baseline-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 114.33327432186343,
+     "user_s": 81.94101,
+     "sys_s": 29.269577,
+     "max_rss_kib": 309324,
+     "inblock": 30728576,
+     "oublock": 25509624
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p2-baseline-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 9.747883963864297,
+     "user_s": 3.130783,
+     "sys_s": 2.306626,
+     "max_rss_kib": 216204,
+     "inblock": 10290720,
+     "oublock": 1834576
+    }
+   ],
+   "name": "s20-p2-baseline-a1",
+   "scale": 20,
+   "pair": 2,
+   "mode": "baseline",
+   "attempt": 1,
+   "busy_samples": 0,
+   "samples": 114,
+   "accepted": true
+  },
+  {
+   "ok": true,
+   "wall_s": 203.38784312596545,
+   "cpu_s": 278.87242399999997,
+   "max_rss_kib": 373412,
+   "validate_wall_s": 191.39005807694048,
+   "validate_cpu_s": 272.774101,
+   "validate_max_rss_kib": 373412,
+   "oublock_512": 65188696,
+   "host_pages_dirtied": 8161288,
+   "host_pages_written": 7767452,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p3-external-tight-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.01230252394452691,
+     "user_s": 0.003711,
+     "sys_s": 0.008659,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p3-external-tight-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.03503813687711954,
+     "user_s": 0.002392,
+     "sys_s": 0.020336999999999997,
+     "max_rss_kib": 216204,
+     "inblock": 32784,
+     "oublock": 32832
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p3-external-tight-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 2.519318284932524,
+     "user_s": 0.0039369999999999995,
+     "sys_s": 0.485353,
+     "max_rss_kib": 216204,
+     "inblock": 1573352,
+     "oublock": 1573400
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p3-external-tight-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 191.39005807694048,
+     "user_s": 156.159524,
+     "sys_s": 116.614577,
+     "max_rss_kib": 373412,
+     "inblock": 30728376,
+     "oublock": 61747792
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p3-external-tight-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 9.430579563137144,
+     "user_s": 3.269785,
+     "sys_s": 2.304149,
+     "max_rss_kib": 216204,
+     "inblock": 10290720,
+     "oublock": 1834576
+    }
+   ],
+   "name": "s20-p3-external-tight-a1",
+   "scale": 20,
+   "pair": 3,
+   "mode": "external-tight",
+   "attempt": 1,
+   "busy_samples": 0,
+   "samples": 183,
+   "accepted": true
+  },
+  {
+   "ok": true,
+   "wall_s": 126.82426543789916,
+   "cpu_s": 118.000962,
+   "max_rss_kib": 321420,
+   "validate_wall_s": 114.66558215511031,
+   "validate_cpu_s": 112.034745,
+   "validate_max_rss_kib": 321420,
+   "oublock_512": 28950528,
+   "host_pages_dirtied": 3627816,
+   "host_pages_written": 3234531,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p3-baseline-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.012063667876645923,
+     "user_s": 0.001295,
+     "sys_s": 0.010362,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p3-baseline-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.03585161711089313,
+     "user_s": 0.00107,
+     "sys_s": 0.023544,
+     "max_rss_kib": 216204,
+     "inblock": 32784,
+     "oublock": 32832
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p3-baseline-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 2.3972669870126992,
+     "user_s": 0.002079,
+     "sys_s": 0.487598,
+     "max_rss_kib": 216204,
+     "inblock": 1573352,
+     "oublock": 1573400
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p3-baseline-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 114.66558215511031,
+     "user_s": 82.645326,
+     "sys_s": 29.389419,
+     "max_rss_kib": 321420,
+     "inblock": 30728552,
+     "oublock": 25509624
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p3-baseline-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 9.713024861179292,
+     "user_s": 3.16721,
+     "sys_s": 2.273059,
+     "max_rss_kib": 216204,
+     "inblock": 10290744,
+     "oublock": 1834576
+    }
+   ],
+   "name": "s20-p3-baseline-a1",
+   "scale": 20,
+   "pair": 3,
+   "mode": "baseline",
+   "attempt": 1,
+   "busy_samples": 0,
+   "samples": 114,
+   "accepted": true
+  },
+  {
+   "ok": true,
+   "wall_s": 135.29870909801684,
+   "cpu_s": 133.77694599999998,
+   "max_rss_kib": 388720,
+   "validate_wall_s": 123.10034616990015,
+   "validate_cpu_s": 127.94441699999999,
+   "validate_max_rss_kib": 388720,
+   "oublock_512": 28950528,
+   "host_pages_dirtied": 3628158,
+   "host_pages_written": 3234723,
+   "scratch_leftovers": [],
+   "steps": [
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p3-external-a1/project",
+      "import-session",
+      "begin"
+     ],
+     "exit": 0,
+     "wall_s": 0.012105677975341678,
+     "user_s": 0.0017319999999999998,
+     "sys_s": 0.010393,
+     "max_rss_kib": 216204,
+     "inblock": 0,
+     "oublock": 96
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p3-external-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 0.03585132793523371,
+     "user_s": 0.001023,
+     "sys_s": 0.021494,
+     "max_rss_kib": 216204,
+     "inblock": 32784,
+     "oublock": 32832
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p3-external-a1/project",
+      "import-session",
+      "register-parquet"
+     ],
+     "exit": 0,
+     "wall_s": 2.5759898929391056,
+     "user_s": 0.0,
+     "sys_s": 0.48766299999999996,
+     "max_rss_kib": 216204,
+     "inblock": 1573352,
+     "oublock": 1573400
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p3-external-a1/project",
+      "import-session",
+      "validate"
+     ],
+     "exit": 0,
+     "wall_s": 123.10034616990015,
+     "user_s": 97.691763,
+     "sys_s": 30.252654,
+     "max_rss_kib": 388720,
+     "inblock": 30728464,
+     "oublock": 25509624
+    },
+    {
+     "argv": [
+      "/home/ubuntu/gf-1507-evidence/runs/s20-p3-external-a1/project",
+      "import-session",
+      "commit"
+     ],
+     "exit": 0,
+     "wall_s": 9.573953630868345,
+     "user_s": 3.062542,
+     "sys_s": 2.247682,
+     "max_rss_kib": 216204,
+     "inblock": 10290720,
+     "oublock": 1834576
+    }
+   ],
+   "name": "s20-p3-external-a1",
+   "scale": 20,
+   "pair": 3,
+   "mode": "external",
+   "attempt": 1,
+   "busy_samples": 0,
+   "samples": 122,
+   "accepted": true
+  }
+ ],
+ "identity_check": {
+  "method": "untimed S18 ingests (baseline, second baseline, external-tight); gf query MATCH (n) RETURN n and MATCH (a)-[r]->(b) RETURN a, r, b to Arrow IPC; schema metadata (query_id) dropped; rows compared in output order and as sorted multisets",
+  "nodes_rows": 262144,
+  "edges_rows": 4194304,
+  "nodes_multiset_digest": {
+   "baseline": "27ec224efd90207b",
+   "baseline2": "27ec224efd90207b",
+   "external-tight": "27ec224efd90207b"
+  },
+  "edges_multiset_digest": {
+   "baseline": "4da3b4fa99fe051d",
+   "baseline2": "4da3b4fa99fe051d",
+   "external-tight": "4da3b4fa99fe051d"
+  },
+  "ordered_digests_differ_even_between_baselines": true
+ }
+}
