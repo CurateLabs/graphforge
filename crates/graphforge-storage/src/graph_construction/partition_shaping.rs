@@ -772,9 +772,9 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                     spill_mode,
                     *expected,
                     codec,
-                    segment_bytes(root, names)?,
+                    || segment_bytes(root, names),
                     self.max_partition_bytes,
-                ) {
+                )? {
                     return super::spill_spike::load_external::<N>(
                         root,
                         names,

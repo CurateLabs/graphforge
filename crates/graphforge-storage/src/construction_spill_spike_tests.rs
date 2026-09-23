@@ -77,7 +77,7 @@ fn spill_ingest(
     project: &Path,
     budgets: GraphConstructionBudgets,
     resume: bool,
-    cancel_after: Option<u64>,
+    cancel_after_spill: bool,
     shaped: &mut Option<String>,
 ) -> Result<serde_json::Value, String> {
     let (nodes, edges) = spill_fixture();
@@ -106,11 +106,11 @@ fn spill_ingest(
         }
         session.seal().map_err(|error| error.to_string())?;
     }
-    let mut polls = 0_u64;
+    // Cancel only once an external sort has spilled runs to disk, so the
+    // cancellation is observed while library scratch exists.
     let shape = session
         .shape_canonical_with_cancellation(|| {
-            polls += 1;
-            cancel_after.is_some_and(|after| polls > after)
+            cancel_after_spill && crate::graph_construction::spill_spike::spill_observed()
         })
         .map_err(|error| error.to_string())?;
     let peak_partition_records = session.evidence().peak_partition_records;
@@ -162,16 +162,14 @@ fn spill_spike_subprocess() {
     let budget = std::env::var("GF_SPILL_TEST_PARTITION_BYTES")
         .ok()
         .map(|value| value.parse().unwrap());
-    let cancel_after = std::env::var("GF_SPILL_TEST_CANCEL_AFTER")
-        .ok()
-        .map(|value| value.parse().unwrap());
+    let cancel_after_spill = std::env::var_os("GF_SPILL_TEST_CANCEL_AFTER_SPILL").is_some();
     let resume = std::env::var_os("GF_SPILL_TEST_RESUME").is_some();
     let mut shaped = None;
     let outcome = spill_ingest(
         &project,
         spill_budgets(budget),
         resume,
-        cancel_after,
+        cancel_after_spill,
         &mut shaped,
     );
     let external = crate::graph_construction::spill_spike::take_recorded_evidence();
@@ -188,6 +186,7 @@ fn spill_spike_subprocess() {
         "shaped": shaped,
         "published": published,
         "external": external,
+        "spill_observed": crate::graph_construction::spill_spike::spill_observed(),
         "construction_temps_clean": tree_has_no_temps(&project),
     });
     std::fs::write(
@@ -416,9 +415,9 @@ fn spill_spike_hybrid_sorts_refused_partitions_and_fails_closed() {
     assert!(unguarded["published"].is_null(), "{unguarded}");
     println!("SPILL_SPIKE_UNGUARDED {unguarded}");
 
-    // Cancellation during the external sort, then a clean retry in the same
-    // session.
-    let cancel_env = tight_env(&[("GF_SPILL_TEST_CANCEL_AFTER", "3")]);
+    // Cancellation after an external sort has spilled runs, then a clean
+    // retry in the same session.
+    let cancel_env = tight_env(&[("GF_SPILL_TEST_CANCEL_AFTER_SPILL", "1")]);
     let (cancelled, cancelled_scratch, _) = run_spill_case(
         root.path(),
         &SpillCase {
@@ -426,6 +425,10 @@ fn spill_spike_hybrid_sorts_refused_partitions_and_fails_closed() {
             project: "cancel",
             env: &cancel_env,
         },
+    );
+    assert_eq!(
+        cancelled["spill_observed"], true,
+        "cancellation fired before any external sort spilled: {cancelled}"
     );
     assert!(error_of(&cancelled).contains("cancel"), "{cancelled}");
     assert!(cancelled["published"].is_null());
@@ -476,7 +479,9 @@ fn spill_spike_crash_resumes_but_orphans_library_runs() {
     );
     assert!(!exited && crashed.is_null(), "the child did not abort");
     assert!(
-        crash_scratch.iter().any(|path| path.contains('/')),
+        crash_scratch
+            .iter()
+            .any(|path| Path::new(path).components().count() > 1),
         "an aborted external sort should leave its runs: {crash_scratch:?}"
     );
     // Resume in a new process against the same scratch root.

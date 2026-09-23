@@ -132,23 +132,25 @@ fn resident_bytes<const N: usize>(
     }
 }
 
-/// Whether this partition takes the external path under `mode`.
+/// Whether this partition takes the external path under `mode`. The segment
+/// length is read only when the answer depends on it, so the baseline mode
+/// performs exactly the baseline's filesystem work.
 pub(super) fn selects_external<const N: usize>(
     mode: Mode,
     expected_records: Option<u64>,
     codec: Option<DetailCodec>,
-    spill_bytes: u64,
+    spill_bytes: impl FnOnce() -> Result<u64, GfError>,
     max_partition_bytes: u64,
-) -> bool {
-    match mode {
+) -> Result<bool, GfError> {
+    Ok(match mode {
         Mode::Baseline => false,
         Mode::Always => true,
         Mode::OnRefusal => admit_materialization(
-            resident_bytes::<N>(expected_records, codec, spill_bytes),
+            resident_bytes::<N>(expected_records, codec, spill_bytes()?),
             max_partition_bytes,
         )
         .is_err(),
-    }
+    })
 }
 
 /// A `GreedyMemoryPool` that also records its high-water reservation, which
@@ -245,6 +247,17 @@ fn fault() -> Result<Option<Fault>, GfError> {
 /// Faults fire once per process, on the first partition that spilled.
 static FAULT_FIRED: AtomicBool = AtomicBool::new(false);
 
+/// Set once an external sort in this process has finished its input with
+/// spilled runs on disk, so a test can cancel while those runs exist.
+#[cfg(test)]
+static SPILL_OBSERVED: AtomicBool = AtomicBool::new(false);
+
+/// Whether any external sort in this process has spilled.
+#[cfg(test)]
+pub(crate) fn spill_observed() -> bool {
+    SPILL_OBSERVED.load(Ordering::Acquire)
+}
+
 fn spill_files(directories: &[PathBuf]) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for directory in directories {
@@ -323,7 +336,6 @@ struct SourceState {
     first_record: Mutex<Option<Vec<u8>>>,
     peak_disk_bytes: AtomicU64,
     peak_disk_files: AtomicUsize,
-    spill_directories: Mutex<Vec<PathBuf>>,
     runtime: Mutex<Option<Arc<RuntimeEnv>>>,
 }
 
@@ -469,15 +481,24 @@ impl<const N: usize> SegmentBatches<N> {
     /// End of input: the sort phase has spilled every run it will spill.
     /// The one place a test fault can observe spilled runs before the merge.
     fn end_of_input(&self) -> Result<(), GfError> {
+        // Read the run directories now, not at setup: in the default
+        // OS-temporary mode DataFusion creates its directory lazily, on the
+        // first spill.
+        let directories = self
+            .state
+            .runtime
+            .lock()
+            .map_err(storage)?
+            .as_ref()
+            .map(|runtime| runtime.disk_manager.temp_dir_paths())
+            .unwrap_or_default();
+        #[cfg(test)]
+        if !spill_files(&directories).is_empty() {
+            SPILL_OBSERVED.store(true, Ordering::Release);
+        }
         let Some(fault) = fault()? else {
             return Ok(());
         };
-        let directories = self
-            .state
-            .spill_directories
-            .lock()
-            .map_err(storage)?
-            .clone();
         if spill_files(&directories).is_empty() || FAULT_FIRED.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
@@ -777,7 +798,6 @@ pub(super) fn load_external<const N: usize>(
     let (pool, env) = runtime_env(pool_bytes, temp_bytes)?;
     let state = Arc::new(SourceState::default());
     *state.runtime.lock().map_err(storage)? = Some(Arc::clone(&env));
-    *state.spill_directories.lock().map_err(storage)? = env.disk_manager.temp_dir_paths();
     let config = SessionConfig::new()
         .with_batch_size(batch_records::<N>(pool_bytes))
         .with_target_partitions(1)

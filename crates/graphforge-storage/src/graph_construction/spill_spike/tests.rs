@@ -5,7 +5,7 @@ fn hybrid_routes_exactly_the_partitions_the_baseline_refuses() {
     // 100 fixed 48-byte records retain 4,800 bytes resident.
     for (limit, external) in [(4_800, false), (4_799, true)] {
         assert_eq!(
-            selects_external::<48>(Mode::OnRefusal, Some(100), None, 4_800, limit),
+            selects_external::<48>(Mode::OnRefusal, Some(100), None, || Ok(4_800), limit).unwrap(),
             external
         );
         assert!(
@@ -13,28 +13,42 @@ fn hybrid_routes_exactly_the_partitions_the_baseline_refuses() {
                 == external
         );
     }
-    assert!(!selects_external::<48>(
-        Mode::Baseline,
-        Some(100),
-        None,
-        4_800,
-        1
-    ));
-    assert!(selects_external::<48>(
-        Mode::Always,
-        Some(100),
-        None,
-        4_800,
-        u64::MAX
-    ));
+    // The baseline never reads the segment length.
+    assert!(
+        !selects_external::<48>(
+            Mode::Baseline,
+            Some(100),
+            None,
+            || panic!("baseline read segment bytes"),
+            1
+        )
+        .unwrap()
+    );
+    assert!(
+        selects_external::<48>(
+            Mode::Always,
+            Some(100),
+            None,
+            || panic!("always read segment bytes"),
+            u64::MAX
+        )
+        .unwrap()
+    );
     // Overflowing estimates are refusals, so the hybrid takes them.
-    assert!(selects_external::<48>(
-        Mode::OnRefusal,
-        Some(u64::MAX),
-        None,
-        0,
-        u64::MAX
-    ));
+    assert!(
+        selects_external::<48>(Mode::OnRefusal, Some(u64::MAX), None, || Ok(0), u64::MAX).unwrap()
+    );
+    // A failure to read the segment length is an error, not a routing choice.
+    assert!(
+        selects_external::<48>(
+            Mode::OnRefusal,
+            Some(100),
+            None,
+            || Err(storage("unreadable")),
+            1
+        )
+        .is_err()
+    );
 }
 
 #[test]
