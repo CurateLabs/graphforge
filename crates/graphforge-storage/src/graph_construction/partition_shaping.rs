@@ -472,6 +472,9 @@ pub(super) struct FixedRangePartitioner<'a, const N: usize> {
     /// [`super::partition_load::consume_in_partition_order`] for the bound.
     load_workers: NonZeroUsize,
     max_partition_bytes: u64,
+    /// A #1508 spike scheduler forced in place of the production pool.
+    #[cfg(test)]
+    load_scheduler: Option<super::partition_load::scheduling_spike::LoadScheduler<'static>>,
 }
 
 impl<const N: usize> Drop for FixedRangePartitioner<'_, N> {
@@ -509,6 +512,8 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             records: 0,
             load_workers: PARTITION_LOAD_WORKERS,
             max_partition_bytes: super::partition::default_materialization_bytes(),
+            #[cfg(test)]
+            load_scheduler: None,
         })
     }
 
@@ -523,6 +528,79 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
     pub(super) fn with_load_workers(mut self, workers: NonZeroUsize) -> Self {
         self.load_workers = workers;
         self
+    }
+
+    /// Run the finish-time loads on a #1508 spike scheduler instead of the
+    /// production pool. Scheduling only, like the worker count.
+    #[cfg(test)]
+    pub(super) fn with_load_scheduler(
+        mut self,
+        scheduler: super::partition_load::scheduling_spike::LoadScheduler<'static>,
+    ) -> Self {
+        self.load_scheduler = Some(scheduler);
+        self
+    }
+
+    /// Load and sort every job's partition off this thread and hand each to
+    /// `consume` here, in job order.
+    fn schedule_loads<C>(
+        &self,
+        jobs: &[(usize, Vec<String>, Option<u64>)],
+        consume: C,
+    ) -> Result<(), GfError>
+    where
+        C: FnMut(usize, (LoadedPartition<N>, PartitionLoadCounters)) -> Result<(), GfError>,
+    {
+        let (root, codec, max_partition_bytes) = (self.root, self.codec, self.max_partition_bytes);
+        #[cfg(any(test, feature = "test-support"))]
+        let spill_mode = super::spill_spike::mode()?;
+        let load_job = move |root: &StableDirectory,
+                             (_, names, expected): &(usize, Vec<String>, Option<u64>),
+                             stop: &AtomicBool| {
+            #[cfg(any(test, feature = "test-support"))]
+            if super::spill_spike::selects_external::<N>(
+                spill_mode,
+                *expected,
+                codec,
+                || segment_bytes(root, names),
+                max_partition_bytes,
+            )? {
+                return super::spill_spike::load_external::<N>(
+                    root,
+                    names,
+                    *expected,
+                    codec,
+                    max_partition_bytes,
+                    stop,
+                )
+                .map(|(records, counters)| {
+                    (LoadedPartition::External(Box::new(records)), counters)
+                });
+            }
+            load_fixed_partition::<N>(root, names, *expected, codec, max_partition_bytes, stop)
+                .map(|(records, counters)| (LoadedPartition::Resident(records), counters))
+        };
+        #[cfg(test)]
+        if let Some(scheduler) = self.load_scheduler {
+            // Tokio and DataFusion tasks are `'static`: the load owns a
+            // duplicated directory handle and its own copy of the job list.
+            let root = root.try_clone().map_err(super::storage)?;
+            let partitions = jobs.len();
+            let jobs = jobs.to_vec();
+            let load = std::sync::Arc::new(move |job: usize, stop: &AtomicBool| {
+                load_job(&root, &jobs[job], stop)
+            });
+            return super::partition_load::scheduling_spike::run(
+                scheduler,
+                partitions,
+                self.load_workers,
+                load,
+                consume,
+                &|| false,
+            );
+        }
+        let load = |job: usize, stop: &AtomicBool| load_job(root, &jobs[job], stop);
+        consume_in_partition_order(jobs.len(), self.load_workers, load, consume)
     }
 
     /// Route one record into the partition owning `key`.
@@ -762,41 +840,6 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                     self.balance.rows().get(partition).copied(),
                 ));
             }
-            let codec = self.codec;
-            #[cfg(any(test, feature = "test-support"))]
-            let spill_mode = super::spill_spike::mode()?;
-            let load = |job: usize, stop: &AtomicBool| {
-                let (_, names, expected) = &jobs[job];
-                #[cfg(any(test, feature = "test-support"))]
-                if super::spill_spike::selects_external::<N>(
-                    spill_mode,
-                    *expected,
-                    codec,
-                    || segment_bytes(root, names),
-                    self.max_partition_bytes,
-                )? {
-                    return super::spill_spike::load_external::<N>(
-                        root,
-                        names,
-                        *expected,
-                        codec,
-                        self.max_partition_bytes,
-                        stop,
-                    )
-                    .map(|(records, counters)| {
-                        (LoadedPartition::External(Box::new(records)), counters)
-                    });
-                }
-                load_fixed_partition::<N>(
-                    root,
-                    names,
-                    *expected,
-                    codec,
-                    self.max_partition_bytes,
-                    stop,
-                )
-                .map(|(records, counters)| (LoadedPartition::Resident(records), counters))
-            };
             let consume =
                 |job: usize, (records, counters): (LoadedPartition<N>, PartitionLoadCounters)| {
                     let partition = jobs[job].0;
@@ -839,7 +882,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                         Ok(())
                     })
                 };
-            consume_in_partition_order(jobs.len(), self.load_workers, load, consume)?;
+            self.schedule_loads(&jobs, consume)?;
             // Load-bearing, not a nicety (#1439): a collapsed one-partition
             // run is perfectly deterministic and passes every byte-equality
             // test, so this is what tells a working range partition apart

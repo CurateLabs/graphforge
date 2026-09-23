@@ -258,7 +258,7 @@ fn materialized_records_bound_scales_with_the_smaller_of_workers_and_partitions(
 
 /// The evidence with native file identities relabelled in order of first
 /// appearance in the transition log, so runs against different roots compare.
-fn relabelled(evidence: &GraphConstructionEvidence) -> serde_json::Value {
+pub(super) fn relabelled(evidence: &GraphConstructionEvidence) -> serde_json::Value {
     let mut labels = BTreeMap::new();
     let mut label = |identity: &str| -> String {
         let next = labels.len();
