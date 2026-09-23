@@ -140,6 +140,7 @@ def ingest(gf, scale, workspace, run_dir, mode_env, extra_env=None):
         "max_rss_kib": max(step["max_rss_kib"] for step in steps),
         "validate_wall_s": steps[3]["wall_s"] if len(steps) > 3 else None,
         "validate_cpu_s": (steps[3]["user_s"] + steps[3]["sys_s"]) if len(steps) > 3 else None,
+        "validate_max_rss_kib": steps[3]["max_rss_kib"] if len(steps) > 3 else None,
         "oublock_512": sum(step["oublock"] for step in steps),
         "host_pages_dirtied": after["nr_dirtied"] - before["nr_dirtied"],
         "host_pages_written": after["nr_written"] - before["nr_written"],
@@ -173,6 +174,10 @@ def main():
     parser.add_argument("--modes", nargs="+", default=list(MODES))
     parser.add_argument("--instrumented-only", action="store_true")
     args = parser.parse_args()
+    # A build without graphforge-storage/test-support silently ignores every
+    # mode variable and measures the baseline three times.
+    if b"GF_SHAPE_SPILL_SPIKE" not in Path(args.gf).read_bytes():
+        raise SystemExit(f"{args.gf} was built without the #1507 experiment")
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     (out / "tmp").mkdir(exist_ok=True)
@@ -262,8 +267,11 @@ def main():
                 "merge_wall_s": total("merge_wall_ns") / 1e9,
                 "wall_s": result["wall_s"],
                 "max_rss_kib": result["max_rss_kib"],
+                "validate_max_rss_kib": result["validate_max_rss_kib"],
                 "scratch_leftovers": result["scratch_leftovers"],
             }
+            if not result["ok"] or not partitions:
+                raise SystemExit(f"{name}: no partition took the external path; see {run_dir}")
             (run_dir / "stderr.txt").unlink()
             shutil.rmtree(run_dir / "project", ignore_errors=True)
             with open(out / "instrumented.jsonl", "a") as stream:
@@ -281,6 +289,7 @@ def main():
                     "max": max(o[key] for o in accepted),
                 }
                 for key in ("wall_s", "cpu_s", "max_rss_kib", "validate_wall_s", "validate_cpu_s",
+                            "validate_max_rss_kib",
                             "oublock_512", "host_pages_dirtied", "host_pages_written")
             } | {"n": len(accepted)}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
