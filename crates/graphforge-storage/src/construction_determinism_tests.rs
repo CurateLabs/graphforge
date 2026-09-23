@@ -193,6 +193,14 @@ mod determinism {
         session: &mut GraphConstructionSession,
         shape: &ConstructionShape,
     ) -> Fingerprint {
+        fingerprint_and_encoding(session, shape).unwrap().0
+    }
+
+    /// Content digest of every shaped artifact, by name.
+    fn shaped_digests(
+        session: &GraphConstructionSession,
+        shape: &ConstructionShape,
+    ) -> Vec<(String, String)> {
         let mut shaped = Vec::new();
         for name in std::iter::once(&shape.identities)
             .chain(shape.node_details.iter())
@@ -206,7 +214,16 @@ mod determinism {
             shaped.push((name.clone(), receipt.sha256));
         }
         shaped.sort_unstable();
-        let encoding = session.encode_canonical(shape, 1).unwrap();
+        shaped
+    }
+
+    /// [`fingerprint`], keeping the encoding so a caller can publish it.
+    fn fingerprint_and_encoding(
+        session: &mut GraphConstructionSession,
+        shape: &ConstructionShape,
+    ) -> Result<(Fingerprint, GraphConstructionEncoding), GfError> {
+        let shaped = shaped_digests(session, shape);
+        let encoding = session.encode_canonical(shape, 1)?;
         for control in NONCE_BEARING_CONTROLS {
             assert!(
                 encoding
@@ -229,14 +246,15 @@ mod determinism {
             })
             .collect::<Vec<_>>();
         encoded.sort_unstable();
-        Fingerprint {
+        let fingerprint = Fingerprint {
             shaped,
             encoded,
             node_count: shape.node_count,
             edge_count: shape.edge_count,
             max_node_surrogate: shape.max_node_surrogate,
             max_edge_surrogate: shape.max_edge_surrogate,
-        }
+        };
+        Ok((fingerprint, encoding))
     }
 
     fn layout(session: &GraphConstructionSession) -> Layout {
@@ -816,4 +834,6 @@ mod determinism {
             })
         );
     }
+
+    include!("construction_spill_spike_tests.rs");
 }

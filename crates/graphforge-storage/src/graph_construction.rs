@@ -76,6 +76,8 @@ mod partition_memory;
 mod partition_records;
 pub(crate) mod partition_shaping;
 mod progress;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod spill_spike;
 mod supersession;
 use progress::{
     LoadedShapeProgress, ShapeResume, load_shape_progress_chain, scan_shape_segments,
