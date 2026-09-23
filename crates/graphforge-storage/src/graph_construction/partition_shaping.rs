@@ -763,8 +763,30 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                 ));
             }
             let codec = self.codec;
+            #[cfg(any(test, feature = "test-support"))]
+            let spill_mode = super::spill_spike::mode()?;
             let load = |job: usize, stop: &AtomicBool| {
                 let (_, names, expected) = &jobs[job];
+                #[cfg(any(test, feature = "test-support"))]
+                if super::spill_spike::selects_external::<N>(
+                    spill_mode,
+                    *expected,
+                    codec,
+                    || segment_bytes(root, names),
+                    self.max_partition_bytes,
+                )? {
+                    return super::spill_spike::load_external::<N>(
+                        root,
+                        names,
+                        *expected,
+                        codec,
+                        self.max_partition_bytes,
+                        stop,
+                    )
+                    .map(|(records, counters)| {
+                        (LoadedPartition::External(Box::new(records)), counters)
+                    });
+                }
                 load_fixed_partition::<N>(
                     root,
                     names,
@@ -773,16 +795,17 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                     self.max_partition_bytes,
                     stop,
                 )
+                .map(|(records, counters)| (LoadedPartition::Resident(records), counters))
             };
             let consume =
-                |job: usize, (records, counters): (PartitionRecords<N>, PartitionLoadCounters)| {
+                |job: usize, (records, counters): (LoadedPartition<N>, PartitionLoadCounters)| {
                     let partition = jobs[job].0;
                     reject_cancelled(cancelled)?;
                     // The ordered critical section: fold the worker's local
                     // counters into the shared evidence, then write the partition.
                     counters.merge_into(evidence)?;
                     injected_input_release_failure()?;
-                    for record in records.iter() {
+                    records.for_each_record(|record| {
                         // Partition order is key order, so the concatenation is the
                         // global order. Prove it rather than assume it: this is the
                         // invariant the external merge's heap used to provide.
@@ -813,8 +836,8 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                         if written.is_multiple_of(4096) {
                             reject_cancelled(cancelled)?;
                         }
-                    }
-                    Ok(())
+                        Ok(())
+                    })
                 };
             consume_in_partition_order(jobs.len(), self.load_workers, load, consume)?;
             // Load-bearing, not a nicety (#1439): a collapsed one-partition
@@ -969,6 +992,44 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
         }
         Ok(Some(output.to_owned()))
     }
+}
+
+/// A loaded fixed-width partition, handed from a load worker to the
+/// coordinator. Only the #1507 experiment produces anything but a resident,
+/// fully sorted partition.
+pub(super) enum LoadedPartition<const N: usize> {
+    Resident(PartitionRecords<N>),
+    #[cfg(any(test, feature = "test-support"))]
+    External(Box<super::spill_spike::ExternalPartition>),
+}
+
+impl<const N: usize> LoadedPartition<N> {
+    /// Hand every record to `consume` in sorted order.
+    fn for_each_record(
+        self,
+        consume: impl FnMut(&[u8]) -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        match self {
+            Self::Resident(records) => records.iter().try_for_each(consume),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::External(records) => records.for_each_record(consume),
+        }
+    }
+}
+
+/// Combined on-disk length of a partition's sealed segments.
+#[cfg(any(test, feature = "test-support"))]
+fn segment_bytes(root: &StableDirectory, names: &[String]) -> Result<u64, GfError> {
+    names.iter().try_fold(0_u64, |total, name| {
+        let length = root
+            .open_child_file(OsStr::new(name))
+            .and_then(|file| file.metadata())
+            .map_err(super::storage)?
+            .len();
+        total
+            .checked_add(length)
+            .ok_or_else(|| super::storage("partition spill byte count overflows"))
+    })
 }
 
 /// Read one fixed-width partition's sealed segments into memory and sort them,
