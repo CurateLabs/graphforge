@@ -5,7 +5,7 @@ use crate::construction_detail_codec::DetailCodec;
 use graphforge_core::GfError;
 
 #[cfg(any(test, feature = "test-support"))]
-mod sort_spike;
+pub(super) mod sort_spike;
 
 pub(super) enum PartitionRecords<const N: usize> {
     Fixed(Vec<[u8; N]>),

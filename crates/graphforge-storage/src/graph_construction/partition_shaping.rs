@@ -987,7 +987,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
 /// families keep their fixed-width arrays. Sorting does not change either wire
 /// representation. Segments are read in boundary order, which is routing
 /// order; the sort below is the only order authority.
-fn load_fixed_partition<const N: usize>(
+pub(super) fn load_fixed_partition<const N: usize>(
     root: &StableDirectory,
     names: &[String],
     expected_records: Option<u64>,
@@ -1645,6 +1645,10 @@ impl<'a> RowRangePartitioner<'a> {
             let combined = concat_batches(schema, &batches).map_err(super::storage)?;
             drop(batches);
             let uuids = key_column(&combined)?;
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(order) = super::partition_records::sort_spike::row_order(uuids)? {
+                return take_record_batch(&combined, &order).map_err(super::storage);
+            }
             let rows = u32::try_from(combined.num_rows()).map_err(super::storage)?;
             let mut order = (0..rows).collect::<Vec<_>>();
             let mut keys = Vec::with_capacity(combined.num_rows());
