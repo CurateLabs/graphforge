@@ -1,0 +1,9 @@
+date: 2026-09-23T08:26:48Z
+Linux OVHC-AGENCY 7.0.0-30-generic #30-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 31 18:22:54 UTC 2026 x86_64 GNU/Linux
+16
+               total        used        free      shared  buff/cache   available
+Mem:             125           8           8           2         111         116
+/dev/md3 ext4
+cf769d2ad12b36750440f9544b8be77a5c3085177a159aeb5d08610a01f1fdb1  /home/ubuntu/gf-1506-evidence/bin-6bf02962/gf
+2637a10636ac4ceafadca2c52d2c60542824782102d6ac9e277cfb280296a11e  /home/ubuntu/gf-1506-evidence/bin-6bf02962/graphforge-benchmark-graph500-generator
+modes: baseline arrow datafusion rounds: 3 scales: 18 20
