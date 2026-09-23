@@ -139,7 +139,7 @@ a defect.
 
 ## Measurements
 
-**Setup.** Binary `gf` SHA-256 `ccc23c62…df790`, built from `01460cc0` with
+**Setup.** Binary `gf` SHA-256 `ccc23c62…df790`, built on main `3b514cd8` plus this branch's spike commit (before the later clippy refactor and rebase) with
 `cargo build --release -p graphforge-cli -p graphforge-storage --features graphforge-storage/test-support`.
 Host OVHC-AGENCY: 16 logical CPUs (Ryzen 7 3800X), ext4 on mdadm RAID 1, no
 cgroup limit. Generator SHA-256 `2637a106…a11e`. S18 inputs are nodes
@@ -302,5 +302,5 @@ Graph500-scale claim is equality of query answers.
 | --- | --- |
 | 2026-09-23 | Predeclared experiment and measurement protocol. |
 | 2026-09-23 | Before any timed run: the driver now refuses a binary built without the experiment. `cargo build -p graphforge-cli --features graphforge-storage/test-support` silently produced one; the S12 smoke run showed zero external partitions. The measured binary is built with `-p graphforge-cli -p graphforge-storage --features graphforge-storage/test-support`. Validate-step peak RSS added, because the largest `gf` process is not the validate step. |
-| 2026-09-23 | After measurement: a clippy-only refactor of the spike (`95fefaa8`) and a ruff-only cleanup of the driver. The storage suite passed unchanged after the refactor, and an S12 smoke run of the cleaned driver reproduced the same partition counts. The results above come from the binary built from `01460cc0` and the driver at `39c6abcf`. |
+| 2026-09-23 | After measurement: a clippy-only refactor of the spike and a ruff-only cleanup of the driver. The storage suite passed unchanged after the refactor, and an S12 smoke run of the cleaned driver reproduced the same partition counts. The results above come from the binary built before that refactor, and the driver as it was before the cleanup. The branch was then rebased onto a newer main. |
 | 2026-09-23 | Correction to the predeclared protocol, from the S12 smoke run before any timed run: a 64 KiB pool forces spill only in partitions whose input exceeds what the pool can buffer (51 of 1,250 at S12), not in every partition. The instrumented runs report the actual count. |
