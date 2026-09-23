@@ -1,0 +1,1186 @@
+{
+  "config": {
+    "batch_records": 8192,
+    "budget_bytes": 33554432,
+    "hub_records": 4194304,
+    "partition_records": 4194304,
+    "partitions": 256,
+    "records": 1048576,
+    "rounds": 5
+  },
+  "schema": "graphforge-sort-partition-spike-1506/1",
+  "workloads": [
+    {
+      "observations": [
+        {
+          "mode": "baseline",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 0,
+          "transient_peak_bytes": 0,
+          "wall_ns": 129497796
+        },
+        {
+          "mode": "arrow-fixed",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 0,
+          "transient_peak_bytes": 60817520,
+          "wall_ns": 283625841
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 0,
+          "transient_peak_bytes": 60817520,
+          "wall_ns": 280291924
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 0,
+          "transient_peak_bytes": 67160933,
+          "wall_ns": 331929673
+        },
+        {
+          "mode": "arrow-fixed",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 1,
+          "transient_peak_bytes": 60817520,
+          "wall_ns": 253291014
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 1,
+          "transient_peak_bytes": 60817520,
+          "wall_ns": 242917538
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 1,
+          "transient_peak_bytes": 67137381,
+          "wall_ns": 272754785
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 1,
+          "transient_peak_bytes": 0,
+          "wall_ns": 118790584
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 2,
+          "transient_peak_bytes": 60817520,
+          "wall_ns": 242136633
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 2,
+          "transient_peak_bytes": 67137381,
+          "wall_ns": 270674470
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 2,
+          "transient_peak_bytes": 0,
+          "wall_ns": 118908145
+        },
+        {
+          "mode": "arrow-fixed",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 2,
+          "transient_peak_bytes": 60817520,
+          "wall_ns": 242227836
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 3,
+          "transient_peak_bytes": 67137381,
+          "wall_ns": 271091247
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 3,
+          "transient_peak_bytes": 0,
+          "wall_ns": 119043837
+        },
+        {
+          "mode": "arrow-fixed",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 3,
+          "transient_peak_bytes": 60817520,
+          "wall_ns": 243262533
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 3,
+          "transient_peak_bytes": 60817520,
+          "wall_ns": 242501950
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 4,
+          "transient_peak_bytes": 0,
+          "wall_ns": 119263231
+        },
+        {
+          "mode": "arrow-fixed",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 4,
+          "transient_peak_bytes": 60817520,
+          "wall_ns": 242713614
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 4,
+          "transient_peak_bytes": 60817520,
+          "wall_ns": 242325507
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 4,
+          "transient_peak_bytes": 67137381,
+          "wall_ns": 273330745
+        }
+      ],
+      "record_width": 26,
+      "records": 1048576,
+      "summary": {
+        "arrow": {
+          "max_wall_ns": 280291924,
+          "median_ratio_to_baseline": 2.037081096436769,
+          "median_transient_peak_bytes": 60817520,
+          "median_wall_ns": 242501950,
+          "min_wall_ns": 242136633,
+          "observations": 5
+        },
+        "arrow-fixed": {
+          "max_wall_ns": 283625841,
+          "median_ratio_to_baseline": 2.04347019661337,
+          "median_transient_peak_bytes": 60817520,
+          "median_wall_ns": 243262533,
+          "min_wall_ns": 242227836,
+          "observations": 5
+        },
+        "baseline": {
+          "max_wall_ns": 129497796,
+          "median_ratio_to_baseline": 1.0,
+          "median_transient_peak_bytes": 0,
+          "median_wall_ns": 119043837,
+          "min_wall_ns": 118790584,
+          "observations": 5
+        },
+        "datafusion": {
+          "max_wall_ns": 331929673,
+          "median_ratio_to_baseline": 2.2912129840035313,
+          "median_transient_peak_bytes": 67137381,
+          "median_wall_ns": 272754785,
+          "min_wall_ns": 270674470,
+          "observations": 5
+        }
+      },
+      "workload": "identities"
+    },
+    {
+      "observations": [
+        {
+          "mode": "baseline",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 0,
+          "transient_peak_bytes": 0,
+          "wall_ns": 119528186
+        },
+        {
+          "mode": "arrow-fixed",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 0,
+          "transient_peak_bytes": 59768944,
+          "wall_ns": 239524680
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 0,
+          "transient_peak_bytes": 59768944,
+          "wall_ns": 239978898
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 0,
+          "transient_peak_bytes": 65040229,
+          "wall_ns": 267256912
+        },
+        {
+          "mode": "arrow-fixed",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 1,
+          "transient_peak_bytes": 59768944,
+          "wall_ns": 239398608
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 1,
+          "transient_peak_bytes": 59768944,
+          "wall_ns": 240202631
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 1,
+          "transient_peak_bytes": 65040229,
+          "wall_ns": 266972757
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 1,
+          "transient_peak_bytes": 0,
+          "wall_ns": 119323503
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 2,
+          "transient_peak_bytes": 59768944,
+          "wall_ns": 240395104
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 2,
+          "transient_peak_bytes": 65040229,
+          "wall_ns": 267772540
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 2,
+          "transient_peak_bytes": 0,
+          "wall_ns": 119795411
+        },
+        {
+          "mode": "arrow-fixed",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 2,
+          "transient_peak_bytes": 59768944,
+          "wall_ns": 241897430
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 3,
+          "transient_peak_bytes": 65040229,
+          "wall_ns": 268586514
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 3,
+          "transient_peak_bytes": 0,
+          "wall_ns": 119483905
+        },
+        {
+          "mode": "arrow-fixed",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 3,
+          "transient_peak_bytes": 59768944,
+          "wall_ns": 240980854
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 3,
+          "transient_peak_bytes": 59768944,
+          "wall_ns": 240915793
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 4,
+          "transient_peak_bytes": 0,
+          "wall_ns": 119417673
+        },
+        {
+          "mode": "arrow-fixed",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 4,
+          "transient_peak_bytes": 59768944,
+          "wall_ns": 240671518
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 4,
+          "transient_peak_bytes": 59768944,
+          "wall_ns": 256334585
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "522ad77509bc7a9610a672a5179f51b413ad6d1c3711a3a84e7ae2de693cafb7",
+          "round": 4,
+          "transient_peak_bytes": 65040229,
+          "wall_ns": 266964627
+        }
+      ],
+      "record_width": 25,
+      "records": 1048576,
+      "summary": {
+        "arrow": {
+          "max_wall_ns": 256334585,
+          "median_ratio_to_baseline": 2.0119454917379875,
+          "median_transient_peak_bytes": 59768944,
+          "median_wall_ns": 240395104,
+          "min_wall_ns": 239978898,
+          "observations": 5
+        },
+        "arrow-fixed": {
+          "max_wall_ns": 241897430,
+          "median_ratio_to_baseline": 2.01425889118706,
+          "median_transient_peak_bytes": 59768944,
+          "median_wall_ns": 240671518,
+          "min_wall_ns": 239398608,
+          "observations": 5
+        },
+        "baseline": {
+          "max_wall_ns": 119795411,
+          "median_ratio_to_baseline": 1.0,
+          "median_transient_peak_bytes": 0,
+          "median_wall_ns": 119483905,
+          "min_wall_ns": 119323503,
+          "observations": 5
+        },
+        "datafusion": {
+          "max_wall_ns": 268586514,
+          "median_ratio_to_baseline": 2.2367607754366583,
+          "median_transient_peak_bytes": 65040229,
+          "median_wall_ns": 267256912,
+          "min_wall_ns": 266964627,
+          "observations": 5
+        }
+      },
+      "workload": "resolved-endpoints"
+    },
+    {
+      "observations": [
+        {
+          "mode": "baseline",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 0,
+          "transient_peak_bytes": 0,
+          "wall_ns": 110267838
+        },
+        {
+          "mode": "arrow-fixed",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 0,
+          "transient_peak_bytes": 68157552,
+          "wall_ns": 296502950
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 0,
+          "transient_peak_bytes": 68157552,
+          "wall_ns": 296069442
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 0,
+          "transient_peak_bytes": 81817445,
+          "wall_ns": 342088627
+        },
+        {
+          "mode": "arrow-fixed",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 1,
+          "transient_peak_bytes": 68157552,
+          "wall_ns": 281587196
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 1,
+          "transient_peak_bytes": 68157552,
+          "wall_ns": 282840187
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 1,
+          "transient_peak_bytes": 81817445,
+          "wall_ns": 333022232
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 1,
+          "transient_peak_bytes": 0,
+          "wall_ns": 101549549
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 2,
+          "transient_peak_bytes": 68157552,
+          "wall_ns": 283801684
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 2,
+          "transient_peak_bytes": 81817445,
+          "wall_ns": 333441848
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 2,
+          "transient_peak_bytes": 0,
+          "wall_ns": 101561579
+        },
+        {
+          "mode": "arrow-fixed",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 2,
+          "transient_peak_bytes": 68157552,
+          "wall_ns": 283369246
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 3,
+          "transient_peak_bytes": 81817445,
+          "wall_ns": 333034792
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 3,
+          "transient_peak_bytes": 0,
+          "wall_ns": 101678022
+        },
+        {
+          "mode": "arrow-fixed",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 3,
+          "transient_peak_bytes": 68157552,
+          "wall_ns": 288074467
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 3,
+          "transient_peak_bytes": 68157552,
+          "wall_ns": 281894811
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 4,
+          "transient_peak_bytes": 0,
+          "wall_ns": 101681452
+        },
+        {
+          "mode": "arrow-fixed",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 4,
+          "transient_peak_bytes": 68157552,
+          "wall_ns": 283366106
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 4,
+          "transient_peak_bytes": 68157552,
+          "wall_ns": 282482681
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "7dfa0cb324fbd3926ba14840bee8a36eaf0214bdf6096149685982204fb9dcb2",
+          "round": 4,
+          "transient_peak_bytes": 81817445,
+          "wall_ns": 335390983
+        }
+      ],
+      "record_width": 33,
+      "records": 1048576,
+      "summary": {
+        "arrow": {
+          "max_wall_ns": 296069442,
+          "median_ratio_to_baseline": 2.781723930467491,
+          "median_transient_peak_bytes": 68157552,
+          "median_wall_ns": 282840187,
+          "min_wall_ns": 281894811,
+          "observations": 5
+        },
+        "arrow-fixed": {
+          "max_wall_ns": 296502950,
+          "median_ratio_to_baseline": 2.7869272083203978,
+          "median_transient_peak_bytes": 68157552,
+          "median_wall_ns": 283369246,
+          "min_wall_ns": 281587196,
+          "observations": 5
+        },
+        "baseline": {
+          "max_wall_ns": 110267838,
+          "median_ratio_to_baseline": 1.0,
+          "median_transient_peak_bytes": 0,
+          "median_wall_ns": 101678022,
+          "min_wall_ns": 101549549,
+          "observations": 5
+        },
+        "datafusion": {
+          "max_wall_ns": 342088627,
+          "median_ratio_to_baseline": 3.279389601029021,
+          "median_transient_peak_bytes": 81817445,
+          "median_wall_ns": 333441848,
+          "min_wall_ns": 333022232,
+          "observations": 5
+        }
+      },
+      "workload": "power-law-endpoints"
+    },
+    {
+      "observations": [
+        {
+          "mode": "baseline",
+          "output_sha256": "8593ddecdc88daf2abb6eb46c5c8544c91bc4fa67ab9886cf7ebef081fa20dcb",
+          "round": 0,
+          "transient_peak_bytes": 0,
+          "wall_ns": 197501843
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "8593ddecdc88daf2abb6eb46c5c8544c91bc4fa67ab9886cf7ebef081fa20dcb",
+          "round": 0,
+          "transient_peak_bytes": 29360304,
+          "wall_ns": 385448955
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "8593ddecdc88daf2abb6eb46c5c8544c91bc4fa67ab9886cf7ebef081fa20dcb",
+          "round": 0,
+          "transient_peak_bytes": 51293567,
+          "wall_ns": 432931424
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "8593ddecdc88daf2abb6eb46c5c8544c91bc4fa67ab9886cf7ebef081fa20dcb",
+          "round": 1,
+          "transient_peak_bytes": 29360304,
+          "wall_ns": 384221294
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "8593ddecdc88daf2abb6eb46c5c8544c91bc4fa67ab9886cf7ebef081fa20dcb",
+          "round": 1,
+          "transient_peak_bytes": 51293567,
+          "wall_ns": 432906083
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "8593ddecdc88daf2abb6eb46c5c8544c91bc4fa67ab9886cf7ebef081fa20dcb",
+          "round": 1,
+          "transient_peak_bytes": 0,
+          "wall_ns": 197758987
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "8593ddecdc88daf2abb6eb46c5c8544c91bc4fa67ab9886cf7ebef081fa20dcb",
+          "round": 2,
+          "transient_peak_bytes": 51293567,
+          "wall_ns": 431663472
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "8593ddecdc88daf2abb6eb46c5c8544c91bc4fa67ab9886cf7ebef081fa20dcb",
+          "round": 2,
+          "transient_peak_bytes": 0,
+          "wall_ns": 197246970
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "8593ddecdc88daf2abb6eb46c5c8544c91bc4fa67ab9886cf7ebef081fa20dcb",
+          "round": 2,
+          "transient_peak_bytes": 29360304,
+          "wall_ns": 384890415
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "8593ddecdc88daf2abb6eb46c5c8544c91bc4fa67ab9886cf7ebef081fa20dcb",
+          "round": 3,
+          "transient_peak_bytes": 0,
+          "wall_ns": 197165008
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "8593ddecdc88daf2abb6eb46c5c8544c91bc4fa67ab9886cf7ebef081fa20dcb",
+          "round": 3,
+          "transient_peak_bytes": 29360304,
+          "wall_ns": 384794633
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "8593ddecdc88daf2abb6eb46c5c8544c91bc4fa67ab9886cf7ebef081fa20dcb",
+          "round": 3,
+          "transient_peak_bytes": 51293567,
+          "wall_ns": 433883010
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "8593ddecdc88daf2abb6eb46c5c8544c91bc4fa67ab9886cf7ebef081fa20dcb",
+          "round": 4,
+          "transient_peak_bytes": 29360304,
+          "wall_ns": 382746949
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "8593ddecdc88daf2abb6eb46c5c8544c91bc4fa67ab9886cf7ebef081fa20dcb",
+          "round": 4,
+          "transient_peak_bytes": 51293567,
+          "wall_ns": 433664226
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "8593ddecdc88daf2abb6eb46c5c8544c91bc4fa67ab9886cf7ebef081fa20dcb",
+          "round": 4,
+          "transient_peak_bytes": 0,
+          "wall_ns": 197115727
+        }
+      ],
+      "record_width": 272,
+      "records": 1048576,
+      "summary": {
+        "arrow": {
+          "max_wall_ns": 385448955,
+          "median_ratio_to_baseline": 1.9508265855744198,
+          "median_transient_peak_bytes": 29360304,
+          "median_wall_ns": 384794633,
+          "min_wall_ns": 382746949,
+          "observations": 5
+        },
+        "baseline": {
+          "max_wall_ns": 197758987,
+          "median_ratio_to_baseline": 1.0,
+          "median_transient_peak_bytes": 0,
+          "median_wall_ns": 197246970,
+          "min_wall_ns": 197115727,
+          "observations": 5
+        },
+        "datafusion": {
+          "max_wall_ns": 433883010,
+          "median_ratio_to_baseline": 2.194869832474486,
+          "median_transient_peak_bytes": 51293567,
+          "median_wall_ns": 432931424,
+          "min_wall_ns": 431663472,
+          "observations": 5
+        }
+      },
+      "workload": "compact-node-details"
+    },
+    {
+      "observations": [
+        {
+          "mode": "baseline-sort-unstable",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 0,
+          "transient_peak_bytes": 0,
+          "wall_ns": 120175547
+        },
+        {
+          "mode": "arrow-sort-to-indices-kernel",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 0,
+          "transient_peak_bytes": 33554488,
+          "wall_ns": 220914443
+        },
+        {
+          "mode": "arrow-sort-to-indices-kernel",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 1,
+          "transient_peak_bytes": 33554488,
+          "wall_ns": 221614384
+        },
+        {
+          "mode": "baseline-sort-unstable",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 1,
+          "transient_peak_bytes": 0,
+          "wall_ns": 120211288
+        },
+        {
+          "mode": "baseline-sort-unstable",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 2,
+          "transient_peak_bytes": 0,
+          "wall_ns": 120278649
+        },
+        {
+          "mode": "arrow-sort-to-indices-kernel",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 2,
+          "transient_peak_bytes": 33554488,
+          "wall_ns": 222350196
+        },
+        {
+          "mode": "arrow-sort-to-indices-kernel",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 3,
+          "transient_peak_bytes": 33554488,
+          "wall_ns": 222256524
+        },
+        {
+          "mode": "baseline-sort-unstable",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 3,
+          "transient_peak_bytes": 0,
+          "wall_ns": 120166836
+        },
+        {
+          "mode": "baseline-sort-unstable",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 4,
+          "transient_peak_bytes": 0,
+          "wall_ns": 120525641
+        },
+        {
+          "mode": "arrow-sort-to-indices-kernel",
+          "output_sha256": "65616d07e11fb4ee92cee53f6f807946636ad15a2cd94e1784cc007df4c7a76c",
+          "round": 4,
+          "transient_peak_bytes": 33554488,
+          "wall_ns": 222257435
+        }
+      ],
+      "record_width": 26,
+      "records": 1048576,
+      "summary": {
+        "arrow-sort-to-indices-kernel": {
+          "max_wall_ns": 222350196,
+          "median_ratio_to_baseline": 1.8488823112851098,
+          "median_transient_peak_bytes": 33554488,
+          "median_wall_ns": 222256524,
+          "min_wall_ns": 220914443,
+          "observations": 5
+        },
+        "baseline-sort-unstable": {
+          "max_wall_ns": 120525641,
+          "median_ratio_to_baseline": 1.0,
+          "median_transient_peak_bytes": 0,
+          "median_wall_ns": 120211288,
+          "min_wall_ns": 120166836,
+          "observations": 5
+        }
+      },
+      "workload": "identities-kernel-only"
+    },
+    {
+      "observations": [
+        {
+          "mode": "baseline",
+          "output_sha256": "100c654967ca965f9d1b8b9e3b99298a1f2bbf416f694b852ea256e8fe06b311",
+          "round": 0,
+          "transient_peak_bytes": 20971520,
+          "wall_ns": 89637458
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "100c654967ca965f9d1b8b9e3b99298a1f2bbf416f694b852ea256e8fe06b311",
+          "round": 0,
+          "transient_peak_bytes": 33554488,
+          "wall_ns": 171649247
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "100c654967ca965f9d1b8b9e3b99298a1f2bbf416f694b852ea256e8fe06b311",
+          "round": 0,
+          "transient_peak_bytes": 37776397,
+          "wall_ns": 181991132
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "100c654967ca965f9d1b8b9e3b99298a1f2bbf416f694b852ea256e8fe06b311",
+          "round": 1,
+          "transient_peak_bytes": 33554488,
+          "wall_ns": 171512166
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "100c654967ca965f9d1b8b9e3b99298a1f2bbf416f694b852ea256e8fe06b311",
+          "round": 1,
+          "transient_peak_bytes": 37776397,
+          "wall_ns": 181397103
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "100c654967ca965f9d1b8b9e3b99298a1f2bbf416f694b852ea256e8fe06b311",
+          "round": 1,
+          "transient_peak_bytes": 20971520,
+          "wall_ns": 89834502
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "100c654967ca965f9d1b8b9e3b99298a1f2bbf416f694b852ea256e8fe06b311",
+          "round": 2,
+          "transient_peak_bytes": 37776397,
+          "wall_ns": 181349912
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "100c654967ca965f9d1b8b9e3b99298a1f2bbf416f694b852ea256e8fe06b311",
+          "round": 2,
+          "transient_peak_bytes": 20971520,
+          "wall_ns": 90235129
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "100c654967ca965f9d1b8b9e3b99298a1f2bbf416f694b852ea256e8fe06b311",
+          "round": 2,
+          "transient_peak_bytes": 33554488,
+          "wall_ns": 171167650
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "100c654967ca965f9d1b8b9e3b99298a1f2bbf416f694b852ea256e8fe06b311",
+          "round": 3,
+          "transient_peak_bytes": 20971520,
+          "wall_ns": 89998755
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "100c654967ca965f9d1b8b9e3b99298a1f2bbf416f694b852ea256e8fe06b311",
+          "round": 3,
+          "transient_peak_bytes": 33554488,
+          "wall_ns": 171121338
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "100c654967ca965f9d1b8b9e3b99298a1f2bbf416f694b852ea256e8fe06b311",
+          "round": 3,
+          "transient_peak_bytes": 37776397,
+          "wall_ns": 189850627
+        },
+        {
+          "mode": "arrow",
+          "output_sha256": "100c654967ca965f9d1b8b9e3b99298a1f2bbf416f694b852ea256e8fe06b311",
+          "round": 4,
+          "transient_peak_bytes": 33554488,
+          "wall_ns": 171020837
+        },
+        {
+          "mode": "datafusion",
+          "output_sha256": "100c654967ca965f9d1b8b9e3b99298a1f2bbf416f694b852ea256e8fe06b311",
+          "round": 4,
+          "transient_peak_bytes": 37776397,
+          "wall_ns": 182153006
+        },
+        {
+          "mode": "baseline",
+          "output_sha256": "100c654967ca965f9d1b8b9e3b99298a1f2bbf416f694b852ea256e8fe06b311",
+          "round": 4,
+          "transient_peak_bytes": 20971520,
+          "wall_ns": 90523324
+        }
+      ],
+      "record_width": 16,
+      "records": 1048576,
+      "summary": {
+        "arrow": {
+          "max_wall_ns": 171649247,
+          "median_ratio_to_baseline": 1.9018890872434846,
+          "median_transient_peak_bytes": 33554488,
+          "median_wall_ns": 171167650,
+          "min_wall_ns": 171020837,
+          "observations": 5
+        },
+        "baseline": {
+          "max_wall_ns": 90523324,
+          "median_ratio_to_baseline": 1.0,
+          "median_transient_peak_bytes": 20971520,
+          "median_wall_ns": 89998755,
+          "min_wall_ns": 89637458,
+          "observations": 5
+        },
+        "datafusion": {
+          "max_wall_ns": 189850627,
+          "median_ratio_to_baseline": 2.0221516619868796,
+          "median_transient_peak_bytes": 37776397,
+          "median_wall_ns": 181991132,
+          "min_wall_ns": 181349912,
+          "observations": 5
+        }
+      },
+      "workload": "row-partition-order"
+    },
+    {
+      "batch_records": 8192,
+      "budget_bytes": 33554432,
+      "current_contract": {
+        "error": "storage error: graph construction session: partition materialization requires 138412032 bytes, exceeds recorded budget 33554432",
+        "outcome": "refused",
+        "wall_ns": 14900
+      },
+      "external_sort_outcomes": [
+        {
+          "output_batches": 512,
+          "output_sha256": "20313b88ef1d8a246b52d905f69a53698aec30d36422c777a1665fadd2c72f7e",
+          "peak_reserved_bytes": 33259520,
+          "pool_limit_bytes": 33554432,
+          "records": 4194304,
+          "spill_count": 12,
+          "spilled_bytes": 139011680,
+          "spilled_rows": 4194304
+        },
+        {
+          "output_batches": 512,
+          "output_sha256": "20313b88ef1d8a246b52d905f69a53698aec30d36422c777a1665fadd2c72f7e",
+          "peak_reserved_bytes": 33259520,
+          "pool_limit_bytes": 33554432,
+          "records": 4194304,
+          "spill_count": 12,
+          "spilled_bytes": 139011680,
+          "spilled_rows": 4194304
+        },
+        {
+          "output_batches": 512,
+          "output_sha256": "20313b88ef1d8a246b52d905f69a53698aec30d36422c777a1665fadd2c72f7e",
+          "peak_reserved_bytes": 33259520,
+          "pool_limit_bytes": 33554432,
+          "records": 4194304,
+          "spill_count": 12,
+          "spilled_bytes": 139011680,
+          "spilled_rows": 4194304
+        },
+        {
+          "output_batches": 512,
+          "output_sha256": "20313b88ef1d8a246b52d905f69a53698aec30d36422c777a1665fadd2c72f7e",
+          "peak_reserved_bytes": 33259520,
+          "pool_limit_bytes": 33554432,
+          "records": 4194304,
+          "spill_count": 12,
+          "spilled_bytes": 139011680,
+          "spilled_rows": 4194304
+        },
+        {
+          "output_batches": 512,
+          "output_sha256": "20313b88ef1d8a246b52d905f69a53698aec30d36422c777a1665fadd2c72f7e",
+          "peak_reserved_bytes": 33259520,
+          "pool_limit_bytes": 33554432,
+          "records": 4194304,
+          "spill_count": 12,
+          "spilled_bytes": 139011680,
+          "spilled_rows": 4194304
+        }
+      ],
+      "observations": [
+        {
+          "mode": "in-memory-raised-budget",
+          "output_sha256": "20313b88ef1d8a246b52d905f69a53698aec30d36422c777a1665fadd2c72f7e",
+          "round": 0,
+          "transient_peak_bytes": 139460752,
+          "wall_ns": 630358309
+        },
+        {
+          "mode": "datafusion-external",
+          "output_sha256": "20313b88ef1d8a246b52d905f69a53698aec30d36422c777a1665fadd2c72f7e",
+          "round": 0,
+          "transient_peak_bytes": 32782260,
+          "wall_ns": 917004705
+        },
+        {
+          "mode": "datafusion-external",
+          "output_sha256": "20313b88ef1d8a246b52d905f69a53698aec30d36422c777a1665fadd2c72f7e",
+          "round": 1,
+          "transient_peak_bytes": 32781908,
+          "wall_ns": 968237962
+        },
+        {
+          "mode": "in-memory-raised-budget",
+          "output_sha256": "20313b88ef1d8a246b52d905f69a53698aec30d36422c777a1665fadd2c72f7e",
+          "round": 1,
+          "transient_peak_bytes": 139460752,
+          "wall_ns": 677416576
+        },
+        {
+          "mode": "in-memory-raised-budget",
+          "output_sha256": "20313b88ef1d8a246b52d905f69a53698aec30d36422c777a1665fadd2c72f7e",
+          "round": 2,
+          "transient_peak_bytes": 139460752,
+          "wall_ns": 674300823
+        },
+        {
+          "mode": "datafusion-external",
+          "output_sha256": "20313b88ef1d8a246b52d905f69a53698aec30d36422c777a1665fadd2c72f7e",
+          "round": 2,
+          "transient_peak_bytes": 32781908,
+          "wall_ns": 946778119
+        },
+        {
+          "mode": "datafusion-external",
+          "output_sha256": "20313b88ef1d8a246b52d905f69a53698aec30d36422c777a1665fadd2c72f7e",
+          "round": 3,
+          "transient_peak_bytes": 32781908,
+          "wall_ns": 900968043
+        },
+        {
+          "mode": "in-memory-raised-budget",
+          "output_sha256": "20313b88ef1d8a246b52d905f69a53698aec30d36422c777a1665fadd2c72f7e",
+          "round": 3,
+          "transient_peak_bytes": 139460752,
+          "wall_ns": 622515916
+        },
+        {
+          "mode": "in-memory-raised-budget",
+          "output_sha256": "20313b88ef1d8a246b52d905f69a53698aec30d36422c777a1665fadd2c72f7e",
+          "round": 4,
+          "transient_peak_bytes": 139460752,
+          "wall_ns": 622506206
+        },
+        {
+          "mode": "datafusion-external",
+          "output_sha256": "20313b88ef1d8a246b52d905f69a53698aec30d36422c777a1665fadd2c72f7e",
+          "round": 4,
+          "transient_peak_bytes": 32781908,
+          "wall_ns": 913892391
+        }
+      ],
+      "partition_bytes": 138412032,
+      "record_width": 33,
+      "records": 4194304,
+      "summary": {
+        "datafusion-external": {
+          "max_wall_ns": 968237962,
+          "median_ratio_to_baseline": 1.454735650989888,
+          "median_transient_peak_bytes": 32781908,
+          "median_wall_ns": 917004705,
+          "min_wall_ns": 900968043,
+          "observations": 5
+        },
+        "in-memory-raised-budget": {
+          "max_wall_ns": 677416576,
+          "median_ratio_to_baseline": 1.0,
+          "median_transient_peak_bytes": 139460752,
+          "median_wall_ns": 630358309,
+          "min_wall_ns": 622506206,
+          "observations": 5
+        }
+      },
+      "workload": "over-budget-hub-partition"
+    },
+    {
+      "hash_partition_inspection": {
+        "concat_is_globally_sorted": false,
+        "max_partition_rows": 16780,
+        "nonempty_partitions": 256,
+        "partitions": 256,
+        "records": 4194304
+      },
+      "observations": [
+        {
+          "mode": "range-recorded-splitters",
+          "output_sha256": "b4110e3f0b74cecd9db4220f861d760a86d776d2306dd04e3b5444b2e8a0a739",
+          "round": 0,
+          "transient_peak_bytes": 165685248,
+          "wall_ns": 284314576
+        },
+        {
+          "mode": "datafusion-hash-merge",
+          "output_sha256": "b4110e3f0b74cecd9db4220f861d760a86d776d2306dd04e3b5444b2e8a0a739",
+          "round": 0,
+          "transient_peak_bytes": 272755914,
+          "wall_ns": 1440185828
+        },
+        {
+          "mode": "datafusion-hash-merge",
+          "output_sha256": "b4110e3f0b74cecd9db4220f861d760a86d776d2306dd04e3b5444b2e8a0a739",
+          "round": 1,
+          "transient_peak_bytes": 272755914,
+          "wall_ns": 1341907593
+        },
+        {
+          "mode": "range-recorded-splitters",
+          "output_sha256": "b4110e3f0b74cecd9db4220f861d760a86d776d2306dd04e3b5444b2e8a0a739",
+          "round": 1,
+          "transient_peak_bytes": 165685248,
+          "wall_ns": 262374375
+        },
+        {
+          "mode": "range-recorded-splitters",
+          "output_sha256": "b4110e3f0b74cecd9db4220f861d760a86d776d2306dd04e3b5444b2e8a0a739",
+          "round": 2,
+          "transient_peak_bytes": 165685248,
+          "wall_ns": 284814915
+        },
+        {
+          "mode": "datafusion-hash-merge",
+          "output_sha256": "b4110e3f0b74cecd9db4220f861d760a86d776d2306dd04e3b5444b2e8a0a739",
+          "round": 2,
+          "transient_peak_bytes": 272755914,
+          "wall_ns": 1391082125
+        },
+        {
+          "mode": "datafusion-hash-merge",
+          "output_sha256": "b4110e3f0b74cecd9db4220f861d760a86d776d2306dd04e3b5444b2e8a0a739",
+          "round": 3,
+          "transient_peak_bytes": 272755914,
+          "wall_ns": 1314312255
+        },
+        {
+          "mode": "range-recorded-splitters",
+          "output_sha256": "b4110e3f0b74cecd9db4220f861d760a86d776d2306dd04e3b5444b2e8a0a739",
+          "round": 3,
+          "transient_peak_bytes": 165685248,
+          "wall_ns": 266548385
+        },
+        {
+          "mode": "range-recorded-splitters",
+          "output_sha256": "b4110e3f0b74cecd9db4220f861d760a86d776d2306dd04e3b5444b2e8a0a739",
+          "round": 4,
+          "transient_peak_bytes": 165685248,
+          "wall_ns": 284251135
+        },
+        {
+          "mode": "datafusion-hash-merge",
+          "output_sha256": "b4110e3f0b74cecd9db4220f861d760a86d776d2306dd04e3b5444b2e8a0a739",
+          "round": 4,
+          "transient_peak_bytes": 272755914,
+          "wall_ns": 1388829427
+        }
+      ],
+      "partitions": 256,
+      "record_width": 16,
+      "records": 4194304,
+      "summary": {
+        "datafusion-hash-merge": {
+          "max_wall_ns": 1440185828,
+          "median_ratio_to_baseline": 4.885923945387237,
+          "median_transient_peak_bytes": 272755914,
+          "median_wall_ns": 1388829427,
+          "min_wall_ns": 1314312255,
+          "observations": 5
+        },
+        "range-recorded-splitters": {
+          "max_wall_ns": 284814915,
+          "median_ratio_to_baseline": 1.0,
+          "median_transient_peak_bytes": 165685248,
+          "median_wall_ns": 284251135,
+          "min_wall_ns": 262374375,
+          "observations": 5
+        }
+      },
+      "workload": "range-vs-hash-partitioning"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+head 6bf029621efdfa805dbc7496ba5d521eb503cf23 dirty=0
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.78s
+  Executable unittests src/lib.rs (/home/ubuntu/gf-1506-target/debug/deps/graphforge_storage-24b31a768ec00c5c)
+== baseline start 2026-09-23T03:16:58Z
+test result: ok. 1296 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 193.83s
+== baseline end 2026-09-23T03:20:12Z
+== arrow-fixed start 2026-09-23T03:20:12Z
+test result: ok. 1296 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 196.05s
+== arrow-fixed end 2026-09-23T03:23:28Z
+== arrow start 2026-09-23T03:23:28Z
+test result: ok. 1296 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 281.96s
+== arrow end 2026-09-23T03:28:11Z
+== datafusion start 2026-09-23T03:28:11Z
+test result: ok. 1296 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 192.07s
+== datafusion end 2026-09-23T03:31:23Z

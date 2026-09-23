@@ -1363,6 +1363,16 @@
       "notes": "#1477 manual quiet-host scheduler calibration"
     },
     {
+      "package": "graphforge-storage",
+      "target": "sort_partition_spike",
+      "class": "example",
+      "source": "crates/graphforge-storage/examples/sort_partition_spike.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-storage:sort_partition_spike",
+      "exception_id": null,
+      "notes": "#1506 manual quiet-host sort/partition kernel measurements"
+    },
+    {
       "package": "graphforge-value",
       "target": "graphforge_value",
       "class": "lib",

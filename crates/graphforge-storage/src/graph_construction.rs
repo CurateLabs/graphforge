@@ -74,6 +74,12 @@ use catalog::{
 mod partition_load;
 mod partition_memory;
 mod partition_records;
+#[cfg(any(test, feature = "test-support"))]
+mod sort_partition_spike;
+#[cfg(feature = "test-support")]
+pub use sort_partition_spike::bench::{
+    HeapProbe, SortPartitionBenchConfig, run_sort_partition_bench,
+};
 pub(crate) mod partition_shaping;
 mod progress;
 #[cfg(any(test, feature = "test-support"))]

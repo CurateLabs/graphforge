@@ -58,6 +58,12 @@ named-lock = "0.4.1"
 divan = { workspace = true }
 wait-timeout = "0.2"
 
+# Operator-run #1506 sort/partition kernel measurements; see
+# docs/development/evidence/shape-sort-partition-spike-1506.md.
+[[example]]
+name = "sort_partition_spike"
+required-features = ["test-support"]
+
 [[bench]]
 name = "m6_storage"
 harness = false

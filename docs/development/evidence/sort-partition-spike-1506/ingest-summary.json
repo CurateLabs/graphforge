@@ -1,0 +1,212 @@
+{
+ "s18-baseline": {
+  "observations": [
+   {
+    "round": "r0",
+    "wall": 30.16,
+    "cpu": 27.91,
+    "rss": 240828416,
+    "vwall": 27.68,
+    "after": "quiet"
+   },
+   {
+    "round": "r1",
+    "wall": 30.330000000000002,
+    "cpu": 28.160000000000004,
+    "rss": 254390272,
+    "vwall": 27.87,
+    "after": "quiet"
+   },
+   {
+    "round": "r2",
+    "wall": 30.22,
+    "cpu": 28.14,
+    "rss": 241815552,
+    "vwall": 27.8,
+    "after": "quiet"
+   }
+  ],
+  "median_wall_s": 30.22,
+  "min_wall_s": 30.16,
+  "max_wall_s": 30.330000000000002,
+  "median_cpu_s": 28.14,
+  "median_peak_rss_bytes": 241815552,
+  "query_outputs_match_baseline": false,
+  "published_parquet_match_baseline": false
+ },
+ "s18-arrow": {
+  "observations": [
+   {
+    "round": "r0",
+    "wall": 30.47,
+    "cpu": 28.3,
+    "rss": 261562368,
+    "vwall": 28.07,
+    "after": "quiet"
+   },
+   {
+    "round": "r1",
+    "wall": 30.599999999999998,
+    "cpu": 28.54,
+    "rss": 266391552,
+    "vwall": 28.2,
+    "after": "quiet"
+   },
+   {
+    "round": "r2",
+    "wall": 30.28,
+    "cpu": 28.29,
+    "rss": 264265728,
+    "vwall": 27.91,
+    "after": "quiet"
+   }
+  ],
+  "median_wall_s": 30.47,
+  "min_wall_s": 30.28,
+  "max_wall_s": 30.599999999999998,
+  "median_cpu_s": 28.3,
+  "median_peak_rss_bytes": 264265728,
+  "query_outputs_match_baseline": false,
+  "published_parquet_match_baseline": false
+ },
+ "s18-datafusion": {
+  "observations": [
+   {
+    "round": "r0",
+    "wall": 30.54,
+    "cpu": 28.57,
+    "rss": 274153472,
+    "vwall": 28.15,
+    "after": "quiet"
+   },
+   {
+    "round": "r1",
+    "wall": 30.35,
+    "cpu": 28.25,
+    "rss": 266149888,
+    "vwall": 27.87,
+    "after": "quiet"
+   },
+   {
+    "round": "r2",
+    "wall": 30.39,
+    "cpu": 28.520000000000003,
+    "rss": 269123584,
+    "vwall": 27.97,
+    "after": "quiet"
+   }
+  ],
+  "median_wall_s": 30.39,
+  "min_wall_s": 30.35,
+  "max_wall_s": 30.54,
+  "median_cpu_s": 28.520000000000003,
+  "median_peak_rss_bytes": 269123584,
+  "query_outputs_match_baseline": false,
+  "published_parquet_match_baseline": false
+ },
+ "s20-baseline": {
+  "observations": [
+   {
+    "round": "r0",
+    "wall": 124.03,
+    "cpu": 115.75000000000001,
+    "rss": 297246720,
+    "vwall": 114.09,
+    "after": "quiet"
+   },
+   {
+    "round": "r1",
+    "wall": 124.03999999999999,
+    "cpu": 116.15,
+    "rss": 302014464,
+    "vwall": 114.16,
+    "after": "quiet"
+   },
+   {
+    "round": "r2",
+    "wall": 124.11000000000001,
+    "cpu": 116.15,
+    "rss": 305287168,
+    "vwall": 114.21000000000001,
+    "after": "quiet"
+   }
+  ],
+  "median_wall_s": 124.03999999999999,
+  "min_wall_s": 124.03,
+  "max_wall_s": 124.11000000000001,
+  "median_cpu_s": 116.15,
+  "median_peak_rss_bytes": 302014464,
+  "query_outputs_match_baseline": false,
+  "published_parquet_match_baseline": false
+ },
+ "s20-arrow": {
+  "observations": [
+   {
+    "round": "r0",
+    "wall": 125.5,
+    "cpu": 118.55000000000001,
+    "rss": 337567744,
+    "vwall": 115.58,
+    "after": "quiet"
+   },
+   {
+    "round": "r1",
+    "wall": 123.84,
+    "cpu": 116.53999999999999,
+    "rss": 338944000,
+    "vwall": 113.93,
+    "after": "quiet"
+   },
+   {
+    "round": "r2",
+    "wall": 125.37,
+    "cpu": 117.44,
+    "rss": 337240064,
+    "vwall": 115.72,
+    "after": "quiet"
+   }
+  ],
+  "median_wall_s": 125.37,
+  "min_wall_s": 123.84,
+  "max_wall_s": 125.5,
+  "median_cpu_s": 117.44,
+  "median_peak_rss_bytes": 337567744,
+  "query_outputs_match_baseline": false,
+  "published_parquet_match_baseline": false
+ },
+ "s20-datafusion": {
+  "observations": [
+   {
+    "round": "r0",
+    "wall": 124.62,
+    "cpu": 117.94,
+    "rss": 349036544,
+    "vwall": 114.75,
+    "after": "quiet"
+   },
+   {
+    "round": "r1",
+    "wall": 125.04,
+    "cpu": 118.19000000000001,
+    "rss": 366624768,
+    "vwall": 115.17,
+    "after": "quiet"
+   },
+   {
+    "round": "r2",
+    "wall": 124.08000000000001,
+    "cpu": 116.76,
+    "rss": 288747520,
+    "vwall": 114.12,
+    "after": "quiet"
+   }
+  ],
+  "median_wall_s": 124.62,
+  "min_wall_s": 124.08000000000001,
+  "max_wall_s": 125.04,
+  "median_cpu_s": 117.94,
+  "median_peak_rss_bytes": 349036544,
+  "query_outputs_match_baseline": false,
+  "published_parquet_match_baseline": false
+ }
+}
