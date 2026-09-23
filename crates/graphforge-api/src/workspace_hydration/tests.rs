@@ -90,6 +90,59 @@ fn publish_compact_graph_workspace(project: &Path, workspace: &Path) {
         .unwrap();
 }
 
+fn assert_same_inode_graph_object_corruption_is_refused(
+    project: &Path,
+    entry: &graphforge_storage::GraphFileEntry,
+    ordinary_open: bool,
+) {
+    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+
+    let object = graphforge_storage::graph_object_path(project, &entry.content_sha256).unwrap();
+    let original_metadata = std::fs::metadata(&object).unwrap();
+    let identity = graphforge_filesystem::path_identity(&object).unwrap();
+    let mut writable = original_metadata.permissions();
+    writable.set_readonly(false);
+    std::fs::set_permissions(&object, writable).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&object)
+        .unwrap();
+    let mut byte = [0_u8; 1];
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    file.write_all(&[byte[0] ^ 0xff]).unwrap();
+    file.sync_all().unwrap();
+    assert_eq!(std::fs::metadata(&object).unwrap().len(), entry.byte_length);
+    assert_eq!(
+        graphforge_filesystem::path_identity(&object).unwrap(),
+        identity
+    );
+
+    // Resolve afresh: a previous ResolvedProjectGeneration intentionally
+    // memoizes its admitted inventory for one open.
+    let fresh = graphforge_storage::resolve_project_generation(project).unwrap();
+    assert!(
+        fresh.graph_files_inventory().is_err(),
+        "{:?} object {} was accepted after in-place corruption",
+        entry.role,
+        entry.relative_path
+    );
+    drop(fresh);
+    if ordinary_open {
+        assert!(
+            GraphForge::new(Some(project.to_str().unwrap())).is_err(),
+            "ordinary open accepted corrupted {}",
+            entry.relative_path
+        );
+    }
+    file.seek(SeekFrom::Start(0)).unwrap();
+    file.write_all(&byte).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    std::fs::set_permissions(&object, original_metadata.permissions()).unwrap();
+}
+
 #[test]
 fn compact_graph_root_reopens_through_ordinary_api_and_rematerializes() {
     let project = tempfile::tempdir().unwrap();
@@ -581,4 +634,111 @@ fn hardlinked_topology_payload_corruption_is_refused() {
             );
         }
     }
+}
+
+/// Every declared role passes through the same V2 payload admission. The
+/// adjacency and search entries come from their real public build paths;
+/// Delta and Other use small opaque files to exercise the role classifier
+/// without requiring a journal replay or a consumer for an unknown file.
+#[test]
+fn compact_graph_root_refuses_same_inode_corruption_for_every_role() {
+    use graphforge_storage::GraphFileRole;
+
+    let project = tempfile::tempdir().unwrap();
+    let graph = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    graph
+        .execute("CREATE (a:Person {name:'Ada'})-[:KNOWS]->(b:Person {name:'Bob'})")
+        .unwrap();
+    graph.index_adjacency().unwrap();
+    graph
+        .index_search(
+            "Person",
+            crate::SearchIndexOptions::Text {
+                properties: Some(vec!["name".into()]),
+                rebuild: false,
+            },
+        )
+        .unwrap();
+    let workspace = graph.dir();
+    publish_compact_graph_workspace(project.path(), &workspace);
+    drop(graph);
+
+    // These are real, published index artifacts, and the ordinary API must
+    // refuse them at open. Keep the later opaque role fixtures out of this
+    // phase so they cannot cause an unrelated journal/consumer refusal.
+    let clean_open = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    drop(clean_open);
+    let real = graphforge_storage::resolve_project_generation(project.path()).unwrap();
+    let real_inventory = real.graph_files_inventory().unwrap().unwrap();
+    for path in [
+        "indexes/adjacency/index_manifest.parquet",
+        "indexes/search/",
+    ] {
+        let entry = real_inventory
+            .files
+            .iter()
+            .find(|entry| {
+                entry.role == GraphFileRole::Index
+                    && if path.ends_with('/') {
+                        entry.relative_path.starts_with(path)
+                    } else {
+                        entry.relative_path == path
+                    }
+                    && entry.byte_length > 0
+            })
+            .unwrap_or_else(|| panic!("real Index publication lacks {path}"));
+        assert_same_inode_graph_object_corruption_is_refused(project.path(), entry, true);
+    }
+
+    for (relative, bytes) in [
+        ("deltas/role-proof.bin", b"delta".as_slice()),
+        ("misc/role-proof.bin", b"other".as_slice()),
+    ] {
+        let path = workspace.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+    publish_compact_graph_workspace(project.path(), &workspace);
+    drop(workspace);
+
+    let resolved = graphforge_storage::resolve_project_generation(project.path()).unwrap();
+    let inventory = resolved.graph_files_inventory().unwrap().unwrap();
+    assert!(
+        inventory
+            .files
+            .iter()
+            .any(|entry| entry.relative_path.starts_with("indexes/search/")
+                && entry.role == GraphFileRole::Index),
+        "a real search index must reach the compact inventory"
+    );
+    let selected = [
+        (GraphFileRole::Topology, "topology/nodes.parquet"),
+        (GraphFileRole::Properties, "properties/"),
+        (
+            GraphFileRole::Index,
+            "indexes/adjacency/index_manifest.parquet",
+        ),
+        (GraphFileRole::Index, "indexes/search/"),
+        (GraphFileRole::Delta, "deltas/role-proof.bin"),
+        (GraphFileRole::Catalog, "semantic-routes.json"),
+        (GraphFileRole::Other, "misc/role-proof.bin"),
+    ];
+    for (role, path) in selected {
+        let entry = inventory
+            .files
+            .iter()
+            .find(|entry| {
+                entry.role == role
+                    && if path.ends_with('/') {
+                        entry.relative_path.starts_with(path)
+                    } else {
+                        entry.relative_path == path
+                    }
+                    && entry.byte_length > 0
+            })
+            .unwrap_or_else(|| panic!("missing nonempty {role:?} entry at {path}"));
+        assert_same_inode_graph_object_corruption_is_refused(project.path(), entry, false);
+    }
+    let fresh = graphforge_storage::resolve_project_generation(project.path()).unwrap();
+    assert_eq!(fresh.graph_files_inventory().unwrap().unwrap(), inventory);
 }

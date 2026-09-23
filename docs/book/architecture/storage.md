@@ -287,6 +287,29 @@ version 2 for raw routes and version 4 for mapped routes. The descriptor and
 payload must agree. Immutable generations remain unchanged while a writable
 facade materializes an authenticated private workspace.
 
+The graph-files role is inferred from the relative path. It does not select a
+different integrity policy: V2/V4 open verifies the full SHA-256 and length of
+**every** CAS payload before exposing the inventory. V1/V3 open verifies the
+expanded graph tree. The V2/V4 same-inode, same-length corruption test in
+`graphforge-api/src/workspace_hydration/tests.rs` covers every role, including
+real adjacency and search index publications:
+
+| Role | Inventory source | Corruption coverage |
+| --- | --- | --- |
+| Topology | `topology/`, including the current `topology/runtime_catalog.parquet` | Real payload; also covered by the ordinary API reopen/query regression |
+| Properties | `properties/` and `edge_properties/` | Real property payload; the property overlay also re-hashes its routes |
+| Index | Published `indexes/adjacency/` CSR and `indexes/search/` artifacts | Both real build paths reach the compact inventory and refuse changed bytes |
+| Delta | `deltas/` journal runs | Role-level CAS admission test uses an opaque fixture; journal replay has separate validation |
+| Catalog | Top-level `semantic-routes.json` | Real control payload |
+| Other | Any admitted graph workspace file outside the named prefixes | Opaque fixture proves the default role receives the same CAS check |
+
+`runtime_catalog.parquet` at the graph root would be Catalog-role, but the
+current compact writer places it under `topology/`. The role classifier permits
+that top-level path without relying on a writer to produce it. Search artifacts
+are also derived, but an explicit search build publishes them under
+`indexes/search/` in the graph-files inventory. The cache outside a published
+graph workspace is separate from this inventory.
+
 ### Semantic routes and portable filenames
 
 Node labels and edge relations are semantic UTF-8 identifiers, not filesystem
