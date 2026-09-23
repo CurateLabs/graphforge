@@ -243,10 +243,11 @@ is consumed exactly once by its shaped-output slice.
 
 Retiring each partition run as its shaped-output slice completes would clip
 the up-to-199.3 B/edge tail (bounded below by one partition's worth). That is
-a shaping-pipeline sequencing change with its own crash-recovery surface; it
-belongs to the byte-removal lane of the ingest floor workstream (#1478, D2),
-which owns reduction sequencing. This issue's gate is the S26 admission
-margin, and the margin below is stated from the measured, landed state.
+a shaping-pipeline sequencing change with its own crash-recovery surface, and
+it has its own owner: #1562, a native child of the ingest epic #1387. That
+issue carries this composition table as its measured baseline and its own
+acceptance criteria. This issue's gate is the S26 admission margin, stated
+below from the measured, landed state; #1562 does not gate it.
 
 ### Target and margin, from the measured slope
 
