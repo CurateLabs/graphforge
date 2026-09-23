@@ -57,6 +57,8 @@ named-lock = "0.4.1"
 [dev-dependencies]
 divan = { workspace = true }
 wait-timeout = "0.2"
+# #1508 scheduling spike: Rayon is the scheduling baseline candidate. Test-only.
+rayon = "1.10"
 
 # Operator-run #1506 sort/partition kernel measurements; see
 # docs/development/evidence/shape-sort-partition-spike-1506.md.

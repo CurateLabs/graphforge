@@ -1,5 +1,5 @@
 {
-  "checksum": "8905a2046e7dc333083148f5fc8f81d4721394f55372a14dbe0b8a9d1d11648b",
+  "checksum": "824271983b30781bb60ff848ef4aac457bc7c685f6de8366d973da9091c77c26",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -14092,6 +14092,10 @@
               "id": "codspeed-divan-compat 5.0.1",
               "target": "codspeed_divan_compat",
               "alias": "divan"
+            },
+            {
+              "id": "rayon 1.12.0",
+              "target": "rayon"
             },
             {
               "id": "wait-timeout 0.2.1",
