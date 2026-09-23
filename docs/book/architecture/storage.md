@@ -717,14 +717,23 @@ schema declarations return an error before Arrow's schema converter is invoked.
 Decoded offsets must start at zero, remain monotone, and end at the edge count.
 
 Opening checks shard metadata without reading payloads. Cloned readers share one
-cache. On a miss, the prior cached CSR stays alive until the replacement fully
-validates. Resource accounting must include that old cache, the encoded file,
-Arrow's body buffer and decoded arrays, the new CSR vectors, parser/alignment
-allocations and the fixed Zstd decoder context. The pinned bulk Zstd decoder uses
-the supplied bounded destination rather than a separate streaming window buffer.
-`D` is a deterministic buffer-content bound, **not** a process RSS bound. Allocator
-overhead and other graph/query owners remain separate. A whole logical hub row can
-span many shards; only `row_chunk` bounds the returned row portion by its limit.
+cache. Retained decoded shards are bounded by bytes, not by count: a
+least-recently-used policy evicts within the reader's decoded-shard budget
+(`DEFAULT_DECODED_SHARD_CACHE_BYTES`, 1 GiB), so sequential traversal still pays
+one decode per shard while random-access frontiers (for example a two-hop
+`ExpandExec` frontier in neighbour order, #1518) stop paying one decode per
+row. A shard larger than the whole budget is impossible under the hard shard
+caps; if it were, it would still cache alone. Retained bytes therefore never
+exceed `max(budget, one shard)` and never scale with the graph (#1094). On a
+miss, the prior cached shards stay alive until the replacement fully
+validates; a failed read evicts nothing. Resource accounting must include the
+retained cache, the encoded file, Arrow's body buffer and decoded arrays, the
+new CSR vectors, parser/alignment allocations and the fixed Zstd decoder
+context. The pinned bulk Zstd decoder uses the supplied bounded destination
+rather than a separate streaming window buffer. `D` is a deterministic
+buffer-content bound, **not** a process RSS bound. Allocator overhead and other
+graph/query owners remain separate. A whole logical hub row can span many
+shards; only `row_chunk` bounds the returned row portion by its limit.
 
 ### Rebuild and versioning semantics
 
