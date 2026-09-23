@@ -173,7 +173,7 @@ impl fmt::Display for PeakPool {
 }
 
 impl MemoryPool for PeakPool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "graphforge-spill-spike-peak"
     }
     fn grow(&self, reservation: &MemoryReservation, additional: usize) {
@@ -403,7 +403,10 @@ impl<const N: usize> SegmentBatches<N> {
     }
 
     fn next_batch(&mut self) -> Result<Option<RecordBatch>, GfError> {
-        let mut fixed = FixedSizeBinaryBuilder::with_capacity(self.batch_records, N as i32);
+        let mut fixed = FixedSizeBinaryBuilder::with_capacity(
+            self.batch_records,
+            i32::try_from(N).map_err(storage)?,
+        );
         let mut details = BinaryBuilder::with_capacity(self.batch_records, self.batch_records * 64);
         let mut records = 0;
         let mut fed = Multiset::default();
@@ -665,6 +668,80 @@ fn spill_mode() -> DiskManagerMode {
     }
 }
 
+fn guard_enabled() -> Result<bool, GfError> {
+    match std::env::var("GF_SHAPE_SPILL_GUARD") {
+        Err(std::env::VarError::NotPresent) => Ok(true),
+        Ok(value) if value == "on" => Ok(true),
+        Ok(value) if value == "off" => Ok(false),
+        _ => Err(storage("invalid shape spill guard mode")),
+    }
+}
+
+/// One partition's pool and runtime environment: a disk manager of its own,
+/// so its disk limit is this partition's alone.
+fn runtime_env(
+    pool_bytes: usize,
+    temp_bytes: Option<u64>,
+) -> Result<(Arc<PeakPool>, Arc<RuntimeEnv>), GfError> {
+    let pool = Arc::new(PeakPool {
+        inner: GreedyMemoryPool::new(pool_bytes),
+        peak: AtomicUsize::new(0),
+    });
+    let mut disk = DiskManagerBuilder::default().with_mode(spill_mode());
+    if let Some(limit) = temp_bytes {
+        disk = disk.with_max_temp_directory_size(limit);
+    }
+    let env = RuntimeEnvBuilder::new()
+        .with_memory_pool(Arc::clone(&pool) as Arc<dyn MemoryPool>)
+        .with_disk_manager_builder(disk)
+        .build_arc()
+        .map_err(storage)?;
+    Ok((pool, env))
+}
+
+/// `SortExec` over the partition's segments, ascending on the whole record.
+fn sort_plan<const N: usize>(
+    codec: Option<DetailCodec>,
+    pool_bytes: usize,
+    readers: Vec<SegmentReader>,
+    state: &Arc<SourceState>,
+) -> Result<Arc<SortExec>, GfError> {
+    let data_type = if codec.is_some() {
+        DataType::Binary
+    } else {
+        DataType::FixedSizeBinary(i32::try_from(N).map_err(storage)?)
+    };
+    let schema = Arc::new(Schema::new(vec![Field::new("record", data_type, false)]));
+    let source = StreamingTableExec::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(SegmentSource::<N> {
+            schema: Arc::clone(&schema),
+            codec,
+            batch_records: batch_records::<N>(pool_bytes),
+            readers: Mutex::new(Some(readers)),
+            state: Arc::clone(state),
+        })],
+        None,
+        [],
+        false,
+        None,
+    )
+    .map_err(storage)?;
+    let ordering = LexOrdering::new([PhysicalSortExpr::new(
+        col("record", &schema).map_err(storage)?,
+        SortOptions {
+            descending: false,
+            nulls_first: false,
+        },
+    )])
+    .ok_or_else(|| storage("empty external sort ordering"))?;
+    let plan = Arc::new(SortExec::new(ordering, Arc::new(source)));
+    if plan.properties().output_partitioning().partition_count() != 1 {
+        return Err(storage("external sort unexpectedly repartitioned"));
+    }
+    Ok(plan)
+}
+
 /// Sort one fixed-width partition with DataFusion's external `SortExec`.
 ///
 /// Runs the sort phase to completion on the calling worker: every input
@@ -687,12 +764,7 @@ pub(super) fn load_external<const N: usize>(
     let pool_bytes = bytes_env("GF_SHAPE_SPILL_POOL_BYTES")?.unwrap_or(max_partition_bytes);
     let pool_bytes = usize::try_from(pool_bytes).map_err(storage)?;
     let temp_bytes = bytes_env("GF_SHAPE_SPILL_TEMP_BYTES")?;
-    let guard = match std::env::var("GF_SHAPE_SPILL_GUARD") {
-        Err(std::env::VarError::NotPresent) => true,
-        Ok(value) if value == "on" => true,
-        Ok(value) if value == "off" => false,
-        _ => return Err(storage("invalid shape spill guard mode")),
-    };
+    let guard = guard_enabled()?;
     let mut spill_bytes = 0_u64;
     let mut readers = Vec::with_capacity(names.len());
     for name in names {
@@ -702,19 +774,7 @@ pub(super) fn load_external<const N: usize>(
             .ok_or_else(|| storage("partition spill byte count overflows"))?;
         readers.push((reader, counter));
     }
-    let pool = Arc::new(PeakPool {
-        inner: GreedyMemoryPool::new(pool_bytes),
-        peak: AtomicUsize::new(0),
-    });
-    let mut disk = DiskManagerBuilder::default().with_mode(spill_mode());
-    if let Some(limit) = temp_bytes {
-        disk = disk.with_max_temp_directory_size(limit);
-    }
-    let env = RuntimeEnvBuilder::new()
-        .with_memory_pool(Arc::clone(&pool) as Arc<dyn MemoryPool>)
-        .with_disk_manager_builder(disk)
-        .build_arc()
-        .map_err(storage)?;
+    let (pool, env) = runtime_env(pool_bytes, temp_bytes)?;
     let state = Arc::new(SourceState::default());
     *state.runtime.lock().map_err(storage)? = Some(Arc::clone(&env));
     *state.spill_directories.lock().map_err(storage)? = env.disk_manager.temp_dir_paths();
@@ -727,39 +787,7 @@ pub(super) fn load_external<const N: usize>(
             .with_session_config(config)
             .with_runtime(Arc::clone(&env)),
     );
-    let data_type = if codec.is_some() {
-        DataType::Binary
-    } else {
-        DataType::FixedSizeBinary(i32::try_from(N).map_err(storage)?)
-    };
-    let schema = Arc::new(Schema::new(vec![Field::new("record", data_type, false)]));
-    let source = StreamingTableExec::try_new(
-        Arc::clone(&schema),
-        vec![Arc::new(SegmentSource::<N> {
-            schema: Arc::clone(&schema),
-            codec,
-            batch_records: batch_records::<N>(pool_bytes),
-            readers: Mutex::new(Some(readers)),
-            state: Arc::clone(&state),
-        })],
-        None,
-        [],
-        false,
-        None,
-    )
-    .map_err(storage)?;
-    let ordering = LexOrdering::new([PhysicalSortExpr::new(
-        col("record", &schema).map_err(storage)?,
-        SortOptions {
-            descending: false,
-            nulls_first: false,
-        },
-    )])
-    .ok_or_else(|| storage("empty external sort ordering"))?;
-    let plan = Arc::new(SortExec::new(ordering, Arc::new(source)));
-    if plan.properties().output_partitioning().partition_count() != 1 {
-        return Err(storage("external sort unexpectedly repartitioned"));
-    }
+    let plan = sort_plan::<N>(codec, pool_bytes, readers, &state)?;
     // DataFusion reads spilled runs back through `spawn_blocking`; bound that
     // pool rather than accept tokio's default of 512 threads per partition.
     let runtime = tokio::runtime::Builder::new_current_thread()

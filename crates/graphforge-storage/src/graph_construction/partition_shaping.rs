@@ -783,7 +783,9 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                         self.max_partition_bytes,
                         stop,
                     )
-                    .map(|(records, counters)| (LoadedPartition::External(records), counters));
+                    .map(|(records, counters)| {
+                        (LoadedPartition::External(Box::new(records)), counters)
+                    });
                 }
                 load_fixed_partition::<N>(
                     root,
@@ -998,19 +1000,19 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
 pub(super) enum LoadedPartition<const N: usize> {
     Resident(PartitionRecords<N>),
     #[cfg(any(test, feature = "test-support"))]
-    External(super::spill_spike::ExternalPartition),
+    External(Box<super::spill_spike::ExternalPartition>),
 }
 
 impl<const N: usize> LoadedPartition<N> {
     /// Hand every record to `consume` in sorted order.
     fn for_each_record(
         self,
-        mut consume: impl FnMut(&[u8]) -> Result<(), GfError>,
+        consume: impl FnMut(&[u8]) -> Result<(), GfError>,
     ) -> Result<(), GfError> {
         match self {
             Self::Resident(records) => records.iter().try_for_each(consume),
             #[cfg(any(test, feature = "test-support"))]
-            Self::External(records) => records.for_each_record(&mut consume),
+            Self::External(records) => records.for_each_record(consume),
         }
     }
 }
