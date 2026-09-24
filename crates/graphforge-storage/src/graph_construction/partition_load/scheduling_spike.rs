@@ -39,8 +39,8 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 
 /// How often a candidate coordinator polls the caller's cancellation while it
-/// waits for the head partition. The production pool polls only in `consume`,
-/// so it notices cancellation only once the head partition has loaded.
+/// waits for the head partition. The production pool polls on the same
+/// interval since #1581.
 pub(in crate::graph_construction) const CANCEL_POLL: Duration = Duration::from_millis(1);
 
 /// A scheduler for the finish-time partition loads.
@@ -84,14 +84,15 @@ impl LoadScheduler<'_> {
 /// thread in partition index order.
 ///
 /// `cancelled` is polled by candidate coordinators while they wait; the
-/// baseline ignores it, as production does, and relies on `consume` to poll.
+/// baseline forwards it to the production pool, which polls it the same way
+/// (#1581).
 pub(in crate::graph_construction) fn run<T, L, C>(
     scheduler: LoadScheduler<'_>,
     partitions: usize,
     workers: NonZeroUsize,
     load: Arc<L>,
     consume: C,
-    cancelled: &dyn Fn() -> bool,
+    cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<(), GfError>
 where
     T: Send + 'static,
@@ -106,6 +107,7 @@ where
             partitions,
             workers,
             |index, stop| load(index, stop),
+            &mut *cancelled,
             consume,
         ),
         LoadScheduler::Rayon(Some(pool)) => {
@@ -157,7 +159,7 @@ fn rayon_ordered<T, L, C>(
     workers: NonZeroUsize,
     load: &L,
     mut consume: C,
-    cancelled: &dyn Fn() -> bool,
+    cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<(), GfError>
 where
     T: Send,
@@ -247,7 +249,7 @@ fn tokio_ordered<T, L, C>(
     workers: NonZeroUsize,
     load: Arc<L>,
     consume: C,
-    cancelled: &dyn Fn() -> bool,
+    cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<(), GfError>
 where
     T: Send + 'static,
@@ -276,7 +278,7 @@ async fn drive<T, L, C>(
     window: usize,
     load: Arc<L>,
     mut consume: C,
-    cancelled: &dyn Fn() -> bool,
+    cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<(), GfError>
 where
     T: Send + 'static,

@@ -35,17 +35,21 @@
 //!   exceeded.
 //!
 //! Cancellation needs no `Send` bound on the caller's `FnMut() -> bool`: the
-//! callback stays on the coordinator, which polls it in the consume step, and
-//! the pool observes a stop flag. Workers poll the flag between records so an
-//! abandoned load exits promptly.
+//! callback stays on the coordinator, which polls it in the consume step and
+//! while it waits for the next partition, and the pool observes a stop flag.
+//! Workers poll the flag between records so an abandoned load exits promptly.
 
-use super::{GraphConstructionEvidence, account_cache_release, account_sequential_read, storage};
+use super::{
+    GraphConstructionEvidence, account_cache_release, account_sequential_read, reject_cancelled,
+    storage,
+};
 use graphforge_core::GfError;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 /// Concurrent partition jobs per fixed-width family finish: one partition
 /// loading and sorting while the coordinator writes the previous one.
@@ -59,6 +63,12 @@ pub(super) const PARTITION_LOAD_WORKERS: NonZeroUsize = NonZeroUsize::new(2).unw
 
 /// How often a load polls the stop flag, in records.
 const STOP_POLL_RECORDS: usize = 4096;
+
+/// How often the coordinator polls the caller's cancellation while it waits
+/// for a partition to be delivered (#1581, measured against the candidates in
+/// #1508 F15: a cancel 50 ms into a 500 ms head load must not return 450 ms
+/// late).
+const CANCEL_POLL: Duration = Duration::from_millis(1);
 
 /// Evidence a worker accumulates while loading one partition, kept apart from
 /// the shared [`GraphConstructionEvidence`] until the coordinator merges it.
@@ -171,6 +181,16 @@ impl<T> Shared<T> {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Bounded wait, so the coordinator can poll the caller's cancellation
+    /// between naps instead of sleeping until some worker happens to deliver.
+    fn wait_bounded<'a>(&'a self, guard: MutexGuard<'a, State<T>>) -> MutexGuard<'a, State<T>> {
+        let (guard, _) = self
+            .changed
+            .wait_timeout(guard, CANCEL_POLL)
+            .unwrap_or_else(PoisonError::into_inner);
+        guard
+    }
+
     /// Release dispatch capacity only after a successful coordinator consume.
     fn release_consumed(&self, consumed: Result<(), GfError>) -> Result<(), GfError> {
         consumed?;
@@ -265,16 +285,25 @@ where
 /// never observed. A panicking load is that partition's error; a panicking
 /// `consume` stops the pool and resumes on the caller once every worker has
 /// exited.
-pub(super) fn consume_in_partition_order<T, L, C>(
+///
+/// `cancelled` is the caller's cancellation callback. Like `consume` it stays
+/// on the calling thread and needs no `Send`: the coordinator polls it every
+/// [`CANCEL_POLL`] while it waits for the next partition, so a cancel that
+/// lands during the head load is not held hostage by that load (#1581). On
+/// cancel the pool sets `stop` and returns the `construction cancelled` error
+/// after every worker has exited, exactly like any other stop.
+pub(super) fn consume_in_partition_order<T, L, C, K>(
     partitions: usize,
     workers: NonZeroUsize,
     load: L,
+    mut cancelled: K,
     mut consume: C,
 ) -> Result<(), GfError>
 where
     T: Send,
     L: Fn(usize, &AtomicBool) -> Result<T, GfError> + Sync,
     C: FnMut(usize, T) -> Result<(), GfError>,
+    K: FnMut() -> bool,
 {
     if partitions == 0 {
         return Ok(());
@@ -308,7 +337,18 @@ where
                                 "partition loaders exited before every partition was delivered",
                             ));
                         }
-                        state = shared.wait(state);
+                        // A ready result and a worker failure are the stronger
+                        // claims, in partition order; past them, notice a
+                        // cancel now rather than when the load being waited
+                        // on finally finishes (#1581). Setting `stop` makes
+                        // the workers abandon their loads, and the scope's
+                        // join makes the return joined, as for any error.
+                        if let Err(cancelled) = reject_cancelled(&mut cancelled) {
+                            shared.stop.store(true, Ordering::Release);
+                            shared.changed.notify_all();
+                            return Err(cancelled);
+                        }
+                        state = shared.wait_bounded(state);
                     }
                 };
                 shared.release_consumed(consume(index, loaded?))?;

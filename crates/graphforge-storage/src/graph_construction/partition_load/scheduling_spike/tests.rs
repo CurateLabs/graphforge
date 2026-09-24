@@ -135,7 +135,15 @@ fn every_parallel_candidate_consumes_in_order_and_holds_the_window() {
                 order.push(index);
                 Ok(())
             };
-            run(scheduler, PARTITIONS, workers(count), load, consume, &never).unwrap();
+            run(
+                scheduler,
+                PARTITIONS,
+                workers(count),
+                load,
+                consume,
+                &mut never,
+            )
+            .unwrap();
             let label = format!("{} workers={count}", scheduler.name());
             assert_eq!(order, (0..PARTITIONS).collect::<Vec<_>>(), "{label}");
             assert!(gauges.at_rest(), "{label}");
@@ -171,7 +179,7 @@ fn parallel_candidates_overlap_loads_on_distinct_threads() {
             workers(WINDOW),
             load,
             |_, _: Value| Ok(()),
-            &never,
+            &mut never,
         )
         .unwrap();
         let threads = gauges.threads.lock().unwrap();
@@ -216,7 +224,7 @@ fn inline_async_loads_run_one_at_a_time_on_the_coordinator() {
             order.push(index);
             Ok(())
         },
-        &never,
+        &mut never,
     )
     .unwrap();
     assert_eq!(order, (0..6).collect::<Vec<_>>());
@@ -250,20 +258,20 @@ fn cancellation_before_the_first_consume_consumes_nothing() {
                 consumed.push(index);
                 Err(cancelled_error())
             },
-            &|| true,
+            &mut || true,
         )
         .unwrap_err()
         .to_string();
         assert!(error.contains("construction cancelled"), "{error}");
-        // The baseline and inline candidates notice in `consume`, the others
-        // while waiting; neither consumes a partition past the cancellation.
+        // The inline candidate notices in `consume`, the others while
+        // waiting; neither consumes a partition past the cancellation.
         assert!(consumed.len() <= 1, "{}", scheduler.name());
         assert!(gauges.at_rest(), "{}", scheduler.name());
     }
 }
 
-/// A head load that runs until the coordinator stops it, bounded so the
-/// baseline, which cannot stop it, still returns.
+/// A head load that runs until the coordinator stops it, bounded so a
+/// candidate that fails to stop it still returns.
 fn head_load_until_stopped(
     gauges: &Arc<Gauges>,
     head_started: &Arc<AtomicBool>,
@@ -313,7 +321,7 @@ fn cancellation_while_the_head_load_runs_returns_only_after_it_exits() {
                 consumed.push(index);
                 Ok(())
             },
-            &|| cancel.load(Ordering::SeqCst),
+            &mut || cancel.load(Ordering::SeqCst),
         )
         .unwrap_err()
         .to_string();
@@ -353,7 +361,7 @@ fn cancellation_during_consume_keeps_the_consumed_prefix_only() {
                 consumed.push(index);
                 Ok(())
             },
-            &|| cancel.load(Ordering::SeqCst),
+            &mut || cancel.load(Ordering::SeqCst),
         )
         .unwrap_err()
         .to_string();
@@ -389,7 +397,7 @@ fn load_error_surfaces_at_its_partition_and_stops_dispatch() {
                     consumed.push(index);
                     Ok(())
                 },
-                &never,
+                &mut never,
             )
             .unwrap_err()
             .to_string();
@@ -445,7 +453,7 @@ fn consume_error_returns_only_after_in_flight_loads_exit() {
                 }
                 Ok(())
             },
-            &never,
+            &mut never,
         )
         .unwrap_err()
         .to_string();
@@ -476,7 +484,7 @@ fn outcome_of_a_panicking_load(
                 }
                 Ok(index)
             });
-            run(scheduler, 8, workers(2), load, |_, _| Ok(()), &never)
+            run(scheduler, 8, workers(2), load, |_, _| Ok(()), &mut never)
                 .map_err(|error| error.to_string())
         }));
         let _ = sender.send(outcome.map_err(|_| "panic"));
@@ -571,7 +579,7 @@ fn tokio_candidates_refuse_to_nest_and_thread_candidates_do_not_care() {
     outer.block_on(async {
         for scheduler in PER_CALL {
             let load = Arc::new(|index: usize, _stop: &AtomicBool| Ok(index));
-            let outcome = run(scheduler, 4, workers(2), load, |_, _| Ok(()), &never);
+            let outcome = run(scheduler, 4, workers(2), load, |_, _| Ok(()), &mut never);
             match scheduler {
                 LoadScheduler::Baseline | LoadScheduler::Rayon(_) => {
                     outcome.unwrap();
@@ -620,7 +628,7 @@ fn a_shared_runtime_or_pool_bounds_loads_across_concurrent_imports() {
                         workers(2),
                         load,
                         |_, _: Value| Ok(()),
-                        &never,
+                        &mut never,
                     )
                     .unwrap();
                 });
@@ -1109,7 +1117,7 @@ mod report {
                                 checksum ^= values[0] ^ values[values.len() - 1];
                                 Ok(())
                             },
-                            &never,
+                            &mut never,
                         )
                     });
                     outcome.unwrap();
@@ -1191,7 +1199,7 @@ mod report {
                         }
                         Ok(())
                     },
-                    &|| cancel.load(Ordering::SeqCst),
+                    &mut || cancel.load(Ordering::SeqCst),
                 )
                 .unwrap_err();
                 let returned = Instant::now();
@@ -1244,7 +1252,7 @@ mod report {
                                         cpu_bound_sort(index, elements / 4, stop)
                                     });
                                     let started = Instant::now();
-                                    run(scheduler, 16, workers(2), load, |_, _| Ok(()), &never)
+                                    run(scheduler, 16, workers(2), load, |_, _| Ok(()), &mut never)
                                         .unwrap();
                                     started.elapsed().as_secs_f64() * 1e3
                                 })

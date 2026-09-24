@@ -49,6 +49,7 @@ use graphforge_filesystem::{FileIdentity, file_identity};
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use sha2::Digest;
+use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::io::{BufWriter, Write};
 use std::num::NonZeroUsize;
@@ -543,9 +544,14 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
 
     /// Load and sort every job's partition off this thread and hand each to
     /// `consume` here, in job order.
+    ///
+    /// `cancelled` is the caller's cancellation callback, forwarded so the
+    /// coordinator can poll it while it waits for a partition (#1581); the
+    /// candidate schedulers poll it the same way.
     fn schedule_loads<C>(
         &self,
         jobs: &[(usize, Vec<String>, Option<u64>)],
+        cancelled: &mut dyn FnMut() -> bool,
         consume: C,
     ) -> Result<(), GfError>
     where
@@ -602,17 +608,18 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             let load = std::sync::Arc::new(move |job: usize, stop: &AtomicBool| {
                 load_job(&root, &jobs[job], stop)
             });
+            let mut cancelled_for_candidates = || cancelled();
             return super::partition_load::scheduling_spike::run(
                 scheduler,
                 partitions,
                 workers,
                 load,
                 consume,
-                &|| false,
+                &mut cancelled_for_candidates,
             );
         }
         let load = |job: usize, stop: &AtomicBool| load_job(root, &jobs[job], stop);
-        consume_in_partition_order(jobs.len(), workers, load, consume)
+        consume_in_partition_order(jobs.len(), workers, load, cancelled, consume)
     }
 
     /// Route one record into the partition owning `key`.
@@ -850,6 +857,10 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             let cleanup = cleanup_failed_shape_output(writer, &mut publication, evidence);
             return combine_secondary_cleanup(Err(primary), cleanup, "partition output cleanup");
         }
+        // The callback is polled from three places on this thread — the
+        // consume boundary, the record loop and the load coordinator's wait
+        // (#1581) — and never two at once, so it lives behind a `RefCell`.
+        let cancelled = RefCell::new(cancelled);
         let concatenated = (|| -> Result<u64, GfError> {
             let mut previous: Option<[u8; 16]> = None;
             let mut written = 0_u64;
@@ -885,7 +896,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             let consume =
                 |job: usize, (records, counters): (LoadedPartition<N>, PartitionLoadCounters)| {
                     let partition = jobs[job].0;
-                    reject_cancelled(cancelled)?;
+                    reject_cancelled(&mut **cancelled.borrow_mut())?;
                     // The ordered critical section: fold the worker's local
                     // counters into the shared evidence, then write the partition.
                     counters.merge_into(evidence)?;
@@ -919,12 +930,16 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                             super::storage("partition output record count overflows")
                         })?;
                         if written.is_multiple_of(4096) {
-                            reject_cancelled(cancelled)?;
+                            reject_cancelled(&mut **cancelled.borrow_mut())?;
                         }
                         Ok(())
                     })
                 };
-            self.schedule_loads(&jobs, consume)?;
+            // The coordinator polls the same callback while it waits for a
+            // partition, so a cancel is not held hostage by the head load.
+            let mut cancelled_while_waiting =
+                || reject_cancelled(&mut **cancelled.borrow_mut()).is_err();
+            self.schedule_loads(&jobs, &mut cancelled_while_waiting, consume)?;
             // Load-bearing, not a nicety (#1439): a collapsed one-partition
             // run is perfectly deterministic and passes every byte-equality
             // test, so this is what tells a working range partition apart

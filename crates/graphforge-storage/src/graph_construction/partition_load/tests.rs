@@ -85,7 +85,8 @@ fn slow_first_partition_is_consumed_first_and_holds_the_pool_at_the_bound() {
             order.push(index);
             Ok(())
         };
-        consume_in_partition_order(PARTITIONS, workers(count), load, consume).unwrap();
+        consume_in_partition_order(PARTITIONS, workers(count), load, &mut || false, consume)
+            .unwrap();
         assert_eq!(
             order,
             (0..PARTITIONS).collect::<Vec<_>>(),
@@ -120,9 +121,10 @@ fn load_error_surfaces_at_its_partition_and_stops_dispatch() {
             consumed.push(index);
             Ok(())
         };
-        let error = consume_in_partition_order(PARTITIONS, workers(count), load, consume)
-            .unwrap_err()
-            .to_string();
+        let error =
+            consume_in_partition_order(PARTITIONS, workers(count), load, &mut || false, consume)
+                .unwrap_err()
+                .to_string();
         assert!(error.contains("injected partition load failure"), "{error}");
         assert_eq!(consumed, vec![0, 1], "workers={count}");
         // Dispatch never ran past the window ahead of the failing partition.
@@ -165,13 +167,73 @@ fn consume_error_stops_the_pool_and_abandoned_loads_are_never_observed() {
         }
         Ok(())
     };
-    let error = consume_in_partition_order(PARTITIONS, workers(3), load, consume)
+    let error = consume_in_partition_order(PARTITIONS, workers(3), load, &mut || false, consume)
         .unwrap_err()
         .to_string();
     assert!(error.contains("injected consume failure"), "{error}");
     assert!(!error.contains("abandoned"), "{error}");
     let abandoned = abandoned.load(Ordering::SeqCst);
     assert!((1..=2).contains(&abandoned), "abandoned={abandoned}");
+}
+
+#[test]
+fn cancellation_while_the_head_load_runs_returns_promptly_and_joined() {
+    // #1508 F15, as a contract: with a head load that runs up to 500 ms while
+    // polling its stop flag, a cancel 50 ms in must not return 450 ms late.
+    // The pre-#1581 pool noticed the cancel only at the consume boundary,
+    // after the head load had run out its limit.
+    const PARTITIONS: usize = 3;
+    const CANCEL_AFTER: Duration = Duration::from_millis(50);
+    const HEAD_LOAD_LIMIT: Duration = Duration::from_millis(500);
+    const RETURN_BOUND: Duration = Duration::from_millis(250);
+
+    let gauge = Gauge::default();
+    let head_exited_via_stop = AtomicBool::new(false);
+    let load = |index: usize, stop: &AtomicBool| {
+        if index == 0 {
+            // Hold the coordinator on the head partition while polling the
+            // stop flag, like the production loads.
+            let started = Instant::now();
+            while !stop.load(Ordering::Acquire) && started.elapsed() < HEAD_LOAD_LIMIT {
+                std::thread::yield_now();
+            }
+            if stop.load(Ordering::Acquire) {
+                head_exited_via_stop.store(true, Ordering::SeqCst);
+                return Err(storage("partition load abandoned after coordinator stop"));
+            }
+        }
+        gauge.enter();
+        Ok(Materialized {
+            index,
+            gauge: &gauge,
+        })
+    };
+    let mut consumed = Vec::new();
+    let consume = |index: usize, value: Materialized<'_>| {
+        assert_eq!(value.index, index);
+        consumed.push(index);
+        Ok(())
+    };
+    let started = Instant::now();
+    let mut cancelled = || started.elapsed() >= CANCEL_AFTER;
+    let outcome = consume_in_partition_order(PARTITIONS, workers(2), load, &mut cancelled, consume);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < RETURN_BOUND,
+        "returned {elapsed:?} after a cancel {CANCEL_AFTER:?} in, bound {RETURN_BOUND:?}"
+    );
+    let error = outcome.unwrap_err().to_string();
+    assert!(error.contains("construction cancelled"), "{error}");
+    // The pool stopped the workers, and the head load saw it.
+    assert!(
+        head_exited_via_stop.load(Ordering::SeqCst),
+        "the head load must observe the coordinator stop"
+    );
+    // Joined: nothing was consumed, no load is running (the scope joined) and
+    // nothing is materialized, including the partition that was loaded but
+    // never consumed.
+    assert!(consumed.is_empty(), "consumed {consumed:?}");
+    assert_eq!(gauge.live.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -194,7 +256,7 @@ fn zero_partitions_is_a_no_op() {
         panic!("no partition to load")
     };
     let consume = |_index: usize, (): ()| panic!("no partition to consume");
-    consume_in_partition_order(0, workers(3), load, consume).unwrap();
+    consume_in_partition_order(0, workers(3), load, &mut || false, consume).unwrap();
 }
 
 #[test]
@@ -532,8 +594,10 @@ fn a_panicking_load_fails_the_pool_instead_of_hanging_it() {
                 assert!(index != 0, "injected partition load panic");
                 Ok(held)
             };
-            consume_in_partition_order(PARTITIONS, workers(count), load, |_, _| Ok(()))
-                .map_err(|error| error.to_string())
+            consume_in_partition_order(PARTITIONS, workers(count), load, &mut || false, |_, _| {
+                Ok(())
+            })
+            .map_err(|error| error.to_string())
         });
         let Some(Ok(Err(error))) = outcome else {
             panic!("workers={count}: expected a structured error, got {outcome:?}");
@@ -565,7 +629,7 @@ fn a_panicking_consume_resumes_on_the_caller_after_the_workers_exit() {
             assert!(index != 1, "injected consume panic");
             Ok(())
         };
-        consume_in_partition_order(8, workers(3), load, consume)
+        consume_in_partition_order(8, workers(3), load, &mut || false, consume)
     });
     // The caller's panic is the caller's to see, not a hang and not an error.
     assert!(matches!(outcome, Some(Err(_))), "{outcome:?}");
