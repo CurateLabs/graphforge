@@ -1294,6 +1294,12 @@ impl GraphConstructionSession {
         lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
         allocation: Option<&crate::StorageAllocationOperation>,
     ) -> Result<Self, GfError> {
+        // #1509: a `test-support` build may record a smaller partition budget
+        // from the environment, so the #1507 hybrid is exercised on real
+        // Graph500 partitions. It is recorded like any budget, so a resume
+        // with a different value fails closed.
+        #[cfg(any(test, feature = "test-support"))]
+        let budgets = spill_spike::recorded_budget_override(budgets)?;
         let budgets = budgets.validate()?;
         let semantic_authority_sha256 = semantic_authority
             .as_ref()

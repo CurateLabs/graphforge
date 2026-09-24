@@ -763,6 +763,21 @@ fn sort_plan<const N: usize>(
     Ok(plan)
 }
 
+/// `GF_SHAPE_MAX_PARTITION_BYTES` replaces the recorded
+/// `max_partition_bytes` budget for a new session (#1509). It exists so the
+/// hybrid's refused-partition path runs on real Graph500 partitions without a
+/// public knob. The value is recorded in the checkpoint like any budget: a
+/// resume must present the same value or it fails closed. Unset leaves the
+/// caller's budgets untouched; an invalid value is refused.
+pub(super) fn recorded_budget_override(
+    mut budgets: super::GraphConstructionBudgets,
+) -> Result<super::GraphConstructionBudgets, GfError> {
+    if let Some(bytes) = bytes_env("GF_SHAPE_MAX_PARTITION_BYTES")? {
+        budgets.max_partition_bytes = bytes;
+    }
+    Ok(budgets)
+}
+
 /// Sort one fixed-width partition with DataFusion's external `SortExec`.
 ///
 /// Runs the sort phase to completion on the calling worker: every input

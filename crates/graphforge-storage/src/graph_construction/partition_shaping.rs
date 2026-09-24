@@ -473,7 +473,7 @@ pub(super) struct FixedRangePartitioner<'a, const N: usize> {
     load_workers: NonZeroUsize,
     max_partition_bytes: u64,
     /// A #1508 spike scheduler forced in place of the production pool.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     load_scheduler: Option<super::partition_load::scheduling_spike::LoadScheduler<'static>>,
 }
 
@@ -512,7 +512,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             records: 0,
             load_workers: PARTITION_LOAD_WORKERS,
             max_partition_bytes: super::partition::default_materialization_bytes(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             load_scheduler: None,
         })
     }
@@ -580,8 +580,20 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             load_fixed_partition::<N>(root, names, *expected, codec, max_partition_bytes, stop)
                 .map(|(records, counters)| (LoadedPartition::Resident(records), counters))
         };
-        #[cfg(test)]
-        if let Some(scheduler) = self.load_scheduler {
+        #[cfg(not(any(test, feature = "test-support")))]
+        let workers = self.load_workers;
+        // #1509: a `test-support` build may select a #1508 scheduler and a
+        // worker count from the environment; a forced test scheduler wins.
+        #[cfg(any(test, feature = "test-support"))]
+        let (workers, scheduler) = {
+            let (selected, workers) = super::partition_load::scheduling_spike::from_env()?;
+            (
+                workers.unwrap_or(self.load_workers),
+                self.load_scheduler.or(selected),
+            )
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(scheduler) = scheduler {
             // Tokio and DataFusion tasks are `'static`: the load owns a
             // duplicated directory handle and its own copy of the job list.
             let root = root.try_clone().map_err(super::storage)?;
@@ -593,14 +605,14 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             return super::partition_load::scheduling_spike::run(
                 scheduler,
                 partitions,
-                self.load_workers,
+                workers,
                 load,
                 consume,
                 &|| false,
             );
         }
         let load = |job: usize, stop: &AtomicBool| load_job(root, &jobs[job], stop);
-        consume_in_partition_order(jobs.len(), self.load_workers, load, consume)
+        consume_in_partition_order(jobs.len(), workers, load, consume)
     }
 
     /// Route one record into the partition owning `key`.
