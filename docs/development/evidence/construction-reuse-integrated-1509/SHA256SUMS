@@ -1,5 +1,6 @@
 8561df3d30d106d129cc71b5da9b6830e026e03bf1b87a55a428abec1315d6e2  ./__pycache__/measure.cpython-314.pyc
 2b5e9b4b7139e44dfea8d12798d272cadbc7f1f47df9bf2b3e5ab42a1ec99fee  ./calibration-s18.jsonl
+f4a9070b09d37c00f7dfc13b41cbdb7db92c19a4a1f3f3cc4b3d256981827297  ./independent-review.md
 19d80a853c5fef893131f22e03e2637fb6bbfbb7016ccb2586879197b252753e  ./main/aborted-first-attempt.jsonl
 9a70ae31da019b2916521e5615b7bbc20137c759bffe3a887e733aa1157de3c3  ./main/instrumented.jsonl
 0fa3f14675309eddf76c827112b3d0e5ebcdb98beb2f7996cfa80e137ff6e722  ./main/manifest.json

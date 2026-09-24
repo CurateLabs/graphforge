@@ -396,6 +396,10 @@ export default defineConfig({
                   label: '0045 — Ingest authentication regime — hash once on write, verify at trust boundaries',
                   slug: 'adr/0045-ingest-authentication-regime',
                 },
+                {
+                  label: '0046 — Construction keeps its own sorting, partitioning and admission; library reuse is bounded to named hybrids',
+                  slug: 'adr/0046-construction-reuse-decisions',
+                },
                 // END generated ADR records
               ],
             },
