@@ -185,6 +185,105 @@ of these adapter changes, none of which exists today:
 Each adds an ownership boundary that the Rayon and production pools do not
 need, because their coordinator is a plain thread.
 
+## Measurements
+
+**Setup.** Binary `gf` SHA-256 `bc324b03…d601c`, generator
+`4556db3b…6da1`, both built at `9d4c9cba` (this branch on `origin/main`
+`0c91dc4c`). Host OVHC-AGENCY: 16 logical CPUs, 125 GiB RAM, ext4 on mdadm
+RAID 1, no cgroup limit. Inputs: S18 nodes `44c9dfd9…` and edges `f112ccbe…`,
+the same S18 inputs as #1481 and #1507; S20 hashes are in
+[`main/manifest.json`](construction-reuse-integrated-1509/main/manifest.json).
+Runs took place 2026-09-24 13:45–15:03 UTC. All 30 main observations and all 3
+stress observations were accepted on their first attempt; no run saw a busy
+host. Raw data: [`main/`](construction-reuse-integrated-1509/main/) and
+[`stress/`](construction-reuse-integrated-1509/stress/), with validate and
+commit receipts per run and a `SHA256SUMS` over the directory.
+
+The first attempt stopped after one run on the driver's query `TMPDIR` defect
+(changelog). Its one observation is kept as
+[`main/aborted-first-attempt.jsonl`](construction-reuse-integrated-1509/main/aborted-first-attempt.jsonl)
+and is not in any figure.
+
+Medians, with the observed range in brackets. Deltas are against `baseline` at
+the same scale. The stress row ran as a separate invocation immediately after
+the main runs, with the same binary, inputs and quiet rules, and is compared
+with the main S18 baseline.
+
+| Scale / mode | Ingest wall (s) | Δ wall | Ingest CPU (s) | Δ CPU | Validate wall (s) | Validate peak RSS (MiB) | Host writeback (GB) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| S18 baseline | 31.4 [30.9–31.5] | — | 28.7 [28.2–28.8] | — | 28.3 | 232 [227–233] | 3.29 |
+| S18 rayon | 31.3 [31.2–31.3] | −0.3% | 28.6 [28.4–28.6] | −0.4% | 28.2 | 251 [231–252] | 3.28 |
+| S18 tokio | 31.3 [31.1–31.4] | −0.3% | 28.7 [28.7–28.7] | +0.2% | 28.2 | 237 [232–239] | 3.28 |
+| S18 hybrid | 32.6 [32.1–32.7] | +3.7% | 30.0 [29.9–30.1] | +4.5% | 29.3 | 260 [258–266] | 3.57 |
+| S18 hybrid-rayon | 32.2 [31.9–32.5] | +2.7% | 30.0 [29.5–30.1] | +4.6% | 29.2 | 285 [267–300] | 3.58 |
+| S18 hybrid-rayon, 64 KiB pool | 36.4 [36.1–36.4] | +15.9% | 35.7 [35.7–35.8] | +24.6% | 33.2 | 259 [257–260] | 4.19 |
+| S20 baseline | 128.0 [127.1–129.2] | — | 118.0 [117.8–118.8] | — | 116.0 | 308 [294–309] | 13.25 |
+| S20 rayon | 127.7 [127.6–128.1] | −0.2% | 118.0 [117.9–118.1] | −0.0% | 115.3 | 305 [269–320] | 13.25 |
+| S20 tokio | 127.4 [126.9–127.5] | −0.4% | 118.1 [117.7–118.6] | +0.0% | 115.5 | 286 [283–296] | 13.25 |
+| S20 hybrid | 133.9 [132.5–134.0] | +4.6% | 130.1 [129.0–130.5] | +10.2% | 122.0 | 362 [361–387] | 17.31 |
+| S20 hybrid-rayon | 134.1 [133.8–134.7] | +4.7% | 130.0 [130.0–130.5] | +10.2% | 121.9 | 368 [360–374] | 17.31 |
+
+**Instrumented runs** (untimed, one per case):
+
+| Case | External partitions | Input wire bytes | Spill runs | Spilled bytes | Byte amplification | Peak pool of limit | Peak simultaneous run files | Sort + merge wall (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: |
+| S18 hybrid-rayon, 1 MiB | 119 (all spilled) | 148.5 MB | 620 | 291.8 MB | 1.97× | 1,048,402 of 1,048,576 B | 7 | 1.84 + 0.67 |
+| S20 hybrid-rayon, 1 MiB | 256 (all spilled) | 1,107.3 MB | 5,380 | 4,050.6 MB | 3.66× | 1,048,402 of 1,048,576 B | 21 | 19.40 + 5.49 |
+| S18 hybrid-rayon, 64 KiB pool | 119 (all spilled) | 148.5 MB | 11,974 | 878.3 MB | 5.92× | 65,488 of 65,536 B | 117 | 7.33 + 1.05 |
+
+No run, timed or instrumented, left a DataFusion run file behind.
+
+### What the numbers show
+
+- **Correctness held in every mode.** At each scale, every accepted run's node
+  count, edge count, one-hop and two-hop `result_sha256` equal `baseline`'s.
+  Every commit receipt reports the same GraphForge-accounted evidence: at S18
+  4,456,448 rows, 68 chunks, 9,310 fsyncs and 3,039,429,943 write bytes; at
+  S20 17,825,792 rows, 272 chunks, 37,695 fsyncs and 12,272,356,363 write
+  bytes. The stress runs match S18's.
+- **The scheduler alone does not change complete ingest.** Rayon and Tokio
+  land within 0.4% of baseline on wall and CPU at both scales, inside the
+  observed ranges. At the production worker count of two, finish-time loads
+  are not what bounds ingest; #1508 found the real finish bound by the ordered
+  consume. Library scheduling adds nothing here and removes nothing wrong.
+- **The integrated candidate is correct and costs time, CPU and memory.**
+  Processing about 7–9% of fixed-width partitions externally (119 at S18, 256
+  at S20) under a 1 MiB pool costs +2.7–4.7% wall and +4.6–10.2% CPU against
+  production, which keeps those partitions in memory under its default budget. The 64 KiB pool raises that to
+  +15.9% wall and +24.6% CPU at S18.
+- **Rayon does not change the hybrid.** `hybrid` and `hybrid-rayon` overlap on
+  wall and CPU at both scales.
+- **A smaller budget did not buy a smaller process.** Validate peak RSS rose
+  in the hybrid modes (+28 to +60 MiB), although their recorded budget is 1 MiB
+  against production's 256 MiB. The partitions production keeps resident here
+  are at most 8.4 MB of input, so the default budget was never what sized the
+  process. The DataFusion runtime, batches and spill buffers sit outside the
+  pool, as #1507 found.
+- **Spill bytes reach storage and GraphForge cannot see them.** Host writeback
+  grew by 0.28 GB at S18 and 4.06 GB at S20, and by 0.90 GB under the 64 KiB
+  pool. None of it appears in GraphForge's I/O evidence or allocation ledger.
+
+## Bounded conclusions for the ADR
+
+These hold for the tested designs, pins, host and scales only.
+
+- **Integrated candidate (hybrid + Rayon): correct, not adopted as a unit.**
+  It is the one combination that runs end to end. Its only benefit is turning
+  a refusal into a publication, and no production workload is known to hit the
+  refusal. Its costs are measured above.
+- **Hybrid external sort: designated design for over-budget partitions,
+  pending a maintainer decision on the refusal contract.** Its adapter
+  obligations from #1507 stand, plus one from this experiment: it requires a
+  thread-based scheduler.
+- **Scheduling: retain the production pool.** Rayon is equivalent at complete
+  ingest and remains the designated alternative if a shared CPU budget or
+  nested lanes are needed. Tokio and DataFusion `SpawnedTask` are rejected for
+  construction CPU scheduling: equivalent alone, unable to host the hybrid,
+  and carrying the extra invariants #1508 recorded.
+- **Tokio-driven scheduler with the hybrid: incompatible as built**, with the
+  three adapter routes listed under correctness evidence. None is justified by
+  a measured benefit.
+
 ## Maintenance assessment (protocol §5.6)
 
 Code sizes are non-blank, non-comment lines at this branch's head (measured).
@@ -210,4 +309,5 @@ already built for `graphforge-exec`, so the build compiles no new crate
 | --- | --- |
 | 2026-09-24 | Predeclared experiment, before any timed run. |
 | 2026-09-24 | Budget calibration at S18 under the predeclared rule selected 1 MiB, before any timed run. |
+| 2026-09-24 | Main S18/S20 measurement and S18 stress case completed; results, instrumented runs and conclusions recorded. |
 | 2026-09-24 | Driver fix after the first timed run: the untimed reopen query inherited a tmpfs `TMPDIR` and failed with a cross-device rename. It now uses the ingest's ext4 `TMPDIR`. The one completed observation was set aside and the measurement restarted from the beginning. Timed commands are unchanged. |

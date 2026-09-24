@@ -1,5 +1,10 @@
 # Construction sort/partition reuse spike (#1506)
 
+> **Integrated follow-up (#1509):** this mechanism was combined with the other
+> spikes' candidates and measured through complete ingest, publication, reopen
+> and queries on a tree containing #1562. See
+> [`construction-reuse-integrated-1509.md`](construction-reuse-integrated-1509.md).
+
 **Status:** complete for #1506. This follows
 [`construction-reuse-inventory-protocol-1505.md`](../construction-reuse-inventory-protocol-1505.md).
 **Measured revision:** `6bf02962` (branch `spike/1506-sort-partition-evaluation`

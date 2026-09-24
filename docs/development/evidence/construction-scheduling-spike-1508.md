@@ -1,5 +1,10 @@
 # Construction scheduling and cancellation spike (#1508)
 
+> **Integrated follow-up (#1509):** this mechanism was combined with the other
+> spikes' candidates and measured through complete ingest, publication, reopen
+> and queries on a tree containing #1562. See
+> [`construction-reuse-integrated-1509.md`](construction-reuse-integrated-1509.md).
+
 **Status:** runnable experiment, correctness evidence, and repeated measurements
 for the scheduling mechanism. Follows
 [`construction-reuse-inventory-protocol-1505.md`](../construction-reuse-inventory-protocol-1505.md)
