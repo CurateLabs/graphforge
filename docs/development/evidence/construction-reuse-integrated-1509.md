@@ -185,6 +185,25 @@ of these adapter changes, none of which exists today:
 Each adds an ownership boundary that the Rayon and production pools do not
 need, because their coordinator is a plain thread.
 
+## Maintenance assessment (protocol §5.6)
+
+Code sizes are non-blank, non-comment lines at this branch's head (measured).
+Everything else is marked as an estimate.
+
+| Alternative | Custom code it deletes | Adapter code it adds | What GraphForge still owns | New risks |
+| --- | --- | --- | --- | --- |
+| Production (retained) | none | none | Pool (`partition_load.rs`, 188 lines with #1564's panic containment), splitters, budgets, spills, receipts, recovery | Cancellation noticed only in `consume` (#1508 F15) |
+| Rayon scheduler alone | *Estimate:* the pool's window, reorder buffer and worker loop, about 120 lines | `rayon_ordered`, 62 lines, plus `contain_panic` (3) and cancel polling | Window, reorder buffer, stop flag, panic containment | A shared Rayon pool would put blocking file I/O on CPU workers that analytics also uses; not exercised |
+| Tokio scheduler alone | Same *estimate* | `tokio_ordered` (27) and `drive` (69), plus nested-runtime refusal (8) | As Rayon, plus explicit drain (F7) and `'static` ownership of the load (F8) | Detached loads if the drain is skipped; cannot host the hybrid (this experiment) |
+| Hybrid external sort | none: it adds capability for refused partitions | `spill_spike.rs`, 730 lines, and the `LoadedPartition` split in `partition_shaping.rs` | Splitters, segments, receipts, recovery, total admission, the integrity guard, run-directory ownership, a shared disk limit, evidence accounting (#1507) | Unvalidated spill reads; orphaned runs after a crash; DataFusion API churn per major (*estimate:* a small touch per upgrade) |
+| Integrated candidate (hybrid + Rayon) | The Rayon row's *estimate* | Both adapters: about 800 lines | Everything in both rows | Both rows' risks; the thread-scheduler requirement couples the two choices |
+| This experiment's selectors | none | `from_env` (29), `recorded_budget_override` (7), the `schedule_loads` branch, and a storage `rayon` dependency | — | None in production: all compiled only under `cfg(test)` or `test-support` |
+
+Dependency and build: every candidate uses crates already in the workspace
+graph. Rayon became a direct storage dependency for this experiment; it was
+already built for `graphforge-exec`, so the build compiles no new crate
+(`Cargo.lock` gains one edge).
+
 ## Changelog
 
 | Date | Change |

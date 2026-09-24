@@ -1,0 +1,592 @@
+{
+ "s18/baseline": {
+  "wall_s": {
+   "median": 31.404100774088874,
+   "min": 30.923166246851906,
+   "max": 31.52220244007185
+  },
+  "cpu_s": {
+   "median": 28.657121,
+   "min": 28.167468000000003,
+   "max": 28.751146000000002
+  },
+  "max_rss_kib": {
+   "median": 237692,
+   "min": 232816,
+   "max": 238736
+  },
+  "validate_wall_s": {
+   "median": 28.25783194694668,
+   "min": 27.869588566944003,
+   "max": 28.399236836005002
+  },
+  "validate_cpu_s": {
+   "median": 27.119308,
+   "min": 26.740132000000003,
+   "max": 27.208047
+  },
+  "validate_max_rss_kib": {
+   "median": 237692,
+   "min": 232816,
+   "max": 238736
+  },
+  "commit_wall_s": {
+   "median": 2.500488074030727,
+   "min": 2.4091183058917522,
+   "max": 2.515703828074038
+  },
+  "oublock_512": {
+   "median": 7178184,
+   "min": 7178184,
+   "max": 7178184
+  },
+  "host_pages_dirtied": {
+   "median": 901275,
+   "min": 901112,
+   "max": 902173
+  },
+  "host_pages_written": {
+   "median": 802272,
+   "min": 801364,
+   "max": 802658
+  },
+  "n": 3,
+  "answers": [
+   "{\"edge-count\": {\"result_sha256\": \"2cb98d6493038230f3d574b16c2cbe283c07e43471b8764f6dfb59bea0aca486\", \"rows\": 1, \"scalar_u64\": 4194304}, \"node-count\": {\"result_sha256\": \"3943ce07cba5fc8b1b779daf479b68f69c81d1b0427e0ac49c8433fe53b17e8f\", \"rows\": 1, \"scalar_u64\": 262144}, \"one-hop\": {\"result_sha256\": \"b73a4441b8a7358838773819082202e4055f965637f36d4e1b43d3c2b9635c28\", \"rows\": 1000, \"scalar_u64\": null}, \"two-hop\": {\"result_sha256\": \"3541076a1d4b4914fa1686264d88f0595f95fa45d10578dec497b3936be8bd60\", \"rows\": 1000, \"scalar_u64\": null}}"
+  ],
+  "commit_evidence": [
+   "{\"accepted_chunks\": 68, \"application_fsync_calls\": 9310, \"application_read_bytes\": 4225356283, \"application_write_bytes\": 3039429943, \"input_rows\": 4456448}"
+  ]
+ },
+ "s18/rayon": {
+  "wall_s": {
+   "median": 31.32140679610893,
+   "min": 31.15738461795263,
+   "max": 31.326251071877778
+  },
+  "cpu_s": {
+   "median": 28.550848,
+   "min": 28.37535,
+   "max": 28.580622
+  },
+  "max_rss_kib": {
+   "median": 256904,
+   "min": 236448,
+   "max": 257552
+  },
+  "validate_wall_s": {
+   "median": 28.16985299694352,
+   "min": 27.95128388190642,
+   "max": 28.203285687835887
+  },
+  "validate_cpu_s": {
+   "median": 27.001161,
+   "min": 26.837839000000002,
+   "max": 27.033014
+  },
+  "validate_max_rss_kib": {
+   "median": 256904,
+   "min": 236448,
+   "max": 257552
+  },
+  "commit_wall_s": {
+   "median": 2.5002738318871707,
+   "min": 2.477757103042677,
+   "max": 2.5007888390682638
+  },
+  "oublock_512": {
+   "median": 7178184,
+   "min": 7178184,
+   "max": 7178184
+  },
+  "host_pages_dirtied": {
+   "median": 901486,
+   "min": 900437,
+   "max": 901712
+  },
+  "host_pages_written": {
+   "median": 800913,
+   "min": 800735,
+   "max": 801875
+  },
+  "n": 3,
+  "answers": [
+   "{\"edge-count\": {\"result_sha256\": \"2cb98d6493038230f3d574b16c2cbe283c07e43471b8764f6dfb59bea0aca486\", \"rows\": 1, \"scalar_u64\": 4194304}, \"node-count\": {\"result_sha256\": \"3943ce07cba5fc8b1b779daf479b68f69c81d1b0427e0ac49c8433fe53b17e8f\", \"rows\": 1, \"scalar_u64\": 262144}, \"one-hop\": {\"result_sha256\": \"b73a4441b8a7358838773819082202e4055f965637f36d4e1b43d3c2b9635c28\", \"rows\": 1000, \"scalar_u64\": null}, \"two-hop\": {\"result_sha256\": \"3541076a1d4b4914fa1686264d88f0595f95fa45d10578dec497b3936be8bd60\", \"rows\": 1000, \"scalar_u64\": null}}"
+  ],
+  "commit_evidence": [
+   "{\"accepted_chunks\": 68, \"application_fsync_calls\": 9310, \"application_read_bytes\": 4225356283, \"application_write_bytes\": 3039429943, \"input_rows\": 4456448}"
+  ]
+ },
+ "s18/tokio": {
+  "wall_s": {
+   "median": 31.302096026949584,
+   "min": 31.132273335941136,
+   "max": 31.39188769692555
+  },
+  "cpu_s": {
+   "median": 28.710718,
+   "min": 28.67576,
+   "max": 28.726125999999997
+  },
+  "max_rss_kib": {
+   "median": 242760,
+   "min": 237540,
+   "max": 245172
+  },
+  "validate_wall_s": {
+   "median": 28.180766504025087,
+   "min": 28.093393326969817,
+   "max": 28.24397945892997
+  },
+  "validate_cpu_s": {
+   "median": 27.15109,
+   "min": 27.134177,
+   "max": 27.188112999999998
+  },
+  "validate_max_rss_kib": {
+   "median": 242760,
+   "min": 237540,
+   "max": 245172
+  },
+  "commit_wall_s": {
+   "median": 2.513822212116793,
+   "min": 2.4708647960796952,
+   "max": 2.5589498470071703
+  },
+  "oublock_512": {
+   "median": 7178184,
+   "min": 7178184,
+   "max": 7178184
+  },
+  "host_pages_dirtied": {
+   "median": 899730,
+   "min": 899618,
+   "max": 901965
+  },
+  "host_pages_written": {
+   "median": 800643,
+   "min": 800138,
+   "max": 801914
+  },
+  "n": 3,
+  "answers": [
+   "{\"edge-count\": {\"result_sha256\": \"2cb98d6493038230f3d574b16c2cbe283c07e43471b8764f6dfb59bea0aca486\", \"rows\": 1, \"scalar_u64\": 4194304}, \"node-count\": {\"result_sha256\": \"3943ce07cba5fc8b1b779daf479b68f69c81d1b0427e0ac49c8433fe53b17e8f\", \"rows\": 1, \"scalar_u64\": 262144}, \"one-hop\": {\"result_sha256\": \"b73a4441b8a7358838773819082202e4055f965637f36d4e1b43d3c2b9635c28\", \"rows\": 1000, \"scalar_u64\": null}, \"two-hop\": {\"result_sha256\": \"3541076a1d4b4914fa1686264d88f0595f95fa45d10578dec497b3936be8bd60\", \"rows\": 1000, \"scalar_u64\": null}}"
+  ],
+  "commit_evidence": [
+   "{\"accepted_chunks\": 68, \"application_fsync_calls\": 9310, \"application_read_bytes\": 4225356283, \"application_write_bytes\": 3039429943, \"input_rows\": 4456448}"
+  ]
+ },
+ "s18/hybrid": {
+  "wall_s": {
+   "median": 32.56299093691632,
+   "min": 32.07169848983176,
+   "max": 32.656052612001076
+  },
+  "cpu_s": {
+   "median": 29.953113000000002,
+   "min": 29.879438999999998,
+   "max": 30.101626
+  },
+  "max_rss_kib": {
+   "median": 266080,
+   "min": 264584,
+   "max": 272492
+  },
+  "validate_wall_s": {
+   "median": 29.33312858105637,
+   "min": 29.053491875063628,
+   "max": 29.47995841014199
+  },
+  "validate_cpu_s": {
+   "median": 28.404403000000002,
+   "min": 28.350672,
+   "max": 28.564358
+  },
+  "validate_max_rss_kib": {
+   "median": 266080,
+   "min": 264584,
+   "max": 272492
+  },
+  "commit_wall_s": {
+   "median": 2.5345518779940903,
+   "min": 2.4498820658773184,
+   "max": 2.5599934549536556
+  },
+  "oublock_512": {
+   "median": 7750256,
+   "min": 7750256,
+   "max": 7750256
+  },
+  "host_pages_dirtied": {
+   "median": 971459,
+   "min": 971397,
+   "max": 974889
+  },
+  "host_pages_written": {
+   "median": 871807,
+   "min": 871597,
+   "max": 874242
+  },
+  "n": 3,
+  "answers": [
+   "{\"edge-count\": {\"result_sha256\": \"2cb98d6493038230f3d574b16c2cbe283c07e43471b8764f6dfb59bea0aca486\", \"rows\": 1, \"scalar_u64\": 4194304}, \"node-count\": {\"result_sha256\": \"3943ce07cba5fc8b1b779daf479b68f69c81d1b0427e0ac49c8433fe53b17e8f\", \"rows\": 1, \"scalar_u64\": 262144}, \"one-hop\": {\"result_sha256\": \"b73a4441b8a7358838773819082202e4055f965637f36d4e1b43d3c2b9635c28\", \"rows\": 1000, \"scalar_u64\": null}, \"two-hop\": {\"result_sha256\": \"3541076a1d4b4914fa1686264d88f0595f95fa45d10578dec497b3936be8bd60\", \"rows\": 1000, \"scalar_u64\": null}}"
+  ],
+  "commit_evidence": [
+   "{\"accepted_chunks\": 68, \"application_fsync_calls\": 9310, \"application_read_bytes\": 4225356283, \"application_write_bytes\": 3039429943, \"input_rows\": 4456448}"
+  ]
+ },
+ "s18/hybrid-rayon": {
+  "wall_s": {
+   "median": 32.244114336092025,
+   "min": 31.919712473172694,
+   "max": 32.5441729829181
+  },
+  "cpu_s": {
+   "median": 29.966721,
+   "min": 29.507214,
+   "max": 30.113384999999997
+  },
+  "max_rss_kib": {
+   "median": 291840,
+   "min": 273224,
+   "max": 307388
+  },
+  "validate_wall_s": {
+   "median": 29.159012343967333,
+   "min": 28.732277675066143,
+   "max": 29.33498074300587
+  },
+  "validate_cpu_s": {
+   "median": 28.427104,
+   "min": 27.960288000000002,
+   "max": 28.568407999999998
+  },
+  "validate_max_rss_kib": {
+   "median": 291840,
+   "min": 273224,
+   "max": 307388
+  },
+  "commit_wall_s": {
+   "median": 2.5311221280135214,
+   "min": 2.4807670249138027,
+   "max": 2.552712578792125
+  },
+  "oublock_512": {
+   "median": 7750256,
+   "min": 7750256,
+   "max": 7750256
+  },
+  "host_pages_dirtied": {
+   "median": 972899,
+   "min": 971162,
+   "max": 973326
+  },
+  "host_pages_written": {
+   "median": 872966,
+   "min": 872047,
+   "max": 873440
+  },
+  "n": 3,
+  "answers": [
+   "{\"edge-count\": {\"result_sha256\": \"2cb98d6493038230f3d574b16c2cbe283c07e43471b8764f6dfb59bea0aca486\", \"rows\": 1, \"scalar_u64\": 4194304}, \"node-count\": {\"result_sha256\": \"3943ce07cba5fc8b1b779daf479b68f69c81d1b0427e0ac49c8433fe53b17e8f\", \"rows\": 1, \"scalar_u64\": 262144}, \"one-hop\": {\"result_sha256\": \"b73a4441b8a7358838773819082202e4055f965637f36d4e1b43d3c2b9635c28\", \"rows\": 1000, \"scalar_u64\": null}, \"two-hop\": {\"result_sha256\": \"3541076a1d4b4914fa1686264d88f0595f95fa45d10578dec497b3936be8bd60\", \"rows\": 1000, \"scalar_u64\": null}}"
+  ],
+  "commit_evidence": [
+   "{\"accepted_chunks\": 68, \"application_fsync_calls\": 9310, \"application_read_bytes\": 4225356283, \"application_write_bytes\": 3039429943, \"input_rows\": 4456448}"
+  ]
+ },
+ "s20/baseline": {
+  "wall_s": {
+   "median": 128.01880188588984,
+   "min": 127.05647478299215,
+   "max": 129.2483021710068
+  },
+  "cpu_s": {
+   "median": 118.026189,
+   "min": 117.82769900000001,
+   "max": 118.751899
+  },
+  "max_rss_kib": {
+   "median": 315824,
+   "min": 301096,
+   "max": 316688
+  },
+  "validate_wall_s": {
+   "median": 115.95478899800219,
+   "min": 114.84704910288565,
+   "max": 117.27313039381988
+  },
+  "validate_cpu_s": {
+   "median": 112.164705,
+   "min": 111.79947800000001,
+   "max": 112.741191
+  },
+  "validate_max_rss_kib": {
+   "median": 315824,
+   "min": 301096,
+   "max": 316688
+  },
+  "commit_wall_s": {
+   "median": 9.867118136025965,
+   "min": 9.7692387169227,
+   "max": 10.06056485697627
+  },
+  "oublock_512": {
+   "median": 28951256,
+   "min": 28951256,
+   "max": 28951256
+  },
+  "host_pages_dirtied": {
+   "median": 3628434,
+   "min": 3628228,
+   "max": 3628644
+  },
+  "host_pages_written": {
+   "median": 3234244,
+   "min": 3234148,
+   "max": 3234445
+  },
+  "n": 3,
+  "answers": [
+   "{\"edge-count\": {\"result_sha256\": \"3daeda0e54a362622ffdc547a631479e3f18cd0f7fa1b28c3b1fce9b7e88a150\", \"rows\": 1, \"scalar_u64\": 16777216}, \"node-count\": {\"result_sha256\": \"d41814e11f492a8c36191b100c805a370de2b4bdbe6ca88c7eef41360ef53066\", \"rows\": 1, \"scalar_u64\": 1048576}, \"one-hop\": {\"result_sha256\": \"da48cf8bd82d136635cba999906d07a783deabf66427e13128f645d756adb116\", \"rows\": 1000, \"scalar_u64\": null}, \"two-hop\": {\"result_sha256\": \"404560fda0d6c2f6988aa4cee9c8d1d465c7254181b8c760e659e00b3f1bd255\", \"rows\": 1000, \"scalar_u64\": null}}"
+  ],
+  "commit_evidence": [
+   "{\"accepted_chunks\": 272, \"application_fsync_calls\": 37695, \"application_read_bytes\": 17033535450, \"application_write_bytes\": 12272356363, \"input_rows\": 17825792}"
+  ]
+ },
+ "s20/rayon": {
+  "wall_s": {
+   "median": 127.73712568311021,
+   "min": 127.6467949799262,
+   "max": 128.12409170297906
+  },
+  "cpu_s": {
+   "median": 118.018345,
+   "min": 117.906496,
+   "max": 118.14766999999999
+  },
+  "max_rss_kib": {
+   "median": 312788,
+   "min": 275448,
+   "max": 328180
+  },
+  "validate_wall_s": {
+   "median": 115.31768046994694,
+   "min": 115.31676731887273,
+   "max": 116.00204602605663
+  },
+  "validate_cpu_s": {
+   "median": 112.038304,
+   "min": 111.798461,
+   "max": 112.14198499999999
+  },
+  "validate_max_rss_kib": {
+   "median": 312788,
+   "min": 275448,
+   "max": 328180
+  },
+  "commit_wall_s": {
+   "median": 9.828651171177626,
+   "min": 9.786884642904624,
+   "max": 9.887676199898124
+  },
+  "oublock_512": {
+   "median": 28951256,
+   "min": 28951256,
+   "max": 28951256
+  },
+  "host_pages_dirtied": {
+   "median": 3629229,
+   "min": 3628306,
+   "max": 3629916
+  },
+  "host_pages_written": {
+   "median": 3235068,
+   "min": 3233989,
+   "max": 3235325
+  },
+  "n": 3,
+  "answers": [
+   "{\"edge-count\": {\"result_sha256\": \"3daeda0e54a362622ffdc547a631479e3f18cd0f7fa1b28c3b1fce9b7e88a150\", \"rows\": 1, \"scalar_u64\": 16777216}, \"node-count\": {\"result_sha256\": \"d41814e11f492a8c36191b100c805a370de2b4bdbe6ca88c7eef41360ef53066\", \"rows\": 1, \"scalar_u64\": 1048576}, \"one-hop\": {\"result_sha256\": \"da48cf8bd82d136635cba999906d07a783deabf66427e13128f645d756adb116\", \"rows\": 1000, \"scalar_u64\": null}, \"two-hop\": {\"result_sha256\": \"404560fda0d6c2f6988aa4cee9c8d1d465c7254181b8c760e659e00b3f1bd255\", \"rows\": 1000, \"scalar_u64\": null}}"
+  ],
+  "commit_evidence": [
+   "{\"accepted_chunks\": 272, \"application_fsync_calls\": 37695, \"application_read_bytes\": 17033535450, \"application_write_bytes\": 12272356363, \"input_rows\": 17825792}"
+  ]
+ },
+ "s20/tokio": {
+  "wall_s": {
+   "median": 127.44743676413782,
+   "min": 126.90823137713596,
+   "max": 127.46746118203737
+  },
+  "cpu_s": {
+   "median": 118.060098,
+   "min": 117.70534999999998,
+   "max": 118.621092
+  },
+  "max_rss_kib": {
+   "median": 292700,
+   "min": 289620,
+   "max": 303168
+  },
+  "validate_wall_s": {
+   "median": 115.46688460605219,
+   "min": 115.20985365402885,
+   "max": 115.51904737390578
+  },
+  "validate_cpu_s": {
+   "median": 112.059257,
+   "min": 111.60491099999999,
+   "max": 112.568364
+  },
+  "validate_max_rss_kib": {
+   "median": 292700,
+   "min": 289620,
+   "max": 303168
+  },
+  "commit_wall_s": {
+   "median": 9.714733448112383,
+   "min": 9.456745557952672,
+   "max": 9.731167322956026
+  },
+  "oublock_512": {
+   "median": 28951256,
+   "min": 28951256,
+   "max": 28951256
+  },
+  "host_pages_dirtied": {
+   "median": 3628710,
+   "min": 3628661,
+   "max": 3635389
+  },
+  "host_pages_written": {
+   "median": 3234577,
+   "min": 3234434,
+   "max": 3240060
+  },
+  "n": 3,
+  "answers": [
+   "{\"edge-count\": {\"result_sha256\": \"3daeda0e54a362622ffdc547a631479e3f18cd0f7fa1b28c3b1fce9b7e88a150\", \"rows\": 1, \"scalar_u64\": 16777216}, \"node-count\": {\"result_sha256\": \"d41814e11f492a8c36191b100c805a370de2b4bdbe6ca88c7eef41360ef53066\", \"rows\": 1, \"scalar_u64\": 1048576}, \"one-hop\": {\"result_sha256\": \"da48cf8bd82d136635cba999906d07a783deabf66427e13128f645d756adb116\", \"rows\": 1000, \"scalar_u64\": null}, \"two-hop\": {\"result_sha256\": \"404560fda0d6c2f6988aa4cee9c8d1d465c7254181b8c760e659e00b3f1bd255\", \"rows\": 1000, \"scalar_u64\": null}}"
+  ],
+  "commit_evidence": [
+   "{\"accepted_chunks\": 272, \"application_fsync_calls\": 37695, \"application_read_bytes\": 17033535450, \"application_write_bytes\": 12272356363, \"input_rows\": 17825792}"
+  ]
+ },
+ "s20/hybrid": {
+  "wall_s": {
+   "median": 133.86532199010253,
+   "min": 132.48346317885444,
+   "max": 133.95900310506113
+  },
+  "cpu_s": {
+   "median": 130.104868,
+   "min": 128.991042,
+   "max": 130.463413
+  },
+  "max_rss_kib": {
+   "median": 370240,
+   "min": 370168,
+   "max": 395912
+  },
+  "validate_wall_s": {
+   "median": 121.9941253720317,
+   "min": 120.54809075314552,
+   "max": 122.24680427904241
+  },
+  "validate_cpu_s": {
+   "median": 124.19628500000002,
+   "min": 122.883184,
+   "max": 124.58719500000001
+  },
+  "validate_max_rss_kib": {
+   "median": 370240,
+   "min": 370168,
+   "max": 395912
+  },
+  "commit_wall_s": {
+   "median": 9.61187541903928,
+   "min": 9.602305519860238,
+   "max": 9.629268772201613
+  },
+  "oublock_512": {
+   "median": 36878056,
+   "min": 36878056,
+   "max": 36878056
+  },
+  "host_pages_dirtied": {
+   "median": 4620102,
+   "min": 4619627,
+   "max": 4620822
+  },
+  "host_pages_written": {
+   "median": 4226494,
+   "min": 4226254,
+   "max": 4227055
+  },
+  "n": 3,
+  "answers": [
+   "{\"edge-count\": {\"result_sha256\": \"3daeda0e54a362622ffdc547a631479e3f18cd0f7fa1b28c3b1fce9b7e88a150\", \"rows\": 1, \"scalar_u64\": 16777216}, \"node-count\": {\"result_sha256\": \"d41814e11f492a8c36191b100c805a370de2b4bdbe6ca88c7eef41360ef53066\", \"rows\": 1, \"scalar_u64\": 1048576}, \"one-hop\": {\"result_sha256\": \"da48cf8bd82d136635cba999906d07a783deabf66427e13128f645d756adb116\", \"rows\": 1000, \"scalar_u64\": null}, \"two-hop\": {\"result_sha256\": \"404560fda0d6c2f6988aa4cee9c8d1d465c7254181b8c760e659e00b3f1bd255\", \"rows\": 1000, \"scalar_u64\": null}}"
+  ],
+  "commit_evidence": [
+   "{\"accepted_chunks\": 272, \"application_fsync_calls\": 37695, \"application_read_bytes\": 17033535450, \"application_write_bytes\": 12272356363, \"input_rows\": 17825792}"
+  ]
+ },
+ "s20/hybrid-rayon": {
+  "wall_s": {
+   "median": 134.05307689704932,
+   "min": 133.8292783240322,
+   "max": 134.69530287501402
+  },
+  "cpu_s": {
+   "median": 130.045502,
+   "min": 129.951989,
+   "max": 130.501882
+  },
+  "max_rss_kib": {
+   "median": 376500,
+   "min": 368180,
+   "max": 382656
+  },
+  "validate_wall_s": {
+   "median": 121.86586232297122,
+   "min": 121.7093875289429,
+   "max": 122.54619832499884
+  },
+  "validate_cpu_s": {
+   "median": 124.10677799999999,
+   "min": 123.992411,
+   "max": 124.506875
+  },
+  "validate_max_rss_kib": {
+   "median": 376500,
+   "min": 368180,
+   "max": 382656
+  },
+  "commit_wall_s": {
+   "median": 9.841786627890542,
+   "min": 9.76753498101607,
+   "max": 9.889694283017889
+  },
+  "oublock_512": {
+   "median": 36878056,
+   "min": 36878056,
+   "max": 36878056
+  },
+  "host_pages_dirtied": {
+   "median": 4619899,
+   "min": 4619738,
+   "max": 4736567
+  },
+  "host_pages_written": {
+   "median": 4226461,
+   "min": 4226168,
+   "max": 4312040
+  },
+  "n": 3,
+  "answers": [
+   "{\"edge-count\": {\"result_sha256\": \"3daeda0e54a362622ffdc547a631479e3f18cd0f7fa1b28c3b1fce9b7e88a150\", \"rows\": 1, \"scalar_u64\": 16777216}, \"node-count\": {\"result_sha256\": \"d41814e11f492a8c36191b100c805a370de2b4bdbe6ca88c7eef41360ef53066\", \"rows\": 1, \"scalar_u64\": 1048576}, \"one-hop\": {\"result_sha256\": \"da48cf8bd82d136635cba999906d07a783deabf66427e13128f645d756adb116\", \"rows\": 1000, \"scalar_u64\": null}, \"two-hop\": {\"result_sha256\": \"404560fda0d6c2f6988aa4cee9c8d1d465c7254181b8c760e659e00b3f1bd255\", \"rows\": 1000, \"scalar_u64\": null}}"
+  ],
+  "commit_evidence": [
+   "{\"accepted_chunks\": 272, \"application_fsync_calls\": 37695, \"application_read_bytes\": 17033535450, \"application_write_bytes\": 12272356363, \"input_rows\": 17825792}"
+  ]
+ }
+}

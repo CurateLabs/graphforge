@@ -1,0 +1,61 @@
+{
+ "s18/hybrid-rayon-tight": {
+  "wall_s": {
+   "median": 36.40003591007553,
+   "min": 36.1486759588588,
+   "max": 36.40903537487611
+  },
+  "cpu_s": {
+   "median": 35.712449,
+   "min": 35.693026,
+   "max": 35.797957
+  },
+  "max_rss_kib": {
+   "median": 264728,
+   "min": 262740,
+   "max": 266752
+  },
+  "validate_wall_s": {
+   "median": 33.23817747319117,
+   "min": 33.07078113988973,
+   "max": 33.24150648294017
+  },
+  "validate_cpu_s": {
+   "median": 34.178043,
+   "min": 34.152521,
+   "max": 34.25783
+  },
+  "validate_max_rss_kib": {
+   "median": 264728,
+   "min": 262740,
+   "max": 266752
+  },
+  "commit_wall_s": {
+   "median": 2.515047825872898,
+   "min": 2.498675110982731,
+   "max": 2.5274069930892438
+  },
+  "oublock_512": {
+   "median": 8966336,
+   "min": 8966336,
+   "max": 8966336
+  },
+  "host_pages_dirtied": {
+   "median": 1123274,
+   "min": 1123053,
+   "max": 1123425
+  },
+  "host_pages_written": {
+   "median": 1023918,
+   "min": 1023639,
+   "max": 1025273
+  },
+  "n": 3,
+  "answers": [
+   "{\"edge-count\": {\"result_sha256\": \"2cb98d6493038230f3d574b16c2cbe283c07e43471b8764f6dfb59bea0aca486\", \"rows\": 1, \"scalar_u64\": 4194304}, \"node-count\": {\"result_sha256\": \"3943ce07cba5fc8b1b779daf479b68f69c81d1b0427e0ac49c8433fe53b17e8f\", \"rows\": 1, \"scalar_u64\": 262144}, \"one-hop\": {\"result_sha256\": \"b73a4441b8a7358838773819082202e4055f965637f36d4e1b43d3c2b9635c28\", \"rows\": 1000, \"scalar_u64\": null}, \"two-hop\": {\"result_sha256\": \"3541076a1d4b4914fa1686264d88f0595f95fa45d10578dec497b3936be8bd60\", \"rows\": 1000, \"scalar_u64\": null}}"
+  ],
+  "commit_evidence": [
+   "{\"accepted_chunks\": 68, \"application_fsync_calls\": 9310, \"application_read_bytes\": 4225356283, \"application_write_bytes\": 3039429943, \"input_rows\": 4456448}"
+  ]
+ }
+}
