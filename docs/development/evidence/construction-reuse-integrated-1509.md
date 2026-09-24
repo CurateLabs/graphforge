@@ -7,6 +7,7 @@ Mechanism evidence: sorting and partitioning
 ([#1506](shape-sort-partition-spike-1506.md)), spill and memory
 ([#1507](spill-memory-pool-1507.md)), scheduling and cancellation
 ([#1508](construction-scheduling-spike-1508.md)).
+Decision: [ADR 0046](../../adr/0046-construction-reuse-decisions.md).
 
 ## Predeclared experiment (recorded before any timed run)
 

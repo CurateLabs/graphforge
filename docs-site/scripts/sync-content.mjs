@@ -167,6 +167,7 @@ const PAGES = [
   'adr/0043-atomic-research-proposal-acceptance.md',
   'adr/0044-research-interchange-authority.md',
   'adr/0045-ingest-authentication-regime.md',
+  'adr/0046-construction-reuse-decisions.md',
   // END generated ADR records
   'releases/roadmap.md',
   'legal/licensing.md',

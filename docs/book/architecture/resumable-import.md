@@ -48,6 +48,9 @@ can therefore be refused even at 4,096 ranges. The failed private shape remains
 unpublished and reopening retains the same limits. The materialization budget
 is separate from source decoding, routing/writer buffers, allocator metadata,
 page cache and the process memory limit; it is not a whole-process RSS promise.
+Refusal is the recorded contract: [ADR 0046](../../adr/0046-construction-reuse-decisions.md)
+retains it and names a DataFusion external sort as the designated design if the
+maintainers decide over-budget partitions must succeed instead.
 
 The new budget fields have stable defaults for historical checkpoints and omit
 default values when serialized. Opening a checkpoint with the exact former
