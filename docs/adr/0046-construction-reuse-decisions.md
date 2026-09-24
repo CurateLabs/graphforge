@@ -20,6 +20,16 @@ boundary), ADR 0045 (ingest authentication regime); epic #1504 and its children
 #1508 (scheduling and cancellation), #1509 (integrated experiment and this
 record); #1448 (shaping parallelism), #1387 (ingest floor).
 
+## Later decision: ADR 0047
+
+The maintainers took the two decisions this record reserved.
+[ADR 0047](0047-over-budget-partitions-and-instance-cpu-budget.md) decides that
+an over-budget fixed-width partition is processed externally instead of refusing
+the ingest, which replaces this record's "retain refusal" row. It also decides
+that one CPU budget per instance is shared by queries and construction. Every
+other decision below stands. The record is otherwise unchanged from its
+acceptance.
+
 ## Context
 
 GraphForge builds a graph with its own construction machinery. Intake sorts

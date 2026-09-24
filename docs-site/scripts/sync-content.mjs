@@ -168,6 +168,7 @@ const PAGES = [
   'adr/0044-research-interchange-authority.md',
   'adr/0045-ingest-authentication-regime.md',
   'adr/0046-construction-reuse-decisions.md',
+  'adr/0047-over-budget-partitions-and-instance-cpu-budget.md',
   // END generated ADR records
   'releases/roadmap.md',
   'legal/licensing.md',

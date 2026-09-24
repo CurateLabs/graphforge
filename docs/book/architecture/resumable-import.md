@@ -48,9 +48,11 @@ can therefore be refused even at 4,096 ranges. The failed private shape remains
 unpublished and reopening retains the same limits. The materialization budget
 is separate from source decoding, routing/writer buffers, allocator metadata,
 page cache and the process memory limit; it is not a whole-process RSS promise.
-Refusal is the recorded contract: [ADR 0046](../../adr/0046-construction-reuse-decisions.md)
-retains it and names a DataFusion external sort as the designated design if the
-maintainers decide over-budget partitions must succeed instead.
+This refusal is how construction behaves today. [ADR 0047](../../adr/0047-over-budget-partitions-and-instance-cpu-budget.md)
+changes the contract: an over-budget fixed-width partition will be processed
+externally, bounded by a recorded scratch limit, instead of refusing. #1585
+implements it. Sessions recorded before that change keep their recorded
+refusal. Arrow property-row partitions keep refusing.
 
 The new budget fields have stable defaults for historical checkpoints and omit
 default values when serialized. Opening a checkpoint with the exact former

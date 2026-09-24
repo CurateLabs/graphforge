@@ -1,0 +1,7 @@
+# ingest.sh summary lines, 2026-09-24, frozen gf sha256 bc324b03b46a23f25ab273db926527e313baab1cbfc3e12a009a54ecf37d601c
+# (test-support build of 9d4c9cba; with no GF_SHAPE_* selector set it runs the production construction path)
+star4m-production PUBLISHED wall=45.08s edges=4000000 ec6f08216159ae3cfe445d2467543bdb00dfac22750e2037540acae9eee483ee validate_rss_kib=320464
+star9m-production REFUSED wall=48.65s: partition materialization requires 297536415 bytes, exceeds recorded budget 268435456
+star9m-hybrid REFUSED wall=48.46s: Resources exhausted: Failed to allocate additional 264.0 KB for ExternalSorterMerge[0] with 36.6 MB already allocated for this reservation - 244.4 KB remain available for the total memory pool: greedy(used: 255.8 MB, pool_size: 256.0 MB)
+star9m-hybrid-pool67108864 PUBLISHED wall=91.48s edges=9000000 a5803634ea2e458b88d3650eacc931ae0cdc48f697414e83266aea1a4da6489d validate_rss_kib=484504
+star9m-hybrid-pool8388608 PUBLISHED wall=95.41s edges=9000000 a5803634ea2e458b88d3650eacc931ae0cdc48f697414e83266aea1a4da6489d validate_rss_kib=464768
