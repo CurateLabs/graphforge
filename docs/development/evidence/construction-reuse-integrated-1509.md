@@ -248,7 +248,7 @@ No run, timed or instrumented, left a DataFusion run file behind.
   consume. Library scheduling adds nothing here and removes nothing wrong.
 - **The integrated candidate is correct and costs time, CPU and memory.**
   Processing about 7–9% of fixed-width partitions externally (119 at S18, 256
-  at S20) under a 1 MiB pool costs +2.7–4.7% wall and +4.6–10.2% CPU against
+  at S20) under a 1 MiB pool costs +2.7–4.7% wall and +4.5–10.2% CPU against
   production, which keeps those partitions in memory under its default budget. The 64 KiB pool raises that to
   +15.9% wall and +24.6% CPU at S18.
 - **Rayon does not change the hybrid.** `hybrid` and `hybrid-rayon` overlap on
