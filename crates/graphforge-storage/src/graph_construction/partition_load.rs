@@ -296,7 +296,7 @@ pub(super) fn consume_in_partition_order<T, L, C, K>(
     partitions: usize,
     workers: NonZeroUsize,
     load: L,
-    _cancelled: K,
+    mut cancelled: K,
     mut consume: C,
 ) -> Result<(), GfError>
 where
@@ -337,7 +337,18 @@ where
                                 "partition loaders exited before every partition was delivered",
                             ));
                         }
-                        state = shared.wait(state);
+                        // A ready result and a worker failure are the stronger
+                        // claims, in partition order; past them, notice a
+                        // cancel now rather than when the load being waited
+                        // on finally finishes (#1581). Setting `stop` makes
+                        // the workers abandon their loads, and the scope's
+                        // join makes the return joined, as for any error.
+                        if let Err(cancelled) = reject_cancelled(&mut cancelled) {
+                            shared.stop.store(true, Ordering::Release);
+                            shared.changed.notify_all();
+                            return Err(cancelled);
+                        }
+                        state = shared.wait_bounded(state);
                     }
                 };
                 shared.release_consumed(consume(index, loaded?))?;

@@ -202,6 +202,7 @@ fn cancellation_while_the_head_load_runs_returns_promptly_and_joined() {
                 return Err(storage("partition load abandoned after coordinator stop"));
             }
         }
+        gauge.enter();
         Ok(Materialized {
             index,
             gauge: &gauge,
