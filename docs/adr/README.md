@@ -52,6 +52,7 @@ Roadmap-only ADRs are not retained in this tree.
 | 0044 | [Research interchange preserves content identity separately from authority](0044-research-interchange-authority.md) | `0044-research-interchange-authority.md` |
 | 0045 | [Ingest authentication regime — hash once on write, verify at trust boundaries](0045-ingest-authentication-regime.md) | `0045-ingest-authentication-regime.md` |
 | 0046 | [Construction keeps its own sorting, partitioning and admission; library reuse is bounded to named hybrids](0046-construction-reuse-decisions.md) | `0046-construction-reuse-decisions.md` |
+| 0047 | [Over-budget construction partitions succeed; one CPU budget per instance](0047-over-budget-partitions-and-instance-cpu-budget.md) | `0047-over-budget-partitions-and-instance-cpu-budget.md` |
 
 ## Superseded records
 

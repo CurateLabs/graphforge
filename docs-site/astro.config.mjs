@@ -400,6 +400,10 @@ export default defineConfig({
                   label: '0046 — Construction keeps its own sorting, partitioning and admission; library reuse is bounded to named hybrids',
                   slug: 'adr/0046-construction-reuse-decisions',
                 },
+                {
+                  label: '0047 — Over-budget construction partitions succeed; one CPU budget per instance',
+                  slug: 'adr/0047-over-budget-partitions-and-instance-cpu-budget',
+                },
                 // END generated ADR records
               ],
             },
