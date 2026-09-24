@@ -80,6 +80,7 @@ mod sort_partition_spike;
 pub use sort_partition_spike::bench::{
     HeapProbe, SortPartitionBenchConfig, run_sort_partition_bench,
 };
+mod finish_stages;
 pub(crate) mod partition_shaping;
 mod progress;
 #[cfg(any(test, feature = "test-support"))]
@@ -962,6 +963,12 @@ pub struct GraphConstructionSession {
     /// boundary retires; never durable, because the shape-end checkpoint
     /// captures the reconciled ledger itself.
     shape_boundary_retired_through: u64,
+    /// Whether this process began a staged finish (#1562) that has not
+    /// completed. A returned error inside it can leave successors installed
+    /// or segments half retired, with the in-memory ledger charged for both;
+    /// like every other interrupted shape, it is recovered by reopening, not
+    /// by a same-facade retry.
+    shape_finish_interrupted: bool,
     session_lock: File,
     _reservation: ProcessReservation,
 }
@@ -1605,6 +1612,7 @@ impl GraphConstructionSession {
             shape_outputs_verified: false,
             shape_resume: None,
             shape_boundary_retired_through: 0,
+            shape_finish_interrupted: false,
             session_lock,
             _reservation: reservation,
         };

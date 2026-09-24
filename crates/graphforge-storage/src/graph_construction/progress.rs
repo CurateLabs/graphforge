@@ -350,6 +350,9 @@ pub(super) struct ShapeResume {
     pub(super) row_schemas: BTreeMap<String, arrow::datatypes::SchemaRef>,
     /// Body digest of the chain head, chaining the next installed boundary.
     pub(super) last_progress_sha256: Option<String>,
+    /// Finish stages completed before the interruption (#1562), whose
+    /// successors were authenticated at the resume boundary.
+    pub(super) stages: super::finish_stages::ShapeStages,
 }
 
 /// Sweep the construction root's partition-spill segments.
@@ -365,25 +368,36 @@ pub(super) struct ShapeResume {
 /// with that receipt; the authentication keeps the discard fail-closed against
 /// in-place payload corruption (#1392).
 ///
+/// Finish stages (#1562) narrow the claim: a segment a recorded stage still
+/// hands forward is neither claimed nor discarded here (the stage owns it),
+/// and a segment whose family a completed stage already retired is unclaimed
+/// even below the boundary — its rows live on in the stage's successor, so a
+/// copy left by a crash between the stage install and the unlink is garbage.
+///
 /// The returned scan carries claimed receipt sets only.
 pub(super) fn scan_shape_segments(
     root: &StableDirectory,
     retired_through: u64,
+    stages: &super::finish_stages::ShapeStages,
     evidence: &mut super::GraphConstructionEvidence,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<BTreeMap<String, Vec<Vec<super::ArtifactReceipt>>>, GfError> {
     use super::partition_shaping::parse_segment_name;
     let mut claimed: BTreeMap<String, Vec<Vec<super::ArtifactReceipt>>> = BTreeMap::new();
     let mut unclaimed: Vec<(String, Option<super::ArtifactReceipt>)> = Vec::new();
+    let handed_forward = stages.live_output_names();
     for name in root.child_names().map_err(storage)? {
         let Some(text) = name.to_str() else { continue };
         let Some(segment) = parse_segment_name(text) else {
             continue;
         };
+        if handed_forward.contains(text) {
+            continue;
+        }
         let tag = segment.tag();
         let partition = segment.partition;
         let receipt = read_segment_writer_receipt(root, text)?;
-        if segment.boundary > retired_through {
+        if segment.boundary > retired_through || !stages.boundary_may_claim(text) {
             unclaimed.push((text.to_owned(), receipt));
             continue;
         }
@@ -518,7 +532,7 @@ pub(super) fn authenticate_shape_segments(
     Ok(row_schemas)
 }
 
-fn charge_segment_reads(
+pub(super) fn charge_segment_reads(
     evidence: &mut super::GraphConstructionEvidence,
     bytes: u64,
     operations: u64,

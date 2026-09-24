@@ -138,6 +138,7 @@ impl GraphConstructionSession {
         // every payload retired they are dead weight (#1418). They are also
         // inert: any later open takes the completed-shape path and never reads
         // them.
+        super::finish_stages::unlink_shape_stages(&self.root)?;
         unlink_shape_progress(&self.root)?;
         Ok(())
     }

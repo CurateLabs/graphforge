@@ -752,22 +752,52 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
     ///
     /// Returns `None` when no record was routed.
     ///
-    /// Sealed segments are **not** unlinked here: they remain until
-    /// supersession retires them, so a crash after one family finished can
-    /// still resume from its segments (#1418).
-    #[allow(clippy::too_many_lines)] // One publication lifecycle; the cleanup arms are the invariant.
+    /// With `retain_segments`, sealed segments are **not** unlinked here: they
+    /// remain the family's resume authority until a finish stage hands it to
+    /// the installed output (#1418, #1562).
     pub(super) fn finish_optional(
-        mut self,
+        self,
         output: &str,
         boundary: u64,
         retain_segments: bool,
         cancelled: &mut impl FnMut() -> bool,
         evidence: &mut GraphConstructionEvidence,
     ) -> Result<Option<String>, GfError> {
+        self.finish_with_segments(output, boundary, retain_segments, cancelled, evidence)
+            .map(|(output, _)| output)
+    }
+
+    /// [`Self::finish_optional`] that retains every sealed segment and returns
+    /// their receipts, for the caller to retire once a finish stage records
+    /// the installed output as their successor (#1562).
+    pub(super) fn finish_retaining(
+        self,
+        output: &str,
+        boundary: u64,
+        cancelled: &mut impl FnMut() -> bool,
+        evidence: &mut GraphConstructionEvidence,
+    ) -> Result<(Option<String>, Vec<ArtifactReceipt>), GfError> {
+        self.finish_with_segments(output, boundary, true, cancelled, evidence)
+    }
+
+    /// Every sealed segment receipt, in partition then boundary order.
+    pub(super) fn sealed_segments(&self) -> Vec<ArtifactReceipt> {
+        self.sealed.iter().flatten().cloned().collect()
+    }
+
+    #[allow(clippy::too_many_lines)] // One publication lifecycle; the cleanup arms are the invariant.
+    fn finish_with_segments(
+        mut self,
+        output: &str,
+        boundary: u64,
+        retain_segments: bool,
+        cancelled: &mut impl FnMut() -> bool,
+        evidence: &mut GraphConstructionEvidence,
+    ) -> Result<(Option<String>, Vec<ArtifactReceipt>), GfError> {
         let root = self.root;
         self.seal(boundary, evidence)?;
         if self.records == 0 {
-            return Ok(None);
+            return Ok((None, self.sealed_segments()));
         }
         #[cfg(any(test, feature = "test-support"))]
         super::diagnostics::inputs(self.family.as_str(), self.records);
@@ -1033,7 +1063,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                 }
             }
         }
-        Ok(Some(output.to_owned()))
+        Ok((Some(output.to_owned()), self.sealed_segments()))
     }
 }
 

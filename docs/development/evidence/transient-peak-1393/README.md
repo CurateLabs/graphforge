@@ -249,6 +249,11 @@ issue carries this composition table as its measured baseline and its own
 acceptance criteria. This issue's gate is the S26 admission margin, stated
 below from the measured, landed state; #1562 does not gate it.
 
+**Landed (#1562):** partition runs now retire family by family behind durable
+finish stages. The peak is 315.9 B/edge, flat from S20 to S22, and the S26
+margin is 258.8 GB (76.3% of peak). The before/after composition is in
+`../partition-run-retirement-1562/`.
+
 ### Target and margin, from the measured slope
 
 449.4 B/edge at S22 (67,108,864 edges), flat to 1.2% over sixteen-fold:
