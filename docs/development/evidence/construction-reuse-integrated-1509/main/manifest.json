@@ -1,0 +1,36 @@
+{
+ "gf": "/home/ubuntu/gf-1509-bin-9d4c9cba/gf",
+ "gf_sha256": "bc324b03b46a23f25ab273db926527e313baab1cbfc3e12a009a54ecf37d601c",
+ "generator_sha256": "4556db3b93ecfa496ce6ab7dc9ad489bbc46a0efa3b58e2e48c072e8de166da1",
+ "seed": "13907095936298285200",
+ "edge_factor": 16,
+ "budget": 1048576,
+ "modes": {
+  "baseline": {},
+  "rayon": {
+   "GF_SHAPE_LOAD_SCHEDULER": "rayon"
+  },
+  "tokio": {
+   "GF_SHAPE_LOAD_SCHEDULER": "tokio-blocking"
+  },
+  "hybrid": {
+   "GF_SHAPE_MAX_PARTITION_BYTES": "1048576",
+   "GF_SHAPE_SPILL_SPIKE": "datafusion"
+  },
+  "hybrid-rayon": {
+   "GF_SHAPE_MAX_PARTITION_BYTES": "1048576",
+   "GF_SHAPE_SPILL_SPIKE": "datafusion",
+   "GF_SHAPE_LOAD_SCHEDULER": "rayon"
+  }
+ },
+ "quiet_samples_before_start": 12,
+ "uname": "7.0.0-30-generic",
+ "s18_inputs": {
+  "nodes.parquet": "44c9dfd9325013d0f6ea2f03bd86b00d2bea01265254cb28f70f0881a6478075",
+  "edges.parquet": "f112ccbec94875f36f113e9bdf3e6e7d88e3105bafbaeeb3a7cb42ac4883e9c4"
+ },
+ "s20_inputs": {
+  "nodes.parquet": "5792da943d39a3ec0cfe48c375fef1b078ae31f2c086af5d9bcfd417c74f24aa",
+  "edges.parquet": "3fb656aa9af568f12359c51fcb6a337460d0521ac07bd05def3a7e98f2e51086"
+ }
+}

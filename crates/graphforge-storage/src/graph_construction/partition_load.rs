@@ -326,7 +326,7 @@ pub(super) fn abandon_if_stopped(records: usize, stop: &AtomicBool) -> Result<()
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) mod scheduling_spike;
 #[cfg(test)]
 mod tests;

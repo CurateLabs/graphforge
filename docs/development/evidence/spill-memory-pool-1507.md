@@ -1,5 +1,10 @@
 # Construction spill, buffering, and memory-pool reuse (#1507)
 
+> **Integrated follow-up (#1509):** this mechanism was combined with the other
+> spikes' candidates and measured through complete ingest, publication, reopen
+> and queries on a tree containing #1562. See
+> [`construction-reuse-integrated-1509.md`](construction-reuse-integrated-1509.md).
+
 Parent: [#1504](https://github.com/CurateLabs/graphforge/issues/1504). Follows the
 binding protocol in
 [`construction-reuse-inventory-protocol-1505.md`](../construction-reuse-inventory-protocol-1505.md).

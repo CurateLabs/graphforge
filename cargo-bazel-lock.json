@@ -1,5 +1,5 @@
 {
-  "checksum": "824271983b30781bb60ff848ef4aac457bc7c685f6de8366d973da9091c77c26",
+  "checksum": "317566ed22c3663bb77f7d3f942476c88b3bf6a6a9536d3dddb6049456e460d3",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -14023,6 +14023,10 @@
               "target": "parquet"
             },
             {
+              "id": "rayon 1.12.0",
+              "target": "rayon"
+            },
+            {
               "id": "serde 1.0.229",
               "target": "serde"
             },
@@ -14092,10 +14096,6 @@
               "id": "codspeed-divan-compat 5.0.1",
               "target": "codspeed_divan_compat",
               "alias": "divan"
-            },
-            {
-              "id": "rayon 1.12.0",
-              "target": "rayon"
             },
             {
               "id": "wait-timeout 0.2.1",

@@ -1,6 +1,8 @@
 //! Scheduling and cancellation candidates for the ordered partition load pool
-//! (#1508, a spike under #1504). Test-only: nothing here is reachable from a
-//! production build.
+//! (#1508, a spike under #1504). Compiled only under `cfg(test)` or the
+//! `test-support` feature: nothing here is reachable from a production build.
+//! A `test-support` `gf` selects a candidate with `GF_SHAPE_LOAD_SCHEDULER`
+//! for the #1509 complete-ingest experiment; see [`from_env`].
 //!
 //! Every candidate meets the contract [`super::consume_in_partition_order`]
 //! already meets, so each can be swapped in at the real call site
@@ -63,6 +65,7 @@ pub(in crate::graph_construction) enum LoadScheduler<'a> {
 }
 
 impl LoadScheduler<'_> {
+    #[cfg(test)]
     pub(in crate::graph_construction) fn name(self) -> &'static str {
         match self {
             Self::Baseline => "baseline",
@@ -254,19 +257,17 @@ where
     refuse_nested_runtime()?;
     let window = workers.get();
     let driven = drive(spawner, partitions, window, load, consume, cancelled);
-    match handle {
-        Some(handle) => handle.block_on(driven),
-        None => {
-            // A current-thread runtime's `Handle::block_on` cannot drive its
-            // timer, so the owned runtime blocks directly.
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_time()
-                .max_blocking_threads(window)
-                .build()
-                .map_err(storage)?;
-            runtime.block_on(driven)
-        }
+    if let Some(handle) = handle {
+        return handle.block_on(driven);
     }
+    // A current-thread runtime's `Handle::block_on` cannot drive its timer,
+    // so the owned runtime blocks directly.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .max_blocking_threads(window)
+        .build()
+        .map_err(storage)?;
+    runtime.block_on(driven)
 }
 
 async fn drive<T, L, C>(
@@ -372,4 +373,43 @@ where
     })
 }
 
+/// Environment selection for the #1509 integrated experiment.
+///
+/// `GF_SHAPE_LOAD_SCHEDULER` names a candidate (`baseline`, `rayon`,
+/// `tokio-blocking`, `datafusion-spawned`, `tokio-inline`); unset selects
+/// nothing and the production pool runs as it always does. Every candidate
+/// builds its own pool or runtime per call, as in the #1508 measurements.
+/// `GF_SHAPE_LOAD_WORKERS` forces the finish-time worker count (scheduling
+/// only; output bytes must not change with it). Any other value fails closed.
+pub(in crate::graph_construction) fn from_env()
+-> Result<(Option<LoadScheduler<'static>>, Option<NonZeroUsize>), GfError> {
+    let scheduler = match std::env::var("GF_SHAPE_LOAD_SCHEDULER") {
+        Err(std::env::VarError::NotPresent) => None,
+        Ok(value) => Some(match value.as_str() {
+            "baseline" => LoadScheduler::Baseline,
+            "rayon" => LoadScheduler::Rayon(None),
+            "tokio-blocking" => LoadScheduler::TokioBlocking(None),
+            "datafusion-spawned" => LoadScheduler::DataFusionSpawned(None),
+            "tokio-inline" => LoadScheduler::TokioInline,
+            _ => return Err(storage("invalid load scheduler experiment mode")),
+        }),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(storage("invalid load scheduler experiment mode"));
+        }
+    };
+    let workers = match std::env::var("GF_SHAPE_LOAD_WORKERS") {
+        Err(std::env::VarError::NotPresent) => None,
+        Ok(value) => Some(
+            value
+                .parse::<NonZeroUsize>()
+                .map_err(|_| storage("invalid load worker experiment count"))?,
+        ),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(storage("invalid load worker experiment count"));
+        }
+    };
+    Ok((scheduler, workers))
+}
+
+#[cfg(test)]
 mod tests;
