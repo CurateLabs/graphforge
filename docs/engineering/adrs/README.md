@@ -93,6 +93,7 @@ the Repository Policy job (#1390).
 | 0044 | Research interchange preserves content identity separately from authority | Accepted | [`../../adr/0044-research-interchange-authority.md`](../../adr/0044-research-interchange-authority.md) |
 | 0045 | Ingest authentication regime — hash once on write, verify at trust boundaries | Accepted | [`../../adr/0045-ingest-authentication-regime.md`](../../adr/0045-ingest-authentication-regime.md) |
 | 0046 | Construction keeps its own sorting, partitioning and admission; library reuse is bounded to named hybrids | Accepted | [`../../adr/0046-construction-reuse-decisions.md`](../../adr/0046-construction-reuse-decisions.md) |
+| 0047 | Over-budget construction partitions succeed; one CPU budget per instance | Accepted | [`../../adr/0047-over-budget-partitions-and-instance-cpu-budget.md`](../../adr/0047-over-budget-partitions-and-instance-cpu-budget.md) |
 
 ### Superseded
 
