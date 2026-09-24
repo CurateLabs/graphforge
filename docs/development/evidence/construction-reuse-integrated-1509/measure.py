@@ -241,7 +241,13 @@ def reopen_and_query(gf, run_dir):
     argv = [gf, "--json", "--project", str(run_dir / "project"), "query"]
     for name, cypher in QUERIES:
         argv += ["--cypher", cypher, "--output", str(run_dir / f"{name}.arrow")]
-    report = subprocess.run(argv, capture_output=True, stdin=subprocess.DEVNULL, check=False)
+    # Hydration stages objects under TMPDIR and renames them into the project,
+    # so TMPDIR must be on the project's volume, as it is for the ingest.
+    env = dict(os.environ)
+    env["TMPDIR"] = str(run_dir.parent.parent / "tmp")
+    report = subprocess.run(
+        argv, capture_output=True, stdin=subprocess.DEVNULL, env=env, check=False
+    )
     if report.returncode != 0:
         return {"ok": False, "stderr": report.stderr.decode(errors="replace")[-2000:]}
     answers = {}

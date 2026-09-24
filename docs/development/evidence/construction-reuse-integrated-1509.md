@@ -79,6 +79,24 @@ therefore production against a design that processes the refused partitions
 externally. It is not two designs under one budget, because under the small
 budget production refuses.
 
+### Budget selected (calibration, untimed)
+
+Run once per candidate at S18 before any timed run. Raw records:
+[`calibration-s18.jsonl`](construction-reuse-integrated-1509/calibration-s18.jsonl).
+
+| Recorded budget | Ingest | External fixed-width partitions | Share of about 1,298 | Largest external partition input |
+| --- | --- | ---: | ---: | ---: |
+| 8 MiB | Completed | 0 | 0% | none |
+| 4 MiB | Completed | 0 | 0% | none |
+| 2 MiB | Completed | 2 | 0.15% | 2.89 MB |
+| **1 MiB** | Completed | **119** | **9.2%** | 2.89 MB |
+| 512 KiB | Completed | 768 | 59% | 2.89 MB |
+
+The rule selects **1 MiB**: the largest candidate at which at least 1% of
+S18's fixed-width partitions take the external path. Every external partition
+also spilled at these budgets, because the pool equals the budget and each
+external partition exceeds it by construction.
+
 ### Measurement
 
 Driver: [`construction-reuse-integrated-1509/measure.py`](construction-reuse-integrated-1509/measure.py),
@@ -112,8 +130,65 @@ derived from the #1507 driver.
 3. The correctness suite below passes on the measured tree.
 4. No run leaves DataFusion runs in its scratch directory.
 
+## Correctness evidence
+
+`crates/graphforge-storage/src/construction_integrated_spike_tests.rs` runs
+every case as a complete construction (shape, encode, publish, reopen, adjacency
+hydration) in a fresh process, through the #1507 child body. The fixture is
+#1507's: 1,024 nodes and 8,192 edges, half of them pointing at one hub. The
+tight recorded budget is 16 KiB and reaches the child through
+`GF_SHAPE_MAX_PARTITION_BYTES`, so the budget override is itself under test.
+Every child runs under a 300 s bound, so a scheduler that hangs fails its case.
+
+```bash
+TMPDIR=<ext4 dir> cargo test -p graphforge-storage --lib integrated_ -- --nocapture
+```
+
+| Case | Outcome |
+| --- | --- |
+| Production path, default budget (control) | Publishes; the reopened adjacency index holds 8,192 edges |
+| Production path, 16 KiB recorded budget | Refused: `exceeds recorded budget`; nothing published |
+| Each scheduler alone (`baseline`, `rayon`, `tokio-blocking`, `datafusion-spawned`) at 1, 2 and 3 workers | Byte-identical to the control (shaped and encoded fingerprint), no temps |
+| Hybrid with the production pool or Rayon, at 1, 2 and 3 workers | Byte-identical to the control; one partition external and spilling; no DataFusion runs left |
+| Hybrid with `tokio-blocking` or `datafusion-spawned`, at 1, 2 and 3 workers | **Cannot run.** The child panics with `Cannot start a runtime from within a runtime`. Nothing is published and no runs are left |
+| Integrated candidate, spill payload byte flipped | Refused by the #1507 guard |
+| Integrated candidate, spill run truncated | Refused (`failed to fill whole buffer`) |
+| Integrated candidate, 4 KiB disk quota | Refused (`exceeded the allowable limit`) |
+| Integrated candidate, 1 KiB pool | Refused (`Not enough memory to continue external sort`) |
+| Invalid scheduler, zero workers, non-numeric budget | Refused with a structured error before anything is published |
+| Zero recorded budget | Refused by budget validation (`invalid construction budgets`) |
+| Integrated candidate, cancelled after an external sort spilled, then retried | Cancel returns a structured error with no temps or runs; the retry publishes the control's bytes |
+| Integrated candidate, process aborted after spilling (exit by signal), then resumed | Resumes to the control's bytes |
+| Integrated candidate, exit at `shape.partition_output.after_install` (exit 86), then resumed | Resumes to the control's bytes |
+| Either crash, resumed with a different recorded budget | Refused: `checkpoint authority or resume parameters changed` |
+
+In every failing case the recorded outcome shows no published generation and
+no construction temporaries.
+
+**Known positive for the override.** With the override call removed from
+session open, all three integrated tests fail. The tight-budget control
+publishes instead of refusing, and the non-numeric budget is accepted.
+
+**Why the Tokio schedulers cannot host the hybrid.** The #1507 adapter hands the
+coordinator an external partition whose sorted output is still streaming. The
+coordinator pulls it with `Runtime::block_on(stream.next())` in
+`ExternalPartition::for_each_record`. The #1508 Tokio and DataFusion adapters
+run the coordinator's `consume` inside their own `block_on`. Tokio forbids
+entering a runtime from a thread already driving one, so the process panics.
+The failure is a panic, not a structured error. Making the pair work needs one
+of these adapter changes, none of which exists today:
+
+- stream the merge on a separate thread and hand batches over a channel;
+- drive the external stream on the scheduler's runtime instead of its own;
+- or make `consume` asynchronous.
+
+Each adds an ownership boundary that the Rayon and production pools do not
+need, because their coordinator is a plain thread.
+
 ## Changelog
 
 | Date | Change |
 | --- | --- |
 | 2026-09-24 | Predeclared experiment, before any timed run. |
+| 2026-09-24 | Budget calibration at S18 under the predeclared rule selected 1 MiB, before any timed run. |
+| 2026-09-24 | Driver fix after the first timed run: the untimed reopen query inherited a tmpfs `TMPDIR` and failed with a cross-device rename. It now uses the ingest's ext4 `TMPDIR`. The one completed observation was set aside and the measurement restarted from the beginning. Timed commands are unchanged. |
