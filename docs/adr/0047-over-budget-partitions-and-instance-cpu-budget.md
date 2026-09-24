@@ -51,8 +51,9 @@ budget. The measurements behind this record
 - The #1507 DataFusion external-sort adapter, run with its pool equal to the
   default budget, **failed** on the 9M star with DataFusion's own
   `Resources exhausted` during the merge. With 64 MiB and 8 MiB pools it
-  published the same answers. The spikes had only proved it with pools of
-  1 MiB or less. The adapter needs pool headroom it did not have.
+  published the same answers. Every earlier run that spilled had used a pool
+  of 2 MiB or less, so a spilling sort under a large pool had never been
+  tested. The cause inside DataFusion is not isolated.
 
 **The CPU budget.** Each `GraphForge` instance sizes one private CPU pool from
 `compute_threads` (#337). Query kernels run on it, and import normalization
@@ -92,8 +93,9 @@ obligation below.
   construction evidence.
 - **Integrity.** Scratch is checksummed, or checked by the #1507 record-multiset
   guard, before anything derived from it is published.
-- **Memory headroom.** Any library pool is a sub-budget with measured headroom
-  below `max_partition_bytes`, never equal to it.
+- **Tested pool size.** Any library pool is a sub-budget whose size is chosen
+  from tests at the partition sizes it will meet, not set equal to
+  `max_partition_bytes`.
 - **Thread-based coordinator.** The coordinator is a plain thread, because a
   streaming merge that blocks on its own runtime cannot run under a Tokio
   coordinator (#1509).
@@ -164,6 +166,6 @@ are admitted, not which scheduler runs them.
 
 | Evidence | What it establishes |
 | --- | --- |
-| `docs/development/evidence/partition-refusal-1584.md` | Graph500 hub growth S18–S26, the partition-size model and its fit, the star-graph refusal, and the #1507 adapter's pool-headroom failure and fix |
+| `docs/development/evidence/partition-refusal-1584.md` | Graph500 hub growth S18–S26, the partition-size model and its fit, the star-graph refusal, and the #1507 adapter's failure under a large pool and success under smaller ones |
 | `docs/development/evidence/construction-reuse-integrated-1509.md` | The hybrid's measured cost at a forced 1 MiB budget, and the Tokio-coordinator incompatibility |
 | `docs/development/evidence/construction-scheduling-spike-1508.md` | F12 shared-admission measurement; F13 on the API runtime's blocking pool |

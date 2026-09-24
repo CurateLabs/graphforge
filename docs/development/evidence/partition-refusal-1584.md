@@ -35,6 +35,10 @@ the generator's edge Parquet. Inputs are the ladder profile's: edge factor 16,
 seed `13907095936298285200`. Records: `degrees.jsonl`; input hashes:
 `inputs.sha256`.
 
+The range formula takes every staged node, including nodes with no edges. That
+is the row count of `nodes.parquet`, which is `2^scale` for these inputs
+(`staged-nodes.json`). It is not `nodes_with_edges` in `degrees.jsonl`.
+
 | Scale | Edges | Largest total degree | Largest out / in | Growth per step |
 | --- | ---: | ---: | --- | ---: |
 | S18 | 4,194,304 | 59,962 | 29,799 / 30,163 | — |
@@ -104,7 +108,8 @@ metrics are also under `star-runs/`.
 | #1507 hybrid, 64 MiB pool | 9,000,000 | Publishes; 11 spill runs, 298.8 MB spilled, peak pool 66,985,422 of 67,108,864 B |
 | #1507 hybrid, 8 MiB pool | 9,000,000 | Publishes; 117 spill runs, 848.5 MB spilled, peak pool 8,381,720 of 8,388,608 B |
 
-The refusal's byte count fits the model. Divided by 33 bytes, 297,536,415 bytes
+The 9M star stages 9,000,001 nodes, so its node plan has 550 ranges. The
+refusal's byte count fits the model. Divided by 33 bytes, 297,536,415 bytes
 is 9,016,255 records: the hub's 9,000,000 plus 16,255 leaf records from its
 range. The external-sort metrics report the same record count.
 
@@ -113,15 +118,20 @@ the same `result_sha256` (`a5803634…`). With the default budget, the refusal
 threshold is a hub of about 8.1 million edges at any total graph size. That is
 roughly the edge count of the S19 Graph500 rung.
 
-### The hybrid's pool needs headroom
+### The hybrid fails with a large pool
 
-The #1507 adapter sizes DataFusion's pool to `max_partition_bytes` by default.
-With the pool equal to the budget and a partition just over it, the sort filled
-the pool before spilling. Its merge reservation then could not grow, and
-DataFusion refused. Pools of 64 MiB and 8 MiB left the merge room and
-published. The #1507 and #1509 spikes never saw this: they only ran pools of
-1 MiB or less against partitions of at most 8.4 MB. Any production adapter must
-size its pool with measured headroom below the budget (ADR 0047, #1585).
+The #1507 adapter sizes DataFusion's pool to `max_partition_bytes` by default
+(`spill_spike.rs`, `load_external`). On the 9M star that is 256 MiB, and the
+sort spilled: its merge reservation could not grow, and DataFusion refused.
+With 64 MiB and 8 MiB pools the same partition spilled, merged and published.
+
+No earlier run covered this combination. Every #1507 and #1509 run that
+spilled used a pool of 2 MiB or less: 16 KiB, 64 KiB, 512 KiB, 1 MiB and
+2 MiB. The only 256 MiB pools were #1507's `external` mode, whose partitions
+fit without spilling. So the failure is specific to a spilling sort under a
+large pool. The cause inside DataFusion is not isolated here. A production
+adapter must choose its pool size from tests at the partition sizes it will
+meet, not set it equal to the budget (ADR 0047, #1585).
 
 Wall times here are indicative only. They are single runs without the quiet-host
 protocol, and the host was generating and counting the S24 and S26 inputs at
@@ -146,4 +156,5 @@ host.
 
 | Date | Change |
 | --- | --- |
+| 2026-09-24 | Independent review corrections: the history of pools that spilled is stated exactly (2 MiB or less), and staged node counts are recorded for the range formula. |
 | 2026-09-24 | Measurements and model. `degrees.py` and `star.py` were cleaned for lint after they ran. The cleaned `degrees.py` reproduces the S18 and S20 records exactly, and the cleaned `star.py` reproduces the 4M star's Parquet byte for byte. |
