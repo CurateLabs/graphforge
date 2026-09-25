@@ -67,8 +67,8 @@ pub struct ExecutionResourcePolicy {
     /// construction_cpu_reserve` parallel construction lanes, so queries keep
     /// at least this share of the compute budget while imports run. At least
     /// one, and below `compute_threads` unless that is one (a one-thread
-    /// instance runs construction on one lane). `None` → the default,
-    /// `max(1, compute_threads / 4)`.
+    /// instance runs construction on one lane). `None` → the default, 1
+    /// (see `docs/development/evidence/construction-cpu-budget-1586.md`).
     pub construction_cpu_reserve: Option<usize>,
 }
 
@@ -375,9 +375,13 @@ impl ExecutionResourcePolicy {
     }
 }
 
-/// Default compute threads kept from construction: a quarter, at least one.
-pub(crate) fn default_construction_cpu_reserve(compute_threads: usize) -> usize {
-    (compute_threads / 4).max(1)
+/// Default compute threads kept from construction: one (#1586 evidence).
+///
+/// Measured at 4 and 8 compute threads, a larger reserve did not lower query
+/// latency during concurrent imports beyond run-to-run variation, so the
+/// smallest reserve ADR 0047 allows is the default; it costs imports least.
+pub(crate) fn default_construction_cpu_reserve(_compute_threads: usize) -> usize {
+    1
 }
 
 /// Validate the construction reserve and derive the shared lane limit.
@@ -454,8 +458,8 @@ impl HeavyQueryAdmission {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn construction_reserve_defaults_to_a_quarter_and_leaves_queries_a_share() {
-        for (compute, reserve, limit) in [(1, 1, 1), (2, 1, 1), (4, 1, 3), (8, 2, 6), (16, 4, 12)] {
+    fn construction_reserve_defaults_to_one_and_leaves_queries_a_share() {
+        for (compute, reserve, limit) in [(1, 1, 1), (2, 1, 1), (4, 1, 3), (8, 1, 7), (16, 1, 15)] {
             let normalized = ExecutionResourcePolicy {
                 mode: ResourcePolicyMode::Explicit,
                 tokio_worker_threads: Some(compute.min(4)),

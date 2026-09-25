@@ -40,7 +40,9 @@ lanes across all imports. Normalization therefore never occupies more of the
 query pool than that, so at least `reserve` pool threads stay free for queries.
 Finish-time loads run on their own threads and count against the same limit.
 
-The default reserve and its evidence are in
+The default reserve is 1. Measured at 4 and 8 compute threads with two
+concurrent imports, a larger reserve did not lower query latency beyond
+run-to-run variation, and the limit held at every setting. Evidence:
 `docs/development/evidence/construction-cpu-budget-1586.md`.
 
 ## Context
