@@ -114,10 +114,12 @@ runs, but the branch was slower in all six pairs:
 | S18 | 31.44 s | 31.67 s | +0.05, +0.24, +0.46 s |
 | S20 | 127.58 s | 128.20 s | +0.44, +1.07, +1.80 s |
 
-The cause was in the branch. Before each codec-free partition load, the resident
-fit check opened every sealed segment to sum its length, even when the routed
-record count was known, and then used that count. `fb8a3348` decides from the
-routed count without I/O.
+The branch had added redundant work to the resident path. Before each
+codec-free partition load, the resident fit check opened every sealed segment
+to sum its length, even when the routed record count was known, and then used
+that count. `fb8a3348` decides from the routed count without I/O. The second
+A/B shows no remaining difference. It does not separately prove that the opens
+were the whole of the first A/B's difference.
 
 **Second A/B (`ab2/`, branch `fb8a3348`).**
 

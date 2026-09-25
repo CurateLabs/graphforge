@@ -1,38 +1,70 @@
-"""Summarize an ab.sh output directory: wall/CPU per run, per-pair deltas,
-query-answer identity and CAS digest overlap.  usage: summarize_ab.py AB_DIR"""
-import glob, itertools, json, statistics, sys
+"""Summarize an ab.sh output directory.
 
-root = sys.argv[1]
-runs = {}
-for d in sorted(glob.glob(f"{root}/runs/s*-r*-*")):
-    name = d.rsplit("/", 1)[1]
-    kv = dict(l.strip().split("=", 1) for l in open(f"{d}/runexec.txt") if "=" in l)
+Reports wall and CPU time per run, per-pair deltas, query-answer identity and
+CAS digest overlap.  usage: summarize_ab.py AB_DIR
+"""
+
+import itertools
+import json
+from pathlib import Path
+import statistics
+import sys
+
+QUERIES = ["nodes", "node-scan", "edges", "edge-scan"]
+
+
+def first_json_line(path: Path) -> dict:
+    with path.open() as handle:
+        return json.loads(handle.readline())
+
+
+def load(run: Path) -> dict:
+    with (run / "runexec.txt").open() as handle:
+        fields = dict(line.strip().split("=", 1) for line in handle if "=" in line)
     answers = {}
-    for q in ["nodes", "node-scan", "edges", "edge-scan"]:
-        r = json.loads(open(f"{d}/{q}.json").readline())
-        answers[q] = (r["rows"], r.get("scalar_u64"), r["result_sha256"])
-    runs[name] = {
-        "wall": float(kv["walltime"].rstrip("s")),
-        "cpu": float(kv["cputime"].rstrip("s")),
+    for query in QUERIES:
+        receipt = first_json_line(run / f"{query}.json")
+        answers[query] = (receipt["rows"], receipt.get("scalar_u64"), receipt["result_sha256"])
+    return {
+        "wall": float(fields["walltime"].rstrip("s")),
+        "cpu": float(fields["cputime"].rstrip("s")),
         "answers": answers,
-        "cas": set(open(f"{d}/cas-digests.txt").read().split()),
+        "cas": set((run / "cas-digests.txt").read_text().split()),
     }
-for scale in ["s18", "s20"]:
-    sel = {k: v for k, v in runs.items() if k.startswith(scale)}
-    print(f"## {scale}")
-    for b in ["main", "branch"]:
-        w = [v["wall"] for k, v in sel.items() if k.endswith(b)]
-        c = [v["cpu"] for k, v in sel.items() if k.endswith(b)]
-        print(f"{b}: wall {[round(x, 2) for x in w]} median {statistics.median(w):.2f}; "
-              f"cpu median {statistics.median(c):.2f}")
-    for r in ["r1", "r2", "r3"]:
-        m, b = sel[f"{scale}-{r}-main"], sel[f"{scale}-{r}-branch"]
-        print(f"{r}: branch - main wall {b['wall'] - m['wall']:+.2f}s cpu {b['cpu'] - m['cpu']:+.2f}s")
-    print("distinct answer sets:", len({json.dumps(v["answers"], sort_keys=True) for v in sel.values()}))
-    for q, a in next(iter(sel.values()))["answers"].items():
-        print(f"  {q}: rows={a[0]} scalar={a[1]} sha256={a[2]}")
-    cas = [v["cas"] for v in sel.values()]
-    common = set.intersection(*cas)
-    diffs = {len(a - b) for a, b in itertools.combinations(cas, 2)}
-    print(f"CAS objects {sorted({len(c) for c in cas})}, common to every run {len(common)}, "
-          f"differing between any two runs {sorted(diffs)}")
+
+
+def main(root: Path) -> None:
+    runs = {run.name: load(run) for run in sorted((root / "runs").glob("s*-r*-*"))}
+    for scale in ["s18", "s20"]:
+        sel = {name: run for name, run in runs.items() if name.startswith(scale)}
+        print(f"## {scale}")
+        for arm in ["main", "branch"]:
+            walls = [run["wall"] for name, run in sel.items() if name.endswith(arm)]
+            cpus = [run["cpu"] for name, run in sel.items() if name.endswith(arm)]
+            print(
+                f"{arm}: wall {[round(wall, 2) for wall in walls]} "
+                f"median {statistics.median(walls):.2f}; "
+                f"cpu median {statistics.median(cpus):.2f}"
+            )
+        for round_ in ["r1", "r2", "r3"]:
+            main_run = sel[f"{scale}-{round_}-main"]
+            branch_run = sel[f"{scale}-{round_}-branch"]
+            print(
+                f"{round_}: branch - main wall {branch_run['wall'] - main_run['wall']:+.2f}s "
+                f"cpu {branch_run['cpu'] - main_run['cpu']:+.2f}s"
+            )
+        answer_sets = {json.dumps(run["answers"], sort_keys=True) for run in sel.values()}
+        print("distinct answer sets:", len(answer_sets))
+        for query, answer in next(iter(sel.values()))["answers"].items():
+            print(f"  {query}: rows={answer[0]} scalar={answer[1]} sha256={answer[2]}")
+        cas = [run["cas"] for run in sel.values()]
+        common = set.intersection(*cas)
+        diffs = {len(a - b) for a, b in itertools.combinations(cas, 2)}
+        print(
+            f"CAS objects {sorted({len(c) for c in cas})}, common to every run {len(common)}, "
+            f"differing between any two runs {sorted(diffs)}"
+        )
+
+
+if __name__ == "__main__":
+    main(Path(sys.argv[1]))
