@@ -1,5 +1,5 @@
 {
-  "checksum": "317566ed22c3663bb77f7d3f942476c88b3bf6a6a9536d3dddb6049456e460d3",
+  "checksum": "8905a2046e7dc333083148f5fc8f81d4721394f55372a14dbe0b8a9d1d11648b",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -14021,10 +14021,6 @@
             {
               "id": "parquet 58.4.0",
               "target": "parquet"
-            },
-            {
-              "id": "rayon 1.12.0",
-              "target": "rayon"
             },
             {
               "id": "serde 1.0.229",

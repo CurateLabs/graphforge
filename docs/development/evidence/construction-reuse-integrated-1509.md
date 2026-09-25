@@ -1,5 +1,12 @@
 # Integrated construction reuse experiment (#1509)
 
+> **Retired (#1582).** The integrated harness this document evidences
+> (`construction_integrated_spike_tests.rs`, `from_env`,
+> `recorded_budget_override` and its call at session open) was removed from
+> `crates/`, along with the mechanism spikes it combined (#1506, #1507, #1508).
+> The code was last present on `main` at commit `d2c52a87`; rebuild from git
+> history and this evidence if a trigger in ADR 0046 fires.
+
 Parent: [#1504](https://github.com/CurateLabs/graphforge/issues/1504). Follows the
 binding protocol in
 [`construction-reuse-inventory-protocol-1505.md`](../construction-reuse-inventory-protocol-1505.md).

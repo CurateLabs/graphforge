@@ -1,5 +1,10 @@
 # Construction scheduling and cancellation spike (#1508)
 
+> **Retired (#1582).** `GF_SHAPE_LOAD_SCHEDULER`, `GF_SHAPE_LOAD_WORKERS` and
+> `graph_construction/partition_load/scheduling_spike.rs` were removed from
+> `crates/`. The code was last present on `main` at commit `d2c52a87`; rebuild
+> from git history and this evidence if a trigger in ADR 0046 fires.
+
 > **Integrated follow-up (#1509):** this mechanism was combined with the other
 > spikes' candidates and measured through complete ingest, publication, reopen
 > and queries on a tree containing #1562. See

@@ -139,6 +139,16 @@ the same time.
 
 ## Reproduce
 
+> **Retired (#1582).** The `#1507` hybrid this reproduce step exercises
+> (`GF_SHAPE_SPILL_SPIKE`, `GF_SHAPE_SPILL_POOL_BYTES`, `GF_SHAPE_SPILL_METRICS`,
+> last in `crates/graphforge-storage/src/graph_construction/spill_spike.rs` at
+> commit `d2c52a87` on `main`) was retired with the rest of the #1504 spike
+> code; ADR 0047 selected the native external merge (`external_partition.rs`)
+> instead. The production refusal path this document measures is unchanged.
+> The `star9m-production` command below still reproduces; the
+> `star9m-hybrid-pool67108864` command needs the pre-#1582 binary or a rebuild
+> from git history and this evidence.
+
 ```bash
 # Graph500 degrees (inputs from the generator with the ladder seed)
 uv run --no-sync python degrees.py <scale-dir>/edges.parquet

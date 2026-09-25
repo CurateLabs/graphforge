@@ -1,5 +1,12 @@
 # Construction sort/partition reuse spike (#1506)
 
+> **Retired (#1582).** `GF_SHAPE_SORT_SPIKE` and its modules
+> (`graph_construction/sort_partition_spike.rs`,
+> `graph_construction/partition_records/sort_spike.rs`,
+> `examples/sort_partition_spike.rs`) were removed from `crates/`. The code was
+> last present on `main` at commit `d2c52a87`; rebuild from git history and
+> this evidence if a trigger in ADR 0046 fires.
+
 > **Integrated follow-up (#1509):** this mechanism was combined with the other
 > spikes' candidates and measured through complete ingest, publication, reopen
 > and queries on a tree containing #1562. See

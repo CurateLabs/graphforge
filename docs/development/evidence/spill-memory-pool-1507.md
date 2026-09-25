@@ -1,5 +1,13 @@
 # Construction spill, buffering, and memory-pool reuse (#1507)
 
+> **Retired (#1582).** #1585 compared this DataFusion adapter against a native
+> bounded external merge (see
+> [`external-partition-comparison-1585.md`](external-partition-comparison-1585.md))
+> and chose native. `GF_SHAPE_SPILL_SPIKE` and
+> `graph_construction/spill_spike.rs` were removed from `crates/`; the code was
+> last present on `main` at commit `d2c52a87`. Rebuild from git history and
+> this evidence if a trigger in ADR 0046 fires.
+
 > **Integrated follow-up (#1509):** this mechanism was combined with the other
 > spikes' candidates and measured through complete ingest, publication, reopen
 > and queries on a tree containing #1562. See

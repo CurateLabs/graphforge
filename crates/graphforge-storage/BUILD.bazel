@@ -36,16 +36,6 @@ gf_rust_binary(
     deps = [":graphforge_storage"],
 )
 
-# #1506 sort/partition kernel measurements; run manually on a quiet host.
-gf_rust_binary(
-    name = "sort_partition_spike",
-    srcs = ["examples/sort_partition_spike.rs"],
-    deps = [
-        ":graphforge_storage",
-        "@crates//:serde_json",
-    ],
-)
-
 gf_rust_test(
     name = "graphforge_storage_test",
     crate = ":graphforge_storage",

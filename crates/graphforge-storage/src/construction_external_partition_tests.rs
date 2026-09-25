@@ -183,13 +183,7 @@ fn run_external_case(
         .env_remove("GF_EXTERNAL_TEST_RESUME")
         .env_remove("GF_EXTERNAL_TEST_CANCEL_WITH_RUNS")
         .env_remove("GF_CONSTRUCTION_FAILPOINT")
-        .env_remove("GF_CONSTRUCTION_FAILPOINT_COOKIE")
-        .env_remove("GF_SHAPE_SPILL_SPIKE")
-        .env_remove("GF_SHAPE_SORT_SPIKE")
-        .env_remove("GF_SHAPE_LOAD_SCHEDULER")
-        .env_remove("GF_SHAPE_LOAD_WORKERS")
-        .env_remove("GF_SHAPE_MAX_PARTITION_BYTES")
-        .env_remove("GF_SHAPE_MAX_EXTERNAL_PARTITION_BYTES");
+        .env_remove("GF_CONSTRUCTION_FAILPOINT_COOKIE");
     for (key, value) in env {
         command.env(key, value);
     }
