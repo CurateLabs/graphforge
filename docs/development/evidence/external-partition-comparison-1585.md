@@ -235,16 +235,18 @@ Applying the predeclared rule from §Choice criteria:
 | Wall time (star-20m) | 2 (not reached) | 171.0 s | 188.4 s | datafusion |
 | Maintenance | 3 (not reached) | — | — | — |
 
-Native writes fewer bytes and fewer run files in both workloads at equal per-partition memory budget (64 MiB).  The run-count advantage is substantial: native produces 2.2–2.4× fewer runs than DataFusion's `GreedyMemoryPool` at the same pool size, because DataFusion must leave headroom for the concurrent merge reservation, effectively reducing usable run capacity below the nominal pool size.  Step 2 (wall time) and step 3 (maintenance) were not consulted; step 1 decided.
+Native writes fewer bytes and fewer run files in both workloads at an equal per-partition memory budget (64 MiB). The byte difference is small (0.4%) and would not decide anything on its own. The run-count difference decides it: native writes 2.2–2.4× fewer runs than DataFusion's `GreedyMemoryPool` at the same pool size. Why DataFusion writes more runs was not isolated. One untested possibility is that its merge reservation takes part of the pool, so less of the pool holds each run. Step 1 decided, so step 2 (wall time) and step 3 (maintenance) were not consulted.
 
-**Confidence:** High.  Equal-envelope protocol eliminates the confound present in the original unequal runs.  Results are consistent across three rounds and both workloads.
+**Cost the rule did not weigh.** Native is 9–10% slower in wall time on both stars (83.9 s against 76.8 s at 9M; 188.4 s against 171.0 s at 20M). That is a secondary criterion under the predeclared rule, and the production implementation (#1585) should measure it again.
+
+**Confidence:** high in the ranking under the predeclared rule, because the equal-envelope protocol removes the confound in the original unequal runs, and the result is consistent across three rounds and both workloads. It is not evidence that native is faster; it is slower here.
 
 **Limits of this evidence:**
 
 - Partitions up to ~630 MiB (star-20M) were tested.  Very large partitions (>1 GiB) were not.
 - Graph500 workloads at S18 and S20 did not trigger external sort (as expected; no partition in those workloads reaches the 256 MiB budget, so the run-size change does not affect that path).  S22+ was not tested.
 - star-9M datafusion run 1 (01:21:30 UTC) in the original runs overlapped coordinator #1586 timed pass (01:21:26–01:26:36 UTC).  That run was moved to `runs/contaminated/` and excluded.  The equal-envelope reruns are uncontaminated.
-- Native implementation uses a single-threaded k-way merge.  DataFusion uses a parallel merge with Tokio threads.
+- Both candidates merge on one thread. Native uses a k-way heap merge on the coordinator. The DataFusion adapter runs its merge on a current-thread Tokio runtime per partition, with at most two blocking threads for reading spilled runs (`spill_spike.rs`, `load_external`).
 
 **Retirement:** The losing candidate's code is retired under #1582.
 
