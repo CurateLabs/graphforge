@@ -816,6 +816,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             .map(|job| std::sync::Mutex::new(Some(job)))
             .collect::<Vec<_>>();
         let next = std::sync::atomic::AtomicUsize::new(0);
+        let reversed = super::lane_jobs_reversed();
         let sealed = std::sync::Mutex::new(Vec::with_capacity(jobs.len()));
         let lane_batches = std::sync::Mutex::new(Vec::new());
         std::thread::scope(|scope| {
@@ -823,7 +824,11 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                 scope.spawn(|| {
                     let mut lane_batch = SealDirectoryBatch::new(root);
                     loop {
-                        let index = next.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                        let index = super::lane_job(
+                            next.fetch_add(1, std::sync::atomic::Ordering::AcqRel),
+                            jobs.len(),
+                            reversed,
+                        );
                         let Some(job) = jobs.get(index) else {
                             break;
                         };

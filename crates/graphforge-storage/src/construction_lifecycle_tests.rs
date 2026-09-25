@@ -1647,7 +1647,7 @@ mod group_boundary {
     /// #1448: a boundary shape whose boundaries seal their spills and whose
     /// finish stages retire their segments on parallel lanes publishes the
     /// same shape and records the same evidence as one that does both on the
-    /// calling thread.
+    /// calling thread, including when the lanes take their jobs in reverse.
     #[test]
     fn parallel_segment_retirement_matches_the_calling_thread() {
         let shape = |partition_count: u32,
@@ -1683,13 +1683,17 @@ mod group_boundary {
                 std::num::NonZeroUsize::new(8).unwrap(),
             ));
             let parallel = shape(partition_count, Some(admission.clone()));
-            // Finish-time loads lease two lanes; only retirement and sealing
-            // ask for more.
             assert!(
                 admission.peak() > 2,
                 "{partition_count}: no retirement or seal ran on parallel lanes"
             );
             assert_eq!(serial, parallel, "{partition_count}");
+            // A deliberately permuted schedule: lanes take their jobs in the
+            // reverse of the calling thread's order.
+            crate::graph_construction::REVERSE_LANE_JOBS.with(|reversed| reversed.set(true));
+            let permuted = shape(partition_count, Some(admission.clone()));
+            crate::graph_construction::REVERSE_LANE_JOBS.with(|reversed| reversed.set(false));
+            assert_eq!(serial, permuted, "{partition_count}: permuted schedule");
         }
     }
 
