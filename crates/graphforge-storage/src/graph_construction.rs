@@ -73,20 +73,12 @@ use catalog::{
     CatalogSource, build_runtime_catalog, load_parent_runtime_catalog,
     load_parent_runtime_catalog_from_compact,
 };
+mod finish_stages;
 mod partition_load;
 mod partition_memory;
 mod partition_records;
-#[cfg(any(test, feature = "test-support"))]
-mod sort_partition_spike;
-#[cfg(feature = "test-support")]
-pub use sort_partition_spike::bench::{
-    HeapProbe, SortPartitionBenchConfig, run_sort_partition_bench,
-};
-mod finish_stages;
 pub(crate) mod partition_shaping;
 mod progress;
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) mod spill_spike;
 mod supersession;
 use progress::{
     LoadedShapeProgress, ShapeResume, load_shape_progress_chain, scan_shape_segments,
@@ -1324,12 +1316,6 @@ impl GraphConstructionSession {
         lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
         allocation: Option<&crate::StorageAllocationOperation>,
     ) -> Result<Self, GfError> {
-        // #1509: a `test-support` build may record a smaller partition budget
-        // from the environment, so the #1507 hybrid is exercised on real
-        // Graph500 partitions. It is recorded like any budget, so a resume
-        // with a different value fails closed.
-        #[cfg(any(test, feature = "test-support"))]
-        let budgets = spill_spike::recorded_budget_override(budgets)?;
         let budgets = budgets.validate()?;
         let semantic_authority_sha256 = semantic_authority
             .as_ref()

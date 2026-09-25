@@ -193,6 +193,16 @@ Deterministic coverage in `graphforge-storage`:
 
 ## Reproduce
 
+> **Retired (#1582).** The `branch-ts` binary's `GF_SHAPE_MAX_PARTITION_BYTES`
+> and `GF_SHAPE_MAX_EXTERNAL_PARTITION_BYTES` overrides
+> (`recorded_budget_override`, last in
+> `crates/graphforge-storage/src/graph_construction/spill_spike.rs` at commit
+> `d2c52a87` on `main`) were retired with the rest of the #1504 spike code. The
+> production mechanism this document evidences (`external_partition.rs`) is
+> unchanged. A rerun needs a harness that sets `GraphConstructionBudgets`
+> directly, as `construction_external_partition_tests.rs` does, instead of the
+> removed environment override.
+
 ```bash
 # TMPDIR must be on ext4; the scripts name the frozen binaries and inputs.
 docs/development/evidence/external-partitions-1585/run_all.sh

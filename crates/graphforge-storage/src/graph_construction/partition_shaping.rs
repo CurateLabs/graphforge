@@ -478,9 +478,6 @@ pub(super) struct FixedRangePartitioner<'a, const N: usize> {
     max_partition_bytes: u64,
     /// Recorded external partition bound (#1585); zero keeps the refusal.
     max_external_partition_bytes: u64,
-    /// A #1508 spike scheduler forced in place of the production pool.
-    #[cfg(any(test, feature = "test-support"))]
-    load_scheduler: Option<super::partition_load::scheduling_spike::LoadScheduler<'static>>,
 }
 
 impl<const N: usize> Drop for FixedRangePartitioner<'_, N> {
@@ -520,8 +517,6 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             cpu_admission: None,
             max_partition_bytes: super::partition::default_materialization_bytes(),
             max_external_partition_bytes: 0,
-            #[cfg(any(test, feature = "test-support"))]
-            load_scheduler: None,
         })
     }
 
@@ -554,17 +549,6 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
         self
     }
 
-    /// Run the finish-time loads on a #1508 spike scheduler instead of the
-    /// production pool. Scheduling only, like the worker count.
-    #[cfg(test)]
-    pub(super) fn with_load_scheduler(
-        mut self,
-        scheduler: super::partition_load::scheduling_spike::LoadScheduler<'static>,
-    ) -> Self {
-        self.load_scheduler = Some(scheduler);
-        self
-    }
-
     /// Load and sort every job's partition off this thread and hand each to
     /// `consume` here, in job order.
     ///
@@ -582,44 +566,9 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
     {
         let (root, codec, max_partition_bytes) = (self.root, self.codec, self.max_partition_bytes);
         let max_external_partition_bytes = self.max_external_partition_bytes;
-        #[cfg(any(test, feature = "test-support"))]
-        let spill_mode = super::spill_spike::mode()?;
         let load_job = move |root: &StableDirectory,
                              (_, names, expected): &(usize, Vec<String>, Option<u64>),
                              stop: &AtomicBool| {
-            #[cfg(any(test, feature = "test-support"))]
-            if super::spill_spike::selects_external::<N>(
-                spill_mode,
-                *expected,
-                codec,
-                || segment_bytes(root, names),
-                max_partition_bytes,
-            )? {
-                if spill_mode == super::spill_spike::Mode::NativeOnRefusal {
-                    return super::spill_spike::load_native_external::<N>(
-                        root,
-                        names,
-                        *expected,
-                        codec,
-                        max_partition_bytes,
-                        stop,
-                    )
-                    .map(|(records, counters)| {
-                        (LoadedPartition::NativeExternal(Box::new(records)), counters)
-                    });
-                }
-                return super::spill_spike::load_external::<N>(
-                    root,
-                    names,
-                    *expected,
-                    codec,
-                    max_partition_bytes,
-                    stop,
-                )
-                .map(|(records, counters)| {
-                    (LoadedPartition::External(Box::new(records)), counters)
-                });
-            }
             // #1585: a codec-free partition over its resident budget is sorted
             // into on-disk runs when the recorded external bound admits it.
             if max_external_partition_bytes != 0
@@ -639,18 +588,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             load_fixed_partition::<N>(root, names, *expected, codec, max_partition_bytes, stop)
                 .map(|(records, counters)| (LoadedPartition::Resident(records), counters))
         };
-        #[cfg(not(any(test, feature = "test-support")))]
         let workers = self.load_workers;
-        // #1509: a `test-support` build may select a #1508 scheduler and a
-        // worker count from the environment; a forced test scheduler wins.
-        #[cfg(any(test, feature = "test-support"))]
-        let (workers, scheduler) = {
-            let (selected, workers) = super::partition_load::scheduling_spike::from_env()?;
-            (
-                workers.unwrap_or(self.load_workers),
-                self.load_scheduler.or(selected),
-            )
-        };
         // #1586: lease the workers from the instance admission. Scheduling
         // only; a partial grant runs with fewer workers and the same bytes.
         let lease = match &self.cpu_admission {
@@ -660,26 +598,6 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
         let workers = lease
             .as_ref()
             .map_or(workers, super::cpu_admission::ConstructionCpuLease::lanes);
-        #[cfg(any(test, feature = "test-support"))]
-        if let Some(scheduler) = scheduler {
-            // Tokio and DataFusion tasks are `'static`: the load owns a
-            // duplicated directory handle and its own copy of the job list.
-            let root = root.try_clone().map_err(super::storage)?;
-            let partitions = jobs.len();
-            let jobs = jobs.to_vec();
-            let load = std::sync::Arc::new(move |job: usize, stop: &AtomicBool| {
-                load_job(&root, &jobs[job], stop)
-            });
-            let mut cancelled_for_candidates = || cancelled();
-            return super::partition_load::scheduling_spike::run(
-                scheduler,
-                partitions,
-                workers,
-                load,
-                consume,
-                &mut cancelled_for_candidates,
-            );
-        }
         let load = |job: usize, stop: &AtomicBool| load_job(root, &jobs[job], stop);
         consume_in_partition_order(jobs.len(), workers, load, cancelled, consume)
     }
@@ -1157,18 +1075,12 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
 }
 
 /// A loaded fixed-width partition, handed from a load worker to the
-/// coordinator. Only the #1507 / #1585 experiments produce anything but a
-/// resident, fully sorted partition.
+/// coordinator. An over-budget partition is sorted into on-disk runs and
+/// merged instead of resident (#1585).
 pub(super) enum LoadedPartition<const N: usize> {
     Resident(PartitionRecords<N>),
     /// An over-budget partition sorted into on-disk runs (#1585).
     Runs(Box<super::external_partition::ExternalPartition<N>>),
-    /// Candidate A (#1507, #1585): DataFusion `SortExec` with fixed pool sizing.
-    #[cfg(any(test, feature = "test-support"))]
-    External(Box<super::spill_spike::ExternalPartition>),
-    /// Candidate B (#1585): GraphForge native bounded external merge.
-    #[cfg(any(test, feature = "test-support"))]
-    NativeExternal(Box<super::spill_spike::NativePartition>),
 }
 
 impl<const N: usize> LoadedPartition<N> {
@@ -1180,10 +1092,6 @@ impl<const N: usize> LoadedPartition<N> {
         match self {
             Self::Resident(records) => records.iter().try_for_each(consume),
             Self::Runs(runs) => runs.for_each_record(consume),
-            #[cfg(any(test, feature = "test-support"))]
-            Self::External(records) => records.for_each_record(consume),
-            #[cfg(any(test, feature = "test-support"))]
-            Self::NativeExternal(records) => records.for_each_record(consume),
         }
     }
 }
@@ -1343,9 +1251,6 @@ pub(super) fn load_fixed_partition<const N: usize>(
     // The sort key is the whole record, whose leading 16 bytes are the
     // UUID. Records are globally unique on that prefix, so this is a total
     // order and no stability assumption is needed.
-    #[cfg(any(test, feature = "test-support"))]
-    records.sort_selected()?;
-    #[cfg(not(any(test, feature = "test-support")))]
     records.sort();
     Ok((records, counters))
 }
@@ -1898,10 +1803,6 @@ impl<'a> RowRangePartitioner<'a> {
             let combined = concat_batches(schema, &batches).map_err(super::storage)?;
             drop(batches);
             let uuids = key_column(&combined)?;
-            #[cfg(any(test, feature = "test-support"))]
-            if let Some(order) = super::partition_records::sort_spike::row_order(uuids)? {
-                return take_record_batch(&combined, &order).map_err(super::storage);
-            }
             let rows = u32::try_from(combined.num_rows()).map_err(super::storage)?;
             let mut order = (0..rows).collect::<Vec<_>>();
             let mut keys = Vec::with_capacity(combined.num_rows());

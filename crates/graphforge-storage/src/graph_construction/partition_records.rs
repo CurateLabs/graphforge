@@ -4,9 +4,6 @@ use super::storage;
 use crate::construction_detail_codec::DetailCodec;
 use graphforge_core::GfError;
 
-#[cfg(any(test, feature = "test-support"))]
-pub(super) mod sort_spike;
-
 pub(super) enum PartitionRecords<const N: usize> {
     Fixed(Vec<[u8; N]>),
     Details { bytes: Vec<u8>, offsets: Vec<usize> },
@@ -72,12 +69,6 @@ impl<const N: usize> PartitionRecords<N> {
                 });
             }
         }
-    }
-
-    /// Sort using the #1506 spike selector when compiled for tests/test-support.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(super) fn sort_selected(&mut self) -> Result<(), GfError> {
-        sort_spike::apply(self)
     }
 
     pub(super) fn iter(&self) -> impl Iterator<Item = &[u8]> {

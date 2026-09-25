@@ -835,7 +835,5 @@ mod determinism {
         );
     }
 
-    include!("construction_spill_spike_tests.rs");
-    include!("construction_integrated_spike_tests.rs");
     include!("construction_external_partition_tests.rs");
 }

@@ -248,7 +248,8 @@ Native writes fewer bytes and fewer run files in both workloads at an equal per-
 - star-9M datafusion run 1 (01:21:30 UTC) in the original runs overlapped coordinator #1586 timed pass (01:21:26–01:26:36 UTC).  That run was moved to `runs/contaminated/` and excluded.  The equal-envelope reruns are uncontaminated.
 - Both candidates merge on one thread. Native uses a k-way heap merge on the coordinator. The DataFusion adapter runs its merge on a current-thread Tokio runtime per partition, with at most two blocking threads for reading spilled runs (`spill_spike.rs`, `load_external`).
 
-**Retirement:** The losing candidate's code is retired under #1582.
+**Retirement:** The losing candidate's code (`spill_spike.rs`) is retired under
+#1582; it was last present on `main` at commit `d2c52a87`.
 
 ## Results — equal-envelope paired runs (primary)
 
