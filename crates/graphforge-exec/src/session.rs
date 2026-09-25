@@ -691,6 +691,12 @@ impl ExecutionSession {
             // Runs after DataFusion's default rules, when terminal fetches and
             // eager round-robin exchanges are visible (#1269).
             .with_physical_optimizer_rule(Arc::new(demand::FixedHopDemandRule))
+            // Runs last, after the fast paths have replaced the sorts they own:
+            // full sorts get input runs large enough to merge within the pool
+            // they spill from (#1591).
+            .with_physical_optimizer_rule(Arc::new(crate::sort_runs::SortRunCoalesceRule::new(
+                crate::sort_runs::sort_run_bytes(memory_budget, resources.target_partitions),
+            )))
             .build();
         let ctx = SessionContext::new_with_state(state);
         let semantic_composition_fingerprint = catalog

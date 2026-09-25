@@ -427,6 +427,7 @@ pub use expand_exec::{ExpandExec, OntologyInferExec, V4OrdinalIdentityResolver, 
 mod row_exec;
 pub use row_exec::{OptionalMatchExec, UnwindExec};
 mod session;
+mod sort_runs;
 pub use session::{
     AdjacencyProviderExt, ExecutionSession, GraphForgeQueryPlanner, SessionResourceConfig,
 };

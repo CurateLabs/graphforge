@@ -613,3 +613,209 @@ fn graph_schema_has_topology_nodes_table() {
         "topology_nodes table should be registered"
     );
 }
+
+/// Two `FixedSizeBinary(16)` sort keys, the shape of `a.node_uuid, b.node_uuid`,
+/// in `batch_rows`-row input batches: one constant (a star hub) and one
+/// pseudo-random (its leaves).
+fn uuid_pair_batches(rows: usize, batch_rows: usize) -> Vec<arrow::record_batch::RecordBatch> {
+    use arrow::array::FixedSizeBinaryArray;
+    use arrow::datatypes::{DataType, Field, Schema};
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("s", DataType::FixedSizeBinary(16), false),
+        Field::new("d", DataType::FixedSizeBinary(16), false),
+    ]));
+    (0..rows)
+        .step_by(batch_rows)
+        .map(|start| {
+            let end = (start + batch_rows).min(rows);
+            let hub = FixedSizeBinaryArray::try_from_iter((start..end).map(|_| [7_u8; 16]))
+                .expect("hub keys");
+            let leaves = FixedSizeBinaryArray::try_from_iter((start..end).map(|row| {
+                let mut key = [0_u8; 16];
+                let mixed = (row as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                key[..8].copy_from_slice(&mixed.to_be_bytes());
+                key[8..].copy_from_slice(&(row as u64).to_be_bytes());
+                key
+            }))
+            .expect("leaf keys");
+            arrow::record_batch::RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(hub), Arc::new(leaves)],
+            )
+            .expect("uuid pair batch")
+        })
+        .collect()
+}
+
+fn sort_spill_count(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> usize {
+    let own = if plan
+        .downcast_ref::<datafusion::physical_plan::sorts::sort::SortExec>()
+        .is_some()
+    {
+        plan.metrics()
+            .and_then(|metrics| metrics.spill_count())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    own + plan
+        .children()
+        .into_iter()
+        .map(sort_spill_count)
+        .sum::<usize>()
+}
+
+/// #1591: a full `ORDER BY` whose input exceeds the query memory budget must
+/// spill and complete. Before the fix every buffered input batch was a single
+/// merge chunk, so merging them for the first spill needed the buffered data
+/// plus its row-format keys (74 bytes a row against 64 reserved) and failed
+/// with `Resources exhausted ... ExternalSorterMerge` once the budget was large
+/// enough that the fixed 10 MiB merge headroom no longer covered the excess
+/// (about 70 MiB). 128 MiB is past that point; 2.5M rows reserve 160 MiB.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn order_by_spills_when_input_exceeds_query_memory_budget() {
+    use arrow::array::FixedSizeBinaryArray;
+    use datafusion::datasource::MemTable;
+
+    const ROWS: usize = 2_500_000;
+    let spill = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
+    let resources = SessionResourceConfig {
+        target_partitions: 1,
+        memory_budget_bytes: 128 * 1024 * 1024,
+        spill_enabled: true,
+        spill_directory: Some(spill.path().to_path_buf()),
+        ..SessionResourceConfig::default()
+    };
+    let session = ExecutionSession::build(
+        catalog,
+        None,
+        PathBuf::new(),
+        OntologyMode::Exploratory,
+        None,
+        OrdinalIdentityConfig::default(),
+        &resources,
+    );
+    let batches = uuid_pair_batches(ROWS, resources.batch_size);
+    let table = MemTable::try_new(batches[0].schema(), vec![batches]).unwrap();
+    session.ctx.register_table("t", Arc::new(table)).unwrap();
+
+    let plan = session
+        .ctx
+        .sql("SELECT s, d FROM t ORDER BY s, d")
+        .await
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
+    let sorted = datafusion::physical_plan::collect(Arc::clone(&plan), session.ctx.task_ctx())
+        .await
+        .expect("ORDER BY over the budget must spill, not exhaust the pool");
+
+    assert_eq!(
+        sorted
+            .iter()
+            .map(arrow::record_batch::RecordBatch::num_rows)
+            .sum::<usize>(),
+        ROWS
+    );
+    assert!(
+        sort_spill_count(&plan) > 0,
+        "the input exceeds the budget, so the sort must have spilled"
+    );
+    let mut previous: Option<Vec<u8>> = None;
+    for batch in &sorted {
+        let leaves = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            let key = leaves.value(row).to_vec();
+            assert!(
+                previous.as_ref().is_none_or(|p| *p < key),
+                "keys out of order"
+            );
+            previous = Some(key);
+        }
+    }
+}
+
+/// Every full sort a Cypher query plans gets coalesced input runs; top-k sorts
+/// (`LIMIT`) do not, because they never spill and the ordered fast paths match
+/// their shape.
+#[tokio::test]
+async fn cypher_full_sorts_get_coalesced_input_runs() {
+    let dir = TempDir::new().unwrap();
+    let rc = Arc::new(std::sync::Mutex::new(RuntimeCatalog::new()));
+    let bind = |query: &str| {
+        let ast = graphforge_cypher::parse(query).expect("parse");
+        graphforge_ir::Binder::new(None, Arc::clone(&rc), OntologyMode::Exploratory)
+            .bind(&ast)
+            .expect("bind")
+    };
+    let session = |dir: &std::path::Path| {
+        let catalog = GraphCatalog::open(dir, None, &rc.lock().unwrap()).unwrap();
+        ExecutionSession::new_with_target(
+            catalog,
+            None,
+            dir.to_path_buf(),
+            OntologyMode::Exploratory,
+        )
+        .unwrap()
+    };
+    let create = bind("CREATE (:N {k: 2})-[:E]->(:N {k: 1}), (:N {k: 3})-[:E]->(:N {k: 0})");
+    session(dir.path())
+        .execute_write_statement(&create)
+        .await
+        .unwrap();
+
+    let full = bind("MATCH (a)-[r]->(b) RETURN a.k AS s, b.k AS d ORDER BY s, d");
+    let explained = session(dir.path()).explain_physical(&full).await.unwrap();
+    let sort = explained
+        .lines()
+        .position(|line| line.contains("SortExec"))
+        .unwrap_or_else(|| panic!("full ORDER BY plans a SortExec:\n{explained}"));
+    assert!(
+        explained
+            .lines()
+            .nth(sort + 1)
+            .is_some_and(|line| line.contains("SortRunCoalesceExec")),
+        "the sort's input must be coalesced into runs:\n{explained}"
+    );
+    let result = session(dir.path()).execute_plan(&full).await.unwrap();
+    let rows: Vec<String> = result
+        .batches
+        .iter()
+        .flat_map(|batch| {
+            (0..batch.num_rows()).map(move |row| {
+                (0..batch.num_columns())
+                    .map(|col| {
+                        arrow::util::display::array_value_to_string(batch.column(col), row).unwrap()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+        })
+        .collect();
+    assert_eq!(rows, ["2,1", "3,0"]);
+
+    let top_k = bind("MATCH (a)-[r]->(b) RETURN a.k AS s ORDER BY s LIMIT 1");
+    let explained = session(dir.path()).explain_physical(&top_k).await.unwrap();
+    assert!(
+        !explained.contains("SortRunCoalesceExec"),
+        "top-k sorts keep their input unchanged:\n{explained}"
+    );
+}
+
+#[test]
+fn sort_run_target_scales_with_the_partition_share_within_bounds() {
+    use crate::sort_runs::sort_run_bytes;
+    const MIB: usize = 1024 * 1024;
+    assert_eq!(sort_run_bytes(512 * MIB, 8), 4 * MIB);
+    assert_eq!(sort_run_bytes(512 * MIB, 1), 32 * MIB);
+    assert_eq!(sort_run_bytes(16 * MIB, 8), MIB);
+    assert_eq!(sort_run_bytes(usize::MAX, 1), 64 * MIB);
+    assert_eq!(sort_run_bytes(512 * MIB, 0), 32 * MIB);
+}
