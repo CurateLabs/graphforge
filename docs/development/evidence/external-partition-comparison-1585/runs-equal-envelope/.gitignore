@@ -1,0 +1,6 @@
+# Exclude constructed graph projects (100s of MB each) and binary query outputs
+project/
+edges.arrow
+# GraphForge process lock files (per-process, not evidence)
+.graphforge-admission-*.lock
+# Empty stderr files carry nothing

@@ -67,8 +67,9 @@ fixed-size `[u8; N]` records and uses no third-party memory-pool accounting.
 1. **Run phase** (worker thread, bounded memory): read input segments in
    batches of `run_records` records.  Each full batch is sorted in place and
    written to a numbered temp file as raw `N`-byte records.  The run size is
-   chosen so each run fits in `max(max_partition_bytes / 16, MIN_RUN_BYTES)`
-   memory.
+   chosen as `default_datafusion_pool_bytes(max_partition_bytes).max(MIN_NATIVE_RUN_BYTES)`,
+   i.e. the same formula used for Candidate A's pool, so both candidates operate
+   at equal per-partition memory budgets (64 MiB for the tested workloads).
 2. **k-way merge** (coordinator streaming, bounded I/O): open all run files,
    maintain a min-heap of `(first_record, run_index)` entries, and yield
    records globally in sorted order.  Reads one record at a time per stream
@@ -218,37 +219,81 @@ large run counts (known cost, not yet implemented).
 
 ## Recommendation
 
-**Candidate B (native)** is recommended, with medium confidence.
+**Candidate B (native)** is recommended.
 
-**Summary of evidence:**
+**Decision reached at step 1 (scratch I/O, primary criterion).**
 
-- Star-9M: DataFusion 11 spill runs, native 18 spill runs (1.6× ratio)
-- Star-9M total scratch: DataFusion 299 MB, native 298 MB (differ)
-- Star-9M validate wall: DataFusion 76.4s, native 84.9s (1.11×)
-- Star-20M: DataFusion 24 spill runs, native 40 spill runs
+Applying the predeclared rule from §Choice criteria:
 
-**Choice rationale:**
+| Criterion | Step | DataFusion | Native | Winner |
+| --- | --- | --- | --- | --- |
+| Scratch bytes (star-9m) | 1 | 298.8 MB | 297.5 MB | native |
+| Scratch bytes (star-20m) | 1 | 663.4 MB | 660.5 MB | native |
+| Spill run count (star-9m) | 1 | 11 | 5 | native |
+| Spill run count (star-20m) | 1 | 24 | 10 | native |
+| Wall time (star-9m) | 2 (not reached) | 76.8 s | 83.9 s | datafusion |
+| Wall time (star-20m) | 2 (not reached) | 171.0 s | 188.4 s | datafusion |
+| Maintenance | 3 (not reached) | — | — | — |
 
-The predeclaration choice criteria rank scratch I/O as primary and maintenance burden as tie-breaker.
-Candidate B (native) was chosen because: comparable I/O and performance with lower maintenance burden.
+Native writes fewer bytes and fewer run files in both workloads at equal per-partition memory budget (64 MiB).  The run-count advantage is substantial: native produces 2.2–2.4× fewer runs than DataFusion's `GreedyMemoryPool` at the same pool size, because DataFusion must leave headroom for the concurrent merge reservation, effectively reducing usable run capacity below the nominal pool size.  Step 2 (wall time) and step 3 (maintenance) were not consulted; step 1 decided.
+
+**Confidence:** High.  Equal-envelope protocol eliminates the confound present in the original unequal runs.  Results are consistent across three rounds and both workloads.
 
 **Limits of this evidence:**
 
-- Partitions up to ~627 MiB (star-20M) were tested. Very large partitions (>1 GiB) were not.
-- Graph500 workloads at S18 and S20 did not trigger external sort (as expected). S22+ was not tested.
-- star-9M datafusion run 1 (01:21:30 UTC) overlapped coordinator #1586 timed pass (01:21:26–01:26:36 UTC). That run was moved to `runs/contaminated/` and a replacement was collected after all other runs finished. The n=3 datafusion star-9M cell uses the replacement as run 1.
-- Native implementation uses a single-threaded k-way merge. DataFusion uses a parallel merge with Tokio threads.
+- Partitions up to ~630 MiB (star-20M) were tested.  Very large partitions (>1 GiB) were not.
+- Graph500 workloads at S18 and S20 did not trigger external sort (as expected; no partition in those workloads reaches the 256 MiB budget, so the run-size change does not affect that path).  S22+ was not tested.
+- star-9M datafusion run 1 (01:21:30 UTC) in the original runs overlapped coordinator #1586 timed pass (01:21:26–01:26:36 UTC).  That run was moved to `runs/contaminated/` and excluded.  The equal-envelope reruns are uncontaminated.
+- Native implementation uses a single-threaded k-way merge.  DataFusion uses a parallel merge with Tokio threads.
 
 **Retirement:** The losing candidate's code is retired under #1582.
 
-## Results
+## Results — equal-envelope paired runs (primary)
 
-Implementation commit: `47722461` (spill_spike.rs candidates A and B)
-Binary: `/home/ubuntu/gf-1585-bin/gf` (built from `47722461` with `--features graphforge-storage/test-support`)
-Host: OVHC-AGENCY
-Date: 2026-09-25
+Protocol: both candidates measured from the same binary in the same time
+window, rotated round by round (datafusion then native per round), n=3.
+Equal per-partition memory budget: 64 MiB (DataFusion pool = native run size).
+Implementation commit: `5989eb11`
+Binary: `/home/ubuntu/gf-1585-bin/gf-equal-envelope` (built from `5989eb11`
+with `-p graphforge-cli -p graphforge-storage --features graphforge-storage/test-support`)
+Host: OVHC-AGENCY; Date: 2026-09-25; completed at 05:39:10 UTC.
 
-### Star-9M (hub: 9,016,255 records, ~297 MiB)
+### Star-9M (hub: 9,016,255 records, ~284 MiB) — equal envelope
+
+| Candidate | n | Wall (s) ± | RSS (MiB) | Spill# | Spilled (MB) | SHA256 |
+| --- | --- | --- | --- | --- | --- | --- |
+| datafusion | 3 | 76.8 ± 0.9 | 480 | 11 | 298.8 | a5803634ea2e458b ✓ |
+| native | 3 | 83.9 ± 0.8 | 396 | 5 | 297.5 | a5803634ea2e458b ✓ |
+
+Cross-candidate SHA256: both `a5803634ea2e458b88d3650eacc931ae0cdc48f697414e83266aea1a4da6489d` → **MATCH** ✓
+
+### Star-20M (hub: 20,016,255 records, ~630 MiB) — equal envelope
+
+| Candidate | n | Wall (s) ± | RSS (MiB) | Spill# | Spilled (MB) | SHA256 |
+| --- | --- | --- | --- | --- | --- | --- |
+| datafusion | 3 | 171.0 ± 1.0 | 691 | 24 | 663.4 | e441de2e222b58ef ✓ |
+| native | 3 | 188.4 ± 0.7 | 577 | 10 | 660.5 | e441de2e222b58ef ✓ |
+
+Cross-candidate SHA256: both `e441de2e222b58ef14a5c1f9bf3d6158e4f865bbcc24f608e4768d63be80a538` → **MATCH** ✓
+
+### Graph500 S18 and S20 — no rerun needed
+
+Graph500 S18 and S20 workloads do not trigger external sort: no partition in
+these graphs reaches the 256 MiB recorded budget, so the equal-envelope run-size
+change does not affect those code paths.  Original results stand (see below).
+
+## Results — original unequal-envelope runs (superseded, retained for reference)
+
+These runs used different per-partition memory envelopes: DataFusion pool =
+64 MiB, native run size = 16 MiB (budget/16).  The unequal envelope inflated
+native's run count and biased the comparison against Candidate B.  Superseded
+by the equal-envelope paired runs above.
+
+Implementation commit: `47722461`
+Binary: `/home/ubuntu/gf-1585-bin/gf` (built from `47722461`)
+Host: OVHC-AGENCY; Date: 2026-09-25.
+
+### Star-9M — original (unequal envelope, superseded)
 
 | Candidate | n | Wall (s) ± | RSS (MiB) | Spill# | Spilled (MB) | SHA256 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -257,7 +302,7 @@ Date: 2026-09-25
 
 Cross-candidate SHA256: datafusion=`a5803634ea2e458b88d3650eacc931ae` native=`a5803634ea2e458b88d3650eacc931ae` → **MATCH** ✓
 
-### Star-20M (hub: 20,016,255 records, ~627 MiB)
+### Star-20M — original (unequal envelope, superseded)
 
 | Candidate | n | Wall (s) ± | RSS (MiB) | Spill# | Spilled (MB) | SHA256 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -266,7 +311,7 @@ Cross-candidate SHA256: datafusion=`a5803634ea2e458b88d3650eacc931ae` native=`a5
 
 Cross-candidate SHA256: datafusion=`e441de2e222b58ef14a5c1f9bf3d6158` native=`e441de2e222b58ef14a5c1f9bf3d6158` → **MATCH** ✓
 
-### Graph500 S18 (~4.2M edges, no external sort expected)
+### Graph500 S18 (~4.2M edges, no external sort)
 
 | Candidate | n | Wall (s) ± | RSS (MiB) | Spill# | Spilled (MB) | SHA256 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -275,7 +320,7 @@ Cross-candidate SHA256: datafusion=`e441de2e222b58ef14a5c1f9bf3d6158` native=`e4
 
 Cross-candidate SHA256: datafusion=`2cb98d6493038230f3d574b16c2cbe28` native=`2cb98d6493038230f3d574b16c2cbe28` → **MATCH** ✓
 
-### Graph500 S20 (~16.8M edges, no external sort expected)
+### Graph500 S20 (~16.8M edges, no external sort)
 
 | Candidate | n | Wall (s) ± | RSS (MiB) | Spill# | Spilled (MB) | SHA256 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -284,10 +329,10 @@ Cross-candidate SHA256: datafusion=`2cb98d6493038230f3d574b16c2cbe28` native=`2c
 
 Cross-candidate SHA256: datafusion=`3daeda0e54a362622ffdc547a631479e` native=`3daeda0e54a362622ffdc547a631479e` → **MATCH** ✓
 
-
 ## Changelog
 
 | Date | Change |
 | --- | --- |
 | 2026-09-25 | Predeclaration committed before any timed run |
-| 2026-09-25 | Measurement results and recommendation added |
+| 2026-09-25 | Measurement results and recommendation added (original unequal-envelope runs) |
+| 2026-09-25 | Equal-envelope paired rerun results added; recommendation updated to apply predeclared rule |
