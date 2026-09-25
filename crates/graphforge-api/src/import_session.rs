@@ -210,6 +210,16 @@ pub struct ImportConstructionEvidence {
     /// Peak allocated bytes for construction staging/spill specifically.
     #[serde(default)]
     pub construction_staging_transient_peak_allocated_bytes: u64,
+    /// Partitions over the recorded resident budget that were sorted in
+    /// bounded runs instead of refused (ADR 0047, #1585).
+    #[serde(default)]
+    pub external_partitions: u64,
+    /// Sorted runs written for those partitions.
+    #[serde(default)]
+    pub external_runs: u64,
+    /// Scratch bytes written to those runs.
+    #[serde(default)]
+    pub external_run_bytes: u64,
 }
 
 /// Closed semantic publication-work contract for ordinary construction evidence.
@@ -1053,6 +1063,9 @@ impl GraphImportSession {
                 .storage_transient_peak_total_allocated_bytes,
             construction_staging,
             construction_staging_transient_peak_allocated_bytes,
+            external_partitions: progress.evidence.external_partitions,
+            external_runs: progress.evidence.external_runs,
+            external_run_bytes: progress.evidence.external_run_bytes,
         });
         Ok(())
     }
