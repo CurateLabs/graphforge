@@ -699,10 +699,22 @@ pub(super) fn unlink_shape_artifact(
     name: &str,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<(), GfError> {
+    let receipt = unlink_shape_artifact_files(root, name)?;
+    reconcile_shape_artifact_removal(evidence, &receipt)
+}
+
+/// The filesystem half of [`unlink_shape_artifact`]: authenticate and unlink
+/// one shaped artifact and its writer capability, touching no evidence. The
+/// returned receipt is what [`reconcile_shape_artifact_removal`] charges, so a
+/// caller may unlink on several threads and reconcile in its own order.
+pub(super) fn unlink_shape_artifact_files(
+    root: &StableDirectory,
+    name: &str,
+) -> Result<ArtifactReceipt, GfError> {
     let receipt = receipt_for_existing(root, name)?;
     unlink_artifact(root, &receipt)?;
     construction_failpoint("shape.after_derived_unlink");
-    reconcile_shape_artifact_removal(evidence, &receipt)
+    Ok(receipt)
 }
 
 /// Every sealed partition segment still on disk, in name order, with the
@@ -801,7 +813,7 @@ pub(super) fn discard_completed_shape_segments(
 
 /// Charge one removed shape artifact against the identity, category and
 /// merge-temporary ledgers.
-fn reconcile_shape_artifact_removal(
+pub(super) fn reconcile_shape_artifact_removal(
     evidence: &mut GraphConstructionEvidence,
     receipt: &ArtifactReceipt,
 ) -> Result<(), GfError> {

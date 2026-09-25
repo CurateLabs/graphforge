@@ -11,7 +11,9 @@ use super::progress::{
     LoadedShapeProgress, ShapeProgressPartition, authenticate_shape_segments,
     install_shape_progress,
 };
-use super::recovery::is_shape_scoped_name;
+use super::recovery::{
+    is_shape_scoped_name, reconcile_shape_artifact_removal, unlink_shape_artifact_files,
+};
 use super::{
     ArtifactReceipt, AuthenticatedShapeSource, AuthenticatedUuidIndexSnapshot, BASE_IDENTITY_WIDTH,
     BLOCK_BYTES, BTreeMap, BufReader, BufWriter, CatalogSource, Checkpoint, ConstructionChunkKind,
@@ -286,6 +288,7 @@ impl GraphConstructionSession {
         // A resumed shape replays the recorded splitters instead: the chunks
         // behind the resumed boundary are retired, so their sampling domain is
         // gone, and the recorded intent is the authority anyway.
+        let planning = crate::concurrency_attribution::RegionScope::named("shape_planning");
         let (plan, node_plan) = if let Some(state) = &resume {
             (
                 PartitionPlan::from_recorded(
@@ -303,6 +306,7 @@ impl GraphConstructionSession {
                 self.choose_node_partition_plan(&mut cancelled)?,
             )
         };
+        drop(planning);
         let partitions = plan.partitions();
         self.checkpoint.evidence.shape_partitions = u64::try_from(partitions).map_err(storage)?;
         self.checkpoint.evidence.shape_partition_count = u64::from(plan.partition_count());
@@ -481,6 +485,7 @@ impl GraphConstructionSession {
             .as_ref()
             .map(|state| state.segment_rows.clone())
             .unwrap_or_default();
+        let routing = crate::concurrency_attribution::RegionScope::named("shape_routing");
         for sequence in start_sequence..self.checkpoint.next_sequence {
             reject_cancelled(&mut cancelled)?;
             let receipt = self.read_receipt(sequence)?;
@@ -719,6 +724,7 @@ impl GraphConstructionSession {
         // perfectly deterministic and passes every byte-equality test, so this
         // is the only check that can tell a working range partition from a
         // catastrophically skewed one.
+        drop(routing);
         identities.balance().assert_balanced("staged identity")?;
         let partition_identity_rows = identities.balance().rows().to_vec();
         self.checkpoint.evidence.max_partition_identity_rows = identities.balance().max_rows();
@@ -747,6 +753,8 @@ impl GraphConstructionSession {
             None
         };
         self.shape_finish_interrupted = stages.is_some();
+        let family_finish =
+            crate::concurrency_attribution::RegionScope::named("shape_family_finish");
         let staged_identities = finish_family_stage(
             &self.root,
             &mut self.checkpoint,
@@ -755,6 +763,7 @@ impl GraphConstructionSession {
             identities,
             STAGED_IDENTITIES,
             final_boundary,
+            self.cpu_admission.as_ref(),
             &mut cancelled,
         )?
         .ok_or_else(|| storage("construction contains no identities"))?;
@@ -766,6 +775,7 @@ impl GraphConstructionSession {
             node_details,
             SHAPED_NODE_DETAILS,
             final_boundary,
+            self.cpu_admission.as_ref(),
             &mut cancelled,
         )?;
         let edge_details = finish_family_stage(
@@ -776,6 +786,7 @@ impl GraphConstructionSession {
             edge_details,
             SHAPED_EDGE_DETAILS,
             final_boundary,
+            self.cpu_admission.as_ref(),
             &mut cancelled,
         )?;
         let endpoints = finish_family_stage(
@@ -786,8 +797,10 @@ impl GraphConstructionSession {
             endpoints,
             STAGED_ENDPOINTS,
             final_boundary,
+            self.cpu_admission.as_ref(),
             &mut cancelled,
         )?;
+        drop(family_finish);
         let (base_max_node, base_max_edge) = match self.checkpoint.parent_topology_generation {
             0 => (0, 0),
             _ => (if let Some(inventory) = &self.compact_parent {
@@ -808,6 +821,7 @@ impl GraphConstructionSession {
             .as_ref()
             .and_then(|stages| stages.completed(ShapeStageKind::Assigned))
             .map(|stage| (stage.new_nodes, stage.new_edges));
+        let assignment = crate::concurrency_attribution::RegionScope::named("surrogate_assignment");
         let (identities, new_nodes, new_edges) = if let Some((new_nodes, new_edges)) = assigned {
             // Validation, base-conflict rejection and assignment all ran
             // before the interruption; the recorded successor carries them.
@@ -867,7 +881,9 @@ impl GraphConstructionSession {
             shape_publication_failure("shape.after_identity_retirement")?;
             (identities, new_nodes, new_edges)
         };
+        drop(assignment);
         reject_cancelled(&mut cancelled)?;
+        let resolution = crate::concurrency_attribution::RegionScope::named("endpoint_resolution");
         let edge_endpoints = resolve_endpoint_stages(
             &self.root,
             &mut self.checkpoint,
@@ -881,6 +897,7 @@ impl GraphConstructionSession {
             self.cpu_admission.as_ref(),
             &mut cancelled,
         )?;
+        drop(resolution);
         let node_count = self
             .checkpoint
             .base_work
@@ -899,6 +916,7 @@ impl GraphConstructionSession {
         let max_edge_surrogate = base_max_edge
             .checked_add(new_edges)
             .ok_or_else(|| storage("edge surrogate overflow"))?;
+        let row_finish = crate::concurrency_attribution::RegionScope::named("shape_row_finish");
         let mut node_rows = Vec::new();
         let mut edge_rows = Vec::new();
         for ((kind, schema_digest), rows) in row_groups {
@@ -919,6 +937,8 @@ impl GraphConstructionSession {
                 edge_rows.push(output);
             }
         }
+        drop(row_finish);
+        let catalog_region = crate::concurrency_attribution::RegionScope::named("runtime_catalog");
         let runtime_catalog = build_runtime_catalog(
             self.parent_catalog.clone(),
             &self.root,
@@ -937,6 +957,7 @@ impl GraphConstructionSession {
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
+        drop(catalog_region);
         let shape = ConstructionShape {
             ontology_mode: self.checkpoint.ontology_mode,
             semantic_authority_sha256: self.checkpoint.semantic_authority_sha256.clone(),
@@ -959,6 +980,7 @@ impl GraphConstructionSession {
             max_node_surrogate,
             max_edge_surrogate,
         };
+        let _completion = crate::concurrency_attribution::RegionScope::named("shape_completion");
         let (identity_output, mut inventory_work) =
             receipt_for_existing_with_work(&self.root, &shape.identities)?;
         let mut outputs = vec![identity_output];
@@ -2272,6 +2294,7 @@ fn finish_family_stage<const N: usize>(
     partitioner: FixedRangePartitioner<'_, N>,
     output: &str,
     boundary: u64,
+    cpu_admission: Option<&std::sync::Arc<super::cpu_admission::ConstructionCpuAdmission>>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Option<String>, GfError> {
     let Some(stages) = stages else {
@@ -2294,17 +2317,24 @@ fn finish_family_stage<const N: usize>(
         stages,
         kind,
         StageResult {
-            outputs: installed
-                .as_deref()
-                .map(|name| receipt_for_existing(root, name))
-                .transpose()?
-                .into_iter()
-                .collect(),
+            outputs: installed_outputs(root, installed.as_deref())?,
             ..StageResult::default()
         },
         &segments,
+        cpu_admission,
     )?;
     Ok(installed)
+}
+
+/// The receipt of a finish's installed output, if it installed one.
+fn installed_outputs(
+    root: &StableDirectory,
+    installed: Option<&str>,
+) -> Result<Vec<ArtifactReceipt>, GfError> {
+    installed
+        .map(|name| receipt_for_existing(root, name))
+        .transpose()
+        .map(|receipt| receipt.into_iter().collect())
 }
 
 /// Install `kind`'s stage, then unlink the segments its successor replaces.
@@ -2319,14 +2349,86 @@ fn retire_behind_stage(
     kind: ShapeStageKind,
     result: StageResult,
     segments: &[ArtifactReceipt],
+    cpu_admission: Option<&std::sync::Arc<super::cpu_admission::ConstructionCpuAdmission>>,
 ) -> Result<(), GfError> {
     stages.record(root, checkpoint, kind, result)?;
     construction_failpoint(&format!("shape.stage.{}.after_install", kind.tag()));
-    for segment in segments {
-        unlink_shape_artifact(root, &segment.name, &mut checkpoint.evidence)?;
-    }
+    retire_segments(root, segments, cpu_admission, &mut checkpoint.evidence)?;
     construction_failpoint(&format!("shape.stage.{}.after_retire", kind.tag()));
     Ok(())
+}
+
+/// Most lanes one retirement leases (#1448). Each segment's retirement is a
+/// few small metadata operations and two directory syncs, so lanes mostly
+/// overlap sync waits; more than this measured no further gain.
+const RETIRE_LANES: usize = 8;
+
+/// Unlink every retired segment, in parallel lanes when the instance has CPU
+/// admission to spare (#1448).
+///
+/// Each segment's retirement is independent once its stage is durable: any
+/// subset left on disk by a crash is garbage recovery discards. Lanes do only
+/// the filesystem work; the evidence is reconciled here, in segment order, so
+/// it does not depend on the schedule. Every segment is attempted even after
+/// one fails, so the set removed, and the evidence charged for it, is the
+/// same for any lane count; the first error in segment order is returned.
+fn retire_segments(
+    root: &StableDirectory,
+    segments: &[ArtifactReceipt],
+    cpu_admission: Option<&std::sync::Arc<super::cpu_admission::ConstructionCpuAdmission>>,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    let want = std::num::NonZeroUsize::new(RETIRE_LANES.min(segments.len()))
+        .filter(|lanes| lanes.get() > 1);
+    let lease =
+        want.and_then(|want| cpu_admission.and_then(|admission| admission.try_acquire(want)));
+    let lanes = lease.as_ref().map_or(1, |lease| lease.lanes().get());
+    if lanes == 1 {
+        let mut first_error = None;
+        for segment in segments {
+            if let Err(error) = unlink_shape_artifact(root, &segment.name, evidence) {
+                first_error.get_or_insert(error);
+            }
+        }
+        return first_error.map_or(Ok(()), Err);
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(
+        std::iter::repeat_with(|| None)
+            .take(segments.len())
+            .collect::<Vec<Option<Result<ArtifactReceipt, GfError>>>>(),
+    );
+    std::thread::scope(|scope| {
+        for _ in 0..lanes {
+            scope.spawn(|| {
+                use std::sync::atomic::Ordering;
+                loop {
+                    let index = next.fetch_add(1, Ordering::AcqRel);
+                    let Some(segment) = segments.get(index) else {
+                        break;
+                    };
+                    let result = unlink_shape_artifact_files(root, &segment.name);
+                    if let Ok(mut results) = results.lock() {
+                        results[index] = Some(result);
+                    }
+                }
+            });
+        }
+    });
+    drop(lease);
+    let results = results
+        .into_inner()
+        .map_err(|_| storage("segment retirement results poisoned"))?;
+    let mut first_error = None;
+    for result in results.into_iter().flatten() {
+        match result {
+            Ok(receipt) => reconcile_shape_artifact_removal(evidence, &receipt)?,
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Resolve endpoints under finish stages (#1562): the resolved segments are
@@ -2438,15 +2540,11 @@ fn resolve_endpoint_stages(
         stages,
         ShapeStageKind::Resolved,
         StageResult {
-            outputs: installed
-                .as_deref()
-                .map(|name| receipt_for_existing(root, name))
-                .transpose()?
-                .into_iter()
-                .collect(),
+            outputs: installed_outputs(root, installed.as_deref())?,
             ..StageResult::default()
         },
         &segments,
+        cpu_admission,
     )?;
     Ok(installed)
 }
