@@ -329,6 +329,7 @@ impl GraphConstructionSession {
             true,
         )?
         .with_materialization_limit(self.checkpoint.budgets.max_partition_bytes)
+        .with_external_partitions(self.checkpoint.budgets.max_external_partition_bytes)
         .with_cpu_admission(self.cpu_admission.clone());
         let mut node_details = FixedRangePartitioner::<NODE_DETAIL_WIDTH>::new(
             &self.root,
@@ -338,6 +339,7 @@ impl GraphConstructionSession {
             false,
         )?
         .with_materialization_limit(self.checkpoint.budgets.max_partition_bytes)
+        .with_external_partitions(self.checkpoint.budgets.max_external_partition_bytes)
         .with_cpu_admission(self.cpu_admission.clone());
         let mut edge_details = FixedRangePartitioner::<EDGE_DETAIL_WIDTH>::new(
             &self.root,
@@ -347,6 +349,7 @@ impl GraphConstructionSession {
             false,
         )?
         .with_materialization_limit(self.checkpoint.budgets.max_partition_bytes)
+        .with_external_partitions(self.checkpoint.budgets.max_external_partition_bytes)
         .with_cpu_admission(self.cpu_admission.clone());
         let mut endpoints = FixedRangePartitioner::<ENDPOINT_WIDTH>::new(
             &self.root,
@@ -356,6 +359,7 @@ impl GraphConstructionSession {
             false,
         )?
         .with_materialization_limit(self.checkpoint.budgets.max_partition_bytes)
+        .with_external_partitions(self.checkpoint.budgets.max_external_partition_bytes)
         .with_cpu_admission(self.cpu_admission.clone());
         let mut row_groups: BTreeMap<(u8, String), RowRangePartitioner> = BTreeMap::new();
         // #1455. A kind whose every staged chunk carries the bare canonical
@@ -2120,6 +2124,7 @@ pub(super) fn resolve_endpoint_surrogates(
     base: Option<&mut AuthenticatedUuidIndexSnapshot>,
     window_rows: usize,
     max_partition_bytes: u64,
+    max_external_partition_bytes: u64,
     boundary: u64,
     retain_segments: bool,
     cpu_admission: Option<&std::sync::Arc<super::cpu_admission::ConstructionCpuAdmission>>,
@@ -2137,6 +2142,7 @@ pub(super) fn resolve_endpoint_surrogates(
         false,
     )?
     .with_materialization_limit(max_partition_bytes)
+    .with_external_partitions(max_external_partition_bytes)
     .with_cpu_admission(cpu_admission.cloned());
     route_resolved_endpoints(
         root,
@@ -2341,8 +2347,7 @@ fn resolve_endpoint_stages(
     cpu_admission: Option<&std::sync::Arc<super::cpu_admission::ConstructionCpuAdmission>>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Option<String>, GfError> {
-    let window_rows = checkpoint.budgets.max_batch_rows;
-    let max_partition_bytes = checkpoint.budgets.max_partition_bytes;
+    let budgets = checkpoint.budgets;
     let Some(stages) = stages else {
         return resolve_endpoint_surrogates(
             root,
@@ -2350,8 +2355,9 @@ fn resolve_endpoint_stages(
             identities_name,
             endpoints_name,
             base,
-            window_rows,
-            max_partition_bytes,
+            budgets.max_batch_rows,
+            budgets.max_partition_bytes,
+            budgets.max_external_partition_bytes,
             boundary,
             retain_segments,
             cpu_admission,
@@ -2369,7 +2375,8 @@ fn resolve_endpoint_stages(
         None,
         false,
     )?
-    .with_materialization_limit(max_partition_bytes)
+    .with_materialization_limit(budgets.max_partition_bytes)
+    .with_external_partitions(budgets.max_external_partition_bytes)
     .with_cpu_admission(cpu_admission.cloned());
     if let Some(stage) = stages.completed(ShapeStageKind::ResolvedRouted) {
         let mut segments = vec![Vec::new(); plan.partitions()];
@@ -2391,7 +2398,7 @@ fn resolve_endpoint_stages(
                 identities_name,
                 endpoints_name,
                 base,
-                window_rows,
+                budgets.max_batch_rows,
                 &mut resolved,
                 cancelled,
                 &mut checkpoint.evidence,

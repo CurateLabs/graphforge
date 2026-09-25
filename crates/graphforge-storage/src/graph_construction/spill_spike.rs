@@ -787,6 +787,10 @@ pub(super) fn recorded_budget_override(
     if let Some(bytes) = bytes_env("GF_SHAPE_MAX_PARTITION_BYTES")? {
         budgets.max_partition_bytes = bytes;
     }
+    // #1585: zero records the pre-ADR-0047 refusal, for spike controls.
+    if let Some(bytes) = bytes_env("GF_SHAPE_MAX_EXTERNAL_PARTITION_BYTES")? {
+        budgets.max_external_partition_bytes = bytes;
+    }
     Ok(budgets)
 }
 

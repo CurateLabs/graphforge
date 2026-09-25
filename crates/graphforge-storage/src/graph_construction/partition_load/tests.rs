@@ -273,6 +273,7 @@ fn merge_is_total_and_touches_nothing_else() {
             released_bytes: 23,
             peak_window_bytes: 29,
         },
+        ..PartitionLoadCounters::default()
     };
     let mut evidence = GraphConstructionEvidence::default();
     counters.merge_into(&mut evidence).unwrap();
@@ -288,6 +289,26 @@ fn merge_is_total_and_touches_nothing_else() {
         peak_cache_release_window_bytes: 29,
         peak_partition_records: 5,
         ..GraphConstructionEvidence::default()
+    };
+    assert_eq!(evidence, expected);
+
+    // An external load (#1585) also counts its partition, runs and run bytes,
+    // and credits the largest run, not the partition, as materialized.
+    let external = PartitionLoadCounters {
+        external_runs: 3,
+        external_run_bytes: 31,
+        external_peak_run_records: 2,
+        ..counters
+    };
+    let mut evidence = GraphConstructionEvidence::default();
+    external.merge_into(&mut evidence).unwrap();
+    external.merge_into(&mut evidence).unwrap();
+    let expected = GraphConstructionEvidence {
+        external_partitions: 2,
+        external_runs: 6,
+        external_run_bytes: 62,
+        peak_partition_records: 2,
+        ..expected
     };
     assert_eq!(evidence, expected);
 }

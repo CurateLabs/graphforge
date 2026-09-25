@@ -371,6 +371,15 @@ pub struct GraphConstructionEvidence {
     /// Largest number of records materialized for one sorted partition.
     #[serde(default)]
     pub peak_partition_records: u64,
+    /// Over-budget partitions sorted externally instead of refused (#1585).
+    #[serde(default)]
+    pub external_partitions: u64,
+    /// Sorted runs those external partitions wrote.
+    #[serde(default)]
+    pub external_runs: u64,
+    /// Bytes written to external runs; the merge reads each byte once.
+    #[serde(default)]
+    pub external_run_bytes: u64,
     /// Records emitted through range-partitioned shaped outputs.
     #[serde(default)]
     pub partition_rows: u64,

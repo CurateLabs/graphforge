@@ -76,7 +76,10 @@ const CANCEL_POLL: Duration = Duration::from_millis(1);
 /// Every field here is either a plain sum or a per-partition maximum, so the
 /// merge is commutative: the same set of loads produces the same evidence in
 /// every consume order. The allocation ledger is deliberately absent; a load
-/// installs and removes nothing.
+/// installs nothing. An external load (#1585) writes run temporaries, which
+/// are transient scratch like unsealed spill temporaries: they are counted
+/// here and in the evidence, and unlinked before the partition is released,
+/// but never installed in the ledger.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct PartitionLoadCounters {
     /// Spill length on disk, credited to `merge_read_blocks` as whole blocks.
@@ -90,6 +93,12 @@ pub(super) struct PartitionLoadCounters {
     pub(super) read_operations: u64,
     /// Page-cache release boundaries observed while reading.
     pub(super) cache_release: graphforge_filesystem::FileCacheReleaseEvidence,
+    /// Sorted runs an external load wrote (#1585); zero for a resident load.
+    pub(super) external_runs: u64,
+    /// Bytes written to those runs; the merge reads each byte once.
+    pub(super) external_run_bytes: u64,
+    /// Records in the largest run: what an external load held in memory.
+    pub(super) external_peak_run_records: u64,
 }
 
 impl PartitionLoadCounters {
@@ -99,8 +108,13 @@ impl PartitionLoadCounters {
     /// Fields written: `merge_read_blocks`, `merge_read_records`,
     /// `merge_read_bytes`, `merge_read_operations`, `cache_release_operations`,
     /// `cache_release_unsupported_operations`, `cache_released_bytes`,
-    /// `peak_cache_release_window_bytes` (max) and `peak_partition_records`
-    /// (max). The test `merge_is_total_and_touches_nothing_else` pins that list.
+    /// `peak_cache_release_window_bytes` (max), `peak_partition_records`
+    /// (max), and for an external load (#1585) `external_partitions`,
+    /// `external_runs` and `external_run_bytes`. The test
+    /// `merge_is_total_and_touches_nothing_else` pins that list.
+    ///
+    /// `peak_partition_records` is the records materialized at once: the whole
+    /// partition for a resident load, the largest run for an external one.
     pub(super) fn merge_into(
         self,
         evidence: &mut GraphConstructionEvidence,
@@ -122,7 +136,24 @@ impl PartitionLoadCounters {
             .checked_add(self.read_operations)
             .ok_or_else(|| storage("merge read operation count overflows"))?;
         account_cache_release(self.cache_release, evidence)?;
-        evidence.peak_partition_records = evidence.peak_partition_records.max(self.records);
+        let materialized = if self.external_runs == 0 {
+            self.records
+        } else {
+            evidence.external_partitions = evidence
+                .external_partitions
+                .checked_add(1)
+                .ok_or_else(|| storage("external partition count overflows"))?;
+            evidence.external_runs = evidence
+                .external_runs
+                .checked_add(self.external_runs)
+                .ok_or_else(|| storage("external run count overflows"))?;
+            evidence.external_run_bytes = evidence
+                .external_run_bytes
+                .checked_add(self.external_run_bytes)
+                .ok_or_else(|| storage("external run byte count overflows"))?;
+            self.external_peak_run_records
+        };
+        evidence.peak_partition_records = evidence.peak_partition_records.max(materialized);
         Ok(())
     }
 }

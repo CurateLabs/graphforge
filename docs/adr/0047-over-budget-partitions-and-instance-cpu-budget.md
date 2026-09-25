@@ -10,9 +10,8 @@ superseded_by: null
 
 **Status:** Accepted
 
-**Implementation:** Decision 2 is implemented by #1586; see the implementation
-update below. Decision 1 is pending in #1585; until it lands, over-budget
-partitions still refuse.
+**Implementation:** Decision 1 is implemented by #1585 and decision 2 by
+#1586; see the implementation updates below.
 
 **Build target:** v0.6.0
 
@@ -21,6 +20,52 @@ decisions it reserved for maintainers), ADR 0038 (determinism at the
 publication boundary), ADR 0045 (ingest authentication regime); #337
 (per-instance execution resource policy); #1448 (shaping parallelism); #1504
 (construction reuse epic).
+
+## Implementation update: external partitions (#1585)
+
+#1585 compared the #1507 DataFusion adapter with a native bounded merge under
+the #1505 protocol and selected the native merge
+(`docs/development/evidence/external-partition-comparison-1585.md`).
+
+A fixed-width partition without a detail codec whose materialization would
+exceed `max_partition_bytes` is sorted on its load worker into runs of at most
+`max_partition_bytes`. Each run is written as a construction artifact
+temporary with an XXH64 checksum. The coordinator merges the runs into the
+consumer the resident path feeds, so the shaped bytes are unchanged. The
+families without a detail codec are identities and the staged and resolved
+endpoints; the endpoint families are the ones a hub can push over budget.
+Detail-codec partitions and Arrow property-row partitions keep the refusal.
+
+How each obligation is met:
+
+- **Recorded parameter.** `GraphConstructionBudgets::max_external_partition_bytes`
+  bounds the scratch for one partition. It defaults to 64 GiB and must be zero
+  or at least `max_partition_bytes`. Zero keeps the refusal. A checkpoint
+  recorded before the field exists reads it as zero, and a default-budget
+  resume keeps that recorded value.
+- **Owned scratch.** Runs are `.artifact-xrun-p<N>-<random>.tmp` temporaries in
+  the session directory. Every exit path unlinks them, and session open and
+  recovery reclaim any a crash leaves. Runs are never resume authority; the
+  sealed segments are.
+- **Bounded scratch.** A partition whose sealed segments exceed the external
+  bound is refused before any run is written. The ADR text above says the
+  limit is "derived from the allocation ledger". The ledger has no scratch
+  budget to derive one from, so the limit is a recorded budget instead. Run
+  counts and bytes are recorded in construction evidence and on the import
+  receipt (`external_partitions`, `external_runs`, `external_run_bytes`). Runs
+  are not charged to the allocation ledger's transient peak, because the load
+  workers write them concurrently and the recorded peak would then depend on
+  their interleaving.
+- **Integrity.** The merge verifies each run's file identity, length, record
+  count and checksum, and refuses before any derived output is installed.
+- **Tested pool size.** No library pool is used. Memory per run is the
+  resident budget itself.
+- **Thread-based coordinator.** The merge runs on the existing plain-thread
+  coordinator.
+- **Unchanged resident path.** Partitions within budget take the resident path
+  unchanged.
+
+Evidence: `docs/development/evidence/external-partitions-1585.md`.
 
 ## Implementation update: the instance construction budget (#1586)
 

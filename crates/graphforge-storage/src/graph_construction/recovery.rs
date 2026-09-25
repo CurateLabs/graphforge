@@ -1240,7 +1240,8 @@ pub(super) fn is_owned_artifact_temp(name: &str) -> bool {
     };
     random.len() == 32
         && random.bytes().all(|byte| byte.is_ascii_hexdigit())
-        && canonical_artifact_target(target)
+        && (canonical_artifact_target(target)
+            || super::external_partition::is_external_run_target(target))
 }
 
 pub(super) fn canonical_artifact_target(name: &str) -> bool {

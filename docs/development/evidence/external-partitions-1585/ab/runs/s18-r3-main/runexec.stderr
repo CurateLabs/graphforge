@@ -1,0 +1,2 @@
+2026-09-25 08:30:23,609 - INFO - Starting command bash /home/ubuntu/gf-1585p/docs/development/evidence/external-partitions-1585/ingest-one.sh /home/ubuntu/gf-1448-bin-cca7a1fc/gf /home/ubuntu/gf-1585-ab/tmp/project-s18-r3-main /home/ubuntu/gf-1448-evidence/inputs/s18 /home/ubuntu/gf-1585-ab/runs/s18-r3-main
+2026-09-25 08:30:23,609 - INFO - Writing output to /home/ubuntu/gf-1585-ab/runs/s18-r3-main/ingest.log

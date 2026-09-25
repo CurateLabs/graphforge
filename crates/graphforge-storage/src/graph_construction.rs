@@ -57,6 +57,7 @@ use recovery::{
 };
 mod controls;
 pub mod cpu_admission;
+mod external_partition;
 use controls::{
     SealDirectoryBatch, artifact_temp, control_sha256, decode_bounded, decode_shape_intent,
     initial_checkpoint_format, install_control, install_control_batched, install_shape_intent,
@@ -512,6 +513,14 @@ pub struct GraphConstructionBudgets {
         skip_serializing_if = "partition::is_default_materialization_bytes"
     )]
     pub max_partition_bytes: u64,
+    /// Largest fixed-width partition processed externally when it exceeds
+    /// `max_partition_bytes` (#1585, ADR 0047): it is sorted into on-disk runs
+    /// of at most `max_partition_bytes` and merged, instead of refusing the
+    /// ingest. This is also the partition's external scratch bound. Zero keeps
+    /// the refusal. A checkpoint recorded before this field existed has none,
+    /// reads as zero, and keeps its refusal on resume.
+    #[serde(default)]
+    pub max_external_partition_bytes: u64,
 }
 
 impl Default for GraphConstructionBudgets {
@@ -530,9 +539,14 @@ impl Default for GraphConstructionBudgets {
             partition_count: partition::DEFAULT_PARTITION_COUNT,
             target_partition_records: partition::default_target_records(),
             max_partition_bytes: partition::default_materialization_bytes(),
+            max_external_partition_bytes: DEFAULT_MAX_EXTERNAL_PARTITION_BYTES,
         }
     }
 }
+
+/// Default external partition bound: 64 GiB of scratch for one partition,
+/// enough for a node with roughly two billion endpoint records.
+pub const DEFAULT_MAX_EXTERNAL_PARTITION_BYTES: u64 = 64 << 30;
 
 impl GraphConstructionBudgets {
     fn validate(self) -> Result<Self, GfError> {
@@ -548,6 +562,8 @@ impl GraphConstructionBudgets {
             || self.max_catalog_identifier_bytes == 0
             || self.target_partition_records == 0
             || self.max_partition_bytes == 0
+            || (self.max_external_partition_bytes != 0
+                && self.max_external_partition_bytes < self.max_partition_bytes)
             || self.partition_count == 0
             || self.partition_count > partition::MAX_PARTITION_COUNT
         {
@@ -1364,18 +1380,28 @@ impl GraphConstructionSession {
         // The former public default recorded a 256-partition maximum. Opening
         // that exact legacy default with today's default retains its authority;
         // explicit non-default changes still fail validate_checkpoint below.
-        let legacy_defaults = GraphConstructionBudgets {
-            partition_count: 256,
-            ..GraphConstructionBudgets::default()
-        };
-        let budgets = if budgets == GraphConstructionBudgets::default()
-            && recovered_checkpoint
-                .as_ref()
-                .is_some_and(|checkpoint| checkpoint.budgets == legacy_defaults)
-        {
-            legacy_defaults
-        } else {
-            budgets
+        // Likewise a checkpoint recorded before external partitions (#1585)
+        // has no external bound and keeps its refusal contract.
+        let legacy_defaults = [256, GraphConstructionBudgets::default().partition_count]
+            .into_iter()
+            .flat_map(|partition_count| {
+                [0, DEFAULT_MAX_EXTERNAL_PARTITION_BYTES].map(|max_external_partition_bytes| {
+                    GraphConstructionBudgets {
+                        partition_count,
+                        max_external_partition_bytes,
+                        ..GraphConstructionBudgets::default()
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let budgets = match recovered_checkpoint.as_ref() {
+            Some(checkpoint)
+                if budgets == GraphConstructionBudgets::default()
+                    && legacy_defaults.contains(&checkpoint.budgets) =>
+            {
+                checkpoint.budgets
+            }
+            _ => budgets,
         };
         if let Some(checkpoint) = recovered_checkpoint.as_mut()
             && (DetailCodec::from_version(checkpoint.format_version).is_err()

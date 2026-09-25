@@ -476,6 +476,8 @@ pub(super) struct FixedRangePartitioner<'a, const N: usize> {
     /// count is leased from it (#1586).
     cpu_admission: Option<std::sync::Arc<super::cpu_admission::ConstructionCpuAdmission>>,
     max_partition_bytes: u64,
+    /// Recorded external partition bound (#1585); zero keeps the refusal.
+    max_external_partition_bytes: u64,
     /// A #1508 spike scheduler forced in place of the production pool.
     #[cfg(any(test, feature = "test-support"))]
     load_scheduler: Option<super::partition_load::scheduling_spike::LoadScheduler<'static>>,
@@ -517,6 +519,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             load_workers: PARTITION_LOAD_WORKERS,
             cpu_admission: None,
             max_partition_bytes: super::partition::default_materialization_bytes(),
+            max_external_partition_bytes: 0,
             #[cfg(any(test, feature = "test-support"))]
             load_scheduler: None,
         })
@@ -524,6 +527,13 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
 
     pub(super) fn with_materialization_limit(mut self, bytes: u64) -> Self {
         self.max_partition_bytes = bytes;
+        self
+    }
+
+    /// Process a partition over `max_partition_bytes` externally, up to
+    /// `bytes` (#1585). Zero keeps the refusal.
+    pub(super) fn with_external_partitions(mut self, bytes: u64) -> Self {
+        self.max_external_partition_bytes = bytes;
         self
     }
 
@@ -571,6 +581,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
         C: FnMut(usize, (LoadedPartition<N>, PartitionLoadCounters)) -> Result<(), GfError>,
     {
         let (root, codec, max_partition_bytes) = (self.root, self.codec, self.max_partition_bytes);
+        let max_external_partition_bytes = self.max_external_partition_bytes;
         #[cfg(any(test, feature = "test-support"))]
         let spill_mode = super::spill_spike::mode()?;
         let load_job = move |root: &StableDirectory,
@@ -608,6 +619,22 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                 .map(|(records, counters)| {
                     (LoadedPartition::External(Box::new(records)), counters)
                 });
+            }
+            // #1585: a codec-free partition over its resident budget is sorted
+            // into on-disk runs when the recorded external bound admits it.
+            if max_external_partition_bytes != 0
+                && codec.is_none()
+                && !fits_resident::<N>(root, names, *expected, max_partition_bytes)?
+            {
+                return super::external_partition::sort_into_runs::<N>(
+                    root,
+                    names,
+                    *expected,
+                    max_partition_bytes,
+                    max_external_partition_bytes,
+                    stop,
+                )
+                .map(|(runs, counters)| (LoadedPartition::Runs(Box::new(runs)), counters));
             }
             load_fixed_partition::<N>(root, names, *expected, codec, max_partition_bytes, stop)
                 .map(|(records, counters)| (LoadedPartition::Resident(records), counters))
@@ -1134,6 +1161,8 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
 /// resident, fully sorted partition.
 pub(super) enum LoadedPartition<const N: usize> {
     Resident(PartitionRecords<N>),
+    /// An over-budget partition sorted into on-disk runs (#1585).
+    Runs(Box<super::external_partition::ExternalPartition<N>>),
     /// Candidate A (#1507, #1585): DataFusion `SortExec` with fixed pool sizing.
     #[cfg(any(test, feature = "test-support"))]
     External(Box<super::spill_spike::ExternalPartition>),
@@ -1150,6 +1179,7 @@ impl<const N: usize> LoadedPartition<N> {
     ) -> Result<(), GfError> {
         match self {
             Self::Resident(records) => records.iter().try_for_each(consume),
+            Self::Runs(runs) => runs.for_each_record(consume),
             #[cfg(any(test, feature = "test-support"))]
             Self::External(records) => records.for_each_record(consume),
             #[cfg(any(test, feature = "test-support"))]
@@ -1159,7 +1189,6 @@ impl<const N: usize> LoadedPartition<N> {
 }
 
 /// Combined on-disk length of a partition's sealed segments.
-#[cfg(any(test, feature = "test-support"))]
 fn segment_bytes(root: &StableDirectory, names: &[String]) -> Result<u64, GfError> {
     names.iter().try_fold(0_u64, |total, name| {
         let length = root
@@ -1171,6 +1200,28 @@ fn segment_bytes(root: &StableDirectory, names: &[String]) -> Result<u64, GfErro
             .checked_add(length)
             .ok_or_else(|| super::storage("partition spill byte count overflows"))
     })
+}
+
+/// Whether a codec-free partition's resident materialization fits
+/// `max_partition_bytes`: the admission `load_fixed_partition` applies, taken
+/// before anything is allocated (#1585).
+fn fits_resident<const N: usize>(
+    root: &StableDirectory,
+    names: &[String],
+    expected_records: Option<u64>,
+    max_partition_bytes: u64,
+) -> Result<bool, GfError> {
+    // The routed count decides without I/O. Only a load without one reads the
+    // segment lengths; either load re-checks the count against the records.
+    let count = if let Some(count) = expected_records {
+        count
+    } else {
+        segment_bytes(root, names)? / N as u64
+    };
+    Ok(
+        super::partition::admit_materialization(count.checked_mul(N as u64), max_partition_bytes)
+            .is_ok(),
+    )
 }
 
 /// Read one fixed-width partition's sealed segments into memory and sort them,
