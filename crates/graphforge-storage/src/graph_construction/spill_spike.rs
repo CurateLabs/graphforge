@@ -17,7 +17,9 @@
 //! * `native` — hybrid: partitions the baseline admits stay resident, and a
 //!   partition the baseline would refuse is sorted by GraphForge's own
 //!   bounded external merge (run-sort then k-way merge), with no third-party
-//!   memory pool.
+//!   memory pool.  Run size uses the same formula as the DataFusion pool
+//!   (`default_datafusion_pool_bytes`) so both candidates operate at equal
+//!   per-partition memory envelopes.
 //!
 //! Recorded splitters, routing, GraphForge's own spill segments, publication,
 //! receipts and recovery are unchanged. DataFusion owns only the transient
@@ -1240,7 +1242,9 @@ pub(super) fn load_native_external<const N: usize>(
     }
     let guard = guard_enabled()?;
     let temp_bytes_limit = bytes_env("GF_SHAPE_SPILL_TEMP_BYTES")?;
-    let run_bytes = (max_partition_bytes / 16).clamp(MIN_NATIVE_RUN_BYTES, 64 << 20);
+    // Use the same memory envelope as Candidate A (DataFusion pool) so both
+    // candidates are compared at equal per-partition memory budgets.
+    let run_bytes = default_datafusion_pool_bytes(max_partition_bytes).max(MIN_NATIVE_RUN_BYTES);
     let run_records = ((run_bytes as usize) / N).max(1);
     let spill_dir = match std::env::var_os("GF_SHAPE_SPILL_DIR") {
         Some(path) => PathBuf::from(&path),

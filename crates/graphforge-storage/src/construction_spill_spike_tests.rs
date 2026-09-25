@@ -719,12 +719,12 @@ fn spill_spike_native_crash_resumes_but_orphans_runs() {
         },
     );
     assert!(!exited && crashed.is_null(), "native child did not abort");
-    // The abort fires after the first run is written; the scratch directory
-    // should contain at least one run file.  (The NativeRun Drop impl runs
-    // during process abort? No — abort does not run destructors.  So files
-    // remain.)
-    // Note: whether any files are present depends on OS abort behaviour.
-    // We accept either: what we require is that resume still publishes correctly.
+    // SIGABRT does not run Rust destructors, so NativeRun's Drop (which
+    // removes scratch files) does not execute.  Scratch files written before
+    // the abort are therefore orphaned.  Whether any files are present at the
+    // point we inspect depends on OS buffering and filesystem behaviour, so
+    // we do not assert on scratch file presence.  The invariant asserted is:
+    // a clean retry after abort publishes the correct fingerprint.
     let scratch = root.path().join("native-crash-scratch");
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
     let output = command

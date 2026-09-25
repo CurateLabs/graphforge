@@ -16,7 +16,8 @@ The existing `#1507` `DataFusion` `SortExec` adapter
 `GreedyMemoryPool` is changed from `max_partition_bytes` (the whole recorded
 budget) to a tested fraction.
 
-**Root cause of the existing failure.**  When `pool_bytes = max_partition_bytes`
+**Root cause of the existing failure (reading of DataFusion 54.x source, not
+confirmed by a targeted unit test).**  When `pool_bytes = max_partition_bytes`
 (e.g. 256 MiB) and a partition is large enough to spill, DataFusion's
 `sort_and_spill_in_mem_batches` path accumulates nearly `pool − sort_spill_reservation`
 bytes in ExternalSorter[0] (the sorted sub-stream splits).  Simultaneously, the
@@ -172,6 +173,17 @@ was discovered late; a future DataFusion version could reintroduce a related
 failure under a different pool-sizing regime.  Re-validation is O(hours) with
 the star workloads.
 
+**ADR 0047 obligations remaining.**
+
+| Obligation | Status |
+| --- | --- |
+| Recorded construction parameter | Not met: pool size is not written to the construction log or ledger. |
+| Scratch through construction directory, reclaimed at recovery | Not met: scratch is written to `GF_SHAPE_SPILL_DIR` or OS temp, not the construction directory; recovery does not reclaim it. |
+| Ledger-derived scratch limit | Not met: `GF_SHAPE_SPILL_TEMP_BYTES` is an env override, not derived from the ledger. |
+| Scratch bytes in evidence accounting | Met via `ExternalEvidence.spilled_bytes` in `SHAPE_SPILL` metrics. |
+| Integrity (multiset guard) | Met: `Multiset` guard detects corruption before publication. |
+| Thread-based coordinator | Not met: DataFusion uses a Tokio async task pool, not a dedicated coordinator thread as specified by ADR 0047. |
+
 ### Candidate B
 
 **Dependency surface.**  Zero third-party memory management.  Sort is
@@ -189,7 +201,20 @@ and guard mismatches all originate in GraphForge code.
 for large run counts this is O(run_count × I/O_per_record).  Candidate A's
 DataFusion merge uses a sorted run merger with larger read batches.  The
 relative I/O cost depends on how many runs each produces for the measured
-workloads; see measurement results.
+workloads; see measurement results.  The heap allocates a `Box<[u8]>` per
+merge-step record; a fixed `[u8; N]` key would reduce allocator pressure for
+large run counts (known cost, not yet implemented).
+
+**ADR 0047 obligations remaining.**
+
+| Obligation | Status |
+| --- | --- |
+| Recorded construction parameter | Not met: run size is not written to the construction log or ledger. |
+| Scratch through construction directory, reclaimed at recovery | Not met: scratch is written to `GF_SHAPE_SPILL_DIR` or OS temp, not the construction directory; recovery does not reclaim orphaned run files. |
+| Ledger-derived scratch limit | Not met: `GF_SHAPE_SPILL_TEMP_BYTES` is an env override, not derived from the ledger. |
+| Scratch bytes in evidence accounting | Met via `ExternalEvidence.spilled_bytes` in `SHAPE_SPILL_NATIVE` metrics. |
+| Integrity (multiset guard) | Met: `Multiset` guard detects corruption before publication. |
+| Thread-based coordinator | Met: native sort and merge run on a dedicated worker thread spawned per partition. |
 
 ## Recommendation
 
