@@ -250,3 +250,62 @@ fn row_partition_admits_before_decode_and_authenticates_before_ipc_allocation() 
         assert!(error.to_string().contains("identity"), "{error}");
     }
 }
+
+/// #1448: sealing a boundary's spills on parallel lanes installs the same
+/// segments and charges the same evidence as sealing them on the calling
+/// thread, and leaves one pending directory flush for the boundary.
+#[test]
+fn boundary_seal_on_lanes_matches_the_calling_thread() {
+    let seal = |lanes: usize| {
+        let root = tempfile::TempDir::new().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let mut session = super::super::tests::open(&root, 0x1448_5ea1);
+        let admission = Arc::new(super::super::cpu_admission::ConstructionCpuAdmission::new(
+            NonZeroUsize::new(lanes).unwrap(),
+        ));
+        let super::super::GraphConstructionSession {
+            root: session_root,
+            checkpoint,
+            ..
+        } = &mut session;
+        let mut partitioner = FixedRangePartitioner::<33>::new(
+            session_root,
+            PartitionFamily::Endpoints,
+            16,
+            None,
+            false,
+        )
+        .unwrap()
+        .with_cpu_admission(Some(admission.clone()));
+        let mut receipts = Vec::new();
+        for boundary in 1..=3_u64 {
+            for partition in 0..16_usize {
+                let mut record = [0_u8; 33];
+                record[..8].copy_from_slice(&boundary.to_be_bytes());
+                record[8..16].copy_from_slice(&(partition as u64).to_be_bytes());
+                partitioner
+                    .route_slice(partition, &record, 1, &mut checkpoint.evidence)
+                    .unwrap();
+            }
+            let mut batch = SealDirectoryBatch::new(session_root);
+            partitioner
+                .seal_at_boundary(boundary, &mut checkpoint.evidence, &mut batch)
+                .unwrap();
+            batch.flush(&mut checkpoint.evidence).unwrap();
+        }
+        for receipt in partitioner.sealed_segments() {
+            receipts.push((receipt.name, receipt.bytes, receipt.sha256));
+        }
+        (
+            admission.peak(),
+            receipts,
+            super::super::tests::evidence_without_file_identities(&checkpoint.evidence),
+        )
+    };
+    let serial = seal(1);
+    let parallel = seal(8);
+    assert_eq!(serial.0, 1);
+    assert_eq!(parallel.0, 8, "sealing never ran on parallel lanes");
+    assert_eq!(serial.1.len(), 48);
+    assert_eq!((serial.1, serial.2), (parallel.1, parallel.2));
+}
