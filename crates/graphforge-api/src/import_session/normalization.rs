@@ -65,6 +65,17 @@ struct Window<'a> {
     admitted_bytes: usize,
     byte_budget: usize,
     workers: usize,
+    /// Test-only observation of batches normalizing at once (#1586).
+    #[cfg(test)]
+    probe: Option<std::sync::Arc<InFlightProbe>>,
+}
+
+/// Counts batches normalizing at once; test-only.
+#[cfg(test)]
+#[derive(Default)]
+struct InFlightProbe {
+    current: std::sync::atomic::AtomicUsize,
+    peak: std::sync::atomic::AtomicUsize,
 }
 
 impl Window<'_> {
@@ -125,6 +136,15 @@ impl Window<'_> {
                 self.graph
                     .compute_pool
                     .map_ordered(group, |(index, batch)| {
+                        #[cfg(test)]
+                        if let Some(probe) = &self.probe {
+                            use std::sync::atomic::Ordering;
+                            let now = probe.current.fetch_add(1, Ordering::AcqRel) + 1;
+                            probe.peak.fetch_max(now, Ordering::AcqRel);
+                            // Hold the lane long enough for any overlap to show.
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                            probe.current.fetch_sub(1, Ordering::AcqRel);
+                        }
                         let result = if self
                             .cancellation
                             .is_some_and(CancellationToken::is_cancelled)
@@ -193,6 +213,8 @@ pub(super) fn for_each(
             .unwrap_or(usize::MAX)
             .clamp(1, 256 << 20),
         workers: graph.compute_pool.num_threads().min(4),
+        #[cfg(test)]
+        probe: None,
     };
     let mut decoded_index = 0_u64;
     for_each_source_batch(root, source, batch_rows, |batch| {

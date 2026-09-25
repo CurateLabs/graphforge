@@ -763,3 +763,26 @@ fn finish_waiting_for_admission_is_cancellable() {
     drop(held);
     assert_eq!(admission.in_use(), 0);
 }
+
+/// #1586: while another holder has every lane, the finish does not start; it
+/// completes with the unconstrained bytes once the lane is released.
+#[test]
+fn finish_waits_for_a_lane_while_the_admission_is_full() {
+    use super::super::cpu_admission::ConstructionCpuAdmission;
+    let (expected, _) = finish_identity_fixture(0x1586, None, &mut || false).unwrap();
+    let admission = std::sync::Arc::new(ConstructionCpuAdmission::new(workers(1)));
+    let held = admission.acquire(workers(1), &mut || false).unwrap();
+    let finish = {
+        let admission = std::sync::Arc::clone(&admission);
+        std::thread::spawn(move || finish_identity_fixture(0x1586, Some(admission), &mut || false))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !finish.is_finished(),
+        "the finish ran without a lane while the admission was full"
+    );
+    drop(held);
+    let (digest, _) = finish.join().unwrap().unwrap();
+    assert_eq!(digest, expected);
+    assert_eq!(admission.in_use(), 0);
+}

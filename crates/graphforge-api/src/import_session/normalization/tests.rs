@@ -72,6 +72,7 @@ fn window(graph: &GraphForge, budget: usize) -> Window<'_> {
         admitted_bytes: 0,
         byte_budget: budget,
         workers: graph.compute_pool.num_threads().min(4),
+        probe: None,
     }
 }
 
@@ -556,4 +557,39 @@ fn flush_waiting_for_construction_lanes_is_cancellable() {
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
     drop(held);
     assert_eq!(graph.construction_cpu_admission.in_use(), 0);
+}
+
+/// #1586: a flush maps no more batches at once than its lease grants. With a
+/// four-worker pool and four pending batches, a one-lane and a two-lane
+/// admission cap the batches in flight; a four-lane admission lets all four
+/// overlap.
+#[test]
+fn flush_maps_no_more_batches_at_once_than_its_lease() {
+    let batches = (0..4_u128)
+        .map(|index| nodes(&[Some(fixture_uuid(700 + index))], 1))
+        .collect::<Vec<_>>();
+    for (lanes, expected_peak) in [(1, 1), (2, 2), (4, 4)] {
+        let mut graph = graph(4);
+        graph.construction_cpu_admission = admission(lanes);
+        let probe = Arc::new(InFlightProbe::default());
+        let mut window = window(&graph, usize::MAX);
+        window.probe = Some(Arc::clone(&probe));
+        let mut consumed = Vec::new();
+        let mut consume = |index, _batch| {
+            consumed.push(index);
+            Ok(())
+        };
+        for (index, batch) in batches.iter().enumerate() {
+            window
+                .push(index as u64, batch.clone(), &mut consume)
+                .unwrap();
+        }
+        window.flush(&mut consume).unwrap();
+        assert_eq!(consumed, vec![0, 1, 2, 3], "lanes={lanes}");
+        assert_eq!(
+            probe.peak.load(std::sync::atomic::Ordering::Acquire),
+            expected_peak,
+            "lanes={lanes}"
+        );
+    }
 }
