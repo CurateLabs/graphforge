@@ -66,21 +66,18 @@ impl GraphForge {
         self.open_graph_construction(session_uuid, budgets, true)
     }
 
-    fn open_graph_construction(
+    /// Open or resume the storage session for `open_graph_construction`,
+    /// selecting the semantic authority and lifecycle this facade carries.
+    fn open_storage_construction(
         &self,
+        dir: &std::path::Path,
         session_uuid: Uuid,
+        parent_topology_generation: u64,
         budgets: GraphConstructionBudgets,
         resume: bool,
-    ) -> Result<GraphConstructionSession<'_>, GfError> {
-        if self.read_only {
-            return Err(validation("historical graph views cannot construct"));
-        }
-        let _visibility = self.graph_visibility.read()?;
-        let workspace = self.workspace_for_session();
-        let dir = workspace.path();
-        let parent_topology_generation = graphforge_storage::read_topology_generation(dir)?;
+    ) -> Result<graphforge_storage::GraphConstructionSession, GfError> {
         let project = self.resolved_generation.container_root();
-        let mut inner = if let Some(allocation) = &self.allocation_operation {
+        let inner = if let Some(allocation) = &self.allocation_operation {
             let authority = if self.ontology_mode == OntologyMode::Exploratory {
                 None
             } else {
@@ -166,6 +163,29 @@ impl GraphForge {
                 )?
             }
         };
+        Ok(inner)
+    }
+
+    fn open_graph_construction(
+        &self,
+        session_uuid: Uuid,
+        budgets: GraphConstructionBudgets,
+        resume: bool,
+    ) -> Result<GraphConstructionSession<'_>, GfError> {
+        if self.read_only {
+            return Err(validation("historical graph views cannot construct"));
+        }
+        let _visibility = self.graph_visibility.read()?;
+        let workspace = self.workspace_for_session();
+        let dir = workspace.path();
+        let parent_topology_generation = graphforge_storage::read_topology_generation(dir)?;
+        let mut inner = self.open_storage_construction(
+            dir,
+            session_uuid,
+            parent_topology_generation,
+            budgets,
+            resume,
+        )?;
         // #1586: every import on this instance draws its parallel lanes from
         // one admission, so construction never takes the whole CPU budget.
         inner.set_cpu_admission(Some(std::sync::Arc::clone(
