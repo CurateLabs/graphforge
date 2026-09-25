@@ -636,3 +636,130 @@ fn a_panicking_consume_resumes_on_the_caller_after_the_workers_exit() {
     assert_eq!(joined.running.load(Ordering::SeqCst), 0);
     assert_eq!(joined.live.load(Ordering::SeqCst), 0);
 }
+
+/// Route a fixed identity fixture and finish it, optionally leasing the
+/// finish-time workers from `admission`. Returns the output digest and the
+/// relabelled evidence, or the finish error as text.
+fn finish_identity_fixture(
+    seed: u128,
+    admission: Option<std::sync::Arc<super::super::cpu_admission::ConstructionCpuAdmission>>,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<(String, serde_json::Value), String> {
+    use super::super::GraphConstructionSession;
+    use super::super::partition::IdentitySampler;
+    use super::super::partition_shaping::{FixedRangePartitioner, PartitionFamily};
+    use sha2::Digest;
+    use std::ffi::OsStr;
+    use std::io::Read;
+
+    const RECORDS: u64 = 4_096;
+    const REQUESTED_PARTITIONS: u32 = 16;
+    let keys = (0..RECORDS)
+        .map(|index| u128::from(index + 1).to_be_bytes())
+        .collect::<Vec<_>>();
+    let root = tempfile::TempDir::new().unwrap();
+    crate::open_or_initialize_project(root.path()).unwrap();
+    let mut session = super::super::tests::open(&root, seed);
+    let GraphConstructionSession {
+        root: session_root,
+        checkpoint,
+        ..
+    } = &mut session;
+    let mut sampler = IdentitySampler::new(REQUESTED_PARTITIONS, RECORDS).unwrap();
+    let positions = sampler.positions().collect::<Vec<_>>();
+    for position in positions {
+        sampler
+            .admit(keys[usize::try_from(position).unwrap()])
+            .unwrap();
+    }
+    let plan = sampler.into_plan(REQUESTED_PARTITIONS).unwrap();
+    let mut partitioner = FixedRangePartitioner::<16>::new(
+        session_root,
+        PartitionFamily::Identities,
+        plan.partitions(),
+        None,
+        true,
+    )
+    .unwrap()
+    .with_cpu_admission(admission);
+    for key in &keys {
+        partitioner
+            .route(&plan, key, key, &mut checkpoint.evidence)
+            .unwrap();
+    }
+    let output = partitioner
+        .finish_optional(
+            "staged-identities.run",
+            0,
+            false,
+            &mut || cancelled(),
+            &mut checkpoint.evidence,
+        )
+        .map_err(|error| error.to_string())?
+        .unwrap();
+    let mut bytes = Vec::new();
+    session_root
+        .open_child_file(OsStr::new(&output))
+        .unwrap()
+        .read_to_end(&mut bytes)
+        .unwrap();
+    assert_eq!(bytes.len() as u64, RECORDS * 16);
+    Ok((
+        super::super::hex(&sha2::Sha256::digest(&bytes)),
+        relabelled(&checkpoint.evidence),
+    ))
+}
+
+/// #1586: the finish leases its workers from the instance admission. A
+/// one-lane grant publishes the same bytes and evidence as the fixed pool,
+/// the lease is released afterwards, and the lanes in use never exceed the
+/// limit.
+#[test]
+fn finish_leases_its_workers_from_the_instance_admission() {
+    use super::super::cpu_admission::ConstructionCpuAdmission;
+    let (expected, expected_evidence) =
+        finish_identity_fixture(0x1586, None, &mut || false).unwrap();
+    for limit in [1, 2, 3] {
+        let admission = std::sync::Arc::new(ConstructionCpuAdmission::new(workers(limit)));
+        let (digest, evidence) =
+            finish_identity_fixture(0x1586, Some(std::sync::Arc::clone(&admission)), &mut || {
+                false
+            })
+            .unwrap();
+        assert_eq!(digest, expected, "output bytes differ at limit={limit}");
+        assert_eq!(
+            evidence, expected_evidence,
+            "evidence differs at limit={limit}"
+        );
+        assert_eq!(admission.in_use(), 0, "the lease must be released");
+        let wanted = PARTITION_LOAD_WORKERS.get();
+        assert_eq!(admission.peak(), limit.min(wanted), "limit={limit}");
+    }
+}
+
+/// #1586: a finish that cannot get a lane because another holder has them all
+/// waits, polls its cancellation, and returns `construction cancelled` without
+/// publishing, leaving the other holder's lease intact.
+#[test]
+fn finish_waiting_for_admission_is_cancellable() {
+    use super::super::cpu_admission::ConstructionCpuAdmission;
+    let admission = std::sync::Arc::new(ConstructionCpuAdmission::new(workers(1)));
+    let held = admission.acquire(workers(1), &mut || false).unwrap();
+    let started = Instant::now();
+    let mut polls = 0_u32;
+    let error =
+        finish_identity_fixture(0x1586, Some(std::sync::Arc::clone(&admission)), &mut || {
+            polls += 1;
+            polls > 3
+        })
+        .unwrap_err();
+    assert!(error.contains("construction cancelled"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(
+        admission.in_use(),
+        1,
+        "only the other holder's lease remains"
+    );
+    drop(held);
+    assert_eq!(admission.in_use(), 0);
+}

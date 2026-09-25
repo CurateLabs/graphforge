@@ -590,6 +590,9 @@ pub struct GraphForge {
     compute_pool: graphforge_exec::SharedComputePool,
     /// Instance-owned heavy-query admission gate (#337).
     heavy_query_admission: Arc<resource_policy::HeavyQueryAdmission>,
+    /// Instance-wide limit on parallel construction lanes (#1586, ADR 0047):
+    /// `compute_threads - construction_cpu_reserve`, shared by every import.
+    construction_cpu_admission: Arc<graphforge_storage::ConstructionCpuAdmission>,
     /// Ensures mutation bursts share one bounded process-local driver thread.
     provider_refresh_driver_active: Arc<AtomicBool>,
     /// Runtime-only provider recipes capable of refreshing exact lineages.
@@ -779,6 +782,7 @@ impl GraphForge {
             compute_pool: Arc::new(graphforge_exec::ComputePool::new(
                 resource_policy.compute_threads,
             )?),
+            construction_cpu_admission: resource_policy.construction_cpu_admission(),
             provider_refresh_driver_active: Arc::new(AtomicBool::new(false)),
             provider_refresh_runtimes: Arc::new(Mutex::new(Vec::new())),
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
@@ -977,6 +981,7 @@ impl GraphForge {
         let compute_pool = Arc::new(graphforge_exec::ComputePool::new(
             resource_policy.compute_threads,
         )?);
+        let construction_cpu_admission = resource_policy.construction_cpu_admission();
         let runtime = build_runtime(&resource_policy)?;
 
         let adjacency_provider =
@@ -1011,6 +1016,7 @@ impl GraphForge {
             resource_policy,
             compute_pool,
             heavy_query_admission,
+            construction_cpu_admission,
             provider_refresh_driver_active: Arc::new(AtomicBool::new(false)),
             provider_refresh_runtimes: Arc::new(Mutex::new(Vec::new())),
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),

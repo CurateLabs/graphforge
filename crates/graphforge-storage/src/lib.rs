@@ -72,6 +72,7 @@ pub use graph_construction::{
     GraphConstructionEncoding, GraphConstructionEncodingEvidence,
     GraphConstructionEncodingInvocationEvidence, GraphConstructionEvidence,
     GraphConstructionSession, GraphConstructionState,
+    cpu_admission::{ConstructionCpuAdmission, ConstructionCpuLease},
 };
 
 pub mod graph_files;

@@ -96,26 +96,57 @@ impl Window<'_> {
         }
         let pending = std::mem::take(&mut self.pending);
         self.admitted_bytes = 0;
-        let region = RegionScope::named("normalization");
-        let normalized = self
+        // #1586: lease this flush's lanes from the instance construction
+        // admission on the calling thread, so no compute-pool worker ever
+        // blocks waiting for one, then map at most that many batches at once.
+        // Each batch normalizes independently, so the grouping changes
+        // neither results nor their order.
+        let cancellation = self.cancellation;
+        let want =
+            std::num::NonZeroUsize::new(pending.len()).unwrap_or(std::num::NonZeroUsize::MIN);
+        let lease = self
             .graph
-            .compute_pool
-            .map_ordered(&pending, |(index, batch)| {
-                let result = if self
-                    .cancellation
-                    .is_some_and(CancellationToken::is_cancelled)
-                {
-                    Err(cancelled())
+            .construction_cpu_admission
+            .acquire(want, &mut || {
+                cancellation.is_some_and(CancellationToken::is_cancelled)
+            })
+            .map_err(|error| {
+                if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                    cancelled()
                 } else {
-                    normalize_batch(
-                        self.graph,
-                        import_batch_operation(self.operation_uuid, self.source_sequence, *index),
-                        self.kind,
-                        batch,
-                    )
-                };
-                (*index, result)
-            });
+                    error
+                }
+            })?;
+        let lanes = lease.lanes().get();
+        let region = RegionScope::named("normalization");
+        let mut normalized = Vec::with_capacity(pending.len());
+        for group in pending.chunks(lanes) {
+            normalized.extend(
+                self.graph
+                    .compute_pool
+                    .map_ordered(group, |(index, batch)| {
+                        let result = if self
+                            .cancellation
+                            .is_some_and(CancellationToken::is_cancelled)
+                        {
+                            Err(cancelled())
+                        } else {
+                            normalize_batch(
+                                self.graph,
+                                import_batch_operation(
+                                    self.operation_uuid,
+                                    self.source_sequence,
+                                    *index,
+                                ),
+                                self.kind,
+                                batch,
+                            )
+                        };
+                        (*index, result)
+                    }),
+            );
+        }
+        drop(lease);
         RegionScope::record_work(
             "rows",
             normalized

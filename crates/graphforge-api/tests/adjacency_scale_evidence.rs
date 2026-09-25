@@ -478,6 +478,7 @@ fn scale_policy(spill_dir: &Path) -> ExecutionResourcePolicy {
             max_bytes: Some(128 * 1024 * 1024 * 1024),
         },
         max_concurrent_heavy_queries: Some(1),
+        construction_cpu_reserve: None,
     }
 }
 

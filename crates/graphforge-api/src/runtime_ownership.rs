@@ -24,6 +24,10 @@ impl GraphForge {
             compute_threads: self.resource_policy.compute_threads,
             max_concurrent_heavy_queries: self.resource_policy.max_concurrent_heavy_queries,
             heavy_query_available: self.heavy_query_admission.available_permits(),
+            construction_cpu_reserve: self.resource_policy.construction_cpu_reserve,
+            construction_cpu_limit: self.construction_cpu_admission.limit(),
+            construction_cpu_in_use: self.construction_cpu_admission.in_use(),
+            construction_cpu_peak: self.construction_cpu_admission.peak(),
             observed_logical_cpus: self.resource_policy.observed_logical_cpus,
         }
     }

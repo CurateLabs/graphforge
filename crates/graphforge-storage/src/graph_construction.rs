@@ -56,6 +56,7 @@ use recovery::{
     unlink_reconciled_shape_segments, unlink_shape_artifact, unlink_writer_capability,
 };
 mod controls;
+pub mod cpu_admission;
 use controls::{
     SealDirectoryBatch, artifact_temp, control_sha256, decode_bounded, decode_shape_intent,
     initial_checkpoint_format, install_control, install_control_batched, install_shape_intent,
@@ -969,6 +970,9 @@ pub struct GraphConstructionSession {
     /// like every other interrupted shape, it is recovered by reopening, not
     /// by a same-facade retry.
     shape_finish_interrupted: bool,
+    /// Instance-wide construction CPU admission (#1586, ADR 0047). `None`
+    /// keeps the fixed finish-time worker count, as for direct storage users.
+    cpu_admission: Option<std::sync::Arc<cpu_admission::ConstructionCpuAdmission>>,
     session_lock: File,
     _reservation: ProcessReservation,
 }
@@ -984,6 +988,16 @@ impl Drop for GraphConstructionSession {
 }
 
 impl GraphConstructionSession {
+    /// Draw this session's parallel construction lanes from `admission`
+    /// (#1586, ADR 0047). Scheduling only: output bytes and evidence do not
+    /// depend on it. `None` restores the fixed finish-time worker count.
+    pub fn set_cpu_admission(
+        &mut self,
+        admission: Option<std::sync::Arc<cpu_admission::ConstructionCpuAdmission>>,
+    ) {
+        self.cpu_admission = admission;
+    }
+
     /// Create or resume an operation pinned to one parent topology generation.
     pub fn open_with_mode(
         project_dir: &Path,
@@ -1619,6 +1633,7 @@ impl GraphConstructionSession {
             shape_resume: None,
             shape_boundary_retired_through: 0,
             shape_finish_interrupted: false,
+            cpu_admission: None,
             session_lock,
             _reservation: reservation,
         };

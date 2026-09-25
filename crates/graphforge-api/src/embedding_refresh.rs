@@ -291,6 +291,7 @@ impl GraphForge {
             resource_policy: self.resource_policy.clone(),
             compute_pool: Arc::clone(&self.compute_pool),
             heavy_query_admission: Arc::clone(&self.heavy_query_admission),
+            construction_cpu_admission: Arc::clone(&self.construction_cpu_admission),
             provider_refresh_driver_active: Arc::clone(&self.provider_refresh_driver_active),
             provider_refresh_runtimes: Arc::clone(&self.provider_refresh_runtimes),
             provider_find_runtimes: Arc::clone(&self.provider_find_runtimes),

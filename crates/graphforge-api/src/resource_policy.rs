@@ -61,6 +61,15 @@ pub struct ExecutionResourcePolicy {
     /// generation, and global triangle counting partition work through that
     /// pool above documented crossovers; `1` keeps the serial path.
     pub compute_threads: Option<usize>,
+    /// Compute threads construction may never use (#1586, ADR 0047).
+    ///
+    /// Every import on the instance shares one limit of `compute_threads -
+    /// construction_cpu_reserve` parallel construction lanes, so queries keep
+    /// at least this share of the compute budget while imports run. At least
+    /// one, and below `compute_threads` unless that is one (a one-thread
+    /// instance runs construction on one lane). `None` → the default,
+    /// `max(1, compute_threads / 4)`.
+    pub construction_cpu_reserve: Option<usize>,
 }
 
 impl Default for ExecutionResourcePolicy {
@@ -80,6 +89,7 @@ impl Default for ExecutionResourcePolicy {
             io_concurrency: None,
             max_concurrent_heavy_queries: Some(DEFAULT_MAX_CONCURRENT_HEAVY_QUERIES),
             compute_threads: None,
+            construction_cpu_reserve: None,
         }
     }
 }
@@ -109,6 +119,10 @@ pub struct NormalizedResourcePolicy {
     pub max_concurrent_heavy_queries: usize,
     /// Compute-thread budget for the instance-owned private CPU pool (#342 / #343 / #344 / #588).
     pub compute_threads: usize,
+    /// Compute threads construction may never use (#1586).
+    pub construction_cpu_reserve: usize,
+    /// Parallel construction lanes shared by every import (#1586).
+    pub construction_cpu_limit: usize,
     /// Machine logical parallelism observed at normalize time.
     pub observed_logical_cpus: usize,
 }
@@ -136,6 +150,14 @@ pub struct ResourcePolicyDiagnostics {
     pub max_concurrent_heavy_queries: usize,
     /// Currently available heavy-query slots.
     pub heavy_query_available: usize,
+    /// Compute threads construction may never use (#1586).
+    pub construction_cpu_reserve: usize,
+    /// Parallel construction lanes shared by every import (#1586).
+    pub construction_cpu_limit: usize,
+    /// Construction lanes currently leased.
+    pub construction_cpu_in_use: usize,
+    /// Most construction lanes leased at once since the instance opened.
+    pub construction_cpu_peak: usize,
     /// Logical CPUs observed at normalize time.
     pub observed_logical_cpus: usize,
 }
@@ -284,6 +306,9 @@ impl ExecutionResourcePolicy {
             )));
         }
 
+        let (construction_reserve, construction_limit) =
+            construction_cpu_split(compute, self.construction_cpu_reserve)?;
+
         let batch_size = self.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
         if !(MIN_BATCH_SIZE..=MAX_BATCH_SIZE).contains(&batch_size) {
             return Err(validation(format!(
@@ -343,12 +368,50 @@ impl ExecutionResourcePolicy {
             io_concurrency: io_conc,
             max_concurrent_heavy_queries: heavy,
             compute_threads: compute,
+            construction_cpu_reserve: construction_reserve,
+            construction_cpu_limit: construction_limit,
             observed_logical_cpus: observed,
         })
     }
 }
 
+/// Default compute threads kept from construction: a quarter, at least one.
+pub(crate) fn default_construction_cpu_reserve(compute_threads: usize) -> usize {
+    (compute_threads / 4).max(1)
+}
+
+/// Validate the construction reserve and derive the shared lane limit.
+fn construction_cpu_split(
+    compute_threads: usize,
+    requested: Option<usize>,
+) -> Result<(usize, usize), GfError> {
+    let reserve = requested.unwrap_or_else(|| default_construction_cpu_reserve(compute_threads));
+    if reserve == 0 {
+        return Err(validation("construction_cpu_reserve must be at least one"));
+    }
+    if compute_threads == 1 {
+        // One compute thread cannot be split: construction runs one lane and
+        // queries run inline on their callers.
+        return Ok((reserve, 1));
+    }
+    if reserve >= compute_threads {
+        return Err(validation(format!(
+            "construction_cpu_reserve {reserve} must be below compute_threads {compute_threads}"
+        )));
+    }
+    Ok((reserve, compute_threads - reserve))
+}
+
 impl NormalizedResourcePolicy {
+    /// A fresh instance construction admission sized by this policy (#1586).
+    pub(crate) fn construction_cpu_admission(
+        &self,
+    ) -> std::sync::Arc<graphforge_storage::ConstructionCpuAdmission> {
+        let limit = std::num::NonZeroUsize::new(self.construction_cpu_limit)
+            .unwrap_or(std::num::NonZeroUsize::MIN);
+        std::sync::Arc::new(graphforge_storage::ConstructionCpuAdmission::new(limit))
+    }
+
     /// Build a Tokio multi-thread runtime honoring this policy.
     pub(crate) fn build_tokio_runtime(&self) -> Result<tokio::runtime::Runtime, GfError> {
         tokio::runtime::Builder::new_multi_thread()
@@ -390,6 +453,69 @@ impl HeavyQueryAdmission {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn construction_reserve_defaults_to_a_quarter_and_leaves_queries_a_share() {
+        for (compute, reserve, limit) in [(1, 1, 1), (2, 1, 1), (4, 1, 3), (8, 2, 6), (16, 4, 12)] {
+            let normalized = ExecutionResourcePolicy {
+                mode: ResourcePolicyMode::Explicit,
+                tokio_worker_threads: Some(compute.min(4)),
+                compute_threads: Some(compute),
+                ..Default::default()
+            }
+            .normalize();
+            // Some hosts cannot admit 16 compute threads; skip those rows.
+            let Ok(normalized) = normalized else {
+                continue;
+            };
+            assert_eq!(
+                normalized.construction_cpu_reserve, reserve,
+                "compute={compute}"
+            );
+            assert_eq!(
+                normalized.construction_cpu_limit, limit,
+                "compute={compute}"
+            );
+            assert_eq!(
+                normalized.construction_cpu_admission().limit(),
+                limit,
+                "compute={compute}"
+            );
+        }
+    }
+
+    #[test]
+    fn construction_reserve_is_validated() {
+        let policy = |compute, reserve| ExecutionResourcePolicy {
+            mode: ResourcePolicyMode::Explicit,
+            tokio_worker_threads: Some(2),
+            compute_threads: Some(compute),
+            construction_cpu_reserve: Some(reserve),
+            ..Default::default()
+        };
+        assert!(
+            policy(2, 0)
+                .normalize()
+                .unwrap_err()
+                .to_string()
+                .contains("at least one")
+        );
+        assert!(
+            policy(2, 2)
+                .normalize()
+                .unwrap_err()
+                .to_string()
+                .contains("must be below compute_threads")
+        );
+        let split = policy(2, 1).normalize().unwrap();
+        assert_eq!(
+            (split.construction_cpu_reserve, split.construction_cpu_limit),
+            (1, 1)
+        );
+        // One compute thread cannot be split: construction keeps one lane.
+        let single = policy(1, 3).normalize().unwrap();
+        assert_eq!(single.construction_cpu_limit, 1);
+    }
+
     use super::*;
 
     #[test]
@@ -478,6 +604,7 @@ mod tests {
             io_concurrency: None,
             max_concurrent_heavy_queries: None,
             compute_threads: None,
+            construction_cpu_reserve: None,
         }
         .normalize()
         .expect("automatic");

@@ -80,7 +80,7 @@ impl GraphForge {
         let dir = workspace.path();
         let parent_topology_generation = graphforge_storage::read_topology_generation(dir)?;
         let project = self.resolved_generation.container_root();
-        let inner = if let Some(allocation) = &self.allocation_operation {
+        let mut inner = if let Some(allocation) = &self.allocation_operation {
             let authority = if self.ontology_mode == OntologyMode::Exploratory {
                 None
             } else {
@@ -166,6 +166,11 @@ impl GraphForge {
                 )?
             }
         };
+        // #1586: every import on this instance draws its parallel lanes from
+        // one admission, so construction never takes the whole CPU budget.
+        inner.set_cpu_admission(Some(std::sync::Arc::clone(
+            &self.construction_cpu_admission,
+        )));
         Ok(GraphConstructionSession {
             graph: self,
             session_uuid,

@@ -1561,6 +1561,7 @@ mod lifecycle_budget {
                 partition::default_materialization_bytes(),
                 0,
                 false,
+                None,
                 &mut || false,
                 &mut evidence,
             )
