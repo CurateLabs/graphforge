@@ -539,12 +539,13 @@ fn failed_consume_cannot_admit_a_replacement_partition() {
             released: 0,
             ready: BTreeMap::new(),
             live_workers: 3,
+            window_weight: 0,
         }),
         changed: Condvar::new(),
         stop: AtomicBool::new(false),
     };
     let error = shared
-        .release_consumed(Err(storage("injected consume failure")))
+        .release_consumed(Err(storage("injected consume failure")), 0)
         .unwrap_err();
     assert!(error.to_string().contains("injected consume failure"));
     {
@@ -558,7 +559,7 @@ fn failed_consume_cannot_admit_a_replacement_partition() {
             "replacement work must remain inadmissible"
         );
     }
-    shared.release_consumed(Ok(())).unwrap();
+    shared.release_consumed(Ok(()), 0).unwrap();
     let state = shared.lock();
     assert_eq!(state.released, 1);
     assert!(
@@ -809,4 +810,76 @@ fn finish_waits_for_a_lane_while_the_admission_is_full() {
     let (digest, _) = finish.join().unwrap().unwrap();
     assert_eq!(digest, expected);
     assert_eq!(admission.in_use(), 0);
+}
+
+/// #1448: the weight bound holds the dispatched-but-unconsumed weight within
+/// the budget (a single partition heavier than the budget still loads alone),
+/// and the order and results are those of the unweighted pool.
+#[test]
+fn weighted_window_never_exceeds_its_budget() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let weights = [6_u64, 6, 3, 3, 3, 12, 1, 1, 1, 1, 5, 5];
+    let in_flight = AtomicU64::new(0);
+    let peak = AtomicU64::new(0);
+    let load = |index: usize, _stop: &AtomicBool| -> Result<usize, GfError> {
+        let now = in_flight.fetch_add(weights[index], Ordering::SeqCst) + weights[index];
+        peak.fetch_max(now, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        Ok(index * 10)
+    };
+    let mut consumed = Vec::new();
+    consume_in_partition_order_weighted(
+        weights.len(),
+        workers(4),
+        &weights,
+        10,
+        load,
+        &mut || false,
+        |index, value| {
+            consumed.push((index, value));
+            in_flight.fetch_sub(weights[index], Ordering::SeqCst);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        consumed,
+        (0..weights.len())
+            .map(|index| (index, index * 10))
+            .collect::<Vec<_>>()
+    );
+    // 12 is heavier than the budget and loads alone; everything else stays
+    // within 10.
+    assert!(
+        peak.load(Ordering::SeqCst) <= 12,
+        "{}",
+        peak.load(Ordering::SeqCst)
+    );
+}
+
+/// #1448: small partitions load concurrently up to the worker count; the
+/// weight bound does not reduce the pool to one load at a time.
+#[test]
+fn weighted_window_loads_small_partitions_concurrently() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let active = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+    let load = |index: usize, _stop: &AtomicBool| -> Result<usize, GfError> {
+        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+        peak.fetch_max(now, Ordering::SeqCst);
+        // Give the other workers time to start while this one is loading.
+        let started = std::time::Instant::now();
+        while active.load(Ordering::SeqCst) < 4
+            && started.elapsed() < std::time::Duration::from_millis(500)
+        {
+            std::thread::yield_now();
+        }
+        active.fetch_sub(1, Ordering::SeqCst);
+        Ok(index)
+    };
+    consume_in_partition_order_weighted(8, workers(4), &[1; 8], 10, load, &mut || false, |_, _| {
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(peak.load(Ordering::SeqCst), 4);
 }
