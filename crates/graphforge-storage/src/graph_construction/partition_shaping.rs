@@ -1189,7 +1189,6 @@ impl<const N: usize> LoadedPartition<N> {
 }
 
 /// Combined on-disk length of a partition's sealed segments.
-#[cfg(any(test, feature = "test-support"))]
 fn segment_bytes(root: &StableDirectory, names: &[String]) -> Result<u64, GfError> {
     names.iter().try_fold(0_u64, |total, name| {
         let length = root
@@ -1214,22 +1213,10 @@ fn fits_resident<const N: usize>(
 ) -> Result<bool, GfError> {
     // The routed count decides without I/O. Only a load without one reads the
     // segment lengths; either load re-checks the count against the records.
-    let count = match expected_records {
-        Some(count) => count,
-        None => {
-            let mut spill_bytes = 0_u64;
-            for name in names {
-                let length = root
-                    .open_child_file(OsStr::new(name))
-                    .and_then(|file| file.metadata())
-                    .map_err(super::storage)?
-                    .len();
-                spill_bytes = spill_bytes
-                    .checked_add(length)
-                    .ok_or_else(|| super::storage("partition spill byte count overflows"))?;
-            }
-            spill_bytes / N as u64
-        }
+    let count = if let Some(count) = expected_records {
+        count
+    } else {
+        segment_bytes(root, names)? / N as u64
     };
     Ok(
         super::partition::admit_materialization(count.checked_mul(N as u64), max_partition_bytes)
