@@ -3,10 +3,14 @@
 Usage: python summarize.py [runs_dir]
 Reads runs/<workload>-<candidate>-<n>/run.log and validate.stderr.
 """
-import json, re, sys
+
+import json
 from pathlib import Path
+import re
+import sys
 
 RUNS_DIR = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).parent / "runs"
+
 
 def parse_run(run_dir: Path) -> dict:
     result = {"run_dir": str(run_dir), "workload": None, "candidate": None, "run_num": None}
@@ -23,7 +27,9 @@ def parse_run(run_dir: Path) -> dict:
         return result
 
     # Parse run.log
-    log = (run_dir / "run.log").read_text(errors="replace") if (run_dir / "run.log").exists() else ""
+    log = (
+        (run_dir / "run.log").read_text(errors="replace") if (run_dir / "run.log").exists() else ""
+    )
     # wall time for validate
     m = re.search(r"validate exit=(\d+) wall=(\d+)ms", log)
     if m:
@@ -70,11 +76,14 @@ def parse_run(run_dir: Path) -> dict:
             # Aggregate
             result["total_spill_count"] = sum(d.get("spill_count", 0) for d in spill_lines)
             result["total_spilled_bytes"] = sum(d.get("spilled_bytes", 0) for d in spill_lines)
-            result["peak_pool_bytes"] = max((d.get("peak_pool_bytes", 0) for d in spill_lines), default=0)
+            result["peak_pool_bytes"] = max(
+                (d.get("peak_pool_bytes", 0) for d in spill_lines), default=0
+            )
             result["sort_wall_ns"] = sum(d.get("sort_wall_ns", 0) for d in spill_lines)
             result["merge_wall_ns"] = sum(d.get("merge_wall_ns", 0) for d in spill_lines)
 
     return result
+
 
 def main():
     if not RUNS_DIR.exists():
@@ -92,14 +101,20 @@ def main():
         print("No completed runs found.")
         return
 
-    # Group by workload × candidate
+    # Group by workload x candidate
     from collections import defaultdict
+
     groups = defaultdict(list)
     for r in runs:
         k = (r["workload"], r["candidate"])
         groups[k].append(r)
 
-    print(f"{'Workload':<12} {'Candidate':<12} {'N':>2} {'Wall(ms)':>10} {'RSS(MiB)':>9} {'Spill#':>7} {'Spilled(MB)':>12} {'SHA256'}")
+    header = (
+        f"{'Workload':<12} {'Candidate':<12} {'N':>2}"
+        f" {'Wall(ms)':>10} {'RSS(MiB)':>9} {'Spill#':>7}"
+        f" {'Spilled(MB)':>12} {'SHA256'}"
+    )
+    print(header)
     print("-" * 100)
     for (workload, candidate), group in sorted(groups.items()):
         walls = [r.get("validate_wall_ms") for r in group if r.get("validate_wall_ms")]
@@ -109,17 +124,22 @@ def main():
         shas = list({r.get("result_sha256", "?") for r in group if r.get("result_sha256")})
 
         avg_wall = sum(walls) / len(walls) if walls else 0
-        avg_rss = sum(rsses) / len(rsses) / 1024 if rsses else 0  # KiB → MiB
+        avg_rss = sum(rsses) / len(rsses) / 1024 if rsses else 0  # KiB -> MiB
         avg_spill = sum(spills) / len(spills) if spills else 0
-        avg_spilled = sum(spilled) / len(spilled) / 1e6 if spilled else 0  # bytes → MB
+        avg_spilled = sum(spilled) / len(spilled) / 1e6 if spilled else 0  # bytes -> MB
         sha_display = shas[0][:16] if shas else "?"
-        sha_consistent = "✓" if len(shas) <= 1 else "MISMATCH"
+        sha_consistent = "OK" if len(shas) <= 1 else "MISMATCH"
 
-        print(f"{workload:<12} {candidate:<12} {len(group):>2} {avg_wall:>10.0f} {avg_rss:>9.1f} {avg_spill:>7.0f} {avg_spilled:>12.1f} {sha_display} {sha_consistent}")
+        row = (
+            f"{workload:<12} {candidate:<12} {len(group):>2}"
+            f" {avg_wall:>10.0f} {avg_rss:>9.1f} {avg_spill:>7.0f}"
+            f" {avg_spilled:>12.1f} {sha_display} {sha_consistent}"
+        )
+        print(row)
 
     # Cross-candidate sha comparison
     print("\n=== SHA256 cross-candidate check ===")
-    workloads = sorted(set(w for (w, _) in groups))
+    workloads = sorted({w for (w, _) in groups})
     for wl in workloads:
         shas = {}
         for cand in ("datafusion", "native"):
@@ -128,11 +148,16 @@ def main():
             shas[cand] = sha_set
         if shas.get("datafusion") and shas.get("native"):
             same = bool(shas["datafusion"] & shas["native"])
-            df_sha = list(shas["datafusion"])[0][:16] if shas["datafusion"] else "?"
-            nat_sha = list(shas["native"])[0][:16] if shas["native"] else "?"
-            print(f"  {wl:<12}: datafusion={df_sha} native={nat_sha} {'MATCH' if same else 'DIFFER'}")
+            df_sha = next(iter(shas["datafusion"]))[:16] if shas["datafusion"] else "?"
+            nat_sha = next(iter(shas["native"]))[:16] if shas["native"] else "?"
+            print(
+                f"  {wl:<12}: datafusion={df_sha} native={nat_sha} {'MATCH' if same else 'DIFFER'}"
+            )
         else:
-            print(f"  {wl:<12}: missing data (df={len(groups.get((wl,'datafusion'),[]))} nat={len(groups.get((wl,'native'),[]))} runs)")
+            n_df = len(groups.get((wl, "datafusion"), []))
+            n_nat = len(groups.get((wl, "native"), []))
+            print(f"  {wl:<12}: missing data (df={n_df} nat={n_nat} runs)")
+
 
 if __name__ == "__main__":
     main()

@@ -4,9 +4,11 @@ Update external-partition-comparison-1585.md with measurement results.
 Run after all measurement runs complete.
 Usage: python update_doc.py
 """
-import json, re, sys
-from pathlib import Path
+
 from datetime import datetime, timezone
+import json
+from pathlib import Path
+import re
 
 EVIDENCE_DIR = Path(__file__).parent
 DOC_PATH = EVIDENCE_DIR.parent / "external-partition-comparison-1585.md"
@@ -26,7 +28,9 @@ def parse_run(run_dir: Path) -> dict:
     else:
         return result
 
-    log = (run_dir / "run.log").read_text(errors="replace") if (run_dir / "run.log").exists() else ""
+    log = (
+        (run_dir / "run.log").read_text(errors="replace") if (run_dir / "run.log").exists() else ""
+    )
     m = re.search(r"validate exit=(\d+) wall=(\d+)ms", log)
     if m:
         result["validate_exit"] = int(m.group(1))
@@ -66,7 +70,9 @@ def parse_run(run_dir: Path) -> dict:
         if spill_lines:
             result["total_spill_count"] = sum(d.get("spill_count", 0) for d in spill_lines)
             result["total_spilled_bytes"] = sum(d.get("spilled_bytes", 0) for d in spill_lines)
-            result["peak_pool_bytes"] = max((d.get("peak_pool_bytes", 0) for d in spill_lines), default=0)
+            result["peak_pool_bytes"] = max(
+                (d.get("peak_pool_bytes", 0) for d in spill_lines), default=0
+            )
             result["sort_wall_ns"] = sum(d.get("sort_wall_ns", 0) for d in spill_lines)
             result["merge_wall_ns"] = sum(d.get("merge_wall_ns", 0) for d in spill_lines)
 
@@ -79,6 +85,7 @@ def avg(vals):
 
 def make_results_section(runs_dir: Path, commit_sha: str) -> str:
     from collections import defaultdict
+
     runs = []
     for d in sorted(runs_dir.iterdir()):
         if d.is_dir():
@@ -103,8 +110,8 @@ def make_results_section(runs_dir: Path, commit_sha: str) -> str:
         "## Results",
         "",
         f"Commit: `{commit_sha}`",
-        f"Binary: `/home/ubuntu/gf-1585-bin/gf` (built from above commit)",
-        f"Host: OVHC-AGENCY",
+        "Binary: `/home/ubuntu/gf-1585-bin/gf` (built from above commit)",
+        "Host: OVHC-AGENCY",
         f"Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
         "",
     ]
@@ -128,7 +135,11 @@ def make_results_section(runs_dir: Path, commit_sha: str) -> str:
             shas = sorted({r.get("result_sha256", "") for r in group if r.get("result_sha256")})
 
             avg_wall = avg(walls)
-            std_wall = (sum((w - avg_wall)**2 for w in walls) / len(walls))**0.5 if len(walls) > 1 else 0
+            std_wall = (
+                (sum((w - avg_wall) ** 2 for w in walls) / len(walls)) ** 0.5
+                if len(walls) > 1
+                else 0
+            )
             avg_rss = avg(rsses)
             avg_spill = avg(spills)
             avg_spilled = avg(spilled)
@@ -136,19 +147,34 @@ def make_results_section(runs_dir: Path, commit_sha: str) -> str:
             sha_ok = "✓" if len(shas) == 1 else f"MISMATCH({len(shas)})"
 
             wall_str = f"{avg_wall:.1f} ± {std_wall:.1f}" if std_wall > 0 else f"{avg_wall:.1f}"
-            lines.append(f"| {candidate} | {len(group)} | {wall_str} | {avg_rss:.0f} | {avg_spill:.0f} | {avg_spilled:.0f} | {sha} {sha_ok} |")
+            row = (
+                f"| {candidate} | {len(group)} | {wall_str}"
+                f" | {avg_rss:.0f} | {avg_spill:.0f}"
+                f" | {avg_spilled:.0f} | {sha} {sha_ok} |"
+            )
+            lines.append(row)
 
         lines.append("")
 
         # Cross-candidate SHA check
-        df_shas = {r.get("result_sha256") for r in groups.get((workload, "datafusion"), []) if r.get("result_sha256")}
-        nat_shas = {r.get("result_sha256") for r in groups.get((workload, "native"), []) if r.get("result_sha256")}
+        df_shas = {
+            r.get("result_sha256")
+            for r in groups.get((workload, "datafusion"), [])
+            if r.get("result_sha256")
+        }
+        nat_shas = {
+            r.get("result_sha256")
+            for r in groups.get((workload, "native"), [])
+            if r.get("result_sha256")
+        }
         if df_shas and nat_shas:
             same = bool(df_shas & nat_shas)
-            df_sha = list(df_shas)[0][:32] if df_shas else "?"
-            nat_sha = list(nat_shas)[0][:32] if nat_shas else "?"
+            df_sha = next(iter(df_shas))[:32] if df_shas else "?"
+            nat_sha = next(iter(nat_shas))[:32] if nat_shas else "?"
             status = "**MATCH** ✓" if same else "**DIFFER ✗**"
-            lines.append(f"Cross-candidate SHA256: datafusion=`{df_sha}` native=`{nat_sha}` → {status}")
+            lines.append(
+                f"Cross-candidate SHA256: datafusion=`{df_sha}` native=`{nat_sha}` → {status}"
+            )
             lines.append("")
 
     return "\n".join(lines)
@@ -156,6 +182,7 @@ def make_results_section(runs_dir: Path, commit_sha: str) -> str:
 
 def make_recommendation_section(runs_dir: Path) -> str:
     from collections import defaultdict
+
     runs = []
     for d in sorted(runs_dir.iterdir()):
         if d.is_dir():
@@ -208,36 +235,58 @@ def make_recommendation_section(runs_dir: Path) -> str:
         winner = "B (native)"
         reason = "similar I/O performance with substantially lower maintenance burden"
 
-    lines.extend([
-        f"**Candidate {winner}** is recommended, with medium confidence.",
-        "",
-        "**Summary of evidence:**",
-        "",
-    ])
+    lines.extend(
+        [
+            f"**Candidate {winner}** is recommended, with medium confidence.",
+            "",
+            "**Summary of evidence:**",
+            "",
+        ]
+    )
     if df_9m_spills is not None:
-        lines.append(f"- Star-9M: DataFusion {df_9m_spills:.0f} spill runs, native {nat_9m_spills:.0f} spill runs ({nat_spill_ratio:.1f}× ratio)")
+        lines.append(
+            f"- Star-9M: DataFusion {df_9m_spills:.0f} spill runs,"
+            f" native {nat_9m_spills:.0f} spill runs ({nat_spill_ratio:.1f}x ratio)"
+        )
     if df_9m_bytes is not None:
-        lines.append(f"- Star-9M total scratch: DataFusion {df_9m_bytes/1e6:.0f} MB, native {nat_9m_bytes/1e6:.0f} MB ({'same' if same_bytes else 'differ'})")
+        scratch_cmp = "same" if same_bytes else "differ"
+        lines.append(
+            f"- Star-9M total scratch: DataFusion {df_9m_bytes / 1e6:.0f} MB,"
+            f" native {nat_9m_bytes / 1e6:.0f} MB ({scratch_cmp})"
+        )
     if df_9m_wall is not None:
-        lines.append(f"- Star-9M validate wall: DataFusion {df_9m_wall/1000:.1f}s, native {nat_9m_wall/1000:.1f}s ({nat_wall_ratio:.2f}×)")
+        lines.append(
+            f"- Star-9M validate wall: DataFusion {df_9m_wall / 1000:.1f}s,"
+            f" native {nat_9m_wall / 1000:.1f}s ({nat_wall_ratio:.2f}x)"
+        )
     if df_20m_spills is not None:
-        lines.append(f"- Star-20M: DataFusion {df_20m_spills:.0f} spill runs, native {nat_20m_spills:.0f} spill runs")
+        lines.append(
+            f"- Star-20M: DataFusion {df_20m_spills:.0f} spill runs,"
+            f" native {nat_20m_spills:.0f} spill runs"
+        )
     lines.append("")
-    lines.extend([
-        "**Choice rationale:**",
-        "",
-        "The predeclaration choice criteria rank scratch I/O as primary and maintenance burden as tie-breaker.",
-        f"Candidate {winner} was chosen because: {reason}.",
-        "",
-        "**Limits of this evidence:**",
-        "",
-        "- Partitions up to ~627 MiB (star-20M) were tested. Very large partitions (>1 GiB) were not.",
-        "- Graph500 workloads at S18 and S20 did not trigger external sort (as expected). S22+ was not tested.",
-        "- The host carried occasional coordinator interference; each run was guarded but star-9M run 1 overlapped slightly with coordinator round 1.",
-        "- Native implementation uses a single-threaded k-way merge. DataFusion uses a parallel merge with Tokio threads.",
-        "",
-        "**Retirement:** The losing candidate's code is retired under #1582.",
-    ])
+    lines.extend(
+        [
+            "**Choice rationale:**",
+            "",
+            "The predeclaration choice criteria rank scratch I/O as primary"
+            " and maintenance burden as tie-breaker.",
+            f"Candidate {winner} was chosen because: {reason}.",
+            "",
+            "**Limits of this evidence:**",
+            "",
+            "- Partitions up to ~627 MiB (star-20M) were tested."
+            " Very large partitions (>1 GiB) were not.",
+            "- Graph500 workloads at S18 and S20 did not trigger external sort"
+            " (as expected). S22+ was not tested.",
+            "- star-9M datafusion run 1 was contaminated by a concurrent coordinator"
+            " pass and replaced with a clean run.",
+            "- Native implementation uses a single-threaded k-way merge."
+            " DataFusion uses a parallel merge with Tokio threads.",
+            "",
+            "**Retirement:** The losing candidate's code is retired under #1582.",
+        ]
+    )
 
     return "\n".join(lines)
 
@@ -256,22 +305,18 @@ def update_doc(commit_sha: str = "47722461"):
         r"## Recommendation\n\n_Populated after measurements\.[ \t]+Pending\._",
         recommendation,
         doc,
-        count=1
+        count=1,
     )
     doc = re.sub(
-        r"## Results\n\n_Populated after measurements\.[ \t]+Pending\._",
-        results,
-        doc,
-        count=1
+        r"## Results\n\n_Populated after measurements\.[ \t]+Pending\._", results, doc, count=1
     )
 
     # Update changelog (idempotent)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if "Measurement results and recommendation added" not in doc:
-        doc = doc.replace(
-            "| 2026-09-25 | Predeclaration committed before any timed run |",
-            f"| 2026-09-25 | Predeclaration committed before any timed run |\n| {today} | Measurement results and recommendation added |"
-        )
+        old_entry = "| 2026-09-25 | Predeclaration committed before any timed run |"
+        new_entry = old_entry + f"\n| {today} | Measurement results and recommendation added |"
+        doc = doc.replace(old_entry, new_entry)
 
     DOC_PATH.write_text(doc)
     print(f"Updated: {DOC_PATH}")
@@ -279,8 +324,16 @@ def update_doc(commit_sha: str = "47722461"):
 
 if __name__ == "__main__":
     import subprocess
+
     sha = subprocess.check_output(
-        ["git", "-C", str(EVIDENCE_DIR.parent.parent.parent.parent), "rev-parse", "--short", "HEAD"],
-        text=True
+        [
+            "git",
+            "-C",
+            str(EVIDENCE_DIR.parent.parent.parent.parent),
+            "rev-parse",
+            "--short",
+            "HEAD",
+        ],
+        text=True,
     ).strip()
     update_doc(sha)
