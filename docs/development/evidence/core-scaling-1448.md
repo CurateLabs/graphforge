@@ -112,7 +112,7 @@ The profile is flat:
 | ---: | --- |
 | 7.3% | SHA-256 compression, the largest single item: the digest written inline with each shaped and encoded output |
 | about 6% | Zstd (Parquet encoding) |
-| about 6% | Sorts |
+| about 8% | Sorts |
 | 2.2% | `PartitionPlan::partition_of` |
 | 1.9% | Runtime catalog build |
 | 2.3% | SipHash `HashMap` hashing |
