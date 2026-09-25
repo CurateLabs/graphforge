@@ -20,7 +20,8 @@
 
 use super::partition::{PartitionBalance, PartitionPlan};
 use super::partition_load::{
-    PARTITION_LOAD_WORKERS, PartitionLoadCounters, abandon_if_stopped, consume_in_partition_order,
+    PARTITION_LOAD_WORKERS, PartitionLoadCounters, abandon_if_stopped,
+    consume_in_partition_order_weighted,
 };
 use super::partition_records::PartitionRecords;
 use super::{
@@ -311,6 +312,10 @@ impl SpillWriter {
     }
 }
 
+/// Most load workers a finish leases from the instance admission (#1448).
+/// The load window's weight bound, not this count, bounds memory.
+const LOAD_LANES: NonZeroUsize = NonZeroUsize::new(8).unwrap();
+
 /// Most lanes one boundary's spill seals lease (#1448). A seal is a data
 /// fsync, a rename and a small control install; lanes overlap the fsyncs.
 const SEAL_LANES: usize = 8;
@@ -507,7 +512,7 @@ pub(super) struct FixedRangePartitioner<'a, const N: usize> {
     balance: PartitionBalance,
     records: u64,
     /// Concurrent partition loads while finishing; see
-    /// [`super::partition_load::consume_in_partition_order`] for the bound.
+    /// [`super::partition_load::consume_in_partition_order_weighted`] for the bound.
     load_workers: NonZeroUsize,
     /// Instance construction CPU admission; when set, the finish-time worker
     /// count is leased from it (#1586).
@@ -625,18 +630,40 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             load_fixed_partition::<N>(root, names, *expected, codec, max_partition_bytes, stop)
                 .map(|(records, counters)| (LoadedPartition::Resident(records), counters))
         };
-        let workers = self.load_workers;
         // #1586: lease the workers from the instance admission. Scheduling
         // only; a partial grant runs with fewer workers and the same bytes.
+        // #1448: with an admission, ask for up to `LOAD_LANES`; the weight
+        // bound below keeps what is materialized at once to two partition
+        // budgets, the same peak two workers allow.
         let lease = match &self.cpu_admission {
-            Some(admission) => Some(admission.acquire(workers, &mut *cancelled)?),
+            Some(admission) => Some(admission.acquire(LOAD_LANES, &mut *cancelled)?),
             None => None,
         };
-        let workers = lease
-            .as_ref()
-            .map_or(workers, super::cpu_admission::ConstructionCpuLease::lanes);
+        let workers = lease.as_ref().map_or(
+            self.load_workers,
+            super::cpu_admission::ConstructionCpuLease::lanes,
+        );
+        // A partition materializes at most its routed records, and never more
+        // than the budget (an over-budget one is sorted in budget-sized runs);
+        // an unknown count is charged the whole budget.
+        let weights = jobs
+            .iter()
+            .map(|(_, _, expected)| {
+                expected
+                    .and_then(|records| records.checked_mul(N as u64))
+                    .map_or(max_partition_bytes, |bytes| bytes.min(max_partition_bytes))
+            })
+            .collect::<Vec<_>>();
         let load = |job: usize, stop: &AtomicBool| load_job(root, &jobs[job], stop);
-        consume_in_partition_order(jobs.len(), workers, load, cancelled, consume)
+        consume_in_partition_order_weighted(
+            jobs.len(),
+            workers,
+            &weights,
+            max_partition_bytes.saturating_mul(2),
+            load,
+            cancelled,
+            consume,
+        )
     }
 
     /// Route one record into the partition owning `key`.
