@@ -65,6 +65,7 @@ mod construction_record_layout;
 mod corruption_checksum;
 pub mod graph_construction;
 mod graph_construction_encoding;
+pub use graph_construction::cpu_admission::{ConstructionCpuAdmission, ConstructionCpuLease};
 pub use graph_construction::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkKind,
     ConstructionChunkReceipt, ConstructionRetainedArtifact, ConstructionSemanticAuthority,
@@ -72,7 +73,6 @@ pub use graph_construction::{
     GraphConstructionEncoding, GraphConstructionEncodingEvidence,
     GraphConstructionEncodingInvocationEvidence, GraphConstructionEvidence,
     GraphConstructionSession, GraphConstructionState,
-    cpu_admission::{ConstructionCpuAdmission, ConstructionCpuLease},
 };
 
 pub mod graph_files;
