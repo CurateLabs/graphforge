@@ -713,7 +713,13 @@ async fn order_by_spills_when_input_exceeds_query_memory_budget() {
         .await
         .expect("ORDER BY over the budget must spill, not exhaust the pool");
 
-    assert_eq!(sorted.iter().map(|b| b.num_rows()).sum::<usize>(), ROWS);
+    assert_eq!(
+        sorted
+            .iter()
+            .map(arrow::record_batch::RecordBatch::num_rows)
+            .sum::<usize>(),
+        ROWS
+    );
     assert!(
         sort_spill_count(&plan) > 0,
         "the input exceeds the budget, so the sort must have spilled"
