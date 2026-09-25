@@ -9,6 +9,37 @@
 
 set -u
 
+# Quiet-host guard: wait until no competing gf/graphforge processes.
+quiet_host_guard() {
+  local attempts=0
+  while pgrep -x gf >/dev/null 2>&1 || \
+        pgrep -x graphforge_api >/dev/null 2>&1 || \
+        pgrep -x graphforge_stor >/dev/null 2>&1; do
+    attempts=$((attempts + 1))
+    if [ $((attempts % 6)) -eq 0 ]; then
+      echo "  [guard] waiting for quiet host (attempt $attempts)..." >&2
+    fi
+    sleep 10
+  done
+  # Check load: wait until 1-min load < 2.0
+  local load
+  load=$(awk '{print $1}' /proc/loadavg)
+  local load_int
+  load_int=$(echo "$load" | awk -F. '{print $1}')
+  if [ "$load_int" -ge 2 ]; then
+    echo "  [guard] load=$load, waiting..." >&2
+    attempts=0
+    while [ "$(awk '{print $1}' /proc/loadavg | awk -F. '{print $1}')" -ge 2 ]; do
+      sleep 10
+      attempts=$((attempts + 1))
+      if [ $((attempts % 6)) -eq 0 ]; then
+        echo "  [guard] still waiting for load < 2.0 ($(awk '{print $1}' /proc/loadavg))..." >&2
+      fi
+    done
+  fi
+  echo "  [guard] host is quiet (load=$(awk '{print $1}' /proc/loadavg))" >&2
+}
+
 GF_BIN="${1:?Usage: $0 <gf_binary> <workload> <candidate>}"
 WORKLOAD="${2:?}"
 CANDIDATE="${3:?}"
@@ -57,6 +88,9 @@ mkdir -p "$SCRATCH_DIR"
 
 echo "=== Run ${WORKLOAD}-${CANDIDATE}-${RUN_NUM} at $(date) ===" | tee "$RUN_DIR/run.log"
 echo "GF: $GF_BIN" | tee -a "$RUN_DIR/run.log"
+echo "--- quiet-host guard ---" | tee -a "$RUN_DIR/run.log"
+quiet_host_guard
+echo "Host quiet at $(date)" | tee -a "$RUN_DIR/run.log"
 
 export TMPDIR=/home/ubuntu/gf-1585-tmp
 export GF_SHAPE_SPILL_SPIKE="$SPIKE_MODE"
