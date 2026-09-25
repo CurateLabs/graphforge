@@ -472,6 +472,9 @@ pub(super) struct FixedRangePartitioner<'a, const N: usize> {
     /// Concurrent partition loads while finishing; see
     /// [`super::partition_load::consume_in_partition_order`] for the bound.
     load_workers: NonZeroUsize,
+    /// Instance construction CPU admission; when set, the finish-time worker
+    /// count is leased from it (#1586).
+    cpu_admission: Option<std::sync::Arc<super::cpu_admission::ConstructionCpuAdmission>>,
     max_partition_bytes: u64,
     /// A #1508 spike scheduler forced in place of the production pool.
     #[cfg(any(test, feature = "test-support"))]
@@ -512,6 +515,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             balance: PartitionBalance::new(partitions),
             records: 0,
             load_workers: PARTITION_LOAD_WORKERS,
+            cpu_admission: None,
             max_partition_bytes: super::partition::default_materialization_bytes(),
             #[cfg(any(test, feature = "test-support"))]
             load_scheduler: None,
@@ -520,6 +524,15 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
 
     pub(super) fn with_materialization_limit(mut self, bytes: u64) -> Self {
         self.max_partition_bytes = bytes;
+        self
+    }
+
+    /// Lease the finish-time worker count from the instance admission (#1586).
+    pub(super) fn with_cpu_admission(
+        mut self,
+        admission: Option<std::sync::Arc<super::cpu_admission::ConstructionCpuAdmission>>,
+    ) -> Self {
+        self.cpu_admission = admission;
         self
     }
 
@@ -598,6 +611,15 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                 self.load_scheduler.or(selected),
             )
         };
+        // #1586: lease the workers from the instance admission. Scheduling
+        // only; a partial grant runs with fewer workers and the same bytes.
+        let lease = match &self.cpu_admission {
+            Some(admission) => Some(admission.acquire(workers, &mut *cancelled)?),
+            None => None,
+        };
+        let workers = lease
+            .as_ref()
+            .map_or(workers, super::cpu_admission::ConstructionCpuLease::lanes);
         #[cfg(any(test, feature = "test-support"))]
         if let Some(scheduler) = scheduler {
             // Tokio and DataFusion tasks are `'static`: the load owns a

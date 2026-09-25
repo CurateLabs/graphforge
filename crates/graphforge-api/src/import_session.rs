@@ -19,6 +19,8 @@ use uuid::Uuid;
 
 use crate::{BulkInputKind, CancellationToken, GraphConstructionBudgets, GraphForge, OperationId};
 
+#[cfg(test)]
+mod cpu_budget_report;
 mod normalization;
 
 const FORMAT_VERSION: u32 = 1;

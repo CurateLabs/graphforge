@@ -27,7 +27,16 @@ fn graph_at(path: Option<&str>, workers: usize) -> GraphForge {
     // admission is tested separately; this fixture exercises the private pool.
     graph.compute_pool = Arc::new(graphforge_exec::ComputePool::new(workers).unwrap());
     graph.resource_policy.compute_threads = workers;
+    // Admit every forced worker, so these cases keep exercising the pool;
+    // the #1586 admission limit has its own cases below.
+    graph.construction_cpu_admission = admission(workers);
     graph
+}
+
+fn admission(lanes: usize) -> Arc<graphforge_storage::ConstructionCpuAdmission> {
+    Arc::new(graphforge_storage::ConstructionCpuAdmission::new(
+        std::num::NonZeroUsize::new(lanes).unwrap(),
+    ))
 }
 
 fn nodes(ids: &[Option<Uuid>], properties: usize) -> RecordBatch {
@@ -63,6 +72,7 @@ fn window(graph: &GraphForge, budget: usize) -> Window<'_> {
         admitted_bytes: 0,
         byte_budget: budget,
         workers: graph.compute_pool.num_threads().min(4),
+        probe: None,
     }
 }
 
@@ -458,4 +468,128 @@ fn serial_and_parallel_import_publish_identical_payloads_with_recorded_clock_fix
         fingerprints.push(fingerprint);
     }
     assert_eq!(fingerprints[0], fingerprints[1]);
+}
+
+fn normalize_all(graph: &GraphForge, batches: &[RecordBatch]) -> Vec<(u64, RecordBatch)> {
+    let mut window = window(graph, usize::MAX);
+    let mut consumed = Vec::new();
+    let mut consume = |index, batch| {
+        consumed.push((index, batch));
+        Ok(())
+    };
+    for (index, batch) in batches.iter().enumerate() {
+        window
+            .push(index as u64, batch.clone(), &mut consume)
+            .unwrap();
+    }
+    window.flush(&mut consume).unwrap();
+    consumed
+}
+
+/// #1586: two imports normalizing at once on one instance share its
+/// construction admission. Neither ever holds more lanes than the limit, and
+/// each produces exactly what an unconstrained serial run produces.
+#[test]
+fn concurrent_windows_share_the_instance_construction_limit() {
+    let batches = (0..12_u128)
+        .map(|index| nodes(&[None, Some(fixture_uuid(100 + index))], 3))
+        .collect::<Vec<_>>();
+    let expected = normalize_all(&graph(1), &batches);
+    let mut shared = graph(4);
+    shared.construction_cpu_admission = admission(2);
+    let shared = &shared;
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| normalize_all(shared, &batches));
+        let second = scope.spawn(|| normalize_all(shared, &batches));
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    for outcome in [&first, &second] {
+        assert_eq!(outcome.len(), expected.len());
+        for ((index, batch), (expected_index, expected_batch)) in outcome.iter().zip(&expected) {
+            assert_eq!(index, expected_index);
+            // Generated UUIDs derive from the operation and batch index, so
+            // equal inputs normalize to equal batches whatever the grouping.
+            assert_eq!(batch, expected_batch, "batch {index}");
+        }
+    }
+    // Each first flush asks for four lanes, so the limit is always reached,
+    // and never passed.
+    assert_eq!(shared.construction_cpu_admission.peak(), 2);
+    assert_eq!(shared.construction_cpu_admission.in_use(), 0);
+}
+
+/// #1586: a normalization flush that cannot get a lane waits, notices the
+/// import's cancellation, and returns the import's own cancellation error
+/// without consuming anything.
+#[test]
+fn flush_waiting_for_construction_lanes_is_cancellable() {
+    let mut graph = graph(4);
+    graph.construction_cpu_admission = admission(1);
+    let held = graph
+        .construction_cpu_admission
+        .acquire(std::num::NonZeroUsize::MIN, &mut || false)
+        .unwrap();
+    let token = CancellationToken::new();
+    let mut window = window(&graph, usize::MAX);
+    window.cancellation = Some(&token);
+    let mut consumed = 0_usize;
+    let started = std::time::Instant::now();
+    let error = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            token.cancel();
+        });
+        window
+            .push(0, nodes(&[Some(fixture_uuid(900))], 1), &mut |_, _| {
+                consumed += 1;
+                Ok(())
+            })
+            .and_then(|()| {
+                window.flush(&mut |_, _| {
+                    consumed += 1;
+                    Ok(())
+                })
+            })
+            .unwrap_err()
+    });
+    assert_eq!(error.to_string(), cancelled().to_string());
+    assert_eq!(consumed, 0);
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    drop(held);
+    assert_eq!(graph.construction_cpu_admission.in_use(), 0);
+}
+
+/// #1586: a flush maps no more batches at once than its lease grants. With a
+/// four-worker pool and four pending batches, a one-lane and a two-lane
+/// admission cap the batches in flight; a four-lane admission lets all four
+/// overlap.
+#[test]
+fn flush_maps_no_more_batches_at_once_than_its_lease() {
+    let batches = (0..4_u128)
+        .map(|index| nodes(&[Some(fixture_uuid(700 + index))], 1))
+        .collect::<Vec<_>>();
+    for (lanes, expected_peak) in [(1, 1), (2, 2), (4, 4)] {
+        let mut graph = graph(4);
+        graph.construction_cpu_admission = admission(lanes);
+        let probe = Arc::new(InFlightProbe::default());
+        let mut window = window(&graph, usize::MAX);
+        window.probe = Some(Arc::clone(&probe));
+        let mut consumed = Vec::new();
+        let mut consume = |index, _batch| {
+            consumed.push(index);
+            Ok(())
+        };
+        for (index, batch) in batches.iter().enumerate() {
+            window
+                .push(index as u64, batch.clone(), &mut consume)
+                .unwrap();
+        }
+        window.flush(&mut consume).unwrap();
+        assert_eq!(consumed, vec![0, 1, 2, 3], "lanes={lanes}");
+        assert_eq!(
+            probe.peak.load(std::sync::atomic::Ordering::Acquire),
+            expected_peak,
+            "lanes={lanes}"
+        );
+    }
 }

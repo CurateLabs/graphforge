@@ -65,6 +65,17 @@ struct Window<'a> {
     admitted_bytes: usize,
     byte_budget: usize,
     workers: usize,
+    /// Test-only observation of batches normalizing at once (#1586).
+    #[cfg(test)]
+    probe: Option<std::sync::Arc<InFlightProbe>>,
+}
+
+/// Counts batches normalizing at once; test-only.
+#[cfg(test)]
+#[derive(Default)]
+struct InFlightProbe {
+    current: std::sync::atomic::AtomicUsize,
+    peak: std::sync::atomic::AtomicUsize,
 }
 
 impl Window<'_> {
@@ -96,26 +107,66 @@ impl Window<'_> {
         }
         let pending = std::mem::take(&mut self.pending);
         self.admitted_bytes = 0;
-        let region = RegionScope::named("normalization");
-        let normalized = self
+        // #1586: lease this flush's lanes from the instance construction
+        // admission on the calling thread, so no compute-pool worker ever
+        // blocks waiting for one, then map at most that many batches at once.
+        // Each batch normalizes independently, so the grouping changes
+        // neither results nor their order.
+        let cancellation = self.cancellation;
+        let want =
+            std::num::NonZeroUsize::new(pending.len()).unwrap_or(std::num::NonZeroUsize::MIN);
+        let lease = self
             .graph
-            .compute_pool
-            .map_ordered(&pending, |(index, batch)| {
-                let result = if self
-                    .cancellation
-                    .is_some_and(CancellationToken::is_cancelled)
-                {
-                    Err(cancelled())
+            .construction_cpu_admission
+            .acquire(want, &mut || {
+                cancellation.is_some_and(CancellationToken::is_cancelled)
+            })
+            .map_err(|error| {
+                if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                    cancelled()
                 } else {
-                    normalize_batch(
-                        self.graph,
-                        import_batch_operation(self.operation_uuid, self.source_sequence, *index),
-                        self.kind,
-                        batch,
-                    )
-                };
-                (*index, result)
-            });
+                    error
+                }
+            })?;
+        let lanes = lease.lanes().get();
+        let region = RegionScope::named("normalization");
+        let mut normalized = Vec::with_capacity(pending.len());
+        for group in pending.chunks(lanes) {
+            normalized.extend(
+                self.graph
+                    .compute_pool
+                    .map_ordered(group, |(index, batch)| {
+                        #[cfg(test)]
+                        if let Some(probe) = &self.probe {
+                            use std::sync::atomic::Ordering;
+                            let now = probe.current.fetch_add(1, Ordering::AcqRel) + 1;
+                            probe.peak.fetch_max(now, Ordering::AcqRel);
+                            // Hold the lane long enough for any overlap to show.
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                            probe.current.fetch_sub(1, Ordering::AcqRel);
+                        }
+                        let result = if self
+                            .cancellation
+                            .is_some_and(CancellationToken::is_cancelled)
+                        {
+                            Err(cancelled())
+                        } else {
+                            normalize_batch(
+                                self.graph,
+                                import_batch_operation(
+                                    self.operation_uuid,
+                                    self.source_sequence,
+                                    *index,
+                                ),
+                                self.kind,
+                                batch,
+                            )
+                        };
+                        (*index, result)
+                    }),
+            );
+        }
+        drop(lease);
         RegionScope::record_work(
             "rows",
             normalized
@@ -162,6 +213,8 @@ pub(super) fn for_each(
             .unwrap_or(usize::MAX)
             .clamp(1, 256 << 20),
         workers: graph.compute_pool.num_threads().min(4),
+        #[cfg(test)]
+        probe: None,
     };
     let mut decoded_index = 0_u64;
     for_each_source_batch(root, source, batch_rows, |batch| {

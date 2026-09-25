@@ -504,6 +504,7 @@ fn explicit_thread_policy(workers: usize) -> ExecutionResourcePolicy {
         memory_budget_bytes: Some(512 * 1024 * 1024),
         spill: SpillPolicy::default(),
         max_concurrent_heavy_queries: Some(1),
+        construction_cpu_reserve: None,
     }
 }
 

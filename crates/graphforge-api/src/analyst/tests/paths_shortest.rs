@@ -339,6 +339,7 @@ fn dijkstra_all_pairs_public_fingerprint_matches_thread_configs() {
             io_concurrency: Some(workers),
             max_concurrent_heavy_queries: Some(1),
             compute_threads: Some(workers),
+            construction_cpu_reserve: None,
         }
     }
 
@@ -353,6 +354,7 @@ fn dijkstra_all_pairs_public_fingerprint_matches_thread_configs() {
             io_concurrency: None,
             max_concurrent_heavy_queries: None,
             compute_threads: None,
+            construction_cpu_reserve: None,
         }
     }
 
