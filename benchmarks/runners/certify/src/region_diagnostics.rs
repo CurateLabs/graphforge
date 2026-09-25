@@ -78,7 +78,7 @@ const MEASUREMENTS: [&str; 9] = [
     "thread_iowait_ns",
     "thread_unknown_ns",
 ];
-const REGIONS: [&str; 30] = [
+const REGIONS: [&str; 39] = [
     "import_command",
     "begin_import",
     "resume_import",
@@ -109,6 +109,15 @@ const REGIONS: [&str; 30] = [
     "hydration",
     "read_authority",
     "adjacency_encoding",
+    "shape_planning",
+    "shape_routing",
+    "shape_family_finish",
+    "partition_load_wait",
+    "surrogate_assignment",
+    "endpoint_resolution",
+    "shape_row_finish",
+    "runtime_catalog",
+    "shape_completion",
 ];
 
 pub(crate) fn valid_snapshot(value: &Value) -> bool {

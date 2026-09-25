@@ -18,6 +18,62 @@ pub(super) fn fixed(values: &[[u8; 16]]) -> FixedSizeBinaryArray {
     FixedSizeBinaryArray::try_from_iter(values.iter().map(|value| value.as_slice())).unwrap()
 }
 
+/// Construction evidence as JSON with file identities (`volume:file_id`
+/// inode keys) made comparable across runs. Inodes differ between any two
+/// runs, and the filesystem reuses a freed inode for a later file, so which
+/// file gets which number depends on unlink order. Each install in the
+/// allocation transition log gets a fresh ordinal, and each removal names the
+/// ordinal of the latest install of its key; the active-identity map becomes
+/// its sorted sizes. Everything else must not depend on where or how the work
+/// was scheduled.
+pub(super) fn evidence_without_file_identities(
+    evidence: &GraphConstructionEvidence,
+) -> serde_json::Value {
+    let mut value = serde_json::to_value(evidence).unwrap();
+    let object = value.as_object_mut().unwrap();
+    let mut sizes: Vec<u64> = object["storage_active_identity_allocated_bytes"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|size| size.as_u64().unwrap())
+        .collect();
+    sizes.sort_unstable();
+    object.insert(
+        "storage_active_identity_allocated_bytes".to_owned(),
+        serde_json::json!(sizes),
+    );
+    let mut latest = std::collections::HashMap::<String, usize>::new();
+    let mut installs = 0_usize;
+    for transition in object["storage_allocation_transitions"]
+        .as_array_mut()
+        .unwrap()
+    {
+        let transition = transition.as_object_mut().unwrap();
+        let removed = transition["removed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|key| {
+                let key = key.as_str().unwrap();
+                let ordinal = latest.get(key).map_or_else(
+                    || format!("unknown-{key}"),
+                    |ordinal| format!("identity-{ordinal}"),
+                );
+                serde_json::Value::String(ordinal)
+            })
+            .collect::<Vec<_>>();
+        let mut installed = serde_json::Map::new();
+        for (key, size) in transition["installed"].as_object().unwrap() {
+            latest.insert(key.clone(), installs);
+            installed.insert(format!("identity-{installs}"), size.clone());
+            installs += 1;
+        }
+        transition.insert("removed".to_owned(), serde_json::Value::Array(removed));
+        transition.insert("installed".to_owned(), serde_json::Value::Object(installed));
+    }
+    value
+}
+
 pub(super) fn tree_has_no_temps(path: &Path) -> bool {
     std::fs::read_dir(path).unwrap().all(|entry| {
         let entry = entry.unwrap();

@@ -1644,6 +1644,33 @@ mod group_boundary {
         session.seal().unwrap();
     }
 
+    /// #1448: a boundary shape whose finish stages retire their segments on
+    /// parallel lanes publishes the same shape and records the same evidence
+    /// as one that retires them on the calling thread.
+    #[test]
+    fn parallel_segment_retirement_matches_the_calling_thread() {
+        let shape = |admission: Option<std::sync::Arc<crate::ConstructionCpuAdmission>>| {
+            let root = TempDir::new().unwrap();
+            crate::open_or_initialize_project(root.path()).unwrap();
+            let mut session = boundary_session(root.path(), 156_448);
+            session.set_cpu_admission(admission);
+            stage_boundary_groups(&mut session, 3);
+            session.shape_canonical_with_cancellation(|| false).unwrap();
+            (
+                shape_output_content(&session),
+                super::evidence_without_file_identities(session.evidence()),
+            )
+        };
+        let serial = shape(None);
+        let admission = std::sync::Arc::new(crate::ConstructionCpuAdmission::new(
+            std::num::NonZeroUsize::new(8).unwrap(),
+        ));
+        let parallel = shape(Some(admission.clone()));
+        // Finish-time loads lease two lanes; only retirement asks for more.
+        assert!(admission.peak() > 2, "retirement never ran on parallel lanes");
+        assert_eq!(serial, parallel);
+    }
+
     fn complete_boundary(session: &mut GraphConstructionSession) {
         if session.state() == GraphConstructionState::Staging {
             stage_boundary_chunks(session);

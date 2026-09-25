@@ -359,6 +359,11 @@ where
             for index in 0..partitions {
                 let loaded = {
                     let mut state = shared.lock();
+                    // Charged only when the coordinator actually blocks: the
+                    // time consumption waits on loading (#1448).
+                    let _waiting = (!state.ready.contains_key(&index)).then(|| {
+                        crate::concurrency_attribution::RegionScope::named("partition_load_wait")
+                    });
                     loop {
                         if let Some(loaded) = state.ready.remove(&index) {
                             break loaded;

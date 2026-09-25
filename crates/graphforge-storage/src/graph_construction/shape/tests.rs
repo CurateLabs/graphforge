@@ -789,3 +789,77 @@ fn assert_bounded_partition_run<const N: usize>(
     assert_eq!(actual, expected, "bound={bound}");
     assert_eq!(evidence.partition_rows, records.len() as u64);
 }
+
+/// Seal `segments` one-record segments of a one-partition endpoint family and
+/// return their receipts, in the evidence of `session`.
+fn sealed_segments(session: &mut GraphConstructionSession, segments: u64) -> Vec<ArtifactReceipt> {
+    let GraphConstructionSession {
+        root, checkpoint, ..
+    } = session;
+    let mut partitioner = super::super::partition_shaping::FixedRangePartitioner::<33>::new(
+        root,
+        super::super::partition_shaping::PartitionFamily::Endpoints,
+        1,
+        None,
+        false,
+    )
+    .unwrap();
+    for boundary in 1..=segments {
+        let mut record = [0_u8; 33];
+        record[..8].copy_from_slice(&boundary.to_be_bytes());
+        partitioner
+            .route_slice(0, &record, 1, &mut checkpoint.evidence)
+            .unwrap();
+        partitioner
+            .seal(boundary, &mut checkpoint.evidence)
+            .unwrap();
+    }
+    partitioner.sealed_segments()
+}
+
+/// #1448: retiring segments on parallel lanes removes the same files and
+/// charges the same evidence as one lane, including when one retirement
+/// fails part-way through the list.
+#[test]
+fn segment_retirement_is_schedule_independent_including_failure() {
+    let retire = |lanes: usize| {
+        let root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let mut session = open(&root, 0x1448);
+        let mut segments = sealed_segments(&mut session, 24);
+        // A segment that cannot be authenticated, in the middle of the list.
+        let mut missing = segments[11].clone();
+        missing.name = "part-endpoints-g99999999999999999999-p0.run".to_owned();
+        segments.insert(12, missing);
+        let admission = Arc::new(super::super::cpu_admission::ConstructionCpuAdmission::new(
+            std::num::NonZeroUsize::new(lanes).unwrap(),
+        ));
+        let error = retire_segments(
+            &session.root,
+            &segments,
+            Some(&admission),
+            &mut session.checkpoint.evidence,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(admission.peak(), lanes.min(RETIRE_LANES));
+        let remaining = session
+            .root
+            .child_names()
+            .unwrap()
+            .into_iter()
+            .filter_map(|name| name.into_string().ok())
+            .filter(|name| super::super::partition_shaping::is_partition_artifact_name(name))
+            .count();
+        (
+            error,
+            remaining,
+            super::super::tests::evidence_without_file_identities(&session.checkpoint.evidence),
+        )
+    };
+    let serial = retire(1);
+    let parallel = retire(8);
+    // Every real segment is retired on either path, so none remain.
+    assert_eq!(serial.1, 0);
+    assert_eq!(serial, parallel);
+}
