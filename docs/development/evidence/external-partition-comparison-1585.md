@@ -193,14 +193,76 @@ workloads; see measurement results.
 
 ## Recommendation
 
-_Populated after measurements.  Pending._
+**Candidate B (native)** is recommended, with medium confidence.
+
+**Summary of evidence:**
+
+- Star-9M: DataFusion 11 spill runs, native 18 spill runs (1.6× ratio)
+- Star-9M total scratch: DataFusion 299 MB, native 298 MB (differ)
+- Star-9M validate wall: DataFusion 76.4s, native 84.9s (1.11×)
+- Star-20M: DataFusion 24 spill runs, native 40 spill runs
+
+**Choice rationale:**
+
+The predeclaration choice criteria rank scratch I/O as primary and maintenance burden as tie-breaker.
+Candidate B (native) was chosen because: comparable I/O and performance with lower maintenance burden.
+
+**Limits of this evidence:**
+
+- Partitions up to ~627 MiB (star-20M) were tested. Very large partitions (>1 GiB) were not.
+- Graph500 workloads at S18 and S20 did not trigger external sort (as expected). S22+ was not tested.
+- star-9M datafusion run 1 (01:21:30 UTC) overlapped coordinator #1586 timed pass (01:21:26–01:26:36 UTC). That run was moved to `runs/contaminated/` and a replacement was collected after all other runs finished. The n=3 datafusion star-9M cell uses the replacement as run 1.
+- Native implementation uses a single-threaded k-way merge. DataFusion uses a parallel merge with Tokio threads.
+
+**Retirement:** The losing candidate's code is retired under #1582.
 
 ## Results
 
-_Populated after measurements.  Pending._
+Implementation commit: `47722461` (spill_spike.rs candidates A and B)
+Binary: `/home/ubuntu/gf-1585-bin/gf` (built from `47722461` with `--features graphforge-storage/test-support`)
+Host: OVHC-AGENCY
+Date: 2026-09-25
+
+### Star-9M (hub: 9,016,255 records, ~297 MiB)
+
+| Candidate | n | Wall (s) ± | RSS (MiB) | Spill# | Spilled (MB) | SHA256 |
+| --- | --- | --- | --- | --- | --- | --- |
+| datafusion | 3 | 76.4 ± 0.4 | 509 | 11 | 299 | a5803634ea2e458b ✓ |
+| native | 3 | 84.9 ± 0.7 | 352 | 18 | 298 | a5803634ea2e458b ✓ |
+
+Cross-candidate SHA256: datafusion=`a5803634ea2e458b88d3650eacc931ae` native=`a5803634ea2e458b88d3650eacc931ae` → **MATCH** ✓
+
+### Star-20M (hub: 20,016,255 records, ~627 MiB)
+
+| Candidate | n | Wall (s) ± | RSS (MiB) | Spill# | Spilled (MB) | SHA256 |
+| --- | --- | --- | --- | --- | --- | --- |
+| datafusion | 3 | 170.8 ± 1.8 | 699 | 24 | 663 | e441de2e222b58ef ✓ |
+| native | 3 | 187.3 ± 0.7 | 520 | 40 | 661 | e441de2e222b58ef ✓ |
+
+Cross-candidate SHA256: datafusion=`e441de2e222b58ef14a5c1f9bf3d6158` native=`e441de2e222b58ef14a5c1f9bf3d6158` → **MATCH** ✓
+
+### Graph500 S18 (~4.2M edges, no external sort expected)
+
+| Candidate | n | Wall (s) ± | RSS (MiB) | Spill# | Spilled (MB) | SHA256 |
+| --- | --- | --- | --- | --- | --- | --- |
+| datafusion | 3 | 28.4 ± 0.2 | 255 | 0 | 0 | 2cb98d6493038230 ✓ |
+| native | 3 | 28.6 ± 0.3 | 247 | 0 | 0 | 2cb98d6493038230 ✓ |
+
+Cross-candidate SHA256: datafusion=`2cb98d6493038230f3d574b16c2cbe28` native=`2cb98d6493038230f3d574b16c2cbe28` → **MATCH** ✓
+
+### Graph500 S20 (~16.8M edges, no external sort expected)
+
+| Candidate | n | Wall (s) ± | RSS (MiB) | Spill# | Spilled (MB) | SHA256 |
+| --- | --- | --- | --- | --- | --- | --- |
+| datafusion | 3 | 116.2 ± 0.8 | 310 | 0 | 0 | 3daeda0e54a36262 ✓ |
+| native | 3 | 116.4 ± 0.3 | 316 | 0 | 0 | 3daeda0e54a36262 ✓ |
+
+Cross-candidate SHA256: datafusion=`3daeda0e54a362622ffdc547a631479e` native=`3daeda0e54a362622ffdc547a631479e` → **MATCH** ✓
+
 
 ## Changelog
 
 | Date | Change |
 | --- | --- |
 | 2026-09-25 | Predeclaration committed before any timed run |
+| 2026-09-25 | Measurement results and recommendation added |

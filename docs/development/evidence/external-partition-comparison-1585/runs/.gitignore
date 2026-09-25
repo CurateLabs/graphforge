@@ -1,0 +1,3 @@
+# Exclude constructed graph projects (100s of MB each) and binary query outputs
+project/
+edges.arrow

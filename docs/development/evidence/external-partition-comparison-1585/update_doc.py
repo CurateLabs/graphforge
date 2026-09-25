@@ -253,24 +253,25 @@ def update_doc(commit_sha: str = "47722461"):
 
     # Replace placeholder sections
     doc = re.sub(
-        r"## Recommendation\n\n_Populated after measurements\. Pending\._",
+        r"## Recommendation\n\n_Populated after measurements\.[ \t]+Pending\._",
         recommendation,
         doc,
         count=1
     )
     doc = re.sub(
-        r"## Results\n\n_Populated after measurements\. Pending\._",
+        r"## Results\n\n_Populated after measurements\.[ \t]+Pending\._",
         results,
         doc,
         count=1
     )
 
-    # Update changelog
+    # Update changelog (idempotent)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    doc = doc.replace(
-        "| 2026-09-25 | Predeclaration committed before any timed run |",
-        f"| 2026-09-25 | Predeclaration committed before any timed run |\n| {today} | Measurement results and recommendation added |"
-    )
+    if "Measurement results and recommendation added" not in doc:
+        doc = doc.replace(
+            "| 2026-09-25 | Predeclaration committed before any timed run |",
+            f"| 2026-09-25 | Predeclaration committed before any timed run |\n| {today} | Measurement results and recommendation added |"
+        )
 
     DOC_PATH.write_text(doc)
     print(f"Updated: {DOC_PATH}")

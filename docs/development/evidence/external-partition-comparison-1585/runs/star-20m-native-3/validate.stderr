@@ -1,0 +1,1 @@
+SHAPE_SPILL_NATIVE {"records":20016255,"input_wire_bytes":660536415,"pool_limit_bytes":0,"peak_pool_bytes":0,"spill_count":40,"spilled_bytes":660536415,"spilled_rows":20016255,"peak_spill_disk_bytes":660536415,"peak_spill_files":40,"sort_wall_ns":19664759477,"merge_wall_ns":3656727217}

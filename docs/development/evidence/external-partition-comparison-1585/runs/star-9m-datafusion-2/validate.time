@@ -1,0 +1,23 @@
+	Command being timed: "/home/ubuntu/gf-1585-bin/gf --json --project /home/ubuntu/gf-1585/docs/development/evidence/external-partition-comparison-1585/runs/star-9m-datafusion-2/project import-session validate --session-uuid 10000000-0000-4000-8000-000000000002"
+	User time (seconds): 55.87
+	System time (seconds): 17.20
+	Percent of CPU this job got: 96%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:16.02
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 516740
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 413873
+	Voluntary context switches: 109599
+	Involuntary context switches: 1240
+	Swaps: 0
+	File system inputs: 22717400
+	File system outputs: 18171816
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
