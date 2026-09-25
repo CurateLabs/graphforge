@@ -617,7 +617,9 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             Some(admission) => Some(admission.acquire(workers, &mut *cancelled)?),
             None => None,
         };
-        let workers = lease.as_ref().map_or(workers, |lease| lease.lanes());
+        let workers = lease
+            .as_ref()
+            .map_or(workers, super::cpu_admission::ConstructionCpuLease::lanes);
         #[cfg(any(test, feature = "test-support"))]
         if let Some(scheduler) = scheduler {
             // Tokio and DataFusion tasks are `'static`: the load owns a
