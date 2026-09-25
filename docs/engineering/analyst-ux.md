@@ -8,6 +8,13 @@ The [research journey guide](../guide/research-journey.md) connects consumer
 questions to captured Core results. Application rendering and observed human
 comprehension have separate owners and evidence.
 
+The provider-neutral decision workflow below is an M12 design contract. The
+current M11 research journey and its tests do not claim that generic external
+decision inputs/results are already supported by a single public workflow.
+The [M12 acceptance map](TESTING.md#m12-decision-workflow-contract) names the
+capabilities that exist, the gaps assigned to M12 children, and the evidence
+each child must provide.
+
 M11 delivers Rust-owned capabilities through the public facade and thin Python,
 Node, and CLI surfaces, plus a consumer UX contract. Associated projects such as
 XYG and graphforge-nextjs, applications, and peer extensions own their interfaces,
@@ -83,6 +90,114 @@ and research semantics. The analyst must be able to inspect selected scope,
 evidence and proposed effects before a consequential research decision. An
 agent's assertion that an operation succeeded is not a substitute for its real
 result or receipt. Applications own interaction and access enforcement.
+
+## M12 provider-neutral decision workflow contract
+
+This contract describes the boundary between selected GraphForge state, an
+independently supplied decision producer, caller policy, and an optional native
+action. It defines information and outcomes; it does not prescribe new method
+names or require Core to execute a model.
+
+### Two journeys over one synthetic research fixture
+
+Use the two-story corpus described in the [research journey guide](../guide/research-journey.md).
+The synthetic decision cases add a finite set of review candidates with stable
+object identities and explicit source/evidence links:
+
+| Journey | Caller supplies | Producer returns | Caller decides | GraphForge can change |
+| --- | --- | --- | --- | --- |
+| Analyst evidence triage | An exact selected Version/projection, candidate item IDs, allowed review queues, and an ordered rubric for relevance/urgency. | A queue choice, one score per candidate and rubric, and a yes/no answer to “does this evidence need human review?”, each correlated by stable IDs. | Whether to route, rank, abstain, compare alternatives, or request human review. Tie-breaking and score thresholds are explicit caller policy. | Nothing from the returned values alone. A separate valid native research operation may record a review or apply an explicitly selected update. |
+| Agent next step | The current situation, an exact selected context, permitted next-step choices, and the yes/no question “is more context required before proceeding?”. | `continue`, `clarify`, or `review`, plus any answer, uncertainty, missing item, or unavailability by question/item ID. | Whether to ask for specified missing context, stop, request a person, or take an allowed action after revalidation. | Nothing from the answer alone. A separate action must name its target and use the native conflict/replay contract. |
+
+The shared fixture proves representation and correlation, not model quality.
+An offline producer may be a caller-owned function returning records; another
+may read an independently produced Arrow artifact. Both feed the same public
+validation and caller-policy path. Core does not choose or run either producer.
+
+For a contract example, select `evidence-mystery-17` and
+`evidence-voyage-04` from one frozen Version, with queue choices
+`research`/`human_review` and rubric levels `low < medium < high`. A producer
+may return the Voyage row before the Mystery row: Mystery → `research`, score
+`high`, review probability `0.15`; Voyage → `human_review`, score `medium`,
+review probability `0.82`. Caller policy may route Voyage for review and rank
+Mystery first, while keeping its threshold and tie rules visible. The caller
+can inspect the exact Version/projection, evidence links, returned values,
+question IDs, producer revision (`unknown` if unavailable), and policy outcome.
+The graph is unchanged. An agent case over the same selected Version may receive
+`clarify` with missing item `source-date`; the caller asks for that context and
+prepares a new decision instead of applying the old answer to a changed state.
+These values are illustrative contract fixtures, not captured runtime output or
+model-evaluation evidence.
+
+### Minimum logical records
+
+Names here are conceptual fields, not proposed Rust or binding symbols. The
+native API may group them differently after verified gaps are implemented.
+
+| Record | Required content and rule |
+| --- | --- |
+| Selected state | Project and context identity; live or immutable source Version; projection identity/digest; selected object/item IDs; inclusion rule; separately listed boundary and dependency identities; evidence references and availability; fields deliberately omitted. A projection is not the complete Version. |
+| Question | Stable question ID; kind (`choice`, `rubric_score`, or `yes_no_probability`); exact selected-state identity; finite allowed choices or an ordered rubric; proposition text for yes/no. One question cannot silently become the state for another. |
+| Producer identity | Caller-supplied producer name and optional model/revision identity. Unknown revision is represented as unknown or absent, never guessed. This is descriptive provenance, not a claim that saving the name reproduces execution. |
+| Result | Question ID and, when applicable, candidate/item ID; typed choice, finite rubric score, or yes probability; optional explicit yes/no distribution; status (`answered`, `uncertain`, `unavailable`, or `missing`); optional confidence with value, declared domain and meaning. Results may arrive in any order; IDs, not row position, establish correlation. |
+| Policy outcome | Caller-owned threshold, ranking/tie rule, abstention/review rule, and selected next step. It records what the caller chose without granting GraphForge authority. |
+| Action outcome | Optional native action target, prepared operation identity, commit state and receipt. An action failure remains distinct from a successfully recorded external result; exact retry reuses the original prepared identity and request. |
+
+### Validation, freshness, bounds, and retention
+
+- Reject duplicate or unknown question/item IDs, incompatible choice/rubric
+  membership, non-finite scores/probabilities/confidence, and values outside
+  their declared range. A malformed payload is not partly re-correlated by
+  array order. A valid partial response names unanswered items as `missing`;
+  producer/transport failures are `unavailable`, not a successful negative.
+- A yes probability is in `[0, 1]`. If both yes/no probabilities are supplied,
+  they must sum to one within absolute tolerance `1e-9`; preserve supplied values
+  and reject out-of-tolerance input instead of silently normalizing it. Optional
+  producer confidence preserves its declared domain and meaning; if expressed
+  on a normalized `[0, 1]` scale, it is still not probability, GraphForge
+  assertion confidence, or canonical authority.
+- Rubric order and labels are caller supplied and preserved. A score is compared
+  only under that rubric. Equal scores remain ties until caller policy resolves
+  them; Core supplies no universal scale, threshold, ranking, or tie-breaker.
+- Use the existing Slice resource limits and cursor-bound paging for selected
+  state: at most 100,000 selected objects, 100,000 boundary references,
+  100,000 dependencies, 64 MiB working bytes, and 16 MiB per response; the
+  existing API also bounds scanned rows at 1,000,000. The first decision
+  workflow accepts at most 256 questions/items per submitted decision batch;
+  larger work is explicitly divided into batches whose state identity is
+  unchanged. Cancellation or a limit error produces no implicit full-project
+  export or partial action.
+- A live selection is bound to the observed generation and must be re-prepared
+  if that generation changes before an action. A frozen selection remains
+  historical evidence for its exact Version/projection. Applying it to changed
+  live state requires explicit caller review and native target/conflict checks;
+  no automatic refresh substitutes newer state into the old decision.
+- External results are ephemeral unless the caller explicitly records them.
+  Retained evidence names the exact source Version, projection, question and
+  result identities plus available producer metadata. Retention follows the
+  owning research Version/receipt lifecycle and may be released; after release,
+  metadata must distinguish an expired payload from a never-recorded or
+  unavailable result. Reopen/replay claims require durable evidence.
+
+### Caller and Core responsibility
+
+The caller or an optional extension obtains the selected data, invokes a local
+function, SDK or service, and returns typed result data. Core owns selected
+state identity, validation, provenance, bounded output, native action authority,
+conflict handling and receipts. Applications own transport, credentials,
+provider selection, model execution, retry policy for external calls, scoring
+thresholds, ranking/ties, continue/clarify/review policy and any user interface.
+No callback, provider registry, inference loop, network client, model catalogue
+or mandatory inference dependency belongs in Core for this workflow.
+
+Current Slice, Version, comparison, Proposal/review and action operations remain
+the source of GraphForge authority. `ConfidencePolicyRequest` assesses an
+assertion and must not be repurposed as provider probability or confidence.
+Search embedding/reranking provider capabilities and `Algorithm` run records
+also have different semantics; none is implicitly an external decision
+contract. See [current research operations](../book/architecture/research-workspaces.md)
+for implemented behavior and the [M12 evidence map](TESTING.md#m12-decision-workflow-contract)
+for concrete capability gaps and owners.
 
 ## Journey questions and user stories
 
