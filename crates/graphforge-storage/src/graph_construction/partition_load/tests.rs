@@ -753,8 +753,11 @@ fn finish_leases_its_workers_from_the_instance_admission() {
             "evidence differs at limit={limit}"
         );
         assert_eq!(admission.in_use(), 0, "the lease must be released");
+        // Loads lease their workers (the known positive); boundary seals may
+        // lease more (#1448), but nothing ever exceeds the limit.
         let wanted = PARTITION_LOAD_WORKERS.get();
-        assert_eq!(admission.peak(), limit.min(wanted), "limit={limit}");
+        assert!(admission.peak() >= limit.min(wanted), "limit={limit}");
+        assert!(admission.peak() <= limit, "limit={limit}");
     }
 }
 
