@@ -14,6 +14,7 @@ quiet_host_guard() {
   local attempts=0
   while pgrep -x gf >/dev/null 2>&1 || \
         pgrep -x graphforge_api >/dev/null 2>&1 || \
+        pgrep -x "graphforge_api-" >/dev/null 2>&1 || \
         pgrep -x graphforge_stor >/dev/null 2>&1; do
     attempts=$((attempts + 1))
     if [ $((attempts % 6)) -eq 0 ]; then
