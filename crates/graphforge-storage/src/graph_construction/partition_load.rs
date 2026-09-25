@@ -14,7 +14,7 @@
 //!   and total ([`PartitionLoadCounters::merge_into`]): plain sums add,
 //!   per-partition maxima take `max`.
 //! * **One coordinator owns the checkpoint, the allocation ledger and
-//!   publication.** [`consume_in_partition_order`] runs the loads on a bounded
+//!   publication.** [`consume_in_partition_order_weighted`] runs the loads on a bounded
 //!   pool and hands each result to the calling thread in canonical partition
 //!   index order, so scheduling cannot change output. The ordered critical
 //!   section is the coordinator's consume step; decoding, sorting and the bulk
@@ -58,7 +58,7 @@ use std::time::Duration;
 /// durable partition count and splitters are unchanged by it, and the
 /// schedule-independence tests hold the evidence and output bytes equal
 /// across worker counts. It bounds the materialized partitions, see
-/// [`consume_in_partition_order`].
+/// [`consume_in_partition_order_weighted`].
 pub(super) const PARTITION_LOAD_WORKERS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 
 /// How often a load polls the stop flag, in records.
@@ -342,6 +342,7 @@ fn worker<T, L>(
 /// lands during the head load is not held hostage by that load (#1581). On
 /// cancel the pool sets `stop` and returns the `construction cancelled` error
 /// after every worker has exited, exactly like any other stop.
+#[cfg(test)]
 pub(super) fn consume_in_partition_order<T, L, C, K>(
     partitions: usize,
     workers: NonZeroUsize,
@@ -358,8 +359,10 @@ where
     consume_in_partition_order_weighted(partitions, workers, &[], 0, load, cancelled, consume)
 }
 
-/// [`consume_in_partition_order`] with a second, weight bound on the window
-/// (#1448).
+/// Load `partitions` on `workers` threads and consume every result on the
+/// calling thread in partition index order, with a second, weight bound on
+/// the window (#1448). The count-only window's contract, documented on
+/// `consume_in_partition_order`, holds unchanged.
 ///
 /// `weights[index]` is partition `index`'s materialization weight, in the
 /// same unit as `weight_budget`. Besides the `workers` count, a partition is
