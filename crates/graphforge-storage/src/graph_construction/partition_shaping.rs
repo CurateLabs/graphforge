@@ -584,6 +584,19 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                 || segment_bytes(root, names),
                 max_partition_bytes,
             )? {
+                if spill_mode == super::spill_spike::Mode::NativeOnRefusal {
+                    return super::spill_spike::load_native_external::<N>(
+                        root,
+                        names,
+                        *expected,
+                        codec,
+                        max_partition_bytes,
+                        stop,
+                    )
+                    .map(|(records, counters)| {
+                        (LoadedPartition::NativeExternal(Box::new(records)), counters)
+                    });
+                }
                 return super::spill_spike::load_external::<N>(
                     root,
                     names,
@@ -1117,12 +1130,16 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
 }
 
 /// A loaded fixed-width partition, handed from a load worker to the
-/// coordinator. Only the #1507 experiment produces anything but a resident,
-/// fully sorted partition.
+/// coordinator. Only the #1507 / #1585 experiments produce anything but a
+/// resident, fully sorted partition.
 pub(super) enum LoadedPartition<const N: usize> {
     Resident(PartitionRecords<N>),
+    /// Candidate A (#1507, #1585): DataFusion `SortExec` with fixed pool sizing.
     #[cfg(any(test, feature = "test-support"))]
     External(Box<super::spill_spike::ExternalPartition>),
+    /// Candidate B (#1585): GraphForge native bounded external merge.
+    #[cfg(any(test, feature = "test-support"))]
+    NativeExternal(Box<super::spill_spike::NativePartition>),
 }
 
 impl<const N: usize> LoadedPartition<N> {
@@ -1135,6 +1152,8 @@ impl<const N: usize> LoadedPartition<N> {
             Self::Resident(records) => records.iter().try_for_each(consume),
             #[cfg(any(test, feature = "test-support"))]
             Self::External(records) => records.for_each_record(consume),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::NativeExternal(records) => records.for_each_record(consume),
         }
     }
 }

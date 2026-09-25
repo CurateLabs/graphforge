@@ -518,3 +518,246 @@ fn spill_spike_crash_resumes_but_orphans_library_runs() {
     }
     println!("SPILL_SPIKE_ORPHANS {after:?}");
 }
+
+// ─── Candidate B: native bounded external merge tests (#1585) ─────────────────
+
+/// Hub-heavy partition that the recorded budget refuses: the native merge
+/// publishes byte-identical artifacts, removes its run files, and reports the
+/// correct evidence.  Correctness gates (ADR 0047 obligations):
+///
+/// 1. Byte-identical publication with control.
+/// 2. Corrupt scratch refused (flip, mutation-proven: unguarded lets it through).
+/// 3. Truncated scratch refused.
+/// 4. Scratch limit refusal.
+/// 5. Cancellation mid-run, then clean retry.
+/// 6. No scratch after success.
+/// 7. No construction temps after any outcome.
+#[test]
+fn spill_spike_native_sorts_refused_partitions_and_fails_closed() {
+    let root = TempDir::new().unwrap();
+    let tight = "16384";
+    let native_env = |extra: &'static [(&'static str, &'static str)]| {
+        let mut env = vec![
+            ("GF_SPILL_TEST_PARTITION_BYTES", tight),
+            ("GF_SHAPE_SPILL_SPIKE", "native"),
+        ];
+        env.extend_from_slice(extra);
+        env
+    };
+
+    // ── Control (uninterrupted production path) ─────────────────────────────
+    let (control, control_scratch, _) = run_spill_case(
+        root.path(),
+        &SpillCase {
+            name: "native-control",
+            project: "native-control",
+            env: &[],
+        },
+    );
+    let control_result = &control["result"];
+    assert!(control_result.is_object(), "native control failed: {control}");
+    assert!(control_scratch.is_empty());
+    let fingerprint = control_result["fingerprint"].as_str().unwrap().to_owned();
+    assert_eq!(control_result["reopened_edge_count"], 8_192);
+
+    // ── Native hybrid publishes byte-identical answer ───────────────────────
+    let native_base_env = native_env(&[]);
+    let (native, native_scratch, _) = run_spill_case(
+        root.path(),
+        &SpillCase {
+            name: "native-hybrid",
+            project: "native-hybrid",
+            env: &native_base_env,
+        },
+    );
+    assert_eq!(
+        native["result"]["fingerprint"].as_str(),
+        Some(fingerprint.as_str()),
+        "native hybrid fingerprint differs from control: {native}"
+    );
+    assert_eq!(native["result"]["reopened_edge_count"], 8_192, "{native}");
+    let external = native["external"].as_array().unwrap();
+    assert!(
+        !external.is_empty(),
+        "native: no partition took the external path: {native}"
+    );
+    // Verify at least one run was actually written (spill_count > 0).
+    assert!(
+        external
+            .iter()
+            .any(|p| p["spill_count"].as_u64().unwrap_or(0) > 0),
+        "native sort never wrote a run: {native}"
+    );
+    assert!(native_scratch.is_empty(), "native left run files: {native_scratch:?}");
+    println!("SPILL_SPIKE_NATIVE {native}");
+
+    // ── Failure cases ───────────────────────────────────────────────────────
+    let refusals: [(&str, Vec<(&str, &str)>, &str); 3] = [
+        (
+            "native-flip-guarded",
+            native_env(&[("GF_SHAPE_SPILL_FAULT", "flip")]),
+            "differs from its input record multiset",
+        ),
+        (
+            "native-truncate",
+            native_env(&[("GF_SHAPE_SPILL_FAULT", "truncate")]),
+            "",
+        ),
+        (
+            "native-disk-quota",
+            native_env(&[("GF_SHAPE_SPILL_TEMP_BYTES", "4096")]),
+            "exceeded the allowable limit",
+        ),
+    ];
+    for (name, env, expected) in refusals {
+        let (outcome, scratch, _) = run_spill_case(
+            root.path(),
+            &SpillCase {
+                name,
+                project: name,
+                env: &env,
+            },
+        );
+        let error = error_of(&outcome);
+        assert!(!error.is_empty(), "{name} did not fail: {outcome}");
+        assert!(error.contains(expected), "{name}: {error}");
+        assert!(outcome["published"].is_null(), "{name}: {outcome}");
+        assert_eq!(outcome["construction_temps_clean"], true, "{name}");
+        assert!(scratch.is_empty(), "{name} left run files: {scratch:?}");
+        println!("SPILL_SPIKE_NATIVE_REFUSAL {name}: {error}");
+    }
+
+    // Without the guard, the flip propagates into the shaped output.
+    let unguarded_env = native_env(&[
+        ("GF_SHAPE_SPILL_FAULT", "flip"),
+        ("GF_SHAPE_SPILL_GUARD", "off"),
+    ]);
+    let (unguarded, _, _) = run_spill_case(
+        root.path(),
+        &SpillCase {
+            name: "native-flip-unguarded",
+            project: "native-flip-unguarded",
+            env: &unguarded_env,
+        },
+    );
+    let control_shaped = control_result["shaped"].as_str().unwrap();
+    let unguarded_shaped = unguarded["shaped"].as_str().expect("native unguarded shape completed");
+    assert_ne!(unguarded_shaped, control_shaped, "{unguarded}");
+    assert!(
+        error_of(&unguarded).contains("streams differ"),
+        "native unguarded did not catch the corruption at encoding: {unguarded}"
+    );
+    assert!(unguarded["published"].is_null(), "{unguarded}");
+    println!("SPILL_SPIKE_NATIVE_UNGUARDED {unguarded}");
+
+    // Cancellation after the first native run is written, then clean retry.
+    let cancel_env = native_env(&[("GF_SPILL_TEST_CANCEL_AFTER_SPILL", "1")]);
+    let (cancelled, cancelled_scratch, _) = run_spill_case(
+        root.path(),
+        &SpillCase {
+            name: "native-cancel",
+            project: "native-cancel",
+            env: &cancel_env,
+        },
+    );
+    assert_eq!(
+        cancelled["spill_observed"], true,
+        "native cancellation fired before any run written: {cancelled}"
+    );
+    assert!(
+        error_of(&cancelled).contains("cancel"),
+        "native cancel did not report cancel: {cancelled}"
+    );
+    assert!(cancelled["published"].is_null(), "{cancelled}");
+    assert_eq!(cancelled["construction_temps_clean"], true, "{cancelled}");
+    assert!(cancelled_scratch.is_empty(), "native cancel left runs: {cancelled_scratch:?}");
+
+    let retry_env = native_env(&[("GF_SPILL_TEST_RESUME", "1")]);
+    let (retried, _, _) = run_spill_case(
+        root.path(),
+        &SpillCase {
+            name: "native-cancel-retry",
+            project: "native-cancel",
+            env: &retry_env,
+        },
+    );
+    assert_eq!(
+        retried["result"]["fingerprint"].as_str(),
+        Some(fingerprint.as_str()),
+        "native retry fingerprint wrong: {retried}"
+    );
+}
+
+/// A process killed while native runs exist: GraphForge recovery resumes and
+/// publishes the correct answer.  The orphaned run files (if any) are left
+/// behind — native scratch is not construction state.
+#[test]
+fn spill_spike_native_crash_resumes_but_orphans_runs() {
+    let root = TempDir::new().unwrap();
+    let (control, _, _) = run_spill_case(
+        root.path(),
+        &SpillCase {
+            name: "native-crash-control",
+            project: "native-crash-control",
+            env: &[],
+        },
+    );
+    let fingerprint = control["result"]["fingerprint"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (crashed, crash_scratch, exited) = run_spill_case(
+        root.path(),
+        &SpillCase {
+            name: "native-crash",
+            project: "native-crash",
+            env: &[
+                ("GF_SPILL_TEST_PARTITION_BYTES", "16384"),
+                ("GF_SHAPE_SPILL_SPIKE", "native"),
+                ("GF_SHAPE_SPILL_FAULT", "abort"),
+            ],
+        },
+    );
+    assert!(!exited && crashed.is_null(), "native child did not abort");
+    // SIGABRT does not run Rust destructors, so NativeRun's Drop (which
+    // removes scratch files) does not execute.  Scratch files written before
+    // the abort are therefore orphaned.  Whether any files are present at the
+    // point we inspect depends on OS buffering and filesystem behaviour, so
+    // we do not assert on scratch file presence.  The invariant asserted is:
+    // a clean retry after abort publishes the correct fingerprint.
+    let scratch = root.path().join("native-crash-scratch");
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    let output = command
+        .args([
+            "--exact",
+            "graph_construction::tests::determinism::spill_spike_subprocess",
+            "--nocapture",
+        ])
+        .env("GF_SPILL_TEST_ROOT", root.path())
+        .env("GF_SPILL_TEST_CASE", "native-crash-resume")
+        .env("GF_SPILL_TEST_PROJECT", "native-crash")
+        .env("GF_SPILL_TEST_RESUME", "1")
+        .env("GF_SPILL_TEST_PARTITION_BYTES", "16384")
+        .env("GF_SHAPE_SPILL_SPIKE", "native")
+        .env("GF_SHAPE_SPILL_DIR", &scratch)
+        .env_remove("GF_SHAPE_SPILL_FAULT")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "native crash resume failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let resumed: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.path().join("native-crash-resume.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        resumed["result"]["fingerprint"].as_str(),
+        Some(fingerprint.as_str()),
+        "native crash resume fingerprint wrong: {resumed}"
+    );
+    println!(
+        "SPILL_SPIKE_NATIVE_CRASH crash_scratch={crash_scratch:?}"
+    );
+}

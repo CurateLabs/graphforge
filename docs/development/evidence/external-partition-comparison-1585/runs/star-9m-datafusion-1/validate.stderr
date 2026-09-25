@@ -1,0 +1,1 @@
+SHAPE_SPILL {"records":9016255,"input_wire_bytes":297536415,"pool_limit_bytes":67108864,"peak_pool_bytes":66985422,"spill_count":11,"spilled_bytes":298823488,"spilled_rows":9016255,"peak_spill_disk_bytes":282365520,"peak_spill_files":10,"sort_wall_ns":1740600754,"merge_wall_ns":1183342182}

@@ -1,0 +1,23 @@
+	Command being timed: "/home/ubuntu/gf-1585-bin/gf-equal-envelope --json --project /home/ubuntu/gf-1585/docs/development/evidence/external-partition-comparison-1585/runs-equal-envelope/star-9m-datafusion-equal-1/project import-session validate --session-uuid 30000000-0000-4000-8000-000100010001"
+	User time (seconds): 55.19
+	System time (seconds): 17.62
+	Percent of CPU this job got: 92%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:18.39
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 491344
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 596802
+	Voluntary context switches: 110465
+	Involuntary context switches: 1034
+	Swaps: 0
+	File system inputs: 22717768
+	File system outputs: 18171816
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

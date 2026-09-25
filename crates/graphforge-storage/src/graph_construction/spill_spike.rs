@@ -8,11 +8,18 @@
 //!   `max_partition_bytes`;
 //! * `datafusion` — hybrid: partitions the baseline admits stay resident, and
 //!   a partition the baseline would *refuse* is sorted by DataFusion's
-//!   external `SortExec` under a memory pool of `max_partition_bytes`, spilling
-//!   to a DataFusion `DiskManager`;
+//!   external `SortExec` under a memory pool of `min(max_partition_bytes/4,
+//!   64 MiB)` (see `TESTED_POOL_MAX_BYTES`), spilling to a DataFusion
+//!   `DiskManager`;
 //! * `datafusion-always` — every fixed-width partition goes through the
 //!   external sort, which measures the operator's cost where the baseline
-//!   needs no spill.
+//!   needs no spill;
+//! * `native` — hybrid: partitions the baseline admits stay resident, and a
+//!   partition the baseline would refuse is sorted by GraphForge's own
+//!   bounded external merge (run-sort then k-way merge), with no third-party
+//!   memory pool.  Run size uses the same formula as the DataFusion pool
+//!   (`default_datafusion_pool_bytes`) so both candidates operate at equal
+//!   per-partition memory envelopes.
 //!
 //! Recorded splitters, routing, GraphForge's own spill segments, publication,
 //! receipts and recovery are unchanged. DataFusion owns only the transient
@@ -58,6 +65,8 @@ use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
 use datafusion::prelude::SessionConfig;
 use futures::StreamExt;
 use graphforge_core::GfError;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -88,6 +97,8 @@ pub(super) enum Mode {
     Baseline,
     OnRefusal,
     Always,
+    /// Candidate B (#1585): native bounded external merge (no DataFusion pool).
+    NativeOnRefusal,
 }
 
 pub(super) fn mode() -> Result<Mode, GfError> {
@@ -96,6 +107,7 @@ pub(super) fn mode() -> Result<Mode, GfError> {
         Ok(mode) if mode == "baseline" => Ok(Mode::Baseline),
         Ok(mode) if mode == "datafusion" => Ok(Mode::OnRefusal),
         Ok(mode) if mode == "datafusion-always" => Ok(Mode::Always),
+        Ok(mode) if mode == "native" => Ok(Mode::NativeOnRefusal),
         _ => Err(storage("invalid shape spill experiment mode")),
     }
 }
@@ -145,7 +157,7 @@ pub(super) fn selects_external<const N: usize>(
     Ok(match mode {
         Mode::Baseline => false,
         Mode::Always => true,
-        Mode::OnRefusal => admit_materialization(
+        Mode::OnRefusal | Mode::NativeOnRefusal => admit_materialization(
             resident_bytes::<N>(expected_records, codec, spill_bytes()?),
             max_partition_bytes,
         )
@@ -778,6 +790,42 @@ pub(super) fn recorded_budget_override(
     Ok(budgets)
 }
 
+/// Upper bound on the default DataFusion pool: `budget / 4` is never allowed
+/// to exceed this.  64 MiB is empirically proven safe for a 9M-record hub
+/// partition that exceeds the default 256 MiB budget
+/// (`partition-refusal-1584.md`: pool=64 MiB → 11 spill runs, publishes).
+///
+/// Setting pool = budget (the previous default) caused DataFusion to exhaust
+/// its own `GreedyMemoryPool` during the in-memory merge phase.  With a 256 MiB
+/// pool the inner streaming merge's `push_batch` grows `ExternalSorterMerge[0]`
+/// while `ExternalSorter[0]` holds sorted sub-stream splits; their combined
+/// peak reaches 255.8 MB, leaving only 244.4 KB headroom and causing
+/// "Resources exhausted: Failed to allocate additional 264.0 KB for
+/// ExternalSorterMerge[0]".  Dividing by 4 shrinks the per-cycle batch count
+/// and keeps the two consumers' combined peak safely below the pool limit.
+///
+/// ADR 0047 obligation: "Any library pool is a sub-budget whose size is chosen
+/// from tests at the partition sizes it will meet, not set equal to
+/// `max_partition_bytes`."
+const TESTED_POOL_MAX_BYTES: u64 = 64 << 20; // 64 MiB
+
+/// Floor on the default DataFusion pool so that tiny-budget correctness tests
+/// (tight budget ≪ 256 MiB) still produce a viable pool.  The floor is never
+/// less than the budget itself; `default_datafusion_pool_bytes` clips to min.
+const TESTED_POOL_MIN_BYTES: u64 = 16 << 10; // 16 KiB
+
+/// Compute the default DataFusion pool from the recorded budget.
+///
+/// Returns `clamp(budget / 4, TESTED_POOL_MIN_BYTES, TESTED_POOL_MAX_BYTES)`.
+/// This value is overridden by `GF_SHAPE_SPILL_POOL_BYTES`.
+///
+/// The 9M-star evidence proves that `budget / 4 = 64 MiB` is safe; see
+/// `docs/development/evidence/partition-refusal-1584.md`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn default_datafusion_pool_bytes(max_partition_bytes: u64) -> u64 {
+    (max_partition_bytes / 4).clamp(TESTED_POOL_MIN_BYTES, TESTED_POOL_MAX_BYTES)
+}
+
 /// Sort one fixed-width partition with DataFusion's external `SortExec`.
 ///
 /// Runs the sort phase to completion on the calling worker: every input
@@ -797,7 +845,8 @@ pub(super) fn load_external<const N: usize>(
     if let Some(codec) = codec {
         codec.validate_size(N, 0, 0).map_err(storage)?;
     }
-    let pool_bytes = bytes_env("GF_SHAPE_SPILL_POOL_BYTES")?.unwrap_or(max_partition_bytes);
+    let pool_bytes = bytes_env("GF_SHAPE_SPILL_POOL_BYTES")?
+        .unwrap_or_else(|| default_datafusion_pool_bytes(max_partition_bytes));
     let pool_bytes = usize::try_from(pool_bytes).map_err(storage)?;
     let temp_bytes = bytes_env("GF_SHAPE_SPILL_TEMP_BYTES")?;
     let guard = guard_enabled()?;
@@ -880,6 +929,385 @@ pub(super) fn load_external<const N: usize>(
         guard,
     };
     Ok((partition, counters))
+}
+
+// ─── Candidate B: GraphForge native bounded external merge (#1585) ────────────
+
+/// Smallest run for the native external merge: each run contains at least this
+/// many bytes so very small budgets still produce a few records per run.
+const MIN_NATIVE_RUN_BYTES: u64 = 1 << 20; // 1 MiB
+
+/// Process-unique counter for native run file names.
+static NATIVE_RUN_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// A sorted run written to a temp file during the native sort phase.
+/// Removed from disk when dropped.
+struct NativeRun {
+    path: PathBuf,
+    records: u64,
+}
+
+impl Drop for NativeRun {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Sort `buf` in place and write raw `N`-byte records to a new temp file under
+/// `dir`.  Returns the run on success (records count = `buf.len()`).
+fn write_native_run<const N: usize>(dir: &Path, buf: &mut [[u8; N]]) -> Result<NativeRun, GfError> {
+    use std::io::Write as _;
+    buf.sort_unstable();
+    let idx = NATIVE_RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = dir.join(format!("gf-native-run-{}-{idx}", std::process::id()));
+    let mut file = std::fs::File::create(&path).map_err(storage)?;
+    for record in buf.iter() {
+        file.write_all(record).map_err(storage)?;
+    }
+    Ok(NativeRun {
+        path,
+        records: buf.len() as u64,
+    })
+}
+
+/// Read exactly `buf.len()` bytes from `reader` into `buf`.
+/// Returns `false` at end-of-file aligned to a record boundary.
+/// Returns an error if EOF falls mid-record.
+fn read_native_record(
+    reader: &mut std::io::BufReader<std::fs::File>,
+    buf: &mut [u8],
+) -> Result<bool, GfError> {
+    use std::io::Read as _;
+    let n = buf.len();
+    let mut total = 0;
+    while total < n {
+        match reader.read(&mut buf[total..]).map_err(storage)? {
+            0 if total == 0 => return Ok(false),
+            0 => return Err(storage("native run file truncated mid-record")),
+            read => total += read,
+        }
+    }
+    Ok(true)
+}
+
+/// A partition sorted by GraphForge's own bounded external merge.
+/// Holds sorted run files until the coordinator streams them; dropping it
+/// removes every run regardless of outcome.
+pub(super) struct NativePartition {
+    record_size: usize,
+    runs: Vec<NativeRun>,
+    fed: Multiset,
+    evidence: ExternalEvidence,
+    guard: bool,
+}
+
+impl NativePartition {
+    /// Stream every record in globally sorted order into `consume`, then
+    /// verify the multiset guard.  A mismatch is a hard error before any
+    /// caller can publish.
+    pub(super) fn for_each_record(
+        self,
+        mut consume: impl FnMut(&[u8]) -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        let started = Instant::now();
+        let n = self.record_size;
+        let mut emitted = Multiset::default();
+
+        // Open all run readers.
+        let mut readers: Vec<std::io::BufReader<std::fs::File>> = self
+            .runs
+            .iter()
+            .map(|run| {
+                std::fs::File::open(&run.path)
+                    .map(|f| std::io::BufReader::with_capacity(64 << 10, f))
+                    .map_err(storage)
+            })
+            .collect::<Result<_, _>>()?;
+
+        // Current record for each run (empty vec = not yet loaded / exhausted).
+        let mut heads: Vec<Vec<u8>> = readers.iter_mut().map(|_| vec![0u8; n]).collect::<Vec<_>>();
+
+        // Prime: load the first record from each run.
+        let mut exhausted = vec![false; readers.len()];
+        for (i, reader) in readers.iter_mut().enumerate() {
+            if !read_native_record(reader, &mut heads[i])? {
+                exhausted[i] = true;
+            }
+        }
+
+        // k-way merge via a min-heap.
+        // Heap entry: (Reverse(record_bytes), run_index).
+        let mut heap: BinaryHeap<(Reverse<Box<[u8]>>, usize)> =
+            BinaryHeap::with_capacity(readers.len());
+        for (i, ex) in exhausted.iter().enumerate() {
+            if !*ex {
+                heap.push((Reverse(heads[i].clone().into_boxed_slice()), i));
+            }
+        }
+        while let Some((Reverse(record), run_idx)) = heap.pop() {
+            emitted.add(&record);
+            consume(&record)?;
+            if read_native_record(&mut readers[run_idx], &mut heads[run_idx])? {
+                heap.push((Reverse(heads[run_idx].clone().into_boxed_slice()), run_idx));
+            }
+        }
+        let merge_wall_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        if self.guard && emitted != self.fed {
+            return Err(storage(
+                "native external sort output differs from its input record multiset",
+            ));
+        }
+        let mut evidence = self.evidence;
+        evidence.merge_wall_ns = merge_wall_ns;
+        if std::env::var_os("GF_SHAPE_SPILL_METRICS").is_some() {
+            eprintln!(
+                "SHAPE_SPILL_NATIVE {}",
+                serde_json::to_string(&evidence).map_err(storage)?
+            );
+        }
+        #[cfg(test)]
+        record_evidence(evidence);
+        Ok(())
+    }
+}
+
+/// Inject a test fault into native run files (mirrors `inject` for DataFusion).
+fn inject_native(fault: Fault, runs: &[NativeRun], record_size: usize) -> Result<(), GfError> {
+    if fault == Fault::Abort {
+        std::process::abort();
+    }
+    let Some(first) = runs.first() else {
+        return Err(storage("native fault: no run files"));
+    };
+    match fault {
+        Fault::Flip => {
+            let mut bytes = std::fs::read(&first.path).map_err(storage)?;
+            if bytes.len() < record_size {
+                return Err(storage("native fault: run too small to flip"));
+            }
+            // Flip the last byte of the first record (never the UUID prefix).
+            bytes[record_size - 1] ^= 0x5a;
+            std::fs::write(&first.path, &bytes).map_err(storage)?;
+        }
+        Fault::Truncate => {
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&first.path)
+                .map_err(storage)?;
+            f.set_len((record_size / 2) as u64).map_err(storage)?;
+        }
+        Fault::Abort => unreachable!(),
+    }
+    Ok(())
+}
+
+/// Sort phase for `load_native_external`: reads all records from `readers`,
+/// groups them into sorted run files under `spill_dir`, and accumulates load
+/// counters.  Returns `(runs, fed_multiset, total_records, scratch_bytes,
+/// load_counters, sort_wall_ns)`.
+#[allow(clippy::type_complexity)]
+fn native_sort_phase<const N: usize>(
+    readers: Vec<SegmentReader>,
+    spill_dir: &Path,
+    run_records: usize,
+    temp_bytes_limit: Option<u64>,
+    stop: &AtomicBool,
+    base_counters: PartitionLoadCounters,
+) -> Result<
+    (
+        Vec<NativeRun>,
+        Multiset,
+        u64,
+        u64,
+        PartitionLoadCounters,
+        u64,
+    ),
+    GfError,
+> {
+    let mut runs: Vec<NativeRun> = Vec::new();
+    let mut fed = Multiset::default();
+    let mut counters = base_counters;
+    let mut run_buf: Vec<[u8; N]> = Vec::with_capacity(run_records);
+    let mut total_records: u64 = 0;
+    let mut scratch_bytes: u64 = 0;
+    let started = Instant::now();
+    let mut readers_iter = readers.into_iter();
+    let mut current: Option<SegmentReader> = None;
+
+    'read: loop {
+        if stop.load(Ordering::Acquire) {
+            return Err(storage(
+                "native partition sort abandoned after coordinator stop",
+            ));
+        }
+        if current.is_none() {
+            match readers_iter.next() {
+                Some(seg) => current = Some(seg),
+                None => break 'read,
+            }
+        }
+        let seg = current.as_mut().unwrap();
+        match read_run_record::<N>(&mut seg.0, None)? {
+            None => {
+                let seg = current.take().unwrap();
+                let released = seg.0.into_inner().inner.finish().map_err(storage)?;
+                let (rb, ro) = seg.1.values();
+                merge_cache_release_evidence(&mut counters.cache_release, released)?;
+                counters.read_bytes = counters
+                    .read_bytes
+                    .checked_add(rb)
+                    .ok_or_else(|| storage("native: read byte count overflows"))?;
+                counters.read_operations = counters
+                    .read_operations
+                    .checked_add(ro)
+                    .ok_or_else(|| storage("native: read op count overflows"))?;
+            }
+            Some(record) => {
+                fed.add(&record);
+                run_buf.push(record);
+                total_records += 1;
+                counters.records += 1;
+                if run_buf.len() >= run_records {
+                    let run_bytes_now = run_buf.len() as u64 * N as u64;
+                    if temp_bytes_limit
+                        .is_some_and(|lim| scratch_bytes.saturating_add(run_bytes_now) > lim)
+                    {
+                        return Err(storage("native scratch: exceeded the allowable limit"));
+                    }
+                    let run = write_native_run::<N>(spill_dir, &mut run_buf)?;
+                    scratch_bytes = scratch_bytes
+                        .checked_add(run.records * N as u64)
+                        .ok_or_else(|| storage("native: scratch byte count overflows"))?;
+                    #[cfg(test)]
+                    if runs.is_empty() {
+                        SPILL_OBSERVED.store(true, Ordering::Release);
+                    }
+                    runs.push(run);
+                    run_buf.clear();
+                }
+            }
+        }
+    }
+    // Final partial run.
+    if !run_buf.is_empty() {
+        let run_bytes_now = run_buf.len() as u64 * N as u64;
+        if temp_bytes_limit.is_some_and(|lim| scratch_bytes.saturating_add(run_bytes_now) > lim) {
+            return Err(storage("native scratch: exceeded the allowable limit"));
+        }
+        let run = write_native_run::<N>(spill_dir, &mut run_buf)?;
+        scratch_bytes = scratch_bytes
+            .checked_add(run.records * N as u64)
+            .ok_or_else(|| storage("native: scratch byte count overflows"))?;
+        #[cfg(test)]
+        if runs.is_empty() {
+            SPILL_OBSERVED.store(true, Ordering::Release);
+        }
+        runs.push(run);
+    }
+    let sort_wall_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    Ok((
+        runs,
+        fed,
+        total_records,
+        scratch_bytes,
+        counters,
+        sort_wall_ns,
+    ))
+}
+
+/// Sort one fixed-width partition with GraphForge's own bounded external merge.
+///
+/// Reads input records in run-sized chunks on the calling worker, sorts each
+/// chunk in place, and writes it as a raw binary temp file.  Returns
+/// `NativePartition` with the sorted runs ready for the coordinator's k-way
+/// merge via `for_each_record`.
+///
+/// Only fixed-width (no `DetailCodec`) partitions are supported; the codec
+/// path stays on the DataFusion adapter.
+pub(super) fn load_native_external<const N: usize>(
+    root: &StableDirectory,
+    names: &[String],
+    expected_records: Option<u64>,
+    codec: Option<DetailCodec>,
+    max_partition_bytes: u64,
+    stop: &AtomicBool,
+) -> Result<(NativePartition, PartitionLoadCounters), GfError> {
+    if codec.is_some() {
+        return Err(storage(
+            "native external sort does not support detail-codec partitions",
+        ));
+    }
+    if names.is_empty() {
+        return Err(storage("partition has no sealed segments"));
+    }
+    let guard = guard_enabled()?;
+    let temp_bytes_limit = bytes_env("GF_SHAPE_SPILL_TEMP_BYTES")?;
+    // Use the same memory envelope as Candidate A (DataFusion pool) so both
+    // candidates are compared at equal per-partition memory budgets.
+    let run_bytes = default_datafusion_pool_bytes(max_partition_bytes).max(MIN_NATIVE_RUN_BYTES);
+    let run_records = ((run_bytes as usize) / N).max(1);
+    let spill_dir = match std::env::var_os("GF_SHAPE_SPILL_DIR") {
+        Some(path) => PathBuf::from(&path),
+        None => std::env::temp_dir(),
+    };
+
+    let mut total_spill_bytes = 0_u64;
+    let mut readers: Vec<SegmentReader> = Vec::with_capacity(names.len());
+    for name in names {
+        let (reader, counter, length) = open_fixed_reader(root, name)?;
+        total_spill_bytes = total_spill_bytes
+            .checked_add(length)
+            .ok_or_else(|| storage("native: spill byte count overflows"))?;
+        readers.push((reader, counter));
+    }
+    let base_counters = PartitionLoadCounters {
+        spill_bytes: total_spill_bytes,
+        ..Default::default()
+    };
+
+    let (runs, fed, total_records, scratch_bytes, load_counters, sort_wall_ns) =
+        native_sort_phase::<N>(
+            readers,
+            &spill_dir,
+            run_records,
+            temp_bytes_limit,
+            stop,
+            base_counters,
+        )?;
+
+    if let Some(fault) = fault()?
+        && !runs.is_empty()
+        && !FAULT_FIRED.swap(true, Ordering::AcqRel)
+    {
+        inject_native(fault, &runs, N)?;
+    }
+    if expected_records.is_some_and(|expected| total_records != expected) {
+        return Err(storage(
+            "native: partition differs from admitted record count",
+        ));
+    }
+    let evidence = ExternalEvidence {
+        records: total_records,
+        input_wire_bytes: total_records * N as u64,
+        pool_limit_bytes: 0,
+        sort_wall_ns,
+        spill_count: runs.len() as u64,
+        spilled_bytes: scratch_bytes,
+        spilled_rows: total_records,
+        peak_spill_disk_bytes: scratch_bytes,
+        peak_spill_files: runs.len() as u64,
+        ..ExternalEvidence::default()
+    };
+    Ok((
+        NativePartition {
+            record_size: N,
+            runs,
+            fed,
+            evidence,
+            guard,
+        },
+        load_counters,
+    ))
 }
 
 #[cfg(test)]
