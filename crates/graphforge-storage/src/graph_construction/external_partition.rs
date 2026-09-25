@@ -23,9 +23,12 @@
 //! record count and checksum are verified as the merge reads it, so a mutated
 //! or truncated run is refused before anything derived from it can publish.
 //!
-//! Only partitions without a detail codec take this path. Those are the
-//! node-keyed endpoint families, where one high-degree node's records cannot
-//! be split across partitions. Detail-codec partitions keep the refusal.
+//! Only partitions without a detail codec take this path: identities and the
+//! staged and resolved endpoint families. The endpoint families are the ones
+//! that need it, because one high-degree node's records cannot be split across
+//! partitions. Duplicate and order checks stay on the coordinator's consumer,
+//! so they apply to merged records as to resident ones. Detail-codec
+//! partitions keep the refusal.
 
 use super::partition_load::{PartitionLoadCounters, abandon_if_stopped};
 use super::{merge_cache_release_evidence, open_fixed_reader, read_run_record, storage};
@@ -204,6 +207,14 @@ impl<const N: usize> ExternalPartition<N> {
         for record in run.iter() {
             checksum.update(record);
             writer.write_all(record).map_err(storage)?;
+        }
+        #[cfg(test)]
+        if tests::FAIL_RUN_WRITE_AFTER
+            .with(std::cell::Cell::get)
+            .is_some_and(|runs| self.runs.len() > runs)
+        {
+            // A write that fails once the file holds data, as a full disk does.
+            return Err(storage("injected external run write failure"));
         }
         writer.flush().map_err(storage)?;
         let records = run.len() as u64;

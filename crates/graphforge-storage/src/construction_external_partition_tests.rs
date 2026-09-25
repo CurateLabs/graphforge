@@ -40,11 +40,18 @@ fn external_hub_edge_rows(start: usize, edges: &[[u8; 16]], nodes: &[[u8; 16]]) 
     .unwrap()
 }
 
-/// One ingest through shape, encode, publish and reopen.
+/// Set when the cancellation callback fired while a run was on disk.
+static EXTERNAL_CANCEL_FIRED_WITH_RUNS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// One ingest through shape, encode, publish and reopen. With
+/// `cancel_with_runs`, the shape is cancelled at the first poll that finds a
+/// run temporary in the project.
 fn external_ingest(
     project: &Path,
     budgets: GraphConstructionBudgets,
     resume: bool,
+    cancel_with_runs: bool,
 ) -> Result<serde_json::Value, String> {
     let (nodes, edges) = (node_ids(1_024), edge_ids(8_192));
     let mut session =
@@ -73,7 +80,13 @@ fn external_ingest(
         session.seal().map_err(|error| error.to_string())?;
     }
     let shape = session
-        .shape_canonical_with_cancellation(|| false)
+        .shape_canonical_with_cancellation(|| {
+            let fire = cancel_with_runs && !external_run_temps(project).is_empty();
+            if fire {
+                EXTERNAL_CANCEL_FIRED_WITH_RUNS.store(true, std::sync::atomic::Ordering::Release);
+            }
+            fire
+        })
         .map_err(|error| error.to_string())?;
     let evidence = session.evidence().clone();
     let (fingerprint, encoding) =
@@ -126,7 +139,8 @@ fn external_partition_subprocess() {
         budgets.max_external_partition_bytes = value.parse().unwrap();
     }
     let resume = std::env::var_os("GF_EXTERNAL_TEST_RESUME").is_some();
-    let outcome = external_ingest(&project, budgets, resume);
+    let cancel_with_runs = std::env::var_os("GF_EXTERNAL_TEST_CANCEL_WITH_RUNS").is_some();
+    let outcome = external_ingest(&project, budgets, resume, cancel_with_runs);
     let published = crate::resolve_project_generation(&project)
         .ok()
         .and_then(|generation| generation.graph_files_inventory().ok().flatten())
@@ -136,6 +150,8 @@ fn external_partition_subprocess() {
         "error": outcome.as_ref().err(),
         "published": published,
         "construction_temps_clean": tree_has_no_temps(&project),
+        "cancel_fired_with_runs":
+            EXTERNAL_CANCEL_FIRED_WITH_RUNS.load(std::sync::atomic::Ordering::Acquire),
     });
     std::fs::write(
         root.join(format!("{case}.json")),
@@ -165,6 +181,7 @@ fn run_external_case(
         .env_remove("GF_EXTERNAL_TEST_PARTITION_BYTES")
         .env_remove("GF_EXTERNAL_TEST_EXTERNAL_BYTES")
         .env_remove("GF_EXTERNAL_TEST_RESUME")
+        .env_remove("GF_EXTERNAL_TEST_CANCEL_WITH_RUNS")
         .env_remove("GF_CONSTRUCTION_FAILPOINT")
         .env_remove("GF_CONSTRUCTION_FAILPOINT_COOKIE")
         .env_remove("GF_SHAPE_SPILL_SPIKE")
@@ -324,4 +341,52 @@ fn an_interrupted_external_partition_resumes_to_the_same_answer() {
             "{failpoint}: a run survived the resume"
         );
     }
+}
+
+/// A shape cancelled while runs are on disk publishes nothing and leaves no
+/// run; a retry resumes to the unconstrained answer.
+#[test]
+fn a_cancelled_external_partition_leaves_no_run_and_retries() {
+    let root = tempfile::TempDir::new().unwrap();
+    let tight = EXTERNAL_TEST_TIGHT_BYTES.to_string();
+    let (control, _) = run_external_case(root.path(), "control", "control", &[]);
+    let fingerprint = control["result"]["fingerprint"].as_str().unwrap().to_owned();
+
+    let (cancelled, _) = run_external_case(
+        root.path(),
+        "cancel",
+        "cancel",
+        &[
+            ("GF_EXTERNAL_TEST_PARTITION_BYTES", &tight),
+            ("GF_EXTERNAL_TEST_CANCEL_WITH_RUNS", "1"),
+        ],
+    );
+    // The known positive: cancellation was observed with a run on disk.
+    assert_eq!(cancelled["cancel_fired_with_runs"], true, "{cancelled}");
+    assert!(
+        cancelled["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("cancelled"),
+        "{cancelled}"
+    );
+    assert!(cancelled["published"].is_null(), "{cancelled}");
+    assert_eq!(cancelled["construction_temps_clean"], true, "{cancelled}");
+    assert!(external_run_temps(&root.path().join("cancel")).is_empty());
+
+    let (retried, _) = run_external_case(
+        root.path(),
+        "cancel-retry",
+        "cancel",
+        &[
+            ("GF_EXTERNAL_TEST_PARTITION_BYTES", &tight),
+            ("GF_EXTERNAL_TEST_RESUME", "1"),
+        ],
+    );
+    assert_eq!(
+        retried["result"]["fingerprint"].as_str(),
+        Some(fingerprint.as_str()),
+        "{retried}"
+    );
+    assert!(external_run_temps(&root.path().join("cancel")).is_empty());
 }

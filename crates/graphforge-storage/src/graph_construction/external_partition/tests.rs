@@ -6,6 +6,12 @@ use crate::graph_construction::{
 use sha2::Digest;
 use std::ffi::OsStr;
 
+thread_local! {
+    /// Fail `write_run` once this many runs exist on this thread.
+    pub(super) static FAIL_RUN_WRITE_AFTER: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Record width: a 16-byte key and an 8-byte distinguishing suffix.
 const WIDTH: usize = 24;
 const RECORDS: u64 = 4_096;
@@ -413,4 +419,62 @@ fn recovery_recognizes_run_temporaries_only() {
     assert!(!super::super::recovery::canonical_artifact_target(
         "xrun-p0"
     ));
+}
+
+/// A run write that fails part-way, as on a full scratch disk, refuses the
+/// partition and leaves no run, including the one being written.
+#[test]
+fn a_failed_run_write_leaves_no_run() {
+    let root = tempfile::TempDir::new().unwrap();
+    let (session, names, records) = hub_segments(&root);
+    let stop = AtomicBool::new(false);
+    FAIL_RUN_WRITE_AFTER.with(|after| after.set(Some(3)));
+    let result = sort_into_runs::<WIDTH>(
+        &session.root,
+        &names,
+        Some(records),
+        100 * WIDTH as u64,
+        1 << 30,
+        &stop,
+    );
+    FAIL_RUN_WRITE_AFTER.with(|after| after.set(None));
+    let error = result.err().unwrap().to_string();
+    assert!(
+        error.contains("injected external run write failure"),
+        "{error}"
+    );
+    assert!(scratch_names(&session.root).is_empty());
+}
+
+/// A merge that stops part-way, as a cancellation observed by the consumer
+/// does, returns the consumer's error and removes every run.
+#[test]
+fn a_merge_stopped_by_its_consumer_removes_every_run() {
+    let root = tempfile::TempDir::new().unwrap();
+    let (session, names, records) = hub_segments(&root);
+    let stop = AtomicBool::new(false);
+    let (partition, _) = sort_into_runs::<WIDTH>(
+        &session.root,
+        &names,
+        Some(records),
+        100 * WIDTH as u64,
+        1 << 30,
+        &stop,
+    )
+    .unwrap();
+    assert!(!scratch_names(&session.root).is_empty());
+    let mut consumed = 0;
+    let error = partition
+        .for_each_record(|_| {
+            consumed += 1;
+            if consumed == 10 {
+                return Err(super::storage("construction cancelled"));
+            }
+            Ok(())
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("cancelled"), "{error}");
+    assert_eq!(consumed, 10);
+    assert!(scratch_names(&session.root).is_empty());
 }

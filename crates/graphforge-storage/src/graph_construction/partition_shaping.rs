@@ -1212,18 +1212,25 @@ fn fits_resident<const N: usize>(
     expected_records: Option<u64>,
     max_partition_bytes: u64,
 ) -> Result<bool, GfError> {
-    let mut spill_bytes = 0_u64;
-    for name in names {
-        let length = root
-            .open_child_file(OsStr::new(name))
-            .and_then(|file| file.metadata())
-            .map_err(super::storage)?
-            .len();
-        spill_bytes = spill_bytes
-            .checked_add(length)
-            .ok_or_else(|| super::storage("partition spill byte count overflows"))?;
-    }
-    let count = expected_records.unwrap_or(spill_bytes / N as u64);
+    // The routed count decides without I/O. Only a load without one reads the
+    // segment lengths; either load re-checks the count against the records.
+    let count = match expected_records {
+        Some(count) => count,
+        None => {
+            let mut spill_bytes = 0_u64;
+            for name in names {
+                let length = root
+                    .open_child_file(OsStr::new(name))
+                    .and_then(|file| file.metadata())
+                    .map_err(super::storage)?
+                    .len();
+                spill_bytes = spill_bytes
+                    .checked_add(length)
+                    .ok_or_else(|| super::storage("partition spill byte count overflows"))?;
+            }
+            spill_bytes / N as u64
+        }
+    };
     Ok(
         super::partition::admit_materialization(count.checked_mul(N as u64), max_partition_bytes)
             .is_ok(),
