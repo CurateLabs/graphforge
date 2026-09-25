@@ -1449,3 +1449,20 @@ fn recorded_partition_refusal_survives_reopen_with_no_completed_shape() {
         "{error}"
     );
 }
+
+/// #1448: the permuted-schedule switch really reverses lane claims.
+#[test]
+fn lane_job_claims_in_order_or_reversed() {
+    assert_eq!(
+        (0..4)
+            .map(|claim| super::lane_job(claim, 4, false))
+            .collect::<Vec<_>>(),
+        [0, 1, 2, 3]
+    );
+    assert_eq!(
+        (0..5)
+            .map(|claim| super::lane_job(claim, 4, true))
+            .collect::<Vec<_>>(),
+        [3, 2, 1, 0, 4]
+    );
+}

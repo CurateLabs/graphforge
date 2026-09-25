@@ -2393,6 +2393,7 @@ fn retire_segments(
         return first_error.map_or(Ok(()), Err);
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
+    let reversed = super::lane_jobs_reversed();
     let results = std::sync::Mutex::new(
         std::iter::repeat_with(|| None)
             .take(segments.len())
@@ -2403,7 +2404,11 @@ fn retire_segments(
             scope.spawn(|| {
                 use std::sync::atomic::Ordering;
                 loop {
-                    let index = next.fetch_add(1, Ordering::AcqRel);
+                    let index = super::lane_job(
+                        next.fetch_add(1, Ordering::AcqRel),
+                        segments.len(),
+                        reversed,
+                    );
                     let Some(segment) = segments.get(index) else {
                         break;
                     };
