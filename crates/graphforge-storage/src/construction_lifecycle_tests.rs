@@ -1560,6 +1560,7 @@ mod lifecycle_budget {
                 window_rows,
                 partition::default_materialization_bytes(),
                 0,
+                0,
                 false,
                 None,
                 &mut || false,

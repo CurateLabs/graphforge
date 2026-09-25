@@ -12,7 +12,8 @@
 
 /// Environment every integrated child starts without, so a variable set on the
 /// parent test process can never leak into a case.
-const INTEGRATED_ENV: [&str; 11] = [
+const INTEGRATED_ENV: [&str; 12] = [
+    "GF_SHAPE_MAX_EXTERNAL_PARTITION_BYTES",
     "GF_SHAPE_SPILL_SPIKE",
     "GF_SHAPE_SPILL_FAULT",
     "GF_SHAPE_SPILL_GUARD",
@@ -146,7 +147,12 @@ fn integrated_schedulers_with_the_hybrid_publish_the_control_graph() {
         root.path(),
         "baseline-tight",
         "baseline-tight",
-        &[("GF_SHAPE_MAX_PARTITION_BYTES", INTEGRATED_TIGHT_BUDGET)],
+        // The refusal this experiment was measured against: since ADR 0047 a
+        // session refuses only when its recorded external bound is zero.
+        &[
+            ("GF_SHAPE_MAX_PARTITION_BYTES", INTEGRATED_TIGHT_BUDGET),
+            ("GF_SHAPE_MAX_EXTERNAL_PARTITION_BYTES", "0"),
+        ],
     );
     assert!(
         error_of(&refused.recorded).contains("exceeds recorded budget"),

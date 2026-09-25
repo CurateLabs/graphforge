@@ -222,7 +222,8 @@ fn run_spill_case(root: &Path, case: &SpillCase<'_>) -> (serde_json::Value, Vec<
         .env_remove("GF_SHAPE_SPILL_FAULT")
         .env_remove("GF_SHAPE_SPILL_GUARD")
         .env_remove("GF_SHAPE_SPILL_POOL_BYTES")
-        .env_remove("GF_SHAPE_SPILL_TEMP_BYTES");
+        .env_remove("GF_SHAPE_SPILL_TEMP_BYTES")
+        .env_remove("GF_SHAPE_MAX_EXTERNAL_PARTITION_BYTES");
     for (key, value) in case.env {
         command.env(key, value);
     }
@@ -285,7 +286,12 @@ fn spill_spike_hybrid_sorts_refused_partitions_and_fails_closed() {
         &SpillCase {
             name: "baseline-tight",
             project: "baseline-tight",
-            env: &[("GF_SPILL_TEST_PARTITION_BYTES", tight)],
+            // The refusal this spike was measured against: since ADR 0047 a
+            // session refuses only when its recorded external bound is zero.
+            env: &[
+                ("GF_SPILL_TEST_PARTITION_BYTES", tight),
+                ("GF_SHAPE_MAX_EXTERNAL_PARTITION_BYTES", "0"),
+            ],
         },
     );
     assert!(
