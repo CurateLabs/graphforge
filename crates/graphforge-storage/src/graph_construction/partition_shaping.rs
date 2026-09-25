@@ -311,6 +311,10 @@ impl SpillWriter {
     }
 }
 
+/// Most lanes one boundary's spill seals lease (#1448). A seal is a data
+/// fsync, a rename and a small control install; lanes overlap the fsyncs.
+const SEAL_LANES: usize = 8;
+
 /// One open, unsealed fixed-width partition spill (#1439 follow-up, #1443).
 ///
 /// Unlike [`SpillWriter`], this holds no fixed-size per-partition block.
@@ -402,12 +406,25 @@ impl FixedSpillWriter {
     }
 
     fn seal(
-        mut self,
+        self,
         name: &str,
         root: &StableDirectory,
         evidence: &mut GraphConstructionEvidence,
         batch: &mut SealDirectoryBatch,
     ) -> Result<ArtifactReceipt, GfError> {
+        self.seal_files(name, root, batch)?.account(evidence)
+    }
+
+    /// The filesystem half of [`Self::seal`]: make the spill durable, install
+    /// it under `name` and persist its writer capability into `batch`. The
+    /// evidence is charged by [`SealedSpill::account`], so lanes may seal
+    /// spills concurrently and the caller charge them in partition order.
+    fn seal_files(
+        mut self,
+        name: &str,
+        root: &StableDirectory,
+        batch: &mut SealDirectoryBatch,
+    ) -> Result<SealedSpill, GfError> {
         self.flush_buffer()?;
         self.writer.flush().map_err(super::storage)?;
         self.writer
@@ -415,8 +432,6 @@ impl FixedSpillWriter {
             .sync_all_and_release()
             .map_err(super::storage)?;
         let cache_release = self.writer.inner.evidence();
-        account_cache_release(cache_release, evidence)?;
-        account_sequential_write(self.writer.bytes, evidence)?;
         let receipt = ArtifactReceipt {
             name: name.to_owned(),
             bytes: self.writer.bytes,
@@ -441,6 +456,28 @@ impl FixedSpillWriter {
         batch.mark();
         construction_failpoint("shape.partition_spill.after_install");
         persist_shape_receipt_in_batch(root, &receipt, batch)?;
+        Ok(SealedSpill {
+            receipt,
+            cache_release,
+        })
+    }
+}
+
+/// A spill sealed on disk whose evidence is not yet charged (#1448).
+struct SealedSpill {
+    receipt: ArtifactReceipt,
+    cache_release: graphforge_filesystem::FileCacheReleaseEvidence,
+}
+
+impl SealedSpill {
+    /// Charge the seal to `evidence`, exactly as a sequential seal does.
+    fn account(self, evidence: &mut GraphConstructionEvidence) -> Result<ArtifactReceipt, GfError> {
+        let Self {
+            receipt,
+            cache_release,
+        } = self;
+        account_cache_release(cache_release, evidence)?;
+        account_sequential_write(receipt.bytes, evidence)?;
         record_shape_artifact_install(evidence, &receipt)?;
         account_fixed_write_operations(&receipt, evidence)?;
         evidence.merge_fsync_operations = evidence
@@ -716,14 +753,91 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
         evidence: &mut GraphConstructionEvidence,
         batch: &mut SealDirectoryBatch,
     ) -> Result<(), GfError> {
-        for partition in 0..self.spills.len() {
-            if let Some(spill) = self.spills[partition].take() {
+        let open = self
+            .spills
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(partition, slot)| slot.take().map(|spill| (partition, spill)))
+            .collect::<Vec<_>>();
+        let want = NonZeroUsize::new(SEAL_LANES.min(open.len())).filter(|lanes| lanes.get() > 1);
+        let lease = want.and_then(|want| {
+            self.cpu_admission
+                .as_ref()
+                .and_then(|admission| admission.try_acquire(want))
+                .filter(|lease| lease.lanes().get() > 1)
+        });
+        let Some(lease) = lease else {
+            let mut first_error = None;
+            for (partition, spill) in open {
                 let name = fixed_spill_name(self.family, boundary, partition);
-                let receipt = spill.seal(&name, self.root, evidence, batch)?;
-                self.sealed[partition].push(receipt);
+                match spill.seal(&name, self.root, evidence, batch) {
+                    Ok(receipt) => self.sealed[partition].push(receipt),
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+            return first_error.map_or(Ok(()), Err);
+        };
+        // #1448: seal on lanes, each into its own directory batch; charge the
+        // evidence in partition order afterwards, so it does not depend on
+        // the schedule. Every spill is attempted even after one fails.
+        let family = self.family;
+        let root = self.root;
+        let jobs = open
+            .into_iter()
+            .map(|job| std::sync::Mutex::new(Some(job)))
+            .collect::<Vec<_>>();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let sealed = std::sync::Mutex::new(Vec::with_capacity(jobs.len()));
+        let lane_batches = std::sync::Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            for _ in 0..lease.lanes().get() {
+                scope.spawn(|| {
+                    let mut lane_batch = SealDirectoryBatch::new(root);
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                        let Some(job) = jobs.get(index) else {
+                            break;
+                        };
+                        let Some((partition, spill)) =
+                            job.lock().ok().and_then(|mut job| job.take())
+                        else {
+                            continue;
+                        };
+                        let name = fixed_spill_name(family, boundary, partition);
+                        let result = spill.seal_files(&name, root, &mut lane_batch);
+                        if let Ok(mut sealed) = sealed.lock() {
+                            sealed.push((partition, result));
+                        }
+                    }
+                    if let Ok(mut batches) = lane_batches.lock() {
+                        batches.push(lane_batch);
+                    }
+                });
+            }
+        });
+        drop(lease);
+        for mut lane_batch in lane_batches
+            .into_inner()
+            .map_err(|_| super::storage("seal lane batches poisoned"))?
+        {
+            batch.absorb(&mut lane_batch);
+        }
+        let mut sealed = sealed
+            .into_inner()
+            .map_err(|_| super::storage("seal lane results poisoned"))?;
+        sealed.sort_by_key(|(partition, _)| *partition);
+        let mut first_error = None;
+        for (partition, result) in sealed {
+            match result.and_then(|spill| spill.account(evidence)) {
+                Ok(receipt) => self.sealed[partition].push(receipt),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
             }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Seal every open spill with a private durability batch.

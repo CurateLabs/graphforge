@@ -1644,31 +1644,53 @@ mod group_boundary {
         session.seal().unwrap();
     }
 
-    /// #1448: a boundary shape whose finish stages retire their segments on
-    /// parallel lanes publishes the same shape and records the same evidence
-    /// as one that retires them on the calling thread.
+    /// #1448: a boundary shape whose boundaries seal their spills and whose
+    /// finish stages retire their segments on parallel lanes publishes the
+    /// same shape and records the same evidence as one that does both on the
+    /// calling thread.
     #[test]
     fn parallel_segment_retirement_matches_the_calling_thread() {
-        let shape = |admission: Option<std::sync::Arc<crate::ConstructionCpuAdmission>>| {
+        let shape = |partition_count: u32,
+                     admission: Option<std::sync::Arc<crate::ConstructionCpuAdmission>>| {
             let root = TempDir::new().unwrap();
             crate::open_or_initialize_project(root.path()).unwrap();
-            let mut session = boundary_session(root.path(), 156_448);
+            let mut session = GraphConstructionSession::open_with_mode(
+                root.path(),
+                Uuid::from_u128(156_448),
+                0,
+                graphforge_core::OntologyMode::Exploratory,
+                GraphConstructionBudgets {
+                    partition_count,
+                    ..boundary_budgets()
+                },
+            )
+            .unwrap();
             session.set_cpu_admission(admission);
             stage_boundary_groups(&mut session, 3);
             session.shape_canonical_with_cancellation(|| false).unwrap();
+            assert!(session.evidence().merge_directory_fsync_operations > 1);
             (
                 shape_output_content(&session),
                 super::evidence_without_file_identities(session.evidence()),
             )
         };
-        let serial = shape(None);
-        let admission = std::sync::Arc::new(crate::ConstructionCpuAdmission::new(
-            std::num::NonZeroUsize::new(8).unwrap(),
-        ));
-        let parallel = shape(Some(admission.clone()));
-        // Finish-time loads lease two lanes; only retirement asks for more.
-        assert!(admission.peak() > 2, "retirement never ran on parallel lanes");
-        assert_eq!(serial, parallel);
+        // One partition: many segments per family to retire. Two: two open
+        // spills per family at every boundary to seal. (This fixture's
+        // endpoints are too concentrated to pass the balance check at more.)
+        for partition_count in [1, 2] {
+            let serial = shape(partition_count, None);
+            let admission = std::sync::Arc::new(crate::ConstructionCpuAdmission::new(
+                std::num::NonZeroUsize::new(8).unwrap(),
+            ));
+            let parallel = shape(partition_count, Some(admission.clone()));
+            // Finish-time loads lease two lanes; only retirement and sealing
+            // ask for more.
+            assert!(
+                admission.peak() > 2,
+                "{partition_count}: no retirement or seal ran on parallel lanes"
+            );
+            assert_eq!(serial, parallel, "{partition_count}");
+        }
     }
 
     fn complete_boundary(session: &mut GraphConstructionSession) {
