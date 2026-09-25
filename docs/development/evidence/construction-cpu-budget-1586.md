@@ -29,10 +29,11 @@ Query kernels are not admission-gated. They keep running on the instance's
 `compute_threads` pool, because each kernel splits its work into
 `compute_threads` chunks. Letting a kernel's width vary with load would change
 its chunking, and with it the order of floating-point reductions. The budget is
-therefore shared as ADR 0047 intends from the construction side: construction,
-across every concurrent import, never uses more than `compute_threads - reserve`
-lanes. The instance's queries own the whole pool, and construction is kept out
-of at least `reserve` of its width.
+therefore shared from the construction side. Construction, across every
+concurrent import, never uses more than `compute_threads - reserve` lanes.
+Normalization runs on the query pool, so at least `reserve` of the pool's
+threads stay free for queries. Finish-time loads run on their own threads and
+count against the same limit.
 
 ## Predeclared measurement (recorded before any timed run)
 
@@ -69,3 +70,4 @@ aborted, so the project never changes.
 | Date | Change |
 | --- | --- |
 | 2026-09-25 | Implementation and predeclared measurement, before any timed run. |
+| 2026-09-25 | Harness fix before any valid run: the first attempt panicked at setup because its edge IDs were not UUIDv7 and its imports reused the base graph's node IDs. Each input now has its own UUIDv7 identity space. Nothing was measured; the protocol is unchanged. |

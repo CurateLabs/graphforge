@@ -10,8 +10,9 @@ superseded_by: null
 
 **Status:** Accepted
 
-**Implementation:** Pending. #1585 implements decision 1 and #1586 implements
-decision 2. Until they land, production behaviour is unchanged.
+**Implementation:** Decision 2 is implemented by #1586; see the implementation
+update below. Decision 1 is pending in #1585; until it lands, over-budget
+partitions still refuse.
 
 **Build target:** v0.6.0
 
@@ -20,6 +21,27 @@ decisions it reserved for maintainers), ADR 0038 (determinism at the
 publication boundary), ADR 0045 (ingest authentication regime); #337
 (per-instance execution resource policy); #1448 (shaping parallelism); #1504
 (construction reuse epic).
+
+## Implementation update: the instance construction budget (#1586)
+
+Each instance builds one `ConstructionCpuAdmission`, sized
+`compute_threads - construction_cpu_reserve`, and attaches it to every
+construction session it opens. Finish-time partition loads lease their workers
+from it. Import normalization leases its compute-pool lanes for each flush on
+the calling thread. Concurrent imports on the instance therefore share one
+construction limit.
+
+Query kernels are not admission-gated. They keep the instance's
+`compute_threads` pool, because each kernel splits its work into
+`compute_threads` chunks, and a width that varied with load would change its
+chunking and floating-point reduction order. The budget is shared from the
+construction side. Construction never uses more than `compute_threads - reserve`
+lanes across all imports. Normalization therefore never occupies more of the
+query pool than that, so at least `reserve` pool threads stay free for queries.
+Finish-time loads run on their own threads and count against the same limit.
+
+The default reserve and its evidence are in
+`docs/development/evidence/construction-cpu-budget-1586.md`.
 
 ## Context
 

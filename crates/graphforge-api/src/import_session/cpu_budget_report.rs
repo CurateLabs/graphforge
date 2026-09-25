@@ -44,11 +44,10 @@ fn uuid_column(prefix: u128, indexes: impl Iterator<Item = u64>) -> Arc<FixedSiz
     Arc::new(FixedSizeBinaryArray::try_from_iter(values.iter()).unwrap())
 }
 
-const NODE_PREFIX: u128 = 0x0190_0000_0000_7000_8000_0000_0000_0000;
-
-/// Deterministic node and edge batches. `edge_prefix` separates the edge
-/// identity spaces of different inputs.
-fn input(nodes: u64, edges: u64, edge_prefix: u128) -> (Vec<RecordBatch>, Vec<RecordBatch>) {
+/// Deterministic node and edge batches. `prefix` separates the identity
+/// spaces of different inputs; edges use `prefix + 1`.
+fn input(nodes: u64, edges: u64, prefix: u128) -> (Vec<RecordBatch>, Vec<RecordBatch>) {
+    let (node_prefix, edge_prefix) = (prefix, prefix + (1 << 112));
     let node_batches = (0..nodes)
         .step_by(BATCH_ROWS)
         .map(|start| {
@@ -56,7 +55,7 @@ fn input(nodes: u64, edges: u64, edge_prefix: u128) -> (Vec<RecordBatch>, Vec<Re
             RecordBatch::try_new(
                 bulk_node_input_schema(Vec::new()).unwrap(),
                 vec![
-                    uuid_column(NODE_PREFIX, start..end),
+                    uuid_column(node_prefix, start..end),
                     Arc::new(StringArray::from(vec!["Node"; (end - start) as usize])),
                 ],
             )
@@ -83,8 +82,8 @@ fn input(nodes: u64, edges: u64, edge_prefix: u128) -> (Vec<RecordBatch>, Vec<Re
                 vec![
                     uuid_column(edge_prefix, start..end),
                     Arc::new(StringArray::from(vec!["LINKS"; count])),
-                    uuid_column(NODE_PREFIX, sources.into_iter()),
-                    uuid_column(NODE_PREFIX, targets.into_iter()),
+                    uuid_column(node_prefix, sources.into_iter()),
+                    uuid_column(node_prefix, targets.into_iter()),
                 ],
             )
             .unwrap()
@@ -170,7 +169,11 @@ fn construction_cpu_reserve_report() {
     fs::create_dir(&project).unwrap();
     {
         let graph = GraphForge::new_with_options(project.to_str(), options(compute, None)).unwrap();
-        let (nodes, edges) = input(base_edges / 8, base_edges, 0x0191 << 112);
+        let (nodes, edges) = input(
+            base_edges / 8,
+            base_edges,
+            0x0190_0000_0000_7000_8000_0000_0000_0000,
+        );
         let mut session = graph
             .begin_import_session(
                 OperationId(Uuid::now_v7()),
@@ -185,8 +188,10 @@ fn construction_cpu_reserve_report() {
         session.validate(&graph).unwrap();
         session.commit(&graph, None).unwrap();
     }
-    let (first_nodes, first_edges) = input(edges / 8, edges, 0x0192 << 112);
-    let (second_nodes, second_edges) = input(edges / 8, edges, 0x0193 << 112);
+    let (first_nodes, first_edges) =
+        input(edges / 8, edges, 0x0192_0000_0000_7000_8000_0000_0000_0000);
+    let (second_nodes, second_edges) =
+        input(edges / 8, edges, 0x0194_0000_0000_7000_8000_0000_0000_0000);
     // Unbounded, then reserve 1, a quarter and a half of the compute threads.
     let mut configurations = vec![("unbounded".to_owned(), None)];
     let mut reserves = vec![1, compute / 4, compute / 2];
