@@ -1,0 +1,38 @@
+## A/B s18
+base r1: wall 32.38 s, cpu 28.88 s, cpu/wall 0.89, shaping 15.42 s (cpu/wall 0.87), peak 810 MiB
+base r2: wall 31.53 s, cpu 28.40 s, cpu/wall 0.90, shaping 15.17 s (cpu/wall 0.87), peak 804 MiB
+base r3: wall 31.22 s, cpu 27.98 s, cpu/wall 0.90, shaping 15.06 s (cpu/wall 0.87), peak 805 MiB
+cand r1: wall 29.41 s, cpu 28.46 s, cpu/wall 0.97, shaping 12.20 s (cpu/wall 1.09), peak 832 MiB
+cand r2: wall 28.45 s, cpu 28.54 s, cpu/wall 1.00, shaping 11.60 s (cpu/wall 1.14), peak 839 MiB
+cand r3: wall 28.30 s, cpu 28.79 s, cpu/wall 1.02, shaping 11.42 s (cpu/wall 1.16), peak 838 MiB
+median wall: base 31.53 s, cand 28.45 s, change -9.8%
+per-pair cand - base: -2.97 s, -3.08 s, -2.92 s
+distinct answer sets: 1
+  nodes: rows=1 scalar=262144 sha256=3943ce07cba5fc8b1b779daf479b68f69c81d1b0427e0ac49c8433fe53b17e8f
+  node-scan: rows=262144 scalar=None sha256=a4759b63cc96a01e5b1abe2f53c249d26ca52026fe8f0b633c5a7a422ca3d1e8
+  edges: rows=1 scalar=4194304 sha256=2cb98d6493038230f3d574b16c2cbe283c07e43471b8764f6dfb59bea0aca486
+  edge-scan: rows=4194304 scalar=None sha256=82a56ff970f9e64bf6a565e4e21e4dca20b436f40f312fcfab2c9152a82f4be6
+## A/B s20
+base r1: wall 130.47 s, cpu 117.19 s, cpu/wall 0.90, shaping 61.21 s (cpu/wall 0.86), peak 2702 MiB
+base r2: wall 128.00 s, cpu 117.26 s, cpu/wall 0.92, shaping 60.16 s (cpu/wall 0.88), peak 2721 MiB
+base r3: wall 127.59 s, cpu 117.23 s, cpu/wall 0.92, shaping 59.46 s (cpu/wall 0.89), peak 2698 MiB
+cand r1: wall 114.34 s, cpu 116.34 s, cpu/wall 1.02, shaping 45.13 s (cpu/wall 1.16), peak 2760 MiB
+cand r2: wall 112.51 s, cpu 117.17 s, cpu/wall 1.04, shaping 44.87 s (cpu/wall 1.18), peak 2781 MiB
+cand r3: wall 113.51 s, cpu 117.44 s, cpu/wall 1.03, shaping 43.54 s (cpu/wall 1.21), peak 2764 MiB
+median wall: base 128.00 s, cand 113.51 s, change -11.3%
+per-pair cand - base: -16.12 s, -15.49 s, -14.08 s
+distinct answer sets: 1
+  nodes: rows=1 scalar=1048576 sha256=d41814e11f492a8c36191b100c805a370de2b4bdbe6ca88c7eef41360ef53066
+  node-scan: rows=1048576 scalar=None sha256=a6e97315aeea1abea378e7252ab2be425422c67ca660ad9f3f8f6879a23aabdf
+  edges: rows=1 scalar=16777216 sha256=3daeda0e54a362622ffdc547a631479e3f18cd0f7fa1b28c3b1fce9b7e88a150
+  edge-scan: rows=16777216 scalar=None sha256=9682f98ce5f867f958fafa61405f5915b8ce2a010efe68afbaa9f58a9e37f97a
+## S22 regions (one run each)
+base: wall 527.97 s, cpu/wall 0.93, shaping 249.68 s (cpu/wall 0.89)
+cand: wall 453.77 s, cpu/wall 1.08, shaping 180.49 s (cpu/wall 1.23)
+## Candidate core-count curve, S18
+ 1 cores (3 runs): wall 34.66 s [34.66, 34.65, 35.00], cpu 26.39 s, effective cores 0.76, relative throughput 1.00, cpu pressure 1.75 s, io pressure 5.66 s, peak 747 MiB
+ 2 cores (1 runs): wall 35.23 s [35.23], cpu 27.40 s, effective cores 0.78, relative throughput 0.98, cpu pressure 0.08 s, io pressure 3.81 s, peak 739 MiB
+ 4 cores (1 runs): wall 35.93 s [35.93], cpu 28.63 s, effective cores 0.80, relative throughput 0.96, cpu pressure 0.07 s, io pressure 2.74 s, peak 772 MiB
+ 8 cores (3 runs): wall 29.01 s [28.70, 29.32, 29.01], cpu 28.23 s, effective cores 0.97, relative throughput 1.19, cpu pressure 0.05 s, io pressure 2.71 s, peak 812 MiB
+   criterion: throughput 1.19x (need >= 2.0), effective cores 0.97 (need >= 2.0)
+16 cores (1 runs): wall 28.44 s [28.44], cpu 28.67 s, effective cores 1.01, relative throughput 1.22, cpu pressure 0.03 s, io pressure 2.18 s, peak 848 MiB

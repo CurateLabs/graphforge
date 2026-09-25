@@ -1,0 +1,3 @@
+2026-09-25 15:31:25,924 - INFO - Starting command bash /home/ubuntu/gf-1448/docs/development/evidence/core-scaling-1448/ingest-one.sh /home/ubuntu/gf-1448-ab-bin/base-8d553e0e/gf /home/ubuntu/gf-1448-cand-evidence/tmp/project-ab-s20-r3-base /home/ubuntu/gf-1448-evidence/inputs/s20 /home/ubuntu/gf-1448-cand-evidence/runs/ab-s20-r3-base
+2026-09-25 15:31:25,924 - INFO - Writing output to /home/ubuntu/gf-1448-cand-evidence/runs/ab-s20-r3-base/ingest.log
+2026-09-25 15:33:33,617 - WARNING - System has swapped during benchmarking. Benchmark results are unreliable!
