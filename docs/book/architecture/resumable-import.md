@@ -42,21 +42,31 @@ conservative representation might fit. Unsupported Arrow representations are
 refused rather than assigned an unproven estimate. Sealed IPC spills are
 authenticated with bounded reads before Arrow can allocate from their metadata.
 
-A partition exceeding its recorded budget is refused before its retained load
-is allocated. Increasing the cut cannot split one node's hub group; a large hub
-can therefore be refused even at 4,096 ranges. The failed private shape remains
-unpublished and reopening retains the same limits. The materialization budget
-is separate from source decoding, routing/writer buffers, allocator metadata,
-page cache and the process memory limit; it is not a whole-process RSS promise.
-This refusal is how construction behaves today. [ADR 0047](../../adr/0047-over-budget-partitions-and-instance-cpu-budget.md)
-changes the contract: an over-budget fixed-width partition will be processed
-externally, bounded by a recorded scratch limit, instead of refusing. #1585
-implements it. Sessions recorded before that change keep their recorded
-refusal. Arrow property-row partitions keep refusing.
+A fixed-width partition exceeding its recorded budget is not materialized.
+Increasing the cut cannot split one node's hub group, so a large hub can exceed
+the budget even at 4,096 ranges. Under [ADR 0047](../../adr/0047-over-budget-partitions-and-instance-cpu-budget.md),
+a partition without a detail codec (identities and the endpoint families) is
+sorted externally instead: its
+load worker sorts it into checksummed runs of at most `max_partition_bytes`,
+and the coordinator merges them into the same shaped bytes. The recorded
+`max_external_partition_bytes` (default 64 GiB) bounds one partition's run
+scratch. A partition above it is refused with "exceeds recorded external
+budget" before any run is written; zero keeps the earlier refusal. Runs are
+construction artifact temporaries, never resume authority, and recovery
+reclaims any a crash leaves. Detail-codec partitions and Arrow property-row
+partitions are still refused before their retained load is allocated. The
+failed private shape remains unpublished and reopening retains the same limits.
+The materialization budget is separate from source decoding, routing/writer
+buffers, allocator metadata, page cache and the process memory limit; it is not
+a whole-process RSS promise.
 
 The new budget fields have stable defaults for historical checkpoints and omit
-default values when serialized. Opening a checkpoint with the exact former
-256-partition default through today's default retains its recorded budgets;
+default values when serialized, except `max_external_partition_bytes`, which
+is always written because its absence means zero. Opening a checkpoint with
+the exact former
+256-partition default through today's default retains its recorded budgets.
+Likewise a checkpoint recorded before `max_external_partition_bytes` reads it
+as zero and keeps its refusal when resumed with today's default;
 other explicit budget mismatches remain errors. Completed shapes and their
 recorded authority are not rewritten.
 

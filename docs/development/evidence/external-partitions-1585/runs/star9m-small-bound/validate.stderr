@@ -1,0 +1,1 @@
+{"error":{"code":"GF_IO","message":"storage error: graph construction session: partition requires 297536415 bytes of external scratch, exceeds recorded external budget 268435456","details":{"source":"runtime","kind":"storage"}}}

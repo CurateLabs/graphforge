@@ -1,0 +1,23 @@
+	Command being timed: "/home/ubuntu/gf-1585-bin-fb8a3348-ts/gf --json --project /home/ubuntu/gf-1585-evidence/runs/star20m-resident/project import-session validate --session-uuid 00000000-0000-4000-8000-000000001585"
+	User time (seconds): 122.89
+	System time (seconds): 37.51
+	Percent of CPU this job got: 95%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:48.06
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 845272
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 1284109
+	Voluntary context switches: 272267
+	Involuntary context switches: 2215
+	Swaps: 0
+	File system inputs: 50362344
+	File system outputs: 39192752
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
