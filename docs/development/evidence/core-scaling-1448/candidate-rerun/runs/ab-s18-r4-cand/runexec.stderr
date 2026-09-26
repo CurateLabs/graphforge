@@ -1,0 +1,2 @@
+2026-09-26 22:18:01,142 - INFO - Starting command bash /home/ubuntu/gf-1448/docs/development/evidence/core-scaling-1448/ingest-one.sh /home/ubuntu/gf-1448-ab-bin/cand-a8123879/gf /home/ubuntu/gf-1448-cand2-evidence/tmp/project-ab-s18-r4-cand /home/ubuntu/gf-1448-evidence/inputs/s18 /home/ubuntu/gf-1448-cand2-evidence/runs/ab-s18-r4-cand
+2026-09-26 22:18:01,142 - INFO - Writing output to /home/ubuntu/gf-1448-cand2-evidence/runs/ab-s18-r4-cand/ingest.log

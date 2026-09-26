@@ -1,0 +1,41 @@
+## A/B s18
+base r1: wall 32.36 s, cpu 28.74 s, cpu/wall 0.89, shaping 15.58 s (cpu/wall 0.86), peak 802 MiB, cpu pressure 0.047 s [BUSY after the run: excluded]
+base r2: wall 31.44 s, cpu 28.38 s, cpu/wall 0.90, shaping 15.13 s (cpu/wall 0.87), peak 819 MiB, cpu pressure 0.041 s
+base r3: wall 31.92 s, cpu 28.75 s, cpu/wall 0.90, shaping 15.32 s (cpu/wall 0.88), peak 805 MiB, cpu pressure 0.035 s
+base r4: wall 31.43 s, cpu 28.23 s, cpu/wall 0.90, shaping 15.02 s (cpu/wall 0.88), peak 822 MiB, cpu pressure 0.039 s
+cand r1: wall 28.50 s, cpu 28.81 s, cpu/wall 1.01, shaping 11.73 s (cpu/wall 1.13), peak 831 MiB, cpu pressure 0.034 s
+cand r2: wall 28.17 s, cpu 29.02 s, cpu/wall 1.03, shaping 11.64 s (cpu/wall 1.18), peak 828 MiB, cpu pressure 0.046 s
+cand r3: wall 27.93 s, cpu 28.61 s, cpu/wall 1.02, shaping 11.31 s (cpu/wall 1.17), peak 828 MiB, cpu pressure 0.033 s
+cand r4: wall 27.98 s, cpu 28.51 s, cpu/wall 1.02, shaping 11.51 s (cpu/wall 1.15), peak 833 MiB, cpu pressure 0.031 s
+median wall (accepted runs: base 3, cand 4): base 31.44 s, cand 28.08 s, change -10.7%
+per-pair cand - base (accepted pairs): r2 -3.27 s, r3 -3.99 s, r4 -3.45 s
+distinct answer sets: 1
+  nodes: rows=1 scalar=262144 sha256=3943ce07cba5fc8b1b779daf479b68f69c81d1b0427e0ac49c8433fe53b17e8f
+  node-scan: rows=262144 scalar=None sha256=a4759b63cc96a01e5b1abe2f53c249d26ca52026fe8f0b633c5a7a422ca3d1e8
+  edges: rows=1 scalar=4194304 sha256=2cb98d6493038230f3d574b16c2cbe283c07e43471b8764f6dfb59bea0aca486
+  edge-scan: rows=4194304 scalar=None sha256=82a56ff970f9e64bf6a565e4e21e4dca20b436f40f312fcfab2c9152a82f4be6
+## A/B s20
+base r1: wall 132.84 s, cpu 120.07 s, cpu/wall 0.90, shaping 61.51 s (cpu/wall 0.89), peak 2704 MiB, cpu pressure 0.184 s
+base r2: wall 131.38 s, cpu 117.97 s, cpu/wall 0.90, shaping 61.00 s (cpu/wall 0.87), peak 2700 MiB, cpu pressure 0.195 s
+base r3: wall 132.03 s, cpu 118.53 s, cpu/wall 0.90, shaping 61.02 s (cpu/wall 0.88), peak 2707 MiB, cpu pressure 0.172 s
+cand r1: wall 115.45 s, cpu 118.33 s, cpu/wall 1.02, shaping 43.94 s (cpu/wall 1.20), peak 2769 MiB, cpu pressure 0.130 s
+cand r2: wall 114.49 s, cpu 117.20 s, cpu/wall 1.02, shaping 45.17 s (cpu/wall 1.17), peak 2763 MiB, cpu pressure 0.131 s
+cand r3: wall 113.69 s, cpu 117.26 s, cpu/wall 1.03, shaping 44.40 s (cpu/wall 1.20), peak 2770 MiB, cpu pressure 0.137 s
+median wall (accepted runs: base 3, cand 3): base 132.03 s, cand 114.49 s, change -13.3%
+per-pair cand - base (accepted pairs): r1 -17.39 s, r2 -16.89 s, r3 -18.34 s
+distinct answer sets: 1
+  nodes: rows=1 scalar=1048576 sha256=d41814e11f492a8c36191b100c805a370de2b4bdbe6ca88c7eef41360ef53066
+  node-scan: rows=1048576 scalar=None sha256=a6e97315aeea1abea378e7252ab2be425422c67ca660ad9f3f8f6879a23aabdf
+  edges: rows=1 scalar=16777216 sha256=3daeda0e54a362622ffdc547a631479e3f18cd0f7fa1b28c3b1fce9b7e88a150
+  edge-scan: rows=16777216 scalar=None sha256=9682f98ce5f867f958fafa61405f5915b8ce2a010efe68afbaa9f58a9e37f97a
+## S22 regions (one run each)
+base: wall 528.92 s, cpu/wall 0.93, shaping 249.72 s (cpu/wall 0.90)
+cand: wall 479.42 s, cpu/wall 1.03, shaping 189.52 s (cpu/wall 1.19)
+## Candidate core-count curve, S18
+   excluded as BUSY after the run: curve-s18-c1-r3
+ 1 cores (3 runs): wall 35.46 s [36.50, 35.18, 35.46], cpu 26.70 s, effective cores 0.75, relative throughput 1.00, cpu pressure 1.77 s, io pressure 5.86 s, peak 745 MiB
+ 2 cores (1 runs): wall 34.97 s [34.97], cpu 27.55 s, effective cores 0.79, relative throughput 1.01, cpu pressure 0.09 s, io pressure 3.11 s, peak 731 MiB
+ 4 cores (1 runs): wall 36.38 s [36.38], cpu 28.83 s, effective cores 0.79, relative throughput 0.97, cpu pressure 0.06 s, io pressure 2.57 s, peak 761 MiB
+ 8 cores (3 runs): wall 29.41 s [28.60, 29.54, 29.41], cpu 27.96 s, effective cores 0.95, relative throughput 1.21, cpu pressure 0.05 s, io pressure 2.64 s, peak 821 MiB
+   criterion: throughput 1.21x (need >= 2.0), effective cores 0.95 (need >= 2.0)
+16 cores (1 runs): wall 27.48 s [27.48], cpu 28.37 s, effective cores 1.03, relative throughput 1.29, cpu pressure 0.03 s, io pressure 1.69 s, peak 830 MiB

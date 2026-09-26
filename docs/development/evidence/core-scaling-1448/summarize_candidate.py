@@ -43,29 +43,55 @@ def answers(run: Path) -> tuple:
     return tuple(out)
 
 
+def accepted_runs(root: Path) -> dict[str, bool]:
+    """Each run's host check after it ended: True when QUIET."""
+    after = {}
+    with (root / "driver.log").open() as handle:
+        for line in handle:
+            parts = line.split()
+            if len(parts) >= 4 and parts[1] == "end":
+                after[parts[2]] = parts[3] == "after=QUIET"
+    return after
+
+
 def ab(root: Path, scale: str) -> None:
     print(f"## A/B {scale}")
-    walls = {"base": [], "cand": []}
+    quiet = accepted_runs(root)
+    rounds = sorted({run.name.split("-")[2] for run in (root / "runs").glob(f"ab-{scale}-r*-base")})
+    walls = {"base": {}, "cand": {}}
     for arm in ("base", "cand"):
-        for rnd in ("r1", "r2", "r3"):
-            run = root / "runs" / f"ab-{scale}-{rnd}-{arm}"
+        for rnd in rounds:
+            name = f"ab-{scale}-{rnd}-{arm}"
+            run = root / "runs" / name
             measured = runexec(run)
             shaping_wall, shaping_cpu = region(run, SHAPING)
-            walls[arm].append(measured["wall"])
+            accepted = quiet.get(name, False)
+            if accepted:
+                walls[arm][rnd] = measured["wall"]
             print(
                 f"{arm} {rnd}: wall {measured['wall']:.2f} s, cpu {measured['cpu']:.2f} s, "
                 f"cpu/wall {measured['cpu'] / measured['wall']:.2f}, "
                 f"shaping {shaping_wall:.2f} s (cpu/wall {shaping_cpu / shaping_wall:.2f}), "
-                f"peak {measured['memory_mib']:.0f} MiB"
+                f"peak {measured['memory_mib']:.0f} MiB, "
+                f"cpu pressure {measured['cpu_pressure']:.3f} s"
+                + ("" if accepted else " [BUSY after the run: excluded]")
             )
-    base, cand = statistics.median(walls["base"]), statistics.median(walls["cand"])
-    print(f"median wall: base {base:.2f} s, cand {cand:.2f} s, change {cand / base - 1:+.1%}")
-    deltas = [c - b for b, c in zip(walls["base"], walls["cand"], strict=True)]
-    print("per-pair cand - base: " + ", ".join(f"{delta:+.2f} s" for delta in deltas))
+    base = statistics.median(walls["base"].values())
+    cand = statistics.median(walls["cand"].values())
+    print(
+        f"median wall (accepted runs: base {len(walls['base'])}, cand {len(walls['cand'])}): "
+        f"base {base:.2f} s, cand {cand:.2f} s, change {cand / base - 1:+.1%}"
+    )
+    pairs = [rnd for rnd in rounds if rnd in walls["base"] and rnd in walls["cand"]]
+    deltas = [walls["cand"][rnd] - walls["base"][rnd] for rnd in pairs]
+    print(
+        "per-pair cand - base (accepted pairs): "
+        + ", ".join(f"{rnd} {delta:+.2f} s" for rnd, delta in zip(pairs, deltas, strict=True))
+    )
     sets = {
         answers(root / "runs" / f"ab-{scale}-{rnd}-{arm}")
-        for arm in walls
-        for rnd in ("r1", "r2", "r3")
+        for arm in ("base", "cand")
+        for rnd in rounds
     }
     print(f"distinct answer sets: {len(sets)}")
     for query, rows, scalar, digest in next(iter(sets)):
@@ -74,9 +100,14 @@ def ab(root: Path, scale: str) -> None:
 
 def curve(root: Path) -> None:
     print("## Candidate core-count curve, S18")
+    quiet = accepted_runs(root)
     one = None
     for cores in (1, 2, 4, 8, 16):
-        runs = sorted((root / "runs").glob(f"curve-s18-c{cores}-r*"))
+        every = sorted((root / "runs").glob(f"curve-s18-c{cores}-*"))
+        runs = [run for run in every if quiet.get(run.name, False)]
+        excluded = [run.name for run in every if run not in runs]
+        if excluded:
+            print(f"   excluded as BUSY after the run: {', '.join(excluded)}")
         measured = [runexec(run) for run in runs]
         wall = statistics.median(m["wall"] for m in measured)
         cpu = statistics.median(m["cpu"] for m in measured)
