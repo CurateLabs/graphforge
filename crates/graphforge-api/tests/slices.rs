@@ -2,6 +2,7 @@
 use arrow::array::{FixedSizeBinaryArray, StringArray};
 use graphforge_api::*;
 use std::collections::BTreeSet;
+use std::str::FromStr;
 use uuid::Uuid;
 fn request(selector: SliceSelector) -> SliceRequest {
     SliceRequest {
@@ -673,6 +674,294 @@ fn frozen_cursors_bind_selector_and_final_ipc_limits_cover_metadata() {
             ..
         })
     ));
+}
+
+#[test]
+fn in_memory_decision_input_composes_bounded_slice_and_explicit_query_without_retention() {
+    let graph = GraphForge::new(None).unwrap();
+    graph
+        .execute(
+            "CREATE (m:Story {name:'Mystery', summary:'A locked room', private_note:'not selected'}), \
+             (v:Story {name:'Voyage', summary:'A sea crossing', private_note:'not selected'}), \
+             (c:Character {name:'Ada'}), (m)-[:FEATURES]->(c), (v)-[:FEATURES]->(c)",
+        )
+        .unwrap();
+
+    let generation = graph
+        .research_project_summary()
+        .unwrap()
+        .identity
+        .generation_uuid;
+    let selection_request = request(SliceSelector::Query {
+        query: "MATCH (s:Story {name:'Mystery'}) RETURN s.node_uuid AS node_uuid".into(),
+    });
+    let selected = graph
+        .preview_slice(
+            &selection_request,
+            SlicePageKind::Included,
+            PageRequest {
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        selected.schema.metadata()["graphforge.slice.snapshot_uuid"],
+        generation.to_string()
+    );
+    assert_eq!(selected.batches[0].num_rows(), 1);
+    let selected_id = selected.batches[0]
+        .column_by_name("object_uuid")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap()
+        .value(0)
+        .to_owned();
+
+    // The caller chooses the fields and reads only the selected candidate.
+    // The query result retains Arrow UUID fidelity and carries no unrequested
+    // private field into the external decision payload.
+    let input = graph
+        .execute(
+            "MATCH (s:Story {name:'Mystery'}) \
+             RETURN s.node_uuid AS item_uuid, s.name AS title, s.summary AS summary \
+             ORDER BY s.node_uuid LIMIT 1",
+        )
+        .unwrap();
+    assert_eq!(input.batches[0].num_rows(), 1);
+    assert_eq!(
+        input
+            .schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        ["item_uuid", "title", "summary"]
+    );
+    let item_uuid = input.batches[0]
+        .column_by_name("item_uuid")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .unwrap();
+    assert_eq!(
+        Uuid::from_slice(item_uuid.value(0)).unwrap().to_string(),
+        selected_id
+    );
+    let titles = input.batches[0]
+        .column_by_name("title")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let summaries = input.batches[0]
+        .column_by_name("summary")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(titles.value(0), "Mystery");
+    assert_eq!(summaries.value(0), "A locked room");
+    assert_eq!(
+        graph
+            .research_project_summary()
+            .unwrap()
+            .identity
+            .generation_uuid,
+        generation
+    );
+    assert_eq!(
+        graph.list_research_versions().unwrap().batches[0].num_rows(),
+        0
+    );
+    assert!(input.side_effects.is_none());
+    assert!(input.mutation_receipt.is_none());
+
+    let boundary_request = request(SliceSelector::Traverse {
+        seeds: BTreeSet::from([Uuid::from_str(&selected_id).unwrap()]),
+        direction: SliceDirection::Both,
+        max_depth: 1,
+        relationship_types: BTreeSet::new(),
+    });
+    let outside = rows(&graph, &boundary_request, SlicePageKind::Boundary);
+    assert!(outside.iter().any(|(kind, _)| kind == "node"));
+    assert_eq!(
+        graph
+            .research_project_summary()
+            .unwrap()
+            .identity
+            .generation_uuid,
+        generation
+    );
+}
+
+#[test]
+fn selected_branch_decision_context_reads_exact_version_after_parent_change_reopen_and_cleanup() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("project");
+    let mut graph = GraphForge::new(root.to_str()).unwrap();
+    graph
+        .execute(
+            "CREATE (m:Story {name:'Mystery', summary:'A locked room', private_note:'not selected'}), \
+             (v:Story {name:'Voyage', summary:'A sea crossing', private_note:'not selected'}), \
+             (c:Character {name:'Ada'}), (m)-[:FEATURES]->(c), (v)-[:FEATURES]->(c)",
+        )
+        .unwrap();
+    let mystery = id(&graph, "Mystery");
+    let source_version = capture(&mut graph);
+    let mut selection = request(SliceSelector::Traverse {
+        seeds: BTreeSet::from([mystery]),
+        direction: SliceDirection::Both,
+        max_depth: 1,
+        relationship_types: BTreeSet::from(["FEATURES".into()]),
+    });
+    selection.source = SliceSource::Version {
+        version_uuid: source_version,
+    };
+    let included = rows(&graph, &selection, SlicePageKind::Included);
+    let boundary = rows(&graph, &selection, SlicePageKind::Boundary);
+    let voyages = graph
+        .execute("MATCH (s:Story {name:'Voyage'}) RETURN s.node_uuid AS node_uuid")
+        .unwrap();
+    let voyage = Uuid::from_slice(
+        voyages.batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .unwrap()
+            .value(0),
+    )
+    .unwrap();
+    assert!(included.contains(&("node".into(), mystery.to_string())));
+    assert!(!included.contains(&("node".into(), voyage.to_string())));
+    assert!(boundary.contains(&("node".into(), voyage.to_string())));
+
+    let frozen = graph
+        .freeze_slice(&selection, &CancellationToken::new())
+        .unwrap();
+    let branch = CreateResearchBranchRequest {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: graph
+            .research_project_summary()
+            .unwrap()
+            .identity
+            .generation_uuid,
+        branch_uuid: Uuid::now_v7(),
+        version_uuid: Uuid::now_v7(),
+        source: BranchSource::Slice {
+            frozen_ipc: ipc(&frozen),
+        },
+        creator_uuid: Uuid::now_v7(),
+        created_at: 1,
+        label: "Mystery decision context".into(),
+    };
+    graph
+        .create_research_branch(&branch, &CancellationToken::new())
+        .unwrap();
+    let branch_version = graph
+        .open_research_branch(branch.branch_uuid)
+        .unwrap()
+        .version_uuid();
+    let mut decision_slice = request(SliceSelector::Query {
+        query: "MATCH (s:Story) RETURN s.node_uuid AS node_uuid".into(),
+    });
+    decision_slice.source = SliceSource::Version {
+        version_uuid: branch_version,
+    };
+    let before_parent_change = graph
+        .preview_slice(
+            &decision_slice,
+            SlicePageKind::Included,
+            PageRequest::default(),
+        )
+        .unwrap();
+    assert_eq!(before_parent_change.batches[0].num_rows(), 1);
+    assert_eq!(
+        serde_json::from_str::<SliceSource>(
+            &before_parent_change.schema.metadata()["graphforge.slice.source"]
+        )
+        .unwrap(),
+        decision_slice.source
+    );
+    let expected_rows = rows(&graph, &decision_slice, SlicePageKind::Included);
+    let historical = graph.open_research_version(branch_version).unwrap();
+    let data = historical
+        .execute(
+            "MATCH (s:Story) RETURN s.node_uuid AS item_uuid, s.name AS title, s.summary AS summary \
+             ORDER BY s.node_uuid LIMIT 10",
+        )
+        .unwrap();
+    assert_eq!(data.batches[0].num_rows(), 1);
+    assert_eq!(
+        data.schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        ["item_uuid", "title", "summary"]
+    );
+    assert_eq!(
+        data.batches[0]
+            .column_by_name("title")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0),
+        "Mystery"
+    );
+    drop(historical);
+
+    // The exact Branch Version remains the source after unrelated parent edits.
+    graph
+        .execute("CREATE (:Story {name:'Parent only', summary:'outside selection'})")
+        .unwrap();
+    let after_parent_change = graph
+        .preview_slice(
+            &decision_slice,
+            SlicePageKind::Included,
+            PageRequest::default(),
+        )
+        .unwrap();
+    assert_eq!(after_parent_change.batches[0].num_rows(), 1);
+    assert_eq!(
+        after_parent_change.schema.metadata()["graphforge.slice.snapshot_uuid"],
+        before_parent_change.schema.metadata()["graphforge.slice.snapshot_uuid"]
+    );
+    assert_eq!(
+        graph
+            .open_research_version(branch_version)
+            .unwrap()
+            .execute("MATCH (s:Story) RETURN s.name ORDER BY s.name")
+            .unwrap()
+            .batches[0]
+            .num_rows(),
+        1
+    );
+    drop(graph);
+    graphforge_storage::execute_project_cleanup(
+        &root,
+        graphforge_storage::ProjectRetentionPolicy {
+            retained_ancestors: 0,
+        },
+        Default::default(),
+    )
+    .unwrap();
+    let reopened = GraphForge::new(root.to_str()).unwrap();
+    let retained = reopened.open_research_version(branch_version).unwrap();
+    assert_eq!(
+        rows(&reopened, &decision_slice, SlicePageKind::Included),
+        expected_rows
+    );
+    assert_eq!(
+        retained
+            .execute("MATCH (s:Story) RETURN s.name ORDER BY s.name")
+            .unwrap()
+            .batches[0]
+            .num_rows(),
+        1
+    );
 }
 
 #[test]

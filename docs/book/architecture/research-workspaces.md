@@ -184,6 +184,38 @@ Version. Return included objects, boundary references, inclusion explanations,
 counts, and required evidence/ontology dependencies as separately inspectable
 information. Dependencies do not silently expand active research.
 
+### Decision-context composition (#1576)
+
+The M12 decision input reuses the native Slice, Cypher, Branch and Version
+facades; it adds no second graph export or retention engine. For ephemeral use,
+an in-memory caller selects with `preview_slice` against `current`, records the
+returned `snapshot_uuid`, and issues a separate read-only Cypher query that
+returns only its chosen canonical UUIDs and fields, in deterministic order and
+under a finite candidate limit. Compare the Project generation before and after
+the two reads; discard and prepare again if it changed. This path creates no
+Version or other durable record. A query result's fields are the caller's
+projection, not proof that a complete Project payload was exported.
+
+For retained research, select against an explicit Version, freeze the Slice,
+and pass that same capsule as `BranchSource::Slice` when an independent research
+Branch is needed. Query the Branch head through its exact Version or Branch
+view. Parent changes do not refresh that historical decision input. The frozen
+membership capsule carries the source Version and selection commitments, but
+not graph property payloads and no new retention root; callers obtain selected
+values through the exact-version query. A released source remains inspectable
+as membership only. Historical query/evidence reads return
+`GF_RESULT_NOT_RETAINED` when the required payload is no longer available; they
+never substitute current values or fetch external evidence.
+
+Slice pages bound membership, boundaries, dependencies, scan work and each
+Arrow response. Data-bearing Cypher output is a separately chosen projection:
+callers must name fields and impose their finite item/byte budget while
+streaming or materializing the query. The Slice page's `response_bytes` limit
+does not claim to bound a separate query result. The Rust facade composition
+and its memory-only and reopened-Branch evidence are in
+`crates/graphforge-api/tests/slices.rs`; Python/Node ergonomics and runnable
+consumer examples are owned by #1578.
+
 For the Three Apples example, a shared character can be included while other
 appearances remain outside the Slice. Explain whether each object came from
 direct selection, story containment, evidence dependency, or a traversal rule.
