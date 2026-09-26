@@ -217,6 +217,79 @@ own rendering and access enforcement and are not Core runtime dependencies.
 Ordinary changed-surface CI gates apply; M11 introduces no publication-only
 workflow requirement for individual implementation issue closure.
 
+## M12 decision workflow contract
+
+This map implements the documentation/evidence portion of #1575. The contract
+is in [analyst-ux.md](analyst-ux.md#m12-provider-neutral-decision-workflow-contract).
+M11's completed journey proves research state and action foundations; it does
+not prove a provider-neutral choice, rubric-score, or probability result path.
+Do not describe proposed fields below as implemented API until the owning child
+has direct evidence.
+
+### Current capability and gap map
+
+| Workflow step | Public capability and direct evidence today | Classification and smallest M12 gap | Owner/evidence layer |
+| --- | --- | --- | --- |
+| Select bounded state and evidence | Rust `preview_slice`, `freeze_slice`, `inspect_frozen_slice`; Python/Node Slice methods; CLI `gf research slice preview|freeze|inspect`; `tests/contracts/slice-api-v1.json`; Rust owner tests in `crates/graphforge-api/tests/slices.rs`. Current selection distinguishes included objects, boundaries, dependencies, explanations and exact source Version; paging and resource limits are explicit. Existing analyst agent tools can query and display caller-selected graph results. | Existing capability for selecting research context. Ergonomic gap for a decision-specific, bounded projection that carries the exact Version/projection and item/evidence identities into an external decision workflow without private payload export. No whole-Project default. | #1575 maps evidence; #1576 owns native contract/gap implementation and Rust tests; #1578 proves Python/Node and applicable CLI/agent flow. |
+| Identify a retained or live input | Rust `prepare_research_version`, immutable Version inspection/open/query and retention operations; Python/Node Version bindings; CLI `gf research version prepare|show|query|retention`; `research-version-api-v1.json`; `research_versions.rs` tests. Research journey tests prove identity and reopened evidence. | Existing capability for complete immutable Project Versions and receipts. Missing only where a selected decision projection needs a stable identity distinct from the complete Version; never substitute a runtime generation for ontology/research Version identity. | #1576 direct Rust facade and reopen/recovery evidence; #1579 composition. |
+| Ask choice, rubric, or yes/no question | Slice selection, caller queries and explicit Proposal field selection exist. | Runtime gap: no neutral question schema shared across choice, ordered rubric and yes/no probability, with stable question/item correlation and validation. Similar-looking search embedding/reranking records do not satisfy this contract. | #1575 defines logical semantics; #1577 owns Rust validation and direct regressions. |
+| Obtain an external result | Ordinary callers can invoke their own function/service and form data; Arrow is the data-bearing boundary. | External/application responsibility for producer execution. Runtime gap only for accepting/validating/correlating typed decision records; no model callback, registry, transport or inference execution in Core. | #1577 direct Rust tests; #1579 tests two structurally independent producer sources against the same workflow. |
+| Inspect provenance and uncertainty | Sources, Artifacts, evidence references, Version metadata, Proposal histories and operation receipts preserve their own meanings. `ConfidencePolicyRequest` concerns assertion assessment. | Runtime gap: decision value, optional probability distribution, optional declared-meaning confidence, producer identity/revision and missing/uncertain/unavailable statuses need distinct fields. Do not convert producer confidence to assertion confidence or canonical status. | #1577 direct Rust/API contract tests and #1578 binding parity. |
+| Rank, abstain, clarify, or request review | Existing caller code can implement ordinary comparisons and use research preview/review actions. Agent adapter validates bounded tool envelopes and remains semantics-free. | Caller/application responsibility for thresholds, tie-breaking and policy; ergonomic gap for examples and schemas that expose allowed choices, bounds, state identity, result meaning and permitted next steps. | #1578 runnable examples and thin-surface tests; #1579 composed journeys. |
+| Commit an optional action and retry | Rust research mutation APIs use expected state, stable operation identity and receipts; Proposal acceptance is explicit, replayable and distinct from review. Python/Node/CLI expose the relevant research operations. | Existing authority/action foundation. A decision result grants no authority. Revalidate a stale target, pass explicit caller selection, preserve action failure separately, and reuse the prepared operation and receipt for retry. | #1577 direct action-boundary tests; #1578 ergonomics/parity; #1579 changed-state, failure and exact-retry composition. |
+| Retain/release decision evidence | Version retention, evidence lineage, cleanup and reopen are implemented for existing research records. | Runtime gap only for any new retained decision record; ephemeral use remains valid. Retention must bind exact source/projection/question identities and report released/unavailable payload truthfully. | #1577 persistence/replay tests where implemented; #1579 cleanup/reopen proof for retained claims, with ephemeral examples explicitly labeled. |
+
+The primary surfaces to inspect are `crates/graphforge-api/src/slices/`,
+`research_versions.rs`, `research_proposals/`, the Python and Node `slices`,
+`research_versions`, and `research_proposals` modules, `crates/graphforge-cli`,
+and `packages/agent-skills/{adapter,schemas,workflows}`. The agent package's
+`retrieveAnalyze` supports bounded caller-selected query/analysis results;
+`dispatchRecordedNeutralAnalysis` invokes a recorded GraphForge algorithm run.
+Neither accepts an external decision result. The CLI has native Slice and
+Version commands but no generic decision command. The Rust facade owns
+semantics; bindings and agent tooling are thin projections.
+
+### M12 outcome-to-evidence ownership
+
+| Epic outcome | Completion evidence |
+| --- | --- |
+| D1 — shared contract and verified capability/gap map | #1575: this contract, the current-capability table, two journey descriptions and logical input/result semantics. Designed behavior is labeled separately from implemented M11 evidence. |
+| D2 — bounded, identity-preserving state | #1576: Rust state preparation regressions prove limits, exact Version/projection/object/evidence identity, omissions, paging, cancellation and no private/full-Project export. |
+| D3 — typed external result semantics | #1577: direct native tests for stable correlation under reorder; allowed choice/rubric/probability; optional declared-confidence meaning; malformed, duplicate, unknown, missing, uncertain and unavailable outcomes. |
+| D4 — usable thin surfaces | #1578: rebuilt Python/Node and applicable CLI/agent paths, typed/documented inputs, stable prepared identities, runnable memory-only and durable reopen examples, schema/inventory parity. |
+| D5 — explicit policy/action boundary | #1577 owner tests plus #1578 parity: no answer causes mutation, Proposal acceptance or canonical promotion; stale context requires explicit review/revalidation; action/recording errors remain separate. |
+| D6 — producer independence | #1579: two structurally independent producer paths, including caller-owned records and an independently loaded Arrow/result artifact, complete the same real Rust-backed workflows with optional model adapters absent. |
+| D7 — honest task evaluation guidance | #1579: a small labeled-fixture recipe compares a caller's rule baseline, reporting errors, missing values, abstentions/reviews separately and explaining held-out calibration/threshold selection. Fixture output is not a real-model quality claim. |
+| D8 — integrated evidence and handoff | #1579: composed Rust/binding/CLI-agent result observations, changed-surface checks, privacy/scope/failure evidence, supported reopen/replay, accurate inventories/docs, limitations, plus neutral-contract handoff to #1574 and working example handoff to #1209/#1208. |
+
+### M12 completion scenarios
+
+**Analyst routing and ranking.** Given the shared fixture, an exact bounded
+context and a finite candidate set, when a producer returns queue choices,
+rubric scores and review probabilities in a different row order, then IDs bind
+each result to the intended question and object. Missing/uncertain/unavailable
+results stay distinct, caller policy exposes ties and review, and GraphForge
+state stays unchanged until a separate valid action commits with its receipt.
+
+**Agent next step.** Given a selected situation and allowed `continue`,
+`clarify`, or `review` choices, when the producer requests clarification or
+review (or the context has changed), then the caller can inspect uncertainty,
+missing evidence and the original state identity. No action occurs by default;
+a separately permitted action validates against current native state and an
+exact retry returns its original receipt without a duplicate effect.
+
+**Independent producers and retention.** Given the same workflow, when a
+caller-owned function and an independently loaded result artifact supply
+different valid outputs, then both use the same Core validation and caller
+policy without compiling a provider into Core. Ephemeral evidence claims no
+reopen guarantee; retained evidence identifies its exact source/projection and
+after supported cleanup/reopen clearly reports what remains and what expired.
+
+For #1575, these scenarios are contract review evidence only. Its completion
+does not claim the native result path or two-producer composition is already
+implemented. Each child owns direct regressions for its own behavior; #1579
+composes those results and must not replace them with wrapper mocks or a plan.
+
 Implementation ownership is recorded in
 [canonical #1347](https://github.com/CurateLabs/graphforge/issues/1347):
 Project discovery #1348; Source/Artifact lineage #1349; Version retention #1350;
