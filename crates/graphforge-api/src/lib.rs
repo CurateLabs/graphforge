@@ -90,6 +90,7 @@ mod construction;
 mod construction_concurrency_tests;
 #[cfg(test)]
 mod construction_ordinal_tests;
+mod decision_results;
 #[cfg(test)]
 mod durability_certification_tests;
 mod embedding_freshness;
@@ -351,6 +352,11 @@ pub use composite_transaction::{
     MAX_COMPOSITE_TRANSACTION_ENTRIES,
 };
 pub use composite_validation::{CompositeOntologySnapshot, CompositeValidationSnapshot};
+pub use decision_results::{
+    DECISION_BATCH_MAX_ROWS, DecisionBatchV1, DecisionConfidenceV1, DecisionInputIdentityV1,
+    DecisionProducerV1, DecisionQuestionKindV1, DecisionQuestionV1, DecisionResultStatusV1,
+    DecisionResultV1, DecisionValueV1,
+};
 pub use embedding_freshness::{
     EmbeddingSpaceFreshnessInspection, EmbeddingSpaceFreshnessState, EmbeddingSpaceReadDecision,
 };

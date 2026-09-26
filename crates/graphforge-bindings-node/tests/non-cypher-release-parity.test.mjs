@@ -65,6 +65,10 @@ test("the Node classification is total, frozen, and backed by non-skipped native
   assert.equal(equivalent.has("GraphForge.explain_stage"), false);
   assert.equal(languageSpecific.has("GraphForge.explain_stage"), false);
   assert.ok(policy.classification.notExposedDefaults.GraphForge);
+  assert.ok(
+    policy.classification.notExposedDefaults.DecisionBatchV1,
+    "Rust decision-result bindings are owned by M12 child #1578",
+  );
   const receivers = {
     CheckpointView,
     GraphForge,

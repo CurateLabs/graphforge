@@ -468,6 +468,13 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "decision_results",
+    srcs = ["tests/decision_results.rs"],
+    crate = ":graphforge_api",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "research_versions",
     srcs = ["tests/research_versions.rs"],
     crate = ":graphforge_api",
@@ -686,6 +693,7 @@ test_suite(
         ":lifecycle_io_attribution",
         ":release_load_construction",
         ":research_project",
+        ":decision_results",
         ":research_versions",
         ":branches",
         ":research_claims",
