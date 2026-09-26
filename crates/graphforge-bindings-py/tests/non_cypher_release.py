@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "80fdbc201a3950df670fd345108af7faf09ca8f7bb5ca8bf5282ab6ebd72c1a0"
-EXPECTED_RELEASE_DIGEST = "b3d1632bbb5ba39c2cd9f720a88fe777ef85d89c69a0bf3cb231125a91b3b090"
+EXPECTED_RUST_DIGEST = "8bc83a4cda91477a89cc48e249a18b5ff561db53f628b8d6a1fbfce04e3a4a7f"
+EXPECTED_RELEASE_DIGEST = "c17d1aa8bf907c714bdbd9f75f492c82bdc0818b6c3f6c8d44fe578846da0523"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -170,6 +170,9 @@ EVIDENCE = {
     "resumable-construction": {
         "non_cypher_release.py": ["check_surface_projection"],
     },
+    "external-decision-results": {
+        "non_cypher_release.py": ["check_surface_projection"],
+    },
     "semantic-generation-diff": {
         "generation_diff.py": ["check_generation_diff"],
     },
@@ -284,7 +287,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 333
+    assert len(release_methods) == 334
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -404,6 +407,9 @@ def _classification_report() -> dict[str, object]:
     )
     assert classifications["GraphForge.explain_stage"]["classification"] == "not-exposed"
     assert classifications["GraphForge.explain_stage"]["python_id"] == ""
+    assert classifications["DecisionBatchV1.validate"]["classification"] == "not-exposed", (
+        "Python decision-result bindings are owned by M12 child #1578"
+    )
 
     # A newly exposed Python product method must be deliberately projected or
     # explicitly listed as Python-only. This catches silent binding expansion.

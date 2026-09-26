@@ -216,6 +216,41 @@ and its memory-only and reopened-Branch evidence are in
 `crates/graphforge-api/tests/slices.rs`; Python/Node ergonomics and runnable
 consumer examples are owned by #1578.
 
+### External decision results (#1577)
+
+`DecisionBatchV1::validate` validates caller-supplied questions, producer
+identity and result rows, then returns a deterministic Arrow table under the
+`decision_result/1` schema. Rows correlate by question UUID and optional
+canonical graph item UUID. A partial response gains explicit `missing` rows;
+unknown and duplicate identities, incompatible values, malformed probabilities
+and invalid confidence scales fail as bounded validation errors. One batch is
+limited to 256 expected result rows. Producer revision remains absent when it
+is unknown.
+
+Choice vocabularies and ordered rubric labels are preserved as supplied. Yes
+probabilities and optional no probabilities retain their original values and
+are checked without normalization. Producer confidence includes its declared
+numeric range, domain and meaning; it has no connection to GraphForge assertion
+confidence or canonical authority. The validator is pure: it does not run a
+producer, store results, choose thresholds or authorize an action.
+
+The returned Arrow table is ephemeral unless the caller explicitly records it.
+For retained evidence, serialize that table as Arrow IPC and register it as a
+local `Artifact` under an explicit `Source`, with derivation references to the
+selected evidence. The table carries the exact generation, optional Version,
+projection and selection digests alongside question/result identities and
+available producer metadata. A later retained research Version owns the
+Artifact's payload lifetime; release follows ordinary retention policy. This
+It uses the existing Source/Artifact and Version facilities; it adds no
+persistent decision table. Native regression coverage is in
+`crates/graphforge-api/tests/decision_results.rs`.
+
+Validation and later policy/action remain separate calls. A valid result does
+not create a Proposal, accept one, promote an assertion or authorize a graph
+mutation. Callers revalidate any target against current state and use the
+existing operation UUID, conflict and receipt contracts for each optional
+action.
+
 For the Three Apples example, a shared character can be included while other
 appearances remain outside the Slice. Explain whether each object came from
 direct selection, story containment, evidence dependency, or a traversal rule.

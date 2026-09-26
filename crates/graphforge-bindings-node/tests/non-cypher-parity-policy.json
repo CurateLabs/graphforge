@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 333,
-  "releaseSurfaceDigest": "b3d1632bbb5ba39c2cd9f720a88fe777ef85d89c69a0bf3cb231125a91b3b090",
+  "releaseSurfaceCount": 334,
+  "releaseSurfaceDigest": "c17d1aa8bf907c714bdbd9f75f492c82bdc0818b6c3f6c8d44fe578846da0523",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -41,7 +41,8 @@
     "research-comparison": "researchComparison",
     "research-proposals": "researchProposals",
     "research-upstream": "researchUpstream",
-    "research-interchange": "researchInterchange"
+    "research-interchange": "researchInterchange",
+    "external-decision-results": "decisionResults"
   },
   "classification": {
     "equivalent": [
@@ -462,7 +463,8 @@
       "GraphForge": "No shipped Node member exists for this Rust facade entry; adding one requires an explicit parity decision.",
       "OpenRouterProviderSession": "Rust provider sessions are not exported; Node owns a configured native provider adapter instead.",
       "RepositoryContext": "Rust owns repository lifecycle behavior; the Node command wrapper parity is delivered by issue #226.",
-      "GraphImportSession": "Per-operation timing observations are Rust/CLI diagnostics; the Node import adapter keeps its explicitly mapped lifecycle methods."
+      "GraphImportSession": "Per-operation timing observations are Rust/CLI diagnostics; the Node import adapter keeps its explicitly mapped lifecycle methods.",
+      "DecisionBatchV1": "External decision-result types remain Rust-only until binding ergonomics are delivered by M12 child #1578."
     }
   },
   "evidence": {
@@ -708,6 +710,11 @@
       ],
       "research-journey.test.mjs": [
         "native two-story journey preserves evidence scope review restore and interchange"
+      ]
+    },
+    "decisionResults": {
+      "non-cypher-release-parity.test.mjs": [
+        "the Node classification is total, frozen, and backed by non-skipped native tests"
       ]
     }
   }
