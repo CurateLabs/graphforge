@@ -104,6 +104,24 @@ impl ConstructionCpuAdmission {
         }
     }
 
+    /// Lease between one and `want` lanes if any is free now, without
+    /// waiting. For work the calling thread can do alone when the instance is
+    /// busy.
+    pub(crate) fn try_acquire(
+        self: &Arc<Self>,
+        want: NonZeroUsize,
+    ) -> Option<ConstructionCpuLease> {
+        let mut state = self.state.lock().ok()?;
+        let free = NonZeroUsize::new(self.limit.get().saturating_sub(state.in_use))?;
+        let lanes = want.min(free);
+        state.in_use += lanes.get();
+        state.peak = state.peak.max(state.in_use);
+        Some(ConstructionCpuLease {
+            admission: Arc::clone(self),
+            lanes,
+        })
+    }
+
     fn release(&self, lanes: usize) {
         // A poisoned lock can only follow a panic while it was held, which the
         // admission itself never does; recover the count rather than leak it.

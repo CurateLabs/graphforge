@@ -34,7 +34,14 @@ worker count and host memory do not select the layout.
 `GraphConstructionBudgets::max_partition_bytes` defaults to 256 MiB of accounted
 materialization per load. Fixed-width families admit the routed record count
 and wire representation before reserving storage; compact details include their
-sorting offsets. The production worker window holds at most two such loads.
+sorting offsets. Finish-time loads run on up to eight workers leased from the
+instance's construction CPU admission, or two without one. Whatever the worker
+count, a partition is dispatched only while the routed bytes of every loaded or
+loading partition not yet consumed stay within two partition budgets, so at
+most two budget-sized partitions are materialized at once. Boundary seals and
+finish-stage segment retirement also run on leased lanes. Each lane does only
+filesystem work, and the coordinator charges the evidence in partition or
+segment order, so the evidence does not depend on the schedule (#1448).
 Arrow property-row partitions load serially and charge decoded buffers,
 concatenation/reordering capacity, nested child capacity, UUID keys and indexes.
 Their conservative accounting can refuse a partition even when a less

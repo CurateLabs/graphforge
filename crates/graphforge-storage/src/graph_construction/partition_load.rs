@@ -14,7 +14,7 @@
 //!   and total ([`PartitionLoadCounters::merge_into`]): plain sums add,
 //!   per-partition maxima take `max`.
 //! * **One coordinator owns the checkpoint, the allocation ledger and
-//!   publication.** [`consume_in_partition_order`] runs the loads on a bounded
+//!   publication.** [`consume_in_partition_order_weighted`] runs the loads on a bounded
 //!   pool and hands each result to the calling thread in canonical partition
 //!   index order, so scheduling cannot change output. The ordered critical
 //!   section is the coordinator's consume step; decoding, sorting and the bulk
@@ -57,8 +57,10 @@ use std::time::Duration;
 /// This is a scheduling decision, not a recorded format parameter: the
 /// durable partition count and splitters are unchanged by it, and the
 /// schedule-independence tests hold the evidence and output bytes equal
-/// across worker counts. It bounds the materialized partitions, see
-/// [`consume_in_partition_order`].
+/// across worker counts. With an instance admission, a finish leases up to
+/// `LOAD_LANES` workers instead, and the window's weight bound, not the
+/// worker count, bounds the materialized partitions; see
+/// [`consume_in_partition_order_weighted`].
 pub(super) const PARTITION_LOAD_WORKERS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 
 /// How often a load polls the stop flag, in records.
@@ -192,6 +194,8 @@ struct State<T> {
     /// Workers that have not exited. The coordinator refuses to wait on a
     /// partition no worker can deliver.
     live_workers: usize,
+    /// Summed weight of partitions dispatched and not yet released (#1448).
+    window_weight: u64,
 }
 
 struct Shared<T> {
@@ -223,10 +227,11 @@ impl<T> Shared<T> {
     }
 
     /// Release dispatch capacity only after a successful coordinator consume.
-    fn release_consumed(&self, consumed: Result<(), GfError>) -> Result<(), GfError> {
+    fn release_consumed(&self, consumed: Result<(), GfError>, weight: u64) -> Result<(), GfError> {
         consumed?;
         let mut state = self.lock();
         state.released += 1;
+        state.window_weight = state.window_weight.saturating_sub(weight);
         drop(state);
         self.changed.notify_all();
         Ok(())
@@ -258,8 +263,14 @@ impl<T> Drop for LiveWorker<'_, T> {
     }
 }
 
-fn worker<T, L>(shared: &Shared<T>, partitions: usize, window: usize, load: &L)
-where
+fn worker<T, L>(
+    shared: &Shared<T>,
+    partitions: usize,
+    window: usize,
+    weights: &[u64],
+    weight_budget: u64,
+    load: &L,
+) where
     L: Fn(usize, &AtomicBool) -> Result<T, GfError>,
 {
     let _live = LiveWorker(shared);
@@ -275,13 +286,23 @@ where
                 // window. A slow first partition therefore holds the pool at
                 // `window` materialized partitions, not `partitions - 1`
                 // (#1448 measured exactly that defect).
-                if state.next < state.released + window {
+                // Weight backpressure (#1448): past the first partition in
+                // the window, a dispatch must also keep the window's summed
+                // weight within the budget, so many small partitions may load
+                // at once but large ones are held to what the budget allows.
+                let weight = weights.get(state.next).copied().unwrap_or(0);
+                let fits = state.next == state.released
+                    || state.window_weight.saturating_add(weight) <= weight_budget;
+                if state.next < state.released + window && fits {
                     break;
                 }
                 state = shared.wait(state);
             }
             let index = state.next;
             state.next += 1;
+            state.window_weight = state
+                .window_weight
+                .saturating_add(weights.get(index).copied().unwrap_or(0));
             index
         };
         // A panicking load is this partition's error. Unwinding instead would
@@ -323,9 +344,41 @@ where
 /// lands during the head load is not held hostage by that load (#1581). On
 /// cancel the pool sets `stop` and returns the `construction cancelled` error
 /// after every worker has exited, exactly like any other stop.
+#[cfg(test)]
 pub(super) fn consume_in_partition_order<T, L, C, K>(
     partitions: usize,
     workers: NonZeroUsize,
+    load: L,
+    cancelled: K,
+    consume: C,
+) -> Result<(), GfError>
+where
+    T: Send,
+    L: Fn(usize, &AtomicBool) -> Result<T, GfError> + Sync,
+    C: FnMut(usize, T) -> Result<(), GfError>,
+    K: FnMut() -> bool,
+{
+    consume_in_partition_order_weighted(partitions, workers, &[], 0, load, cancelled, consume)
+}
+
+/// Load `partitions` on `workers` threads and consume every result on the
+/// calling thread in partition index order, with a second, weight bound on
+/// the window (#1448). The count-only window's contract, documented on
+/// `consume_in_partition_order`, holds unchanged.
+///
+/// `weights[index]` is partition `index`'s materialization weight, in the
+/// same unit as `weight_budget`. Besides the `workers` count, a partition is
+/// dispatched only while the summed weight of every dispatched, unreleased
+/// partition, itself included, stays within `weight_budget`; the first
+/// partition of an empty window is always dispatched. With `workers` above
+/// two and a budget of two partition budgets, the materialized peak is the
+/// same as two workers' whenever partitions are budget-sized, and small
+/// partitions still load concurrently. Missing weights count as zero.
+pub(super) fn consume_in_partition_order_weighted<T, L, C, K>(
+    partitions: usize,
+    workers: NonZeroUsize,
+    weights: &[u64],
+    weight_budget: u64,
     load: L,
     mut cancelled: K,
     mut consume: C,
@@ -346,19 +399,25 @@ where
             released: 0,
             ready: BTreeMap::new(),
             live_workers: window,
+            window_weight: 0,
         }),
         changed: Condvar::new(),
         stop: AtomicBool::new(false),
     };
     std::thread::scope(|scope| {
         for _ in 0..window {
-            scope.spawn(|| worker(&shared, partitions, window, &load));
+            scope.spawn(|| worker(&shared, partitions, window, weights, weight_budget, &load));
         }
         let _stop = StopOnExit(&shared);
         (|| -> Result<(), GfError> {
             for index in 0..partitions {
                 let loaded = {
                     let mut state = shared.lock();
+                    // Charged only when the coordinator actually blocks: the
+                    // time consumption waits on loading (#1448).
+                    let _waiting = (!state.ready.contains_key(&index)).then(|| {
+                        crate::concurrency_attribution::RegionScope::named("partition_load_wait")
+                    });
                     loop {
                         if let Some(loaded) = state.ready.remove(&index) {
                             break loaded;
@@ -382,7 +441,10 @@ where
                         state = shared.wait_bounded(state);
                     }
                 };
-                shared.release_consumed(consume(index, loaded?))?;
+                shared.release_consumed(
+                    consume(index, loaded?),
+                    weights.get(index).copied().unwrap_or(0),
+                )?;
             }
             Ok(())
         })()

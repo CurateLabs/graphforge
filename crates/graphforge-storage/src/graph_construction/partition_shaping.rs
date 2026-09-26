@@ -20,7 +20,8 @@
 
 use super::partition::{PartitionBalance, PartitionPlan};
 use super::partition_load::{
-    PARTITION_LOAD_WORKERS, PartitionLoadCounters, abandon_if_stopped, consume_in_partition_order,
+    PARTITION_LOAD_WORKERS, PartitionLoadCounters, abandon_if_stopped,
+    consume_in_partition_order_weighted,
 };
 use super::partition_records::PartitionRecords;
 use super::{
@@ -311,6 +312,14 @@ impl SpillWriter {
     }
 }
 
+/// Most load workers a finish leases from the instance admission (#1448).
+/// The load window's weight bound, not this count, bounds memory.
+const LOAD_LANES: NonZeroUsize = NonZeroUsize::new(8).unwrap();
+
+/// Most lanes one boundary's spill seals lease (#1448). A seal is a data
+/// fsync, a rename and a small control install; lanes overlap the fsyncs.
+const SEAL_LANES: usize = 8;
+
 /// One open, unsealed fixed-width partition spill (#1439 follow-up, #1443).
 ///
 /// Unlike [`SpillWriter`], this holds no fixed-size per-partition block.
@@ -402,12 +411,25 @@ impl FixedSpillWriter {
     }
 
     fn seal(
-        mut self,
+        self,
         name: &str,
         root: &StableDirectory,
         evidence: &mut GraphConstructionEvidence,
         batch: &mut SealDirectoryBatch,
     ) -> Result<ArtifactReceipt, GfError> {
+        self.seal_files(name, root, batch)?.account(evidence)
+    }
+
+    /// The filesystem half of [`Self::seal`]: make the spill durable, install
+    /// it under `name` and persist its writer capability into `batch`. The
+    /// evidence is charged by [`SealedSpill::account`], so lanes may seal
+    /// spills concurrently and the caller charge them in partition order.
+    fn seal_files(
+        mut self,
+        name: &str,
+        root: &StableDirectory,
+        batch: &mut SealDirectoryBatch,
+    ) -> Result<SealedSpill, GfError> {
         self.flush_buffer()?;
         self.writer.flush().map_err(super::storage)?;
         self.writer
@@ -415,8 +437,6 @@ impl FixedSpillWriter {
             .sync_all_and_release()
             .map_err(super::storage)?;
         let cache_release = self.writer.inner.evidence();
-        account_cache_release(cache_release, evidence)?;
-        account_sequential_write(self.writer.bytes, evidence)?;
         let receipt = ArtifactReceipt {
             name: name.to_owned(),
             bytes: self.writer.bytes,
@@ -441,6 +461,28 @@ impl FixedSpillWriter {
         batch.mark();
         construction_failpoint("shape.partition_spill.after_install");
         persist_shape_receipt_in_batch(root, &receipt, batch)?;
+        Ok(SealedSpill {
+            receipt,
+            cache_release,
+        })
+    }
+}
+
+/// A spill sealed on disk whose evidence is not yet charged (#1448).
+struct SealedSpill {
+    receipt: ArtifactReceipt,
+    cache_release: graphforge_filesystem::FileCacheReleaseEvidence,
+}
+
+impl SealedSpill {
+    /// Charge the seal to `evidence`, exactly as a sequential seal does.
+    fn account(self, evidence: &mut GraphConstructionEvidence) -> Result<ArtifactReceipt, GfError> {
+        let Self {
+            receipt,
+            cache_release,
+        } = self;
+        account_cache_release(cache_release, evidence)?;
+        account_sequential_write(receipt.bytes, evidence)?;
         record_shape_artifact_install(evidence, &receipt)?;
         account_fixed_write_operations(&receipt, evidence)?;
         evidence.merge_fsync_operations = evidence
@@ -470,7 +512,7 @@ pub(super) struct FixedRangePartitioner<'a, const N: usize> {
     balance: PartitionBalance,
     records: u64,
     /// Concurrent partition loads while finishing; see
-    /// [`super::partition_load::consume_in_partition_order`] for the bound.
+    /// [`super::partition_load::consume_in_partition_order_weighted`] for the bound.
     load_workers: NonZeroUsize,
     /// Instance construction CPU admission; when set, the finish-time worker
     /// count is leased from it (#1586).
@@ -588,18 +630,40 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             load_fixed_partition::<N>(root, names, *expected, codec, max_partition_bytes, stop)
                 .map(|(records, counters)| (LoadedPartition::Resident(records), counters))
         };
-        let workers = self.load_workers;
         // #1586: lease the workers from the instance admission. Scheduling
         // only; a partial grant runs with fewer workers and the same bytes.
+        // #1448: with an admission, ask for up to `LOAD_LANES`; the weight
+        // bound below keeps what is materialized at once to two partition
+        // budgets, the same peak two workers allow.
         let lease = match &self.cpu_admission {
-            Some(admission) => Some(admission.acquire(workers, &mut *cancelled)?),
+            Some(admission) => Some(admission.acquire(LOAD_LANES, &mut *cancelled)?),
             None => None,
         };
-        let workers = lease
-            .as_ref()
-            .map_or(workers, super::cpu_admission::ConstructionCpuLease::lanes);
+        let workers = lease.as_ref().map_or(
+            self.load_workers,
+            super::cpu_admission::ConstructionCpuLease::lanes,
+        );
+        // A partition materializes at most its routed records, and never more
+        // than the budget (an over-budget one is sorted in budget-sized runs);
+        // an unknown count is charged the whole budget.
+        let weights = jobs
+            .iter()
+            .map(|(_, _, expected)| {
+                expected
+                    .and_then(|records| records.checked_mul(N as u64))
+                    .map_or(max_partition_bytes, |bytes| bytes.min(max_partition_bytes))
+            })
+            .collect::<Vec<_>>();
         let load = |job: usize, stop: &AtomicBool| load_job(root, &jobs[job], stop);
-        consume_in_partition_order(jobs.len(), workers, load, cancelled, consume)
+        consume_in_partition_order_weighted(
+            jobs.len(),
+            workers,
+            &weights,
+            max_partition_bytes.saturating_mul(2),
+            load,
+            cancelled,
+            consume,
+        )
     }
 
     /// Route one record into the partition owning `key`.
@@ -709,21 +773,14 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
 
     /// Seal every open spill into this boundary's segment set, sharing one
     /// directory-durability batch across every partitioner of the group
-    /// (#1418, #1452).
+    /// (#1418, #1452). One family's case of [`seal_families_at_boundary`].
     pub(super) fn seal_at_boundary(
         &mut self,
         boundary: u64,
         evidence: &mut GraphConstructionEvidence,
         batch: &mut SealDirectoryBatch,
     ) -> Result<(), GfError> {
-        for partition in 0..self.spills.len() {
-            if let Some(spill) = self.spills[partition].take() {
-                let name = fixed_spill_name(self.family, boundary, partition);
-                let receipt = spill.seal(&name, self.root, evidence, batch)?;
-                self.sealed[partition].push(receipt);
-            }
-        }
-        Ok(())
+        seal_families_at_boundary(&mut [self], boundary, evidence, batch)
     }
 
     /// Seal every open spill with a private durability batch.
@@ -1108,6 +1165,216 @@ fn segment_bytes(root: &StableDirectory, names: &[String]) -> Result<u64, GfErro
             .checked_add(length)
             .ok_or_else(|| super::storage("partition spill byte count overflows"))
     })
+}
+
+/// One open spill a boundary seals (#1448).
+pub(super) struct SealJob {
+    family: usize,
+    partition: usize,
+    name: String,
+    spill: FixedSpillWriter,
+}
+
+/// A partitioner whose open spills a boundary seals (#1448).
+pub(super) trait BoundarySeal {
+    /// Move every open spill into `jobs`, in partition order, tagged with
+    /// `family`, its position in the caller's list.
+    fn take_open_spills(&mut self, boundary: u64, family: usize, jobs: &mut Vec<SealJob>);
+    /// Record a sealed segment of `partition`.
+    fn accept_sealed(&mut self, partition: usize, receipt: ArtifactReceipt);
+    /// The admission this partitioner leases lanes from.
+    fn cpu_admission(
+        &self,
+    ) -> Option<&std::sync::Arc<super::cpu_admission::ConstructionCpuAdmission>>;
+}
+
+impl<const N: usize> BoundarySeal for FixedRangePartitioner<'_, N> {
+    fn take_open_spills(&mut self, boundary: u64, family: usize, jobs: &mut Vec<SealJob>) {
+        for (partition, slot) in self.spills.iter_mut().enumerate() {
+            if let Some(spill) = slot.take() {
+                jobs.push(SealJob {
+                    family,
+                    partition,
+                    name: fixed_spill_name(self.family, boundary, partition),
+                    spill,
+                });
+            }
+        }
+    }
+
+    fn accept_sealed(&mut self, partition: usize, receipt: ArtifactReceipt) {
+        self.sealed[partition].push(receipt);
+    }
+
+    fn cpu_admission(
+        &self,
+    ) -> Option<&std::sync::Arc<super::cpu_admission::ConstructionCpuAdmission>> {
+        self.cpu_admission.as_ref()
+    }
+}
+
+/// Seal the open spills of every family in `families` at `boundary`, in one
+/// pool of lanes leased from the instance admission (#1448).
+///
+/// Every family's spills are one job list, so a boundary waits for one pool
+/// rather than one per family. Each lane seals into its own directory batch,
+/// which `batch` absorbs, so the boundary still makes its names durable with
+/// one flush. The evidence is charged afterwards in family, then partition,
+/// order, and every spill is attempted even after one fails; neither depends
+/// on the schedule. Without a free lane the calling thread seals in that
+/// order itself.
+pub(super) fn seal_families_at_boundary(
+    families: &mut [&mut dyn BoundarySeal],
+    boundary: u64,
+    evidence: &mut GraphConstructionEvidence,
+    batch: &mut SealDirectoryBatch,
+) -> Result<(), GfError> {
+    let root = batch.root();
+    let admission = families
+        .iter()
+        .find_map(|family| family.cpu_admission().cloned());
+    let mut open = Vec::new();
+    for (index, family) in families.iter_mut().enumerate() {
+        family.take_open_spills(boundary, index, &mut open);
+    }
+    // Out of their partitioners, the spills lose the partitioner's drop-time
+    // abandonment; each guard restores it for a spill never sealed.
+    let jobs = open
+        .into_iter()
+        .map(|job| PendingSeal {
+            root,
+            family: job.family,
+            partition: job.partition,
+            name: job.name,
+            spill: Some(job.spill),
+        })
+        .collect::<Vec<_>>();
+    let want = NonZeroUsize::new(SEAL_LANES.min(jobs.len())).filter(|lanes| lanes.get() > 1);
+    let lease = want.and_then(|want| {
+        admission
+            .as_ref()
+            .and_then(|admission| admission.try_acquire(want))
+            .filter(|lease| lease.lanes().get() > 1)
+    });
+    let mut first_error = None;
+    let Some(lease) = lease else {
+        for mut job in jobs {
+            let Some(spill) = job.spill.take() else {
+                continue;
+            };
+            match spill.seal(&job.name, root, evidence, batch) {
+                Ok(receipt) => families[job.family].accept_sealed(job.partition, receipt),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        return first_error.map_or(Ok(()), Err);
+    };
+    let places = jobs
+        .iter()
+        .map(|job| (job.family, job.partition))
+        .collect::<Vec<_>>();
+    let (mut sealed, lane_batches) = seal_on_lanes(jobs, root, lease.lanes());
+    drop(lease);
+    for mut lane_batch in lane_batches {
+        batch.absorb(&mut lane_batch);
+    }
+    sealed.sort_by_key(|(index, _)| *index);
+    if sealed.len() != places.len() {
+        first_error.get_or_insert(super::storage("a boundary seal result is missing"));
+    }
+    for (index, result) in sealed {
+        let (family, partition) = places[index];
+        match result.and_then(|spill| spill.account(evidence)) {
+            Ok(receipt) => families[family].accept_sealed(partition, receipt),
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+/// Run `jobs` on `lanes` threads, each sealing into its own directory batch.
+/// Returns every job's result, tagged with its index, and the lane batches for
+/// the caller's batch to absorb.
+#[allow(clippy::type_complexity)] // One private result list and its batches.
+fn seal_on_lanes<'r>(
+    jobs: Vec<PendingSeal<'r>>,
+    root: &'r StableDirectory,
+    lanes: NonZeroUsize,
+) -> (
+    Vec<(usize, Result<SealedSpill, GfError>)>,
+    Vec<SealDirectoryBatch<'r>>,
+) {
+    let jobs = jobs
+        .into_iter()
+        .map(std::sync::Mutex::new)
+        .collect::<Vec<_>>();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let reversed = super::lane_jobs_reversed();
+    let sealed = std::sync::Mutex::new(Vec::with_capacity(jobs.len()));
+    let lane_batches = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..lanes.get() {
+            scope.spawn(|| {
+                let mut lane_batch = SealDirectoryBatch::new(root);
+                loop {
+                    let index = super::lane_job(
+                        next.fetch_add(1, std::sync::atomic::Ordering::AcqRel),
+                        jobs.len(),
+                        reversed,
+                    );
+                    let Some(job) = jobs.get(index) else {
+                        break;
+                    };
+                    let mut job = job
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let result = match job.spill.take() {
+                        Some(spill) => spill.seal_files(&job.name, root, &mut lane_batch),
+                        None => Err(super::storage("boundary seal job was already taken")),
+                    };
+                    drop(job);
+                    sealed
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push((index, result));
+                }
+                lane_batches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(lane_batch);
+            });
+        }
+    });
+    (
+        sealed
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        lane_batches
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
+/// One boundary seal job. A spill it still holds when dropped (a panic, or a
+/// job never run) is abandoned, as its partitioner's drop would have (#1448).
+struct PendingSeal<'r> {
+    root: &'r StableDirectory,
+    family: usize,
+    partition: usize,
+    name: String,
+    spill: Option<FixedSpillWriter>,
+}
+
+impl Drop for PendingSeal<'_> {
+    fn drop(&mut self) {
+        if let Some(spill) = self.spill.take() {
+            spill.abandon(self.root);
+        }
+    }
 }
 
 /// Whether a codec-free partition's resident materialization fits

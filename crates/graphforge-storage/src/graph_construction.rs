@@ -1975,6 +1975,38 @@ pub(super) fn reject_cancelled(cancelled: &mut impl FnMut() -> bool) -> Result<(
     Ok(())
 }
 
+/// Whether lanes spawned from this thread take their jobs in reverse
+/// (#1448). Read on the spawning thread and passed to [`lane_job`]. Always
+/// false outside tests.
+pub(super) fn lane_jobs_reversed() -> bool {
+    #[cfg(test)]
+    {
+        REVERSE_LANE_JOBS.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+/// The job a lane takes for claim number `claim` of `jobs` (#1448): claims
+/// in order, or reversed when a permuted-schedule test asks, so lanes run
+/// their jobs in the opposite order to a calling-thread loop. Lane work must
+/// not depend on it.
+pub(super) fn lane_job(claim: usize, jobs: usize, reversed: bool) -> usize {
+    if reversed && claim < jobs {
+        jobs - 1 - claim
+    } else {
+        claim
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Set by a permuted-schedule test on the thread that spawns lanes.
+    pub(crate) static REVERSE_LANE_JOBS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[cfg(test)]
 pub(crate) fn construction_failpoint(name: &str) {
     if std::env::var("GF_CONSTRUCTION_FAILPOINT_COOKIE").as_deref()
