@@ -284,6 +284,11 @@ impl<'a> SealDirectoryBatch<'a> {
         self.pending = true;
     }
 
+    /// The directory this batch makes durable.
+    pub(super) fn root(&self) -> &'a StableDirectory {
+        self.root
+    }
+
     /// Take over `other`'s pending names, so this batch's flush makes them
     /// durable and `other` no longer syncs on drop (#1448: a lane seals into
     /// its own batch, which the boundary's batch absorbs).

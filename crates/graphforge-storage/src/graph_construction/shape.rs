@@ -5,7 +5,7 @@ use super::partition::PartitionBalance;
 use super::partition::{IdentitySampler, PartitionPlan};
 use super::partition_shaping::{
     FixedRangePartitioner, PartitionFamily, RowRangePartitioner, is_partition_artifact_name,
-    parse_segment_name,
+    parse_segment_name, seal_families_at_boundary,
 };
 use super::progress::{
     LoadedShapeProgress, ShapeProgressPartition, authenticate_shape_segments,
@@ -675,10 +675,18 @@ impl GraphConstructionSession {
             // the batch, so the flush is what makes the boundary's segments
             // durable together.
             let mut batch = SealDirectoryBatch::new(&self.root);
-            identities.seal_at_boundary(boundary, &mut self.checkpoint.evidence, &mut batch)?;
-            node_details.seal_at_boundary(boundary, &mut self.checkpoint.evidence, &mut batch)?;
-            edge_details.seal_at_boundary(boundary, &mut self.checkpoint.evidence, &mut batch)?;
-            endpoints.seal_at_boundary(boundary, &mut self.checkpoint.evidence, &mut batch)?;
+            // #1448: every fixed family's spills seal in one lane pool.
+            seal_families_at_boundary(
+                &mut [
+                    &mut identities,
+                    &mut node_details,
+                    &mut edge_details,
+                    &mut endpoints,
+                ],
+                boundary,
+                &mut self.checkpoint.evidence,
+                &mut batch,
+            )?;
             for partitioner in row_groups.values_mut() {
                 partitioner.seal_at_boundary(
                     boundary,
