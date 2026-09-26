@@ -2388,8 +2388,11 @@ fn retire_segments(
 ) -> Result<(), GfError> {
     let want = std::num::NonZeroUsize::new(RETIRE_LANES.min(segments.len()))
         .filter(|lanes| lanes.get() > 1);
-    let lease =
-        want.and_then(|want| cpu_admission.and_then(|admission| admission.try_acquire(want)));
+    let lease = want.and_then(|want| {
+        cpu_admission
+            .and_then(|admission| admission.try_acquire(want))
+            .filter(|lease| lease.lanes().get() > 1)
+    });
     let lanes = lease.as_ref().map_or(1, |lease| lease.lanes().get());
     if lanes == 1 {
         let mut first_error = None;
@@ -2421,9 +2424,9 @@ fn retire_segments(
                         break;
                     };
                     let result = unlink_shape_artifact_files(root, &segment.name);
-                    if let Ok(mut results) = results.lock() {
-                        results[index] = Some(result);
-                    }
+                    results
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)[index] = Some(result);
                 }
             });
         }
@@ -2431,11 +2434,15 @@ fn retire_segments(
     drop(lease);
     let results = results
         .into_inner()
-        .map_err(|_| storage("segment retirement results poisoned"))?;
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut first_error = None;
-    for result in results.into_iter().flatten() {
-        match result {
-            Ok(receipt) => reconcile_shape_artifact_removal(evidence, &receipt)?,
+    for result in results {
+        match result.unwrap_or_else(|| Err(storage("segment retirement result is missing"))) {
+            Ok(receipt) => {
+                if let Err(error) = reconcile_shape_artifact_removal(evidence, &receipt) {
+                    first_error.get_or_insert(error);
+                }
+            }
             Err(error) => {
                 first_error.get_or_insert(error);
             }

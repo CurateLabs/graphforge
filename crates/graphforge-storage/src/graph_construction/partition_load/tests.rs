@@ -818,7 +818,7 @@ fn finish_waits_for_a_lane_while_the_admission_is_full() {
 #[test]
 fn weighted_window_never_exceeds_its_budget() {
     use std::sync::atomic::{AtomicU64, Ordering};
-    let weights = [6_u64, 6, 3, 3, 3, 12, 1, 1, 1, 1, 5, 5];
+    let weights = [6_u64, 6, 3, 3, 3, 9, 1, 1, 1, 1, 5, 5];
     let in_flight = AtomicU64::new(0);
     let peak = AtomicU64::new(0);
     let load = |index: usize, _stop: &AtomicBool| -> Result<usize, GfError> {
@@ -848,12 +848,48 @@ fn weighted_window_never_exceeds_its_budget() {
             .map(|index| (index, index * 10))
             .collect::<Vec<_>>()
     );
-    // 12 is heavier than the budget and loads alone; everything else stays
-    // within 10.
     assert!(
-        peak.load(Ordering::SeqCst) <= 12,
+        peak.load(Ordering::SeqCst) <= 10,
         "{}",
         peak.load(Ordering::SeqCst)
+    );
+}
+
+/// #1448: a partition heavier than the whole budget still loads, alone.
+#[test]
+fn weighted_window_loads_an_oversized_partition_alone() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let weights = [1_u64, 12, 1, 1];
+    let in_flight = AtomicU64::new(0);
+    let with_heavy = AtomicU64::new(0);
+    let load = |index: usize, _stop: &AtomicBool| -> Result<usize, GfError> {
+        let now = in_flight.fetch_add(weights[index], Ordering::SeqCst) + weights[index];
+        if index == 1 {
+            with_heavy.store(now, Ordering::SeqCst);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        Ok(index)
+    };
+    let mut consumed = Vec::new();
+    consume_in_partition_order_weighted(
+        weights.len(),
+        workers(4),
+        &weights,
+        10,
+        load,
+        &mut || false,
+        |index, _| {
+            consumed.push(index);
+            in_flight.fetch_sub(weights[index], Ordering::SeqCst);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(consumed, [0, 1, 2, 3]);
+    assert_eq!(
+        with_heavy.load(Ordering::SeqCst),
+        12,
+        "it shared the window"
     );
 }
 
@@ -881,5 +917,11 @@ fn weighted_window_loads_small_partitions_concurrently() {
         Ok(())
     })
     .unwrap();
-    assert_eq!(peak.load(Ordering::SeqCst), 4);
+    // More than a count-only window of two allows; exactly 4 is likely but
+    // depends on the host scheduling the workers in time.
+    assert!(
+        peak.load(Ordering::SeqCst) >= 3,
+        "{}",
+        peak.load(Ordering::SeqCst)
+    );
 }

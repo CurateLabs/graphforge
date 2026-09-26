@@ -2122,14 +2122,29 @@ mod group_boundary {
             return;
         };
         let mut session = boundary_session(Path::new(&path), 156_200);
+        if std::env::var_os("GF_TEST_CONSTRUCTION_LANES").is_some() {
+            session.set_cpu_admission(Some(eight_lanes()));
+        }
         complete_boundary(&mut session);
     }
 
+    /// An admission of eight construction lanes (#1448).
+    fn eight_lanes() -> std::sync::Arc<crate::ConstructionCpuAdmission> {
+        std::sync::Arc::new(crate::ConstructionCpuAdmission::new(
+            std::num::NonZeroUsize::new(8).unwrap(),
+        ))
+    }
+
     fn crash_at_finish_stage(failpoint: &str) -> TempDir {
+        crash_at_finish_stage_with(failpoint, false)
+    }
+
+    fn crash_at_finish_stage_with(failpoint: &str, lanes: bool) -> TempDir {
         let root = TempDir::new().unwrap();
         crate::open_or_initialize_project(root.path()).unwrap();
         let prior = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
             .args([
                 "--exact",
                 "graph_construction::tests::group_boundary::finish_stage_crash_child",
@@ -2139,9 +2154,13 @@ mod group_boundary {
                 "GF_CONSTRUCTION_FAILPOINT_COOKIE",
                 "graphforge-construction-test-v1",
             )
-            .env("GF_CONSTRUCTION_FAILPOINT", failpoint)
-            .status()
-            .unwrap();
+            .env("GF_CONSTRUCTION_FAILPOINT", failpoint);
+        if lanes {
+            command.env("GF_TEST_CONSTRUCTION_LANES", "8");
+        } else {
+            command.env_remove("GF_TEST_CONSTRUCTION_LANES");
+        }
+        let status = command.status().unwrap();
         assert_eq!(status.code(), Some(86), "{failpoint}");
         assert_eq!(
             std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
@@ -2149,6 +2168,51 @@ mod group_boundary {
             "{failpoint}"
         );
         root
+    }
+
+    /// #1448: with seals and retirement on parallel lanes, a process ended at
+    /// a seal, boundary or retirement failpoint (from whichever thread reached
+    /// it first) resumes to the uninterrupted graph and reconciles every
+    /// allocation.
+    #[test]
+    fn lane_crashes_resume_with_the_same_graph() {
+        let clean_root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(clean_root.path()).unwrap();
+        let mut clean = boundary_session(clean_root.path(), 156_200);
+        clean.set_cpu_admission(Some(eight_lanes()));
+        stage_boundary_chunks(&mut clean);
+        clean.shape_canonical_with_cancellation(|| false).unwrap();
+        let clean_outputs = shape_output_content(&clean);
+        complete_boundary(&mut clean);
+        let clean_current = clean.evidence().storage_current.clone();
+        drop(clean);
+
+        for failpoint in [
+            "shape.partition_spill.after_install",
+            "shape.partition_spill.before_flush",
+            "shape.after_group_seal",
+            "shape.stage.identities.after_install",
+            "shape.after_derived_unlink",
+            "shape.stage.endpoints.after_retire",
+            "shape.stage.resolved.after_retire",
+        ] {
+            let root = crash_at_finish_stage_with(failpoint, true);
+            let mut recovered = boundary_session(root.path(), 156_200);
+            recovered.set_cpu_admission(Some(eight_lanes()));
+            recovered.shape_canonical_with_cancellation(|| false).unwrap();
+            assert_eq!(
+                shape_output_content(&recovered),
+                clean_outputs,
+                "{failpoint}: resumed shape differs from the uninterrupted one"
+            );
+            complete_boundary(&mut recovered);
+            assert_eq!(
+                recovered.evidence().storage_current,
+                clean_current,
+                "{failpoint}: resumed run must reconcile every allocation"
+            );
+            assert_eq!(published_edge_count(root.path()), 8 * 8192, "{failpoint}");
+        }
     }
 
     /// #1562. Every crash window the finish stages introduce resumes to the

@@ -57,7 +57,9 @@ use std::time::Duration;
 /// This is a scheduling decision, not a recorded format parameter: the
 /// durable partition count and splitters are unchanged by it, and the
 /// schedule-independence tests hold the evidence and output bytes equal
-/// across worker counts. It bounds the materialized partitions, see
+/// across worker counts. With an instance admission, a finish leases up to
+/// `LOAD_LANES` workers instead, and the window's weight bound, not the
+/// worker count, bounds the materialized partitions; see
 /// [`consume_in_partition_order_weighted`].
 pub(super) const PARTITION_LOAD_WORKERS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 

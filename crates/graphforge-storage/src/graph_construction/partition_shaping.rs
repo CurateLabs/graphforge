@@ -1233,10 +1233,22 @@ pub(super) fn seal_families_at_boundary(
     let admission = families
         .iter()
         .find_map(|family| family.cpu_admission().cloned());
-    let mut jobs = Vec::new();
+    let mut open = Vec::new();
     for (index, family) in families.iter_mut().enumerate() {
-        family.take_open_spills(boundary, index, &mut jobs);
+        family.take_open_spills(boundary, index, &mut open);
     }
+    // Out of their partitioners, the spills lose the partitioner's drop-time
+    // abandonment; each guard restores it for a spill never sealed.
+    let jobs = open
+        .into_iter()
+        .map(|job| PendingSeal {
+            root,
+            family: job.family,
+            partition: job.partition,
+            name: job.name,
+            spill: Some(job.spill),
+        })
+        .collect::<Vec<_>>();
     let want = NonZeroUsize::new(SEAL_LANES.min(jobs.len())).filter(|lanes| lanes.get() > 1);
     let lease = want.and_then(|want| {
         admission
@@ -1246,8 +1258,11 @@ pub(super) fn seal_families_at_boundary(
     });
     let mut first_error = None;
     let Some(lease) = lease else {
-        for job in jobs {
-            match job.spill.seal(&job.name, root, evidence, batch) {
+        for mut job in jobs {
+            let Some(spill) = job.spill.take() else {
+                continue;
+            };
+            match spill.seal(&job.name, root, evidence, batch) {
                 Ok(receipt) => families[job.family].accept_sealed(job.partition, receipt),
                 Err(error) => {
                     first_error.get_or_insert(error);
@@ -1260,16 +1275,49 @@ pub(super) fn seal_families_at_boundary(
         .iter()
         .map(|job| (job.family, job.partition))
         .collect::<Vec<_>>();
+    let (mut sealed, lane_batches) = seal_on_lanes(jobs, root, lease.lanes());
+    drop(lease);
+    for mut lane_batch in lane_batches {
+        batch.absorb(&mut lane_batch);
+    }
+    sealed.sort_by_key(|(index, _)| *index);
+    if sealed.len() != places.len() {
+        first_error.get_or_insert(super::storage("a boundary seal result is missing"));
+    }
+    for (index, result) in sealed {
+        let (family, partition) = places[index];
+        match result.and_then(|spill| spill.account(evidence)) {
+            Ok(receipt) => families[family].accept_sealed(partition, receipt),
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+/// Run `jobs` on `lanes` threads, each sealing into its own directory batch.
+/// Returns every job's result, tagged with its index, and the lane batches for
+/// the caller's batch to absorb.
+#[allow(clippy::type_complexity)] // One private result list and its batches.
+fn seal_on_lanes<'r>(
+    jobs: Vec<PendingSeal<'r>>,
+    root: &'r StableDirectory,
+    lanes: NonZeroUsize,
+) -> (
+    Vec<(usize, Result<SealedSpill, GfError>)>,
+    Vec<SealDirectoryBatch<'r>>,
+) {
     let jobs = jobs
         .into_iter()
-        .map(|job| std::sync::Mutex::new(Some(job)))
+        .map(std::sync::Mutex::new)
         .collect::<Vec<_>>();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let reversed = super::lane_jobs_reversed();
     let sealed = std::sync::Mutex::new(Vec::with_capacity(jobs.len()));
     let lane_batches = std::sync::Mutex::new(Vec::new());
     std::thread::scope(|scope| {
-        for _ in 0..lease.lanes().get() {
+        for _ in 0..lanes.get() {
             scope.spawn(|| {
                 let mut lane_batch = SealDirectoryBatch::new(root);
                 loop {
@@ -1281,41 +1329,52 @@ pub(super) fn seal_families_at_boundary(
                     let Some(job) = jobs.get(index) else {
                         break;
                     };
-                    let Some(job) = job.lock().ok().and_then(|mut job| job.take()) else {
-                        continue;
+                    let mut job = job
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let result = match job.spill.take() {
+                        Some(spill) => spill.seal_files(&job.name, root, &mut lane_batch),
+                        None => Err(super::storage("boundary seal job was already taken")),
                     };
-                    let result = job.spill.seal_files(&job.name, root, &mut lane_batch);
-                    if let Ok(mut sealed) = sealed.lock() {
-                        sealed.push((index, result));
-                    }
+                    drop(job);
+                    sealed
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push((index, result));
                 }
-                if let Ok(mut batches) = lane_batches.lock() {
-                    batches.push(lane_batch);
-                }
+                lane_batches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(lane_batch);
             });
         }
     });
-    drop(lease);
-    for mut lane_batch in lane_batches
-        .into_inner()
-        .map_err(|_| super::storage("seal lane batches poisoned"))?
-    {
-        batch.absorb(&mut lane_batch);
-    }
-    let mut sealed = sealed
-        .into_inner()
-        .map_err(|_| super::storage("seal lane results poisoned"))?;
-    sealed.sort_by_key(|(index, _)| *index);
-    for (index, result) in sealed {
-        let (family, partition) = places[index];
-        match result.and_then(|spill| spill.account(evidence)) {
-            Ok(receipt) => families[family].accept_sealed(partition, receipt),
-            Err(error) => {
-                first_error.get_or_insert(error);
-            }
+    (
+        sealed
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        lane_batches
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
+/// One boundary seal job. A spill it still holds when dropped (a panic, or a
+/// job never run) is abandoned, as its partitioner's drop would have (#1448).
+struct PendingSeal<'r> {
+    root: &'r StableDirectory,
+    family: usize,
+    partition: usize,
+    name: String,
+    spill: Option<FixedSpillWriter>,
+}
+
+impl Drop for PendingSeal<'_> {
+    fn drop(&mut self) {
+        if let Some(spill) = self.spill.take() {
+            spill.abandon(self.root);
         }
     }
-    first_error.map_or(Ok(()), Err)
 }
 
 /// Whether a codec-free partition's resident materialization fits

@@ -309,3 +309,53 @@ fn boundary_seal_on_lanes_matches_the_calling_thread() {
     assert_eq!(serial.1.len(), 48);
     assert_eq!((serial.1, serial.2), (parallel.1, parallel.2));
 }
+
+/// #1448: a spill taken for a boundary seal and never sealed is abandoned when
+/// its job is dropped, as its partitioner's drop would have done.
+#[test]
+fn an_unsealed_boundary_job_abandons_its_spill() {
+    let root = tempfile::TempDir::new().unwrap();
+    crate::open_or_initialize_project(root.path()).unwrap();
+    let mut session = super::super::tests::open(&root, 0x1448_ab4d);
+    let super::super::GraphConstructionSession {
+        root: session_root,
+        checkpoint,
+        ..
+    } = &mut session;
+    let mut partitioner =
+        FixedRangePartitioner::<33>::new(session_root, PartitionFamily::Endpoints, 2, None, false)
+            .unwrap();
+    for partition in 0..2 {
+        partitioner
+            .route_slice(
+                partition,
+                &[partition as u8; 33],
+                1,
+                &mut checkpoint.evidence,
+            )
+            .unwrap();
+    }
+    let temps = || {
+        session_root
+            .child_names()
+            .unwrap()
+            .into_iter()
+            .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+            .count()
+    };
+    assert_eq!(temps(), 2);
+    let mut open = Vec::new();
+    BoundarySeal::take_open_spills(&mut partitioner, 1, 0, &mut open);
+    let jobs = open
+        .into_iter()
+        .map(|job| PendingSeal {
+            root: session_root,
+            family: job.family,
+            partition: job.partition,
+            name: job.name,
+            spill: Some(job.spill),
+        })
+        .collect::<Vec<_>>();
+    drop(jobs);
+    assert_eq!(temps(), 0, "an unsealed spill outlived its job");
+}
