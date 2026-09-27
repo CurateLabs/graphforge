@@ -267,6 +267,29 @@ pub(crate) fn build_adjacency_index_for_edge_files(
     topology_generation: u64,
     built_at_micros: i64,
     options: &AdjacencyBuildOptions,
+    checkpoint: impl FnMut() -> Result<(), GfError>,
+) -> Result<(Vec<AdjacencyManifestRow>, AdjacencyBuildMetrics), GfError> {
+    build_adjacency_index_for_edge_files_on_lanes(
+        artifact_project_dir,
+        edge_files,
+        topology_generation,
+        built_at_micros,
+        options,
+        None,
+        checkpoint,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_adjacency_index_for_edge_files_on_lanes(
+    artifact_project_dir: &Path,
+    edge_files: &[(String, PathBuf)],
+    topology_generation: u64,
+    built_at_micros: i64,
+    options: &AdjacencyBuildOptions,
+    admission: Option<
+        &std::sync::Arc<crate::graph_construction::cpu_admission::ConstructionCpuAdmission>,
+    >,
     mut checkpoint: impl FnMut() -> Result<(), GfError>,
 ) -> Result<(Vec<AdjacencyManifestRow>, AdjacencyBuildMetrics), GfError> {
     let generation = topology_generation;
@@ -285,9 +308,12 @@ pub(crate) fn build_adjacency_index_for_edge_files(
         base.join(format!("build-{}", uuid::Uuid::new_v4().as_simple()))
     };
     let mut spill = SpillSession::create(&spill_root)?.with_max_bytes(options.spill_max_bytes);
+    spill.admission = admission.cloned();
     let mut metrics = AdjacencyBuildMetrics::default();
 
     let build_result = (|| {
+        let grouping_region =
+            crate::concurrency_attribution::RegionScope::named("adjacency_grouping");
         let mut groups = stream_build_groups(
             edge_files,
             &options,
@@ -297,44 +323,22 @@ pub(crate) fn build_adjacency_index_for_edge_files(
         )?;
         checkpoint()?;
 
-        let mut manifest = Vec::new();
-        let mut write_pair = |stem: &str, group: &mut EntryGroup| -> Result<(), GfError> {
-            for direction in [Direction::Out, Direction::In] {
-                checkpoint()?;
-                let outcome = group.finish_sharded_csr(
-                    direction,
-                    &csr_path(artifact_project_dir, stem, direction),
-                    &options,
-                    &mut spill,
-                    &mut checkpoint,
-                )?;
-                metrics.csr_shards = metrics.csr_shards.saturating_add(outcome.shards);
-                metrics.peak_shard_edges = metrics.peak_shard_edges.max(outcome.peak_shard_edges);
-                metrics.peak_shard_nodes = metrics.peak_shard_nodes.max(outcome.peak_shard_nodes);
-                manifest.push(AdjacencyManifestRow {
-                    relation_type: stem.to_owned(),
-                    direction,
-                    topology_generation: generation,
-                    built_at_micros,
-                    node_count: outcome.node_count,
-                    edge_count: outcome.edge_count,
-                });
-            }
-            Ok(())
-        };
-
-        let mut union = groups
-            .remove(ALL_RELATIONS_STEM)
-            .unwrap_or_else(EntryGroup::default);
-        // Stable stem order for deterministic manifest row ordering.
-        let stems: Vec<String> = groups.keys().cloned().collect();
-        for stem in stems {
-            let mut group = groups.remove(&stem).expect("stem present");
-            write_pair(&stem, &mut group)?;
-        }
-        write_pair(ALL_RELATIONS_STEM, &mut union)?;
+        drop(grouping_region);
+        let csr_region = crate::concurrency_attribution::RegionScope::named("adjacency_csr");
+        let manifest = finish_groups(
+            artifact_project_dir,
+            &mut groups,
+            generation,
+            built_at_micros,
+            &options,
+            &mut spill,
+            &mut metrics,
+            admission,
+            &mut checkpoint,
+        )?;
         checkpoint()?;
 
+        drop(csr_region);
         // Manifest LAST: a crash before this point leaves the manifest absent or
         // old, so a torn build always reads as stale.
         write_manifest(artifact_project_dir, &manifest)?;
@@ -366,6 +370,8 @@ pub(crate) fn build_adjacency_index_for_edge_files(
 /// RAII spill directory: always removed on drop / explicit cleanup so cancel
 /// and failure cannot leave temporary runs behind as a published artifact.
 struct SpillSession {
+    admission:
+        Option<std::sync::Arc<crate::graph_construction::cpu_admission::ConstructionCpuAdmission>>,
     root: PathBuf,
     bytes_current: u64,
     peak_bytes: u64,
@@ -380,6 +386,7 @@ impl SpillSession {
         // parent spill root (it may be shared with DataFusion / other ops).
         std::fs::create_dir_all(root).map_err(storage_err)?;
         Ok(Self {
+            admission: None,
             root: root.to_path_buf(),
             bytes_current: 0,
             peak_bytes: 0,
@@ -495,22 +502,12 @@ impl EntryGroup {
             self.label.as_str()
         };
         // Out: (src, edge, dst); In: (dst, edge, src).
-        let mut out_keyed: Vec<(u64, u64, u64)> = self
-            .buffer
-            .iter()
-            .map(|&(src, edge, dst)| (src, edge, dst))
-            .collect();
-        out_keyed.sort_unstable_by_key(|&(key, edge, _)| (key, edge));
+        let (out_keyed, in_keyed) =
+            sorted_directions(&self.buffer, spill.admission.as_ref(), checkpoint)?;
         let out_path = spill.next_run_path(label, Direction::Out);
         write_keyed_run(&out_path, &out_keyed, spill)?;
         self.out_runs.push(out_path);
 
-        let mut in_keyed: Vec<(u64, u64, u64)> = self
-            .buffer
-            .iter()
-            .map(|&(src, edge, dst)| (dst, edge, src))
-            .collect();
-        in_keyed.sort_unstable_by_key(|&(key, edge, _)| (key, edge));
         let in_path = spill.next_run_path(label, Direction::In);
         write_keyed_run(&in_path, &in_keyed, spill)?;
         self.in_runs.push(in_path);
@@ -529,6 +526,17 @@ impl EntryGroup {
         spill: &mut SpillSession,
         checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
     ) -> Result<ShardedWriteOutcome, GfError> {
+        self.prepare_direction(direction, options, spill, checkpoint)?;
+        self.write_sharded_csr(direction, path, options, checkpoint)
+    }
+
+    fn prepare_direction(
+        &mut self,
+        direction: Direction,
+        options: &AdjacencyBuildOptions,
+        spill: &mut SpillSession,
+        checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
         let had_runs = match direction {
             Direction::Out => !self.out_runs.is_empty(),
             Direction::In => !self.in_runs.is_empty(),
@@ -550,6 +558,20 @@ impl EntryGroup {
                 checkpoint,
             )?;
         }
+        Ok(())
+    }
+
+    fn write_sharded_csr(
+        &self,
+        direction: Direction,
+        path: &Path,
+        options: &AdjacencyBuildOptions,
+        checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
+    ) -> Result<ShardedWriteOutcome, GfError> {
+        let had_runs = match direction {
+            Direction::Out => !self.out_runs.is_empty(),
+            Direction::In => !self.in_runs.is_empty(),
+        };
         let mut writer =
             ShardedCsrWriter::create(path, options.shard_max_edges, options.shard_max_nodes)?;
         let mut max_key = None::<u64>;
@@ -574,7 +596,10 @@ impl EntryGroup {
                     .collect(),
             };
             keyed.sort_unstable_by_key(|&(key, edge, _)| (key, edge));
-            for entry in keyed {
+            for (index, entry) in keyed.into_iter().enumerate() {
+                if index.is_multiple_of(4096) {
+                    checkpoint()?;
+                }
                 emit(entry)?;
             }
         }
@@ -829,9 +854,11 @@ fn stream_build_groups(
         EntryGroup::with_label(ALL_RELATIONS_STEM),
     );
 
-    for_each_adjacency_edge_path(
+    let admission = spill.admission.clone();
+    for_each_admitted_edge_batch(
         edge_files,
         options.batch_size,
+        admission.as_ref(),
         &mut |stem, exploratory, batch| {
             checkpoint()?;
             let edge_ids = uint64_column(named_column(batch, "edge_id")?, "edge_id")?;
@@ -869,4 +896,269 @@ fn stream_build_groups(
         },
     )?;
     Ok(groups)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_groups(
+    root: &Path,
+    groups: &mut std::collections::BTreeMap<String, EntryGroup>,
+    generation: u64,
+    built_at_micros: i64,
+    options: &AdjacencyBuildOptions,
+    spill: &mut SpillSession,
+    metrics: &mut AdjacencyBuildMetrics,
+    admission: Option<
+        &std::sync::Arc<crate::graph_construction::cpu_admission::ConstructionCpuAdmission>,
+    >,
+    checkpoint: &mut impl FnMut() -> Result<(), GfError>,
+) -> Result<Vec<AdjacencyManifestRow>, GfError> {
+    let union = groups.remove(ALL_RELATIONS_STEM).unwrap_or_default();
+    let mut ordered = std::mem::take(groups).into_iter().collect::<Vec<_>>();
+    ordered.push((ALL_RELATIONS_STEM.to_owned(), union));
+    let want =
+        std::num::NonZeroUsize::new((ordered.len() * 2).min(8)).expect("union has two directions");
+    let lease = admission.and_then(|admission| admission.try_acquire(want));
+    let lanes = lease.as_ref().map_or(1, |lease| lease.lanes().get());
+    let mut outcomes = Vec::new();
+    if lanes == 1 {
+        for (stem, group) in &mut ordered {
+            for direction in [Direction::Out, Direction::In] {
+                checkpoint()?;
+                outcomes.push(group.finish_sharded_csr(
+                    direction,
+                    &csr_path(root, stem, direction),
+                    options,
+                    spill,
+                    checkpoint,
+                )?);
+            }
+        }
+    } else {
+        // Spill names, compaction and accounting follow the original order.
+        // Workers only read prepared runs and write disjoint CSR paths.
+        for (_, group) in &mut ordered {
+            for direction in [Direction::Out, Direction::In] {
+                group.prepare_direction(direction, options, spill, checkpoint)?;
+            }
+        }
+        outcomes = finish_groups_on_lanes(root, &ordered, options, lanes, checkpoint)?;
+    }
+    let mut manifest = Vec::with_capacity(outcomes.len());
+    for (index, outcome) in outcomes.into_iter().enumerate() {
+        metrics.csr_shards = metrics.csr_shards.saturating_add(outcome.shards);
+        metrics.peak_shard_edges = metrics.peak_shard_edges.max(outcome.peak_shard_edges);
+        metrics.peak_shard_nodes = metrics.peak_shard_nodes.max(outcome.peak_shard_nodes);
+        manifest.push(AdjacencyManifestRow {
+            relation_type: ordered[index / 2].0.clone(),
+            direction: if index.is_multiple_of(2) {
+                Direction::Out
+            } else {
+                Direction::In
+            },
+            topology_generation: generation,
+            built_at_micros,
+            node_count: outcome.node_count,
+            edge_count: outcome.edge_count,
+        });
+    }
+    Ok(manifest)
+}
+
+fn finish_groups_on_lanes(
+    root: &Path,
+    ordered: &[(String, EntryGroup)],
+    options: &AdjacencyBuildOptions,
+    lanes: usize,
+    checkpoint: &mut impl FnMut() -> Result<(), GfError>,
+) -> Result<Vec<ShardedWriteOutcome>, GfError> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Mutex, mpsc};
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let count = ordered.len() * 2;
+    let results = Mutex::new((0..count).map(|_| None).collect::<Vec<_>>());
+    let reversed = crate::graph_construction::lane_jobs_reversed();
+    let phase = crate::lifecycle_io::effective_phase(crate::StorageIoPhase::ReadPathScan);
+    let mut cancellation = None;
+    std::thread::scope(|scope| {
+        let (sender, receiver) = mpsc::channel();
+        for _ in 0..lanes {
+            let sender = sender.clone();
+            let ordered = &ordered;
+            let next = &next;
+            let stop = &stop;
+            let results = &results;
+            scope.spawn(move || {
+                let _phase = crate::lifecycle_io::PhaseScope::enter(phase);
+                loop {
+                    let index = crate::graph_construction::lane_job(
+                        next.fetch_add(1, Ordering::Relaxed),
+                        count,
+                        reversed,
+                    );
+                    if index >= count {
+                        break;
+                    }
+                    let result = write_group_job(root, ordered, options, index, &mut || {
+                        if stop.load(Ordering::Acquire) {
+                            Err(storage_err("adjacency construction cancelled"))
+                        } else {
+                            Ok(())
+                        }
+                    });
+                    results
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)[index] = Some(result);
+                }
+                let _ = sender.send(());
+            });
+        }
+        drop(sender);
+        // The coordinator is additional to the admitted background lanes.
+        // Its checkpoint forwards cancellation to all workers.
+        let index = crate::graph_construction::lane_job(
+            next.fetch_add(1, Ordering::Relaxed),
+            count,
+            reversed,
+        );
+        if index < count {
+            let result = write_group_job(root, ordered, options, index, &mut || {
+                let result = checkpoint();
+                if result.is_err() {
+                    stop.store(true, Ordering::Release);
+                }
+                result
+            });
+            results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)[index] = Some(result);
+        }
+        let mut completed = 0;
+        while completed < lanes {
+            if cancellation.is_none()
+                && let Err(error) = checkpoint()
+            {
+                cancellation = Some(error);
+                stop.store(true, Ordering::Release);
+            }
+            match receiver.recv_timeout(std::time::Duration::from_millis(5)) {
+                Ok(()) => completed += 1,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    cancellation.get_or_insert_with(|| storage_err("adjacency lane disconnected"));
+                    break;
+                }
+            }
+        }
+    });
+    if let Some(error) = cancellation {
+        return Err(error);
+    }
+    checkpoint()?;
+    let mut outcomes = Vec::with_capacity(count);
+    for result in results
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    {
+        outcomes.push(result.ok_or_else(|| storage_err("adjacency lane result missing"))??);
+    }
+    Ok(outcomes)
+}
+
+#[allow(clippy::type_complexity)]
+fn sorted_directions(
+    buffer: &[BuildEntry],
+    admission: Option<
+        &std::sync::Arc<crate::graph_construction::cpu_admission::ConstructionCpuAdmission>,
+    >,
+    checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
+) -> Result<(Vec<BuildEntry>, Vec<BuildEntry>), GfError> {
+    let lease = admission
+        .and_then(|admission| admission.try_acquire(std::num::NonZeroUsize::new(1).unwrap()));
+    let mut out = buffer.to_vec();
+    let incoming = || {
+        let mut entries = buffer
+            .iter()
+            .map(|&(src, edge, dst)| (dst, edge, src))
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|&(key, edge, _)| (key, edge));
+        entries
+    };
+    let incoming = if lease.is_some() {
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(incoming);
+            out.sort_unstable_by_key(|&(key, edge, _)| (key, edge));
+            worker
+                .join()
+                .map_err(|_| storage_err("adjacency sorting lane panicked"))
+        })?
+    } else {
+        out.sort_unstable_by_key(|&(key, edge, _)| (key, edge));
+        incoming()
+    };
+    checkpoint()?;
+    Ok((out, incoming))
+}
+
+fn write_group_job(
+    root: &Path,
+    ordered: &[(String, EntryGroup)],
+    options: &AdjacencyBuildOptions,
+    index: usize,
+    checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
+) -> Result<ShardedWriteOutcome, GfError> {
+    let (stem, group) = &ordered[index / 2];
+    let direction = if index.is_multiple_of(2) {
+        Direction::Out
+    } else {
+        Direction::In
+    };
+    group.write_sharded_csr(
+        direction,
+        &csr_path(root, stem, direction),
+        options,
+        checkpoint,
+    )
+}
+
+/// Decode on one admitted lane while the caller groups the preceding batch.
+/// The bounded channel preserves file and row order and limits read-ahead.
+fn for_each_admitted_edge_batch(
+    edge_files: &[(String, PathBuf)],
+    batch_size: usize,
+    admission: Option<
+        &std::sync::Arc<crate::graph_construction::cpu_admission::ConstructionCpuAdmission>,
+    >,
+    consume: &mut impl FnMut(&str, bool, &arrow::record_batch::RecordBatch) -> Result<(), GfError>,
+) -> Result<(), GfError> {
+    let lease = admission
+        .and_then(|admission| admission.try_acquire(std::num::NonZeroUsize::new(1).unwrap()));
+    let Some(_lease) = lease else {
+        return for_each_adjacency_edge_path(edge_files, batch_size, consume);
+    };
+    let phase = crate::lifecycle_io::effective_phase(crate::StorageIoPhase::ReadPathScan);
+    std::thread::scope(|scope| {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        let worker = scope.spawn(move || {
+            let _phase = crate::lifecycle_io::PhaseScope::enter(phase);
+            for_each_adjacency_edge_path(edge_files, batch_size, &mut |stem, exploratory, batch| {
+                sender
+                    .send((stem.to_owned(), exploratory, batch.clone()))
+                    .map_err(|_| storage_err("adjacency decode receiver closed"))
+            })
+        });
+        let consumed = (|| {
+            for (stem, exploratory, batch) in &receiver {
+                consume(&stem, exploratory, &batch)?;
+            }
+            Ok(())
+        })();
+        // Dropping the receiver releases a producer blocked by backpressure,
+        // including when the consumer failed or cancelled.
+        drop(receiver);
+        let decoded = worker
+            .join()
+            .map_err(|_| storage_err("adjacency decoding lane panicked"))?;
+        consumed.and(decoded)
+    })
 }

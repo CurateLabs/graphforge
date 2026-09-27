@@ -52,6 +52,7 @@ use crate::uuid_membership::{
 use crate::{SemanticRouteKind, SemanticStorageBindings};
 
 mod adjacency;
+mod lanes;
 #[cfg(any(test, feature = "test-support"))]
 mod seam_spike;
 
@@ -527,6 +528,7 @@ pub(crate) fn encode(
     shape_authority_sha256: &str,
     expected_inventory_sha256: Option<&str>,
     budgets: GraphConstructionBudgets,
+    admission: Option<&Arc<crate::graph_construction::cpu_admission::ConstructionCpuAdmission>>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphConstructionEncoding, GfError> {
     let _diagnostic_scope =
@@ -688,6 +690,8 @@ pub(crate) fn encode(
     )?;
 
     let identities_sha256 = shaped_output_sha256(shape_outputs, &shape.identities)?;
+    let membership_region =
+        crate::concurrency_attribution::RegionScope::named("membership_encoding");
     let mut index = crate::uuid_membership::encode_construction_index(
         source.physical(),
         &shape.identities,
@@ -702,6 +706,9 @@ pub(crate) fn encode(
         output.allocation(),
     )?;
 
+    drop(membership_region);
+    let nodes_region = crate::concurrency_attribution::RegionScope::named("node_encoding");
+    let mut encoding_lanes = lanes::ParquetLanes::new(admission, budgets.max_batch_bytes);
     let v4 = encode_nodes(
         source,
         detail_codec,
@@ -719,6 +726,7 @@ pub(crate) fn encode(
         &mut artifacts,
         &mut evidence,
         &mut routes,
+        &mut encoding_lanes,
     )?;
     if let Some(bundle) = v4 {
         let metrics = &bundle.metrics;
@@ -774,6 +782,8 @@ pub(crate) fn encode(
         crate::graph_construction::construction_failpoint("encode.after_v4_before_inventory");
         index.artifacts.extend(v4_artifacts);
     }
+    drop(nodes_region);
+    let edges_region = crate::concurrency_attribution::RegionScope::named("edge_encoding");
     encode_edges(
         source,
         detail_codec,
@@ -788,7 +798,10 @@ pub(crate) fn encode(
         &mut artifacts,
         &mut evidence,
         &mut routes,
+        &mut encoding_lanes,
     )?;
+    drop(encoding_lanes);
+    drop(edges_region);
     write_surrogate_tails(
         &output,
         shape.max_node_surrogate,
@@ -823,6 +836,7 @@ pub(crate) fn encode(
         shape,
         generation,
         &routes,
+        admission,
         cancelled,
         &mut artifacts,
         &mut evidence,
@@ -1105,6 +1119,7 @@ fn encode_nodes(
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
     route_table: &mut crate::route_component::RouteTable,
+    encoding_lanes: &mut lanes::ParquetLanes,
 ) -> Result<Option<crate::uuid_membership::V4ConstructionArtifactBundle>, GfError> {
     // The details family is `None` exactly at zero staged nodes. `node_rows`
     // is not a count: a property-free session has none (#1455).
@@ -1253,14 +1268,15 @@ fn encode_nodes(
             let first = *out_id.first().expect("nonempty");
             let last = *out_id.last().expect("nonempty");
             let path = format!("topology/nodes/{first:020}-{last:020}.parquet");
-            artifacts.push(write_parquet(
+            encoding_lanes.push(
                 output,
                 &path,
                 &canonical,
                 cache_window,
                 evidence,
                 cancelled,
-            )?);
+                artifacts,
+            )?;
         }
         if details.next()?.is_some() || next_kind(&mut identities, 0)?.is_some() {
             return Err(storage("node streams contain unconsumed rows"));
@@ -1292,7 +1308,9 @@ fn encode_nodes(
         artifacts,
         evidence,
         route_table,
+        encoding_lanes,
     )?;
+    encoding_lanes.flush(output, evidence, cancelled, artifacts)?;
     v4.map(crate::uuid_membership::V4OrdinalConstructionWriter::finish)
         .transpose()
 }
@@ -1311,6 +1329,7 @@ fn encode_node_properties(
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
     route_table: &mut crate::route_component::RouteTable,
+    encoding_lanes: &mut lanes::ParquetLanes,
 ) -> Result<(), GfError> {
     let mut ordinals = BTreeMap::<String, u64>::new();
     for name in &shape.node_rows {
@@ -1413,14 +1432,15 @@ fn encode_node_properties(
                             encoded_route_component(route_table, &route)?,
                             shape.parent_topology_generation + 1
                         );
-                        artifacts.push(write_parquet(
+                        encoding_lanes.push(
                             output,
                             &path,
                             &property,
                             cache_window,
                             evidence,
                             cancelled,
-                        )?);
+                            artifacts,
+                        )?;
                         *ordinal = ordinal
                             .checked_add(1)
                             .ok_or_else(|| storage("encoded ordinal overflows"))?;
@@ -1476,6 +1496,7 @@ fn encode_edges(
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
     route_table: &mut crate::route_component::RouteTable,
+    encoding_lanes: &mut lanes::ParquetLanes,
 ) -> Result<(), GfError> {
     // Same count guard as `encode_nodes`: `edge_rows` is empty for every
     // property-free session (#1455); the details family is not.
@@ -1661,14 +1682,15 @@ fn encode_edges(
                     "topology/edges/{}/{first:020}-{last:020}.parquet",
                     encoded_route_component(route_table, &topology_route)?
                 );
-                artifacts.push(write_parquet(
+                encoding_lanes.push(
                     output,
                     &path,
                     &selected,
                     cache_window,
                     evidence,
                     cancelled,
-                )?);
+                    artifacts,
+                )?;
             }
         }
         if details.next()?.is_some()
@@ -1709,7 +1731,9 @@ fn encode_edges(
         artifacts,
         evidence,
         route_table,
-    )
+        encoding_lanes,
+    )?;
+    encoding_lanes.flush(output, evidence, cancelled, artifacts)
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1726,6 +1750,7 @@ fn encode_edge_properties(
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
     route_table: &mut crate::route_component::RouteTable,
+    encoding_lanes: &mut lanes::ParquetLanes,
 ) -> Result<(), GfError> {
     let mut ordinals = BTreeMap::<String, u64>::new();
     for name in &shape.edge_rows {
@@ -1828,14 +1853,15 @@ fn encode_edge_properties(
                             encoded_route_component(route_table, &property_route)?,
                             shape.parent_topology_generation + 1
                         );
-                        artifacts.push(write_parquet(
+                        encoding_lanes.push(
                             output,
                             &path,
                             &property,
                             cache_window,
                             evidence,
                             cancelled,
-                        )?);
+                            artifacts,
+                        )?;
                         *ordinal = ordinal
                             .checked_add(1)
                             .ok_or_else(|| storage("encoded ordinal overflows"))?;
@@ -2153,6 +2179,27 @@ fn write_parquet(
     evidence: &mut GraphConstructionEncodingEvidence,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<ConstructionEncodedArtifact, GfError> {
+    write_parquet_chunks(
+        root,
+        relative,
+        batch,
+        cache_window,
+        evidence,
+        cancelled,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_parquet_chunks(
+    root: &StableDirectory,
+    relative: &str,
+    batch: &RecordBatch,
+    cache_window: std::num::NonZeroU64,
+    evidence: &mut GraphConstructionEncodingEvidence,
+    cancelled: &mut impl FnMut() -> bool,
+    chunks: Option<Vec<Vec<u8>>>,
+) -> Result<ConstructionEncodedArtifact, GfError> {
     #[cfg(not(any(test, feature = "test-support")))]
     let _ = cancelled;
     let (directory, name) = directory_for(root, relative)?;
@@ -2168,31 +2215,41 @@ fn write_parquet(
         armed: true,
     };
     let counter = IoCounter::default();
-    let mut writer = ArrowWriter::try_new(
-        CountingWriter {
-            inner: graphforge_filesystem::DurableFileCacheWriter::with_window_bytes(
-                file,
-                cache_window,
-            )
+    let sink = CountingWriter {
+        inner: graphforge_filesystem::DurableFileCacheWriter::with_window_bytes(file, cache_window)
             .map_err(storage)?,
-            counter: counter.clone(),
-            digest: Sha256::new(),
-        },
-        batch.schema(),
-        Some(crate::permanent_parquet::writer_properties().build()),
-    )
-    .map_err(storage)?;
-    #[cfg(any(test, feature = "test-support"))]
-    let mut writer = if seam_spike::enabled()? {
-        seam_spike::write(batch, writer, cancelled)?
-    } else {
-        writer.write(batch).map_err(storage)?;
-        writer.into_inner().map_err(storage)?
+        counter: counter.clone(),
+        digest: Sha256::new(),
     };
-    #[cfg(not(any(test, feature = "test-support")))]
-    let mut writer = {
-        writer.write(batch).map_err(storage)?;
-        writer.into_inner().map_err(storage)?
+    let mut writer = if let Some(chunks) = chunks {
+        let mut sink = sink;
+        for chunk in chunks {
+            if cancelled() {
+                return Err(storage("construction encoding cancelled"));
+            }
+            sink.write_all(&chunk).map_err(storage)?;
+        }
+        sink
+    } else {
+        let mut writer = ArrowWriter::try_new(
+            sink,
+            batch.schema(),
+            Some(crate::permanent_parquet::writer_properties().build()),
+        )
+        .map_err(storage)?;
+        #[cfg(any(test, feature = "test-support"))]
+        let writer = if seam_spike::enabled()? {
+            seam_spike::write(batch, writer, cancelled)?
+        } else {
+            writer.write(batch).map_err(storage)?;
+            writer.into_inner().map_err(storage)?
+        };
+        #[cfg(not(any(test, feature = "test-support")))]
+        let writer = {
+            writer.write(batch).map_err(storage)?;
+            writer.into_inner().map_err(storage)?
+        };
+        writer
     };
     writer.inner.sync_all_and_release().map_err(storage)?;
     let cache_release = writer.inner.evidence();

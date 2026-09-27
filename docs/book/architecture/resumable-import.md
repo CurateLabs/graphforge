@@ -42,6 +42,20 @@ most two budget-sized partitions are materialized at once. Boundary seals and
 finish-stage segment retirement also run on leased lanes. Each lane does only
 filesystem work, and the coordinator charges the evidence in partition or
 segment order, so the evidence does not depend on the schedule (#1448).
+Canonical encoding also leases from the instance admission (#1600). Up to eight
+workers compress Parquet batches while the coordinator reads the next batch.
+Read-ahead is bounded by `max_batch_bytes` of queued Arrow buffers and one more
+queued job than workers. The coordinator replays each compressed write sequence
+onto the existing durable writer in input order, preserving bytes, cache-release
+boundaries and receipts. Worker buffers never become recovery authority.
+
+Adjacency construction uses one admitted decoder with two batches of read-ahead,
+an admitted sort worker alongside the coordinator, and independent CSR jobs for
+each relation and direction. Spill accounting and compaction retain their serial
+order. CSR results are collected in relation/direction order and the manifest is
+written last. Workers finish before cancellation or an error returns; spill and
+unpublished output cleanup follow the existing construction protocol.
+
 Arrow property-row partitions load serially and charge decoded buffers,
 concatenation/reordering capacity, nested child capacity, UUID keys and indexes.
 Their conservative accounting can refuse a partition even when a less

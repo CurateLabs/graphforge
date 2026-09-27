@@ -325,6 +325,62 @@ mod determinism {
     }
 
     #[test]
+    fn encoding_lane_cancellation_joins_workers_and_resumes_identically() {
+        let nodes = node_ids(1_024);
+        let edges = edge_ids(1_024);
+        let baseline_root = TempDir::new().unwrap();
+        let baseline = ingest(&baseline_root, 64, &nodes, &edges, 128).0;
+        for reversed in [false, true] {
+            let root = TempDir::new().unwrap();
+            let mut session = pinned_session(&root, 64);
+            append_all(&mut session, &nodes, &edges, 128);
+            session.seal().unwrap();
+            let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+            let admission = Arc::new(cpu_admission::ConstructionCpuAdmission::new(
+                std::num::NonZeroUsize::new(8).unwrap(),
+            ));
+            session.set_cpu_admission(Some(admission.clone()));
+            REVERSE_LANE_JOBS.with(|value| value.set(reversed));
+            let mut admitted_polls = 0;
+            let cancelled = session.encode_canonical_with_cancellation(&shape, 1, || {
+                if admission.in_use() > 0 { admitted_polls += 1; }
+                admitted_polls >= 4
+            });
+            REVERSE_LANE_JOBS.with(|value| value.set(false));
+            assert!(cancelled.unwrap_err().to_string().contains("cancelled"));
+            assert_eq!(admission.in_use(), 0);
+            assert_eq!(fingerprint(&mut session, &shape), baseline);
+        }
+    }
+
+    #[test]
+    fn encoding_lanes_preserve_digests_and_evidence_under_reversed_schedule() {
+        let nodes = node_ids(4_096);
+        let edges = edge_ids(4_096);
+        let mut expected = None;
+        for (width, reverse) in [(1, false), (8, false), (8, true)] {
+            let root = TempDir::new().unwrap();
+            let mut session = pinned_session(&root, 64);
+            append_all(&mut session, &nodes, &edges, 128);
+            session.seal().unwrap();
+            let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+            let admission = Arc::new(cpu_admission::ConstructionCpuAdmission::new(
+                std::num::NonZeroUsize::new(width).unwrap(),
+            ));
+            session.set_cpu_admission(Some(admission.clone()));
+            REVERSE_LANE_JOBS.with(|value| value.set(reverse));
+            let result = fingerprint_and_encoding(&mut session, &shape);
+            REVERSE_LANE_JOBS.with(|value| value.set(false));
+            let (fingerprint, encoding) = result.unwrap();
+            assert_eq!(admission.in_use(), 0);
+            if width > 1 { assert_eq!(admission.peak(), width); }
+            let actual = (fingerprint, encoding.evidence);
+            if let Some(expected) = &expected { assert_eq!(&actual, expected); }
+            else { expected = Some(actual); }
+        }
+    }
+
+    #[test]
     fn same_input_twice_produces_identical_digests() {
         let nodes = node_ids(1_024);
         let edges = edge_ids(1_024);
