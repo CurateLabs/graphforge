@@ -78,7 +78,7 @@ const MEASUREMENTS: [&str; 9] = [
     "thread_iowait_ns",
     "thread_unknown_ns",
 ];
-const REGIONS: [&str; 39] = [
+const REGIONS: [&str; 44] = [
     "import_command",
     "begin_import",
     "resume_import",
@@ -93,6 +93,11 @@ const REGIONS: [&str; 39] = [
     "publish",
     "shaping",
     "canonical_encoding",
+    "membership_encoding",
+    "node_encoding",
+    "edge_encoding",
+    "adjacency_grouping",
+    "adjacency_csr",
     "seal_authentication",
     "fsync",
     "normalization",
@@ -188,6 +193,17 @@ mod tests {
         assert!(valid_snapshot(&value));
         value["regions"]["private/path"] = value["regions"]["import_command"].clone();
         assert!(!valid_snapshot(&value));
+    }
+
+    #[test]
+    fn snapshot_contract_accepts_captured_encoding_lane_receipt() {
+        let receipt: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../docs/development/evidence/encoding-lanes-1600/candidate/runs/",
+            "curve-s18-c8-r1/receipt-3-validate.json"
+        )))
+        .unwrap();
+        assert!(valid_snapshot(&receipt["region_diagnostics"]));
     }
 
     #[test]
