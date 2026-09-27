@@ -52,6 +52,7 @@ use napi::{Env, JsValue, Task, ValueType};
 use napi_derive::napi;
 
 mod composite;
+mod decision_results;
 mod error;
 mod import_session;
 mod multi_ontology;

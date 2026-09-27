@@ -3,6 +3,7 @@
 mod branches;
 mod claims;
 mod comparison;
+mod decisions;
 mod interchange;
 mod proposals;
 mod slices;
@@ -24,6 +25,11 @@ use crate::{canonical_uuid, write_execution_result};
 
 #[derive(Subcommand)]
 pub(crate) enum ResearchCommand {
+    /// Validate external decision results without running a producer.
+    Decision {
+        #[command(subcommand)]
+        command: decisions::DecisionCommand,
+    },
     /// Cite, export, and independently Fork native research.
     Interchange {
         #[command(subcommand)]
@@ -129,6 +135,7 @@ pub(crate) fn run_research(
     output: &mut dyn Write,
 ) -> Result<(), crate::CliRuntimeError> {
     match command {
+        ResearchCommand::Decision { command } => decisions::run(graph, command, output)?,
         ResearchCommand::Interchange { command } => interchange::run(graph, command, output)?,
         ResearchCommand::Proposal { command } => proposals::run(graph, command, json, output)?,
         ResearchCommand::Upstream { command } => upstream::run(graph, command, json, output)?,

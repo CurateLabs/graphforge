@@ -39,6 +39,7 @@
     "./workflows": "./workflows/index.js",
     "./schemas": "./schemas/validator.js",
     "./schemas/input-envelope-v1.json": "./schemas/input-envelope-v1.json",
+    "./schemas/decision-batch-v1.json": "./schemas/decision-batch-v1.json",
     "./schemas/output-envelope-v1.json": "./schemas/output-envelope-v1.json",
     "./schemas/skill-manifest-v1.json": "./schemas/skill-manifest-v1.json",
     "./compatibility.json": "./compatibility.json"

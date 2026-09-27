@@ -266,6 +266,12 @@
       "GraphForge.fork_research"
     ],
     "languageSpecific": {
+      "DecisionBatchV1.validate": {
+        "nodeMembers": [
+          "GraphForge.validateDecisionBatch"
+        ],
+        "reason": "The Node facade accepts a request object and delegates decision validation to the same Rust contract."
+      },
       "GraphForge.import_session_status": {
         "nodeMembers": [
           "GraphImportSession.status"
@@ -463,8 +469,7 @@
       "GraphForge": "No shipped Node member exists for this Rust facade entry; adding one requires an explicit parity decision.",
       "OpenRouterProviderSession": "Rust provider sessions are not exported; Node owns a configured native provider adapter instead.",
       "RepositoryContext": "Rust owns repository lifecycle behavior; the Node command wrapper parity is delivered by issue #226.",
-      "GraphImportSession": "Per-operation timing observations are Rust/CLI diagnostics; the Node import adapter keeps its explicitly mapped lifecycle methods.",
-      "DecisionBatchV1": "External decision-result types remain Rust-only until binding ergonomics are delivered by M12 child #1578."
+      "GraphImportSession": "Per-operation timing observations are Rust/CLI diagnostics; the Node import adapter keeps its explicitly mapped lifecycle methods."
     }
   },
   "evidence": {
@@ -713,6 +718,11 @@
       ]
     },
     "decisionResults": {
+      "decision-results.test.mjs": [
+        "decision batches validate through Rust and retain Arrow identity columns",
+        "decision batch validation rejects values outside the caller's choices",
+        "decision batch accepts yes/no values with nested probabilities"
+      ],
       "non-cypher-release-parity.test.mjs": [
         "the Node classification is total, frozen, and backed by non-skipped native tests"
       ]

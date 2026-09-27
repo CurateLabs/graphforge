@@ -12,6 +12,7 @@ For validation notes behind these guides, see [research](../research/).
 | [Knowledge graph construction](knowledge-graph-construction.md) | MERGE-based entity graphs, provenance, dedup, `forge.find` |
 | [Network analysis](network-analysis.md) | Notebook metrics, datasets, `forge.rank` / `forge.cluster`, pandas/NetworkX bridge |
 | [LLM-powered workflows](llm-workflows.md) | Extract → store → retrieve → synthesise loops |
+| [Provider neutral decision workflows](decision-workflows.md) | Validate external decision results and apply explicit caller policy |
 | [AI agent grounding](agent-grounding.md) | Ontology-backed tool and capability graphs |
 | [AI agent tool recall](agent-tool-recall.md) | Large tool registries with dependencies and permissions |
 

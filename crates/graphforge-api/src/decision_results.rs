@@ -22,7 +22,8 @@ type DecisionResultMap<'a> = BTreeMap<(Uuid, Option<Uuid>), &'a DecisionResultV1
 /// A missing `version_uuid` denotes ephemeral state. Both digests describe the
 /// caller's exact selected projection; neither field asserts a complete Version
 /// payload. Item UUIDs are canonical graph UUIDs used for correlation.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DecisionInputIdentityV1 {
     /// Observed Project generation or immutable source generation.
     pub generation_uuid: Uuid,
@@ -37,7 +38,8 @@ pub struct DecisionInputIdentityV1 {
 }
 
 /// Caller-supplied producer identity. Unknown facts remain absent.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DecisionProducerV1 {
     /// Producer/application name.
     pub name: String,
@@ -48,7 +50,8 @@ pub struct DecisionProducerV1 {
 }
 
 /// One typed question or rubric applied to zero or more selected items.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DecisionQuestionV1 {
     /// Stable caller-generated question identity.
     pub question_uuid: Uuid,
@@ -62,7 +65,8 @@ pub struct DecisionQuestionV1 {
 }
 
 /// Neutral question semantics; rubric order is caller supplied.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DecisionQuestionKindV1 {
     /// One exact value from a finite caller-supplied set.
     Choice {
@@ -80,7 +84,8 @@ pub enum DecisionQuestionKindV1 {
 
 /// Caller-declared producer confidence. It remains separate from probability,
 /// GraphForge assertion confidence, and canonical authority.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DecisionConfidenceV1 {
     /// Producer-supplied confidence value.
     pub value: f64,
@@ -95,7 +100,8 @@ pub struct DecisionConfidenceV1 {
 }
 
 /// Result status that keeps incomplete outcomes distinct from negative answers.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DecisionResultStatusV1 {
     /// A typed value was supplied.
     Answered,
@@ -108,7 +114,13 @@ pub enum DecisionResultStatusV1 {
 }
 
 /// Typed decision value supplied for one question and optional item.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum DecisionValueV1 {
     /// Caller choice from the question's finite allowed set.
     Choice(String),
@@ -124,7 +136,8 @@ pub enum DecisionValueV1 {
 }
 
 /// One producer result, correlated by IDs rather than array position.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DecisionResultV1 {
     /// Question identity from the submitted batch.
     pub question_uuid: Uuid,
@@ -139,7 +152,8 @@ pub struct DecisionResultV1 {
 }
 
 /// Complete ephemeral input to the provider-neutral decision validator.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DecisionBatchV1 {
     /// Exact state and projection identity used by the producer.
     pub input: DecisionInputIdentityV1,

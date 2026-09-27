@@ -294,6 +294,15 @@ gf_rust_integration_test(
     deps = _CLI_DEPS + ["//crates/graphforge-storage:graphforge_storage"],
 )
 
+gf_rust_integration_test(
+    name = "decision_results",
+    srcs = ["tests/decision_results.rs"],
+    crate = ":graphforge_cli",
+    data = _CLI_TEST_DATA,
+    rustc_env = _CLI_BIN_ENV,
+    deps = _CLI_DEPS + ["//crates/graphforge-storage:graphforge_storage"],
+)
+
 
 test_suite(
     name = "cli_tests",
@@ -313,6 +322,7 @@ test_suite(
         ":research_proposals",
         ":research_upstream",
         ":slices",
+        ":decision_results",
         ":source_artifact",
         ":verify",
     ],

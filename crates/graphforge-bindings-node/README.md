@@ -48,6 +48,16 @@ console.log(table.toArray());
 GraphForge returns Arrow IPC buffers from query and analyst-verb result
 surfaces. Decode them with `apache-arrow` as shown above.
 
+## External decision results
+
+Call `validateDecisionBatch(request)` with the provider-neutral v1 contract to
+validate externally produced choices, ordered rubric scores, probabilities,
+uncertainty and correlation. It returns Arrow IPC with the exact
+`decision_result/1` schema; decode it with `tableFromIPC`. Import the
+discriminated TypeScript input types from
+`@curatelabs/graphforge/lib/decision`. The method only validates. Your
+application owns producer execution, thresholds, review and any action.
+
 ## Graph inspection
 
 ```js

@@ -1433,6 +1433,16 @@
       "notes": "#1351 reproducible native Slice membership"
     },
     {
+      "package": "graphforge-cli",
+      "target": "decision_results",
+      "class": "integration-test",
+      "source": "crates/graphforge-cli/tests/decision_results.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cli:decision_results",
+      "exception_id": null,
+      "notes": "#1578 same-build CLI external decision validation and Arrow output"
+    },
+    {
       "package": "graphforge-api",
       "target": "slices",
       "class": "integration-test",

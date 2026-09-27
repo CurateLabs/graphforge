@@ -170,9 +170,7 @@ EVIDENCE = {
     "resumable-construction": {
         "non_cypher_release.py": ["check_surface_projection"],
     },
-    "external-decision-results": {
-        "non_cypher_release.py": ["check_surface_projection"],
-    },
+    "external-decision-results": {"decision_results.py": ["main"]},
     "semantic-generation-diff": {
         "generation_diff.py": ["check_generation_diff"],
     },
@@ -341,6 +339,7 @@ def _classification_report() -> dict[str, object]:
         ),
     }
     research_adapters = {
+        "DecisionBatchV1.validate": "GraphForge.validate_decision_batch",
         "GraphForge.open_research_branch": "GraphForge.research_branch",
         "ResearchBranchView.record": "GraphForge.research_branch",
         "ResearchBranchView.version_uuid": "GraphForge.research_branch",
@@ -361,7 +360,11 @@ def _classification_report() -> dict[str, object]:
         python_id = research_adapters.get(rust_id, aliases.get(rust_id, rust_id))
         if rust_id in research_adapters:
             classification = "intentionally-language-specific"
-            reason = "explicit immutable Version UUID adapter delegates to the Rust historical view"
+            reason = (
+                "the Python request-object adapter delegates provider-neutral validation to Rust"
+                if rust_id == "DecisionBatchV1.validate"
+                else "explicit immutable Version UUID adapter delegates to the Rust historical view"
+            )
         elif python_id in python_methods:
             classification = "equivalent"
             reason = "same receiver operation delegates through the compiled PyO3 extension"
@@ -407,9 +410,11 @@ def _classification_report() -> dict[str, object]:
     )
     assert classifications["GraphForge.explain_stage"]["classification"] == "not-exposed"
     assert classifications["GraphForge.explain_stage"]["python_id"] == ""
-    assert classifications["DecisionBatchV1.validate"]["classification"] == "not-exposed", (
-        "Python decision-result bindings are owned by M12 child #1578"
-    )
+    assert classifications["DecisionBatchV1.validate"] == {
+        "classification": "intentionally-language-specific",
+        "python_id": "GraphForge.validate_decision_batch",
+        "reason": "the Python request-object adapter delegates provider-neutral validation to Rust",
+    }
 
     # A newly exposed Python product method must be deliberately projected or
     # explicitly listed as Python-only. This catches silent binding expansion.

@@ -3,6 +3,14 @@
 Native Python bindings for GraphForge — an embedded openCypher graph engine
 with Rust-owned behavior, Arrow results, and a thin repository lifecycle CLI.
 
+## External decision results
+
+Provider-neutral results use the public `graphforge.DecisionBatchV1` TypedDict
+contract. Pass one to `GraphForge.validate_decision_batch()`; Rust validates
+correlation and values and returns a `pyarrow.Table` using `decision_result/1`.
+Producer execution, thresholds, review and actions stay in caller code. See
+the [decision workflow guide](../../docs/book/use-cases/decision-workflows.md).
+
 ## Install
 
 **pip**
