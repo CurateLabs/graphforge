@@ -1,0 +1,35 @@
+[
+  {
+    "question": "route",
+    "item_index": 0,
+    "status": "answered",
+    "value": { "kind": "choice", "value": "human_review" }
+  },
+  {
+    "question": "route",
+    "item_index": 1,
+    "status": "answered",
+    "value": { "kind": "choice", "value": "research" }
+  },
+  {
+    "question": "rubric",
+    "item_index": 0,
+    "status": "answered",
+    "value": { "kind": "rubric_score", "value": "low" }
+  },
+  {
+    "question": "rubric",
+    "item_index": 1,
+    "status": "answered",
+    "value": { "kind": "rubric_score", "value": "high" }
+  },
+  {
+    "question": "review",
+    "item_index": null,
+    "status": "answered",
+    "value": {
+      "kind": "yes_no_probability",
+      "value": { "yes_probability": 0.85, "no_probability": 0.15 }
+    }
+  }
+]

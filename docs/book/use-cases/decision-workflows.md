@@ -28,6 +28,30 @@ bounded projection, use labeled local fixtures, inspect uncertainty, and gate
 a sample action in caller code. See the examples README for install and run
 commands; the Node example also needs apache-arrow.
 
+The Python example invokes a caller-owned function that returns route, rubric,
+and project-level probability records. The Node example creates and reloads an
+independent Arrow result artifact, then joins results by question and item UUID
+before validation. Neither path adds a provider to Core. The checked-in
+four-row evaluation fixture reports its rule baseline, answer errors, missing
+and uncertain results, review decisions, and a fixture-only Brier score; it is
+an executable measurement recipe, not model-quality or calibration evidence.
+
+The composition test
+`crates/graphforge-api/tests/decision_results.rs::composed_workflow_supports_independent_producers_explicit_action_and_replay`
+uses a durable graph rooted on a supported filesystem. It validates both
+producer paths through the Rust facade, confirms private fields are excluded,
+keeps missing/unavailable/uncertain and action failures distinct, rejects a
+stale action, and records a separate human override of an uncertain result
+before verifying exact Arrow payload identity plus exact receipt replay after
+cleanup and reopen. Python and Node examples are memory-only;
+their direct native validation tests are
+`crates/graphforge-bindings-py/tests/decision_results.py` and
+`crates/graphforge-bindings-node/tests/decision-results.test.mjs`.
+
+At this evidence point, the binding package metadata remains `0.5.2`. The
+coordinated `0.6` compatibility/version update belongs to #858; this M12 work
+does not claim a released package version.
+
 The CLI accepts the same JSON contract and writes the Arrow result without
 invoking a producer: gf --project PROJECT research decision validate --file
 BATCH.json --output DECISIONS.arrow. The project is opened under the normal

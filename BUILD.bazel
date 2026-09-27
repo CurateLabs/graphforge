@@ -9,6 +9,7 @@ exports_files([
     "LICENSE",
     "rust-toolchain.toml",
     "project-skills/manifest.json",
+    "examples/decision-workflow/fixtures/independent-producer-results.json",
 ])
 
 filegroup(

@@ -289,6 +289,46 @@ does not claim the native result path or two-producer composition is already
 implemented. Each child owns direct regressions for its own behavior; #1579
 composes those results and must not replace them with wrapper mocks or a plan.
 
+### Integrated proof and handoff (#1579)
+
+The composed end-to-end Rust evidence is
+`crates/graphforge-api/tests/decision_results.rs::composed_workflow_supports_independent_producers_explicit_action_and_replay`.
+It invokes a caller-owned typed-record producer and loads a second producer's
+results from `examples/decision-workflow/fixtures/independent-producer-results.json`.
+Both are correlated against the same bounded real graph input and validated by
+the Rust facade. The test covers private-field exclusion, distinct
+missing/unavailable/uncertain results, duplicate and over-limit rejection,
+unchanged state before an explicit action, stale-state rejection, cancellation,
+explicit human override of an uncertain route, Artifact retention,
+cleanup/reopen, exact result identity and byte preservation, and exact receipt
+replay. The runnable Python
+and Node examples exercise native validation on memory-only projects; their
+binding tests remain separately listed above. The CLI's external decision
+validation and Arrow output test is
+`crates/graphforge-cli/tests/decision_results.rs::cli_validates_external_decisions_and_writes_arrow_ipc`.
+
+Reproduction commands used for this slice:
+
+```bash
+TMPDIR=/home/ubuntu/gf-tmp-1579 CARGO_TARGET_DIR=/home/ubuntu/gf-target-1579 \
+  cargo test -p graphforge-api --test decision_results \
+  composed_workflow_supports_independent_producers_explicit_action_and_replay
+python3 examples/decision-workflow/evaluate_fixtures.py
+```
+
+The fixture evaluation currently reports baseline errors `0`, producer answer
+errors `1`, two answered outcomes, one missing result, zero unavailable
+results, one uncertain result, three policy reviews, and fixture-only Brier
+score `0.1825`. These are deterministic fixture observations, not estimates of
+real producer quality or calibrated confidence. The runnable examples use the
+current binding metadata version `0.5.2`; coordinated package compatibility
+and version `0.6` remain owned by #858.
+
+Handoff boundaries: #1209 owns adoption and candidate-install coverage for the
+examples; #1208 owns release guidance and must preserve the no-quality-claim
+limit; #1574 owns the neutral contract and conformance artifact. This evidence
+does not claim those downstream deliverables are complete.
+
 Implementation ownership is recorded in
 [canonical #1347](https://github.com/CurateLabs/graphforge/issues/1347):
 Project discovery #1348; Source/Artifact lineage #1349; Version retention #1350;
