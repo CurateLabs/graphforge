@@ -380,7 +380,7 @@ pub struct GraphConstructionEncodingEvidence {
     pub peak_batch_rows: u64,
     /// Largest decoded Arrow window in bytes.
     pub peak_batch_bytes: u64,
-    /// Largest number of simultaneously live durable shard writers. Always one.
+    /// Largest number of simultaneously live durable Parquet writers. Always one.
     pub peak_open_writers: u64,
     /// New identity records streamed into the v3 index.
     pub membership_records: u64,

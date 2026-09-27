@@ -59,7 +59,6 @@ for S in 18 20; do
   run ab-s$S-r2-cand "$CAND" $S 16 4000MB; run ab-s$S-r2-base "$BASE" $S 16 4000MB
   run ab-s$S-r3-base "$BASE" $S 16 4000MB; run ab-s$S-r3-cand "$CAND" $S 16 4000MB
 done
-run regions-s22-base "$BASE" 22 16 none; run regions-s22-cand "$CAND" 22 16 none
 for C in 1 2 4 16; do
   REPS=1; [ $C = 1 ] || [ $C = 8 ] && REPS=3
   for R in $(seq 1 $REPS); do run curve-s18-c$C-r$R "$CAND" 18 $C 4000MB; done

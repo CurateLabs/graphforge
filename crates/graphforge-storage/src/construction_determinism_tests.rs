@@ -341,10 +341,21 @@ mod determinism {
             ));
             session.set_cpu_admission(Some(admission.clone()));
             REVERSE_LANE_JOBS.with(|value| value.set(reversed));
-            let mut admitted_polls = 0;
+            let encoded_nodes = root
+                .path()
+                .join(PRIVATE_ROOT)
+                .join(Uuid::from_u128(OPERATION).simple().to_string())
+                .join("encoded-v1/graph/topology/nodes");
+            // Cancel after the first real artifact is installed, while the
+            // remaining queued results still need to be consumed.
             let cancelled = session.encode_canonical_with_cancellation(&shape, 1, || {
-                if admission.in_use() > 0 { admitted_polls += 1; }
-                admitted_polls >= 4
+                std::fs::read_dir(&encoded_nodes).is_ok_and(|mut entries| {
+                    entries.any(|entry| {
+                        entry.is_ok_and(|entry| {
+                            entry.path().extension() == Some(OsStr::new("parquet"))
+                        })
+                    })
+                })
             });
             REVERSE_LANE_JOBS.with(|value| value.set(false));
             assert!(cancelled.unwrap_err().to_string().contains("cancelled"));
@@ -373,10 +384,15 @@ mod determinism {
             REVERSE_LANE_JOBS.with(|value| value.set(false));
             let (fingerprint, encoding) = result.unwrap();
             assert_eq!(admission.in_use(), 0);
-            if width > 1 { assert_eq!(admission.peak(), width); }
+            if width > 1 {
+                assert_eq!(admission.peak(), width);
+            }
             let actual = (fingerprint, encoding.evidence);
-            if let Some(expected) = &expected { assert_eq!(&actual, expected); }
-            else { expected = Some(actual); }
+            if let Some(expected) = &expected {
+                assert_eq!(&actual, expected);
+            } else {
+                expected = Some(actual);
+            }
         }
     }
 
@@ -392,6 +408,22 @@ mod determinism {
         assert_eq!(first_layout.splitters, second_layout.splitters);
         assert_eq!(first_layout.partitions, second_layout.partitions);
         assert!(first_layout.partitions > 1);
+        for reversed in [false, true] {
+            let root = TempDir::new().unwrap();
+            let mut session = pinned_session(&root, 64);
+            append_all(&mut session, &nodes, &edges, 128);
+            session.seal().unwrap();
+            let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+            session.set_cpu_admission(Some(Arc::new(
+                cpu_admission::ConstructionCpuAdmission::new(
+                    std::num::NonZeroUsize::new(8).unwrap(),
+                ),
+            )));
+            REVERSE_LANE_JOBS.with(|value| value.set(reversed));
+            let result = fingerprint_and_encoding(&mut session, &shape);
+            REVERSE_LANE_JOBS.with(|value| value.set(false));
+            assert_eq!(first, result.unwrap().0);
+        }
         println!(
             "DETERMINISM_SAME_INPUT {}",
             serde_json::json!({

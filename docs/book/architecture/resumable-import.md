@@ -49,7 +49,7 @@ queued job than workers. The coordinator replays each compressed write sequence
 onto the existing durable writer in input order, preserving bytes, cache-release
 boundaries and receipts. Worker buffers never become recovery authority.
 
-Adjacency construction uses one admitted decoder with two batches of read-ahead,
+Adjacency construction uses one admitted decoder and a two-batch channel,
 an admitted sort worker alongside the coordinator, and independent CSR jobs for
 each relation and direction. Spill accounting and compaction retain their serial
 order. CSR results are collected in relation/direction order and the manifest is
