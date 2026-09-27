@@ -15,6 +15,54 @@ def digest(value: bytes) -> list[int]:
     return list(hashlib.sha256(value).digest())
 
 
+def caller_producer(
+    route_question: str, rank_question: str, review_question: str, items: list[str]
+) -> list[dict]:
+    """Local callable standing in for an independently chosen application producer."""
+    return [
+        {
+            "question_uuid": route_question,
+            "item_uuid": items[0],
+            "status": "answered",
+            "value": {"kind": "choice", "value": "research"},
+        },
+        {
+            "question_uuid": route_question,
+            "item_uuid": items[1],
+            "status": "uncertain",
+            "value": {"kind": "choice", "value": "human_review"},
+            "confidence": {
+                "value": 0.55,
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "domain": "unit_interval",
+                "meaning": "fixture estimate of routing correctness",
+            },
+        },
+        {
+            "question_uuid": rank_question,
+            "item_uuid": items[0],
+            "status": "answered",
+            "value": {"kind": "rubric_score", "value": "high"},
+        },
+        {
+            "question_uuid": rank_question,
+            "item_uuid": items[1],
+            "status": "answered",
+            "value": {"kind": "rubric_score", "value": "medium"},
+        },
+        {
+            "question_uuid": review_question,
+            "item_uuid": None,
+            "status": "answered",
+            "value": {
+                "kind": "yes_no_probability",
+                "value": {"yes_probability": 0.25, "no_probability": 0.75},
+            },
+        },
+    ]
+
+
 def main() -> None:
     graph = graphforge.GraphForge()
     try:
@@ -33,40 +81,8 @@ def main() -> None:
         ]
         selected_bytes = json.dumps(items, separators=(",", ":")).encode()
         projection_bytes = json.dumps(projection, sort_keys=True, separators=(",", ":")).encode()
-        route_question, rank_question = str(uuid.uuid4()), str(uuid.uuid4())
-        producer = [
-            {
-                "question_uuid": route_question,
-                "item_uuid": items[0],
-                "status": "answered",
-                "value": {"kind": "choice", "value": "research"},
-            },
-            {
-                "question_uuid": route_question,
-                "item_uuid": items[1],
-                "status": "uncertain",
-                "value": {"kind": "choice", "value": "human_review"},
-                "confidence": {
-                    "value": 0.55,
-                    "minimum": 0.0,
-                    "maximum": 1.0,
-                    "domain": "unit_interval",
-                    "meaning": "fixture estimate of routing correctness",
-                },
-            },
-            {
-                "question_uuid": rank_question,
-                "item_uuid": items[0],
-                "status": "answered",
-                "value": {"kind": "rubric_score", "value": "high"},
-            },
-            {
-                "question_uuid": rank_question,
-                "item_uuid": items[1],
-                "status": "answered",
-                "value": {"kind": "rubric_score", "value": "medium"},
-            },
-        ]
+        route_question, rank_question, review_question = (str(uuid.uuid4()) for _ in range(3))
+        producer = caller_producer(route_question, rank_question, review_question, items)
         batch: graphforge.DecisionBatchV1 = {
             "input": {
                 "generation_uuid": graph.research_project_summary()["identity"]["generation_uuid"],
@@ -95,6 +111,12 @@ def main() -> None:
                         "ordered_levels": ["low", "medium", "high"],
                     },
                 },
+                {
+                    "question_uuid": review_question,
+                    "text": "Does this evidence need human review?",
+                    "item_uuids": [],
+                    "kind": {"kind": "yes_no_probability"},
+                },
             ],
             "results": producer,
         }
@@ -104,12 +126,18 @@ def main() -> None:
         }
         for result in table.to_pylist():
             print(
-                title_by_item[result["item_uuid"]],
+                title_by_item.get(result["item_uuid"], "review policy"),
                 result["question_text"],
                 result["status"],
                 result["choice_value"] or result["rubric_score"],
                 result["confidence_meaning"],
             )
+        review = next(
+            row
+            for row in table.to_pylist()
+            if row["question_uuid"] == uuid.UUID(review_question).bytes
+        )
+        print("review probability", review["yes_probability"])
 
         # Explicit caller policy stages only the clear route. Preserve this exact
         # request and operation UUID for retry; MERGE is idempotent on that key.
@@ -131,6 +159,7 @@ def main() -> None:
         )
         existing = graph.execute(receipt_query, prepared).to_pylist()
         current = graph.research_project_summary()["identity"]["generation_uuid"]
+        review_required = review["status"] != "answered" or review["yes_probability"] >= 0.6
         if existing:
             receipt = existing[0]
             if (
@@ -140,7 +169,9 @@ def main() -> None:
                 raise ValueError("operation UUID already has a different action receipt")
             print("exact action retry:", receipt)
         elif (
-            current == prepared["expected_generation_uuid"] and clear_route["status"] == "answered"
+            current == prepared["expected_generation_uuid"]
+            and clear_route["status"] == "answered"
+            and not review_required
         ):
             graph.execute(
                 "MERGE (r:DecisionRoute {operation_uuid: $operation_uuid}) "
