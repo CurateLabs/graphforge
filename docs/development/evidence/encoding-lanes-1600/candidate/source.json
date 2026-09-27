@@ -1,0 +1,5 @@
+{
+  "candidate": "c94b6cf13e6375dcdbad072bdb3db6ee9358cc71",
+  "baseline": "e4a4f3cb1a056eaedbd85768449c8dd12740629b",
+  "build": "CARGO_TARGET_DIR=<isolated target> cargo build --release -p graphforge-cli"
+}
