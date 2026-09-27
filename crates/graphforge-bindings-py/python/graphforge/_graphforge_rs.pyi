@@ -12,6 +12,8 @@ import uuid
 
 import pyarrow
 
+from graphforge.decision import DecisionBatchV1
+
 __version__: str
 
 def _cli_execute(args: list[str]) -> tuple[int, bytes, bytes]: ...
@@ -201,6 +203,7 @@ class ResolvedBeliefProjection:
     ) -> InvocationDescriptor: ...
 
 class GraphForge:
+    def validate_decision_batch(self, request: DecisionBatchV1) -> pyarrow.Table: ...
     def __init__(
         self,
         path: str | None = None,

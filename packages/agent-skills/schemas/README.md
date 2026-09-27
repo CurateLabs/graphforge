@@ -9,6 +9,10 @@ is closed (`additionalProperties: false`) and carries the exact integer
 - `input-envelope-v1.json` carries one skill invocation.
 - `output-envelope-v1.json` carries either a successful result or a structured
   error.
+- `decision-batch-v1.json` describes the provider-neutral input accepted by
+  the native Rust decision validator, including finite choices, ordered
+  rubric levels, explicit result status, confidence meaning and the 256-row
+  result bound.
 
 Import `validateSkillManifest`, `validateSkillInput`, or `validateSkillOutput`
 from `@curatelabs/graphforge-agent-skills/schemas`. Validation is local and deterministic;

@@ -1,0 +1,119 @@
+// Offline agent next-step example using the real Node binding.
+import { createHash, randomUUID } from "node:crypto";
+import { tableFromIPC } from "apache-arrow";
+import { GraphForge } from "@curatelabs/graphforge";
+
+const uuidText = (value) => {
+  const hex = Buffer.from(value).toString("hex");
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20),
+  ].join("-");
+};
+const digest = (value) => [...createHash("sha256").update(value).digest()];
+
+const graph = new GraphForge();
+try {
+  graph.execute(
+    "CREATE (:Task {title: 'Summarize evidence'}), (:Task {title: 'Resolve source conflict'})",
+  );
+  const context = tableFromIPC(
+    graph.execute(
+      "MATCH (t:Task) RETURN t.node_uuid AS item_uuid, t.title AS title ORDER BY t.node_uuid LIMIT 20",
+    ),
+  );
+  const items = Array.from({ length: context.numRows }, (_, row) =>
+    uuidText(context.getChild("item_uuid").get(row)),
+  );
+  const projection = items.map((item, row) => ({
+    item_uuid: item,
+    title: context.getChild("title").get(row),
+  }));
+  const inputBytes = Buffer.from(JSON.stringify(items));
+  const projectionBytes = Buffer.from(JSON.stringify(projection));
+  const question = randomUUID();
+  const batch = {
+    input: {
+      generation_uuid: graph.researchProjectSummary().identity.generationUuid,
+      version_uuid: null,
+      projection_sha256: digest(projectionBytes),
+      selection_sha256: digest(inputBytes),
+      selected_item_uuids: items,
+    },
+    producer: { name: "offline agent fixture", model: "fixture-v1" },
+    questions: [
+      {
+        question_uuid: question,
+        text: "What is the next permitted step?",
+        item_uuids: items,
+        kind: {
+          kind: "choice",
+          allowed_choices: ["continue", "clarify", "review"],
+        },
+      },
+    ],
+    // Replace this local fixture with caller-owned producer output.
+    results: [
+      {
+        question_uuid: question,
+        item_uuid: items[0],
+        status: "answered",
+        value: { kind: "choice", value: "continue" },
+      },
+      {
+        question_uuid: question,
+        item_uuid: items[1],
+        status: "uncertain",
+        value: { kind: "choice", value: "clarify" },
+      },
+    ],
+  };
+  const output = tableFromIPC(graph.validateDecisionBatch(batch));
+  for (let row = 0; row < output.numRows; row += 1) {
+    const item = uuidText(output.getChild("item_uuid").get(row));
+    const title = context.getChild("title").get(items.indexOf(item));
+    console.log(title, output.getChild("status").get(row), output.getChild("choice_value").get(row));
+  }
+
+  // Only an answered continue result is eligible for this caller's action.
+  // Preserve this request and operation UUID if retrying after a failure.
+  const prepared = {
+    operation_uuid: randomUUID(),
+    expected_generation_uuid: batch.input.generation_uuid,
+    item_uuid: items[0],
+    action: "continue",
+  };
+  const existing = tableFromIPC(
+    graph.execute(
+      "MATCH (r:AgentAction {operation_uuid: $operation_uuid}) "
+        + "RETURN r.item_uuid AS item_uuid, r.action AS action",
+      prepared,
+    ),
+  );
+  const current = graph.researchProjectSummary().identity.generationUuid;
+  if (existing.numRows > 0) {
+    const receiptItem = uuidText(existing.getChild("item_uuid").get(0));
+    const receiptAction = existing.getChild("action").get(0);
+    if (receiptItem !== prepared.item_uuid || receiptAction !== prepared.action) {
+      throw new Error("operation UUID already has a different action receipt");
+    }
+    console.log("exact action retry", existing.toArray());
+  } else if (
+    current === prepared.expected_generation_uuid &&
+    output.getChild("status").get(0) === "answered"
+  ) {
+    graph.execute(
+      "MERGE (r:AgentAction {operation_uuid: $operation_uuid}) "
+        + "SET r.item_uuid = $item_uuid, r.action = $action",
+      prepared,
+    );
+    console.log("continue on", items[0]);
+  } else {
+    console.log("clarify or review; no graph action was applied");
+  }
+} finally {
+  graph.close();
+}

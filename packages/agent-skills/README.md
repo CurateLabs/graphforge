@@ -68,6 +68,15 @@ Input, output, and error-detail payloads enforce the same recursive value
 budgets in the dependency-free validator; the checked-in schemas additionally
 bound every nested string, array, and object.
 
+For an external decision call, place the complete request contract under the
+normal input envelope and validate that value with the separately exported
+`decision-batch-v1.json` schema. The schema carries the Rust validator's typed
+choices, rubric order, uncertainty, producer confidence meaning, input
+identity, and row limits. The adapter remains transport only: application code
+passes the batch to the native `validateDecisionBatch` method and owns any
+clarification, review, or action policy. It does not execute a producer or
+drop fields to fit its recursive payload budget.
+
 ## Local offline smoke
 
 From the repository root, create the local artifact and run the deterministic

@@ -228,6 +228,23 @@ test("checked-in schemas are closed, versioned, and aligned with the validator",
   }
 });
 
+test("decision batch schema preserves caller supplied bounds and result meaning", async () => {
+  const schema = JSON.parse(
+    await readFile(
+      new URL("../schemas/decision-batch-v1.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
+  assert.match(schema.$id, /decision-batch-v1\.json$/);
+  assert.equal(schema.additionalProperties, false);
+  assert.equal(schema.properties.results.maxItems, 256);
+  assert.equal(schema.properties.questions.maxItems, 256);
+  assert.equal(schema.$defs.result.properties.status.enum.includes("uncertain"), true);
+  assert.equal(schema.$defs.result.properties.confidence.anyOf.length, 2);
+  assert.equal(Object.hasOwn(schema.properties, "action"), false);
+});
+
 test("shipped workflow manifests satisfy the shared contract", async () => {
   const expectedCapabilities = {
     bootstrap: { graph: 1 },
