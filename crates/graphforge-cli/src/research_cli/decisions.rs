@@ -41,6 +41,20 @@ fn validate_file(path: PathBuf) -> Result<DecisionBatchV1, GfError> {
         .map_err(|_| GfError::Validation("invalid decision batch JSON contract".into()))
 }
 
+fn encode_arrow(
+    result: &arrow::record_batch::RecordBatch,
+    output: impl Write,
+) -> Result<(), GfError> {
+    let mut writer = StreamWriter::try_new(output, result.schema().as_ref())
+        .map_err(|_| GfError::Validation("cannot initialize decision Arrow IPC".into()))?;
+    writer
+        .write(result)
+        .map_err(|_| GfError::Validation("cannot write decision Arrow IPC".into()))?;
+    writer
+        .finish()
+        .map_err(|_| GfError::Validation("cannot finish decision Arrow IPC".into()))
+}
+
 pub(crate) fn run(
     _graph: &GraphForge,
     command: DecisionCommand,
@@ -51,18 +65,7 @@ pub(crate) fn run(
             let batch = validate_file(args.file)?;
             let result = batch.validate()?;
             let mut ipc = Vec::new();
-            {
-                let mut writer = StreamWriter::try_new(&mut ipc, result.schema().as_ref())
-                    .map_err(|_| {
-                        GfError::Validation("cannot encode decision Arrow result".into())
-                    })?;
-                writer.write(&result).map_err(|_| {
-                    GfError::Validation("cannot encode decision Arrow result".into())
-                })?;
-                writer.finish().map_err(|_| {
-                    GfError::Validation("cannot encode decision Arrow result".into())
-                })?;
-            }
+            encode_arrow(&result, &mut ipc)?;
             std::fs::write(args.output, ipc)
                 .map_err(|_| GfError::Validation("cannot write decision Arrow result".into()))?;
             writeln!(output, "validated {} decision rows", result.num_rows())
@@ -70,4 +73,103 @@ pub(crate) fn run(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_arrow;
+    use arrow::record_batch::RecordBatch;
+    use graphforge_api::{DecisionBatchV1, GfError};
+    use std::{
+        cell::Cell,
+        io::{self, Write},
+        rc::Rc,
+    };
+    use uuid::Uuid;
+
+    struct TestWriter {
+        calls: Rc<Cell<usize>>,
+        fail_on: Option<usize>,
+    }
+
+    impl Write for TestWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let call = self.calls.get() + 1;
+            self.calls.set(call);
+            if self.fail_on == Some(call) {
+                Err(io::Error::other("injected Arrow IPC write failure"))
+            } else {
+                Ok(bytes.len())
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn decision_batch() -> RecordBatch {
+        let question = Uuid::now_v7();
+        let request = serde_json::json!({
+            "input": {
+                "generation_uuid": Uuid::now_v7(),
+                "version_uuid": null,
+                "projection_sha256": vec![1; 32],
+                "selection_sha256": vec![2; 32],
+                "selected_item_uuids": [],
+            },
+            "producer": { "name": "coverage fixture" },
+            "questions": [{
+                "question_uuid": question,
+                "text": "Continue?",
+                "item_uuids": [],
+                "kind": { "kind": "choice", "allowed_choices": ["yes"] },
+            }],
+            "results": [{
+                "question_uuid": question,
+                "item_uuid": null,
+                "status": "answered",
+                "value": { "kind": "choice", "value": "yes" },
+            }],
+        });
+        serde_json::from_value::<DecisionBatchV1>(request)
+            .unwrap()
+            .validate()
+            .unwrap()
+    }
+
+    #[test]
+    fn arrow_ipc_encoder_reports_initialization_write_and_finish_failures() {
+        let result = decision_batch();
+        let calls = Rc::new(Cell::new(0));
+        encode_arrow(
+            &result,
+            TestWriter {
+                calls: calls.clone(),
+                fail_on: None,
+            },
+        )
+        .unwrap();
+
+        let mut failures = Vec::new();
+        for fail_on in 1..=calls.get() {
+            let error = encode_arrow(
+                &result,
+                TestWriter {
+                    calls: Rc::new(Cell::new(0)),
+                    fail_on: Some(fail_on),
+                },
+            );
+            if let Err(GfError::Validation(message)) = error {
+                failures.push(message);
+            }
+        }
+        for expected in [
+            "cannot initialize decision Arrow IPC",
+            "cannot write decision Arrow IPC",
+            "cannot finish decision Arrow IPC",
+        ] {
+            assert!(failures.iter().any(|message| message == expected));
+        }
+    }
 }

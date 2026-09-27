@@ -88,3 +88,22 @@ fn cli_validates_external_decisions_and_writes_arrow_ipc() {
         before
     );
 }
+
+#[test]
+fn cli_rejects_decision_input_over_the_byte_bound() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("project");
+    let graph = GraphForge::new(root.to_str()).unwrap();
+    drop(graph);
+
+    let input = directory.path().join("oversized-decision.json");
+    let output = directory.path().join("decision.arrow");
+    std::fs::write(&input, vec![b' '; 1024 * 1024 + 1]).unwrap();
+    let result = run(&root, &input, &output);
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("decision batch input exceeds its byte bound")
+    );
+    assert!(!output.exists());
+}
