@@ -325,6 +325,78 @@ mod determinism {
     }
 
     #[test]
+    fn encoding_lane_cancellation_joins_workers_and_resumes_identically() {
+        let nodes = node_ids(1_024);
+        let edges = edge_ids(1_024);
+        let baseline_root = TempDir::new().unwrap();
+        let baseline = ingest(&baseline_root, 64, &nodes, &edges, 128).0;
+        for reversed in [false, true] {
+            let root = TempDir::new().unwrap();
+            let mut session = pinned_session(&root, 64);
+            append_all(&mut session, &nodes, &edges, 128);
+            session.seal().unwrap();
+            let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+            let admission = Arc::new(cpu_admission::ConstructionCpuAdmission::new(
+                std::num::NonZeroUsize::new(8).unwrap(),
+            ));
+            session.set_cpu_admission(Some(admission.clone()));
+            REVERSE_LANE_JOBS.with(|value| value.set(reversed));
+            let encoded_nodes = root
+                .path()
+                .join(PRIVATE_ROOT)
+                .join(Uuid::from_u128(OPERATION).simple().to_string())
+                .join("encoded-v1/graph/topology/nodes");
+            // Cancel after the first real artifact is installed, while the
+            // remaining queued results still need to be consumed.
+            let cancelled = session.encode_canonical_with_cancellation(&shape, 1, || {
+                std::fs::read_dir(&encoded_nodes).is_ok_and(|mut entries| {
+                    entries.any(|entry| {
+                        entry.is_ok_and(|entry| {
+                            entry.path().extension() == Some(OsStr::new("parquet"))
+                        })
+                    })
+                })
+            });
+            REVERSE_LANE_JOBS.with(|value| value.set(false));
+            assert!(cancelled.unwrap_err().to_string().contains("cancelled"));
+            assert_eq!(admission.in_use(), 0);
+            assert_eq!(fingerprint(&mut session, &shape), baseline);
+        }
+    }
+
+    #[test]
+    fn encoding_lanes_preserve_digests_and_evidence_under_reversed_schedule() {
+        let nodes = node_ids(4_096);
+        let edges = edge_ids(4_096);
+        let mut expected = None;
+        for (width, reverse) in [(1, false), (8, false), (8, true)] {
+            let root = TempDir::new().unwrap();
+            let mut session = pinned_session(&root, 64);
+            append_all(&mut session, &nodes, &edges, 128);
+            session.seal().unwrap();
+            let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+            let admission = Arc::new(cpu_admission::ConstructionCpuAdmission::new(
+                std::num::NonZeroUsize::new(width).unwrap(),
+            ));
+            session.set_cpu_admission(Some(admission.clone()));
+            REVERSE_LANE_JOBS.with(|value| value.set(reverse));
+            let result = fingerprint_and_encoding(&mut session, &shape);
+            REVERSE_LANE_JOBS.with(|value| value.set(false));
+            let (fingerprint, encoding) = result.unwrap();
+            assert_eq!(admission.in_use(), 0);
+            if width > 1 {
+                assert_eq!(admission.peak(), width);
+            }
+            let actual = (fingerprint, encoding.evidence);
+            if let Some(expected) = &expected {
+                assert_eq!(&actual, expected);
+            } else {
+                expected = Some(actual);
+            }
+        }
+    }
+
+    #[test]
     fn same_input_twice_produces_identical_digests() {
         let nodes = node_ids(1_024);
         let edges = edge_ids(1_024);
@@ -336,6 +408,22 @@ mod determinism {
         assert_eq!(first_layout.splitters, second_layout.splitters);
         assert_eq!(first_layout.partitions, second_layout.partitions);
         assert!(first_layout.partitions > 1);
+        for reversed in [false, true] {
+            let root = TempDir::new().unwrap();
+            let mut session = pinned_session(&root, 64);
+            append_all(&mut session, &nodes, &edges, 128);
+            session.seal().unwrap();
+            let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+            session.set_cpu_admission(Some(Arc::new(
+                cpu_admission::ConstructionCpuAdmission::new(
+                    std::num::NonZeroUsize::new(8).unwrap(),
+                ),
+            )));
+            REVERSE_LANE_JOBS.with(|value| value.set(reversed));
+            let result = fingerprint_and_encoding(&mut session, &shape);
+            REVERSE_LANE_JOBS.with(|value| value.set(false));
+            assert_eq!(first, result.unwrap().0);
+        }
         println!(
             "DETERMINISM_SAME_INPUT {}",
             serde_json::json!({

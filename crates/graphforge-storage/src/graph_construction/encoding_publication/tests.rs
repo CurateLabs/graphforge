@@ -2707,3 +2707,66 @@ fn publication_refuses_same_inode_encoded_payload_corruption_at_cas_install() {
         "{sweep}"
     );
 }
+
+#[test]
+fn property_encoding_lanes_preserve_heterogeneous_artifacts_and_evidence() {
+    let mut expected = None;
+    for (width, reversed) in [(1, false), (8, false), (8, true)] {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(1600);
+        let mut session = GraphConstructionSession::open(
+            root.path(),
+            operation,
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        session.checkpoint.session_now_micros = 1_789_000_000_000_000;
+        for index in 0..16 {
+            session
+                .append(
+                    ConstructionChunkKind::Node,
+                    &format!("property-{index}"),
+                    &heterogeneous_property_batch(index as u128 + 1, index % 4),
+                )
+                .unwrap();
+        }
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        let admission = Arc::new(super::super::cpu_admission::ConstructionCpuAdmission::new(
+            std::num::NonZeroUsize::new(width).unwrap(),
+        ));
+        session.set_cpu_admission(Some(admission.clone()));
+        super::super::REVERSE_LANE_JOBS.with(|value| value.set(reversed));
+        let result = session.encode_canonical(&shape, 1);
+        super::super::REVERSE_LANE_JOBS.with(|value| value.set(false));
+        let encoded = result.unwrap();
+        assert_eq!(admission.in_use(), 0);
+        let graph = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join(&encoded.root)
+            .join("graph");
+        assert_eq!(
+            crate::read_nodes(&graph)
+                .unwrap()
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            16
+        );
+        let digests = encoded
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.path != "topology/uuid-membership/ordinal-v4-receipt.json")
+            .map(|artifact| (artifact.path.clone(), artifact.sha256.clone()))
+            .collect::<Vec<_>>();
+        let actual = (digests, encoded.evidence);
+        if let Some(expected) = &expected {
+            assert_eq!(&actual, expected);
+        } else {
+            expected = Some(actual);
+        }
+    }
+}

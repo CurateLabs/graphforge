@@ -621,3 +621,122 @@ fn a_publish_style_scope_moves_the_build_out_of_the_read_path_row() {
         "encode writes unattributed: {region:#?}"
     );
 }
+
+#[test]
+fn admission_lanes_preserve_spilled_csr_and_metrics() {
+    let source = TempDir::new().unwrap();
+    write_diamond(source.path());
+    let inventory = crate::adjacency::capture_adjacency_inventory(source.path()).unwrap();
+    let files =
+        super::super::resolve_adjacency_edge_files(source.path(), Some(&inventory)).unwrap();
+    let mut expected = None;
+    for (width, reversed) in [(1, false), (8, false), (8, true)] {
+        let output = TempDir::new().unwrap();
+        let admission = std::sync::Arc::new(
+            crate::graph_construction::cpu_admission::ConstructionCpuAdmission::new(
+                std::num::NonZeroUsize::new(width).unwrap(),
+            ),
+        );
+        let options = AdjacencyBuildOptions {
+            chunk_rows: 1,
+            batch_size: 1,
+            shard_max_edges: 2,
+            shard_max_nodes: 2,
+            merge_fan_in: 2,
+            ..Default::default()
+        };
+        crate::graph_construction::REVERSE_LANE_JOBS.with(|value| value.set(reversed));
+        let result = build_adjacency_index_for_edge_files_on_lanes(
+            output.path(),
+            &files,
+            1,
+            BUILD_TS,
+            &options,
+            Some(&admission),
+            || Ok(()),
+        );
+        crate::graph_construction::REVERSE_LANE_JOBS.with(|value| value.set(false));
+        let (rows, metrics) = result.unwrap();
+        assert_eq!(admission.in_use(), 0);
+        let mut bytes = Vec::new();
+        fn collect(root: &Path, dir: &Path, result: &mut Vec<(PathBuf, Vec<u8>)>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    collect(root, &path, result);
+                } else {
+                    result.push((
+                        path.strip_prefix(root).unwrap().to_owned(),
+                        std::fs::read(&path).unwrap(),
+                    ));
+                }
+            }
+        }
+        collect(output.path(), &adjacency_dir(output.path()), &mut bytes);
+        bytes.sort();
+        let actual = (rows, metrics, bytes);
+        if let Some(expected) = &expected {
+            assert_eq!(&actual, expected);
+        } else {
+            expected = Some(actual);
+        }
+    }
+}
+
+#[test]
+fn cancelling_adjacency_lanes_joins_and_cleans_spill_before_returning() {
+    let source = TempDir::new().unwrap();
+    write_diamond(source.path());
+    let inventory = crate::adjacency::capture_adjacency_inventory(source.path()).unwrap();
+    let files =
+        super::super::resolve_adjacency_edge_files(source.path(), Some(&inventory)).unwrap();
+    for (reversed, minimum) in [(false, 0), (true, 0), (false, 1), (true, 1)] {
+        let output = TempDir::new().unwrap();
+        let spill = output.path().join("private-spill");
+        let options = AdjacencyBuildOptions {
+            spill_dir: Some(spill.clone()),
+            ..Default::default()
+        };
+        let admission = std::sync::Arc::new(
+            crate::graph_construction::cpu_admission::ConstructionCpuAdmission::new(
+                std::num::NonZeroUsize::new(8).unwrap(),
+            ),
+        );
+        crate::graph_construction::REVERSE_LANE_JOBS.with(|value| value.set(reversed));
+        let result = build_adjacency_index_for_edge_files_on_lanes(
+            output.path(),
+            &files,
+            1,
+            BUILD_TS,
+            &options,
+            Some(&admission),
+            || {
+                if admission.in_use() > minimum {
+                    Err(storage_err("cancelled at encoding lanes"))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        crate::graph_construction::REVERSE_LANE_JOBS.with(|value| value.set(false));
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert_eq!(admission.in_use(), 0);
+        assert_eq!(std::fs::read_dir(&spill).unwrap().count(), 0);
+        assert!(
+            !adjacency_dir(output.path())
+                .join("index_manifest.parquet")
+                .exists()
+        );
+        let (rows, _) = build_adjacency_index_for_edge_files_on_lanes(
+            output.path(),
+            &files,
+            1,
+            BUILD_TS,
+            &options,
+            Some(&admission),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(read_manifest(output.path()).unwrap(), rows);
+    }
+}

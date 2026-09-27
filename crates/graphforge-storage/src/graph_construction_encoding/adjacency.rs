@@ -61,11 +61,15 @@ const ADJACENCY_SPILL_ROOT: &str = ".adjacency-spill";
 /// (R-ADJ-2), the shard directory takes its content digest as its name, and
 /// the manifest's build time is the session's recorded clock, so the encoded
 /// inventory authority stays reproducible across sessions and resume.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn encode_adjacency(
     output: &StableDirectory,
     shape: &ConstructionShape,
     generation: u64,
     routes: &crate::route_component::RouteTable,
+    admission: Option<
+        &std::sync::Arc<crate::graph_construction::cpu_admission::ConstructionCpuAdmission>,
+    >,
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
@@ -107,12 +111,13 @@ pub(super) fn encode_adjacency(
     let phase_scope = crate::lifecycle_io::PhaseScope::enter(
         crate::StorageIoPhase::EncodeWritePostwriteAuthentication,
     );
-    let (rows, metrics) = crate::adjacency::build_adjacency_index_for_edge_files(
+    let (rows, metrics) = crate::adjacency::build_adjacency_index_for_edge_files_on_lanes(
         &graph_root,
         &edge_files,
         generation,
         shape.runtime_catalog_now_micros,
         &options,
+        admission,
         || crate::graph_construction::reject_cancelled(cancelled),
     )?;
     drop(phase_scope);

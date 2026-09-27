@@ -250,6 +250,7 @@ impl GraphConstructionSession {
             &shape_authority,
             self.checkpoint.encoding_inventory_sha256.as_deref(),
             self.checkpoint.budgets,
+            self.cpu_admission.as_ref(),
             &mut cancelled,
         )?;
         record_encoded_active_artifacts(&self.root, &encoded, &mut self.checkpoint.evidence)?;
