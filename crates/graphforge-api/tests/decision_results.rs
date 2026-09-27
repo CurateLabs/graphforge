@@ -902,22 +902,27 @@ fn composed_workflow_supports_independent_producers_explicit_action_and_replay()
     fresh_results.producer.name = "caller callable fixture".into();
     fresh_results.results = callable_results(&fresh);
     let fresh_arrow = fresh_results.validate().unwrap();
+    let reviewed_item = voyage;
     let route_row = find_row(
         &fresh_arrow,
         fresh.questions[0].question_uuid,
-        Some(selected),
+        Some(reviewed_item),
     );
     assert_eq!(
         strings(&fresh_arrow, "choice_value").value(route_row),
-        "research"
+        "human_review"
+    );
+    assert_eq!(
+        strings(&fresh_arrow, "status").value(route_row),
+        "uncertain"
     );
     let action = CreateResearchClaimRequest {
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current_generation(&graph),
         assertion_uuid: Uuid::now_v7(),
-        claim: "Caller policy routed Mystery to research after review checks.".into(),
+        claim: "Human review explicitly overrides Voyage's uncertain route to research.".into(),
         graph_refs: vec![AssertionGraphRefInput {
-            graph_uuid: selected,
+            graph_uuid: reviewed_item,
             graph_kind: GraphObjectKind::Node,
             role: AssertionGraphRole::Subject,
             ordinal: 0,

@@ -41,8 +41,9 @@ The composition test
 uses a durable graph rooted on a supported filesystem. It validates both
 producer paths through the Rust facade, confirms private fields are excluded,
 keeps missing/unavailable/uncertain and action failures distinct, rejects a
-stale action, and verifies exact Arrow payload identity plus exact receipt
-replay after cleanup and reopen. Python and Node examples are memory-only;
+stale action, and records a separate human override of an uncertain result
+before verifying exact Arrow payload identity plus exact receipt replay after
+cleanup and reopen. Python and Node examples are memory-only;
 their direct native validation tests are
 `crates/graphforge-bindings-py/tests/decision_results.py` and
 `crates/graphforge-bindings-node/tests/decision-results.test.mjs`.

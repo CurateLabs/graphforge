@@ -299,8 +299,9 @@ Both are correlated against the same bounded real graph input and validated by
 the Rust facade. The test covers private-field exclusion, distinct
 missing/unavailable/uncertain results, duplicate and over-limit rejection,
 unchanged state before an explicit action, stale-state rejection, cancellation,
-explicit claim creation, Artifact retention, cleanup/reopen, exact result
-identity and byte preservation, and exact receipt replay. The runnable Python
+explicit human override of an uncertain route, Artifact retention,
+cleanup/reopen, exact result identity and byte preservation, and exact receipt
+replay. The runnable Python
 and Node examples exercise native validation on memory-only projects; their
 binding tests remain separately listed above. The CLI's external decision
 validation and Arrow output test is
