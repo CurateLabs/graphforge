@@ -35,10 +35,17 @@
     "input": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["generation_uuid", "projection_sha256", "selection_sha256", "selected_item_uuids"],
+      "required": [
+        "generation_uuid",
+        "projection_sha256",
+        "selection_sha256",
+        "selected_item_uuids"
+      ],
       "properties": {
         "generation_uuid": { "$ref": "#/$defs/uuid" },
-        "version_uuid": { "anyOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+        "version_uuid": {
+          "anyOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }]
+        },
         "projection_sha256": { "$ref": "#/$defs/digest" },
         "selection_sha256": { "$ref": "#/$defs/digest" },
         "selected_item_uuids": {
@@ -55,7 +62,9 @@
       "properties": {
         "name": { "$ref": "#/$defs/label" },
         "model": { "anyOf": [{ "$ref": "#/$defs/label" }, { "type": "null" }] },
-        "revision": { "anyOf": [{ "$ref": "#/$defs/label" }, { "type": "null" }] }
+        "revision": {
+          "anyOf": [{ "$ref": "#/$defs/label" }, { "type": "null" }]
+        }
       }
     },
     "question": {
@@ -65,7 +74,11 @@
       "properties": {
         "question_uuid": { "$ref": "#/$defs/uuid" },
         "text": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "item_uuids": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/uuid" } },
+        "item_uuids": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/uuid" }
+        },
         "kind": {
           "oneOf": [
             {
@@ -74,7 +87,12 @@
               "required": ["kind", "allowed_choices"],
               "properties": {
                 "kind": { "const": "choice" },
-                "allowed_choices": { "type": "array", "minItems": 1, "maxItems": 256, "items": { "$ref": "#/$defs/label" } }
+                "allowed_choices": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 256,
+                  "items": { "$ref": "#/$defs/label" }
+                }
               }
             },
             {
@@ -83,7 +101,12 @@
               "required": ["kind", "ordered_levels"],
               "properties": {
                 "kind": { "const": "rubric_score" },
-                "ordered_levels": { "type": "array", "minItems": 2, "maxItems": 256, "items": { "$ref": "#/$defs/label" } }
+                "ordered_levels": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 256,
+                  "items": { "$ref": "#/$defs/label" }
+                }
               }
             },
             {
@@ -114,21 +137,31 @@
       "required": ["question_uuid", "status"],
       "properties": {
         "question_uuid": { "$ref": "#/$defs/uuid" },
-        "item_uuid": { "anyOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
-        "status": { "enum": ["answered", "uncertain", "unavailable", "missing"] },
+        "item_uuid": {
+          "anyOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }]
+        },
+        "status": {
+          "enum": ["answered", "uncertain", "unavailable", "missing"]
+        },
         "value": {
           "oneOf": [
             {
               "type": "object",
               "additionalProperties": false,
               "required": ["kind", "value"],
-              "properties": { "kind": { "const": "choice" }, "value": { "$ref": "#/$defs/label" } }
+              "properties": {
+                "kind": { "const": "choice" },
+                "value": { "$ref": "#/$defs/label" }
+              }
             },
             {
               "type": "object",
               "additionalProperties": false,
               "required": ["kind", "value"],
-              "properties": { "kind": { "const": "rubric_score" }, "value": { "$ref": "#/$defs/label" } }
+              "properties": {
+                "kind": { "const": "rubric_score" },
+                "value": { "$ref": "#/$defs/label" }
+              }
             },
             {
               "type": "object",
@@ -141,15 +174,25 @@
                   "additionalProperties": false,
                   "required": ["yes_probability"],
                   "properties": {
-                    "yes_probability": { "type": "number", "minimum": 0, "maximum": 1 },
-                    "no_probability": { "type": ["number", "null"], "minimum": 0, "maximum": 1 }
+                    "yes_probability": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "no_probability": {
+                      "type": ["number", "null"],
+                      "minimum": 0,
+                      "maximum": 1
+                    }
                   }
                 }
               }
             }
           ]
         },
-        "confidence": { "anyOf": [{ "$ref": "#/$defs/confidence" }, { "type": "null" }] }
+        "confidence": {
+          "anyOf": [{ "$ref": "#/$defs/confidence" }, { "type": "null" }]
+        }
       }
     }
   }

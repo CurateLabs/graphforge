@@ -240,7 +240,10 @@ test("decision batch schema preserves caller supplied bounds and result meaning"
   assert.equal(schema.additionalProperties, false);
   assert.equal(schema.properties.results.maxItems, 256);
   assert.equal(schema.properties.questions.maxItems, 256);
-  assert.equal(schema.$defs.result.properties.status.enum.includes("uncertain"), true);
+  assert.equal(
+    schema.$defs.result.properties.status.enum.includes("uncertain"),
+    true,
+  );
   assert.equal(schema.$defs.result.properties.confidence.anyOf.length, 2);
   assert.equal(Object.hasOwn(schema.properties, "action"), false);
 });
