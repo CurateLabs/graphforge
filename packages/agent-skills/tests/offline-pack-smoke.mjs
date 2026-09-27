@@ -46,6 +46,7 @@ assert.deepEqual(first.files, [
   "compatibility.json",
   "package.json",
   "schemas/README.md",
+  "schemas/decision-batch-v1.json",
   "schemas/input-envelope-v1.json",
   "schemas/output-envelope-v1.json",
   "schemas/skill-manifest-v1.json",
