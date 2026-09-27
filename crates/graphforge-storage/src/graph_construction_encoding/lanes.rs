@@ -1,18 +1,28 @@
 //! Bounded compression pipeline; durable writes and receipt ordering stay on the caller.
+#[cfg(any(test, feature = "test-support"))]
+use super::seam_spike;
 use super::{
     ConstructionEncodedArtifact, GraphConstructionEncodingEvidence, StableDirectory, storage,
-    write_parquet, write_parquet_chunks,
+    write_parquet,
+};
+use super::{
+    CountingWriter, EncodingTempGuard, IoCounter, account_cache_release, add_evidence_counter,
+    directory_for, hex,
 };
 use crate::graph_construction::cpu_admission::{ConstructionCpuAdmission, ConstructionCpuLease};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
+use graphforge_filesystem::file_identity;
 use parquet::arrow::ArrowWriter;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
+use std::ffi::OsStr;
 use std::io::Write;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
+use uuid::Uuid;
 
 type Compressed = Result<Vec<Vec<u8>>, GfError>;
 struct Job {
@@ -252,4 +262,108 @@ fn compress(batch: &RecordBatch, stop: &AtomicBool) -> Result<Vec<Vec<u8>>, GfEr
     .map_err(storage)?;
     writer.write(batch).map_err(storage)?;
     Ok(writer.into_inner().map_err(storage)?.writes)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn write_parquet_chunks(
+    root: &StableDirectory,
+    relative: &str,
+    batch: &RecordBatch,
+    cache_window: std::num::NonZeroU64,
+    evidence: &mut GraphConstructionEncodingEvidence,
+    cancelled: &mut impl FnMut() -> bool,
+    chunks: Option<Vec<Vec<u8>>>,
+) -> Result<ConstructionEncodedArtifact, GfError> {
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = cancelled;
+    let (directory, name) = directory_for(root, relative)?;
+    let temporary = format!(".{}-{}.tmp", name, Uuid::new_v4().simple());
+    let file = directory
+        .create_replaceable_child_file(OsStr::new(&temporary))
+        .map_err(storage)?;
+    let identity = file_identity(&file).map_err(storage)?;
+    let mut temporary_guard = EncodingTempGuard {
+        directory: &directory,
+        name: temporary.clone(),
+        identity,
+        armed: true,
+    };
+    let counter = IoCounter::default();
+    let sink = CountingWriter {
+        inner: graphforge_filesystem::DurableFileCacheWriter::with_window_bytes(file, cache_window)
+            .map_err(storage)?,
+        counter: counter.clone(),
+        digest: Sha256::new(),
+    };
+    let mut writer = if let Some(chunks) = chunks {
+        let mut sink = sink;
+        for chunk in chunks {
+            if cancelled() {
+                return Err(storage("construction encoding cancelled"));
+            }
+            sink.write_all(&chunk).map_err(storage)?;
+        }
+        sink
+    } else {
+        let mut writer = ArrowWriter::try_new(
+            sink,
+            batch.schema(),
+            Some(crate::permanent_parquet::writer_properties().build()),
+        )
+        .map_err(storage)?;
+        #[cfg(any(test, feature = "test-support"))]
+        let writer = if seam_spike::enabled()? {
+            seam_spike::write(batch, writer, cancelled)?
+        } else {
+            writer.write(batch).map_err(storage)?;
+            writer.into_inner().map_err(storage)?
+        };
+        #[cfg(not(any(test, feature = "test-support")))]
+        let writer = {
+            writer.write(batch).map_err(storage)?;
+            writer.into_inner().map_err(storage)?
+        };
+        writer
+    };
+    writer.inner.sync_all_and_release().map_err(storage)?;
+    let cache_release = writer.inner.evidence();
+    account_cache_release(cache_release, evidence)?;
+    crate::graph_construction::construction_failpoint(&format!(
+        "encode.parquet.after_temp_fsync.{relative}"
+    ));
+    let (written, operations) = counter.values();
+    let artifact = ConstructionEncodedArtifact {
+        path: relative.to_owned(),
+        bytes: written,
+        sha256: hex(&writer.digest.finalize()),
+    };
+    directory
+        .replace_child(OsStr::new(&temporary), identity, OsStr::new(&name))
+        .map_err(storage)?;
+    temporary_guard.disarm();
+    directory.sync().map_err(storage)?;
+    crate::graph_construction::construction_failpoint(&format!(
+        "encode.parquet.after_install.{relative}"
+    ));
+    add_evidence_counter(
+        &mut evidence.output_write_bytes,
+        written,
+        "output write bytes",
+    )?;
+    add_evidence_counter(
+        &mut evidence.output_write_operations,
+        operations,
+        "output write operations",
+    )?;
+    add_evidence_counter(
+        &mut evidence.fsync_operations,
+        1,
+        "namespace fsync operations",
+    )?;
+    add_evidence_counter(
+        &mut evidence.fsync_operations,
+        cache_release.sync_operations,
+        "file fsync operations",
+    )?;
+    Ok(artifact)
 }

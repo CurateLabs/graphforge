@@ -29,7 +29,6 @@ use graphforge_filesystem::{file_identity, file_link_count};
 use graphforge_ir::{CompositionBindingContext, SymbolBinding};
 use graphforge_ontology::{QualifiedSymbol, SymbolKind};
 use graphforge_value::{EntityTypeId, RelationTypeId, TaggedTypeId};
-use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -381,7 +380,7 @@ pub struct GraphConstructionEncodingEvidence {
     pub peak_batch_rows: u64,
     /// Largest decoded Arrow window in bytes.
     pub peak_batch_bytes: u64,
-    /// Largest number of simultaneously live shard writers. Always one.
+    /// Largest number of simultaneously live durable shard writers. Always one.
     pub peak_open_writers: u64,
     /// New identity records streamed into the v3 index.
     pub membership_records: u64,
@@ -2179,7 +2178,7 @@ fn write_parquet(
     evidence: &mut GraphConstructionEncodingEvidence,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<ConstructionEncodedArtifact, GfError> {
-    write_parquet_chunks(
+    lanes::write_parquet_chunks(
         root,
         relative,
         batch,
@@ -2188,110 +2187,6 @@ fn write_parquet(
         cancelled,
         None,
     )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_parquet_chunks(
-    root: &StableDirectory,
-    relative: &str,
-    batch: &RecordBatch,
-    cache_window: std::num::NonZeroU64,
-    evidence: &mut GraphConstructionEncodingEvidence,
-    cancelled: &mut impl FnMut() -> bool,
-    chunks: Option<Vec<Vec<u8>>>,
-) -> Result<ConstructionEncodedArtifact, GfError> {
-    #[cfg(not(any(test, feature = "test-support")))]
-    let _ = cancelled;
-    let (directory, name) = directory_for(root, relative)?;
-    let temporary = format!(".{}-{}.tmp", name, Uuid::new_v4().simple());
-    let file = directory
-        .create_replaceable_child_file(OsStr::new(&temporary))
-        .map_err(storage)?;
-    let identity = file_identity(&file).map_err(storage)?;
-    let mut temporary_guard = EncodingTempGuard {
-        directory: &directory,
-        name: temporary.clone(),
-        identity,
-        armed: true,
-    };
-    let counter = IoCounter::default();
-    let sink = CountingWriter {
-        inner: graphforge_filesystem::DurableFileCacheWriter::with_window_bytes(file, cache_window)
-            .map_err(storage)?,
-        counter: counter.clone(),
-        digest: Sha256::new(),
-    };
-    let mut writer = if let Some(chunks) = chunks {
-        let mut sink = sink;
-        for chunk in chunks {
-            if cancelled() {
-                return Err(storage("construction encoding cancelled"));
-            }
-            sink.write_all(&chunk).map_err(storage)?;
-        }
-        sink
-    } else {
-        let mut writer = ArrowWriter::try_new(
-            sink,
-            batch.schema(),
-            Some(crate::permanent_parquet::writer_properties().build()),
-        )
-        .map_err(storage)?;
-        #[cfg(any(test, feature = "test-support"))]
-        let writer = if seam_spike::enabled()? {
-            seam_spike::write(batch, writer, cancelled)?
-        } else {
-            writer.write(batch).map_err(storage)?;
-            writer.into_inner().map_err(storage)?
-        };
-        #[cfg(not(any(test, feature = "test-support")))]
-        let writer = {
-            writer.write(batch).map_err(storage)?;
-            writer.into_inner().map_err(storage)?
-        };
-        writer
-    };
-    writer.inner.sync_all_and_release().map_err(storage)?;
-    let cache_release = writer.inner.evidence();
-    account_cache_release(cache_release, evidence)?;
-    crate::graph_construction::construction_failpoint(&format!(
-        "encode.parquet.after_temp_fsync.{relative}"
-    ));
-    let (written, operations) = counter.values();
-    let artifact = ConstructionEncodedArtifact {
-        path: relative.to_owned(),
-        bytes: written,
-        sha256: hex(&writer.digest.finalize()),
-    };
-    directory
-        .replace_child(OsStr::new(&temporary), identity, OsStr::new(&name))
-        .map_err(storage)?;
-    temporary_guard.disarm();
-    directory.sync().map_err(storage)?;
-    crate::graph_construction::construction_failpoint(&format!(
-        "encode.parquet.after_install.{relative}"
-    ));
-    add_evidence_counter(
-        &mut evidence.output_write_bytes,
-        written,
-        "output write bytes",
-    )?;
-    add_evidence_counter(
-        &mut evidence.output_write_operations,
-        operations,
-        "output write operations",
-    )?;
-    add_evidence_counter(
-        &mut evidence.fsync_operations,
-        1,
-        "namespace fsync operations",
-    )?;
-    add_evidence_counter(
-        &mut evidence.fsync_operations,
-        cache_release.sync_operations,
-        "file fsync operations",
-    )?;
-    Ok(artifact)
 }
 
 fn copy_artifact<R: Read + Seek>(
