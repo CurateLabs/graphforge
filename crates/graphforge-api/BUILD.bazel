@@ -471,6 +471,7 @@ gf_rust_integration_test(
     name = "decision_results",
     srcs = ["tests/decision_results.rs"],
     crate = ":graphforge_api",
+    data = ["//:examples/decision-workflow/fixtures/independent-producer-results.json"],
     deps = _API_DEPS,
 )
 
