@@ -1,0 +1,6 @@
+Integrated baseline commit: b9fc0432f2405ceae02aac96de9c35698f4e6a2e
+Candidate worktree commit before disposition: b9fc0432f2405ceae02aac96de9c35698f4e6a2e
+Rust: rustc 1.96.0 (ac68faa20 2026-05-25)
+Cargo: cargo 1.96.0 (30a34c682 2026-05-25)
+runexec: runexec 3.35
+UTC census completion: done
