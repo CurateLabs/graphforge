@@ -58,7 +58,12 @@ def region(run: Path, name: str) -> tuple[float, float, float, float]:
 def append_profile(run: Path, arm: str) -> None:
     parent = "import_command/validate/append"
     phases = (
-        ["append_input_digest", "append_fixed_run_preparation", "append_arrow_preparation", "append_durable"]
+        [
+            "append_input_digest",
+            "append_fixed_run_preparation",
+            "append_arrow_preparation",
+            "append_durable",
+        ]
         if arm == "base"
         else ["append_preparation", "append_durable"]
     )
@@ -84,8 +89,9 @@ for scale in (18, 20):
             walls[arm].append(values["wall"])
             print(
                 f"{name}: wall={values['wall']:.2f}s CPU={values['cpu']:.2f}s "
-                f"CPU/wall={values['cpu']/values['wall']:.2f} peak={values['memory_mib']:.0f}MiB "
-                f"CPU-pressure={values['cpu_pressure']:.2f}s IO-pressure={values['io_pressure']:.2f}s"
+                f"CPU/wall={values['cpu'] / values['wall']:.2f} peak={values['memory_mib']:.0f}MiB "
+                f"CPU-pressure={values['cpu_pressure']:.2f}s "
+                f"IO-pressure={values['io_pressure']:.2f}s"
             )
             append_profile(run, arm)
     baseline = statistics.median(walls["base"])
@@ -107,10 +113,14 @@ for cores in (1, 2, 4, 8, 16):
         one = wall
     print(
         f"{cores} CPUs ({len(values)} runs): wall={wall:.2f}s CPU={cpu:.2f}s "
-        f"CPU/wall={cpu/wall:.2f} throughput={one/wall:.2f}x"
+        f"CPU/wall={cpu / wall:.2f} throughput={one / wall:.2f}x"
     )
     if cores == 8:
-        append_ratios = [region(run, "import_command/validate/append")[1] / region(run, "import_command/validate/append")[0] for run in names]
+        append_ratios = [
+            region(run, "import_command/validate/append")[1]
+            / region(run, "import_command/validate/append")[0]
+            for run in names
+        ]
         print(
             f"  append CPU/wall={append_ratios}; median={statistics.median(append_ratios):.3f} "
             "(gate >=2.0)"
