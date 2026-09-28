@@ -1,0 +1,14 @@
+{
+  "baseline_tree": "fc09f6a193e50ab6d10488b90206cfee2bf188b5",
+  "baseline_binary_sha256": "ecf55f287eacef15fc78929d9a7ae0dad9e6d8a02982dc8a24881b8452073512",
+  "candidate_tree_base": "fc09f6a193e50ab6d10488b90206cfee2bf188b5",
+  "candidate_source_patch": "candidate-source.patch",
+  "candidate_source_patch_sha256": "983c6700d1beba9b9664f438cb246ea1155055204f2362ff8c76fec8942424cf",
+  "candidate_binary_sha256": "af21b334bddc187b95aa7d578d7a25e4602df94bdd6d0fe12dd6031375d3ad48",
+  "build_command": "CARGO_TARGET_DIR=/home/ubuntu/gf-1606-target TMPDIR=/home/ubuntu/gf-1606-tmp cargo build --release -p graphforge-cli",
+  "inputs": "Graph500 edge factor 16, seed 13907095936298285200, S18 and S20; exact shard hashes in source.sha256",
+  "host": "OVHC-AGENCY, Linux x86_64, 16 logical CPUs, ext4 on md RAID 1",
+  "measurement": "21 runs, 4000 MiB cap, 60 seconds quiet before each timed ingest, reopen counts and full scans after every ingest",
+  "raw_run_archive": "candidate-runs.tar.gz",
+  "raw_run_archive_sha256": "cd1cc5272b9f5ab1fff01285c9a7e823f9160be48efd2b5ad2111a4d3039bc32"
+}

@@ -1,0 +1,538 @@
+diff --git a/crates/graphforge-storage/src/construction_determinism_tests.rs b/crates/graphforge-storage/src/construction_determinism_tests.rs
+index df6c67ac..ff766a4d 100644
+--- a/crates/graphforge-storage/src/construction_determinism_tests.rs
++++ b/crates/graphforge-storage/src/construction_determinism_tests.rs
+@@ -2,8 +2,8 @@
+ //
+ // Range partitioning is what lets shaping stop merging, and it is also what a
+ // later concurrent step will schedule. These tests are the safety net for that
+-// step: they fix the contract now, while the partitions still run sequentially,
+-// so that a determinism failure after concurrency lands can only be concurrency.
++// step: admitted routing lanes can change scheduling, while durable progress
++// remains coordinator-owned.
+ //
+ // # What is being claimed, and what is not
+ //
+@@ -396,6 +396,69 @@ mod determinism {
+         }
+     }
+ 
++    #[test]
++    fn routing_lanes_preserve_artifacts_and_evidence_under_reversed_schedule() {
++        let nodes = node_ids(1_024);
++        let edges = edge_ids(1_024);
++        let mut expected = None;
++        for (width, reverse) in [(1, false), (2, false), (2, true)] {
++            let root = TempDir::new().unwrap();
++            let mut session = pinned_session(&root, 64);
++            append_all(&mut session, &nodes, &edges, 128);
++            session.seal().unwrap();
++            let admission = Arc::new(cpu_admission::ConstructionCpuAdmission::new(
++                std::num::NonZeroUsize::new(width).unwrap(),
++            ));
++            session.set_cpu_admission(Some(admission.clone()));
++            REVERSE_LANE_JOBS.with(|value| value.set(reverse));
++            let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
++            assert_eq!(admission.peak(), width.min(2));
++            let routing_evidence = evidence_without_file_identities(session.evidence());
++            let result = fingerprint_and_encoding(&mut session, &shape);
++            REVERSE_LANE_JOBS.with(|value| value.set(false));
++            let (fingerprint, encoding) = result.unwrap();
++            let actual = (fingerprint, routing_evidence, encoding.evidence);
++            assert_eq!(admission.in_use(), 0);
++            assert_eq!(admission.peak(), width);
++            if let Some(expected) = &expected {
++                assert_eq!(&actual, expected);
++            } else {
++                expected = Some(actual);
++            }
++        }
++    }
++
++    #[test]
++    fn cancelled_routing_joins_admitted_workers_before_retry() {
++        let nodes = node_ids(2_048);
++        let edges = edge_ids(2_048);
++        let root = TempDir::new().unwrap();
++        let mut session = pinned_session(&root, 64);
++        append_all(&mut session, &nodes, &edges, 128);
++        session.seal().unwrap();
++        let admission = Arc::new(cpu_admission::ConstructionCpuAdmission::new(
++            std::num::NonZeroUsize::new(8).unwrap(),
++        ));
++        session.set_cpu_admission(Some(admission.clone()));
++        let mut polls_after_admission = 0_u64;
++        let cancelled = session.shape_canonical_with_cancellation(|| {
++            if admission.in_use() > 0 {
++                polls_after_admission += 1;
++                polls_after_admission >= 128
++            } else {
++                false
++            }
++        });
++        assert!(cancelled.unwrap_err().to_string().contains("cancelled"));
++        assert!(admission.peak() > 0);
++        assert_eq!(admission.in_use(), 0, "routing returned with a lane leased");
++        drop(session);
++
++        let mut retry = pinned_session(&root, 64);
++        let shape = retry.shape_canonical_with_cancellation(|| false).unwrap();
++        let _ = fingerprint(&mut retry, &shape);
++    }
++
+     #[test]
+     fn same_input_twice_produces_identical_digests() {
+         let nodes = node_ids(1_024);
+diff --git a/crates/graphforge-storage/src/graph_construction.rs b/crates/graphforge-storage/src/graph_construction.rs
+index d587d28f..7f57afec 100644
+--- a/crates/graphforge-storage/src/graph_construction.rs
++++ b/crates/graphforge-storage/src/graph_construction.rs
+@@ -1968,7 +1968,9 @@ impl GraphConstructionSession {
+     }
+ }
+ 
+-pub(super) fn reject_cancelled(cancelled: &mut impl FnMut() -> bool) -> Result<(), GfError> {
++pub(super) fn reject_cancelled(
++    cancelled: &mut (impl FnMut() -> bool + ?Sized),
++) -> Result<(), GfError> {
+     if cancelled() {
+         return Err(storage("construction cancelled"));
+     }
+diff --git a/crates/graphforge-storage/src/graph_construction/shape.rs b/crates/graphforge-storage/src/graph_construction/shape.rs
+index 74b94d9a..e6839cb8 100644
+--- a/crates/graphforge-storage/src/graph_construction/shape.rs
++++ b/crates/graphforge-storage/src/graph_construction/shape.rs
+@@ -562,55 +562,20 @@ impl GraphConstructionSession {
+                         &mut self.checkpoint.evidence,
+                     )?;
+             }
+-            route_identity_run(
++            route_receipt_families(
+                 &self.root,
+                 &plan,
++                &node_plan,
+                 &receipt,
++                detail_codec,
+                 &mut identities,
++                &mut node_details,
++                &mut edge_details,
++                &mut endpoints,
++                self.cpu_admission.as_ref(),
+                 &mut cancelled,
+                 &mut self.checkpoint.evidence,
+             )?;
+-            match receipt.kind {
+-                ConstructionChunkKind::Node => {
+-                    route_fixed_run::<NODE_DETAIL_WIDTH>(
+-                        &self.root,
+-                        &node_plan,
+-                        &receipt.details,
+-                        Some(detail_codec),
+-                        &mut node_details,
+-                        &mut cancelled,
+-                        &mut self.checkpoint.evidence,
+-                    )?;
+-                }
+-                ConstructionChunkKind::Edge => {
+-                    route_fixed_run::<EDGE_DETAIL_WIDTH>(
+-                        &self.root,
+-                        &plan,
+-                        &receipt.details,
+-                        Some(detail_codec),
+-                        &mut edge_details,
+-                        &mut cancelled,
+-                        &mut self.checkpoint.evidence,
+-                    )?;
+-                    // Endpoints are keyed by the referenced *node*'s UUID at
+-                    // this staged, pre-resolution stage (#1439) -- the later
+-                    // resolved endpoints, re-keyed by edge UUID in
+-                    // `resolve_endpoint_surrogates`, correctly keep using
+-                    // `plan`.
+-                    route_fixed_run::<ENDPOINT_WIDTH>(
+-                        &self.root,
+-                        &node_plan,
+-                        receipt
+-                            .endpoints
+-                            .as_ref()
+-                            .ok_or_else(|| storage("edge receipt lacks endpoint run"))?,
+-                        None,
+-                        &mut endpoints,
+-                        &mut cancelled,
+-                        &mut self.checkpoint.evidence,
+-                    )?;
+-                }
+-            }
+             routed_since_boundary = routed_since_boundary
+                 .checked_add(staged_input_bytes(&receipt))
+                 .ok_or_else(|| storage("routed input byte count overflows"))?;
+@@ -1612,13 +1577,360 @@ pub(super) fn read_fixed<const N: usize>(
+ /// staged run is authenticated against its writer receipt *while* its records
+ /// are routed, so the verification the copy used to perform survives without
+ /// the copy. No intermediate artifact is produced.
++/// Route every fixed-width family owned by one staged receipt. The coordinator
++/// keeps the identity task so it can poll the caller's `FnMut` cancellation
++/// callback; edge details and endpoints may use the existing construction
++/// admission lanes because their partitioners and source artifacts are
++/// disjoint.
++#[allow(clippy::too_many_arguments)]
++fn route_receipt_families(
++    root: &StableDirectory,
++    plan: &PartitionPlan,
++    node_plan: &PartitionPlan,
++    receipt: &ConstructionChunkReceipt,
++    detail_codec: DetailCodec,
++    identities: &mut FixedRangePartitioner<BASE_IDENTITY_WIDTH>,
++    node_details: &mut FixedRangePartitioner<NODE_DETAIL_WIDTH>,
++    edge_details: &mut FixedRangePartitioner<EDGE_DETAIL_WIDTH>,
++    endpoints: &mut FixedRangePartitioner<ENDPOINT_WIDTH>,
++    admission: Option<&std::sync::Arc<super::cpu_admission::ConstructionCpuAdmission>>,
++    cancelled: &mut impl FnMut() -> bool,
++    evidence: &mut GraphConstructionEvidence,
++) -> Result<(), GfError> {
++    let extra_lanes = if receipt.kind == ConstructionChunkKind::Edge {
++        2
++    } else {
++        1
++    };
++    let lease = admission
++        .map(|admission| {
++            admission.acquire(
++                std::num::NonZeroUsize::new(extra_lanes).expect("routing lane count is nonzero"),
++                cancelled,
++            )
++        })
++        .transpose()?;
++    let Some(lease) = lease else {
++        return route_receipt_families_sequential(
++            root,
++            plan,
++            node_plan,
++            receipt,
++            detail_codec,
++            identities,
++            node_details,
++            edge_details,
++            endpoints,
++            cancelled,
++            evidence,
++        );
++    };
++
++    let stop = std::sync::atomic::AtomicBool::new(false);
++    let mut jobs = Vec::with_capacity(3);
++    let (coordinator, lane_count) = match receipt.kind {
++        ConstructionChunkKind::Node => {
++            let handle = std::thread::scope(|scope| {
++                let detail = scope.spawn(|| {
++                    route_task(1, &stop, |cancelled, evidence| {
++                        route_fixed_run::<NODE_DETAIL_WIDTH>(
++                            root,
++                            node_plan,
++                            &receipt.details,
++                            Some(detail_codec),
++                            node_details,
++                            cancelled,
++                            evidence,
++                        )
++                    })
++                });
++                let coordinator = route_task(0, &stop, |lane_cancelled, evidence| {
++                    let mut coordinator_cancelled = || {
++                        if cancelled() {
++                            stop.store(true, std::sync::atomic::Ordering::Release);
++                            true
++                        } else {
++                            lane_cancelled()
++                        }
++                    };
++                    route_identity_run(
++                        root,
++                        plan,
++                        receipt,
++                        identities,
++                        &mut coordinator_cancelled,
++                        evidence,
++                    )
++                });
++                let detail = join_route_task(detail, 1);
++                (coordinator, detail)
++            });
++            jobs.push(handle.1);
++            (handle.0, 1)
++        }
++        ConstructionChunkKind::Edge => {
++            let endpoint_source = receipt
++                .endpoints
++                .as_ref()
++                .ok_or_else(|| storage("edge receipt lacks endpoint run"))?;
++            let admitted = lease.lanes().get();
++            let (coordinator, detail, endpoint) = std::thread::scope(|scope| {
++                let route_detail = || {
++                    route_task(2, &stop, |cancelled, evidence| {
++                        route_fixed_run::<EDGE_DETAIL_WIDTH>(
++                            root,
++                            plan,
++                            &receipt.details,
++                            Some(detail_codec),
++                            edge_details,
++                            cancelled,
++                            evidence,
++                        )
++                    })
++                };
++                let reversed = super::lane_jobs_reversed();
++                let (detail, endpoint) = if reversed && admitted >= 2 {
++                    let endpoint = Some(scope.spawn(|| {
++                        route_task(3, &stop, |cancelled, evidence| {
++                            route_fixed_run::<ENDPOINT_WIDTH>(
++                                root,
++                                node_plan,
++                                endpoint_source,
++                                None,
++                                endpoints,
++                                cancelled,
++                                evidence,
++                            )
++                        })
++                    }));
++                    let detail = scope.spawn(route_detail);
++                    (detail, endpoint)
++                } else {
++                    let detail = scope.spawn(route_detail);
++                    let endpoint = (admitted >= 2).then(|| {
++                        scope.spawn(|| {
++                            route_task(3, &stop, |cancelled, evidence| {
++                                route_fixed_run::<ENDPOINT_WIDTH>(
++                                    root,
++                                    node_plan,
++                                    endpoint_source,
++                                    None,
++                                    endpoints,
++                                    cancelled,
++                                    evidence,
++                                )
++                            })
++                        })
++                    });
++                    (detail, endpoint)
++                };
++                let coordinator = route_task(0, &stop, |lane_cancelled, evidence| {
++                    let mut coordinator_cancelled = || {
++                        if cancelled() {
++                            stop.store(true, std::sync::atomic::Ordering::Release);
++                            true
++                        } else {
++                            lane_cancelled()
++                        }
++                    };
++                    route_identity_run(
++                        root,
++                        plan,
++                        receipt,
++                        identities,
++                        &mut coordinator_cancelled,
++                        evidence,
++                    )
++                });
++                let detail = join_route_task(detail, 2);
++                let endpoint = endpoint.map(|handle| join_route_task(handle, 3));
++                (coordinator, detail, endpoint)
++            });
++            jobs.push(detail);
++            jobs.push(endpoint.unwrap_or_else(|| {
++                route_task(3, &stop, |cancelled, evidence| {
++                    route_fixed_run::<ENDPOINT_WIDTH>(
++                        root,
++                        node_plan,
++                        endpoint_source,
++                        None,
++                        endpoints,
++                        cancelled,
++                        evidence,
++                    )
++                })
++            }));
++            (coordinator, admitted.min(2))
++        }
++    };
++    drop(lease);
++    jobs.push(coordinator);
++    fold_routing_tasks(evidence, jobs)?;
++    debug_assert!(lane_count > 0);
++    Ok(())
++}
++
++#[allow(clippy::too_many_arguments)]
++fn route_receipt_families_sequential(
++    root: &StableDirectory,
++    plan: &PartitionPlan,
++    node_plan: &PartitionPlan,
++    receipt: &ConstructionChunkReceipt,
++    detail_codec: DetailCodec,
++    identities: &mut FixedRangePartitioner<BASE_IDENTITY_WIDTH>,
++    node_details: &mut FixedRangePartitioner<NODE_DETAIL_WIDTH>,
++    edge_details: &mut FixedRangePartitioner<EDGE_DETAIL_WIDTH>,
++    endpoints: &mut FixedRangePartitioner<ENDPOINT_WIDTH>,
++    cancelled: &mut impl FnMut() -> bool,
++    evidence: &mut GraphConstructionEvidence,
++) -> Result<(), GfError> {
++    route_identity_run(root, plan, receipt, identities, cancelled, evidence)?;
++    match receipt.kind {
++        ConstructionChunkKind::Node => route_fixed_run::<NODE_DETAIL_WIDTH>(
++            root,
++            node_plan,
++            &receipt.details,
++            Some(detail_codec),
++            node_details,
++            cancelled,
++            evidence,
++        ),
++        ConstructionChunkKind::Edge => {
++            route_fixed_run::<EDGE_DETAIL_WIDTH>(
++                root,
++                plan,
++                &receipt.details,
++                Some(detail_codec),
++                edge_details,
++                cancelled,
++                evidence,
++            )?;
++            let endpoint_source = receipt
++                .endpoints
++                .as_ref()
++                .ok_or_else(|| storage("edge receipt lacks endpoint run"))?;
++            route_fixed_run::<ENDPOINT_WIDTH>(
++                root,
++                node_plan,
++                endpoint_source,
++                None,
++                endpoints,
++                cancelled,
++                evidence,
++            )
++        }
++    }
++}
++
++struct RoutingTaskResult {
++    family: u8,
++    result: Result<(), GfError>,
++    evidence: GraphConstructionEvidence,
++}
++
++fn route_task(
++    family: u8,
++    stop: &std::sync::atomic::AtomicBool,
++    task: impl FnOnce(&mut dyn FnMut() -> bool, &mut GraphConstructionEvidence) -> Result<(), GfError>,
++) -> RoutingTaskResult {
++    let mut evidence = GraphConstructionEvidence::default();
++    let _region =
++        (family != 0).then(|| crate::concurrency_attribution::RegionScope::named("shape_routing"));
++    let mut cancelled = || stop.load(std::sync::atomic::Ordering::Acquire);
++    let result = task(&mut cancelled, &mut evidence);
++    if result.is_err() {
++        stop.store(true, std::sync::atomic::Ordering::Release);
++    }
++    RoutingTaskResult {
++        family,
++        result,
++        evidence,
++    }
++}
++
++fn join_route_task(
++    handle: std::thread::ScopedJoinHandle<'_, RoutingTaskResult>,
++    family: u8,
++) -> RoutingTaskResult {
++    match handle.join() {
++        Ok(result) => result,
++        Err(_) => RoutingTaskResult {
++            family,
++            result: Err(storage("construction routing worker panicked")),
++            evidence: GraphConstructionEvidence::default(),
++        },
++    }
++}
++
++/// Fold only counters routing tasks can touch. Each addition is checked and
++/// the cache-window high-water mark is combined by max, in logical family
++/// order, after every admitted worker has joined.
++fn fold_routing_tasks(
++    target: &mut GraphConstructionEvidence,
++    mut tasks: Vec<RoutingTaskResult>,
++) -> Result<(), GfError> {
++    tasks.sort_by_key(|task| task.family);
++    let mut first_error_index = None;
++    let mut cancellation_error = None;
++    for task in tasks {
++        let source = task.evidence;
++        target.merge_read_blocks = target
++            .merge_read_blocks
++            .checked_add(source.merge_read_blocks)
++            .ok_or_else(|| storage("merge read block count overflows"))?;
++        target.merge_read_records = target
++            .merge_read_records
++            .checked_add(source.merge_read_records)
++            .ok_or_else(|| storage("merge read record count overflows"))?;
++        target.merge_read_bytes = target
++            .merge_read_bytes
++            .checked_add(source.merge_read_bytes)
++            .ok_or_else(|| storage("merge read byte count overflows"))?;
++        target.merge_read_operations = target
++            .merge_read_operations
++            .checked_add(source.merge_read_operations)
++            .ok_or_else(|| storage("merge read operation count overflows"))?;
++        target.merge_written_records = target
++            .merge_written_records
++            .checked_add(source.merge_written_records)
++            .ok_or_else(|| storage("merge written record count overflows"))?;
++        target.merge_written_bytes = target
++            .merge_written_bytes
++            .checked_add(source.merge_written_bytes)
++            .ok_or_else(|| storage("merge written byte count overflows"))?;
++        target.cache_release_operations = target
++            .cache_release_operations
++            .checked_add(source.cache_release_operations)
++            .ok_or_else(|| storage("cache release operations overflows"))?;
++        target.cache_release_unsupported_operations = target
++            .cache_release_unsupported_operations
++            .checked_add(source.cache_release_unsupported_operations)
++            .ok_or_else(|| storage("unsupported cache release operations overflows"))?;
++        target.cache_released_bytes = target
++            .cache_released_bytes
++            .checked_add(source.cache_released_bytes)
++            .ok_or_else(|| storage("cache released bytes overflows"))?;
++        target.peak_cache_release_window_bytes = target
++            .peak_cache_release_window_bytes
++            .max(source.peak_cache_release_window_bytes);
++        if let Err(error) = task.result {
++            if error.to_string() == "construction cancelled" {
++                cancellation_error.get_or_insert(error);
++            } else if first_error_index.is_none() {
++                first_error_index = Some(error);
++            }
++        }
++    }
++    first_error_index.or(cancellation_error).map_or(Ok(()), Err)
++}
++
+ pub(super) fn route_fixed_run<const N: usize>(
+     root: &StableDirectory,
+     plan: &PartitionPlan,
+     source: &ArtifactReceipt,
+     codec: Option<DetailCodec>,
+     target: &mut FixedRangePartitioner<N>,
+-    cancelled: &mut impl FnMut() -> bool,
++    cancelled: &mut (impl FnMut() -> bool + ?Sized),
+     evidence: &mut GraphConstructionEvidence,
+ ) -> Result<(), GfError> {
+     let input = root
+@@ -1754,7 +2066,7 @@ fn route_identity_run(
+     plan: &PartitionPlan,
+     receipt: &ConstructionChunkReceipt,
+     target: &mut FixedRangePartitioner<BASE_IDENTITY_WIDTH>,
+-    cancelled: &mut impl FnMut() -> bool,
++    cancelled: &mut (impl FnMut() -> bool + ?Sized),
+     evidence: &mut GraphConstructionEvidence,
+ ) -> Result<(), GfError> {
+     let source = &receipt.identities;
