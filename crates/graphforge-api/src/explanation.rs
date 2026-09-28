@@ -132,7 +132,7 @@ impl GraphForge {
                 execution_mode,
                 adjacency_provider,
                 Some(Arc::clone(&self.ordinal_identities)),
-                &self.session_resource_config(),
+                &self.planning_resource_config(),
             )?;
         // No executable plan or write capability escapes this rendering boundary.
         let physical = self.block_on(async move { session.explain_physical(&plan).await })?;

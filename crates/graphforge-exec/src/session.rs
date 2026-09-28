@@ -344,6 +344,38 @@ impl Default for SessionResourceConfig {
     }
 }
 
+/// The DataFusion runtime for one session: its memory pool, and its disk
+/// manager as the resources say (#1595). Spill goes only to the configured
+/// directory under its cap; disabled means no disk manager at all, not
+/// DataFusion's default of the OS temporary directory, which is unbounded and
+/// RAM-backed on some hosts.
+fn session_runtime(
+    resources: &SessionResourceConfig,
+) -> Result<Arc<datafusion::execution::runtime_env::RuntimeEnv>, GfError> {
+    let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
+    let mut runtime_builder = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
+        .with_memory_limit(memory_budget, 1.0);
+    if let (true, Some(dir)) = (resources.spill_enabled, &resources.spill_directory) {
+        std::fs::create_dir_all(dir)
+            .map_err(|error| GfError::Storage(format!("query spill directory: {error}")))?;
+        runtime_builder = runtime_builder.with_temp_file_path(dir.clone());
+        if let Some(max) = resources.spill_max_bytes {
+            runtime_builder = runtime_builder.with_max_temp_directory_size(max);
+        }
+    } else {
+        runtime_builder = runtime_builder.with_disk_manager_builder(
+            datafusion::execution::disk_manager::DiskManagerBuilder::default()
+                .with_mode(datafusion::execution::disk_manager::DiskManagerMode::Disabled),
+        );
+    }
+    // A spilling runtime creates its temporary directory here, so a full or
+    // read-only volume is an error for this query, not a panic.
+    runtime_builder
+        .build()
+        .map(Arc::new)
+        .map_err(|error| GfError::Storage(format!("query runtime: {error}")))
+}
+
 struct QueryEvidenceStream {
     inner: Option<SendableRecordBatchStream>,
     physical: Arc<dyn ExecutionPlan>,
@@ -479,7 +511,7 @@ impl ExecutionSession {
     /// # Errors
     /// Returns [`GfError`] if session construction fails.
     pub fn new(catalog: GraphCatalog, ontology: Option<OntologyHandle>) -> Result<Self, GfError> {
-        Ok(Self::build(
+        Self::build(
             catalog,
             ontology,
             PathBuf::new(),
@@ -487,7 +519,7 @@ impl ExecutionSession {
             None,
             OrdinalIdentityConfig::default(),
             &SessionResourceConfig::default(),
-        ))
+        )
     }
 
     /// Create a session that can execute writes against `dir`.
@@ -500,7 +532,7 @@ impl ExecutionSession {
         dir: PathBuf,
         mode: OntologyMode,
     ) -> Result<Self, GfError> {
-        Ok(Self::build(
+        Self::build(
             catalog,
             ontology,
             dir,
@@ -508,7 +540,7 @@ impl ExecutionSession {
             None,
             OrdinalIdentityConfig::default(),
             &SessionResourceConfig::default(),
-        ))
+        )
     }
 
     /// Like [`new_with_target`](Self::new_with_target) but reusing a
@@ -565,6 +597,11 @@ impl ExecutionSession {
         ordinal_identities: Option<Arc<V4OrdinalIdentityResolver>>,
         resources: &SessionResourceConfig,
     ) -> Result<Self, GfError> {
+        if resources.spill_enabled && resources.spill_directory.is_none() {
+            return Err(GfError::Validation(
+                "query spill is enabled without a spill directory".into(),
+            ));
+        }
         let identity = match ordinal_identities {
             Some(resolver) => {
                 let pin = resolver.pin()?;
@@ -579,7 +616,7 @@ impl ExecutionSession {
             }
             None => OrdinalIdentityConfig::default(),
         };
-        Ok(Self::build(
+        Self::build(
             catalog,
             ontology,
             dir,
@@ -587,7 +624,7 @@ impl ExecutionSession {
             Some(provider),
             identity,
             resources,
-        ))
+        )
     }
 
     fn build(
@@ -598,7 +635,7 @@ impl ExecutionSession {
         shared_provider: Option<Arc<PersistentAdjacencyProvider>>,
         identity: OrdinalIdentityConfig,
         resources: &SessionResourceConfig,
-    ) -> Self {
+    ) -> Result<Self, GfError> {
         // The session-scoped adjacency provider (#761), threaded to the
         // extension planner via SessionConfig extension. Read-only sessions
         // (empty dir) need no special case: with no `indexes/adjacency/`
@@ -665,22 +702,7 @@ impl ExecutionSession {
             .use_row_number_estimates_to_optimize_partitioning = true;
 
         let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
-        let mut runtime_builder = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
-            .with_memory_limit(memory_budget, 1.0);
-        if resources.spill_enabled
-            && let Some(dir) = &resources.spill_directory
-        {
-            let _ = std::fs::create_dir_all(dir);
-            runtime_builder = runtime_builder.with_temp_file_path(dir.clone());
-            if let Some(max) = resources.spill_max_bytes {
-                runtime_builder = runtime_builder.with_max_temp_directory_size(max);
-            }
-        }
-        let runtime_env = Arc::new(
-            runtime_builder
-                .build()
-                .expect("DataFusion RuntimeEnv construction"),
-        );
+        let runtime_env = session_runtime(resources)?;
 
         let state = SessionStateBuilder::new()
             .with_default_features()
@@ -703,7 +725,7 @@ impl ExecutionSession {
             .semantic_composition_fingerprint()
             .map(str::to_owned);
         ctx.register_catalog("graph", catalog.clone());
-        Self {
+        Ok(Self {
             mutation_health,
             ctx,
             catalog,
@@ -715,7 +737,7 @@ impl ExecutionSession {
             owned_adjacency,
             #[cfg(feature = "differential-testing")]
             relational_fixed_hop_reference: false,
-        }
+        })
     }
 
     pub(super) fn refresh_adjacency_after_mutation(&self) -> Result<(), GfError> {

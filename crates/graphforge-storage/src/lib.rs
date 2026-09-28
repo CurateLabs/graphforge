@@ -20,6 +20,7 @@ mod route_component;
 pub use durable_rewrite::AuxiliaryReceipt;
 #[doc(hidden)]
 pub mod filesystem_admission;
+pub mod query_spill;
 
 pub mod adjacency;
 pub mod adjacency_delta;

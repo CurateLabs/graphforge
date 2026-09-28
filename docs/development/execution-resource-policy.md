@@ -14,7 +14,7 @@ Tokio runtime or any DataFusion execution session.
 | `target_partitions` | `2` | DataFusion `SessionConfig` |
 | `batch_size` | `8192` | DataFusion `SessionConfig`; analyst Arrow shaping / property enrichment (#341) |
 | `memory_budget_bytes` | `512 MiB` | DataFusion `RuntimeEnv` memory pool |
-| `spill` | disabled | Optional absolute spill directory + byte cap |
+| `spill` | project scratch, capped (see below) | DataFusion disk manager for query spill |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
 | `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #501 betweenness; #503 closeness BFS; #504 clustering coefficient; #506 Degree; #508 harmonic closeness BFS; #510 HITS hub; #513 resource allocation; #514 total-neighbors aggregate; #515 triangles; #518 Components; #534 filtered Jaccard; #535 Jaccard similarity; #542 Dijkstra APSP sources) |
@@ -44,12 +44,47 @@ Normalization returns structured [`GfError::Validation`](../../crates/graphforge
   (`min(max(4, 2×cpus), 512)`)
 - reserved `io_concurrency` / `compute_threads` exceed
   `max(tokio_workers, observed_cpus)`
-- spill is enabled without an absolute, non-symlink directory
-- spill directory/max_bytes are set while spill is disabled
+- a configured spill directory is not absolute, is a symlink, or is not a directory
+- spill directory/max_bytes are set while spill is disabled, or `max_bytes` is zero
 - memory / batch / heavy-query bounds are out of range
 
 Invalid settings never partially construct a runtime or authoritative spill
 state.
+
+## Query spill (#1595)
+
+`SpillPolicy` decides where a query whose sort or aggregation exceeds
+`memory_budget_bytes` may spill:
+
+| Policy | Durable project | In-memory instance |
+|---|---|---|
+| default: `enabled`, no `directory` | the project scratch directory `<project>/.graphforge-query-spill/`, at most `max_bytes` (default 8 GiB) per query | no spill |
+| `enabled` with an absolute `directory` | that directory, at most `max_bytes` (DataFusion's 100 GiB default when unset) per query | same |
+| `enabled: false` | no spill | no spill |
+
+"No spill" is enforced: DataFusion's disk manager is disabled, so a query over
+its budget fails with a resource error rather than writing to the operating
+system's temporary directory, which is unbounded and RAM-backed on some hosts.
+Read-only views of a durable project, such as checkpoint and inspection views,
+spill into the project scratch like any other query. Views that bound their own
+memory (branch, private checkpoint-materialization and slice views) set
+`enabled: false` and so fail closed the same way. EXPLAIN renders a plan
+without executing it, so it never acquires scratch.
+
+Each open instance of a durable project owns one scratch subdirectory, created
+on its first query and held by a lock on a sibling `.lock` file. The lock is
+published under its final name only once it is held, so a live instance's
+scratch is never taken for abandoned. The instance removes both when it is
+dropped. Acquiring scratch reclaims any whose lock is free, which means the
+owning process has exited. That is best effort: an entry that cannot be removed
+is skipped, and never stops the new instance acquiring its own
+(`graphforge_storage::query_spill`). Scratch holds only a running query's spill
+files and is never recovery authority. A spill directory that cannot be created
+or used makes that query fail with a storage error.
+
+The search-index adjacency build keeps its own spill root inside its
+unpublished stage unless the caller configures a `directory`. The query scratch
+cap does not apply to it.
 
 ## Application
 
@@ -58,7 +93,8 @@ state.
 3. `build_runtime(&policy)` sets Tokio worker threads
 4. Every DataFusion `ExecutionSession` receives a
    [`SessionResourceConfig`](../../crates/graphforge-exec/src/session.rs) with
-   partitions, batch size, memory, optional spill, and `io_concurrency`
+   partitions, batch size, memory, the resolved spill directory and cap (or
+   none), and `io_concurrency`
 5. Heavy ops (`run_query`, streams construction, `rank`, `similar`,
    `analyze_embedding`) take an admission permit
 6. Query-facing Parquet scans (`GraphForgeParquetExec`, #339) defer file I/O to

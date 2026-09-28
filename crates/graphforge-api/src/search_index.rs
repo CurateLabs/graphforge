@@ -355,13 +355,15 @@ impl GraphForge {
         staged_project_dir: &std::path::Path,
     ) -> graphforge_storage::adjacency::AdjacencyBuildOptions {
         let policy = &self.resource_policy;
-        let spill_dir = if policy.spill_enabled {
-            policy.spill_directory.clone()
-        } else {
-            Some(
+        // Only a caller-configured directory replaces the stage's own spill
+        // root; the default project scratch directory is for query spill
+        // (#1595), and its per-query cap is not this build's bound.
+        let spill_dir = match (&policy.spill_enabled, &policy.spill_directory) {
+            (true, Some(directory)) => Some(directory.clone()),
+            _ => Some(
                 graphforge_storage::adjacency::adjacency_dir(staged_project_dir)
                     .join(graphforge_storage::adjacency::ADJACENCY_SPILL_DIR_NAME),
-            )
+            ),
         };
         let mut options = graphforge_storage::adjacency::AdjacencyBuildOptions::default();
         options.chunk_rows = {
@@ -378,7 +380,7 @@ impl GraphForge {
         };
         options.batch_size = policy.batch_size.max(1);
         options.spill_dir = spill_dir;
-        options.spill_max_bytes = policy.spill_max_bytes;
+        options.spill_max_bytes = policy.spill_directory.as_ref().and(policy.spill_max_bytes);
         options.memory_budget_bytes = Some(policy.memory_budget_bytes);
         options.shard_max_edges = {
             let budget_entries = policy

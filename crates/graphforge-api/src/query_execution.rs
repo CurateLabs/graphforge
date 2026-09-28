@@ -444,7 +444,7 @@ impl GraphForge {
             execution_mode,
             adjacency_provider,
             Some(Arc::clone(&self.ordinal_identities)),
-            &self.session_resource_config(),
+            &self.session_resource_config()?,
         )?;
         let session = if self.read_only {
             session.restrict_to_reads()
@@ -639,7 +639,7 @@ impl GraphForge {
             execution_mode,
             adjacency_provider,
             Some(Arc::clone(&self.ordinal_identities)),
-            &self.session_resource_config(),
+            &self.session_resource_config()?,
         )?;
         let session = if self.read_only {
             session.restrict_to_reads()

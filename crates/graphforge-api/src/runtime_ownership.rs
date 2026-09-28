@@ -32,16 +32,81 @@ impl GraphForge {
         }
     }
 
-    pub(super) fn session_resource_config(&self) -> graphforge_exec::SessionResourceConfig {
+    /// Session resources for one query. Spill follows the policy (#1595):
+    /// disabled means no disk at all; a configured directory is used as given;
+    /// otherwise a durable project spills into its scratch directory, capped
+    /// per query, and any other instance does not spill.
+    ///
+    /// # Errors
+    /// Returns the error from acquiring the project scratch directory.
+    pub(super) fn session_resource_config(
+        &self,
+    ) -> Result<graphforge_exec::SessionResourceConfig, GfError> {
+        let policy = &self.resource_policy;
+        let (spill_enabled, spill_directory, spill_max_bytes) = if !policy.spill_enabled {
+            (false, None, None)
+        } else if let Some(directory) = &policy.spill_directory {
+            (true, Some(directory.clone()), policy.spill_max_bytes)
+        } else if let Some(scratch) = self.query_spill_directory()? {
+            (
+                true,
+                Some(scratch),
+                Some(
+                    policy
+                        .spill_max_bytes
+                        .unwrap_or(graphforge_storage::query_spill::DEFAULT_QUERY_SPILL_MAX_BYTES),
+                ),
+            )
+        } else {
+            (false, None, None)
+        };
+        Ok(graphforge_exec::SessionResourceConfig {
+            target_partitions: policy.target_partitions,
+            batch_size: policy.batch_size,
+            memory_budget_bytes: policy.memory_budget_bytes,
+            spill_enabled,
+            spill_directory,
+            spill_max_bytes,
+            io_concurrency: policy.io_concurrency,
+        })
+    }
+
+    /// Session resources for a plan that is rendered, never executed
+    /// (EXPLAIN): the same knobs with no spill, so planning never acquires
+    /// scratch it cannot use.
+    pub(super) fn planning_resource_config(&self) -> graphforge_exec::SessionResourceConfig {
+        let policy = &self.resource_policy;
         graphforge_exec::SessionResourceConfig {
-            target_partitions: self.resource_policy.target_partitions,
-            batch_size: self.resource_policy.batch_size,
-            memory_budget_bytes: self.resource_policy.memory_budget_bytes,
-            spill_enabled: self.resource_policy.spill_enabled,
-            spill_directory: self.resource_policy.spill_directory.clone(),
-            spill_max_bytes: self.resource_policy.spill_max_bytes,
-            io_concurrency: self.resource_policy.io_concurrency,
+            target_partitions: policy.target_partitions,
+            batch_size: policy.batch_size,
+            memory_budget_bytes: policy.memory_budget_bytes,
+            spill_enabled: false,
+            spill_directory: None,
+            spill_max_bytes: None,
+            io_concurrency: policy.io_concurrency,
         }
+    }
+
+    /// The project scratch directory for query spill, acquired on first use.
+    /// `None` unless this facade is a durable project, including read-only
+    /// views of one (checkpoints, inspection), which spill like any query.
+    fn query_spill_directory(&self) -> Result<Option<std::path::PathBuf>, GfError> {
+        let Some(project) = &self.path else {
+            return Ok(None);
+        };
+        if self.lifecycle_mode
+            != graphforge_storage::filesystem_admission::ProjectLifecycleMode::Durable
+        {
+            return Ok(None);
+        }
+        let mut slot = self
+            .query_spill
+            .lock()
+            .map_err(|_| GfError::Storage("query spill directory lock poisoned".into()))?;
+        if slot.is_none() {
+            *slot = Some(graphforge_storage::query_spill::QuerySpillDirectory::acquire(project)?);
+        }
+        Ok(slot.as_ref().map(|scratch| scratch.path().to_path_buf()))
     }
 
     pub(super) fn admit_heavy_query(&self) -> Result<tokio::sync::SemaphorePermit<'_>, GfError> {
@@ -179,3 +244,6 @@ pub(super) fn build_runtime(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod spill_tests;

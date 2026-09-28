@@ -25,15 +25,33 @@ pub enum ResourcePolicyMode {
 }
 
 /// Fail-closed spill configuration.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+///
+/// The default (#1595) is `enabled` with no `directory`: a durable project's
+/// queries spill into its own scratch directory
+/// (`graphforge_storage::query_spill`), capped at `max_bytes` or
+/// `DEFAULT_QUERY_SPILL_MAX_BYTES` per query, and an in-memory instance does
+/// not spill at all. `enabled: false` never spills: a query over its memory
+/// budget fails with a resource error.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SpillPolicy {
-    /// When false, DataFusion must not spill to disk.
+    /// When false, queries never spill to disk.
     pub enabled: bool,
-    /// Optional spill directory. Relative paths are rejected; must be absolute
-    /// when enabled. Symlinks and non-directories fail closed at normalize time.
+    /// Optional spill directory. Relative paths are rejected. Symlinks and
+    /// non-directories fail closed at normalize time. `None` with `enabled`
+    /// selects the project scratch directory.
     pub directory: Option<PathBuf>,
-    /// Optional upper bound on temporary spill bytes.
+    /// Optional upper bound on one query's temporary spill bytes.
     pub max_bytes: Option<u64>,
+}
+
+impl Default for SpillPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            directory: None,
+            max_bytes: None,
+        }
+    }
 }
 
 /// Requested (pre-normalization) execution resource policy.
@@ -109,7 +127,8 @@ pub struct NormalizedResourcePolicy {
     pub memory_budget_bytes: u64,
     /// Whether spill is enabled.
     pub spill_enabled: bool,
-    /// Absolute spill directory when spill is enabled.
+    /// Caller-configured absolute spill directory. `None` with spill enabled
+    /// selects the project scratch directory (#1595).
     pub spill_directory: Option<PathBuf>,
     /// Optional spill byte cap.
     pub spill_max_bytes: Option<u64>,
@@ -335,18 +354,20 @@ impl ExecutionResourcePolicy {
         }
 
         let (spill_enabled, spill_directory, spill_max_bytes) = if self.spill.enabled {
-            let Some(dir) = self.spill.directory.as_ref() else {
-                return Err(validation(
-                    "spill.directory is required when spill is enabled",
-                ));
-            };
-            let dir = validate_spill_directory(dir)?;
+            // No directory selects the project scratch directory (#1595),
+            // resolved when an instance opens.
+            let dir = self
+                .spill
+                .directory
+                .as_ref()
+                .map(|dir| validate_spill_directory(dir))
+                .transpose()?;
             if let Some(max) = self.spill.max_bytes
                 && max == 0
             {
                 return Err(validation("spill.max_bytes must be greater than zero"));
             }
-            (true, Some(dir), self.spill.max_bytes)
+            (true, dir, self.spill.max_bytes)
         } else {
             if self.spill.directory.is_some() || self.spill.max_bytes.is_some() {
                 return Err(validation(
@@ -538,7 +559,10 @@ mod tests {
         assert_eq!(normalized.io_concurrency, expected);
         assert_eq!(normalized.compute_threads, expected);
         assert_eq!(normalized.mode, ResourcePolicyMode::Automatic);
-        assert!(!normalized.spill_enabled);
+        // #1595: spill into the project scratch directory by default.
+        assert!(normalized.spill_enabled);
+        assert_eq!(normalized.spill_directory, None);
+        assert_eq!(normalized.spill_max_bytes, None);
         assert_eq!(normalized.batch_size, DEFAULT_BATCH_SIZE);
         assert_eq!(normalized.memory_budget_bytes, DEFAULT_MEMORY_BUDGET_BYTES);
         assert_eq!(
@@ -566,9 +590,12 @@ mod tests {
         assert!(matches!(err, GfError::Validation(_)));
     }
 
+    /// #1595: spill enabled with no directory selects the project scratch
+    /// directory, with the caller's cap; a zero cap and a cap or directory
+    /// without spill are still refused.
     #[test]
-    fn spill_without_directory_fails() {
-        let err = ExecutionResourcePolicy {
+    fn spill_without_directory_selects_project_scratch() {
+        let normalized = ExecutionResourcePolicy {
             spill: SpillPolicy {
                 enabled: true,
                 directory: None,
@@ -577,8 +604,30 @@ mod tests {
             ..ExecutionResourcePolicy::default()
         }
         .normalize()
-        .expect_err("spill needs directory");
-        assert!(matches!(err, GfError::Validation(_)));
+        .unwrap();
+        assert!(normalized.spill_enabled);
+        assert_eq!(normalized.spill_directory, None);
+        assert_eq!(normalized.spill_max_bytes, Some(1024));
+        for spill in [
+            SpillPolicy {
+                enabled: true,
+                directory: None,
+                max_bytes: Some(0),
+            },
+            SpillPolicy {
+                enabled: false,
+                directory: None,
+                max_bytes: Some(1024),
+            },
+        ] {
+            let err = ExecutionResourcePolicy {
+                spill,
+                ..ExecutionResourcePolicy::default()
+            }
+            .normalize()
+            .expect_err("invalid spill");
+            assert!(matches!(err, GfError::Validation(_)));
+        }
     }
 
     #[test]
