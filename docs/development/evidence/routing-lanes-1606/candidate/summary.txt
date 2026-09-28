@@ -1,0 +1,76 @@
+## A/B s18
+base r1: wall 23.72 s, cpu 29.94 s, cpu/wall 1.26, shaping 10.63 s (cpu/wall 1.24), peak 1054 MiB, cpu pressure 0.027 s
+base r2: wall 24.16 s, cpu 30.32 s, cpu/wall 1.26, shaping 10.55 s (cpu/wall 1.27), peak 1060 MiB, cpu pressure 0.031 s
+base r3: wall 23.56 s, cpu 30.03 s, cpu/wall 1.27, shaping 10.41 s (cpu/wall 1.26), peak 1037 MiB, cpu pressure 0.027 s
+cand r1: wall 22.07 s, cpu 30.34 s, cpu/wall 1.37, shaping 9.35 s (cpu/wall 1.44), peak 1061 MiB, cpu pressure 0.031 s
+cand r2: wall 21.88 s, cpu 30.25 s, cpu/wall 1.38, shaping 9.21 s (cpu/wall 1.45), peak 1066 MiB, cpu pressure 0.035 s
+cand r3: wall 22.13 s, cpu 30.21 s, cpu/wall 1.36, shaping 9.31 s (cpu/wall 1.44), peak 1048 MiB, cpu pressure 0.032 s
+median wall (accepted runs: base 3, cand 3): base 23.72 s, cand 22.07 s, change -6.9%
+per-pair cand - base (accepted pairs): r1 -1.65 s, r2 -2.28 s, r3 -1.43 s
+distinct answer sets: 1
+  nodes: rows=1 scalar=262144 sha256=3943ce07cba5fc8b1b779daf479b68f69c81d1b0427e0ac49c8433fe53b17e8f
+  node-scan: rows=262144 scalar=None sha256=a4759b63cc96a01e5b1abe2f53c249d26ca52026fe8f0b633c5a7a422ca3d1e8
+  edges: rows=1 scalar=4194304 sha256=2cb98d6493038230f3d574b16c2cbe283c07e43471b8764f6dfb59bea0aca486
+  edge-scan: rows=4194304 scalar=None sha256=82a56ff970f9e64bf6a565e4e21e4dca20b436f40f312fcfab2c9152a82f4be6
+## A/B s20
+base r1: wall 83.81 s, cpu 121.09 s, cpu/wall 1.44, shaping 36.20 s (cpu/wall 1.48), peak 2882 MiB, cpu pressure 0.118 s
+base r2: wall 83.89 s, cpu 121.34 s, cpu/wall 1.45, shaping 36.43 s (cpu/wall 1.47), peak 2908 MiB, cpu pressure 0.118 s
+base r3: wall 82.32 s, cpu 120.61 s, cpu/wall 1.47, shaping 35.35 s (cpu/wall 1.50), peak 2902 MiB, cpu pressure 0.119 s
+cand r1: wall 80.77 s, cpu 122.05 s, cpu/wall 1.51, shaping 31.89 s (cpu/wall 1.70), peak 2914 MiB, cpu pressure 0.115 s
+cand r2: wall 78.17 s, cpu 121.22 s, cpu/wall 1.55, shaping 31.55 s (cpu/wall 1.71), peak 2948 MiB, cpu pressure 0.111 s
+cand r3: wall 78.27 s, cpu 120.86 s, cpu/wall 1.54, shaping 31.80 s (cpu/wall 1.70), peak 2950 MiB, cpu pressure 0.125 s
+median wall (accepted runs: base 3, cand 3): base 83.81 s, cand 78.27 s, change -6.6%
+per-pair cand - base (accepted pairs): r1 -3.04 s, r2 -5.72 s, r3 -4.05 s
+distinct answer sets: 1
+  nodes: rows=1 scalar=1048576 sha256=d41814e11f492a8c36191b100c805a370de2b4bdbe6ca88c7eef41360ef53066
+  node-scan: rows=1048576 scalar=None sha256=a6e97315aeea1abea378e7252ab2be425422c67ca660ad9f3f8f6879a23aabdf
+  edges: rows=1 scalar=16777216 sha256=3daeda0e54a362622ffdc547a631479e3f18cd0f7fa1b28c3b1fce9b7e88a150
+  edge-scan: rows=16777216 scalar=None sha256=9682f98ce5f867f958fafa61405f5915b8ce2a010efe68afbaa9f58a9e37f97a
+
+## Staged routing, S18, 8 usable cores
+run 1: route inclusive wall=3.278s CPU=3.900s CPU/wall=1.1897; residual wall=2.957s CPU=3.640s
+run 2: route inclusive wall=3.193s CPU=3.920s CPU/wall=1.2277; residual wall=2.874s CPU=3.730s
+run 3: route inclusive wall=3.093s CPU=3.880s CPU/wall=1.2544; residual wall=2.771s CPU=3.650s
+Median routing CPU/wall: 1.2277 (required >= 2.0)
+Median routing inclusive wall/CPU: 3.193s / 3.900s
+
+## All-run host pressure and memory
+ab-s18-r1-base: wall=23.72s cpu=29.94s cpu-pressure=0.027s io-pressure=1.732s peak=1054MiB shape-I/O read=2815113093B/5570 calls write=1776290126B/49231 calls cache-release=7756 cache-window=268435456B
+ab-s18-r1-cand: wall=22.07s cpu=30.34s cpu-pressure=0.031s io-pressure=1.904s peak=1061MiB shape-I/O read=2815113093B/5570 calls write=1776290126B/49231 calls cache-release=7756 cache-window=268435456B
+ab-s18-r2-base: wall=24.16s cpu=30.32s cpu-pressure=0.031s io-pressure=1.826s peak=1060MiB shape-I/O read=2815113093B/5570 calls write=1776290126B/49231 calls cache-release=7756 cache-window=268435456B
+ab-s18-r2-cand: wall=21.88s cpu=30.25s cpu-pressure=0.035s io-pressure=1.853s peak=1066MiB shape-I/O read=2815113093B/5570 calls write=1776290126B/49231 calls cache-release=7756 cache-window=268435456B
+ab-s18-r3-base: wall=23.56s cpu=30.03s cpu-pressure=0.027s io-pressure=1.855s peak=1037MiB shape-I/O read=2815113093B/5570 calls write=1776290126B/49231 calls cache-release=7756 cache-window=268435456B
+ab-s18-r3-cand: wall=22.13s cpu=30.21s cpu-pressure=0.032s io-pressure=1.888s peak=1048MiB shape-I/O read=2815113093B/5570 calls write=1776290126B/49231 calls cache-release=7756 cache-window=268435456B
+ab-s20-r1-base: wall=83.81s cpu=121.09s cpu-pressure=0.118s io-pressure=3.846s peak=2882MiB shape-I/O read=11258350664B/21739 calls write=7105153358B/198074 calls cache-release=31484 cache-window=694506837B
+ab-s20-r1-cand: wall=80.77s cpu=122.05s cpu-pressure=0.115s io-pressure=3.675s peak=2914MiB shape-I/O read=11258350664B/21739 calls write=7105153358B/198074 calls cache-release=31484 cache-window=694506837B
+ab-s20-r2-base: wall=83.89s cpu=121.34s cpu-pressure=0.118s io-pressure=4.157s peak=2908MiB shape-I/O read=11258350664B/21739 calls write=7105153358B/198074 calls cache-release=31484 cache-window=694506837B
+ab-s20-r2-cand: wall=78.17s cpu=121.22s cpu-pressure=0.111s io-pressure=3.290s peak=2948MiB shape-I/O read=11258350664B/21739 calls write=7105153358B/198074 calls cache-release=31484 cache-window=694506837B
+ab-s20-r3-base: wall=82.32s cpu=120.61s cpu-pressure=0.119s io-pressure=3.329s peak=2902MiB shape-I/O read=11258350664B/21739 calls write=7105153358B/198074 calls cache-release=31484 cache-window=694506837B
+ab-s20-r3-cand: wall=78.27s cpu=120.86s cpu-pressure=0.125s io-pressure=3.512s peak=2950MiB shape-I/O read=11258350664B/21739 calls write=7105153358B/198074 calls cache-release=31484 cache-window=694506837B
+curve-s18-c1-r1: wall=31.32s cpu=26.46s cpu-pressure=2.263s io-pressure=2.871s peak=764MiB shape-I/O read=2815113093B/5570 calls write=1776290126B/49231 calls cache-release=7756 cache-window=268435456B
+curve-s18-c1-r2: wall=31.42s cpu=26.58s cpu-pressure=2.236s io-pressure=2.884s peak=760MiB shape-I/O read=2815113093B/5570 calls write=1776290126B/49231 calls cache-release=7756 cache-window=268435456B
+curve-s18-c1-r3: wall=31.14s cpu=26.26s cpu-pressure=2.245s io-pressure=2.967s peak=787MiB shape-I/O read=2815113093B/5570 calls write=1776290126B/49231 calls cache-release=7756 cache-window=268435456B
+curve-s18-c16-r1: wall=19.85s cpu=30.50s cpu-pressure=0.029s io-pressure=0.780s peak=1053MiB shape-I/O read=2815113093B/5570 calls write=1776290126B/49231 calls cache-release=7756 cache-window=268435456B
+curve-s18-c2-r1: wall=32.11s cpu=27.70s cpu-pressure=0.076s io-pressure=1.788s peak=776MiB shape-I/O read=2815113093B/5570 calls write=1776290126B/49231 calls cache-release=7756 cache-window=268435456B
+curve-s18-c4-r1: wall=33.06s cpu=28.70s cpu-pressure=0.058s io-pressure=1.255s peak=811MiB shape-I/O read=2815113093B/5570 calls write=1776290126B/49231 calls cache-release=7756 cache-window=268435456B
+curve-s18-c8-r1: wall=24.12s cpu=29.73s cpu-pressure=0.055s io-pressure=2.579s peak=986MiB shape-I/O read=2815113093B/5570 calls write=1776290126B/49231 calls cache-release=7756 cache-window=268435456B
+curve-s18-c8-r2: wall=23.79s cpu=29.66s cpu-pressure=0.060s io-pressure=2.299s peak=964MiB shape-I/O read=2815113093B/5570 calls write=1776290126B/49231 calls cache-release=7756 cache-window=268435456B
+curve-s18-c8-r3: wall=23.87s cpu=29.78s cpu-pressure=0.055s io-pressure=2.460s peak=957MiB shape-I/O read=2815113093B/5570 calls write=1776290126B/49231 calls cache-release=7756 cache-window=268435456B
+4,000 MiB memory limit: PASS (observed maximum 2950 MiB)
+
+## Whole-ingest adoption gate
+S18: baseline median=23.72s, candidate median=22.07s, median wall improvement=+6.9%; per-pair improvements={'r3': 0.060669755556950755, 'r2': 0.09446553062453233, 'r1': 0.069391452419852}
+S18 ideal ceiling if routing vanished: 1.216x (route/ingest fractions=[0.18308261560563832, 0.16867956054554376, 0.17739111572312524])
+S20: baseline median=83.81s, candidate median=78.27s, median wall improvement=+6.6%; per-pair improvements={'r1': 0.03625642357167691, 'r3': 0.049185275584537225, 'r2': 0.06815417610380814}
+S20 ideal ceiling if routing vanished: 1.199x (route/ingest fractions=[0.16569782224443722, 0.1661290338795143, 0.16067529291808705])
+route CPU/wall gate: FAIL
+S18 and S20 ingest wall gates: FAIL
+query counts and full-scan digests: PASS
+adoption: NO-GO
+## Candidate core-count curve, S18
+ 1 cores (3 runs): wall 31.32 s [31.32, 31.42, 31.14], cpu 26.46 s, effective cores 0.84, relative throughput 1.00, cpu pressure 2.25 s, io pressure 2.88 s, peak 787 MiB
+ 2 cores (1 runs): wall 32.11 s [32.11], cpu 27.70 s, effective cores 0.86, relative throughput 0.98, cpu pressure 0.08 s, io pressure 1.79 s, peak 776 MiB
+ 4 cores (1 runs): wall 33.06 s [33.06], cpu 28.70 s, effective cores 0.87, relative throughput 0.95, cpu pressure 0.06 s, io pressure 1.25 s, peak 811 MiB
+ 8 cores (3 runs): wall 23.87 s [24.12, 23.79, 23.87], cpu 29.73 s, effective cores 1.25, relative throughput 1.31, cpu pressure 0.05 s, io pressure 2.46 s, peak 986 MiB
+   criterion: throughput 1.31x (need >= 2.0), effective cores 1.25 (need >= 2.0)
+16 cores (1 runs): wall 19.85 s [19.85], cpu 30.50 s, effective cores 1.54, relative throughput 1.58, cpu pressure 0.03 s, io pressure 0.78 s, peak 1053 MiB
