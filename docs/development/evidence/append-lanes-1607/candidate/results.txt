@@ -1,0 +1,72 @@
+## Post-routing A/B
+### S18
+ab-s18-r1-base: wall=20.94s CPU=30.14s CPU/wall=1.44 peak=1068MiB CPU-pressure=0.03s IO-pressure=0.99s
+  append inclusive=4.266s/3.750s CPU (0.88 CPU/wall); residual=0.122s/0.070s
+    append_input_digest: inclusive=0.186s/0.250s CPU
+    append_fixed_run_preparation: inclusive=1.091s/1.070s CPU
+    append_arrow_preparation: inclusive=0.096s/0.110s CPU
+    append_durable: inclusive=2.753s/2.240s CPU
+ab-s18-r1-cand: wall=20.87s CPU=30.34s CPU/wall=1.45 peak=1067MiB CPU-pressure=0.03s IO-pressure=0.82s
+  append inclusive=4.006s/3.770s CPU (0.94 CPU/wall); residual=0.069s/0.050s
+    append_preparation: inclusive=1.171s/1.450s CPU
+    append_durable: inclusive=2.765s/2.270s CPU
+ab-s18-r2-base: wall=21.68s CPU=30.43s CPU/wall=1.40 peak=1066MiB CPU-pressure=0.03s IO-pressure=1.47s
+  append inclusive=4.075s/3.650s CPU (0.90 CPU/wall); residual=0.116s/0.120s
+    append_input_digest: inclusive=0.176s/0.170s CPU
+    append_fixed_run_preparation: inclusive=1.038s/1.030s CPU
+    append_arrow_preparation: inclusive=0.090s/0.100s CPU
+    append_durable: inclusive=2.637s/2.210s CPU
+ab-s18-r2-cand: wall=21.37s CPU=31.14s CPU/wall=1.46 peak=1049MiB CPU-pressure=0.03s IO-pressure=0.95s
+  append inclusive=4.010s/3.720s CPU (0.93 CPU/wall); residual=0.069s/0.120s
+    append_preparation: inclusive=1.169s/1.430s CPU
+    append_durable: inclusive=2.772s/2.170s CPU
+ab-s18-r3-base: wall=21.46s CPU=30.56s CPU/wall=1.42 peak=1019MiB CPU-pressure=0.03s IO-pressure=0.99s
+  append inclusive=4.252s/3.750s CPU (0.88 CPU/wall); residual=0.123s/0.130s
+    append_input_digest: inclusive=0.189s/0.170s CPU
+    append_fixed_run_preparation: inclusive=1.080s/1.040s CPU
+    append_arrow_preparation: inclusive=0.096s/0.110s CPU
+    append_durable: inclusive=2.746s/2.290s CPU
+ab-s18-r3-cand: wall=20.83s CPU=30.66s CPU/wall=1.47 peak=1060MiB CPU-pressure=0.03s IO-pressure=0.86s
+  append inclusive=4.004s/3.770s CPU (0.94 CPU/wall); residual=0.070s/0.060s
+    append_preparation: inclusive=1.166s/1.420s CPU
+    append_durable: inclusive=2.768s/2.290s CPU
+S18 medians: base=21.46s candidate=20.87s wall improvement=2.8% (gate >=10%)
+### S20
+ab-s20-r1-base: wall=86.49s CPU=120.86s CPU/wall=1.40 peak=2894MiB CPU-pressure=0.12s IO-pressure=5.48s
+  append inclusive=16.791s/14.820s CPU (0.88 CPU/wall); residual=0.475s/0.360s
+    append_input_digest: inclusive=0.734s/0.840s CPU
+    append_fixed_run_preparation: inclusive=4.195s/4.150s CPU
+    append_arrow_preparation: inclusive=0.373s/0.390s CPU
+    append_durable: inclusive=10.941s/9.030s CPU
+ab-s20-r1-cand: wall=85.18s CPU=122.51s CPU/wall=1.44 peak=2911MiB CPU-pressure=0.13s IO-pressure=5.32s
+  append inclusive=16.023s/15.110s CPU (0.94 CPU/wall); residual=0.266s/0.290s
+    append_preparation: inclusive=4.612s/5.610s CPU
+    append_durable: inclusive=11.145s/9.210s CPU
+ab-s20-r2-base: wall=86.80s CPU=121.41s CPU/wall=1.40 peak=2933MiB CPU-pressure=0.12s IO-pressure=5.05s
+  append inclusive=16.772s/14.710s CPU (0.88 CPU/wall); residual=0.476s/0.340s
+    append_input_digest: inclusive=0.744s/0.630s CPU
+    append_fixed_run_preparation: inclusive=4.144s/4.290s CPU
+    append_arrow_preparation: inclusive=0.366s/0.370s CPU
+    append_durable: inclusive=10.969s/9.050s CPU
+ab-s20-r2-cand: wall=85.84s CPU=121.74s CPU/wall=1.42 peak=2933MiB CPU-pressure=0.12s IO-pressure=4.64s
+  append inclusive=16.036s/15.120s CPU (0.94 CPU/wall); residual=0.266s/0.230s
+    append_preparation: inclusive=4.618s/5.710s CPU
+    append_durable: inclusive=11.152s/9.180s CPU
+ab-s20-r3-base: wall=85.92s CPU=120.61s CPU/wall=1.40 peak=2970MiB CPU-pressure=0.12s IO-pressure=5.03s
+  append inclusive=16.605s/14.670s CPU (0.88 CPU/wall); residual=0.471s/0.480s
+    append_input_digest: inclusive=0.735s/0.820s CPU
+    append_fixed_run_preparation: inclusive=4.103s/3.890s CPU
+    append_arrow_preparation: inclusive=0.369s/0.510s CPU
+    append_durable: inclusive=10.856s/8.960s CPU
+ab-s20-r3-cand: wall=85.93s CPU=122.39s CPU/wall=1.42 peak=2928MiB CPU-pressure=0.14s IO-pressure=6.22s
+  append inclusive=16.030s/15.200s CPU (0.95 CPU/wall); residual=0.264s/0.320s
+    append_preparation: inclusive=4.628s/5.650s CPU
+    append_durable: inclusive=11.138s/9.230s CPU
+S20 medians: base=86.49s candidate=85.84s wall improvement=0.8% (gate >=10%)
+## Candidate S18 core curve
+1 CPUs (3 runs): wall=32.48s CPU=26.51s CPU/wall=0.82 throughput=1.00x
+2 CPUs (1 runs): wall=33.70s CPU=27.87s CPU/wall=0.83 throughput=0.96x
+4 CPUs (1 runs): wall=34.57s CPU=29.18s CPU/wall=0.84 throughput=0.94x
+8 CPUs (3 runs): wall=22.85s CPU=30.35s CPU/wall=1.33 throughput=1.42x
+  append CPU/wall=[0.9260272434636396, 0.844152928957694, 0.9430364382908023]; median=0.926 (gate >=2.0)
+16 CPUs (1 runs): wall=21.52s CPU=30.41s CPU/wall=1.41 throughput=1.51x

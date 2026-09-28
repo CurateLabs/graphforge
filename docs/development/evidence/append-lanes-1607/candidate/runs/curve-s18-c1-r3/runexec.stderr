@@ -1,0 +1,2 @@
+2026-09-28 04:34:47,811 - INFO - Starting command bash /home/ubuntu/gf-1607/docs/development/evidence/core-scaling-1448/ingest-one.sh /home/ubuntu/gf-1607-artifacts/gf-candidate docs/development/evidence/append-lanes-1607/candidate/tmp/project-curve-s18-c1-r3 /home/ubuntu/gf-1448-evidence/inputs/s18 docs/development/evidence/append-lanes-1607/candidate/runs/curve-s18-c1-r3
+2026-09-28 04:34:47,811 - INFO - Writing output to docs/development/evidence/append-lanes-1607/candidate/runs/curve-s18-c1-r3/ingest.log

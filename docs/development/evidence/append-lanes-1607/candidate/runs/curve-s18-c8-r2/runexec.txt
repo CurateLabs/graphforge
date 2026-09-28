@@ -1,0 +1,10 @@
+starttime=2026-09-28T03:46:26.505209+00:00
+returnvalue=0
+walltime=24.233725377125666s
+cputime=31.817317s
+memory=1044086784B
+blkio-read=10846920704B
+blkio-write=9824821248B
+pressure-cpu-some=0.07323s
+pressure-io-some=1.479453s
+pressure-memory-some=0s
