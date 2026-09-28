@@ -599,6 +599,10 @@ pub struct GraphForge {
     /// Instance-wide limit on parallel construction lanes (#1586, ADR 0047):
     /// `compute_threads - construction_cpu_reserve`, shared by every import.
     construction_cpu_admission: Arc<graphforge_storage::ConstructionCpuAdmission>,
+    /// This instance's project scratch directory for query spill, acquired on
+    /// the first query that may spill and released when the last facade
+    /// sharing it drops (#1595).
+    query_spill: Arc<Mutex<Option<graphforge_storage::query_spill::QuerySpillDirectory>>>,
     /// Ensures mutation bursts share one bounded process-local driver thread.
     provider_refresh_driver_active: Arc<AtomicBool>,
     /// Runtime-only provider recipes capable of refreshing exact lineages.
@@ -789,6 +793,7 @@ impl GraphForge {
                 resource_policy.compute_threads,
             )?),
             construction_cpu_admission: resource_policy.construction_cpu_admission(),
+            query_spill: Arc::new(Mutex::new(None)),
             provider_refresh_driver_active: Arc::new(AtomicBool::new(false)),
             provider_refresh_runtimes: Arc::new(Mutex::new(Vec::new())),
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
@@ -1023,6 +1028,7 @@ impl GraphForge {
             compute_pool,
             heavy_query_admission,
             construction_cpu_admission,
+            query_spill: Arc::new(Mutex::new(None)),
             provider_refresh_driver_active: Arc::new(AtomicBool::new(false)),
             provider_refresh_runtimes: Arc::new(Mutex::new(Vec::new())),
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),

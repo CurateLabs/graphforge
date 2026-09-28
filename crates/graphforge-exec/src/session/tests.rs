@@ -742,6 +742,128 @@ async fn order_by_spills_when_input_exceeds_query_memory_budget() {
     }
 }
 
+/// #1595: with spill disabled, a sort over the budget fails with a resource
+/// error. It must not fall back to DataFusion's default disk manager, which
+/// spills into the OS temporary directory without any limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn disabled_spill_refuses_instead_of_spilling_to_the_os_temp_directory() {
+    use datafusion::datasource::MemTable;
+
+    const ROWS: usize = 2_500_000;
+    let dir = TempDir::new().unwrap();
+    let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
+    let resources = SessionResourceConfig {
+        target_partitions: 1,
+        memory_budget_bytes: 128 * 1024 * 1024,
+        spill_enabled: false,
+        ..SessionResourceConfig::default()
+    };
+    let session = ExecutionSession::build(
+        catalog,
+        None,
+        PathBuf::new(),
+        OntologyMode::Exploratory,
+        None,
+        OrdinalIdentityConfig::default(),
+        &resources,
+    );
+    assert!(
+        !session.ctx.runtime_env().disk_manager.tmp_files_enabled(),
+        "a disabled spill policy must disable the disk manager"
+    );
+    let batches = uuid_pair_batches(ROWS, resources.batch_size);
+    let table = MemTable::try_new(batches[0].schema(), vec![batches]).unwrap();
+    session.ctx.register_table("t", Arc::new(table)).unwrap();
+    let plan = session
+        .ctx
+        .sql("SELECT s, d FROM t ORDER BY s, d")
+        .await
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
+    let error = datafusion::physical_plan::collect(Arc::clone(&plan), session.ctx.task_ctx())
+        .await
+        .expect_err("a sort over the budget cannot complete without spill")
+        .to_string();
+    assert!(error.contains("Resources exhausted"), "{error}");
+    assert_eq!(sort_spill_count(&plan), 0);
+}
+
+/// #1595: the spill cap bounds what one query may write to its spill
+/// directory. A sort that needs more fails instead of growing past it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_spill_cap_bounds_one_query() {
+    use datafusion::datasource::MemTable;
+
+    const ROWS: usize = 2_500_000;
+    let spill = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
+    let resources = SessionResourceConfig {
+        target_partitions: 1,
+        memory_budget_bytes: 128 * 1024 * 1024,
+        spill_enabled: true,
+        spill_directory: Some(spill.path().to_path_buf()),
+        spill_max_bytes: Some(4096),
+        ..SessionResourceConfig::default()
+    };
+    let session = ExecutionSession::build(
+        catalog,
+        None,
+        PathBuf::new(),
+        OntologyMode::Exploratory,
+        None,
+        OrdinalIdentityConfig::default(),
+        &resources,
+    );
+    let batches = uuid_pair_batches(ROWS, resources.batch_size);
+    let table = MemTable::try_new(batches[0].schema(), vec![batches]).unwrap();
+    session.ctx.register_table("t", Arc::new(table)).unwrap();
+    let plan = session
+        .ctx
+        .sql("SELECT s, d FROM t ORDER BY s, d")
+        .await
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
+    let error = datafusion::physical_plan::collect(Arc::clone(&plan), session.ctx.task_ctx())
+        .await
+        .expect_err("the sort needs more spill than the cap allows")
+        .to_string();
+    assert!(error.contains("exceeded"), "{error}");
+}
+
+/// #1595: spill enabled without a directory has nowhere to go and is refused
+/// when the session is built.
+#[test]
+fn enabled_spill_without_a_directory_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
+    let resources = SessionResourceConfig {
+        spill_enabled: true,
+        spill_directory: None,
+        ..SessionResourceConfig::default()
+    };
+    let error = ExecutionSession::new_with_target_provider_resources_and_identity(
+        catalog,
+        None,
+        dir.path().to_path_buf(),
+        OntologyMode::Exploratory,
+        Arc::new(PersistentAdjacencyProvider::new(
+            dir.path().to_path_buf(),
+            OntologyMode::Exploratory,
+        )),
+        None,
+        &resources,
+    )
+    .err()
+    .expect("spill without a directory must be refused")
+    .to_string();
+    assert!(error.contains("without a spill directory"), "{error}");
+}
+
 /// Every full sort a Cypher query plans gets coalesced input runs; top-k sorts
 /// (`LIMIT`) do not, because they never spill and the ordered fast paths match
 /// their shape.

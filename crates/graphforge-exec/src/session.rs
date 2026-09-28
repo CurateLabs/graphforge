@@ -565,6 +565,11 @@ impl ExecutionSession {
         ordinal_identities: Option<Arc<V4OrdinalIdentityResolver>>,
         resources: &SessionResourceConfig,
     ) -> Result<Self, GfError> {
+        if resources.spill_enabled && resources.spill_directory.is_none() {
+            return Err(GfError::Validation(
+                "query spill is enabled without a spill directory".into(),
+            ));
+        }
         let identity = match ordinal_identities {
             Some(resolver) => {
                 let pin = resolver.pin()?;
@@ -667,14 +672,20 @@ impl ExecutionSession {
         let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
         let mut runtime_builder = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
             .with_memory_limit(memory_budget, 1.0);
-        if resources.spill_enabled
-            && let Some(dir) = &resources.spill_directory
-        {
+        // #1595: spill goes only where the policy says. Disabled means no
+        // disk manager at all, not DataFusion's default of the OS temporary
+        // directory, which is unbounded and RAM-backed on some hosts.
+        if let (true, Some(dir)) = (resources.spill_enabled, &resources.spill_directory) {
             let _ = std::fs::create_dir_all(dir);
             runtime_builder = runtime_builder.with_temp_file_path(dir.clone());
             if let Some(max) = resources.spill_max_bytes {
                 runtime_builder = runtime_builder.with_max_temp_directory_size(max);
             }
+        } else {
+            runtime_builder = runtime_builder.with_disk_manager_builder(
+                datafusion::execution::disk_manager::DiskManagerBuilder::default()
+                    .with_mode(datafusion::execution::disk_manager::DiskManagerMode::Disabled),
+            );
         }
         let runtime_env = Arc::new(
             runtime_builder

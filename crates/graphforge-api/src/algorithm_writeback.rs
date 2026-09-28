@@ -97,7 +97,7 @@ impl GraphForge {
                 self.ontology_mode,
                 self.adjacency_provider_for_session(),
                 Some(std::sync::Arc::clone(&self.ordinal_identities)),
-                &self.session_resource_config(),
+                &self.session_resource_config()?,
             )?;
         let session = if self.read_only {
             session.restrict_to_reads()
