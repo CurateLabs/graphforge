@@ -139,6 +139,8 @@ fn claim_lock(root: &Path) -> Result<Option<(String, PathBuf, File)>, GfError> {
         .create_new(true)
         .open(&temporary)
         .map_err(storage)?;
+    #[cfg(test)]
+    tests::between_create_and_lock(root, &temporary);
     if !try_lock_exclusive(&lock).map_err(storage)? {
         return Ok(None);
     }

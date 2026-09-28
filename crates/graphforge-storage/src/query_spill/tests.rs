@@ -1,4 +1,33 @@
 use super::*;
+use std::cell::{Cell, RefCell};
+
+thread_local! {
+    /// What another process does, in a test, between an owner creating its
+    /// temporary lock file and locking it.
+    static INTERLEAVE: Cell<Option<Interleave>> = const { Cell::new(None) };
+    /// Locks the simulated other process holds.
+    static HELD: RefCell<Vec<File>> = const { RefCell::new(Vec::new()) };
+}
+
+#[derive(Clone, Copy)]
+enum Interleave {
+    /// Reclaim the unheld temporary, as an opener's reclamation would.
+    Reclaim,
+    /// Lock the temporary first and keep holding it.
+    Hold,
+}
+
+pub(super) fn between_create_and_lock(root: &Path, temporary: &Path) {
+    match INTERLEAVE.with(Cell::take) {
+        Some(Interleave::Reclaim) => reclaim_abandoned(root),
+        Some(Interleave::Hold) => {
+            let other = File::open(temporary).unwrap();
+            assert!(try_lock_exclusive(&other).unwrap());
+            HELD.with(|held| held.borrow_mut().push(other));
+        }
+        None => {}
+    }
+}
 
 fn entries(root: &Path) -> Vec<String> {
     let mut names = std::fs::read_dir(root)
@@ -147,4 +176,77 @@ fn a_published_lock_is_already_held() {
         "the owner does not hold its lock"
     );
     assert!(!root.join(format!("{token}.lock.new")).exists());
+}
+
+/// Concurrent acquirers of one project: every acquisition succeeds and no
+/// instance's scratch disappears while it is held. A smoke test only: the race
+/// windows are too narrow to hit reliably here, so the two interleaving tests
+/// above are what prove a raced claim is retried.
+#[test]
+fn concurrent_acquisitions_never_fail_or_reclaim_a_live_instance() {
+    let project = tempfile::TempDir::new().unwrap();
+    std::thread::scope(|scope| {
+        for _ in 0..16 {
+            scope.spawn(|| {
+                for _ in 0..50 {
+                    let scratch = QuerySpillDirectory::acquire(project.path())
+                        .expect("a concurrent acquisition failed");
+                    std::fs::write(scratch.path().join("spill-0"), b"rows")
+                        .expect("a live instance's scratch was reclaimed");
+                    assert!(scratch.path().join("spill-0").is_file());
+                }
+            });
+        }
+    });
+    assert!(entries(&project.path().join(QUERY_SPILL_DIR)).is_empty());
+}
+
+/// Another process reclaims an owner's temporary lock file between its
+/// creation and its lock: the owner must notice and claim a fresh one, and
+/// end up with a published lock it holds.
+#[test]
+fn a_claim_reclaimed_before_its_lock_is_retried() {
+    let project = tempfile::TempDir::new().unwrap();
+    INTERLEAVE.with(|step| step.set(Some(Interleave::Reclaim)));
+    let scratch = QuerySpillDirectory::acquire(project.path()).expect("the claim is retried");
+    let root = project.path().join(QUERY_SPILL_DIR);
+    let token = scratch
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let lock = File::open(root.join(format!("{token}.lock"))).unwrap();
+    assert!(
+        !try_lock_exclusive(&lock).unwrap(),
+        "the published lock is not held"
+    );
+    let entries = entries(&root);
+    assert_eq!(
+        entries,
+        vec![token.clone(), format!("{token}.lock")],
+        "{entries:?}"
+    );
+}
+
+/// Another process locks an owner's temporary lock file first: the owner
+/// must claim a fresh one rather than fail the query.
+#[test]
+fn a_claim_whose_lock_is_taken_is_retried() {
+    let project = tempfile::TempDir::new().unwrap();
+    INTERLEAVE.with(|step| step.set(Some(Interleave::Hold)));
+    let scratch = QuerySpillDirectory::acquire(project.path()).expect("the claim is retried");
+    let root = project.path().join(QUERY_SPILL_DIR);
+    let token = scratch
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let lock = File::open(root.join(format!("{token}.lock"))).unwrap();
+    assert!(
+        !try_lock_exclusive(&lock).unwrap(),
+        "the published lock is not held"
+    );
+    HELD.with(|held| held.borrow_mut().clear());
 }
