@@ -1,0 +1,2 @@
+2026-09-28 22:41:07,437 - INFO - Starting command bash docs/development/evidence/core-scaling-1448/ingest-one.sh /home/ubuntu/gf1448-final-target/release/gf /home/ubuntu/gf-1448/docs/development/evidence/core-scaling-1448/final-integrated-s22/project /home/ubuntu/gf-1448-evidence/inputs/s22 docs/development/evidence/core-scaling-1448/final-integrated-s22/run
+2026-09-28 22:41:07,437 - INFO - Writing output to docs/development/evidence/core-scaling-1448/final-integrated-s22/run/ingest.log
