@@ -71,15 +71,31 @@ impl GraphForge {
         })
     }
 
+    /// Session resources for a plan that is rendered, never executed
+    /// (EXPLAIN): the same knobs with no spill, so planning never acquires
+    /// scratch it cannot use.
+    pub(super) fn planning_resource_config(&self) -> graphforge_exec::SessionResourceConfig {
+        let policy = &self.resource_policy;
+        graphforge_exec::SessionResourceConfig {
+            target_partitions: policy.target_partitions,
+            batch_size: policy.batch_size,
+            memory_budget_bytes: policy.memory_budget_bytes,
+            spill_enabled: false,
+            spill_directory: None,
+            spill_max_bytes: None,
+            io_concurrency: policy.io_concurrency,
+        }
+    }
+
     /// The project scratch directory for query spill, acquired on first use.
-    /// `None` unless this facade is a writable durable project.
+    /// `None` unless this facade is a durable project, including read-only
+    /// views of one (checkpoints, inspection), which spill like any query.
     fn query_spill_directory(&self) -> Result<Option<std::path::PathBuf>, GfError> {
         let Some(project) = &self.path else {
             return Ok(None);
         };
-        if self.read_only
-            || self.lifecycle_mode
-                != graphforge_storage::filesystem_admission::ProjectLifecycleMode::Durable
+        if self.lifecycle_mode
+            != graphforge_storage::filesystem_admission::ProjectLifecycleMode::Durable
         {
             return Ok(None);
         }

@@ -173,3 +173,45 @@ fn two_instances_of_one_project_do_not_share_scratch() {
     );
     assert!(!second_dir.exists());
 }
+
+/// A read-only view of a durable project (here a checkpoint view) spills like
+/// any other query of that project: it acquires its own scratch.
+#[test]
+fn a_checkpoint_view_of_a_durable_project_gets_scratch() {
+    let project = tempfile::tempdir().unwrap();
+    let graph = GraphForge::new_with_options(
+        Some(project.path().to_str().unwrap()),
+        options(SpillPolicy::default()),
+    )
+    .unwrap();
+    graph.execute("CREATE (:Row {v: 1})").unwrap();
+    graph
+        .checkpoint(crate::CheckpointRequest {
+            name: "Spill".into(),
+            description: None,
+            idempotency_key: crate::OperationId(uuid::Uuid::from_u128(1595)),
+            actor_uuid: None,
+        })
+        .unwrap();
+    let before = scratch_entries(project.path());
+    let view = graph.open_checkpoint("Spill").unwrap();
+    view.execute("MATCH (n:Row) RETURN n.v AS v ORDER BY v")
+        .unwrap();
+    let during = scratch_entries(project.path());
+    assert_eq!(during.len(), before.len() + 2, "{before:?} -> {during:?}");
+    drop(view);
+    assert_eq!(scratch_entries(project.path()), before);
+}
+
+/// EXPLAIN renders a plan and never executes it, so it acquires no scratch.
+#[test]
+fn explain_acquires_no_scratch() {
+    let project = tempfile::tempdir().unwrap();
+    let graph = GraphForge::new_with_options(
+        Some(project.path().to_str().unwrap()),
+        options(SpillPolicy::default()),
+    )
+    .unwrap();
+    graph.explain("MATCH (n) RETURN n ORDER BY n").unwrap();
+    assert!(scratch_entries(project.path()).is_empty());
+}

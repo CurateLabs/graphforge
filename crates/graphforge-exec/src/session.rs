@@ -351,12 +351,13 @@ impl Default for SessionResourceConfig {
 /// RAM-backed on some hosts.
 fn session_runtime(
     resources: &SessionResourceConfig,
-) -> Arc<datafusion::execution::runtime_env::RuntimeEnv> {
+) -> Result<Arc<datafusion::execution::runtime_env::RuntimeEnv>, GfError> {
     let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
     let mut runtime_builder = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
         .with_memory_limit(memory_budget, 1.0);
     if let (true, Some(dir)) = (resources.spill_enabled, &resources.spill_directory) {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir)
+            .map_err(|error| GfError::Storage(format!("query spill directory: {error}")))?;
         runtime_builder = runtime_builder.with_temp_file_path(dir.clone());
         if let Some(max) = resources.spill_max_bytes {
             runtime_builder = runtime_builder.with_max_temp_directory_size(max);
@@ -367,11 +368,12 @@ fn session_runtime(
                 .with_mode(datafusion::execution::disk_manager::DiskManagerMode::Disabled),
         );
     }
-    Arc::new(
-        runtime_builder
-            .build()
-            .expect("DataFusion RuntimeEnv construction"),
-    )
+    // A spilling runtime creates its temporary directory here, so a full or
+    // read-only volume is an error for this query, not a panic.
+    runtime_builder
+        .build()
+        .map(Arc::new)
+        .map_err(|error| GfError::Storage(format!("query runtime: {error}")))
 }
 
 struct QueryEvidenceStream {
@@ -509,7 +511,7 @@ impl ExecutionSession {
     /// # Errors
     /// Returns [`GfError`] if session construction fails.
     pub fn new(catalog: GraphCatalog, ontology: Option<OntologyHandle>) -> Result<Self, GfError> {
-        Ok(Self::build(
+        Self::build(
             catalog,
             ontology,
             PathBuf::new(),
@@ -517,7 +519,7 @@ impl ExecutionSession {
             None,
             OrdinalIdentityConfig::default(),
             &SessionResourceConfig::default(),
-        ))
+        )
     }
 
     /// Create a session that can execute writes against `dir`.
@@ -530,7 +532,7 @@ impl ExecutionSession {
         dir: PathBuf,
         mode: OntologyMode,
     ) -> Result<Self, GfError> {
-        Ok(Self::build(
+        Self::build(
             catalog,
             ontology,
             dir,
@@ -538,7 +540,7 @@ impl ExecutionSession {
             None,
             OrdinalIdentityConfig::default(),
             &SessionResourceConfig::default(),
-        ))
+        )
     }
 
     /// Like [`new_with_target`](Self::new_with_target) but reusing a
@@ -614,7 +616,7 @@ impl ExecutionSession {
             }
             None => OrdinalIdentityConfig::default(),
         };
-        Ok(Self::build(
+        Self::build(
             catalog,
             ontology,
             dir,
@@ -622,7 +624,7 @@ impl ExecutionSession {
             Some(provider),
             identity,
             resources,
-        ))
+        )
     }
 
     fn build(
@@ -633,7 +635,7 @@ impl ExecutionSession {
         shared_provider: Option<Arc<PersistentAdjacencyProvider>>,
         identity: OrdinalIdentityConfig,
         resources: &SessionResourceConfig,
-    ) -> Self {
+    ) -> Result<Self, GfError> {
         // The session-scoped adjacency provider (#761), threaded to the
         // extension planner via SessionConfig extension. Read-only sessions
         // (empty dir) need no special case: with no `indexes/adjacency/`
@@ -700,7 +702,7 @@ impl ExecutionSession {
             .use_row_number_estimates_to_optimize_partitioning = true;
 
         let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
-        let runtime_env = session_runtime(resources);
+        let runtime_env = session_runtime(resources)?;
 
         let state = SessionStateBuilder::new()
             .with_default_features()
@@ -723,7 +725,7 @@ impl ExecutionSession {
             .semantic_composition_fingerprint()
             .map(str::to_owned);
         ctx.register_catalog("graph", catalog.clone());
-        Self {
+        Ok(Self {
             mutation_health,
             ctx,
             catalog,
@@ -735,7 +737,7 @@ impl ExecutionSession {
             owned_adjacency,
             #[cfg(feature = "differential-testing")]
             relational_fixed_hop_reference: false,
-        }
+        })
     }
 
     pub(super) fn refresh_adjacency_after_mutation(&self) -> Result<(), GfError> {

@@ -696,7 +696,8 @@ async fn order_by_spills_when_input_exceeds_query_memory_budget() {
         None,
         OrdinalIdentityConfig::default(),
         &resources,
-    );
+    )
+    .unwrap();
     let batches = uuid_pair_batches(ROWS, resources.batch_size);
     let table = MemTable::try_new(batches[0].schema(), vec![batches]).unwrap();
     session.ctx.register_table("t", Arc::new(table)).unwrap();
@@ -766,7 +767,8 @@ async fn disabled_spill_refuses_instead_of_spilling_to_the_os_temp_directory() {
         None,
         OrdinalIdentityConfig::default(),
         &resources,
-    );
+    )
+    .unwrap();
     assert!(
         !session.ctx.runtime_env().disk_manager.tmp_files_enabled(),
         "a disabled spill policy must disable the disk manager"
@@ -816,7 +818,8 @@ async fn the_spill_cap_bounds_one_query() {
         None,
         OrdinalIdentityConfig::default(),
         &resources,
-    );
+    )
+    .unwrap();
     let batches = uuid_pair_batches(ROWS, resources.batch_size);
     let table = MemTable::try_new(batches[0].schema(), vec![batches]).unwrap();
     session.ctx.register_table("t", Arc::new(table)).unwrap();
@@ -833,6 +836,34 @@ async fn the_spill_cap_bounds_one_query() {
         .expect_err("the sort needs more spill than the cap allows")
         .to_string();
     assert!(error.contains("exceeded"), "{error}");
+}
+
+/// #1595: a spill directory that cannot be used is an error for the session
+/// being built, not a panic.
+#[test]
+fn an_unusable_spill_directory_is_an_error() {
+    let dir = TempDir::new().unwrap();
+    let blocked = dir.path().join("not-a-directory");
+    std::fs::write(&blocked, b"a file").unwrap();
+    let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
+    let resources = SessionResourceConfig {
+        spill_enabled: true,
+        spill_directory: Some(blocked.join("spill")),
+        ..SessionResourceConfig::default()
+    };
+    let error = ExecutionSession::build(
+        catalog,
+        None,
+        PathBuf::new(),
+        OntologyMode::Exploratory,
+        None,
+        OrdinalIdentityConfig::default(),
+        &resources,
+    )
+    .err()
+    .expect("an unusable spill directory must be refused")
+    .to_string();
+    assert!(error.contains("query spill directory"), "{error}");
 }
 
 /// #1595: spill enabled without a directory has nowhere to go and is refused

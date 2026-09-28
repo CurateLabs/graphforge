@@ -59,21 +59,28 @@ state.
 | Policy | Durable project | In-memory instance |
 |---|---|---|
 | default: `enabled`, no `directory` | the project scratch directory `<project>/.graphforge-query-spill/`, at most `max_bytes` (default 8 GiB) per query | no spill |
-| `enabled` with an absolute `directory` | that directory, at most `max_bytes` if set | same |
+| `enabled` with an absolute `directory` | that directory, at most `max_bytes` (DataFusion's 100 GiB default when unset) per query | same |
 | `enabled: false` | no spill | no spill |
 
 "No spill" is enforced: DataFusion's disk manager is disabled, so a query over
 its budget fails with a resource error rather than writing to the operating
 system's temporary directory, which is unbounded and RAM-backed on some hosts.
-Views that bound their own memory (branch, checkpoint and slice views) set
-`enabled: false` and so fail closed the same way.
+Read-only views of a durable project, such as checkpoint and inspection views,
+spill into the project scratch like any other query. Views that bound their own
+memory (branch, private checkpoint-materialization and slice views) set
+`enabled: false` and so fail closed the same way. EXPLAIN renders a plan
+without executing it, so it never acquires scratch.
 
 Each open instance of a durable project owns one scratch subdirectory, created
-on its first query and held by a lock on a sibling `.lock` file. The instance
-removes both when it is dropped. Opening another instance reclaims any whose
-lock is free, which means the owning process has exited, and leaves live
-instances' scratch alone (`graphforge_storage::query_spill`). Scratch holds only
-a running query's spill files and is never recovery authority.
+on its first query and held by a lock on a sibling `.lock` file. The lock is
+published under its final name only once it is held, so a live instance's
+scratch is never taken for abandoned. The instance removes both when it is
+dropped. Acquiring scratch reclaims any whose lock is free, which means the
+owning process has exited. That is best effort: an entry that cannot be removed
+is skipped, and never stops the new instance acquiring its own
+(`graphforge_storage::query_spill`). Scratch holds only a running query's spill
+files and is never recovery authority. A spill directory that cannot be created
+or used makes that query fail with a storage error.
 
 The search-index adjacency build keeps its own spill root inside its
 unpublished stage unless the caller configures a `directory`. The query scratch

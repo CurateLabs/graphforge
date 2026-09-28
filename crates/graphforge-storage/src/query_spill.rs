@@ -13,12 +13,20 @@
 //!     3f2c…e9/       DataFusion's spill files for that instance's queries
 //! ```
 //!
-//! An instance removes its own subdirectory and lock when it is dropped. A
-//! crashed process cannot, so acquiring a new directory first reclaims every
-//! entry whose lock is free: its owner is gone, because the operating system
-//! releases a process's locks when it exits. A subdirectory with no lock file
-//! is also stale, since an owner creates and locks its lock file before its
-//! subdirectory. Entries that do not match this grammar are left alone.
+//! An owner creates its lock file under a temporary name (`<token>.lock.new`),
+//! locks it, and only then renames it to `<token>.lock`, so every visible
+//! `<token>.lock` is already held by its owner if the owner is alive. It
+//! creates its subdirectory after the rename and, when dropped, removes the
+//! subdirectory before the lock.
+//!
+//! A crashed process cannot clean up, so acquiring a new directory first
+//! reclaims every entry whose lock is free: its owner is gone, because the
+//! operating system releases a process's locks when it exits. A subdirectory
+//! is also stale when its lock file is absent at the moment it is examined,
+//! because an owner's lock exists for as long as its subdirectory does.
+//! Reclaiming other owners' leftovers is housekeeping: an entry that cannot be
+//! removed is skipped, and never stops this instance acquiring its own
+//! scratch. Entries that do not match this grammar are left alone.
 //!
 //! Scratch is transient: it is never recovery authority and holds nothing a
 //! query needs after it finishes.
@@ -80,17 +88,18 @@ impl QuerySpillDirectory {
             }
             Err(error) => return Err(storage(error)),
         }
-        reclaim_abandoned(&root)?;
-        let token = uuid::Uuid::new_v4().simple().to_string();
-        let lock_path = root.join(format!("{token}.lock"));
-        let lock = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-            .map_err(storage)?;
-        if !try_lock_exclusive(&lock).map_err(storage)? {
-            return Err(storage("a new scratch lock is already held"));
-        }
+        reclaim_abandoned(&root);
+        // A reclaimer can remove a temporary lock file between its creation
+        // and its lock; the rename then fails and a fresh token is tried.
+        let mut attempt = 0;
+        let (token, lock_path, lock) = loop {
+            attempt += 1;
+            match claim_lock(&root)? {
+                Some(claimed) => break claimed,
+                None if attempt < 8 => {}
+                None => return Err(storage("could not claim a scratch lock")),
+            }
+        };
         let directory = root.join(&token);
         if let Err(error) = std::fs::create_dir(&directory) {
             let _ = std::fs::remove_file(&lock_path);
@@ -119,8 +128,42 @@ impl Drop for QuerySpillDirectory {
     }
 }
 
-/// Remove every scratch entry whose owner is gone.
-fn reclaim_abandoned(root: &Path) -> Result<(), GfError> {
+/// Create, lock and publish one `<token>.lock`. `None` when another process
+/// reclaimed the temporary file before it was locked or published.
+fn claim_lock(root: &Path) -> Result<Option<(String, PathBuf, File)>, GfError> {
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let temporary = root.join(format!("{token}.lock.new"));
+    let lock_path = root.join(format!("{token}.lock"));
+    let lock = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(storage)?;
+    if !try_lock_exclusive(&lock).map_err(storage)? {
+        return Ok(None);
+    }
+    // The temporary must still be the file this handle locked.
+    let identity = graphforge_filesystem::file_identity(&lock).map_err(storage)?;
+    match graphforge_filesystem::path_identity(&temporary) {
+        Ok(named) if named == identity => {}
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(storage(error)),
+    }
+    match std::fs::rename(&temporary, &lock_path) {
+        Ok(()) => Ok(Some((token, lock_path, lock))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(storage(error)),
+    }
+}
+
+/// Remove every scratch entry whose owner is gone. Best effort: an entry that
+/// cannot be examined or removed is skipped.
+fn reclaim_abandoned(root: &Path) {
+    let _ = reclaim_abandoned_entries(root);
+}
+
+fn reclaim_abandoned_entries(root: &Path) -> Result<(), GfError> {
     let mut locks = Vec::new();
     let mut directories = Vec::new();
     for entry in std::fs::read_dir(root).map_err(storage)? {
@@ -131,29 +174,39 @@ fn reclaim_abandoned(root: &Path) -> Result<(), GfError> {
             continue;
         };
         if kind.is_file() {
-            if let Some(token) = name.strip_suffix(".lock").filter(|token| is_token(token)) {
-                locks.push(token.to_owned());
+            let lock = name
+                .strip_suffix(".lock")
+                .or_else(|| name.strip_suffix(".lock.new"))
+                .filter(|token| is_token(token));
+            if lock.is_some() {
+                locks.push(name);
             }
         } else if kind.is_dir() && is_token(&name) {
             directories.push(name);
         }
     }
-    for token in &locks {
-        let lock_path = root.join(format!("{token}.lock"));
-        let lock = match File::open(&lock_path) {
-            Ok(lock) => lock,
-            // Another process reclaimed or released it meanwhile.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(storage(error)),
+    for name in &locks {
+        let lock_path = root.join(name);
+        let Ok(lock) = File::open(&lock_path) else {
+            continue; // Reclaimed, released or unreadable meanwhile.
         };
-        if !try_lock_exclusive(&lock).map_err(storage)? {
+        if !matches!(try_lock_exclusive(&lock), Ok(true)) {
             continue; // Its owner is alive.
         }
-        remove_directory(&root.join(token))?;
-        remove_file(&lock_path)?;
+        if let Some(token) = name.strip_suffix(".lock") {
+            let _ = remove_directory(&root.join(token));
+        }
+        let _ = remove_file(&lock_path);
     }
-    for token in directories.iter().filter(|token| !locks.contains(token)) {
-        remove_directory(&root.join(token))?;
+    for token in &directories {
+        // Examined now, not from the listing: an owner's lock exists for as
+        // long as its subdirectory does.
+        match std::fs::symlink_metadata(root.join(format!("{token}.lock"))) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let _ = remove_directory(&root.join(token));
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
