@@ -344,6 +344,36 @@ impl Default for SessionResourceConfig {
     }
 }
 
+/// The DataFusion runtime for one session: its memory pool, and its disk
+/// manager as the resources say (#1595). Spill goes only to the configured
+/// directory under its cap; disabled means no disk manager at all, not
+/// DataFusion's default of the OS temporary directory, which is unbounded and
+/// RAM-backed on some hosts.
+fn session_runtime(
+    resources: &SessionResourceConfig,
+) -> Arc<datafusion::execution::runtime_env::RuntimeEnv> {
+    let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
+    let mut runtime_builder = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
+        .with_memory_limit(memory_budget, 1.0);
+    if let (true, Some(dir)) = (resources.spill_enabled, &resources.spill_directory) {
+        let _ = std::fs::create_dir_all(dir);
+        runtime_builder = runtime_builder.with_temp_file_path(dir.clone());
+        if let Some(max) = resources.spill_max_bytes {
+            runtime_builder = runtime_builder.with_max_temp_directory_size(max);
+        }
+    } else {
+        runtime_builder = runtime_builder.with_disk_manager_builder(
+            datafusion::execution::disk_manager::DiskManagerBuilder::default()
+                .with_mode(datafusion::execution::disk_manager::DiskManagerMode::Disabled),
+        );
+    }
+    Arc::new(
+        runtime_builder
+            .build()
+            .expect("DataFusion RuntimeEnv construction"),
+    )
+}
+
 struct QueryEvidenceStream {
     inner: Option<SendableRecordBatchStream>,
     physical: Arc<dyn ExecutionPlan>,
@@ -670,28 +700,7 @@ impl ExecutionSession {
             .use_row_number_estimates_to_optimize_partitioning = true;
 
         let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
-        let mut runtime_builder = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
-            .with_memory_limit(memory_budget, 1.0);
-        // #1595: spill goes only where the policy says. Disabled means no
-        // disk manager at all, not DataFusion's default of the OS temporary
-        // directory, which is unbounded and RAM-backed on some hosts.
-        if let (true, Some(dir)) = (resources.spill_enabled, &resources.spill_directory) {
-            let _ = std::fs::create_dir_all(dir);
-            runtime_builder = runtime_builder.with_temp_file_path(dir.clone());
-            if let Some(max) = resources.spill_max_bytes {
-                runtime_builder = runtime_builder.with_max_temp_directory_size(max);
-            }
-        } else {
-            runtime_builder = runtime_builder.with_disk_manager_builder(
-                datafusion::execution::disk_manager::DiskManagerBuilder::default()
-                    .with_mode(datafusion::execution::disk_manager::DiskManagerMode::Disabled),
-            );
-        }
-        let runtime_env = Arc::new(
-            runtime_builder
-                .build()
-                .expect("DataFusion RuntimeEnv construction"),
-        );
+        let runtime_env = session_runtime(resources);
 
         let state = SessionStateBuilder::new()
             .with_default_features()
