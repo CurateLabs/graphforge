@@ -59,7 +59,7 @@ NATIVE_OBJECT_IDENTITY = re.compile(
 )
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = ROOT / "crates/graphforge-api/tests/fixtures/scale_g500_certification.v1.json"
-SCHEMA = ROOT / "docs/development/evidence/g500-certification.schema.json"
+SCHEMA = ROOT / "scripts/ci/schemas/g500-certification.schema.json"
 PROVIDER_RESULT_SCHEMA = ROOT / "benchmarks/schemas/progressive-provider-run-result.json"
 RUN_COMMAND = (
     "cargo test -p graphforge-api --release --test scale_g500_ladder "

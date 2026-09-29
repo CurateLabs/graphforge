@@ -102,11 +102,11 @@ The lower-level **~8M-node / ~128M-edge** local scale report remains
 baselines. Public persistence itself is no longer blocked by the legacy
 1/2 GiB Arrow snapshot envelope: #338 publishes `graph`/`files` generations and
 proves reopen through `GraphForge::new` past 2 GiB validated bytes (see
-[`file-backed-oversize-evidence.json`](file-backed-oversize-evidence.json))
+[`file-backed-oversize-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/file-backed-oversize-evidence.json))
 and densified 8M/128M public reopen
-([`file-backed-128m-evidence.json`](file-backed-128m-evidence.json)).
+([`file-backed-128m-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/file-backed-128m-evidence.json)).
 Adjacency construction past the former Arrow boundary is proven by
-[`adjacency-200m-evidence.json`](adjacency-200m-evidence.json).
+[`adjacency-200m-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/adjacency-200m-evidence.json).
 
 CI proves the path with a small multi-file fixture
 (`--test file_backed_graph_generation`) and does not download 8M/128M data.
@@ -125,6 +125,6 @@ Before/after evidence source:
 Every M4 child (#336–#344) compared against this gate’s structural contract.
 #345 reruns it as exit evidence on the final tree
 ([`m4-exit-evidence.md`](m4-exit-evidence.md) /
-[`m4-exit-evidence.json`](m4-exit-evidence.json)).
+[`m4-exit-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/m4-exit-evidence.json)).
 common-neighbors source aggregates (#505) and closeness source BFS (#503) may use the instance-owned private
 Every M4 child (#336–#344, #503) compared against this gate’s structural contract.

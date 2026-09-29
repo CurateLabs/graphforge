@@ -373,7 +373,7 @@ def validate_matrix(path: Path = MATRIX_PATH) -> dict[str, Any]:
     for doc in (adr, architecture, api_doc):
         scan_forbidden_claims(doc, "normative_docs")
 
-    m5_guide = ROOT / "docs/guides/repository-integration.md"
+    m5_guide = ROOT / "docs/guide/repository-integration.md"
     if not m5_guide.is_file():
         raise GateError("repository integration guide is missing")
     guide_text = m5_guide.read_text(encoding="utf-8")

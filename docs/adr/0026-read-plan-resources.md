@@ -4,6 +4,7 @@ adr: "0026"
 status: "Accepted"
 date: "2026-09-07"
 superseded_by: null
+revisit_when: "A relocated or rebound read plan needs eager graph scans or a working-directory fallback the execution boundary forbids"
 ---
 
 # ADR 0026: Read plans bind resources in execution

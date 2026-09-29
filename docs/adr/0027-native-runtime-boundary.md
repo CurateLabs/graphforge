@@ -4,6 +4,7 @@ adr: "0027"
 status: "Accepted"
 date: "2026-09-09"
 superseded_by: null
+revisit_when: "A concrete browser-only user requirement arrives with resource, persistence, API-profile guarantees, and a validation budget"
 ---
 
 # ADR 0027: Native GraphForge execution boundary

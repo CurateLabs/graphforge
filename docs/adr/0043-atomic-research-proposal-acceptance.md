@@ -4,6 +4,7 @@ adr: "0043"
 status: "Accepted"
 date: "2026-09-22"
 superseded_by: null
+revisit_when: "Acceptance tests show partial acceptance can diverge from the prepared destination, or a non-atomic acceptance path is proposed"
 ---
 
 # ADR 0043: Proposal acceptance shares the Project publication owner

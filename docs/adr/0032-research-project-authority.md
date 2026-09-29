@@ -4,6 +4,7 @@ adr: "0032"
 status: "Accepted"
 date: "2026-09-16"
 superseded_by: null
+revisit_when: "Branch publication needs independent writer locks or a per-Branch isolation level beyond the Project's shared coordination boundary"
 ---
 
 # ADR 0032: Research Branches share Project publication authority

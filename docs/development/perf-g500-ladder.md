@@ -197,12 +197,14 @@ and cleanup tooling must not touch.
 
 The work root has already been lost twice. A completed clean
 ladder's rung JSON, result JSON, receipts, and controller summary are retained
-before its numbers are reported — under
-[`docs/development/evidence/ladder/<commit>/`](evidence/ladder/README.md) in a
-PR, or in an out-of-tree archive whose path and manifest digest are recorded on
-the citing issues. The retention step verifies each receipt against the digests
-recorded in its `s<scale>-result.json`; the command is
-`make -C benchmarks retain-ladder-evidence` (see `benchmarks/README.md`).
+before its numbers are reported, in an out-of-tree archive whose path and
+`MANIFEST.sha256` digest are recorded on the citing issue together with the
+result tables. Raw rung output is not committed to `docs/` (#1625); the
+[retained-ladder index](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/ladder/README.md)
+that used to live in the tree is preserved at that permalink and on #1478. The
+retention step verifies each receipt against the digests recorded in its
+`s<scale>-result.json`; the command is `make -C benchmarks retain-ladder-evidence`
+(see `benchmarks/README.md`).
 
 ## Historical reference-client commands
 

@@ -4,6 +4,7 @@ adr: "0039"
 status: "Accepted"
 date: "2026-09-22"
 superseded_by: null
+revisit_when: "Selected-closure retention or a new registry revision changes materialization and weakens authentication or root-closure guarantees"
 ---
 
 # ADR 0039: Research Versions share Project publication authority

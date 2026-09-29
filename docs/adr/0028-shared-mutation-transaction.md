@@ -4,6 +4,7 @@ adr: "0028"
 status: "Accepted"
 date: "2026-09-07"
 superseded_by: null
+revisit_when: "Cypher and analyst write-back need independent writer locks or a durable transaction format beyond the shared MutationTransaction"
 ---
 
 # ADR 0028: One transaction owns graph mutation effects

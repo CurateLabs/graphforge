@@ -28,7 +28,7 @@ Existing reuse that is **not** a #1504 verdict:
 
 - Arrow is already the construction data plane (`RecordBatch`, Parquet writers/readers, `arrow::compute::take` / `concat_batches` / `take_record_batch`).
 - DataFusion owns query/catalog/`parquet_scan` surfaces under `graphforge-storage`; construction shaping does **not** run through DataFusion operators today.
-- [#1465](https://github.com/CurateLabs/graphforge/issues/1465) proved a narrow encode `DataSinkExec` seam (`docs/development/evidence/encode-datafusion-seam-1465.md`). It did **not** exercise `SortExec`, repartition, external spill, or shaping. Its slower/neutral encode timing must not reject shaping/sort/spill/scheduling candidates.
+- [#1465](https://github.com/CurateLabs/graphforge/issues/1465) proved a narrow encode `DataSinkExec` seam ([`docs/development/evidence/encode-datafusion-seam-1465.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/encode-datafusion-seam-1465.md)). It did **not** exercise `SortExec`, repartition, external spill, or shaping. Its slower/neutral encode timing must not reject shaping/sort/spill/scheduling candidates.
 
 ## 2. Pipeline map (where mechanisms sit)
 

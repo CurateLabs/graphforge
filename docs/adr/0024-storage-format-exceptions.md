@@ -4,6 +4,7 @@ adr: "0024"
 status: "Accepted"
 date: "2026-08-30"
 superseded_by: null
+revisit_when: "A third storage format needs an exception beyond GFDR and compiled ontology Parquet"
 ---
 
 # ADR 0024: Storage format exceptions for GFDR and compiled ontologies

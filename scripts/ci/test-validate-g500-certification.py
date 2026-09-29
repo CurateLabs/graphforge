@@ -332,7 +332,7 @@ def validate(
 
 
 def test_accepts_complete_sanitized_evidence():
-    schema = VALIDATOR.ROOT / "docs/development/evidence/g500-certification.schema.json"
+    schema = VALIDATOR.ROOT / "scripts/ci/schemas/g500-certification.schema.json"
     contract = json.loads(schema.read_text())
     Draft202012Validator.check_schema(contract)
     Draft202012Validator(contract).validate(evidence())

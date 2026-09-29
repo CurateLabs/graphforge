@@ -454,6 +454,43 @@ implementation consumes CSR-native adjacency and the existing bounded Arrow
 shaping path; it does not introduce a parallel-only graph copy or a global
 edge-index map.
 
+## Parallel delta-stepping proposal collection (#539)
+
+`paths(by="delta_stepping")` uses the instance-owned private `ComputePool` for
+deterministic proposal collection when a bucket wave has at least
+`262_144` direction-expanded edge scans and more than one current source.
+Smaller waves, single-source waves, one-thread policies, and missing-pool
+controls stay serial. Workers read CSR neighbor slices and emit local candidate
+proposals only; bucket mutation, best-distance updates, stale-bucket filtering,
+final proposal sorting, and public row ordering remain canonical on the caller
+thread, so multi-thread results must match the one-thread oracle.
+
+Structural gates: no process-global Rayon pool (parallel work is installed only
+on the `AlgorithmControl` compute pool); no parallel-only graph copy and no O(E)
+hash-map expansion (workers borrow `AdjacencyGraph` CSR slices); the canonical
+merge sorts proposals by target, complete node path, then edge path before
+applying improvements. Tests cover serial crossover selection, one-thread versus
+2/4/8-thread equality, and structured iteration-limit failure without partial
+results.
+
+The crossover was chosen from a release-mode measurement
+(`algorithm_paths_delta_stepping::tests::measure_delta_stepping_parallel_crossover`,
+2026-08-10, Cursor Cloud Linux x86_64; VmHWM 276,480 KiB). All thread counts
+matched the one-thread oracle exactly. Rows below the crossover stay serial even
+under a multi-thread control, so those columns reflect serial noise, not
+speedups.
+
+| Middle nodes | Fanout | Edge entries | Rows | 1 thread | 2 threads | 4 threads | 8 threads |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 192 | 96 | 18,816 | 289 | 4.851 ms | 3.916 ms | 3.971 ms | 3.561 ms |
+| 512 | 256 | 132,096 | 769 | 40.090 ms | 46.920 ms | 34.302 ms | 41.604 ms |
+| 1,024 | 384 | 395,264 | 1,409 | 139.790 ms | 137.109 ms | 120.984 ms | 102.622 ms |
+
+The provisional 8,192 threshold did not consistently justify the pool tax on the
+132k-entry fixture (2 and 4 threads slower, 8 only slightly faster); the 395k
+fixture is the first wave where 2/4/8 workers beat one thread, so the shipped
+threshold is the conservative power of two between them.
+
 ## Parallel resource-allocation aggregate (#513)
 
 `rank(by="resource_allocation")` partitions **independent source ordinals**

@@ -4,6 +4,7 @@ adr: "0016"
 status: "Accepted"
 date: "2026-07-30"
 superseded_by: null
+revisit_when: "Lifecycle, interchange, or infrastructure validation needs a contract the repository snapshot and deployment spec schemas cannot express"
 ---
 
 # ADR 0016: Repository integration and deployment configuration boundary

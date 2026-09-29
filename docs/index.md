@@ -49,7 +49,7 @@ they never replace or fall back from the Rust engine.
 | [Installation](guide/installation.md) | Install Python or Node packages, or build from source |
 | [Quick Start](guide/quickstart.md) | Create, query, and persist your first graph |
 | [Tutorial](guide/tutorial.md) | Work through a complete citation-network example |
-| [CLI and repository integration](guides/repository-integration.md) | Initialize, validate, synchronize, checkpoint, export, and import a project |
+| [CLI and repository integration](guide/repository-integration.md) | Initialize, validate, synchronize, checkpoint, export, and import a project |
 | [VS Code extension](guide/vscode-extension/) | Explore projects, run Cypher, and pair with coding agents in your editor |
 
 ---

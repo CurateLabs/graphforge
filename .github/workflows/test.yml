@@ -133,6 +133,13 @@ jobs:
           python3 scripts/ci/adr-index.py check
           python3 scripts/ci/test-adr-index.py
 
+      - name: Validate docs tree policy
+        # Unconditional (#1625): evidence-shaped or oversize files under docs/ and
+        # unreferenced development docs are all inert to the suite classifier.
+        run: |
+          python3 scripts/ci/docs-tree-policy.py check
+          python3 scripts/ci/test-docs-tree-policy.py
+
       - name: Validate multi-ontology contract fixtures
         run: python3 scripts/ci/multi-ontology-contract-check.py
 
@@ -1341,7 +1348,7 @@ jobs:
         run: |
           # Do not set --remote_cache; Blacksmith injects repository cache.
           # Strict evaluate of checked-in perf-sample.json is one-shot Bazel-migration
-          # evidence (see bazel-migration-perf.md), not a live regression gate;
+          # evidence (see bazel-migration.md), not a live regression gate;
           # observation/collect lives in bazel-diagnostics.
           python3 scripts/ci/bazel-cache-perf.py --mode policy
           python3 scripts/ci/test-bazel-cache-perf.py
@@ -1468,7 +1475,7 @@ jobs:
           import json
           from pathlib import Path
           payload = json.loads(
-              Path("docs/development/bazel-migration-evidence/perf-sample.json").read_text()
+              Path("tools/bazel/migration-evidence/perf-sample.json").read_text()
           )
           print(payload.get("status", "unknown"))
           PY
@@ -1481,14 +1488,14 @@ jobs:
           PY
           )"
           if [[ "$status" == "complete" ]]; then
-            cp docs/development/bazel-migration-evidence/perf-sample.json \
+            cp tools/bazel/migration-evidence/perf-sample.json \
               dist/perf-sample-collected.json
           elif [[ "$hits" == "yes" ]]; then
             python3 scripts/ci/bazel-cache-perf.py --mode collect-pairs --pairs 10 \
-              --evidence docs/development/bazel-migration-evidence/perf-sample.json \
+              --evidence tools/bazel/migration-evidence/perf-sample.json \
               --write dist/perf-sample-collected.json
           else
-            cp docs/development/bazel-migration-evidence/perf-sample.json \
+            cp tools/bazel/migration-evidence/perf-sample.json \
               dist/perf-sample-collected.json
             echo "skipping collect-pairs: no remote cache hits observed yet"
           fi
@@ -1576,7 +1583,7 @@ jobs:
             dist/bazel-cache-perf-ci-observation.json
             dist/bazel-representative-build.summary.json
             dist/perf-sample-collected.json
-            docs/development/bazel-migration-evidence/perf-sample.json
+            tools/bazel/migration-evidence/perf-sample.json
           if-no-files-found: error
           retention-days: 1
 

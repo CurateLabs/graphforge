@@ -90,6 +90,15 @@ a milestone — it goes in an `**Implementation:**` field beneath the status, no
 in the status value. `docs/engineering/adrs/README.md` carries the same four
 values.
 
+## Lifecycle fields
+
+Every record's frontmatter carries `status`, `superseded_by`, and `revisit_when`
+(#1625). `revisit_when` is a one-line observable trigger: the condition under
+which the decision gets re-examined. `scripts/ci/adr-index.py check` refuses a
+record without it and renders it in `docs/engineering/adrs/README.md`. A
+decision nothing depends on any more is marked Deprecated rather than left
+Accepted.
+
 ## Related navigation
 
 Published Starlight nav: **Engineering → Architecture Decision Records** (sidebar

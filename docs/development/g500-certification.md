@@ -43,7 +43,10 @@ Issue #745 certifies the complete persisted GraphForge lifecycle on an explicitl
 provisioned Linux evidence host. The workflow is manual, protected by the
 `scale-certification` GitHub environment, and never provisions infrastructure.
 A maintainer must approve the provider, exact SKU, ephemeral runner label, cost,
-and teardown before dispatch.
+and teardown before dispatch. Before a Fly volume can serve as an evidence host
+at all, the [Fly filesystem qualification](fly-filesystem-qualification.md)
+probe (#882) must admit it as a process work root; that probe authorizes
+nothing else.
 
 The approved SUT record is immutable for a run. Separate evidence fields record
 provider, region, SKU, and the full Linux image identity with resolved version

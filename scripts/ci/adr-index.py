@@ -18,7 +18,7 @@ header and separator alone.
 
 The markdown tables were hand-maintained until #1390: their titles and statuses
 were assumed to be human prose, but every cell is derivable from the ADR file
-(``# ADR NNNN: Title`` and ``**Status:**``). Hand-maintaining four copies of one
+(the frontmatter ``title``, ``status`` and ``revisit_when``). Hand-maintaining four copies of one
 fact produced exactly the drift this script exists to catch. ``check`` is kept
 and still fails closed, so a hand edit is reported rather than silently
 overwritten on the next run.
@@ -45,6 +45,7 @@ ENGINEERING_README = ROOT / "docs" / "engineering" / "adrs" / "README.md"
 SYNC_CONTENT = ROOT / "docs-site" / "scripts" / "sync-content.mjs"
 ASTRO_CONFIG = ROOT / "docs-site" / "astro.config.mjs"
 
+ENGINEERING_HEADER = "| ADR | Title | Status | Revisit when | Path |"
 BEGIN_MARKER = "BEGIN generated ADR records — scripts/ci/adr-index.py generate"
 END_MARKER = "END generated ADR records"
 
@@ -75,6 +76,7 @@ class Record:
     status: str
     superseded: bool
     superseded_by: str | None
+    revisit_when: str
 
     @property
     def relpath(self) -> str:
@@ -132,12 +134,16 @@ def _parse_record(path: Path, *, superseded: bool) -> Record:
     if not fields:
         raise AdrError(
             f"{path.relative_to(ROOT)}: no YAML frontmatter. Every ADR carries "
-            "title / adr / status / supersedes / superseded_by (ADR 0038, #1390)"
+            "title / adr / status / superseded_by / revisit_when (ADR 0038, #1390, #1625)"
         )
 
-    for required in ("title", "adr", "status"):
+    for required in ("title", "adr", "status", "revisit_when"):
         if not fields.get(required):
-            raise AdrError(f"{path.relative_to(ROOT)}: frontmatter is missing {required!r}")
+            raise AdrError(
+                f"{path.relative_to(ROOT)}: frontmatter is missing {required!r}. Every ADR "
+                "names the condition under which it is re-examined (#1625)"
+            )
+    revisit_when = str(fields["revisit_when"]).strip()
 
     if fields["adr"] != number:
         raise AdrError(
@@ -191,6 +197,7 @@ def _parse_record(path: Path, *, superseded: bool) -> Record:
         status=status,
         superseded=superseded,
         superseded_by=expected,
+        revisit_when=revisit_when,
     )
 
 
@@ -325,7 +332,7 @@ def _engineering_rows(records: list[Record]) -> tuple[list[str], list[str]]:
 
     def row(r: Record) -> str:
         path = f"../../adr/{r.relpath}"
-        return f"| {r.number} | {r.title} | {r.status} | [`{path}`]({path}) |"
+        return f"| {r.number} | {r.title} | {r.status} | {r.revisit_when} | [`{path}`]({path}) |"
 
     return [row(r) for r in active(records)], [row(r) for r in superseded(records)]
 
@@ -373,8 +380,8 @@ def write_markdown_indexes(records: list[Record]) -> list[Path]:
         (
             ENGINEERING_README,
             (
-                ("| ADR | Title | Status | Path |", 0, eng_live),
-                ("| ADR | Title | Status | Path |", 1, eng_dead),
+                (ENGINEERING_HEADER, 0, eng_live),
+                (ENGINEERING_HEADER, 1, eng_dead),
             ),
         ),
     ):
@@ -544,7 +551,7 @@ def check_adr_readme(records: list[Record]) -> list[str]:
 
 def check_engineering_readme(records: list[Record]) -> list[str]:
     """``docs/engineering/adrs/README.md``: decision log and superseded table."""
-    header = "| ADR | Title | Status | Path |"
+    header = ENGINEERING_HEADER
     on_disk = {f"../../adr/{record.relpath}" for record in records}
     problems: list[str] = []
 
@@ -554,14 +561,23 @@ def check_engineering_readme(records: list[Record]) -> list[str]:
     ):
         rows = []
         for cells in _one_table(ENGINEERING_README, header, which, 2):
-            text, target = _unlink(cells[3])
+            text, target = _unlink(cells[4])
             rows.append(
-                (cells[0], (cells[1], cells[2], _uncode(text), _uncode(target or cells[3])))
+                (
+                    cells[0],
+                    (cells[1], cells[2], cells[3], _uncode(text), _uncode(target or cells[4])),
+                )
             )
         expected = [
             (
                 r.number,
-                (r.title, r.status, f"../../adr/{r.relpath}", f"../../adr/{r.relpath}"),
+                (
+                    r.title,
+                    r.status,
+                    r.revisit_when,
+                    f"../../adr/{r.relpath}",
+                    f"../../adr/{r.relpath}",
+                ),
             )
             for r in subset
         ]
@@ -570,7 +586,7 @@ def check_engineering_readme(records: list[Record]) -> list[str]:
             rows,
             expected,
             exists=on_disk,
-            names=("title", "status", "path cell", "path link target"),
+            names=("title", "status", "revisit trigger", "path cell", "path link target"),
         )
     return problems
 

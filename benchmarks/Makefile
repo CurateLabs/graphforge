@@ -158,8 +158,8 @@ progressive-host-ladder-reclaim: install
 		--reclaim "$(RUNG_SCALE)" --output-dir "$(OUTPUT_DIR)" --work-root "$(WORK_ROOT)"
 
 # #1530: retain one completed clean ladder's evidence before reporting the run.
-# DESTINATION is ../docs/development/evidence/ladder/<commit>/ when staging a PR,
-# or any out-of-tree archive whose path and digest go on the citing issues.
+# DESTINATION is an out-of-tree archive directory; its path and MANIFEST.sha256
+# digest go on the citing issue. Raw run output is not committed under docs/ (#1625).
 retain-ladder-evidence: install
 	test -n "$(DESTINATION)" && test -n "$(EVIDENCE_DIR)$(SUMMARY_LOG)"
 	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.ladder_retention \

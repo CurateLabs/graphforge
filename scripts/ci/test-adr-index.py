@@ -122,6 +122,27 @@ def _(root: Path) -> None:
     drop_line(root / "docs-site/astro.config.mjs", "adr/0026-read-plan-resources'")
 
 
+# --- lifecycle fields (#1625) ------------------------------------------------
+
+
+@case("record without a revisit trigger", "missing 'revisit_when'")
+def _(root: Path) -> None:
+    substitute(
+        root / "docs/adr/0026-read-plan-resources.md",
+        "revisit_when:",
+        "revisit_when_unset:",
+    )
+
+
+@case("engineering log shows a stale revisit trigger", "revisit trigger is")
+def _(root: Path) -> None:
+    substitute(
+        root / "docs/engineering/adrs/README.md",
+        "| Accepted | A relocated or rebound read plan",
+        "| Accepted | Whenever a relocated or rebound read plan",
+    )
+
+
 # --- an index row naming a file that does not exist -------------------------
 
 

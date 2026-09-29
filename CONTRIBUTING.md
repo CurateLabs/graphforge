@@ -20,6 +20,15 @@ process, and design principles — is:
 TypeScript first-party policy (compiler 5.9.3, `tsx`, no `ts-node`):
 [docs/development/typescript-toolchain.md](docs/development/typescript-toolchain.md).
 
+Documentation records method, not results. A page under `docs/development/`
+says how to reproduce a measurement and which content digests identify its
+inputs; the raw output (JSON, logs, receipts, run tables) goes on the issue or
+pull request that produced it, never into the tree. CI rejects evidence-shaped
+or oversize files under `docs/` and any development page nothing links to
+(`scripts/ci/docs-tree-policy.py`). Per-issue pages are folded into their topic
+page or deleted when the issue closes, and every ADR carries `status`,
+`superseded_by`, and a `revisit_when` trigger.
+
 Agent-oriented workflow and architecture rules are in [AGENTS.md](AGENTS.md).
 
 ### Validation (summary)

@@ -4,6 +4,7 @@ adr: "0025"
 status: "Accepted"
 date: "2026-09-04"
 superseded_by: null
+revisit_when: "graphforge-value cannot preserve an existing encoding during extraction, forcing a new schema or format version decision"
 ---
 
 # ADR 0025: Storage values have a compiler-independent contract

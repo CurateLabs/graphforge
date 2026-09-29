@@ -4,6 +4,7 @@ adr: "0020"
 status: "Accepted"
 date: "2026-08-16"
 superseded_by: null
+revisit_when: "A drive, controller, hypervisor, or filesystem falsely acknowledges write-through completion on a certified NTFS volume"
 ---
 
 # ADR 0020: NTFS write-through namespace durability

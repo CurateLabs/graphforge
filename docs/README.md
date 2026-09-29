@@ -67,6 +67,8 @@ extension documents are eligible for publication.
 | [`guide/analytics-integration.md`](guide/analytics-integration.md) | Arrow, pandas, Polars, analyst verbs |
 | [`guide/visualization.md`](guide/visualization.md) | Real-data Plotly / Jaal / PyVis / Cytoscape.js / Sigma.js examples |
 | [`guide/datasets/`](guide/datasets/overview.md) | Load real-world networks |
+| [`guide/repository-integration.md`](guide/repository-integration.md) | CLI, repository, checkpoint, export, and import workflows |
+| [`guide/infrastructure-validation.md`](guide/infrastructure-validation.md) | Validate a deployment target's intent before provisioning |
 
 ### Book (research, architecture, deeper usage)
 
@@ -87,7 +89,7 @@ extension documents are eligible for publication.
 | [`engineering/TESTING.md`](engineering/TESTING.md) | How do we prove it before release? |
 | [`engineering/PUBLISHING.md`](engineering/PUBLISHING.md) | How do verified artifacts reach users safely? |
 | [`engineering/OBSERVABILITY.md`](engineering/OBSERVABILITY.md) | How do CI/release signals feed learning? |
-| [`engineering/adrs/`](engineering/adrs/) | ADR index (bodies in [`adr/`](adr/) `0001`–`0014`) |
+| [`engineering/adrs/`](engineering/adrs/) | ADR index with status and revisit triggers (bodies in [`adr/`](adr/)) |
 
 ### Supporting public trees
 
@@ -97,7 +99,7 @@ extension documents are eligible for publication.
 | [`reference/`](reference/api.md) | API, compatibility, TCK, scale limits |
 | [`development/`](development/contributing.md) | Contributor and release process detail |
 | [`legal/licensing.md`](legal/licensing.md) | Licensing copy |
-| [`adr/`](adr/) | ADR bodies (keepers through `0017`) |
+| [`adr/`](adr/) | ADR bodies; superseded records under `adr/superseded/` |
 | [`releases/roadmap.md`](releases/roadmap.md) | Public product roadmap |
 
 ## Conventions
@@ -110,5 +112,11 @@ extension documents are eligible for publication.
 - **Decisions are recorded.** Significant choices get ADRs under [`adr/`](adr/), indexed from
   [`engineering/adrs/`](engineering/adrs/).
 - **Site tooling is separate.** Starlight config under `docs-site/` owns published nav.
+  `docs/` is the single hand-maintained source; the site renders an allowlisted
+  subset at build time and holds no second copy of Guide, Book, or ADR content.
+- **Results live on the issue.** Development pages record method and content
+  digests; raw measurement output attaches to the issue, PR, or release that
+  produced it. `scripts/ci/docs-tree-policy.py` rejects evidence-shaped or
+  oversize files under `docs/` and unreferenced `development/*.md` pages (#1625).
 - **Issue closure.** Docs and legal issues stay open until **manual approval**; PRs use
   `Refs #<issue>`, not `Closes`.

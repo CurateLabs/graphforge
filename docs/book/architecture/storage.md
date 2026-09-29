@@ -1206,7 +1206,7 @@ measurement, not an outcome inferred from this contract test.
 
 ### Publishing-contract acceptance evidence
 
-[The frozen four-case measurement](../../development/evidence/publishing-contract-1221.json)
+[The frozen four-case measurement](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/publishing-contract-1221.json)
 records 55.58 s user CPU, 5.36 s system CPU and 162,652 KiB observed process
 peak RSS. Separate syscall tracing recorded 882,417,829 bytes read and
 157,666,163 bytes written; separate pathname sampling observed 21,864,448
@@ -1253,7 +1253,7 @@ and retained-root checks, and the 128/256/512-entry update ladder cover the
 manifest boundary directly.
 
 The source-bound resource record is
-[`bounded-manifest-1204.json`](../../development/evidence/bounded-manifest-1204.json).
+[`bounded-manifest-1204.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/bounded-manifest-1204.json).
 Its full-fixture CPU observations include the existing codec experiments and
 portable lifecycle; they are not a query-speed benchmark. Application syscall
 reads are 1,303,689,747 baseline versus 1,301,114,860 candidate bytes; writes are
@@ -1300,7 +1300,7 @@ includes project, staging and portable state. It excludes directory blocks and
 open-unlinked files and can miss short peaks; the largest observed sampling gaps
 are approximately 62 ms and 59 ms. These are sampled workspace peaks, not hard
 temporary-disk bounds. The separate point census includes retained generations.
-See [`bounded-csr-1205.json`](../../development/evidence/bounded-csr-1205.json)
+See [`bounded-csr-1205.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/bounded-csr-1205.json)
 for frozen source/executable hashes, exact observations, commands, decoded bounds,
 CPU/I/O costs and limitations, including the superseded incomplete baseline trace.
 
@@ -1350,7 +1350,7 @@ largest observed gap was 15.10 ms despite a requested 5 ms interval; it excludes
 directories and unlinked open files and is not a hard bound. Native process RSS
 is separate from the logical reader-buffer ceilings above.
 
-See [Cypher ownership evidence](../../development/evidence/cypher-property-ownership-1224.json)
+See [Cypher ownership evidence](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/cypher-property-ownership-1224.json)
 for executable/source hashes, all observations, deterministic budgets, reproduction
 instructions, failed prototypes and the known local #1192 fixture limitation.
 
@@ -1398,7 +1398,7 @@ reordered/duplicate/empty projections and payload-derived spill/decoder ceilings
 public lifecycle tests additionally cover mutation, snapshots, reopen and portable
 verification/import followed by mutation.
 
-See [property projection evidence](../../development/evidence/property-projection-1247.json)
+See [property projection evidence](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/property-projection-1247.json)
 for source/executable hashes, all observations, selection budgets, instrumentation
 limits, reproduction commands and validation results.
 
@@ -1448,7 +1448,7 @@ implementation and its direct correctness/CI close gate.
 The production marker now selects an existing qualified identity from the
 aggregate input, retaining the scalar-only fallback and true-for-null behavior.
 Explicit nullable counts keep their argument. The earlier prototype observations
-above remain historical; the [final paired evidence](../../development/evidence/count-row-marker-1249.json)
+above remain historical; the [final paired evidence](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/count-row-marker-1249.json)
 uses baseline `6907d926` (tree-identical to merged `b9765e8e`) and candidate
 `e8cb7dcb`, frozen before any subprocess measurement.
 
@@ -1572,7 +1572,7 @@ Compaction executes once per prepared fixture. A separately frozen CLI runs
 with `--retained-ancestors 0 --cleanup-batch 0`, only after the private fixture's
 leases are released. This preserves CURRENT and does not change default policy.
 
-[The aggregate evidence](../../development/evidence/query-maintenance-assessment-1207.json)
+[The aggregate evidence](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/query-maintenance-assessment-1207.json)
 contains all process observations, syscall totals, page/row-group counts,
 selection ceilings, FD samples and failed/superseded evidence limitations.
 Tracing uses `strace -f -qq -yy -s 0` with read/pread/readv, write/pwrite/writev,

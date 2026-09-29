@@ -19,7 +19,7 @@ from graphforge_bench.ingestion_attribution import (
 from graphforge_bench.native_rung import read_native_rung
 
 ROOT = Path(__file__).resolve().parents[1]
-EVIDENCE = ROOT.parent / "docs/development/evidence/query-rss-1278-repair"
+EVIDENCE = ROOT / "tests/fixtures/rungs/query-rss-1278-repair"
 SPEC = importlib.util.spec_from_file_location(
     "report_ingestion_1282", ROOT / "diagnostics/report_ingestion_1282.py"
 )

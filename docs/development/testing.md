@@ -20,6 +20,9 @@ The testing principles are the same for both:
 3. **Hermetic tests** — no shared state between tests
 4. **Deterministic behavior** — tests pass or fail consistently
 
+Coverage floors are enforced locally by `make pre-push`, not uploaded from CI;
+see [codecov-integration.md](codecov-integration.md).
+
 ---
 
 ## Rust Tests

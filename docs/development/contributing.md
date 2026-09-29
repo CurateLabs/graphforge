@@ -272,14 +272,25 @@ When adding features, update:
 - `docs/book/architecture/` — if the change affects the compiler pipeline, storage, or execution model
 - `docs/reference/` — if the public API changes
 
+Method and hashes live in the repo; results live on the issue. A development
+page records how to reproduce a measurement and the content digests that
+identify its inputs. Raw output (JSON, logs, receipts, per-run tables) is
+attached to the issue or pull request that produced it, or to a release
+artifact when a release claim depends on it, and is never committed under
+`docs/`. `scripts/ci/docs-tree-policy.py` fails CI on evidence-shaped or
+oversize files under `docs/` and on any `docs/development/*.md` that no other
+tracked file references; a page named after an issue is folded into its topic
+page or deleted when the issue closes. `docs/` is the only hand-maintained
+source: the published site renders an allowlisted subset and keeps no copies.
+
 Bazel migration work follows the sub-agent contracts in
-[bazel-migration-orchestration.md](bazel-migration-orchestration.md)
+[bazel-migration.md § Orchestration (#1)](bazel-migration.md#orchestration-1)
 (canonical issue [#1](https://github.com/CurateLabs/graphforge/issues/1)).
 Start with the developer guide [bazel.md](bazel.md). The frozen inventory,
 baseline, and #1 close-readiness evidence map live in
-[bazel-migration-ledger.md](bazel-migration-ledger.md),
-[bazel-migration-baseline.md](bazel-migration-baseline.md), and
-[bazel-migration-ac-evidence.md](bazel-migration-ac-evidence.md).
+[bazel-migration.md § Ledger (#12)](bazel-migration.md#ledger-12),
+[bazel-migration.md § Baseline (#12)](bazel-migration.md#baseline-12), and
+[bazel-migration.md § Close-readiness evidence map (#3)](bazel-migration.md#close-readiness-evidence-map-3).
 Mobile (Swift/Kotlin/UniFFI) bindings are not a Bazel-migration deliverable.
 
 ---

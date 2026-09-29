@@ -4,6 +4,7 @@ adr: "0014"
 status: "Accepted"
 date: "2026-07-25"
 superseded_by: null
+revisit_when: "Callers need graph-only revert or arbitrary generation access, which the named bounded checkpoint registry deliberately forbids"
 ---
 
 # ADR 0014: Complete-workspace checkpoints and generation-preserving revert

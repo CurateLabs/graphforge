@@ -4,6 +4,7 @@ adr: "0001"
 status: "Accepted"
 date: "2026-05-25"
 superseded_by: null
+revisit_when: "A binding surface needs engine-owned behavior of its own, or DataFusion's extension API stops meeting graph-native execution needs"
 ---
 
 # ADR 0001: Rust Core

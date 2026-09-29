@@ -4,6 +4,7 @@ adr: "0018"
 status: "Accepted"
 date: "2026-08-15"
 superseded_by: null
+revisit_when: "Fault modeling, recovery-on-open, deltas, transactions, or certification work needs to change an acknowledged durability or isolation outcome"
 ---
 
 # ADR 0018: Acknowledged durability and isolation contract

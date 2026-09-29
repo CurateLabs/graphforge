@@ -6,7 +6,7 @@ and `Cargo.lock` remain the Rust ecosystem source of truth for dependencies,
 local tooling, publishing metadata, and crate-universe generation.
 
 Canonical contract: [#1](https://github.com/CurateLabs/graphforge/issues/1).
-Close-readiness evidence map: [bazel-migration-ac-evidence.md](bazel-migration-ac-evidence.md).
+Close-readiness evidence map: [bazel-migration.md § Close-readiness evidence map (#3)](bazel-migration.md#close-readiness-evidence-map-3).
 
 ## Architecture and ownership
 
@@ -30,14 +30,8 @@ Companion deep-dives:
 
 | Doc | Role |
 | --- | --- |
-| [bazel-migration-orchestration.md](bazel-migration-orchestration.md) | Sub-agent roles and DAG |
-| [bazel-migration-ledger.md](bazel-migration-ledger.md) | Target + CI command inventory |
-| [bazel-migration-baseline.md](bazel-migration-baseline.md) | Accepted Cargo/Blacksmith baseline |
+| [bazel-migration.md](bazel-migration.md) | Migration record: orchestration, ledger, baseline, parity, cache gates, cutover, AC evidence map |
 | [bazel-bootstrap.md](bazel-bootstrap.md) | Pins, labels, local smoke commands |
-| [bazel-migration-parity.md](bazel-migration-parity.md) | Same-SHA Cargo/Bazel parity |
-| [bazel-migration-perf.md](bazel-migration-perf.md) | Cache metrics, thresholds, troubleshooting |
-| [bazel-migration-cutover.md](bazel-migration-cutover.md) | CI Gate cutover + Cargo rollback |
-| [bazel-migration-ac-evidence.md](bazel-migration-ac-evidence.md) | #1 AC → child evidence |
 
 ## Install
 
@@ -115,7 +109,7 @@ Windows lanes keep their platform default linkers.
 3. Attach the library to the appropriate root aggregate
    (`//:foundation_compiler_libs`, `//:runtime_libs`, or `//:first_party_libs`).
 4. Add/update a row in `tools/bazel/parity/migration_target_map.json` and the
-   human ledger ([bazel-migration-ledger.md](bazel-migration-ledger.md)).
+   human ledger ([bazel-migration.md § Ledger (#12)](bazel-migration.md#ledger-12)).
 5. Refresh Cargo↔Bazel lock/fingerprint state:
 
 ```bash
@@ -227,7 +221,7 @@ and remote-cache payloads.
 
 ### Enablement / metrics / eviction
 
-See [bazel-migration-perf.md](bazel-migration-perf.md) for the full protocol.
+See [bazel-migration.md § Cache and performance gates (#5)](bazel-migration.md#cache-and-performance-gates-5) for the full protocol.
 Short form:
 
 1. Org admin: Blacksmith
@@ -248,7 +242,7 @@ Short form:
 | `dist/bazel-warm-observation.json` | Warm identical-SHA observation |
 | `dist/bazel-affected-inputs.json` | Affected-input isolation probe |
 | `dist/bazel-cache-perf-ci-observation.json` | CI rollup for cache/perf |
-| `docs/development/bazel-migration-evidence/perf-sample.json` | One-shot Bazel-migration ≥10-pair evidence (not a live CI Gate regression gate) |
+| `tools/bazel/migration-evidence/perf-sample.json` | One-shot Bazel-migration ≥10-pair evidence (not a live CI Gate regression gate) |
 | `dist/cargo-bazel-parity-evidence.json` | Diagnostic dual-build parity (`Bazel Diagnostics`, not required) |
 
 `Bazel Diagnostics` uploads the cache/perf set as
@@ -263,7 +257,7 @@ Short form:
 | No remote cache hits | Org-admin enablement; fresh `--output_base` for warm observe; no competing `--remote_cache` |
 | Cold build fails without cache | Bug — cache absence must not require repo/credential changes |
 | Binding packaging mismatch | Ensure assembly consumes Bazel cdylib outputs; do not `maturin build` / `napi build` a second native graph in the smoke path |
-| Need Cargo-only diagnosis | [bazel-migration-cutover.md](bazel-migration-cutover.md) rollback section |
+| Need Cargo-only diagnosis | [bazel-migration.md § CI Gate cutover (#4)](bazel-migration.md#ci-gate-cutover-4) rollback section |
 
 ## Cargo compatibility and rollback
 
@@ -273,7 +267,7 @@ Short form:
 - For one release cycle after cutover, same-SHA dual-build parity remains a
   **diagnostic** under non-required `Bazel Diagnostics` (not in `CI Gate`).
 - Temporary CI rollback to Cargo `rust-test` is documented in
-  [bazel-migration-cutover.md](bazel-migration-cutover.md). Prefer fixing Bazel
+  [bazel-migration.md § CI Gate cutover (#4)](bazel-migration.md#ci-gate-cutover-4). Prefer fixing Bazel
   root causes.
 
 ## CI and release runbooks
@@ -306,4 +300,4 @@ Short form:
 - Cross-branch cache reuse is safe only when Bazel action keys and declared
   inputs match.
 - Details and AC pointers:
-  [bazel-migration-ac-evidence.md](bazel-migration-ac-evidence.md).
+  [bazel-migration.md § Close-readiness evidence map (#3)](bazel-migration.md#close-readiness-evidence-map-3).

@@ -13,7 +13,7 @@ The integrated runtime source is `83a153f164faa2f7dc276e593719ec71e7e0bc9e`,
 based on merged lifecycle main `0539c8eed0be6c5de9b5a7ef83b265e5f3dc0f79`.
 All five tests passed on OVHC-AGENCY, Linux 7.0.0-30, process-root ext4.
 Rust is 1.96.0 (`ac68faa20`), Arrow/Parquet 58.4.0.
-[Raw aggregate evidence](../../development/evidence/permanent-storage-1196.json)
+[Raw aggregate evidence](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/permanent-storage-1196.json)
 records each numerator, denominator and semantic fingerprint. The standalone
 serial test binary took 449.10 seconds; `/usr/bin/time -v` measured 268,780 KiB
 maximum RSS, 397.56 user seconds and 31.65 system seconds. These include the
@@ -129,7 +129,7 @@ Accepted input and private merge Parquet are outside this permanent-output polic
 This repair does not yet change mutation or delta replay writers; their separate
 resource admission requires the publishing-policy follow-up requested under #1194.
 
-[Repair measurements](../../development/evidence/permanent-parquet-1202.json)
+[Repair measurements](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/permanent-parquet-1202.json)
 record source `87a5b19f` on the same host and toolchain as the assessment. All five
 facade tests passed, including exact reopen/query/export/full-verify/clean-import
 oracles and every production column's codec. Random-ID Parquet payloads remain
@@ -174,7 +174,7 @@ a property can legitimately change the catalog digest. Node/property payloads
 remain byte-identical when appending a delta. The catalog writer retains its
 previous Parquet defaults; shared encoding policy remains #1213.
 
-[Measured ownership evidence](../../development/evidence/cas-delta-ownership-1219.json)
+[Measured ownership evidence](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/cas-delta-ownership-1219.json)
 uses runtime source `36bc94505baef9125ad254c4b707aac2383ea090`. Two compiled API
 regressions pass public construction, composite and direct storage publication,
 reopen/query, cancellation before publication, active query snapshots,
@@ -245,7 +245,7 @@ These measurements do not establish portable CPU/RSS or temporary-disk peak
 budgets. Encoding-policy resource assessment remains #1213. The focused public
 test, 53 ontology-related API tests, production workspace Clippy, fast pre-push
 and gate-registry checks pass. Commands and raw measurements are in
-[`workspace-cas-ownership-1222.json`](../../development/evidence/workspace-cas-ownership-1222.json).
+[`workspace-cas-ownership-1222.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/workspace-cas-ownership-1222.json).
 
 Same-name ontology promotion changes graph and ordinal authorities after
 workspace publication, and clearing authority for retained typed data can
@@ -304,7 +304,7 @@ with peak RSS 139,224 KiB and kernel input/output of 126,224/53,288 blocks of
 512 bytes on the admitted native ext4 host. These are source-bound observations,
 not portable resource ceilings; the separate syscall trace includes startup,
 query, verification, import and test output. Raw evidence and commands are in
-[`composite-property-ownership-1224.json`](../../development/evidence/composite-property-ownership-1224.json).
+[`composite-property-ownership-1224.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/composite-property-ownership-1224.json).
 
 Validation includes 734 API unit tests, 45 publication tests, the unequal-route
 property generation regression, production workspace Clippy and fast pre-push.
@@ -368,7 +368,7 @@ a whole-process RSS measurement. The full public fixture process takes 14.86 s
 elapsed (10.57 s user, 2.77 s system), peaks at 146,584 KiB RSS, and records
 148,784 input / 84,416 output kernel blocks of 512 bytes. Startup, query, replay,
 portable verification and import are included. Raw syscall I/O and commands are
-in [`exploratory-replay-1218.json`](../../development/evidence/exploratory-replay-1218.json).
+in [`exploratory-replay-1218.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/exploratory-replay-1218.json).
 
 Validation: four public regressions, 99 construction tests, 23 replay-focused
 tests, ten delta/compaction tests, production workspace Clippy, fast pre-push,
@@ -424,7 +424,7 @@ source audit found no production `SerializedFileWriter` constructor.
 ### Baseline and paired experiments
 
 The baseline source is `60ffdca983ed1ad4b2acd4edfe2605f3e85d6e7e`.
-[`permanent-parquet-1213-baseline.json`](../../development/evidence/permanent-parquet-1213-baseline.json)
+[`permanent-parquet-1213-baseline.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/permanent-parquet-1213-baseline.json)
 records actual public construction, mutation, compaction, reopen, query, export,
 full verification and clean import. At 1,025 nodes and 4,097 random edges with
 heterogeneous properties, construction published 353,548 Parquet bytes; mutation
@@ -507,7 +507,7 @@ several tiny row groups, with rejection immediately below the computed bound.
 
 Implementation source `c16397d2cd7aeb01411f5cbb51c433154d3c3ef9` was measured
 with the same prebuilt public fixture after other builds/tests finished.
-[`permanent-parquet-1213.json`](../../development/evidence/permanent-parquet-1213.json)
+[`permanent-parquet-1213.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/permanent-parquet-1213.json)
 retains actual column-codec/encoding counts, output inventories and process observations.
 
 | Published stage | Baseline Parquet bytes / allocated bytes | Shared policy bytes / allocated bytes |
@@ -596,7 +596,7 @@ copy bytes remain exactly fixed. The regression still rejects one unaccounted
 write byte and refuses absent or oversized control accounting.
 
 Source `ad7a867bc836bf3c7381f3a1f70a71914237b349` and raw observations are in
-[`cas-uuid-ownership-1228.json`](../../development/evidence/cas-uuid-ownership-1228.json).
+[`cas-uuid-ownership-1228.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/cas-uuid-ownership-1228.json).
 
 | Constructed nodes / edges | New control bytes / allocated | Shared immutable UUID bytes | All private hydration writes |
 |---|---:|---:|---:|
@@ -658,7 +658,7 @@ publication. Existing composition certification verifies stale parents and
 forged plans without weakening reader authentication.
 
 Source `f1cf815577d07a697ce1ad505aa3fd2cd6db1cb0` and raw observations are in
-[`bound-ontology-clear-1230.json`](../../development/evidence/bound-ontology-clear-1230.json).
+[`bound-ontology-clear-1230.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/bound-ontology-clear-1230.json).
 The full refusal fixture took 9.83 s elapsed, 6.67 s user and 1.77 s system,
 with 136,936 KiB peak RSS. Separate syscall tracing recorded 132,373,775 read
 bytes, 16,648,242 write bytes and 5,862 successful fsync calls with no traced
@@ -734,7 +734,7 @@ their consumers release them; filesystem sampling must count overlapping
 owners and deduplicate shared immutable inodes.
 
 Source `269fa1dcb74db73555d0a79975c56b099dd34cb9` and raw observations are in
-[`facade-compaction-authority-1231.json`](../../development/evidence/facade-compaction-authority-1231.json).
+[`facade-compaction-authority-1231.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/facade-compaction-authority-1231.json).
 A frozen test executable ran `facade_compaction_ --nocapture --test-threads=1`
 for each separate observation. Untraced elapsed/user/system times were
 63.58/60.11/6.51 seconds and peak RSS was 160,248 KiB. Syscall tracing recorded
@@ -817,7 +817,7 @@ explicitly admits increasing work when fragments are added within a selected
 route. Authenticated tombstone corruption and ambiguous ownership fail closed.
 
 Source `d30ac7553a6825246333d7f815d6b8fa680b5914` and observations are in
-[`composite-edge-property-ownership-1224.json`](../../development/evidence/composite-edge-property-ownership-1224.json).
+[`composite-edge-property-ownership-1224.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/composite-edge-property-ownership-1224.json).
 The two-fragment probes read 16,231/18,153 bytes for 1/16–129 targets, with
 4,164 authentication/snapshot bytes, 401/481 read calls and a 2,104-byte peak
 snapshot. Eight fragments required 58,796 read bytes, 15,747 authentication/
@@ -880,7 +880,7 @@ allocation. Unlabelled node-property reads in ontology mode remain the existing
 lowerer's unsupported multi-table-union case; the promotion oracle uses the
 correctly labelled public queries required by #1229.
 
-[Source-bound resource evidence](../../development/evidence/ontology-promotion-1229.json)
+[Source-bound resource evidence](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/ontology-promotion-1229.json)
 records measured implementation `b7197fdb`, the frozen executable digest, source
 hashes, complete Parquet inventories,
 control-file inventories, CPU/RSS, selected syscall I/O and allocation sampling.
@@ -1000,7 +1000,7 @@ sampling interval was 20.13 ms; unlinked open files, directory allocation and
 shorter-lived peaks can be missed. This is neither a temporary-only total nor a
 hard admission bound. Full provenance, process/native observations, decoder
 budgets and limitations are in
-[`named-edge-property-ownership-1224.json`](../../development/evidence/named-edge-property-ownership-1224.json).
+[`named-edge-property-ownership-1224.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/named-edge-property-ownership-1224.json).
 
 Final validation passed all 41 frozen public publishing tests, all 24
 property-overlay unit tests, ten compaction integration tests, workspace clippy,

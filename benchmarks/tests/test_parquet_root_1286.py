@@ -17,7 +17,7 @@ SPEC = importlib.util.spec_from_file_location(
 )
 REPORT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(REPORT)
-EVIDENCE = ROOT.parent / "docs/development/evidence"
+EVIDENCE = ROOT / "tests/fixtures/rungs"
 
 
 class ParquetRootTests(unittest.TestCase):

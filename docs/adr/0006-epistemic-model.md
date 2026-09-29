@@ -4,6 +4,7 @@ adr: "0006"
 status: "Accepted"
 date: "2026-06-07"
 superseded_by: null
+revisit_when: "Belief state needs to become mutable, or the append-only epistemic tables can no longer represent required ambiguity cases"
 ---
 
 # ADR 0006: Append-only epistemic interpretation

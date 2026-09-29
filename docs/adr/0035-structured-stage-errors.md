@@ -3,13 +3,15 @@ title: "ADR 0035: Preserve stage diagnostics at public error boundaries"
 adr: "0035"
 status: "Accepted"
 superseded_by: null
+revisit_when: "A new binder diagnostic or nested DataFusion source starts double-prefixing or losing information at a public error boundary"
 ---
 
 # ADR 0035: Preserve stage diagnostics at public error boundaries
 
 **Build target:** v0.6.0
 **Implementation:** Accepted for the v0.6.0 implementation of #1018.
-**Related:** #1018
+**Related:** #1018; implementation contract and conversion matrix in
+[`docs/development/stage-error-contract.md`](../development/stage-error-contract.md)
 
 > Renumbered from ADR 0027. Two unrelated records were both filed as 0027;
 > [ADR 0027](0027-native-runtime-boundary.md) is the native GraphForge

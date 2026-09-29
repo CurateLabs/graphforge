@@ -197,12 +197,11 @@ mod tests {
 
     #[test]
     fn snapshot_contract_accepts_captured_encoding_lane_receipt() {
-        let receipt: Value = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../docs/development/evidence/encoding-lanes-1600/candidate/runs/",
-            "curve-s18-c8-r1/receipt-3-validate.json"
-        )))
-        .unwrap();
+        // A `receipt-3-validate.json` captured by the #1600 encoding-lane
+        // candidate run `curve-s18-c8-r1`; retained here as a contract fixture.
+        let receipt: Value =
+            serde_json::from_str(include_str!("../fixtures/region-diagnostics-receipt-1600.json"))
+                .unwrap();
         assert!(valid_snapshot(&receipt["region_diagnostics"]));
     }
 

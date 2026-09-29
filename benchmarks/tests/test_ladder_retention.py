@@ -248,18 +248,6 @@ class LadderRetentionTests(unittest.TestCase):
             self.assertEqual(main(["--destination", str(self.root / "retained")]), 2)
         self.assertIn("ladder evidence retention refused", stdout.getvalue())
 
-    def test_repository_archives_contain_every_manifest_payload(self) -> None:
-        archives = Path(__file__).resolve().parents[2] / "docs/development/evidence/ladder"
-        manifests = sorted(archives.glob("*/MANIFEST.sha256"))
-        self.assertTrue(manifests)
-        for manifest in manifests:
-            for line in manifest.read_text(encoding="utf-8").splitlines():
-                digest, name = line.split("  ", 1)
-                with self.subTest(archive=manifest.parent.name, payload=name):
-                    payload = manifest.parent / name
-                    self.assertTrue(payload.is_file(), f"missing retained payload: {payload}")
-                    self.assertEqual(sha256(payload), digest)
-
 
 if __name__ == "__main__":
     unittest.main()

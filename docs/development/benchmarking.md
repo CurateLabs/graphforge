@@ -153,6 +153,10 @@ scopes. The gate's judgment is unit-tested in `tests/ingest_gate_verdict.rs`:
 a deliberate regression and a deliberate improvement must each fail in the
 expected direction before a clean pass is trusted.
 
+Per-region wall, CPU, fsync, and byte attribution for one import comes from the
+stock receipt's `region_diagnostics` tree; see
+[ingest-region-diagnostics.md](ingest-region-diagnostics.md) for how to read it.
+
 Manual scaling studies also expose Makefile entry points (`make bench-traversal`,
 `make bench-merge-scaling`). Divan test mode (`--sample-count 1`) exercises every
 case without treating the output as performance evidence.

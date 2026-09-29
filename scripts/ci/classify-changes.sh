@@ -133,13 +133,7 @@ while IFS= read -r -d '' path; do
       tests/features/BUILD.bazel | tests/tck/BUILD.bazel | \
       tests/release_workflows/BUILD.bazel | \
       examples/agent_grounding/BUILD.bazel | \
-      docs/development/bazel-migration-parity.md | \
-      docs/development/bazel-migration-ledger.md | \
-      docs/development/bazel-migration-perf.md | \
-      docs/development/bazel-migration-baseline.md | \
-      docs/development/bazel-migration-cutover.md | \
-      docs/development/bazel-migration-evidence/* | \
-      docs/development/bazel-migration-evidence/**/* | \
+      docs/development/bazel-migration.md | \
       scripts/ci/cargo-bazel-drift-check.py | \
       scripts/ci/test-cargo-bazel-drift-check.py | \
       scripts/ci/assemble_bazel_binding_packages.py | \

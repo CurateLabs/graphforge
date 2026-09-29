@@ -100,7 +100,7 @@ for its selective equality and range queries, with an independent exact UUID
 oracle. Mutation, active snapshots, reopen and portable round trips exercise the
 same predicates. Source-bound CPU, syscall I/O, process RSS and sampled disk
 comparisons are recorded in
-[the #1241 evidence](../../development/evidence/input-predicates-1241.json).
+[the #1241 evidence](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/input-predicates-1241.json).
 Timing observations are not CI assertions; sampled peaks are not hard bounds.
 
 ## List expression execution

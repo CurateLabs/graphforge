@@ -4,6 +4,7 @@ adr: "0045"
 status: "Accepted"
 date: "2026-09-22"
 superseded_by: null
+revisit_when: "Retained authentication read-backs drift materially from the measured baseline at the 67,108,864-edge rung, or a trust boundary moves"
 ---
 
 # ADR 0045: Ingest authentication regime — hash once on write, verify at trust boundaries
@@ -149,7 +150,7 @@ attributed by the boundary table above, not by those phase names.
 ## Evidence
 
 - Baseline measurement and survey: issue #1384 (2026-09-17).
-- Retained rung evidence: `docs/development/evidence/ladder/`
+- Retained rung evidence: [`docs/development/evidence/ladder/`](https://github.com/CurateLabs/graphforge/tree/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/ladder)
   (the `b6ffb088` S18–S22 archive) and
-  `docs/development/evidence/authentication-regime-1384.md` for the
+  [`docs/development/evidence/authentication-regime-1384.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/authentication-regime-1384.md) for the
   integrated-tree measurement that accompanied this record.

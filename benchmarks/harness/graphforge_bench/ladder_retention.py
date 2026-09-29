@@ -2,9 +2,9 @@
 
 Every number a decision rests on must survive loss of the ladder work root.
 This module copies a completed clean ladder's rung JSON, result
-JSON, receipts, and the controller summary into a retained directory — either
-`docs/development/evidence/ladder/<commit>/` in a PR or an out-of-tree archive
-whose path and digest are recorded on the citing issues — and writes a
+JSON, receipts, and the controller summary into an out-of-tree archive whose
+path and digest are recorded on the citing issue (raw run output is never
+committed under ``docs/``, #1625) — and writes a
 `MANIFEST.sha256` whose digest identifies the archive. Raw BenchExec output is
 excluded unless requested; each `s<scale>-result.json` records its digest.
 """

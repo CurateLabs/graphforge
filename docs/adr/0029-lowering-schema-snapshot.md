@@ -3,6 +3,7 @@ title: "ADR 0029: Compile against immutable schema and catalog data"
 adr: "0029"
 status: "Accepted"
 superseded_by: null
+revisit_when: "Relational lowering needs source paths, executable providers, or graph rows that LoweringSnapshot's compile-time immutability excludes"
 ---
 
 # ADR 0029: Compile against immutable schema and catalog data

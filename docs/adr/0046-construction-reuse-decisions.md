@@ -4,6 +4,7 @@ adr: "0046"
 status: "Accepted"
 date: "2026-09-24"
 superseded_by: null
+revisit_when: "Any decision-matrix trigger fires: partition sorting becomes a measurable share of ingest, DataFusion gains range partitioning, or the coordinator goes asynchronous"
 ---
 
 # ADR 0046: Construction keeps its own sorting, partitioning and admission; library reuse is bounded to named hybrids
@@ -53,10 +54,10 @@ publication, reopen and queries.
 The evidence behind this record:
 
 - `docs/development/construction-reuse-inventory-protocol-1505.md`
-- `docs/development/evidence/shape-sort-partition-spike-1506.md`
-- `docs/development/evidence/spill-memory-pool-1507.md`
-- `docs/development/evidence/construction-scheduling-spike-1508.md`
-- `docs/development/evidence/construction-reuse-integrated-1509.md`
+- [`docs/development/evidence/shape-sort-partition-spike-1506.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/shape-sort-partition-spike-1506.md)
+- [`docs/development/evidence/spill-memory-pool-1507.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/spill-memory-pool-1507.md)
+- [`docs/development/evidence/construction-scheduling-spike-1508.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/construction-scheduling-spike-1508.md)
+- [`docs/development/evidence/construction-reuse-integrated-1509.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/construction-reuse-integrated-1509.md)
 
 ## Decision
 
@@ -195,7 +196,7 @@ These remain evaluation questions, not implementation follow-ups:
 | Evidence | What it establishes |
 | --- | --- |
 | `docs/development/construction-reuse-inventory-protocol-1505.md` | Inventory, candidate matrix and the binding comparison protocol, recorded before any measurement |
-| `docs/development/evidence/shape-sort-partition-spike-1506.md` | Sorting and partitioning: runnable candidates, six reviewed incompatibility proofs, S18/S20 ingest pairs, kernel measurements |
-| `docs/development/evidence/spill-memory-pool-1507.md` | External sort and memory pool under forced pressure; library properties independently reviewed; failure and crash cases |
-| `docs/development/evidence/construction-scheduling-spike-1508.md` | Scheduling and cancellation: findings F1–F15, on-CPU evidence, repeated measurements |
-| `docs/development/evidence/construction-reuse-integrated-1509.md` | The combined designs through complete ingest, publication, reopen and queries at S18 and S20; correctness and failure suite; maintenance assessment |
+| [`docs/development/evidence/shape-sort-partition-spike-1506.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/shape-sort-partition-spike-1506.md) | Sorting and partitioning: runnable candidates, six reviewed incompatibility proofs, S18/S20 ingest pairs, kernel measurements |
+| [`docs/development/evidence/spill-memory-pool-1507.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/spill-memory-pool-1507.md) | External sort and memory pool under forced pressure; library properties independently reviewed; failure and crash cases |
+| [`docs/development/evidence/construction-scheduling-spike-1508.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/construction-scheduling-spike-1508.md) | Scheduling and cancellation: findings F1–F15, on-CPU evidence, repeated measurements |
+| [`docs/development/evidence/construction-reuse-integrated-1509.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/construction-reuse-integrated-1509.md) | The combined designs through complete ingest, publication, reopen and queries at S18 and S20; correctness and failure suite; maintenance assessment |

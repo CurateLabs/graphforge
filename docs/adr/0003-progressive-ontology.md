@@ -4,6 +4,7 @@ adr: "0003"
 status: "Accepted"
 date: "2026-05-31"
 superseded_by: null
+revisit_when: "Analysts need a binder mode beyond exploratory, guided, and strict, or the exploratory fallback catch-all stops scaling for real workloads"
 ---
 
 # ADR 0003: Progressive Ontology — Exploration First

@@ -4,6 +4,7 @@ adr: "0044"
 status: "Accepted"
 date: "2026-09-22"
 superseded_by: null
+revisit_when: "A round trip fails to stay complete, disjoint, and redacted, or a Fork loses its required independence from installed authority"
 ---
 
 # ADR 0044: Research interchange preserves content identity separately from authority

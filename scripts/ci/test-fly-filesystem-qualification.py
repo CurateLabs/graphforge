@@ -307,7 +307,7 @@ def test_teardown_continues_after_each_timeout():
 
 def test_schema_is_closed_and_committed():
     schema = json.loads(
-        (ROOT / "docs/development/evidence/fly-filesystem-qualification.schema.json").read_text()
+        (ROOT / "scripts/ci/schemas/fly-filesystem-qualification.schema.json").read_text()
     )
     assert schema["additionalProperties"] is False
     assert schema["properties"]["host"]["additionalProperties"] is False

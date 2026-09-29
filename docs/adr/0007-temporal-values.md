@@ -4,6 +4,7 @@ adr: "0007"
 status: "Accepted"
 date: "2026-06-24"
 superseded_by: null
+revisit_when: "A temporal phase changes a rendered string and fails the passing baseline gate, or cypher_eq stops covering a new cross-type comparison"
 ---
 
 # ADR 0007: Runtime Temporal Values

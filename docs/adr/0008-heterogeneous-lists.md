@@ -4,6 +4,7 @@ adr: "0008"
 status: "Accepted"
 date: "2026-06-27"
 superseded_by: null
+revisit_when: "Nested heterogeneous lists or maps become required beyond what the flat tagged-struct representation can express"
 ---
 
 # ADR 0008: Heterogeneous List Values

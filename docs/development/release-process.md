@@ -20,7 +20,7 @@ repository-maintained change history file.
 
 CI Rust compilation and the mapped test graph are Bazel-owned under required
 check **`CI Gate`** (see [bazel.md](bazel.md) and
-[bazel-migration-cutover.md](bazel-migration-cutover.md)). Binding RC and publish
+[bazel-migration.md § CI Gate cutover (#4)](bazel-migration.md#ci-gate-cutover-4)). Binding RC and publish
 lanes must consume Bazel-built (or equivalent) natives rather than silently
 recompiling a different native graph. Publish credentials and OIDC stay in
 release workflows — never in cacheable Bazel actions.
@@ -94,4 +94,7 @@ After reconciliation reports every node verified:
   version.
 
 See [`publication-order.md`](publication-order.md) for the complete state model
-and stop conditions.
+and stop conditions. The partial v0.5.0 publication is the incident these rules
+come from; its operator record is kept as
+[`v0.5.0-release-operator-runbook.md`](v0.5.0-release-operator-runbook.md)
+(historical, not a procedure).

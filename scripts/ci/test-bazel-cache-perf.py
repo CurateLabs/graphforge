@@ -64,7 +64,7 @@ def test_policy_fails_on_competing_flag() -> None:
 
 
 def test_evaluate_pending_allow() -> None:
-    evidence = ROOT / "docs/development/bazel-migration-evidence/perf-sample.json"
+    evidence = ROOT / "tools/bazel/migration-evidence/perf-sample.json"
     if not evidence.is_file():
         raise SystemExit(f"missing evidence scaffold {evidence}")
     # Checked-in sample is complete after #5 measurement; strict evaluate must pass.
