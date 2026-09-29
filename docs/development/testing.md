@@ -23,6 +23,8 @@ The testing principles are the same for both:
 
 Coverage floors are enforced locally by `make pre-push`, not uploaded from CI;
 see [codecov-integration.md](codecov-integration.md).
+The rules for classifying behavior tests and binding smoke checks are in the
+[test coverage classification](test-coverage-classification.md).
 
 ---
 

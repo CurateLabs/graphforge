@@ -16,7 +16,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 MATRIX_PATH = ROOT / "tests/contracts/knowledge-contract-matrix.json"
 SCHEMA_INVENTORY = ROOT / "docs/reference/knowledge-schema-inventory.json"
-GROUPS = {"rust", "python", "node", "cli"}
+GROUPS = {"rust"}
 REQUIRED_CASES = {
     "graph-only-no-knowledge",
     "knowledge-enabled-empty",
@@ -27,8 +27,6 @@ REQUIRED_CASES = {
     "publication-failpoints",
     "idempotent-and-conflicting-uuid",
     "unsupported-pre-v1-rust",
-    "unsupported-pre-v1-python",
-    "unsupported-pre-v1-node",
     "algorithm-exhaustive-isolation",
     "search-find-knowledge-states",
     "descriptor-direct-arrow-equivalence",
@@ -148,7 +146,7 @@ def validate_matrix() -> dict[str, Any]:
         raise GateError("matrix must declare knowledge schema_version 1")
     commands = matrix.get("command_groups")
     if not isinstance(commands, dict) or set(commands) != GROUPS:
-        raise GateError("matrix command groups must be exactly rust, python, and node")
+        raise GateError("matrix command groups must be exactly rust")
     for group, entries in commands.items():
         if not isinstance(entries, list) or not entries:
             raise GateError(f"{group}: command group must be non-empty")
@@ -186,8 +184,8 @@ def validate_matrix() -> dict[str, Any]:
             raise GateError(f"{case_id}: exact test IDs are required")
         test_ids[case_id] = [validate_test(test, case_id) for test in tests]
 
-    if not {"rust", "python", "node"} <= surfaces:
-        raise GateError("matrix omits a public binding surface")
+    if "rust" not in surfaces:
+        raise GateError("matrix omits the Rust behavior oracle")
 
     isolation = (ROOT / "crates/graphforge-api/tests/knowledge_isolation.rs").read_text(
         encoding="utf-8"

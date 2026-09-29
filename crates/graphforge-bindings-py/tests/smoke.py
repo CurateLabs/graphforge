@@ -36,6 +36,22 @@ def check_construction() -> None:
     assert forge.ontology_mode == "exploratory", forge.ontology_mode
     assert forge.path is None, forge.path
 
+    # Legacy projects fail with the stable format error and remain untouched.
+    with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+        project = Path(directory) / "legacy"
+        topology = project / "topology"
+        topology.mkdir(parents=True)
+        nodes = topology / "nodes.parquet"
+        nodes.write_bytes(b"legacy")
+        try:
+            g.GraphForge(str(project))
+        except g.StorageError as error:
+            assert error.code == "GF_UNSUPPORTED_PROJECT_FORMAT", error.code
+        else:
+            raise SystemExit("expected unsupported project format error")
+        assert nodes.read_bytes() == b"legacy"
+        assert not (project / "FORMAT").exists()
+
 
 def check_exception_hierarchy() -> None:
     # #588 — every fault-domain class exists and derives from the base.

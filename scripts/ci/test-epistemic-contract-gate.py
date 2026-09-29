@@ -113,9 +113,9 @@ def main() -> None:
             "epistemic schema evidence missing",
         )
 
-        stale = json.loads((fragments / "node.json").read_text(encoding="utf-8"))
+        stale = json.loads((fragments / "rust.json").read_text(encoding="utf-8"))
         stale["commands"][0]["command"] = "stale command"
-        (fragments / "node.json").write_text(json.dumps(stale), encoding="utf-8")
+        (fragments / "rust.json").write_text(json.dumps(stale), encoding="utf-8")
         try:
             GATE.build_report(sha, fragments, output)
         except GATE.GateError:
