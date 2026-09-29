@@ -3,6 +3,7 @@ title: "ADR 0015: Three embedded project-write modes"
 adr: "0015"
 status: "Accepted"
 superseded_by: null
+revisit_when: "Remote multi-process fleets need engine-native coordination instead of an application-owned or extension-provided authority"
 ---
 
 # ADR 0015: Three embedded project-write modes

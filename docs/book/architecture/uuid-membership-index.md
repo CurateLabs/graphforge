@@ -145,7 +145,7 @@ manifest as reachability evidence.
 
 ## Packed membership evidence (#1203)
 
-[Raw integrated measurements](../../development/evidence/packed-membership-1203.json)
+[Raw integrated measurements](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/packed-membership-1203.json)
 use source `d103c3cb0360e5a76a4b3cbbf60ce3c3cec14d60`, including the merged
 construction Zstd repair. Four permanent fixtures pass exact
 query/reopen/export/full-verify/clean-import checks. The additional boundary test

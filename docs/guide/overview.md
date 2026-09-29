@@ -14,6 +14,8 @@ trees.
 | [Tutorial](tutorial.md) | Step-by-step walkthrough |
 | [VS Code extension](vscode-extension/) | Explore projects, run Cypher, and pair with coding agents inside your editor |
 | [Move projects with portable project v2](portable-projects.md) | Verify and move immutable projects locally, air-gapped, or through OCI |
+| [CLI and repository integration](repository-integration.md) | Initialize, validate, synchronize, checkpoint, export, and import a project |
+| [Validate infrastructure intent](infrastructure-validation.md) | Check a named deployment target before any cloud provider is selected |
 
 ## Everyday workflows
 

@@ -4,6 +4,7 @@ adr: "0040"
 status: "Accepted"
 date: "2026-09-22"
 superseded_by: null
+revisit_when: "A Frozen Slice needs to compact its source Version into a selected projection rather than referencing retained Version context"
 ---
 
 # ADR 0040: Frozen Slices reference retained Version context

@@ -4,6 +4,7 @@ adr: "0041"
 status: "Accepted"
 date: "2026-09-22"
 superseded_by: null
+revisit_when: "Branch acceptance evidence, including two-Branch restoration after reopen, exposes a gap in the current-Version publication model"
 ---
 
 # ADR 0041: Branch state publishes through Project CURRENT

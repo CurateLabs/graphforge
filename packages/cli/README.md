@@ -78,7 +78,7 @@ and Node bindings. This CLI preserves those APIs and does not infer, adopt,
 clear, or export an ontology implicitly.
 
 See the
-[repository integration guide](https://docs.graphforge.sh/guides/repository-integration/)
+[repository integration guide](https://docs.graphforge.sh/guide/repository-integration/)
 for the tracked `.graphforge/` definition boundary, ignored data surfaces,
 Git behavior, and complete lifecycle contract.
 

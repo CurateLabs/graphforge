@@ -3,6 +3,7 @@ title: "ADR 0030: Portable OCI protocol boundary"
 adr: "0030"
 status: "Accepted"
 superseded_by: null
+revisit_when: "graphforge-portable-oci needs a durable package or signature format change, or a second transport beyond OCI registries"
 ---
 
 # ADR 0030: Portable OCI protocol boundary

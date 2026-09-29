@@ -159,7 +159,7 @@ rolled back.
 Import/export and other interchange surfaces that publish a generation reuse
 the same publication vocabulary: stage, validate, durable generation,
 linearize, acknowledge, publish, abort, and recover. See ADR 0018 and the
-[repository integration guide](../../guides/repository-integration.md).
+[repository integration guide](../../guide/repository-integration.md).
 
 ### Property snapshot publication and session isolation
 

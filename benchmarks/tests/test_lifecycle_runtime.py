@@ -10,7 +10,7 @@ from graphforge_bench.lifecycle_runtime import analyze, summarize
 from graphforge_bench.native_rung import read_native_rung
 
 ROOT = Path(__file__).resolve().parents[1]
-EVIDENCE = ROOT.parent / "docs/development/evidence/integrated-storage-1194"
+EVIDENCE = ROOT / "tests/fixtures/rungs/integrated-storage-1194"
 
 
 class RuntimeDiagnosisTests(unittest.TestCase):

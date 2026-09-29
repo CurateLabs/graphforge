@@ -24,9 +24,7 @@ from graphforge_bench.progressive_run import (
 BENCHMARK_ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY_ROOT = BENCHMARK_ROOT.parent
 RUNG_SCHEMA = BENCHMARK_ROOT / "schemas/progressive-qualification-rung-evidence.json"
-QUALIFICATION_SCHEMA = (
-    REPOSITORY_ROOT / "docs/development/evidence/g500-ladder-qualification.schema.json"
-)
+QUALIFICATION_SCHEMA = BENCHMARK_ROOT / "schemas/g500-ladder-qualification.schema.json"
 PROVIDER_RESULT_SCHEMA = BENCHMARK_ROOT / "schemas/progressive-provider-run-result.json"
 PROVIDER_PLAN_SCHEMA = BENCHMARK_ROOT / "schemas/progressive-provider-run-plan.json"
 ASSEMBLY_CONTRACT = "graphforge-progressive-rung-assembly/3"

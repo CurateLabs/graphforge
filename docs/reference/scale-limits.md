@@ -101,7 +101,7 @@ policy; thread configurations `1`/`2`/`4`/`8`/automatic are executed under
 | Path | What it stores | Open behavior | Size guidance |
 |---|---|---|---|
 | Legacy `graph`/`snapshot` (Arrow IPC) | Whole workspace bytes in one participant | Hydrates every file into a private workspace | Historical envelope: 1 GiB/file and 2 GiB total. Still readable. Do not raise these constants. |
-| File-backed `graph`/`files` + generation `graph/` tree | Canonical inventory participant; graph files remain on disk | Validates inventory; read-only opens may pin the generation tree; writers materialize file-by-file | No universal GiB ceiling. Public reopen past the legacy 2 GiB snapshot envelope is proven by oversize file-backed evidence (#338 / #345). Densified 8M-node/128M-edge public reopen is proven by [`file-backed-128m-evidence.json`](../development/file-backed-128m-evidence.json) via `make bench-file-backed-128m` (#338). Hardware-specific; not a CI product max. CI uses a small multi-file fixture. |
+| File-backed `graph`/`files` + generation `graph/` tree | Canonical inventory participant; graph files remain on disk | Validates inventory; read-only opens may pin the generation tree; writers materialize file-by-file | No universal GiB ceiling. Public reopen past the legacy 2 GiB snapshot envelope is proven by oversize file-backed evidence (#338 / #345). Densified 8M-node/128M-edge public reopen is proven by [`file-backed-128m-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/file-backed-128m-evidence.json) via `make bench-file-backed-128m` (#338). Hardware-specific; not a CI product max. CI uses a small multi-file fixture. |
 
 New publications use the file-backed path. Portable interchange currently returns a
 structured unsupported error for file-backed trees (copy the project directory
@@ -110,7 +110,7 @@ instead); legacy snapshot generations remain portable.
 Public persistence past the legacy 2 GiB snapshot envelope is proven by the
 ignored oversize fixture in `file_backed_graph_generation` (sparse padding beside
 a queryable graph; checked-in evidence:
-[`file-backed-oversize-evidence.json`](../development/file-backed-oversize-evidence.json)).
+[`file-backed-oversize-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/file-backed-oversize-evidence.json)).
 That is not a universal size ceiling and does not download 8M/128M data in CI.
 
 ```bash
@@ -152,7 +152,7 @@ Arrow boundary as a GraphForge maximum graph size.
 | No full-file UUID concat during adjacency build/validate/inspect | Covered by CI streaming seam |
 | CSR bytes match scan-build semantics under spill | Covered by tiny-chunk golden tests |
 | Cancel/failure leaves prior index or absent/stale | Covered by cancel + spill-cap tests |
-| >200M edges indexes on a supported machine | Proven — [`adjacency-200m-evidence.json`](../development/adjacency-200m-evidence.json) via `make bench-adjacency-200m` (#336). Hardware-specific; not a universal graph-size ceiling. |
+| >200M edges indexes on a supported machine | Proven — [`adjacency-200m-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/adjacency-200m-evidence.json) via `make bench-adjacency-200m` (#336). Hardware-specific; not a universal graph-size ceiling. |
 
 Manual/scheduled >200M public adjacency evidence (not CI):
 
@@ -168,7 +168,7 @@ CARGO_TARGET_DIR=/tmp/cargo-338-fb \
   make bench-file-backed-128m
 ```
 
-Checked-in evidence: [`file-backed-128m-evidence.json`](../development/file-backed-128m-evidence.json).
+Checked-in evidence: [`file-backed-128m-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/file-backed-128m-evidence.json).
 
 ## CSR-native execution (#340)
 
@@ -196,7 +196,7 @@ heap vectors for every graph edge.
 | Out / in / undirected / typed / wildcard semantics preserved | Covered by adjacency + persistent provider tests |
 | Bounded delta overlay without full base copy | Covered by storage overlay parity tests |
 | Selected-subgraph projection bounded by selection | Covered by export path iterating selected node ids |
-| Peak RSS / cold-warm first-use on #334 fixtures | Hardware-specific observation only; recorded in [`m4-exit-evidence.json`](../development/m4-exit-evidence.json). Never a CI pass/fail gate. |
+| Peak RSS / cold-warm first-use on #334 fixtures | Hardware-specific observation only; recorded in [`m4-exit-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/m4-exit-evidence.json). Never a CI pass/fail gate. |
 ## Construction integrity I/O
 
 The facade's immediate seal-and-publish path commits the receipt journal, then

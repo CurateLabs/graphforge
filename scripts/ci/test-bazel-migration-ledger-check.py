@@ -12,7 +12,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 CHECK = ROOT / "scripts/ci/bazel-migration-ledger-check.py"
 MAP = ROOT / "tools/bazel/parity/migration_target_map.json"
-LEDGER = ROOT / "docs/development/bazel-migration-ledger.md"
+LEDGER = ROOT / "docs/development/bazel-migration.md"
 
 
 def main() -> None:

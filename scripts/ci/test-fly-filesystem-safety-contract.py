@@ -13,7 +13,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 CONTROLLER = Path("scripts/fly-filesystem-qualification.py")
 VALIDATOR = Path("scripts/ci/validate-fly-filesystem-qualification.py")
-SCHEMA = Path("docs/development/evidence/fly-filesystem-qualification.schema.json")
+SCHEMA = Path("scripts/ci/schemas/fly-filesystem-qualification.schema.json")
 DOCKERFILE = Path("containers/fly-filesystem-qualification/Dockerfile")
 ENTRYPOINT = Path("containers/fly-filesystem-qualification/run-smoke.sh")
 

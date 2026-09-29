@@ -86,7 +86,7 @@ pub struct ExecutionResourcePolicy {
     /// at least this share of the compute budget while imports run. At least
     /// one, and below `compute_threads` unless that is one (a one-thread
     /// instance runs construction on one lane). `None` → the default, 1
-    /// (see `docs/development/evidence/construction-cpu-budget-1586.md`).
+    /// (see <https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/construction-cpu-budget-1586.md>).
     pub construction_cpu_reserve: Option<usize>,
 }
 

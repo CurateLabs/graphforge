@@ -26,7 +26,7 @@ or replace this gate.
 | #342 | Merged — parallel exact cosine KNN | [#494](https://github.com/CurateLabs/graphforge/pull/494) |
 | #343 | Merged — parallel PageRank | [#492](https://github.com/CurateLabs/graphforge/pull/492) |
 | #344 | Merged — parallel Node2Vec walks | [#493](https://github.com/CurateLabs/graphforge/pull/493) |
-| #498/#499–#588 | Merged — later algorithm scale/polish batch; per-algorithm disposition notes under `docs/development/m4-disposition-*.md` | individual child PRs on those issues |
+| #498/#499–#588 | Merged — later algorithm scale/polish batch; per-algorithm disposition notes in [`m4-algorithm-dispositions.md`](m4-algorithm-dispositions.md) | individual child PRs on those issues |
 
 Optional milestone side track **#398** (GSI profiler) is not on the #335 close
 ledger and does not block M4.
@@ -35,10 +35,10 @@ ledger and does not block M4.
 
 | Artifact | Schema / role |
 |---|---|
-| [`m4-exit-evidence.json`](m4-exit-evidence.json) | `graphforge-m4-entry-evidence/1` final-tree #334 matrix rerun at the frozen SHA |
-| [`adjacency-200m-evidence.json`](adjacency-200m-evidence.json) | `graphforge-adjacency-200m-evidence/1` densified >200M public `index_adjacency` |
-| [`file-backed-128m-evidence.json`](file-backed-128m-evidence.json) | `graphforge-file-backed-128m-evidence/1` densified 8M/128M public reopen |
-| [`file-backed-oversize-evidence.json`](file-backed-oversize-evidence.json) | `graphforge-file-backed-oversize-evidence/1` sparse >2 GiB envelope reopen |
+| [`m4-exit-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/m4-exit-evidence.json) | `graphforge-m4-entry-evidence/1` final-tree #334 matrix rerun at the frozen SHA |
+| [`adjacency-200m-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/adjacency-200m-evidence.json) | `graphforge-adjacency-200m-evidence/1` densified >200M public `index_adjacency` |
+| [`file-backed-128m-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/file-backed-128m-evidence.json) | `graphforge-file-backed-128m-evidence/1` densified 8M/128M public reopen |
+| [`file-backed-oversize-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/file-backed-oversize-evidence.json) | `graphforge-file-backed-oversize-evidence/1` sparse >2 GiB envelope reopen |
 | [`m4-entry-baseline.md`](m4-entry-baseline.md) | Entry contract narrative |
 | [`execution-resource-policy.md`](execution-resource-policy.md) | #337 policy + CPU-kernel crossovers |
 | [`../reference/scale-limits.md`](../reference/scale-limits.md) | Persistence / adjacency / CSR claim table |
@@ -66,12 +66,12 @@ Short CI surfaces on this tip:
 - **File-backed persistence (#338):** public `GraphForge::new` reopens past the
   legacy 1 GiB/file · 2 GiB snapshot envelope (sparse oversize evidence) and the
   densified **8M-node / 128M-edge** class
-  ([`file-backed-128m-evidence.json`](file-backed-128m-evidence.json)).
+  ([`file-backed-128m-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/file-backed-128m-evidence.json)).
   No universal GiB product ceiling.
 - **Adjacency (#336):** streamed projected Parquet build removes the
   134,217,727-edge Arrow concat ceiling structurally. Densified **>200M-edge**
   public `GraphForge::index_adjacency` succeeded with recorded RSS/spill/chunk
-  configuration ([`adjacency-200m-evidence.json`](adjacency-200m-evidence.json)).
+  configuration ([`adjacency-200m-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/adjacency-200m-evidence.json)).
 - **Streaming Parquet (#339):** query path uses `GraphForgeParquetExec` with
   execution-time I/O and bounded batches.
 - **CSR-native (#340):** fresh index hits report zero base-CSR HashMap expansion
@@ -80,7 +80,7 @@ Short CI surfaces on this tip:
   `rows: Vec<Vec<…>>`).
 - **CPU kernels:** exact cosine KNN, PageRank, and Node2Vec walk generation from
   #342–#344 remain on the close ledger. The later #498/#499–#588 algorithm batch
-  is dispositioned per-issue under `m4-disposition-*.md` on this same tree.
+  is dispositioned per algorithm in [`m4-algorithm-dispositions.md`](m4-algorithm-dispositions.md) on this same tree.
   Thread cells that exceed the machine-relative concurrency budget remain
   recorded as `unavailable`, never fabricated.
 
@@ -90,8 +90,8 @@ Short CI surfaces on this tip:
 |---|---|
 | Legacy 1 GiB/file · 2 GiB snapshot | Historical envelope only; still readable; not raised |
 | Public reopen >2 GiB validated bytes | Proven via oversize file-backed evidence |
-| 8M/128M densified public facade | Proven via [`file-backed-128m-evidence.json`](file-backed-128m-evidence.json) (#338 / #763) |
-| >200M-edge adjacency index | Proven via [`adjacency-200m-evidence.json`](adjacency-200m-evidence.json) (#336 / #762) |
+| 8M/128M densified public facade | Proven via [`file-backed-128m-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/file-backed-128m-evidence.json) (#338 / #763) |
+| >200M-edge adjacency index | Proven via [`adjacency-200m-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/adjacency-200m-evidence.json) (#336 / #762) |
 | GPU / accelerator | Out of scope for M4; no shipped capability or claim |
 | Universal graph-size / SLO / cross-machine timing | Explicitly rejected |
 

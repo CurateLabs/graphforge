@@ -4,6 +4,7 @@ adr: "0033"
 status: "Superseded by ADR 0036"
 date: "2026-09-17"
 superseded_by: "0036"
+revisit_when: "Historical; ADR 0036 owns the release version contract"
 ---
 
 # ADR 0033: Prereleases share one version with per-ecosystem spelling

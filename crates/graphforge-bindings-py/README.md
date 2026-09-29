@@ -52,5 +52,5 @@ point launches the same Rust-owned repository CLI used by `gf` and
 
 - [Quick start](https://docs.graphforge.sh/guide/quickstart/)
 - [Installation](https://docs.graphforge.sh/guide/installation/)
-- [Repository integration](https://docs.graphforge.sh/guides/repository-integration/)
+- [Repository integration](https://docs.graphforge.sh/guide/repository-integration/)
 - [Full documentation](https://docs.graphforge.sh/)

@@ -1,9 +1,0 @@
-2026-09-28T03:49:16Z
-Linux OVHC-AGENCY 7.0.0-30-generic #30-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 31 18:22:54 UTC 2026 x86_64 GNU/Linux
-16
-84fac96438e65cc10f0705fb07b806708e63e65b29b06ae0816f31353d32b35b  /home/ubuntu/gf-1607-artifacts/gf-baseline
-db34c4e4f3fb088644a282cdfa2b909b103f1cb85e2ee3e0a811d62cbea1f4f3  /home/ubuntu/gf-1607-artifacts/gf-candidate
-f112ccbec94875f36f113e9bdf3e6e7d88e3105bafbaeeb3a7cb42ac4883e9c4  s18/edges.parquet
-44c9dfd9325013d0f6ea2f03bd86b00d2bea01265254cb28f70f0881a6478075  s18/nodes.parquet
-3fb656aa9af568f12359c51fcb6a337460d0521ac07bd05def3a7e98f2e51086  s20/edges.parquet
-5792da943d39a3ec0cfe48c375fef1b078ae31f2c086af5d9bcfd417c74f24aa  s20/nodes.parquet

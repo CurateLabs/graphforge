@@ -4,6 +4,7 @@ adr: "0002"
 status: "Accepted"
 date: "2026-05-28"
 superseded_by: null
+revisit_when: "The hand-written recursive-descent and Pratt parser drifts from the openCypher grammar it must match, or the differential corpus stops passing"
 ---
 
 # ADR 0002: Recursive Descent + Pratt Parser for graphforge-cypher

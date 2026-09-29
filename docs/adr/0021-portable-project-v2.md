@@ -4,6 +4,7 @@ adr: "0021"
 status: "Accepted"
 date: "2026-08-19"
 superseded_by: null
+revisit_when: "A package needs full-memory buffering, unmanifested files, or capabilities the closed-world v2 schema and fixture corpus forbid"
 ---
 
 # ADR 0021: Portable project v2 package layout and identity

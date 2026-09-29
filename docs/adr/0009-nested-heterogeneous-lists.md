@@ -4,6 +4,7 @@ adr: "0009"
 status: "Accepted"
 date: "2026-06-28"
 superseded_by: null
+revisit_when: "The finite per-expression payload schema for nested heterogeneous lists and maps cannot represent a new TCK scenario shape"
 ---
 
 # ADR 0009: Nested Heterogeneous List Values

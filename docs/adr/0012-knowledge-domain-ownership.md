@@ -4,6 +4,7 @@ adr: "0012"
 status: "Accepted"
 date: "2026-07-24"
 superseded_by: null
+revisit_when: "The domain-dependency check or compile-time parity tests fail because graph or analyst-verb crates gain a path to knowledge"
 ---
 
 # ADR 0012: Knowledge and epistemic domain ownership and schema evolution

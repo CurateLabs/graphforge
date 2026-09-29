@@ -442,19 +442,22 @@ requirement.
 
 The work root is scratch. Before a completed clean ladder's numbers are
 reported anywhere, copy its rung JSON, result JSON, receipts, and the
-controller summary into a retained location — `docs/development/evidence/ladder/<full-sha>/`
-staged in a PR, or an out-of-tree archive whose path and manifest digest are
-recorded on the citing issues:
+controller summary into an out-of-tree archive, and record the archive path
+and its `MANIFEST.sha256` digest on the citing issue next to the result tables.
+Raw run output is never committed under `docs/` (#1625): the repository keeps
+the method and the digests, the issue keeps the results.
 
 ```bash
 make -C benchmarks retain-ladder-evidence \
   EVIDENCE_DIR=$OUTPUT_DIR SUMMARY_LOG=/home/ubuntu/gf-clean-ladder-<sha>.log \
-  DESTINATION=../docs/development/evidence/ladder/<full-sha> [INCLUDE_BENCHEXEC=1]
+  DESTINATION=/path/to/ladder-archive/<full-sha> [INCLUDE_BENCHEXEC=1]
 ```
 
 Every rung receipt is verified against the digests in its `s<scale>-result.json`
-before anything is copied, and the destination is append-only. The retained
-index lives in [`docs/development/evidence/ladder/README.md`](../docs/development/evidence/ladder/README.md).
+before anything is copied, and the destination is append-only. The archives
+retained before this rule are indexed on
+[#1478](https://github.com/CurateLabs/graphforge/issues/1478) and at the
+[permalinked index](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/ladder/README.md).
 
 Terminal teardown proof:
 
@@ -705,7 +708,7 @@ that provenance the rung schema requires the lifecycle receipt's authoritative
 certify VmHWM phase observations (`graphforge_process`), not BenchExec cgroup
 `memory.peak` (which includes durable page cache on host NVMe mounts). A
 two-run instrumented attribution of that figure at the S18 rung
-([evidence](../docs/development/evidence/rung-rss-1473.md)) measured the tool
+([evidence](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/rung-rss-1473.md)) measured the tool
 scope's peak as 74.6% page cache and 21.9% anonymous, with process VmHWM 3.2x
 below the cgroup peak. That
 payload copies the source and imported ten-category snapshots, committed

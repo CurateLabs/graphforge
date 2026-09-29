@@ -19,7 +19,7 @@ from typing import Any
 
 SCHEMA = "graphforge.bazel-migration-target-map.v1"
 DEFAULT_MAP = Path("tools/bazel/parity/migration_target_map.json")
-DEFAULT_LEDGER = Path("docs/development/bazel-migration-ledger.md")
+DEFAULT_LEDGER = Path("docs/development/bazel-migration.md")
 ALLOWED_EXCEPTION_STATUS = frozenset({"justified", "handoff", "closed", "mapped", "excluded"})
 KIND_TO_CLASS = {
     "lib": "lib",

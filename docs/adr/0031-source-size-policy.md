@@ -4,6 +4,7 @@ adr: "0031"
 status: "Accepted"
 date: "2026-09-16"
 superseded_by: null
+revisit_when: "A reviewed file needs an exemption beyond the accepted ones, or an existing exemption's rationale no longer fits its cohesive contract"
 ---
 
 # ADR 0031: Reviewed source file size bounds

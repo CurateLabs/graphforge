@@ -4,6 +4,7 @@ adr: "0013"
 status: "Accepted"
 date: "2026-07-24"
 superseded_by: null
+revisit_when: "A supported platform's local filesystem stops meeting the atomic-rename and fsync barrier this recovery protocol assumes"
 ---
 
 # ADR 0013: Durable v0.5 project-generation protocol

@@ -3,7 +3,7 @@
 Minimal Bazel workspace for Bazel-migration issues
 [#11](https://github.com/CurateLabs/graphforge/issues/11)–[#7](https://github.com/CurateLabs/graphforge/issues/7).
 Canonical contract: [#1](https://github.com/CurateLabs/graphforge/issues/1).
-Orchestration: [bazel-migration-orchestration.md](bazel-migration-orchestration.md).
+Orchestration: [bazel-migration.md § Orchestration (#1)](bazel-migration.md#orchestration-1).
 
 ## What landed
 
@@ -152,7 +152,7 @@ CARGO_BAZEL_REPIN=1 bazelisk build --repo_env=CARGO_BAZEL_REPIN=1 //:first_party
 - Do **not** add `--remote_cache` in `.bazelrc` or workflow steps. Blacksmith
   injects repository Bazel caching (org-admin enablement complete; see #5).
 - Policy + measurement harness: `scripts/ci/bazel-cache-perf.py` (see
-  [bazel-migration-perf.md](bazel-migration-perf.md)).
+  [bazel-migration.md § Cache and performance gates (#5)](bazel-migration.md#cache-and-performance-gates-5)).
 - After [#4](https://github.com/CurateLabs/graphforge/issues/4), `Bazel Bootstrap`
   is authoritative under `CI Gate` (`//:ci_rust_tests`).
 
@@ -160,4 +160,4 @@ CARGO_BAZEL_REPIN=1 bazelisk build --repo_env=CARGO_BAZEL_REPIN=1 //:first_party
 
 Day-to-day install, extending targets, packaging handoff, troubleshooting, and
 CI/release runbooks: [bazel.md](bazel.md).
-#1 close-readiness evidence map: [bazel-migration-ac-evidence.md](bazel-migration-ac-evidence.md).
+#1 close-readiness evidence map: [bazel-migration.md § Close-readiness evidence map (#3)](bazel-migration.md#close-readiness-evidence-map-3).

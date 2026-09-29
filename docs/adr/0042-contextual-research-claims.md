@@ -4,6 +4,7 @@ adr: "0042"
 status: "Accepted"
 date: "2026-09-22"
 superseded_by: null
+revisit_when: "A new research claim family needs a registry entry whose closed values, bounds, or fingerprints the current schema cannot express"
 ---
 
 # ADR 0042: Contextual research decisions extend immutable knowledge

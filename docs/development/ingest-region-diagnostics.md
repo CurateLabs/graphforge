@@ -93,7 +93,7 @@ residual. Adjacency CSR encoding runs
 inside `validate/seal/canonical_encoding/adjacency_encoding`, not inside
 publish; reconcile publication against that region rather than assuming CSR
 cost lands in `commit`. Measured attribution on the integrated tree is recorded in
-[`evidence/publication-attribution-1481.md`](evidence/publication-attribution-1481.md).
+[`evidence/publication-attribution-1481.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/publication-attribution-1481.md).
 
 Registration reports successfully owned bytes (Arrow registration reports rows),
 append reports accepted rows, and successful new shaping/encoding reports the

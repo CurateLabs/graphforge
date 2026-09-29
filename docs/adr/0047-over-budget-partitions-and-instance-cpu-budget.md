@@ -4,6 +4,7 @@ adr: "0047"
 status: "Accepted"
 date: "2026-09-24"
 superseded_by: null
+revisit_when: "External partitions dominate ingest wall on a real workload, row partitions need the external path, or a second subsystem needs its own CPU admission"
 ---
 
 # ADR 0047: Over-budget construction partitions succeed; one CPU budget per instance
@@ -25,7 +26,7 @@ publication boundary), ADR 0045 (ingest authentication regime); #337
 
 #1585 compared the #1507 DataFusion adapter with a native bounded merge under
 the #1505 protocol and selected the native merge
-(`docs/development/evidence/external-partition-comparison-1585.md`).
+([`docs/development/evidence/external-partition-comparison-1585.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/external-partition-comparison-1585.md)).
 
 A fixed-width partition without a detail codec whose materialization would
 exceed `max_partition_bytes` is sorted on its load worker into runs of at most
@@ -65,7 +66,7 @@ How each obligation is met:
 - **Unchanged resident path.** Partitions within budget take the resident path
   unchanged.
 
-Evidence: `docs/development/evidence/external-partitions-1585.md`.
+Evidence: [`docs/development/evidence/external-partitions-1585.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/external-partitions-1585.md).
 
 ## Implementation update: the instance construction budget (#1586)
 
@@ -88,7 +89,7 @@ Finish-time loads run on their own threads and count against the same limit.
 The default reserve is 1. Measured at 4 and 8 compute threads with two
 concurrent imports, a larger reserve did not lower query latency beyond
 run-to-run variation, and the limit held at every setting. Evidence:
-`docs/development/evidence/construction-cpu-budget-1586.md`.
+[`docs/development/evidence/construction-cpu-budget-1586.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/construction-cpu-budget-1586.md).
 
 ## Context
 
@@ -105,7 +106,7 @@ ingest before allocating; the default budget is 256 MiB. At 33 bytes per
 endpoint record, one node with roughly 8.1 million edges fills the budget on
 its own. More ranges cannot split it and more RAM does not raise the recorded
 budget. The measurements behind this record
-(`docs/development/evidence/partition-refusal-1584.md`) show:
+([`docs/development/evidence/partition-refusal-1584.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/partition-refusal-1584.md)) show:
 
 - A 9,000,000-edge star graph, one hub with every other node linked to it, is
   refused: `partition materialization requires 297536415 bytes, exceeds
@@ -235,6 +236,6 @@ are admitted, not which scheduler runs them.
 
 | Evidence | What it establishes |
 | --- | --- |
-| `docs/development/evidence/partition-refusal-1584.md` | Graph500 hub growth S18–S26, the partition-size model and its fit, the star-graph refusal, and the #1507 adapter's failure under a large pool and success under smaller ones |
-| `docs/development/evidence/construction-reuse-integrated-1509.md` | The hybrid's measured cost at a forced 1 MiB budget, and the Tokio-coordinator incompatibility |
-| `docs/development/evidence/construction-scheduling-spike-1508.md` | F12 shared-admission measurement; F13 on the API runtime's blocking pool |
+| [`docs/development/evidence/partition-refusal-1584.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/partition-refusal-1584.md) | Graph500 hub growth S18–S26, the partition-size model and its fit, the star-graph refusal, and the #1507 adapter's failure under a large pool and success under smaller ones |
+| [`docs/development/evidence/construction-reuse-integrated-1509.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/construction-reuse-integrated-1509.md) | The hybrid's measured cost at a forced 1 MiB budget, and the Tokio-coordinator incompatibility |
+| [`docs/development/evidence/construction-scheduling-spike-1508.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/construction-scheduling-spike-1508.md) | F12 shared-admission measurement; F13 on the API runtime's blocking pool |

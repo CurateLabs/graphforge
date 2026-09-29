@@ -4,6 +4,7 @@ adr: "0011"
 status: "Accepted"
 date: "2026-07-10"
 superseded_by: null
+revisit_when: "A dynamic list literal needs more than 127 elements, exceeding the Int8 tag's addressable range"
 ---
 
 # ADR 0011: Dynamic Heterogeneous Value Lists

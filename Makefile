@@ -341,12 +341,12 @@ bench-m4-entry:  ## Emit the M4 entry large/manual evidence envelope (#334; hard
 	cargo test -p graphforge-api --release --test m4_entry_baseline large_manual_matrix_emits_hardware_dataset_evidence -- --ignored --nocapture --test-threads=1
 
 bench-adjacency-200m:  ## >200M-edge public adjacency build evidence (#336; ignored, scale-host)
-	GF_ADJACENCY_SCALE_EVIDENCE_OUT="$(CURDIR)/docs/development/adjacency-200m-evidence.json" \
+	GF_ADJACENCY_SCALE_EVIDENCE_OUT="$(CURDIR)/build/adjacency-200m-evidence.json" \
 	GF_ADJACENCY_SCALE_WORK="$(CURDIR)/build/adjacency-200m-work" \
 	cargo test -p graphforge-api --release --test adjacency_scale_evidence adjacency_over_200m_public_build_emits_evidence -- --ignored --nocapture --test-threads=1
 
 bench-file-backed-128m:  ## 8M/128M densified public file-backed reopen evidence (#338; ignored, scale-host)
-	GF_FILE_BACKED_SCALE_EVIDENCE_OUT="$(CURDIR)/docs/development/file-backed-128m-evidence.json" \
+	GF_FILE_BACKED_SCALE_EVIDENCE_OUT="$(CURDIR)/build/file-backed-128m-evidence.json" \
 	GF_FILE_BACKED_SCALE_WORK="$(CURDIR)/build/file-backed-128m-work" \
 	cargo test -p graphforge-api --release --test file_backed_scale_evidence densified_8m_128m_public_reopen_emits_evidence -- --ignored --nocapture --test-threads=1
 

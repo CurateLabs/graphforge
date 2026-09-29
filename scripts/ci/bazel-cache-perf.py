@@ -32,10 +32,10 @@ from typing import Any
 SCHEMA = "graphforge.bazel-cache-perf-evidence.v1"
 SCHEMA_RUN = "graphforge.bazel-cache-perf-run.v1"
 
-DEFAULT_EVIDENCE = Path("docs/development/bazel-migration-evidence/perf-sample.json")
-DEFAULT_BASELINE_DOC = Path("docs/development/bazel-migration-baseline.md")
+DEFAULT_EVIDENCE = Path("tools/bazel/migration-evidence/perf-sample.json")
+DEFAULT_BASELINE_DOC = Path("docs/development/bazel-migration.md")
 
-# Accepted Cargo/Blacksmith baseline from #12 (bazel-migration-baseline.md).
+# Accepted Cargo/Blacksmith baseline from #12 (bazel-migration.md).
 CARGO_PRIMARY_P50_SECONDS = 327 + 177 + 121  # Rust Tests + Python + Node
 CARGO_COMPUTE_PROXY_P50_SECONDS = 923
 BASELINE_INVENTORY_SHA = "6e8b8e3fdc1ecd960eacf14a73e5be7b54fcef3c"

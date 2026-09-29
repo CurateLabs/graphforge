@@ -104,3 +104,5 @@ Claims require evidence appropriate to the claim:
 - for release publication claims, the SHA-bound evidence required by the release process.
 
 Do not lie, skip tests, weaken assertions, or claim green without running the relevant checks. Do not invent SHA-citation rituals for ordinary issue close.
+
+**Method and hashes live in the repo; results live on the issue.** A development doc records how to reproduce a measurement and the content digests that identify its inputs. Raw output (JSON, logs, receipts, per-run tables, patches) attaches to the issue or PR that produced it, or to a release artifact when a release claim depends on it; it is never committed under `docs/`. `scripts/ci/docs-tree-policy.py` rejects evidence-shaped and oversize files there and fails on any `docs/development/*.md` nothing references. A doc named after an issue is folded into its topic page or deleted when the issue closes. Every ADR carries `status`, `superseded_by`, and a `revisit_when` trigger.

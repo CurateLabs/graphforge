@@ -8,20 +8,20 @@ These are separate representative workloads. Their savings must not be added or 
 
 | Concern | Implemented outcome and evidence | Measured tradeoff or boundary |
 | --- | --- | --- |
-| Permanent inventory and topology/property Parquet | [#1196 census](evidence/permanent-storage-1196.json) and [#1202 repair](evidence/permanent-parquet-1202.json) cover topology, properties, identities, manifests, catalog and derived adjacency. Sequential permanent allocation fell from 8,388,608 to 4,112,384 bytes; random from 8,929,280 to 7,585,792. | Four heterogeneous/route fixtures and current-format exact lifecycle tests supplement the property-free host ladder. Whole-test CPU/RSS observations are not isolated codec costs. |
-| Membership representation | [#1203 packed membership](evidence/packed-membership-1203.json) removes reserved padding while preserving full-width identity, kind and tombstone information. | Physical savings depend on allocation rounding; exact current-format readers, recovery and corruption refusal remain required. |
-| Manifest allocation | [#1204 bounded buckets](evidence/bounded-manifest-1204.json): the same 352-entry fixture uses 209 objects / 856,064 allocated bytes instead of 483 / 1,978,368; permanent allocation falls from 9,814,016 to 8,691,712. | Bounded authenticated bucket lookup replaces separate tiny objects. The earlier 544-entry assessment is a different fixture. |
-| CSR representation | [#1205 bounded CSR](evidence/bounded-csr-1205.json): payload 4,920,564→1,324,020 bytes, allocation 4,972,544→1,363,968; cold CSR reads 35,552,246→9,577,462 bytes. | Whole-fixture RSS rises from 220,400 to 238,252 KiB; observed query time 3.855→3.891 s does not establish a latency gain. Decode windows remain bounded. |
-| Every verified permanent publisher | [#1213 shared policy](evidence/permanent-parquet-1213.json) applies Zstd level 1 across the verified publishing paths; compaction Parquet allocation 569,344→335,872 bytes on its fixture. | Preserve dictionaries-off compaction, its 8,192-row groups, and justified local streaming/memory settings. Whole-process user CPU 11.89→12.41 s and RSS 156,284→159,492 KiB rise; syscall read/write and sampled temporary allocation fall. |
-| Input predicate placement | [#1241](evidence/input-predicates-1241.json): fixed-path candidates 1,113,889→272, key rows 8,932,490→80,898; warm query median 3.850→0.254 s. | Observed CPU 31→2.1 s and RSS 153,640→101,544 KiB improve on this workload; physical filesystem input blocks are unchanged. |
-| Property projection | [#1247](evidence/property-projection-1247.json): narrow property query median 290.6→27.8 ms; CPU 1.55→0.22 s, RSS 136,192→76,692 KiB. | Full-width median 293.6→309.2 ms is slower within its preselected envelope. Physical input blocks are unchanged; avoiding overlay materialization is not permission to skip authentication. |
-| Qualified count row marker | [#1249 final implementation](evidence/count-row-marker-1249.json): count-all median 14.45→10.93 ms; affected counts avoid about 923.9 KB read and 308.8 KB write syscalls over five queries. | The explicit identity-count RSS control failed its original cap by 232 KiB. Fixed follow-up observations and the bounded disposition remain in the evidence; do not claim all final RSS caps passed. Nullable count, SUM and selective-property controls preserve their semantics. |
+| Permanent inventory and topology/property Parquet | [#1196 census](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/permanent-storage-1196.json) and [#1202 repair](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/permanent-parquet-1202.json) cover topology, properties, identities, manifests, catalog and derived adjacency. Sequential permanent allocation fell from 8,388,608 to 4,112,384 bytes; random from 8,929,280 to 7,585,792. | Four heterogeneous/route fixtures and current-format exact lifecycle tests supplement the property-free host ladder. Whole-test CPU/RSS observations are not isolated codec costs. |
+| Membership representation | [#1203 packed membership](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/packed-membership-1203.json) removes reserved padding while preserving full-width identity, kind and tombstone information. | Physical savings depend on allocation rounding; exact current-format readers, recovery and corruption refusal remain required. |
+| Manifest allocation | [#1204 bounded buckets](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/bounded-manifest-1204.json): the same 352-entry fixture uses 209 objects / 856,064 allocated bytes instead of 483 / 1,978,368; permanent allocation falls from 9,814,016 to 8,691,712. | Bounded authenticated bucket lookup replaces separate tiny objects. The earlier 544-entry assessment is a different fixture. |
+| CSR representation | [#1205 bounded CSR](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/bounded-csr-1205.json): payload 4,920,564→1,324,020 bytes, allocation 4,972,544→1,363,968; cold CSR reads 35,552,246→9,577,462 bytes. | Whole-fixture RSS rises from 220,400 to 238,252 KiB; observed query time 3.855→3.891 s does not establish a latency gain. Decode windows remain bounded. |
+| Every verified permanent publisher | [#1213 shared policy](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/permanent-parquet-1213.json) applies Zstd level 1 across the verified publishing paths; compaction Parquet allocation 569,344→335,872 bytes on its fixture. | Preserve dictionaries-off compaction, its 8,192-row groups, and justified local streaming/memory settings. Whole-process user CPU 11.89→12.41 s and RSS 156,284→159,492 KiB rise; syscall read/write and sampled temporary allocation fall. |
+| Input predicate placement | [#1241](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/input-predicates-1241.json): fixed-path candidates 1,113,889→272, key rows 8,932,490→80,898; warm query median 3.850→0.254 s. | Observed CPU 31→2.1 s and RSS 153,640→101,544 KiB improve on this workload; physical filesystem input blocks are unchanged. |
+| Property projection | [#1247](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/property-projection-1247.json): narrow property query median 290.6→27.8 ms; CPU 1.55→0.22 s, RSS 136,192→76,692 KiB. | Full-width median 293.6→309.2 ms is slower within its preselected envelope. Physical input blocks are unchanged; avoiding overlay materialization is not permission to skip authentication. |
+| Qualified count row marker | [#1249 final implementation](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/count-row-marker-1249.json): count-all median 14.45→10.93 ms; affected counts avoid about 923.9 KB read and 308.8 KB write syscalls over five queries. | The explicit identity-count RSS control failed its original cap by 232 KiB. Fixed follow-up observations and the bounded disposition remain in the evidence; do not claim all final RSS caps passed. Nullable count, SUM and selective-property controls preserve their semantics. |
 
-The [five-candidate assessment](evidence/query-maintenance-assessment-1207.json) also measured optimizer statistics, Parquet layout, property Bloom filters and fragmentation/maintenance. Statistics forwarding changed plans but missed the preselected CPU threshold across seven workloads and was reverted. A 128-row-group layout reduced sparse second-pass compressed column reads from 8,094,549 to 1,012,462 bytes, excluding mandatory validation, but doubled repeated-text allocation and increased dense second-pass reads; the global change was rejected. The 16 KiB page target was byte-identical on 30/30 files. Plain strings saved 45,056 bytes for random text but breached the RSS cap and grew repeated-text allocation. Bloom filters had no false negatives in the tested present-value probes but no admitted public consumer that could skip mandatory validation, so demonstrated public read savings were zero. Existing compaction folded runs and cleanup reclaimed retained generations; approximately 14 ms warm query latency stayed flat, and compaction missed its read-I/O budget in all three cases. These quantified decisions do not substitute for the implemented opportunities above.
+The [five-candidate assessment](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/query-maintenance-assessment-1207.json) also measured optimizer statistics, Parquet layout, property Bloom filters and fragmentation/maintenance. Statistics forwarding changed plans but missed the preselected CPU threshold across seven workloads and was reverted. A 128-row-group layout reduced sparse second-pass compressed column reads from 8,094,549 to 1,012,462 bytes, excluding mandatory validation, but doubled repeated-text allocation and increased dense second-pass reads; the global change was rejected. The 16 KiB page target was byte-identical on 30/30 files. Plain strings saved 45,056 bytes for random text but breached the RSS cap and grew repeated-text allocation. Bloom filters had no false negatives in the tested present-value probes but no admitted public consumer that could skip mandatory validation, so demonstrated public read savings were zero. Existing compaction folded runs and cleanup reclaimed retained generations; approximately 14 ms warm query latency stayed flat, and compaction missed its read-I/O budget in all three cases. These quantified decisions do not substitute for the implemented opportunities above.
 
 ## Capacity follow-up: consumed shaping roots (#1268)
 
-[The frozen comparison](evidence/consumed-shaping-roots-1268.json) measures the same 8,192-node, 32,768/65,536/131,072-edge shaping fixture before and after retiring consumed identity and endpoint roots. Endpoint retirement precedes the final online carry insertion, after the final input run is durable and readers are closed. Original accepted chunks remain incomplete-shape recovery authority. The separately merged #1269 repair authenticates surviving derived payloads before recovery removes their controls.
+[The frozen comparison](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/consumed-shaping-roots-1268.json) measures the same 8,192-node, 32,768/65,536/131,072-edge shaping fixture before and after retiring consumed identity and endpoint roots. Endpoint retirement precedes the final online carry insertion, after the final input run is durable and readers are closed. Original accepted chunks remain incomplete-shape recovery authority. The separately merged #1269 repair authenticates surviving derived payloads before recovery removes their controls.
 
 | Edges | Baseline peak B | Candidate peak B | Reduction | Baseline retained B | Candidate retained B |
 | --- | --- | --- | --- | --- | --- |
@@ -33,11 +33,11 @@ Three frozen runs reproduced each allocation value. Whole-fixture CPU was 4.55�
 
 The peak floor was selected from baseline identity-root bytes before implementation; the final deterministic test additionally retains the measured saving from deferring the final carry. Failed diagnostic publication, superseded first-candidate results, corrected test setup/oracles and the independently repaired corruption cause remain documented in the evidence. Public construction and four publishing-contract fixtures separately cover exact mutation/query/reopen/export/full verification/clean import/subsequent mutation. The integrated S20/S22 results below measure the merged follow-up; the September 11 receipts remain preserved as a historical comparison.
 
-The first #1268 CI run exposed an aggregate-peak derivative false positive. [#1272 evidence](evidence/lifecycle-peak-envelope-1272.md) preserves that failed run and the stronger corrected growth envelope; the focused gate repair merged separately before this change was refreshed.
+The first #1268 CI run exposed an aggregate-peak derivative false positive. [#1272 evidence](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/lifecycle-peak-envelope-1272.md) preserves that failed run and the stronger corrected growth envelope; the focused gate repair merged separately before this change was refreshed.
 
 ## Capacity follow-up: packed construction records (#1274)
 
-[The frozen comparison](evidence/packed-construction-records-1274.json) uses the post-#1268 retirement implementation as its baseline. Current construction format 10 packs endpoint records from 48 to 33 bytes, resolved endpoints from 32 to 25, and shaped identities from 32 to 26. UUIDs, roles, retained markers and 64-bit surrogates remain exact. The permanent membership record remains 25 bytes. Earlier private construction formats and omitted old counters are refused; their readers and backfills are removed. Historical evidence retains its original format and measurements.
+[The frozen comparison](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/packed-construction-records-1274.json) uses the post-#1268 retirement implementation as its baseline. Current construction format 10 packs endpoint records from 48 to 33 bytes, resolved endpoints from 32 to 25, and shaped identities from 32 to 26. UUIDs, roles, retained markers and 64-bit surrogates remain exact. The permanent membership record remains 25 bytes. Earlier private construction formats and omitted old counters are refused; their readers and backfills are removed. Historical evidence retains its original format and measurements.
 
 | Edges (8,192 nodes) | Baseline shaping peak B | Packed peak B | Logical shape reads B, before → after | Merge writes B, before → after |
 | --- | --- | --- | --- | --- |
@@ -57,7 +57,7 @@ This paired fixture proves a material construction improvement. The merged host 
 
 ## Public publishing and correctness
 
-The [current publishing contract](../book/architecture/storage.md#current-publishing-contract) and [#1221 evidence](evidence/publishing-contract-1221.json) cover public construction, ordinary mutation, property replay, compaction, ontology publication, projections, portable clean import and participant writers. All verified permanent Parquet publishers use the shared policy; replay and compaction retain it. Separate lifecycle implementations remain.
+The [current publishing contract](../book/architecture/storage.md#current-publishing-contract) and [#1221 evidence](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/publishing-contract-1221.json) cover public construction, ordinary mutation, property replay, compaction, ontology publication, projections, portable clean import and participant writers. All verified permanent Parquet publishers use the shared policy; replay and compaction retain it. Separate lifecycle implementations remain.
 
 The four `permanent_storage_budgets` publishing-contract fixtures exercise flat/sharded and exploratory/ontology-promoted graphs through real construction or CREATE, property mutation, compaction, canonical topology mutation, reopen, export, full verification, clean import and subsequent mutation. Exact UUIDs, endpoints, routes, nullable properties and allocation continuation are compared. Adjacent recovery, cancellation, retained-stream, promotion and ownership regressions cover their applicable boundaries. Unsupported topology journals fail closed; no legacy reader or compatibility fallback was added.
 
@@ -67,7 +67,7 @@ The four `permanent_storage_budgets` publishing-contract fixtures exercise flat/
 
 The existing `progressive_host_run` controller uses `--maximum-scale 22`, the unchanged `local-linux-cgroups-v2` profile and generator, and the original 141,258,578,535-byte reserve on OVHC-AGENCY. The native root is ext4, with 941,723,856,896 total bytes. Executables were built once from merged source, copied outside Cargo and SHA-256 frozen before any subprocess measurement; no build or other resource campaign overlapped this run. S22 may start only after S20 passes and the controller admits its measured headroom. No S24/S26 run or new certification workflow is used.
 
-The executed build was `make -C benchmarks progressive-host-ladder-binaries HOST_TARGET_DIR=/home/ubuntu/code/graphforge-target-1195`, with `TMPDIR=/home/ubuntu/graphforge-native-tmp-1195` and `CARGO_BUILD_JOBS=4`. The API, execution, relational, IR and storage release packages were invalidated before building to avoid stale shared-target dependency metadata. The [summary](evidence/integrated-storage-1194.json) records the source tree, Rust version, lockfile digests and all three frozen executable hashes.
+The executed build was `make -C benchmarks progressive-host-ladder-binaries HOST_TARGET_DIR=/home/ubuntu/code/graphforge-target-1195`, with `TMPDIR=/home/ubuntu/graphforge-native-tmp-1195` and `CARGO_BUILD_JOBS=4`. The API, execution, relational, IR and storage release packages were invalidated before building to avoid stale shared-target dependency metadata. The [summary](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/integrated-storage-1194.json) records the source tree, Rust version, lockfile digests and all three frozen executable hashes.
 
 From `benchmarks`, the existing controller command was:
 
@@ -98,7 +98,7 @@ PYTHONPATH=harness uv run --locked python -m graphforge_bench.progressive_host_r
 | S20 | 38,239,170,038 | 17,378,779,070 | 208,139,395,072 | 65,235,488,768 |
 | S22 | 162,115,326,212 | 78,265,631,161 | 885,782,102,016 | 371,891,003,392 |
 
-All four rungs passed all ten ordinary lifecycle phases. [Sanitized receipts](evidence/integrated-storage-1194/) and the [derived summary](evidence/integrated-storage-1194.json) retain exact byte values, identities and hashes. The shared native rung reader validated schemas, artifact hashes, phase success and equality with recomputed ordinary-receipt summaries. Frozen executable hashes were unchanged after the run.
+All four rungs passed all ten ordinary lifecycle phases. [Sanitized receipts](https://github.com/CurateLabs/graphforge/tree/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/integrated-storage-1194) and the [derived summary](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/integrated-storage-1194.json) retain exact byte values, identities and hashes. The shared native rung reader validated schemas, artifact hashes, phase success and equality with recomputed ordinary-receipt summaries. Frozen executable hashes were unchanged after the run.
 
 Process `VmHWM` is distinct from BenchExec cgroup memory, which includes charged page cache. Logical application bytes are distinct from process/BenchExec read and write observations. Accounted Arrow/live-state budgets are not native RSS limits. Sampled peaks are observations, not hard bounds.
 
@@ -144,7 +144,7 @@ Process `VmHWM` is distinct from BenchExec cgroup memory, which includes charged
 
 At S22, retained/current-project amplification is 9.717→6.343, while peak/current-project amplification is 10.714→13.090. Permanent output shrinks faster than the remaining peak, so the second ratio can rise despite the substantial absolute peak reduction. Observed whole-lifecycle wall time is 1954.185→1682.601 seconds and CPU is 1747.748→1551.141 seconds; these are single-run observations.
 
-The [older 3868e3c7 baseline receipts](evidence/integrated-storage-1194/historical-3868e3c7/) and final run use identical generator/workload/host profiles. Both sides pass the shared native reader's schema, artifact-hash, identity and recomputed-summary checks. The interim 9312a470 run is retained honestly: it completed through S22 but lacked the operation timings and preceded the same-facade reader repair. A single run per source does not establish variance or isolate each repair's contribution. Historical logical I/O instrumentation differs, including recovery attribution; changes in those totals cannot be assigned solely to a new algorithmic cost.
+The [older 3868e3c7 baseline receipts](https://github.com/CurateLabs/graphforge/tree/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/integrated-storage-1194/historical-3868e3c7) and final run use identical generator/workload/host profiles. Both sides pass the shared native reader's schema, artifact-hash, identity and recomputed-summary checks. The interim 9312a470 run is retained honestly: it completed through S22 but lacked the operation timings and preceded the same-facade reader repair. A single run per source does not establish variance or isolate each repair's contribution. Historical logical I/O instrumentation differs, including recovery attribution; changes in those totals cannot be assigned solely to a new algorithmic cost.
 
 Retained lifecycle allocation is a unique physical-file union. Component snapshots and named owners may refer to those same files, so their totals must not be added to the union. The final owner census is not a timestamped decomposition of an earlier simultaneous peak. Construction staging's retained allocation, its peak and the whole construction owner are different quantities.
 
@@ -193,7 +193,7 @@ From S20 to S22, live edges grow 4×, retained bytes 4.074×, simultaneous peak 
 
 ## Integrated capacity follow-up comparison
 
-The [September 11 baseline](evidence/integrated-storage-1194/historical-24ca688c/integrated-storage-1194.json) and its complete receipts remain unchanged. Both runs use identical generator, workload and host-profile identities, verified with the native rung reader. These single observations measure the combined merged follow-up; they do not isolate each repair or establish CPU variance. Negative reductions indicate increases.
+The [September 11 baseline](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/integrated-storage-1194/historical-24ca688c/integrated-storage-1194.json) and its complete receipts remain unchanged. Both runs use identical generator, workload and host-profile identities, verified with the native rung reader. These single observations measure the combined merged follow-up; they do not isolate each repair or establish CPU variance. Negative reductions indicate increases.
 
 | Rung | Measure | 24ca688c B | 710c6c64 B | Reduction |
 | --- | --- | --- | --- | --- |
@@ -219,13 +219,13 @@ The [September 11 baseline](evidence/integrated-storage-1194/historical-24ca688c
 
 Projected S26 demand falls 762,866,827,264 → 588,524,115,286 bytes, a 174,342,711,978-byte reduction. Holding the old available-capacity sample fixed at 633,354,096,640 bytes and preserving the reserve gives a remaining projected deficit of 96,428,597,181 bytes. This fixed-capacity comparison separates product demand from cleanup.
 
-The [owned-build reclamation ledger](evidence/integrated-storage-1194/owned-build-reclamation.json) records 624,598,843,392 → 699,686,653,952 available bytes, an observed increase of 75,087,810,560 bytes. Only the isolated regenerable development cache and explicitly identified unmeasured debug copies were removed after executable freezing; measured release binaries, raw logs, evidence and source worktrees were preserved. Fourteen registered worktrees and active process references were checked. This is a filesystem available-byte delta, not a sum of potentially overlapping objects; other filesystem activity can affect it. The 47,912,370,176-byte filesystem reserve and the separate 141,258,578,535-byte admission reserve are unchanged.
+The [owned-build reclamation ledger](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/integrated-storage-1194/owned-build-reclamation.json) records 624,598,843,392 → 699,686,653,952 available bytes, an observed increase of 75,087,810,560 bytes. Only the isolated regenerable development cache and explicitly identified unmeasured debug copies were removed after executable freezing; measured release binaries, raw logs, evidence and source worktrees were preserved. Fourteen registered worktrees and active process references were checked. This is a filesystem available-byte delta, not a sum of potentially overlapping objects; other filesystem activity can affect it. The 47,912,370,176-byte filesystem reserve and the separate 141,258,578,535-byte admission reserve are unchanged.
 
 The summary retains the pre-cleanup freeze capacity. Final native qualification instead measures actual available capacity after all accepted rung workspaces are reclaimed. Its projected deficit is 30,096,125,885 bytes and spare capacity after the declared reserve is 0 bytes. Neither projection is an S26 execution.
 
 ## RSS admission diagnosis (#1278)
 
-The [query RSS diagnosis](evidence/query-rss-1278.md) preserves the unchanged full
+The [query RSS diagnosis](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/query-rss-1278.md) preserves the unchanged full
 S24 refusal and exercises the public lifecycle plus 72 independently checked
 query observations at S16/S17/S18. Allocation traces confirm that adjacency
 rebuild merge readers consume 1 MiB per concurrently open run, alongside retained
@@ -234,7 +234,7 @@ increase is a concrete repair target; it is an extrapolation from the smaller
 traces, not a new S20/S22 measurement or a repaired admission pass. The historical
 RSS refusal is preserved as the pre-repair evidence for #1278.
 
-The [reader-buffer repair evidence](evidence/query-rss-1278-repair.md) records a
+The [reader-buffer repair evidence](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/query-rss-1278-repair.md) records a
 verified 1-MiB aggregate merge-reader budget, flat live-reader allocation across
 S16/S17/S18, and all 135 successful small comparison commands. The new native
 S18/S19/S20/S22 prefix passes with frozen executables containing both verified
@@ -262,7 +262,7 @@ records final integration validation and the #1278 close gate.
 
 The epic's permanent encoding, representation, publishing-path correctness and five query-opportunity concerns are fulfilled by the merged evidence above. Final storage headroom/capacity remains a distinct outcome; no assessment-only or compression-only completion is claimed.
 
-The existing [native S20/S22 qualification](evidence/integrated-storage-1194/s20-s22-storage-qualification.json) returns **refuse**: projected S26 lifecycle peak 588,524,115,286 bytes, available capacity 699,686,567,936 bytes and reserve 141,258,578,535 bytes. The deficit against available capacity after reserve is 30,096,125,885 bytes. Here the schema's `volume_bytes` field is measured **available** capacity, not the filesystem's total size. No S26 workload was executed.
+The existing [native S20/S22 qualification](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/integrated-storage-1194/s20-s22-storage-qualification.json) returns **refuse**: projected S26 lifecycle peak 588,524,115,286 bytes, available capacity 699,686,567,936 bytes and reserve 141,258,578,535 bytes. The deficit against available capacity after reserve is 30,096,125,885 bytes. Here the schema's `volume_bytes` field is measured **available** capacity, not the filesystem's total size. No S26 workload was executed.
 
 At this available-capacity sample, preserving the reserve requires projected demand at or below 558,427,989,401 bytes: another 30,096,125,885 bytes of available capacity or a 5.11% reduction in projected demand would remove this planning deficit. Neither is demonstrated here. The final close gate still requires the existing ladder’s admitted S24/S25 observations and actual S26 evidence for at least one billion live persisted edges, the complete public lifecycle, reconciled identities and resource envelopes. Those rungs were not authorized or executed in this follow-up.
 
@@ -271,12 +271,14 @@ The native S20/S22 qualification is a capacity projection, not S26 execution or 
 
 ## Lifecycle runtime investigation (#1279)
 
-The [reproducible baseline](evidence/lifecycle-runtime-1279-baseline.json) is
+The [reproducible baseline](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/lifecycle-runtime-1279-baseline.json) is
 produced by the native rung reader and the existing projection implementation:
 
 ```bash
+# <receipts> is a directory holding the #1194 rung receipts, downloaded from the
+# permalinks above (they are no longer committed under docs/; see #1625).
 PYTHONPATH=benchmarks/harness .venv/bin/python -m graphforge_bench.lifecycle_runtime \
-  --evidence docs/development/evidence/integrated-storage-1194
+  --evidence <receipts>
 ```
 
 Both receipts must pass schema, artifact-hash and recomputed-summary validation,
@@ -297,7 +299,7 @@ scopes in the report.
 
 ### External baseline attribution
 
-[Host profiling observations](evidence/lifecycle-runtime-1279-profile.json)
+[Host profiling observations](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/lifecycle-runtime-1279-profile.json)
 retain executable and raw-artifact hashes. Frozen `710c6c64` executables ran
 the unmodified ordinary S18 profile on OVHC-AGENCY, including exact source and
 imported counts, canonical queries, full verification and clean import. These
@@ -343,7 +345,7 @@ No cache drop was used. Sibling compilation overlapped portions of diagnostic
 captures; our build was paused during entry/return capture. These are scoped
 work observations, not a statistical overhead estimate or a controlled
 before/after speedup. These diagnostic captures are not admission evidence.
-The subsequent [integrated native prefix](evidence/query-rss-1278-repair.md)
+The subsequent [integrated native prefix](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/query-rss-1278-repair.md)
 contains both repairs and passes full S24 admission without executing S24.
 
 ### Verified repair: share decoded row sources
@@ -366,7 +368,7 @@ records for 272 inputs and 3,264 for 1,088 inputs: crossing the level boundary
 adds real work. This is a model of that accumulator, not a claim that every
 construction artifact family has identical pass counts.
 
-[Three alternating fixture comparisons](evidence/lifecycle-runtime-1279-comparison.json)
+[Three alternating fixture comparisons](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/lifecycle-runtime-1279-comparison.json)
 use frozen optimized binaries with the same Rust toolchain and lockfile. All
 observed compilers were stopped before the six measurements; there was no
 manual cache drop. Median total CPU falls 4.69 → 3.90 seconds (16.84%); median
@@ -382,7 +384,7 @@ the preserved S20/S22 admission results and the RSS refusal remain authoritative
 
 ### Ordinary lifecycle correctness comparison
 
-The [S18 baseline/candidate observations](evidence/lifecycle-runtime-1279-lifecycle.json)
+The [S18 baseline/candidate observations](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/lifecycle-runtime-1279-lifecycle.json)
 run all ten ordinary lifecycle phases successfully using frozen release
 executables. Both source and clean-imported projects return exactly 262,144
 nodes and 4,194,304 relationships. All four count/query result hashes agree
@@ -422,7 +424,7 @@ Reproduction commands (the frozen binary variables resolve to the hashes in
 the linked evidence; `TMPDIR` resolves to admitted ext4 storage):
 
 ```bash
-PYTHONPATH=benchmarks/harness .venv/bin/python -m graphforge_bench.lifecycle_runtime --evidence docs/development/evidence/integrated-storage-1194
+PYTHONPATH=benchmarks/harness .venv/bin/python -m graphforge_bench.lifecycle_runtime --evidence <receipts>
 # Run from benchmarks/:
 PYTHONPATH=harness ../.venv/bin/python -m unittest tests.test_lifecycle_runtime tests.test_progressive_qualification -q
 # Run each frozen baseline/candidate storage executable three times, alternating:
@@ -442,7 +444,7 @@ raw files remain on the designated host.
 
 ## Remaining ingestion attribution (#1282)
 
-The [post-repair study](evidence/ingestion-attribution-1282.md) reconciles the
+The [post-repair study](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/ingestion-attribution-1282.md) reconciles the
 completed integrated prefix and measures fixed S16/S17/S18 lifecycles plus
 production fan-in boundaries with three ordinary repetitions each. Integrated
 S20/S22 ingestion shares are 58.32% / 61.68%; these combined-source observations
@@ -459,7 +461,7 @@ all selected runs, identities, raw-artifact hashes and baseline benefit floors.
 
 ## Completed Parquet root retention (#1286)
 
-The [bounded repair and comparison](evidence/parquet-root-retention-1286.md) retain
+The [bounded repair and comparison](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/parquet-root-retention-1286.md) retain
 a scheduler-produced single Parquet root with its existing receipt and allocation
 ownership. Production fan-in boundaries prove that exactly the redundant unary
 merge disappears; necessary original-source and multiple-input work remains.

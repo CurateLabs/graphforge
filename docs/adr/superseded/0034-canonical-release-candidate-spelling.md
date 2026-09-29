@@ -4,6 +4,7 @@ adr: "0034"
 status: "Superseded by ADR 0036"
 date: "2026-09-17"
 superseded_by: "0036"
+revisit_when: "Historical; ADR 0036 owns the release version contract"
 ---
 
 # ADR 0034: One canonical release-candidate spelling, `-rc.N`

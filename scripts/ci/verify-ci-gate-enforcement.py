@@ -14,7 +14,7 @@ Maintainer live check::
 Fixture / unit mode::
 
     python3 scripts/ci/verify-ci-gate-enforcement.py \\
-      --fixture docs/development/bazel-migration-evidence/ci-gate-ruleset-19988544.json
+      --fixture tools/bazel/migration-evidence/ci-gate-ruleset-19988544.json
 """
 
 from __future__ import annotations
@@ -35,9 +35,9 @@ DEFAULT_OWNER = "CurateLabs"
 DEFAULT_REPO = "graphforge"
 DEFAULT_FIXTURE = (
     Path(__file__).resolve().parents[2]
-    / "docs"
-    / "development"
-    / "bazel-migration-evidence"
+    / "tools"
+    / "bazel"
+    / "migration-evidence"
     / "ci-gate-ruleset-19988544.json"
 )
 

@@ -4,6 +4,7 @@ adr: "0017"
 status: "Superseded by ADR 0036"
 date: "2026-08-01"
 superseded_by: "0036"
+revisit_when: "Historical; ADR 0036 owns the release version contract"
 ---
 
 # ADR 0017: One version across core and adapters

@@ -4,6 +4,7 @@ adr: "0004"
 status: "Accepted"
 date: "2026-06-07"
 superseded_by: null
+revisit_when: "Adjacency-backed and join-backed traversal results diverge in the differential correctness corpus, or incremental rebuild becomes required"
 ---
 
 # ADR 0004: Graph-Native Adjacency Index

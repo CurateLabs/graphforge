@@ -4,6 +4,7 @@ adr: "0010"
 status: "Accepted"
 date: "2026-06-30"
 superseded_by: null
+revisit_when: "Calendar correctness tests for ISO-week boundaries, proleptic year 0, or leap years fail, or the temporal corpus regresses"
 ---
 
 # ADR 0010: Full-range dates (proleptic-Gregorian calendar) and a wider duration model

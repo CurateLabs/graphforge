@@ -4,6 +4,7 @@ adr: "0036"
 status: "Accepted"
 date: "2026-09-17"
 superseded_by: null
+revisit_when: "A new prerelease phase such as alpha or beta is needed, reopening the spelling-collision question this contract closed"
 ---
 
 # ADR 0036: The GraphForge release version contract

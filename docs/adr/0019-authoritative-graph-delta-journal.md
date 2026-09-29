@@ -4,6 +4,7 @@ adr: "0019"
 status: "Accepted"
 date: "2026-08-15"
 superseded_by: null
+revisit_when: "Compaction or the frozen fault oracle shows the delta journal can no longer bound replay cost or tiny-run accumulation"
 ---
 
 # ADR 0019: Authoritative durable graph delta journal

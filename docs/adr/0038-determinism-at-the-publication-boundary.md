@@ -4,6 +4,7 @@ adr: "0038"
 status: "Accepted"
 date: "2026-09-17"
 superseded_by: null
+revisit_when: "A concurrency defect reaches published bytes without being caught by the equivalence check, or intermediates need byte stability"
 ---
 
 # ADR 0038: Determinism belongs at the publication boundary

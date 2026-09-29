@@ -5,7 +5,7 @@
 //! ingest, when the session's recorded `max_external_partition_bytes` admits
 //! it. This is GraphForge's own bounded external merge, the mechanism #1585's
 //! predeclared comparison selected
-//! (`docs/development/evidence/external-partition-comparison-1585.md`).
+//! (<https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/external-partition-comparison-1585.md>).
 //!
 //! * **Sort phase, on a load worker.** The partition's sealed segments are read
 //!   in routing order, in runs of at most `max_partition_bytes`. Each run is

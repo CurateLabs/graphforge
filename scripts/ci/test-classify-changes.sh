@@ -127,12 +127,10 @@ assert_classification "$bazel_only" platforms/BUILD.bazel bazel-release-platform
 assert_classification "$bazel_only" tests/release_workflows/BUILD.bazel bazel-release-workflow-inputs
 assert_classification "$bazel_only" scripts/ci/cargo-bazel-parity-check.py bazel-parity-check
 assert_classification "$bazel_only" scripts/ci/bazel-migration-ledger-check.py bazel-ledger-check
-assert_classification "$bazel_only" docs/development/bazel-migration-parity.md bazel-parity-doc
+assert_classification "$bazel_only" docs/development/bazel-migration.md bazel-migration-doc
 assert_classification "$bazel_only" scripts/ci/bazel-cache-perf.py bazel-cache-perf-harness
-assert_classification "$bazel_only" docs/development/bazel-migration-perf.md bazel-cache-perf-doc
-assert_classification "$bazel_only" docs/development/bazel-migration-cutover.md bazel-cutover-doc
 assert_classification "$bazel_only" \
-  docs/development/bazel-migration-evidence/perf-sample.json bazel-cache-perf-evidence
+  tools/bazel/migration-evidence/perf-sample.json bazel-cache-perf-evidence
 assert_classification "$none" "docs/a file with spaces.md" docs-only
 
 # Fail-closed: formerly inert Bazel-mapped test data must enable Rust+Bazel.

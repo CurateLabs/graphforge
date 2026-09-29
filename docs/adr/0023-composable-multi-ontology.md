@@ -4,6 +4,7 @@ adr: "0023"
 status: "Accepted"
 date: "2026-08-19"
 superseded_by: null
+revisit_when: "A legacy single-ontology project's migration or the composition fingerprint cannot describe a new module inventory shape"
 ---
 
 # ADR 0023: Composable ontology modules and semantic bridges

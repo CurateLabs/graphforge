@@ -1,2 +1,0 @@
-2026-09-27 20:05:33,503 - INFO - Starting command bash /home/ubuntu/gf-1600/docs/development/evidence/core-scaling-1448/ingest-one.sh /home/ubuntu/gf-1600-measure/bin/baseline-e4a4f3cb /home/ubuntu/gf-1600-measure/final/tmp/project-ab-s18-r1-base /home/ubuntu/gf-1448-evidence/inputs/s18 /home/ubuntu/gf-1600-measure/final/runs/ab-s18-r1-base
-2026-09-27 20:05:33,503 - INFO - Writing output to /home/ubuntu/gf-1600-measure/final/runs/ab-s18-r1-base/ingest.log

@@ -6,6 +6,10 @@ import starlight from '@astrojs/starlight';
 export default defineConfig({
   site: 'https://docs.graphforge.sh',
   outDir: 'dist',
+  // docs/guides/ merged into docs/guide/ (#1625); keep the published URL alive.
+  redirects: {
+    '/guides/repository-integration/': '/guide/repository-integration/',
+  },
   integrations: [
     starlight({
       title: 'GraphForge',
@@ -39,7 +43,8 @@ export default defineConfig({
             { label: 'Installation', slug: 'guide/installation' },
             { label: 'Quick Start', slug: 'guide/quickstart' },
             { label: 'Tutorial', slug: 'guide/tutorial' },
-            { label: 'CLI & repositories', slug: 'guides/repository-integration' },
+            { label: 'CLI & repositories', slug: 'guide/repository-integration' },
+            { label: 'Validate infrastructure intent', slug: 'guide/infrastructure-validation' },
           ],
         },
         {

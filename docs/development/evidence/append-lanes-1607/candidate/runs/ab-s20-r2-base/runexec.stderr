@@ -1,2 +1,0 @@
-2026-09-28 04:22:13,060 - INFO - Starting command bash /home/ubuntu/gf-1607/docs/development/evidence/core-scaling-1448/ingest-one.sh /home/ubuntu/gf-1607-artifacts/gf-baseline docs/development/evidence/append-lanes-1607/candidate/tmp/project-ab-s20-r2-base /home/ubuntu/gf-1448-evidence/inputs/s20 docs/development/evidence/append-lanes-1607/candidate/runs/ab-s20-r2-base
-2026-09-28 04:22:13,060 - INFO - Writing output to docs/development/evidence/append-lanes-1607/candidate/runs/ab-s20-r2-base/ingest.log

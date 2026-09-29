@@ -4,6 +4,7 @@ adr: "0022"
 status: "Accepted"
 date: "2026-08-19"
 superseded_by: null
+revisit_when: "A field needs required interpretation beyond a new feature token, or the generic manifest and component contract itself must change"
 ---
 
 # ADR 0022: Multi-ontology semantics in portable project v2

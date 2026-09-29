@@ -65,12 +65,12 @@ aggregate CI signals.
 | Docs build failure | `docs.yml` / Starlight build red | Medium | Docs owners | Fix content or site config |
 | Publish dry-run failure | Registry reject | High | Release operator | Stop publication; recover per plan |
 | Scale-limit shape regression | Materialization ratio gate fail | Medium | Execution owners | Investigate adjacency/fetch path; update docs if limits change |
-| Bazel remote-cache regression | Warm identical-SHA hits disappear or cold correctness fails | High | Build owners | Confirm Blacksmith Bazel caching; never add competing `--remote_cache`; see [`../development/bazel-migration-perf.md`](../development/bazel-migration-perf.md) |
+| Bazel remote-cache regression | Warm identical-SHA hits disappear or cold correctness fails | High | Build owners | Confirm Blacksmith Bazel caching; never add competing `--remote_cache`; see [`../development/bazel-migration.md`](../development/bazel-migration.md#cache-and-performance-gates-5) |
 
 There is no hosted ops dashboard product; CI and release artifacts are the shared “dashboard.”
 Bazel per-run summaries and machine-readable benchmark paths are listed in
 [`../development/bazel.md`](../development/bazel.md) and
-[`../development/bazel-migration-ac-evidence.md`](../development/bazel-migration-ac-evidence.md).
+[`../development/bazel-migration.md`](../development/bazel-migration.md#close-readiness-evidence-map-3).
 Blacksmith Cache UI: https://app.blacksmith.sh/cache.
 
 ## Privacy and safety

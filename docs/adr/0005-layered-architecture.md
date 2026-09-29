@@ -4,6 +4,7 @@ adr: "0005"
 status: "Accepted"
 date: "2026-06-07"
 superseded_by: null
+revisit_when: "Knowledge or workbench concerns start leaking onto graph tables as unowned columns, breaking the boundary regression test"
 ---
 
 # ADR 0005: Layered Architecture — Graph / Knowledge / Workbench

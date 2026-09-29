@@ -19,9 +19,9 @@ SPEC.loader.exec_module(vce)
 
 FIXTURE = (
     Path(__file__).resolve().parents[2]
-    / "docs"
-    / "development"
-    / "bazel-migration-evidence"
+    / "tools"
+    / "bazel"
+    / "migration-evidence"
     / "ci-gate-ruleset-19988544.json"
 )
 
