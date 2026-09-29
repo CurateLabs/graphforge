@@ -153,11 +153,11 @@ jobs:
             # answer nextest's --list protocol; they run under cargo test.
             custom='(package(graphforge-api) & binary(bdd)) | (package(graphforge-observability) & binary(disabled_allocations))'
             cargo nextest run --workspace --locked --no-fail-fast -E "not ($custom)" 2>&1 | tee dist/cargo-lane-test.log || rc=$?
-            for target in graphforge-api:bdd graphforge-observability:disabled_allocations; do
-              target_rc=0
-              cargo test --locked -p "${target%%:*}" --test "${target##*:}" 2>&1 | tee -a dist/cargo-lane-test.log || target_rc=$?
-              if [[ "$rc" -eq 0 ]]; then rc=$target_rc; fi
-            done
+            # --workspace keeps workspace feature unification, so these reuse
+            # the nextest build instead of recompiling under per-package features.
+            custom_rc=0
+            cargo test --workspace --locked --test bdd --test disabled_allocations 2>&1 | tee -a dist/cargo-lane-test.log || custom_rc=$?
+            if [[ "$rc" -eq 0 ]]; then rc=$custom_rc; fi
             doc_start=$(date +%s)
             doc_rc=0
             cargo test --workspace --locked --doc 2>&1 | tee -a dist/cargo-lane-test.log || doc_rc=$?
