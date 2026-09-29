@@ -6262,18 +6262,21 @@ def check_lifecycle() -> None:
         assert isinstance(exc, g.GraphForgeError)
     else:
         raise SystemExit("expected LifecycleError after close()")
+
+    def expect_lifecycle_error(operation) -> None:
+        try:
+            operation()
+        except g.LifecycleError:
+            return
+        raise SystemExit("expected LifecycleError before argument coercion")
+
     for operation in (
         lambda: forge.paths("not-a-uuid", by="bfs"),
         lambda: forge.rank("Person", by="pagerank"),
         lambda: forge.find("Alice", label="Person"),
         lambda: forge.add_node("Person", name="Bob"),
     ):
-        try:
-            operation()
-        except g.LifecycleError:
-            pass
-        else:
-            raise SystemExit("expected LifecycleError before argument coercion")
+        expect_lifecycle_error(operation)
 
 
 def check_type_mapping() -> None:
@@ -6283,13 +6286,16 @@ def check_type_mapping() -> None:
     alice = forge.add_node("Person", name="Alice")
     assert isinstance(alice, NodeHandle)
     assert uuid.UUID(alice.uuid).version == 7
-    for source, destination in ((1, alice), (alice, 1)):
+
+    def expect_type_error(source, destination) -> None:
         try:
             forge.add_edge(source, "KNOWS", destination)
         except TypeError:
-            pass
-        else:
-            raise SystemExit("expected TypeError for non-NodeHandle edge endpoint")
+            return
+        raise SystemExit("expected TypeError for non-NodeHandle edge endpoint")
+
+    for source, destination in ((1, alice), (alice, 1)):
+        expect_type_error(source, destination)
     try:
         forge.add_node("Person", unsupported=lambda: None)
     except TypeError:
