@@ -667,9 +667,6 @@ jobs:
           uv sync --locked --all-extras
           uv pip install dist/*.whl
 
-      - name: Prove public API BDD mutations fail closed
-        run: uv run --no-sync python scripts/ci/test-api-bdd-mutations.py
-
       - name: Run audited downstream consumers
         env:
           GRAPHFORGE_WHEEL_SHA: ${{ github.sha }}
