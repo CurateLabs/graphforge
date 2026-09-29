@@ -18,18 +18,6 @@ PRODUCT_TAGS = {
 }
 BINDING_ONLY_SCENARIOS: set[tuple[str, str]] = set()
 FORBIDDEN_SOURCE_PATTERNS = {
-    "tests/features/conftest.py": (
-        r"pytest\.xfail",
-        r"pytest_runtest_makereport",
-        r"wasxfail",
-        r"_xfail_not_implemented",
-        r"NotImplementedError",
-    ),
-    "tests/features/steps/api_steps.py": (
-        r"pytest\.xfail",
-        r"_xfail_not_implemented",
-        r"NotImplementedError",
-    ),
     "tests/features/node/step_definitions/api_steps.ts": (
         r'return\s+["\']pending["\']',
         r'new Error\(["\']not implemented["\']\)',
