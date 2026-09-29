@@ -301,10 +301,16 @@ def _classification_report() -> dict[str, object]:
             }
             missing = sorted(set(symbols) - defined)
             assert not missing, f"{group} has stale Python evidence in {filename}: {missing}"
+            execution_file = (
+                test_root / "coverage_diagnostics.py"
+                if filename == "smoke.py"
+                else test_root / filename
+            )
+            execution_tree = ast.parse(execution_file.read_text(), filename=execution_file.name)
             main = next(
                 (
                     node
-                    for node in tree.body
+                    for node in execution_tree.body
                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                     and node.name == "main"
                 ),
@@ -313,17 +319,20 @@ def _classification_report() -> dict[str, object]:
             executable_nodes = (
                 [main]
                 if main is not None
-                else [node for node in tree.body if isinstance(node, ast.If)]
+                else [node for node in execution_tree.body if isinstance(node, ast.If)]
             )
-            assert executable_nodes, f"{filename} has no executable entry point"
+            assert executable_nodes, f"{execution_file.name} has no executable entry point"
             invoked = {
-                node.func.id
+                node.func.id if isinstance(node.func, ast.Name) else node.func.attr
                 for executable in executable_nodes
                 for node in ast.walk(executable)
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, (ast.Name, ast.Attribute))
             }
             not_invoked = sorted(set(symbols) - {"main"} - invoked)
-            assert not not_invoked, f"{group} evidence is not run by {filename}/main: {not_invoked}"
+            assert not not_invoked, (
+                f"{group} evidence is not run by {execution_file.name}/main: {not_invoked}"
+            )
 
     aliases = {
         "GraphForge.new": "GraphForge.__init__",

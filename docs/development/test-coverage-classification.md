@@ -56,8 +56,9 @@ Record on the issue:
   measured at the same base and candidate commits.
 
 Use `make coverage-rust` for the coverage ledger. It runs the full diagnostic
-inventory to measure Rust adapter line coverage; the PR gate remains limited to
-the bounded smoke commands in `.github/workflows/test.yml`. Measure those smoke
+inventory, including `coverage_diagnostics.py` for broad Python adapter line
+coverage; the PR gate remains limited to the bounded smoke commands in
+`.github/workflows/test.yml`. Measure those smoke
 commands with `/usr/bin/time` and report the exact command and elapsed time so
 the results can be repeated. Do not put per-issue result tables or raw run
 output in `docs/development/`.

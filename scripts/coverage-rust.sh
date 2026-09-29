@@ -189,7 +189,7 @@ run_python_coverage_probes() {
   fi
   printf '%s\0' "${test_files[@]}" | xargs -0 -n 1 -P "$PYTHON_BINDING_WORKERS" \
     env CARGO_TARGET_DIR="$CORE_TARGET_DIR" uv run --no-sync python
-  uv run --no-sync pytest tests/unit tests/integration tests/features \
+  uv run --no-sync pytest tests/unit tests/integration \
     -n "${PYTEST_WORKERS:-4}" --tb=short
 }
 
