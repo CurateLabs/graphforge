@@ -1,4 +1,5 @@
 name: Build Lane Measurement
+run-name: "Build lane ${{ inputs.runner }}/${{ inputs.cache }} ${{ inputs.ref }} [${{ inputs.sticky_key }}]"
 
 # Issue #1618 measurement harness: times the Cargo compile+test lane on the
 # same runner class as the Bazel CI lane (blacksmith-4vcpu-ubuntu-2404).
