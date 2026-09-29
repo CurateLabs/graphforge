@@ -312,7 +312,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
                 "dist/bazel-cache-perf-ci-observation.json\n"
                 "dist/bazel-representative-build.summary.json\n"
                 "dist/perf-sample-collected.json\n"
-                "docs/development/bazel-migration-evidence/perf-sample.json"
+                "tools/bazel/migration-evidence/perf-sample.json"
             ),
             "${{ runner.temp }}/durability-certification-evidence",
             "native/native-durability-aggregate.json",
