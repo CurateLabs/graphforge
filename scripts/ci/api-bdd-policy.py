@@ -16,13 +16,7 @@ PRODUCT_TAGS = {
     "excluded-api-bdd": LANGUAGES,
     "excluded-node-api-bdd": {"node"},
 }
-BINDING_ONLY_SCENARIOS = {
-    ("Graph Construction API", "Closed instances reject path selectors before coercion"),
-    ("Lifecycle State", "LifecycleError on <method> after close"),
-    ("Type Errors", "TypeError when add_edge source is not a NodeHandle"),
-    ("Type Errors", "TypeError when add_edge destination is not a NodeHandle"),
-    ("Type Errors", "TypeError on unsupported property value type"),
-}
+BINDING_ONLY_SCENARIOS: set[tuple[str, str]] = set()
 FORBIDDEN_SOURCE_PATTERNS = {
     "tests/features/conftest.py": (
         r"pytest\.xfail",
@@ -229,7 +223,7 @@ def validate(root: Path, *, check_issues: bool = False) -> tuple[dict, list[str]
             language: sum(
                 1
                 for scenario in scenarios
-                if "binding-only" not in scenario.tags or language != "rust"
+                if ("binding-only" in scenario.tags) == (language != "rust")
                 if not any(
                     tag in scenario.tags and language in languages
                     for tag, languages in PRODUCT_TAGS.items()

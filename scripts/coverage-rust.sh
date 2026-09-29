@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Measure core Rust plus the Rust code executed by real Python and Node acceptance.
+# Measure core Rust plus adapter code reached by the coverage diagnostic corpus.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -179,12 +179,12 @@ if [[ "$(hash_file "$NODE_RUNTIME")" != "$node_hash" ]]; then
   exit 1
 fi
 
-run_python_acceptance() {
+run_python_coverage_probes() {
   export LLVM_PROFILE_FILE="$PROFILE_DIR/python-%p-%10m.profraw"
   shopt -s nullglob
   local test_files=(crates/graphforge-bindings-py/tests/*.py)
   if [[ "${#test_files[@]}" -eq 0 ]]; then
-    echo "Rust coverage evidence error: no Python binding acceptance tests found" >&2
+    echo "Rust coverage evidence error: no Python adapter probes found" >&2
     return 1
   fi
   printf '%s\0' "${test_files[@]}" | xargs -0 -n 1 -P "$PYTHON_BINDING_WORKERS" \
@@ -193,9 +193,8 @@ run_python_acceptance() {
     -n "${PYTEST_WORKERS:-4}" --tb=short
 }
 
-run_node_acceptance() {
+run_node_coverage_probes() {
   export LLVM_PROFILE_FILE="$PROFILE_DIR/node-%p-%10m.profraw"
-  pnpm --filter @curatelabs/graphforge test:smoke
   pnpm --filter @curatelabs/graphforge test
   (
     cd tests/features/node
@@ -210,26 +209,26 @@ run_node_acceptance() {
 
 python_input="artifact_sha256=$python_hash"
 node_input="artifact_sha256=$node_hash"
-echo "━━━ Parallel native acceptance ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-if stamp_matches python-acceptance "$python_input" "${PROFILE_DIR}"/python-*.profraw; then
-  echo "Resuming verified Python native acceptance"
+echo "━━━ Parallel adapter coverage probes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+if stamp_matches python-coverage-probes "$python_input" "${PROFILE_DIR}"/python-*.profraw; then
+  echo "Resuming verified Python adapter coverage probes"
 else
   (
     phase_started=$SECONDS
-    run_python_acceptance
-    write_stamp python-acceptance "$python_input" "${PROFILE_DIR}"/python-*.profraw
-    record_timing python-acceptance "$phase_started"
+    run_python_coverage_probes
+    write_stamp python-coverage-probes "$python_input" "${PROFILE_DIR}"/python-*.profraw
+    record_timing python-coverage-probes "$phase_started"
   ) &
   python_pid=$!
 fi
-if stamp_matches node-acceptance "$node_input" "${PROFILE_DIR}"/node-*.profraw; then
-  echo "Resuming verified Node native acceptance"
+if stamp_matches node-coverage-probes "$node_input" "${PROFILE_DIR}"/node-*.profraw; then
+  echo "Resuming verified Node adapter coverage probes"
 else
   (
     phase_started=$SECONDS
-    run_node_acceptance
-    write_stamp node-acceptance "$node_input" "${PROFILE_DIR}"/node-*.profraw
-    record_timing node-acceptance "$phase_started"
+    run_node_coverage_probes
+    write_stamp node-coverage-probes "$node_input" "${PROFILE_DIR}"/node-*.profraw
+    record_timing node-coverage-probes "$phase_started"
   ) &
   node_pid=$!
 fi

@@ -355,9 +355,9 @@ BLESS_TCK_BASELINE=1 cargo test -p graphforge-api --test bdd
 ```
 
 This rewrites `tests/tck/passing_baseline.txt` to the current passing set. `_meta.scenarios_passing`
-in `coverage_matrix.json` is informational (the baseline line count). `@skip-rust` tags in the corpus
-are now **vestigial** for the Rust run (it runs all); `@skip-node` still gates the Node binding's BDD
-suite.
+in `coverage_matrix.json` is informational (the baseline line count). `@skip-rust` and `@skip-node`
+tags are retained in the upstream snapshot; Rust runs all scenarios, and the Node binding smoke suite
+does not load TCK features.
 
 ### Fast local iteration (`TCK_ONLY`)
 

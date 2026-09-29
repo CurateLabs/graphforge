@@ -65,30 +65,29 @@ Consequence for tests:
 
 ### Public API BDD classifications
 
-The shared scenarios in `tests/features/api/` use three explicit states:
+The shared scenarios in `tests/features/api/` have two execution classes:
 
-- **Required:** the applicable Rust, Python, and Node runners call the real
-  public surface and assert exact Arrow schema, rows, values, or structured
-  error classes. Missing steps, exceptions, xfail/xpass, pending results, and
-  unexpected skips fail the gate.
+- **Engine behavior:** Rust runs the required public-API scenarios and asserts
+  exact Arrow schema, rows, values, or structured error classes. Python and Node
+  do not repeat these assertions; the TCK and Rust facade tests are their oracle.
+- **Binding surface:** runtime coercion, error mapping, lifecycle, and Arrow
+  handoff are checked by one native smoke suite per binding. These assertions
+  are not duplicated in Gherkin.
 - **Product-excluded:** `@excluded-api-bdd` or
   `@excluded-node-api-bdd` identifies behavior that has a confirmed product
   defect. The scenario must appear in
   `tests/contracts/api-bdd-exclusions.json`, carry exactly one matching open
   `@issue-N` reference, and contributes only to the excluded total—never the
   passing total.
-- **Binding-only:** runtime coercion and closed-handle scenarios execute in
-  Python and Node but are reported as not applicable by the statically typed,
-  non-closeable Rust facade. This classification is allowlisted by repository
-  policy and is not a product-behavior exclusion.
 
 `scripts/ci/api-bdd-policy.py` validates the corpus and writes
-`target/api-bdd-policy.json` as machine-readable classification evidence.
-Its policy mutation tests reject stale inventory rows, untracked exclusions,
-language skip tags, xfail conversion, pending Node steps, and manufactured Rust
-errors. The BDD mutation sentinels separately prove that wrong row counts,
-missing columns, wrong values, wrong error classes, and `NotImplementedError`
-all produce failing test processes.
+`target/api-bdd-policy.json` as machine-readable classification evidence. Its
+counts require all in-scope API scenarios to run in Rust and require zero
+Python/Node API scenarios. Policy mutation tests reject stale inventory rows,
+untracked exclusions, language skip tags, xfail conversion, pending Node steps,
+and manufactured Rust errors. BDD mutation sentinels separately prove that wrong row
+counts, missing columns, wrong values, wrong error classes, and
+`NotImplementedError` all produce failing test processes.
 
 This fail-closed public API model does not change the openCypher TCK. The TCK
 continues to use its separately documented advisory passing-set baseline.
@@ -580,7 +579,7 @@ weakened assertions (`AGENTS.md`).
 | Unit | Crate-local logic (parse, lower, storage helpers) | `cargo test` inline + crate `tests/` |
 | Integration / facade | Lifecycle, verbs, reopen, concurrency contracts | `graphforge-api` workspace tests |
 | Language compliance | openCypher semantics | `cargo test -p graphforge-api --test bdd` / `make test-tck` |
-| Binding / IPC | Python & Node projections match Rust semantics | pytest, Node BDD, Arrow/IPC equality |
+| Binding / IPC | Native package loading, Arrow handoff, type/error mapping, lifecycle | Python and Node native smoke suites |
 | Contract gates | Non-Cypher public surface inventory + evidence | `scripts/ci/non-cypher-surface-gate.py`, surface-gate workflows |
 | Agent skills | Offline pack/install, compatibility, schema fail-closed | `pnpm test:agent-skills`, `pnpm smoke:agent-skills` |
 | Scale posture | Fixed-hop `LIMIT` materialization bounds | `make bench-fixed-hop-limit` (shape gate; see scale-limits) |

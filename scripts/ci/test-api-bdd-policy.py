@@ -96,6 +96,15 @@ class ApiBddPolicyMutationTests(unittest.TestCase):
         path.write_text(json.dumps(inventory))
         self.assert_rejected("missing from inventory")
 
+    def test_api_scenarios_are_rust_only(self) -> None:
+        counts, errors = POLICY.validate(self.root)
+        self.assertEqual(errors, [])
+        binding_only = counts["binding_only_not_applicable_to_rust"]
+        self.assertEqual(binding_only, 0)
+        self.assertEqual(counts["required"]["python"], 0)
+        self.assertEqual(counts["required"]["node"], 0)
+        self.assertGreater(counts["required"]["rust"], 0)
+
     def test_inventory_must_be_an_object(self) -> None:
         path = self.root / "tests/contracts/api-bdd-exclusions.json"
         path.write_text("[]")

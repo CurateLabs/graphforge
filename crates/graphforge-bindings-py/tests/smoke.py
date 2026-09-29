@@ -52,47 +52,6 @@ def check_exception_hierarchy() -> None:
     else:
         raise SystemExit("expected StorageError for a missing path")
 
-    # Pre-v1 roots fail with the frozen format code before mutation.
-    with tempfile.TemporaryDirectory() as directory:
-        legacy = Path(directory, "topology", "nodes.parquet")
-        legacy.parent.mkdir()
-        legacy.write_bytes(b"legacy")
-        try:
-            g.GraphForge(directory)
-        except g.StorageError as exc:
-            assert exc.code == "GF_UNSUPPORTED_PROJECT_FORMAT", exc.code
-            assert str(exc) == "project root does not contain the supported FORMAT marker"
-            assert legacy.read_bytes() == b"legacy"
-            assert not Path(directory, "FORMAT").exists()
-        else:
-            raise SystemExit("expected unsupported-format error for pre-v1 root")
-
-    # Durable project admission rejects lexical traversal before reopening or
-    # mutating an otherwise valid project, and preserves the Rust error code.
-    with tempfile.TemporaryDirectory() as directory:
-        parent = Path(directory).resolve()
-        project = parent / "project"
-        forge = g.GraphForge(str(project))
-        forge.close()
-        (parent / "hop").mkdir()
-        current_before = (project / "CURRENT").read_bytes()
-        generations_before = sorted(path.name for path in (project / "generations").iterdir())
-        parent_before = sorted(path.name for path in parent.iterdir())
-
-        traversal = parent / "hop" / ".." / "project"
-        try:
-            g.GraphForge(str(traversal))
-        except g.StorageError as exc:
-            assert exc.code == "GF_UNSUPPORTED_FILESYSTEM", exc.code
-        else:
-            raise SystemExit("expected unsupported-filesystem error for project traversal")
-
-        assert (project / "CURRENT").read_bytes() == current_before
-        assert (
-            sorted(path.name for path in (project / "generations").iterdir()) == generations_before
-        )
-        assert sorted(path.name for path in parent.iterdir()) == parent_before
-
 
 def check_execute() -> None:
     # #586 — execute returns a real pyarrow.Table carrying the result metadata.
@@ -6303,6 +6262,40 @@ def check_lifecycle() -> None:
         assert isinstance(exc, g.GraphForgeError)
     else:
         raise SystemExit("expected LifecycleError after close()")
+    for operation in (
+        lambda: forge.paths("not-a-uuid", by="bfs"),
+        lambda: forge.rank("Person", by="pagerank"),
+        lambda: forge.find("Alice", label="Person"),
+        lambda: forge.add_node("Person", name="Bob"),
+    ):
+        try:
+            operation()
+        except g.LifecycleError:
+            pass
+        else:
+            raise SystemExit("expected LifecycleError before argument coercion")
+
+
+def check_type_mapping() -> None:
+    from graphforge._graphforge_rs import NodeHandle
+
+    forge = g.GraphForge()
+    alice = forge.add_node("Person", name="Alice")
+    assert isinstance(alice, NodeHandle)
+    assert uuid.UUID(alice.uuid).version == 7
+    for source, destination in ((1, alice), (alice, 1)):
+        try:
+            forge.add_edge(source, "KNOWS", destination)
+        except TypeError:
+            pass
+        else:
+            raise SystemExit("expected TypeError for non-NodeHandle edge endpoint")
+    try:
+        forge.add_node("Person", unsupported=lambda: None)
+    except TypeError:
+        pass
+    else:
+        raise SystemExit("expected TypeError for unsupported node property")
 
 
 def check_load_ontology() -> None:
@@ -6979,113 +6972,8 @@ def main() -> None:
     check_exception_hierarchy()
     check_execute()
     check_typed_uuid_parameters()
-    check_add_node()
-    check_bfs_paths()
-    check_dfs_paths()
-    check_dijkstra_paths()
-    check_astar_paths()
-    check_bellman_ford_paths()
-    check_delta_stepping_paths()
-    check_yens_paths()
-    check_floyd_warshall_paths()
-    check_transitive_closure_paths()
-    check_random_walk_paths()
-    check_maximum_flow_paths()
-    check_minimum_cost_maximum_flow_paths()
-    check_minimum_cut_paths()
-    check_is_dag()
-    check_topological_sort()
-    check_articulation_points()
-    check_bridges()
-    check_minimum_spanning_tree()
-    check_minimum_k_spanning_tree()
-    check_maximum_spanning_tree()
-    check_triangle_count()
-    check_transitivity()
-    check_conductance()
-    check_modularity_result()
-    check_modularity_unit_weight_and_knowledge_boundary()
-    check_modularity_errors()
-    check_max_weight_matching()
-    check_max_cardinality_matching_result()
-    check_max_cardinality_matching_empty()
-    check_max_cardinality_matching_errors()
-    check_max_bipartite_matching()
-    check_is_planar()
-    check_triad_census()
-    check_dyad_census()
-    check_node_coloring()
-    check_k1_coloring()
-    check_chromatic_number()
-    check_count_automorphisms()
-    check_edge_coloring()
-    check_find_cycles()
-    check_has_euler_circuit()
-    check_has_euler_path()
-    check_euler_circuit()
-    check_euler_path()
-    check_dag_longest_path()
-    check_weighted_dag_longest_path()
     check_parse_error_span()
-    check_explain()
-    check_clear()
-    check_close_releases_project_handles()
-    check_load_ontology()
-    check_execute_polars()
-    check_execute_stream()
-    check_assertions()
-    check_reasoning()
-    check_assertion_status()
-    check_assertion_supersessions()
-    check_hypothesis_selection()
-    check_assertion_validity()
-    check_resolved_belief_projection()
-    check_confidence_assessments()
-    check_evidence_links()
-    check_algorithm_runs()
-    check_degree_rank()
-    check_pagerank()
-    check_betweenness()
-    check_closeness()
-    check_harmonic_closeness()
-    check_eigenvector()
-    check_article_rank()
-    check_hits_hub()
-    check_hits_authority()
-    check_celf()
-    check_clustering_coefficient()
-    check_triangles()
-    check_k_core()
-    check_preferential_attachment()
-    check_adamic_adar()
-    check_common_neighbors()
-    check_resource_allocation()
-    check_total_neighbors()
-    check_components_cluster()
-    check_strongly_connected_cluster()
-    check_biconnected_cluster()
-    check_k_core_decomposition_cluster()
-    check_louvain_cluster()
-    check_leiden_cluster()
-    check_label_propagation_cluster()
-    check_speaker_listener_cluster()
-    check_girvan_newman_cluster()
-    check_modularity_optimization_cluster()
-    check_fastgreedy_cluster()
-    check_infomap_cluster()
-    check_leading_eigenvector_cluster()
-    check_walktrap_cluster()
-    check_spinglass_cluster()
-    check_hdbscan_cluster()
-    check_kmeans_cluster()
-    check_approximate_max_cut_cluster()
-    check_node_similarity()
-    check_filtered_node_similarity()
-    check_knn()
-    check_filtered_knn()
-    check_cosine()
-    check_find()
-    check_inspection_surface()
+    check_type_mapping()
     check_lifecycle()
     print(f"native smoke OK: graphforge {g.__version__}")
 

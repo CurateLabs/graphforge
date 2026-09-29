@@ -313,6 +313,18 @@ function checkLifecycle() {
     () => forge.paths("not-a-uuid", null, "bfs"),
     (error) => error.code === "LifecycleError",
   );
+  assert.throws(
+    () => forge.execute("MATCH (n) RETURN n"),
+    (error) => error.code === "LifecycleError",
+  );
+  assert.throws(
+    () => forge.rank("Person", "pagerank"),
+    (error) => error.code === "LifecycleError",
+  );
+  assert.throws(
+    () => forge.find("Alice", "Person"),
+    (error) => error.code === "LifecycleError",
+  );
   try {
     forge.explain("MATCH (n) RETURN n.node_uuid AS id");
   } catch (e) {
@@ -322,11 +334,28 @@ function checkLifecycle() {
   throw new Error("expected LifecycleError after close()");
 }
 
+function checkTypeMapping() {
+  const forge = new GraphForge();
+  const alice = forge.addNode("Person", { name: "Alice" });
+  assert.throws(
+    () => forge.addEdge(1, "KNOWS", alice, {}),
+    (error) => error instanceof TypeError,
+  );
+  assert.throws(
+    () => forge.addEdge(alice, "KNOWS", 1, {}),
+    (error) => error instanceof TypeError,
+  );
+  assert.throws(
+    () => forge.addNode("Person", { unsupported: () => {} }),
+    (error) => error instanceof TypeError,
+  );
+}
+
 test("module interop", checkModuleInterop);
 test("version", checkVersion);
 test("construction", checkConstruction);
 test("construction error", checkConstructionError);
 test("execute", checkExecute);
 test("typed UUID parameters", checkTypedUuidParameters);
-test("project capabilities", checkProjectCapabilities);
 test("lifecycle", checkLifecycle);
+test("type mapping", checkTypeMapping);

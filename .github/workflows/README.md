@@ -130,8 +130,9 @@ for native evidence.
 
 ### Behavioral acceptance
 
-Rust BDD runs as part of the workspace test. Python and Node BDD run against
-the same wheel/addon built in their binding job.
+Rust runs the engine API features and TCK as part of the workspace test.
+Python and Node each run one bounded native smoke suite against the same-SHA
+wheel and addon built in their binding jobs.
 
 ### `docs.yml` — Documentation
 

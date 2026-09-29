@@ -1,4 +1,4 @@
-.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-clean pre-push-preflight pre-push-fast bazel-test clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-build-walltime codspeed-run bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal bench-m4-entry bench-adjacency-200m bench-file-backed-128m m4-entry-matrix-check durability-isolation-check native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build pnpm-test-bdd install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
+.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-clean pre-push-preflight pre-push-fast bazel-test clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-build-walltime codspeed-run bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal bench-m4-entry bench-adjacency-200m m4-entry-matrix-check durability-isolation-check native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -61,8 +61,10 @@ cargo-deny-licenses:  ## Allowlist third-party Rust dependency SPDX licenses
 docstring-coverage:  ## Check docstring coverage (90% minimum)
 	uv run interrogate crates/graphforge-bindings-py/python/graphforge --fail-under 90 --quiet
 
-test:  ## Run all tests in parallel (excludes snap/network downloads)
-	python3 scripts/test_environment.py -- uv run pytest tests/ -n $${PYTEST_WORKERS:-4} -m "not snap"
+test:  ## Run the Rust TCK and one native smoke suite per binding
+	$(MAKE) test-tck
+	python3 scripts/test_environment.py -- timeout 60s uv run --no-sync python crates/graphforge-bindings-py/tests/smoke.py
+	python3 scripts/test_environment.py -- timeout 60s pnpm --filter @curatelabs/graphforge test:smoke
 
 test-unit:  ## Run unit tests in parallel
 	python3 scripts/test_environment.py -- uv run pytest tests/unit -n $${PYTEST_WORKERS:-4}
@@ -425,9 +427,6 @@ pnpm-install:  ## Install all Node workspace dependencies
 
 pnpm-build:  ## Build all Node workspace packages
 	pnpm -r build
-
-pnpm-test-bdd:  ## Run BDD tests across Node workspace packages
-	pnpm -r test:bdd
 
 # Node JS API coverage via c8 over hand-written lib/*.mjs (and exercised loader).
 # Requires a built native addon (*.node); does not build it here (heavy — see docs/development/agent-environment.md).

@@ -6,12 +6,13 @@ This page keeps command recipes, suite layout, and local tooling detail.
 
 ## Overview
 
-GraphForge has two test suites that must both pass:
+GraphForge checks engine behavior and binding surfaces through these suites:
 
 | Suite | Location | What it tests |
 |-------|----------|---------------|
 | **Rust tests** (`cargo test`) | `crates/*/src/` | Each Rust crate in isolation and integration |
-| **Python tests** (`pytest`) | `tests/` | Python binding, end-to-end queries, TCK compliance |
+| **Binding smoke** | `crates/graphforge-bindings-{py,node}/tests/` | Native package loading, Arrow handoff, error mapping, type marshalling, lifecycle |
+| **Rust API/TCK BDD** | `crates/graphforge-api/tests/bdd/`, `tests/tck/` | Public API and openCypher behavior |
 
 The testing principles are the same for both:
 
@@ -219,8 +220,9 @@ pytest tests/ -n auto
 `make pre-push` is the full local gate. It begins with a prerequisite and disk
 preflight (including `bazelisk` on `PATH`), then records content-addressed
 evidence for policy checks, Rust tests and coverage, the instrumented native
-Python and Node builds consumed by acceptance, wrapper coverage, API BDD
-acceptance, and coverage thresholds. `make pre-push-fast` (also invoked from the
+Python and Node builds consumed by acceptance, wrapper coverage, Rust engine
+Rust API/TCK BDD and one native smoke suite per binding, and coverage thresholds.
+`make pre-push-fast` (also invoked from the
 policy-static stage) runs bazelisk presence + `cargo-bazel-drift-check.py`
 before format/lint/security. Optional authoritative local Bazel suite:
 `make bazel-test` → `bazelisk test //:ci_rust_tests` (see [bazel.md](bazel.md)).

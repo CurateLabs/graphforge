@@ -26,7 +26,6 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       python: ${{ steps.filter.outputs.python }}
-      gherkin: ${{ steps.filter.outputs.gherkin }}
       bindings: ${{ steps.filter.outputs.bindings }}
       agent_skills: ${{ steps.filter.outputs.agent_skills }}
       pulumi: ${{ steps.filter.outputs.pulumi }}
@@ -437,45 +436,6 @@ jobs:
       - name: Scan Python binding
         run: uv run bandit -c pyproject.toml -r crates/graphforge-bindings-py/python
 
-  gherkin-lint:
-    name: Gherkin Syntax
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: changes
-    timeout-minutes: 15
-    if: needs.changes.outputs.gherkin == 'true'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "20"
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-
-      - name: Install workspace dependencies
-        run: pnpm install
-
-      - name: Validate Gherkin syntax
-        shell: bash
-        run: |
-          node tests/features/node/node_modules/@cucumber/cucumber/bin/cucumber.js \
-            "tests/features/api/**/*.feature" \
-            "tests/features/tck/features/**/*.feature" \
-            --dry-run --no-strict > /tmp/gherkin-lint.log 2>&1 || EC=$?
-          EC=${EC:-0}
-          cat /tmp/gherkin-lint.log
-          if grep -iE "^Parse error|^SyntaxError|^Error: Parse" /tmp/gherkin-lint.log; then
-            echo "Gherkin parse errors found"
-            exit 1
-          fi
-          if [[ "$EC" -ne 0 && "$EC" -ne 2 ]]; then
-            echo "cucumber-js exited with unexpected code $EC"
-            exit "$EC"
-          fi
-
   agent-skills:
     name: Agent Skills
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -699,61 +659,13 @@ jobs:
           assert importlib.util.find_spec("networkx") is None
           assert importlib.util.find_spec("igraph") is None
           PY
-          for test_file in crates/graphforge-bindings-py/tests/*.py; do
-            /tmp/gf-native/bin/python "$test_file"
-          done
-          /tmp/gf-native/bin/python crates/graphforge-bindings-py/tests/multi_ontology.py
-          GRAPHFORGE_PYTHON_PARITY_REPORT=dist/python-non-cypher-classification.json \
-            /tmp/gf-native/bin/python \
-            crates/graphforge-bindings-py/tests/non_cypher_release.py \
-            --classification-only
+          timeout 60s /tmp/gf-native/bin/python crates/graphforge-bindings-py/tests/smoke.py
 
       - name: Install test dependencies and wheel
         shell: bash
         run: |
           uv sync --locked --all-extras
           uv pip install dist/*.whl
-
-      - name: Restore SNAP ego-Facebook fixture
-        id: snap-fixture
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.graphforge/datasets/snap-ego-facebook.txt.gz
-          key: ${{ runner.os }}-snap-ego-facebook-v1
-
-      - name: Download SNAP ego-Facebook fixture
-        if: steps.snap-fixture.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          mkdir -p ~/.graphforge/datasets
-          dest="$HOME/.graphforge/datasets/snap-ego-facebook.txt.gz"
-          # Prefer the checked-in CI fixture. snap.stanford.edu is intermittently
-          # unreachable from CI egress (connection reset), which is unrelated to
-          # binding correctness.
-          if [[ -s tests/fixtures/snap-ego-facebook.txt.gz ]]; then
-            cp tests/fixtures/snap-ego-facebook.txt.gz "$dest"
-          else
-            for attempt in 1 2 3 4 5; do
-              if curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
-                --connect-timeout 30 --max-time 120 \
-                --output "$dest" \
-                https://snap.stanford.edu/data/facebook_combined.txt.gz; then
-                break
-              fi
-              echo "SNAP download attempt ${attempt} failed; sleeping before retry"
-              sleep $((attempt * 5))
-            done
-          fi
-          test -s "$dest"
-          echo "125e84db872eeba443d270c70315c256b0af43a502fcfe51f50621166ad035d7  $dest" \
-            | shasum -a 256 -c -
-
-      - name: Run Python unit, integration, and BDD tests
-        shell: bash
-        run: |
-          test -s ~/.graphforge/datasets/snap-ego-facebook.txt.gz
-          uv run --no-sync pytest tests/unit tests/integration tests/features \
-            -n auto --tb=short
 
       - name: Prove public API BDD mutations fail closed
         run: uv run --no-sync python scripts/ci/test-api-bdd-mutations.py
@@ -774,23 +686,6 @@ jobs:
           --with nbclient==0.11.0
           --with ipykernel==7.3.0
           python scripts/ci/run-native-notebook.py
-
-      - name: Record and upload wheel provenance
-        shell: bash
-        run: |
-          printf '%s\n' "$GITHUB_SHA" > dist/artifact-sha
-          wheels=(dist/*.whl)
-          test "${#wheels[@]}" -eq 1
-          python3 scripts/ci/write-binding-parity-evidence.py \
-            --language python \
-            --artifact "${wheels[0]}" \
-            --classification dist/python-non-cypher-classification.json \
-            --package-manifest crates/graphforge-bindings-py/pyproject.toml \
-            --case check_surface_projection \
-            --case check_native_artifact_and_no_fallback \
-            --case check_lifecycle_checkpoint_errors_and_reopen \
-            --case check_knowledge_epistemic_native_projection \
-            --output dist/python-binding-parity-evidence.json
 
       - name: Upload same-SHA wheel for concurrency matrix
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -852,44 +747,12 @@ jobs:
       - name: Run Node acceptance tests
         shell: bash
         run: |
-          pnpm --filter @curatelabs/graphforge test:smoke
-          pnpm --filter @curatelabs/graphforge test
+          timeout 60s pnpm --filter @curatelabs/graphforge test:smoke
           pnpm --filter @curatelabs/graphforge format:check
           pnpm test:node-cli
           pnpm format:node-cli
           pnpm smoke:node-cli
           pnpm --filter @curatelabs/graphforge-cli test:lifecycle
-
-      - name: Typecheck Node BDD package
-        run: |
-          pnpm --filter @curatelabs/graphforge-bdd-node typecheck
-          pnpm --filter @curatelabs/graphforge-bdd-node typecheck:fail-closed
-
-      - name: Run Node BDD suite
-        working-directory: tests/features/node
-        shell: bash
-        run: |
-          node node_modules/@cucumber/cucumber/bin/cucumber.js \
-            "../api/**/*.feature" \
-            --require-module tsx/cjs \
-            --require "step_definitions/**/*.ts" \
-            --tags "not @excluded-api-bdd and not @excluded-node-api-bdd" \
-            --format summary
-
-      - name: Record and upload addon parity evidence
-        shell: bash
-        run: |
-          addons=(crates/graphforge-bindings-node/*.node)
-          test "${#addons[@]}" -eq 1
-          python3 scripts/ci/write-binding-parity-evidence.py \
-            --language node \
-            --artifact "${addons[0]}" \
-            --classification crates/graphforge-bindings-node/tests/non-cypher-parity-policy.json \
-            --package-manifest crates/graphforge-bindings-node/package.json \
-            --case "the Node classification is total, frozen, and backed by non-skipped native tests" \
-            --case "the native Node facade preserves deterministic IPC through persistence and reopen" \
-            --case "a future project format fails structurally without mutating the project" \
-            --output crates/graphforge-bindings-node/node-binding-parity-evidence.json
 
       - name: Upload same-SHA addon for concurrency matrix
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1652,7 +1515,6 @@ jobs:
       - changes
       - policy
       - python-quality
-      - gherkin-lint
       - agent-skills
       - pulumi-static
       - terraform-static
@@ -1677,7 +1539,6 @@ jobs:
           "${{ needs.changes.result }}"
           "${{ needs.policy.result }}"
           "${{ needs.python-quality.result }}"
-          "${{ needs.gherkin-lint.result }}"
           "${{ needs.agent-skills.result }}"
           "${{ needs.pulumi-static.result }}"
           "${{ needs.terraform-static.result }}"

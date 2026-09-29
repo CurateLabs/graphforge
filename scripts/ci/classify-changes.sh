@@ -6,7 +6,6 @@ head_sha=${2:-HEAD}
 
 rust=false
 python=false
-gherkin=false
 bindings=false
 agent_skills=false
 pulumi=false
@@ -19,7 +18,6 @@ non_cypher_surface=false
 emit() {
   printf 'rust=%s\n' "$rust"
   printf 'python=%s\n' "$python"
-  printf 'gherkin=%s\n' "$gherkin"
   printf 'bindings=%s\n' "$bindings"
   printf 'agent_skills=%s\n' "$agent_skills"
   printf 'pulumi=%s\n' "$pulumi"
@@ -33,7 +31,6 @@ emit() {
 enable_all() {
   rust=true
   python=true
-  gherkin=true
   bindings=true
   agent_skills=true
   pulumi=true
@@ -190,14 +187,10 @@ while IFS= read -r -d '' path; do
 
     tests/features/api/* | tests/features/api/**/* | \
       crates/graphforge-api/tests/bdd/* | crates/graphforge-api/tests/bdd/**/*)
-      gherkin=true
-      bindings=true
       rust=true
       ;;
 
     tests/features/node/* | tests/features/node/**/*)
-      gherkin=true
-      bindings=true
       ;;
 
     # Bazel-mapped hermetic crate test data must win over the binding crate
@@ -274,7 +267,6 @@ while IFS= read -r -d '' path; do
 
     tests/features/* | tests/features/**/* | crates/graphforge-api/tests/bdd/* | \
       crates/graphforge-api/tests/bdd/**/*)
-      gherkin=true
       rust=true
       ;;
 
