@@ -248,5 +248,9 @@ done
 for workflow_file in epistemic-contract-gate knowledge-contract-gate non-cypher-surface-gate; do
   grep -Fq 'workflow_call:' "$(dirname "$workflow")/${workflow_file}.yml"
 done
+for workflow_file in epistemic-contract-gate knowledge-contract-gate; do
+  grep -Fq "github.event_name == 'workflow_dispatch' || inputs.require_closure_report" \
+    "$(dirname "$workflow")/${workflow_file}.yml"
+done
 
 echo "changed-path classifier tests passed"

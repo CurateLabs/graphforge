@@ -23,6 +23,7 @@ _EXEC_DEPS = [
 
 gf_rust_library(
     name = "graphforge_exec",
+    crate_features = ["algorithms-core", "algorithms-extended"],
     deps = _EXEC_DEPS,
 )
 
@@ -35,7 +36,7 @@ _EXEC_DIFFERENTIAL_DEPS = [
 gf_rust_library(
     name = "graphforge_exec_differential",
     crate_name = "graphforge_exec",
-    crate_features = ["differential-testing"],
+    crate_features = ["algorithms-core", "algorithms-extended", "differential-testing"],
     testonly = True,
     visibility = ["//visibility:private"],
     deps = _EXEC_DIFFERENTIAL_DEPS,
