@@ -77,12 +77,21 @@ jobs:
         if: inputs.cache == 'sccache'
         uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2.87.15
         with:
-          tool: sccache@0.9.1
+          tool: sccache@0.10.4
 
       - name: Set sccache wrapper
         if: inputs.cache == 'sccache'
         shell: bash
-        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        run: |
+          set -euo pipefail
+          test -w "$SCCACHE_DIR" || mkdir -p "$SCCACHE_DIR"
+          test -w "$SCCACHE_DIR"
+          # Fail loudly: a silent sccache fallback to direct compilation
+          # produced zero cache requests in the first harness iteration.
+          sccache --start-server
+          sccache --zero-stats
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       - name: Cache Cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -103,10 +112,6 @@ jobs:
             state="populated"
           fi
           echo "state=$state" >> "$GITHUB_OUTPUT"
-          if command -v sccache >/dev/null 2>&1; then
-            sccache --start-server >/dev/null 2>&1 || true
-            sccache --zero-stats >/dev/null 2>&1 || true
-          fi
 
       - name: Cargo fetch (timed)
         id: fetch
@@ -138,10 +143,16 @@ jobs:
         run: |
           set -euo pipefail
           sccache_stats="disabled"
-          if command -v sccache >/dev/null 2>&1; then
+          if [[ "${{ inputs.cache }}" == "sccache" ]]; then
             sccache --show-stats > dist/sccache-stats.txt 2>&1 || true
             sccache_stats="collected"
+            requests=$(grep -m1 "Compile requests" dist/sccache-stats.txt | grep -oE "[0-9]+" || echo 0)
+            if [[ "${requests:-0}" -eq 0 ]]; then
+              echo "::error::sccache intercepted zero compile requests; wrapper did not engage"
+              exit 1
+            fi
           fi
+          export MEASURE_SCCACHE_STATS="$sccache_stats"
           python3 - <<'PY'
           import json, os, pathlib, socket, subprocess, datetime
 
@@ -163,7 +174,7 @@ jobs:
               "fetch_seconds": int(os.environ["MEASURE_FETCH_S"] or 0),
               "test_seconds": int(os.environ["MEASURE_TEST_S"] or 0),
               "test_exit_code": int(os.environ.get("MEASURE_TEST_RC") or 0),
-              "sccache": sccache_stats,
+              "sccache": os.environ["MEASURE_SCCACHE_STATS"],
           }
           dist = pathlib.Path("dist")
           dist.mkdir(exist_ok=True)
