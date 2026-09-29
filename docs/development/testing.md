@@ -241,8 +241,14 @@ output or secrets. The instrumented Rust coverage run executes the full Rust
 corpus once and builds each native artifact once; later acceptance stages reuse
 those exact artifact identities.
 Compatible Cargo dependency compilation is shared beneath the common Git
-metadata directory, while evidence and native binding artifacts stay scoped to
-their individual worktree.
+metadata directory (`graphforge-validation-cache/cargo`, one target directory
+per manifest, toolchain, and heavy-profile identity), while evidence and native
+binding artifacts stay scoped to their individual worktree. Each heavy stage
+records its use and, while holding the shared heavy-build lock, evicts the
+least-recently-used target directories so at most six remain
+(`GF_PRE_PUSH_CACHE_KEEP_ENTRIES` overrides the six). The directories the
+current run needs are always kept. Preflight prunes the same way before it
+checks free disk, unless another worktree is compiling.
 
 Run `make pre-push-preflight` to check those prerequisites and disk budget
 without starting any heavy compilation.
@@ -250,9 +256,11 @@ without starting any heavy compilation.
 Use `make pre-push-clean` to discard only this local validation evidence and
 force every stage to rerun. If the preflight reports insufficient space, it does
 not start compilation. Review its reported safe options first: `make
-clean-builds` removes stale Rust artifacts when possible, while `make
-clean-builds-all` removes all Rust artifacts and forces future recompilation.
-Neither command is run automatically.
+clean-builds` removes stale Rust artifacts under `target/` when possible,
+while `make clean-builds-all` removes all of them and forces future
+recompilation. Neither command is run automatically, and neither touches the
+shared pre-push cache; lower `GF_PRE_PUSH_CACHE_KEEP_ENTRIES` to bound it more
+tightly.
 
 ### Core Fixtures (`tests/conftest.py`)
 
