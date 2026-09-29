@@ -134,7 +134,6 @@ EXPECTED_DEPENDENCY_KEYS = Counter(
         # build-lane-measurement harness: 1.
         # PR Cargo sticky disks retired after #4 cutover.
         "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 11,
-        "${{ runner.os }}-snap-ego-facebook-v1": 1,
         "${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}": 1,
     }
 )
@@ -174,11 +173,7 @@ EXPECTED_SAVES = Counter(
         "checkpoint-transfer-${{ github.run_id }}-python": 1,
         "checkpoint-transfer-${{ github.run_id }}-node": 1,
         "knowledge-transfer-${{ github.run_id }}-rust": 1,
-        "knowledge-transfer-${{ github.run_id }}-python": 1,
-        "knowledge-transfer-${{ github.run_id }}-node": 1,
         "epistemic-transfer-${{ github.run_id }}-rust": 1,
-        "epistemic-transfer-${{ github.run_id }}-python": 1,
-        "epistemic-transfer-${{ github.run_id }}-node": 1,
     }
 )
 EXPECTED_RESTORES = Counter(
@@ -187,11 +182,7 @@ EXPECTED_RESTORES = Counter(
         "checkpoint-transfer-${{ github.run_id }}-python": 1,
         "checkpoint-transfer-${{ github.run_id }}-node": 1,
         "knowledge-transfer-${{ github.run_id }}-rust": 1,
-        "knowledge-transfer-${{ github.run_id }}-python": 1,
-        "knowledge-transfer-${{ github.run_id }}-node": 1,
         "epistemic-transfer-${{ github.run_id }}-rust": 1,
-        "epistemic-transfer-${{ github.run_id }}-python": 1,
-        "epistemic-transfer-${{ github.run_id }}-node": 1,
     }
 )
 
