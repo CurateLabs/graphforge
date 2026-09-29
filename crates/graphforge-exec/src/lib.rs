@@ -4,65 +4,117 @@
 //! Physical CREATE, mutation, traversal, and row operators live in private
 //! domain modules. The session module owns planning, read authority, and query
 //! evidence lifetime; public result types and exports remain here.
+//!
+//! `algorithms-core` retains Degree, PageRank, Components, and all path
+//! algorithms. `algorithms-extended` adds the remaining analyst families and
+//! stays enabled by default for CLI and binding compatibility. Core-only builds
+//! omit extended analyzer, embedding, and similarity modules and register only
+//! core rank and component algorithms.
 #![forbid(unsafe_code)]
 // `name()` returns a string literal but the trait ties it to `&self`.
 #![allow(clippy::unnecessary_literal_bound)]
 
 pub mod adjacency;
+#[cfg(feature = "algorithms-extended")]
 mod algorithm_analyze;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_automorphism;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_automorphism_count;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_bipartite;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_bipartite_matching;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_chromatic_number;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_conductance;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_dag_longest_path;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_dag_longest_path_weighted;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_dag_topology;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_dyad_census;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_edge_coloring;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_euler;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_find_cycles;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_has_euler_circuit;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_has_euler_path;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_is_planar;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_k1_coloring;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_lowlink;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_max_cardinality_matching;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_minimum_k_spanning_tree;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_minimum_spanning_forest;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_modularity;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_node_coloring;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_transitivity;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_triad_census;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_analyze_triangle_count;
 mod algorithm_cluster;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_cluster_biconnected;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_cluster_hdbscan;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_cluster_kmeans;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_cluster_max_cut;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_cluster_scc;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_cluster_spectral;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_cluster_spinglass;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_cluster_walktrap;
 pub(crate) mod algorithm_dispatch;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_embedding_control;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_embedding_fastrp;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_embedding_graphsage;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_embedding_hashgnn;
+#[cfg(feature = "algorithms-extended")]
 mod algorithm_embedding_invocation;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_embedding_options;
 pub mod mutation;
 mod path_hydration;
 pub mod read_resource;
 pub mod write_resource;
+#[cfg(feature = "algorithms-extended")]
 pub use algorithm_embedding_options::validate_embedding_options;
 pub use algorithm_graph::AlgorithmProjectionFingerprint;
 pub(crate) mod algorithm_arrow_sink;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_embedding_node2vec;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_embedding_output;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_embedding_rng;
 pub(crate) mod algorithm_graph;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_k_core;
 pub(crate) mod algorithm_matching_blossom;
 pub(crate) mod algorithm_matching_state;
@@ -87,8 +139,11 @@ pub(crate) mod algorithm_paths_steiner;
 pub(crate) mod algorithm_paths_transitive_closure;
 pub(crate) mod algorithm_paths_yens;
 mod algorithm_rank;
+#[cfg(feature = "algorithms-extended")]
 mod algorithm_similar;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_similar_jaccard;
+#[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_similar_knn;
 pub(crate) mod algorithm_weighted_undirected;
 #[doc(hidden)]
@@ -100,6 +155,7 @@ pub use crate::adjacency::{
     Adjacency, AdjacencyBacking, AdjacencyProvider, AdjacencyStatus, AdmittedAdjacencyProvider,
     PersistentAdjacencyProvider, ScanBuildAdjacencyProvider,
 };
+#[cfg(feature = "algorithms-extended")]
 pub use algorithm_analyze::{
     analyze_algorithm, analyze_algorithm_with_compute, analyze_projection_fingerprint,
     embedding_algorithm, embedding_algorithm_execution, embedding_algorithm_execution_with_compute,
@@ -111,6 +167,7 @@ pub use algorithm_cluster::{
 };
 pub use algorithm_dispatch::AlgorithmLimits;
 mod compute_pool;
+#[cfg(feature = "algorithms-extended")]
 pub use algorithm_embedding_invocation::{
     EmbeddingExecution, EmbeddingInvocationDescriptor, EmbeddingInvocationLimits,
     EmbeddingProjectionSelector, EmbeddingRngContract,
@@ -122,11 +179,32 @@ pub use algorithm_rank::{
     rank_algorithm, rank_algorithm_with_compute, rank_algorithm_with_limits,
     rank_projection_fingerprint,
 };
+#[cfg(feature = "algorithms-extended")]
 pub use algorithm_similar::{
     similar_algorithm, similar_algorithm_with_compute, similar_algorithm_with_limits,
     similar_projection_fingerprint,
 };
 pub use compute_pool::{ComputePool, SharedComputePool};
+
+#[cfg(all(
+    test,
+    feature = "algorithms-core",
+    not(feature = "algorithms-extended")
+))]
+mod feature_boundary_tests {
+    use super::algorithm_dispatch::AlgorithmRegistry;
+
+    #[test]
+    fn core_feature_registers_only_core_rank_and_component_algorithms() {
+        let mut ranks = AlgorithmRegistry::default();
+        super::algorithm_rank::register_rank_algorithms(&mut ranks).unwrap();
+        assert_eq!(ranks.capabilities().len(), 2);
+
+        let mut clusters = AlgorithmRegistry::default();
+        super::algorithm_cluster::register_cluster_algorithms(&mut clusters).unwrap();
+        assert_eq!(clusters.capabilities().len(), 1);
+    }
+}
 
 mod write_driver;
 

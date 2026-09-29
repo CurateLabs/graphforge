@@ -31,12 +31,35 @@ assert_classification() {
     cd "$fixture"
     "$classifier" "$base" HEAD
   )
-  if [[ "$actual" != "$expected" ]]; then
+  actual_core=$(printf '%s\n' "$actual" | sed -n '1,8p')
+  if [[ "$actual_core" != "$expected" ]]; then
     printf 'unexpected classification for %s\nexpected:\n%s\nactual:\n%s\n' \
       "$path" "$expected" "$actual" >&2
     exit 1
   fi
 
+  git -C "$fixture" reset --hard -q "$base"
+}
+
+assert_feature_classification() {
+  local expected=$1
+  local path=$2
+  local message=$3
+
+  mkdir -p "$fixture/$(dirname "$path")"
+  printf '%s\n' "$message" >>"$fixture/$path"
+  git -C "$fixture" add "$path"
+  git -C "$fixture" commit -qm "change $path"
+
+  actual=$(
+    cd "$fixture"
+    "$classifier" "$base" HEAD | sed -n '9,11p'
+  )
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'unexpected feature classification for %s\nexpected:\n%s\nactual:\n%s\n' \
+      "$path" "$expected" "$actual" >&2
+    exit 1
+  fi
   git -C "$fixture" reset --hard -q "$base"
 }
 
@@ -59,6 +82,13 @@ rust_iac=$'rust=true\npython=false\ngherkin=false\nbindings=false\nagent_skills=
 all=$'rust=true\npython=true\ngherkin=true\nbindings=true\nagent_skills=true\npulumi=true\nterraform=true\nbazel=true'
 bazel_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
 rust_bindings_bazel=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
+
+assert_feature_classification $'epistemic_contract=false\nknowledge_contract=false\nnon_cypher_surface=false' \
+  crates/graphforge-storage/src/lib.rs storage-only
+assert_feature_classification $'epistemic_contract=false\nknowledge_contract=true\nnon_cypher_surface=true' \
+  crates/graphforge-api/src/knowledge.rs knowledge-facade
+assert_feature_classification $'epistemic_contract=true\nknowledge_contract=false\nnon_cypher_surface=true' \
+  crates/graphforge-api/src/research_claims.rs research-facade
 
 assert_classification "$rust_only" crates/graphforge-exec/src/kernel.rs core-rust
 assert_classification "$binding_rust" crates/graphforge-api/src/lib.rs public-api-rust
@@ -163,7 +193,7 @@ git -C "$fixture" add Cargo.toml
 git -C "$fixture" commit -qm "change license metadata"
 metadata_actual=$(
   cd "$fixture"
-  "$classifier" "$base" HEAD
+  "$classifier" "$base" HEAD | sed -n '1,8p'
 )
 [[ "$metadata_actual" == "$none" ]] || {
   printf 'license-only manifest edit must be metadata-only, got:\n%s\n' \
@@ -178,7 +208,7 @@ git -C "$fixture" add Cargo.toml
 git -C "$fixture" commit -qm "change dependency"
 manifest_actual=$(
   cd "$fixture"
-  "$classifier" "$base" HEAD
+  "$classifier" "$base" HEAD | sed -n '1,8p'
 )
 [[ "$manifest_actual" == "$rust_bindings_bazel" ]] || {
   printf 'dependency manifest edit must run Rust, bindings, and Bazel drift, got:\n%s\n' \
@@ -189,7 +219,7 @@ git -C "$fixture" reset --hard -q "$base"
 
 missing=$(
   cd "$fixture"
-  "$classifier" deadbeef HEAD
+  "$classifier" deadbeef HEAD | sed -n '1,8p'
 )
 [[ "$missing" == "$all" ]] || {
   printf 'missing base must fail safe, got:\n%s\n' "$missing" >&2
@@ -201,11 +231,24 @@ missing=$(
 grep -Fq '"${{ github.event.pull_request.base.sha }}"' "$workflow"
 empty=$(
   cd "$fixture"
-  "$classifier" "" HEAD
+  "$classifier" "" HEAD | sed -n '1,8p'
 )
 [[ "$empty" == "$all" ]] || {
   printf 'empty base must fail safe, got:\n%s\n' "$empty" >&2
   exit 1
 }
+
+# Reusable contract lanes must consume the feature-specific classifier outputs.
+for feature in epistemic_contract knowledge_contract non_cypher_surface; do
+  grep -Fq "${feature}: \${{ steps.filter.outputs.${feature} }}" "$workflow"
+  grep -Fq "needs.changes.outputs.${feature} == 'true'" "$workflow"
+done
+for workflow_file in epistemic-contract-gate knowledge-contract-gate non-cypher-surface-gate; do
+  grep -Fq 'workflow_call:' "$(dirname "$workflow")/${workflow_file}.yml"
+done
+for workflow_file in epistemic-contract-gate knowledge-contract-gate; do
+  grep -Fq "github.event_name == 'workflow_dispatch' || inputs.require_closure_report" \
+    "$(dirname "$workflow")/${workflow_file}.yml"
+done
 
 echo "changed-path classifier tests passed"

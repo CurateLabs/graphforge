@@ -12,21 +12,37 @@
 
 mod components;
 use components::Components;
+#[cfg(feature = "algorithms-extended")]
 mod louvain;
+#[cfg(feature = "algorithms-extended")]
 use louvain::Louvain;
+#[cfg(feature = "algorithms-extended")]
 mod leiden;
+#[cfg(feature = "algorithms-extended")]
 use leiden::Leiden;
+#[cfg(feature = "algorithms-extended")]
 mod modularity_optimization;
+#[cfg(feature = "algorithms-extended")]
 use modularity_optimization::ModularityOptimization;
+#[cfg(feature = "algorithms-extended")]
 mod fastgreedy;
+#[cfg(feature = "algorithms-extended")]
 use fastgreedy::FastGreedy;
+#[cfg(feature = "algorithms-extended")]
 mod girvan_newman;
+#[cfg(feature = "algorithms-extended")]
 use girvan_newman::GirvanNewman;
+#[cfg(feature = "algorithms-extended")]
 mod infomap;
+#[cfg(feature = "algorithms-extended")]
 use infomap::InfoMap;
+#[cfg(feature = "algorithms-extended")]
 mod label_propagation;
+#[cfg(feature = "algorithms-extended")]
 use label_propagation::LabelPropagation;
+#[cfg(feature = "algorithms-extended")]
 mod speaker_listener;
+#[cfg(feature = "algorithms-extended")]
 use speaker_listener::SpeakerListener;
 
 use graphforge_value::EntityTypeSelection;
@@ -42,13 +58,21 @@ use graphforge_ir::Direction;
 use rayon::prelude::*;
 
 use crate::AdjacencyProvider;
+#[cfg(feature = "algorithms-extended")]
 use crate::algorithm_cluster_biconnected::biconnected_labels;
+#[cfg(feature = "algorithms-extended")]
 use crate::algorithm_cluster_hdbscan::ReachabilityTree;
+#[cfg(feature = "algorithms-extended")]
 use crate::algorithm_cluster_kmeans::stable_labels as kmeans_labels;
+#[cfg(feature = "algorithms-extended")]
 use crate::algorithm_cluster_max_cut::approximate_max_cut_labels;
+#[cfg(feature = "algorithms-extended")]
 use crate::algorithm_cluster_scc::strongly_connected_labels;
+#[cfg(feature = "algorithms-extended")]
 use crate::algorithm_cluster_spectral::leading_eigenvector_communities;
+#[cfg(feature = "algorithms-extended")]
 use crate::algorithm_cluster_spinglass::spinglass_communities;
+#[cfg(feature = "algorithms-extended")]
 use crate::algorithm_cluster_walktrap::walktrap_communities;
 use crate::algorithm_dispatch::{
     AlgorithmCancellation, AlgorithmCapability, AlgorithmControl, AlgorithmError, AlgorithmLimits,
@@ -57,6 +81,7 @@ use crate::algorithm_dispatch::{
 use crate::algorithm_graph::{
     AdjacencyGraph, AdjacencySelection, export_adjacency, load_node_vectors,
 };
+#[cfg(feature = "algorithms-extended")]
 use crate::algorithm_k_core::k_core_numbers;
 use crate::algorithm_output::shape_algorithm_output;
 
@@ -87,22 +112,31 @@ pub(crate) enum LouvainExecutionPath {
     SerialLocalMoves,
 }
 
+#[cfg(feature = "algorithms-extended")]
 struct LeadingEigenvector;
 
+#[cfg(feature = "algorithms-extended")]
 struct Walktrap;
 
+#[cfg(feature = "algorithms-extended")]
 struct Spinglass;
 
+#[cfg(feature = "algorithms-extended")]
 struct Hdbscan;
 
+#[cfg(feature = "algorithms-extended")]
 struct KMeans;
 
+#[cfg(feature = "algorithms-extended")]
 struct ApproximateMaxKCut;
 
+#[cfg(feature = "algorithms-extended")]
 struct StronglyConnected;
 
+#[cfg(feature = "algorithms-extended")]
 struct Biconnected;
 
+#[cfg(feature = "algorithms-extended")]
 struct KCoreDecomposition;
 
 /// Direction-expanded adjacency entries below which components stays serial (#518).
@@ -112,6 +146,7 @@ struct KCoreDecomposition;
 /// hash-map setup costs; above this measured M4 crossover the independent source
 /// scans amortize that overhead while preserving identical component labels.
 pub const COMPONENTS_PARALLEL_CROSSOVER_EDGES: u64 = 16_384;
+#[cfg(feature = "algorithms-extended")]
 impl RustAlgorithm for KCoreDecomposition {
     fn capability(&self) -> AlgorithmCapability {
         AlgorithmCapability {
@@ -131,6 +166,7 @@ impl RustAlgorithm for KCoreDecomposition {
     }
 }
 
+#[cfg(feature = "algorithms-extended")]
 impl RustAlgorithm for Biconnected {
     fn capability(&self) -> AlgorithmCapability {
         AlgorithmCapability {
@@ -150,6 +186,7 @@ impl RustAlgorithm for Biconnected {
     }
 }
 
+#[cfg(feature = "algorithms-extended")]
 impl RustAlgorithm for StronglyConnected {
     fn capability(&self) -> AlgorithmCapability {
         AlgorithmCapability {
@@ -174,6 +211,7 @@ impl RustAlgorithm for StronglyConnected {
     }
 }
 
+#[cfg(feature = "algorithms-extended")]
 impl RustAlgorithm for ApproximateMaxKCut {
     fn capability(&self) -> AlgorithmCapability {
         AlgorithmCapability {
@@ -198,6 +236,7 @@ impl RustAlgorithm for ApproximateMaxKCut {
     }
 }
 
+#[cfg(feature = "algorithms-extended")]
 impl RustAlgorithm for KMeans {
     fn capability(&self) -> AlgorithmCapability {
         AlgorithmCapability {
@@ -226,6 +265,7 @@ impl RustAlgorithm for KMeans {
     }
 }
 
+#[cfg(feature = "algorithms-extended")]
 impl RustAlgorithm for Hdbscan {
     fn capability(&self) -> AlgorithmCapability {
         AlgorithmCapability {
@@ -246,6 +286,7 @@ impl RustAlgorithm for Hdbscan {
     }
 }
 
+#[cfg(feature = "algorithms-extended")]
 impl RustAlgorithm for Spinglass {
     fn capability(&self) -> AlgorithmCapability {
         AlgorithmCapability {
@@ -265,6 +306,7 @@ impl RustAlgorithm for Spinglass {
     }
 }
 
+#[cfg(feature = "algorithms-extended")]
 impl RustAlgorithm for Walktrap {
     fn capability(&self) -> AlgorithmCapability {
         AlgorithmCapability {
@@ -284,6 +326,7 @@ impl RustAlgorithm for Walktrap {
     }
 }
 
+#[cfg(feature = "algorithms-extended")]
 impl RustAlgorithm for LeadingEigenvector {
     fn capability(&self) -> AlgorithmCapability {
         AlgorithmCapability {
@@ -308,6 +351,7 @@ impl RustAlgorithm for LeadingEigenvector {
     }
 }
 
+#[cfg(feature = "algorithms-extended")]
 fn community_output(
     graph: &AdjacencyGraph,
     communities: &[usize],
@@ -328,6 +372,7 @@ fn community_output(
     sink.finish()
 }
 
+#[cfg(feature = "algorithms-extended")]
 fn label_output(
     graph: &AdjacencyGraph,
     labels: &[i64],
@@ -350,23 +395,46 @@ pub(crate) fn register_cluster_algorithms(
     registry: &mut AlgorithmRegistry,
 ) -> Result<(), AlgorithmError> {
     registry.register(Arc::new(Components))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(Louvain))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(Leiden))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(LabelPropagation))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(SpeakerListener))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(GirvanNewman))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(ModularityOptimization))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(FastGreedy))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(InfoMap))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(LeadingEigenvector))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(Walktrap))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(Spinglass))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(Hdbscan))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(KMeans))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(ApproximateMaxKCut))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(StronglyConnected))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(Biconnected))?;
-    registry.register(Arc::new(KCoreDecomposition))
+    #[cfg(feature = "algorithms-extended")]
+    {
+        registry.register(Arc::new(KCoreDecomposition))
+    }
+    #[cfg(not(feature = "algorithms-extended"))]
+    {
+        Ok(())
+    }
 }
 
 /// Execute a typed cluster algorithm through Rust dispatch and return its
@@ -848,6 +916,18 @@ fn checkpoint_chunk(control: &AlgorithmControl, work: &mut usize) -> Result<(), 
 }
 
 #[cfg(test)]
+fn community_ids(output: &AlgorithmOutput) -> Vec<i64> {
+    output
+        .rows()
+        .iter()
+        .map(|row| match row[1] {
+            AlgorithmValue::Int64(value) => value,
+            _ => panic!("expected Int64 community id"),
+        })
+        .collect()
+}
+
+#[cfg(all(test, feature = "algorithms-extended"))]
 mod tests {
     pub(super) fn execute_louvain(
         graph: &AdjacencyGraph,

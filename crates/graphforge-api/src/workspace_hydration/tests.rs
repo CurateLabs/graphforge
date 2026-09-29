@@ -641,6 +641,7 @@ fn hardlinked_topology_payload_corruption_is_refused() {
 /// Delta and Other use small opaque files to exercise the role classifier
 /// without requiring a journal replay or a consumer for an unknown file.
 #[test]
+#[cfg(feature = "search")]
 fn compact_graph_root_refuses_same_inode_corruption_for_every_role() {
     use graphforge_storage::GraphFileRole;
 

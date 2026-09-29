@@ -11,6 +11,7 @@
 //!     passing scenarios are surfaced as `TCK XPASS`. See the comment on the TCK
 //!     run below and `docs/reference/tck-compliance.md`.
 
+#[cfg(feature = "search")]
 mod api_steps;
 mod fixture;
 mod tck_steps;
@@ -85,35 +86,39 @@ async fn main() {
             .expect("workspace root must exist")
     };
 
-    let features_dir = workspace_root.join("tests/features");
-
     // Required public-API scenarios run strictly. Product gaps use the single
     // issue-backed exclusion inventory and never contribute to passing totals.
-    let api_results = std::sync::Arc::new(std::sync::Mutex::new(ScenarioOutcomes::default()));
-    let api_only = std::env::var("API_ONLY").ok();
-    if let Some(needle) = &api_only {
-        eprintln!("API_ONLY subset: only scenarios matching {needle:?} will be evaluated");
-    }
-    GraphForgeWorld::cucumber()
-        .with_writer(cucumber::writer::Tee::new(
-            cucumber::writer::Basic::stdout().summarized(),
-            ScenarioCollector::new(Suite::Api, std::sync::Arc::clone(&api_results), false),
-        ))
-        .with_default_cli()
-        .filter_run(features_dir.join("api"), move |_, _, scenario| {
-            !scenario
-                .tags
-                .iter()
-                .any(|tag| tag == "excluded-api-bdd" || tag == "binding-only")
-                && api_only
-                    .as_deref()
-                    .is_none_or(|needle| scenario.name.contains(needle))
-        })
-        .await;
-    let api_results = std::sync::Arc::into_inner(api_results)
-        .expect("API collector dropped after run")
-        .into_inner()
-        .expect("API outcomes mutex");
+    #[cfg(feature = "search")]
+    let api_results = {
+        let features_dir = workspace_root.join("tests/features");
+        let api_results = std::sync::Arc::new(std::sync::Mutex::new(ScenarioOutcomes::default()));
+        let api_only = std::env::var("API_ONLY").ok();
+        if let Some(needle) = &api_only {
+            eprintln!("API_ONLY subset: only scenarios matching {needle:?} will be evaluated");
+        }
+        GraphForgeWorld::cucumber()
+            .with_writer(cucumber::writer::Tee::new(
+                cucumber::writer::Basic::stdout().summarized(),
+                ScenarioCollector::new(Suite::Api, std::sync::Arc::clone(&api_results), false),
+            ))
+            .with_default_cli()
+            .filter_run(features_dir.join("api"), move |_, _, scenario| {
+                !scenario
+                    .tags
+                    .iter()
+                    .any(|tag| tag == "excluded-api-bdd" || tag == "binding-only")
+                    && api_only
+                        .as_deref()
+                        .is_none_or(|needle| scenario.name.contains(needle))
+            })
+            .await;
+        std::sync::Arc::into_inner(api_results)
+            .expect("API collector dropped after run")
+            .into_inner()
+            .expect("API outcomes mutex")
+    };
+    #[cfg(not(feature = "search"))]
+    let api_results = ScenarioOutcomes::default();
 
     // openCypher TCK scenarios — the WHOLE vendored corpus, run over an EPHEMERAL
     // normalized copy so the vendored files stay byte-for-byte upstream (#886).

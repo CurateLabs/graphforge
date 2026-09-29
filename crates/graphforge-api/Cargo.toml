@@ -7,22 +7,33 @@ license.workspace = true
 license-file.workspace = true
 repository.workspace = true
 
+[features]
+# Preserve the existing facade for default consumers. Lean engine users can
+# select only the surfaces they need with `--no-default-features`.
+default = ["knowledge", "search", "provenance", "portable", "discovery", "research"]
+knowledge = ["dep:graphforge-knowledge", "provenance"]
+search = ["dep:graphforge-search"]
+provenance = ["dep:graphforge-provenance"]
+portable = ["dep:graphforge-portable-oci"]
+discovery = ["dep:graphforge-discovery"]
+research = ["knowledge", "portable"]
+
 [dependencies]
-graphforge-discovery = { version = "0.5.2", path = "../graphforge-discovery" }
-graphforge-portable-oci = { version = "0.5.2", path = "../graphforge-portable-oci" }
+graphforge-discovery = { version = "0.5.2", path = "../graphforge-discovery", optional = true }
+graphforge-portable-oci = { version = "0.5.2", path = "../graphforge-portable-oci", optional = true }
 graphforge-value = { version = "0.5.2", path = "../graphforge-value" }
 graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
 graphforge-ir = { version = "0.5.2", path = "../graphforge-ir" }
 graphforge-ontology = { version = "0.5.2", path = "../graphforge-ontology" }
-graphforge-provenance = { version = "0.5.2", path = "../graphforge-provenance" }
-graphforge-knowledge = { version = "0.5.2", path = "../graphforge-knowledge" }
+graphforge-provenance = { version = "0.5.2", path = "../graphforge-provenance", optional = true }
+graphforge-knowledge = { version = "0.5.2", path = "../graphforge-knowledge", optional = true }
 graphforge-cypher = { version = "0.5.2", path = "../graphforge-cypher" }
 graphforge-rel = { version = "0.5.2", path = "../graphforge-rel" }
 graphforge-storage = { version = "0.5.2", path = "../graphforge-storage" }
 graphforge-exec = { version = "0.5.2", path = "../graphforge-exec" }
 graphforge-io = { version = "0.5.2", path = "../graphforge-io" }
 graphforge-observability = { version = "0.5.2", path = "../graphforge-observability" }
-graphforge-search = { version = "0.5.2", path = "../graphforge-search" }
+graphforge-search = { version = "0.5.2", path = "../graphforge-search", optional = true }
 graphforge-filesystem = { version = "0.5.2", path = "../graphforge-filesystem" }
 arrow = { workspace = true }
 bytes = "1"
@@ -46,6 +57,155 @@ cucumber = { workspace = true }
 tokio = { workspace = true }
 graphforge-cypher = { path = "../graphforge-cypher" }
 graphforge-storage = { path = "../graphforge-storage", features = ["test-failpoints", "test-support"] }
+
+[[bin]]
+name = "graphforge-fly-filesystem-smoke"
+path = "src/bin/graphforge-fly-filesystem-smoke.rs"
+required-features = ["portable"]
+
+[[example]]
+name = "release_load_probe"
+required-features = ["search"]
+
+[[example]]
+name = "atomic_recovery_workflow"
+required-features = ["knowledge", "provenance", "search"]
+
+[[example]]
+name = "cyber_intrusion_workflow"
+required-features = ["knowledge", "provenance", "search", "research"]
+
+[[example]]
+name = "correction_churn_workflow"
+required-features = ["knowledge", "provenance", "research"]
+
+[[example]]
+name = "probate_genealogy_workflow"
+required-features = ["knowledge", "provenance", "portable", "research"]
+
+[[example]]
+name = "derived_state_freshness_workflow"
+required-features = ["knowledge", "provenance", "search"]
+
+[[example]]
+name = "sna_intelligence_workflow"
+required-features = ["knowledge", "provenance", "search"]
+
+[[example]]
+name = "finance_fraud_workflow"
+required-features = ["knowledge", "provenance", "search"]
+
+[[example]]
+name = "ontology_emergence_strict_handoff"
+required-features = ["knowledge", "provenance", "search", "research"]
+
+[[example]]
+name = "knowledge_evolution_workflow"
+required-features = ["knowledge", "provenance", "search", "research"]
+
+[[test]]
+name = "discovery_portable_v2"
+required-features = ["discovery", "portable"]
+
+[[test]]
+name = "algorithm_public_surface"
+required-features = ["knowledge", "provenance", "search"]
+
+[[test]]
+name = "fixed_hop_limit"
+required-features = ["knowledge", "provenance", "portable"]
+
+[[test]]
+name = "branch_projection_provenance"
+required-features = ["research", "search", "portable"]
+
+[[test]]
+name = "research_comparison"
+required-features = ["research"]
+
+[[test]]
+name = "knowledge_isolation"
+required-features = ["knowledge", "provenance"]
+
+[[test]]
+name = "multi_ontology_certification"
+required-features = ["research"]
+
+[[test]]
+name = "public_lifecycle_conformance"
+required-features = ["knowledge", "provenance", "portable", "search", "research"]
+
+[[test]]
+name = "research_journey"
+required-features = ["research", "portable", "search"]
+
+[[test]]
+name = "provider_public_surface"
+required-features = ["search"]
+
+[[test]]
+name = "branch_faults"
+required-features = ["research", "provenance"]
+
+[[test]]
+name = "decision_results"
+required-features = ["knowledge", "provenance", "research"]
+
+[[test]]
+name = "slices"
+required-features = ["research"]
+
+[[test]]
+name = "research_claims"
+required-features = ["research"]
+
+[[test]]
+name = "research_project"
+required-features = ["research"]
+
+[[test]]
+name = "file_backed_graph_generation"
+required-features = ["portable", "knowledge", "provenance"]
+
+[[test]]
+name = "scale_g500_ladder"
+required-features = ["portable"]
+
+[[test]]
+name = "permanent_storage_budgets"
+required-features = ["knowledge", "provenance", "portable"]
+
+[[test]]
+name = "research_versions"
+required-features = ["research"]
+
+[[test]]
+name = "branches"
+required-features = ["research"]
+
+[[test]]
+name = "belief_subject_contract"
+required-features = ["knowledge", "provenance"]
+
+[[test]]
+name = "provider_session"
+required-features = ["search"]
+
+[[test]]
+name = "public_facade_remaining_conformance"
+required-features = ["knowledge", "provenance", "portable", "search", "research"]
+
+[[test]]
+name = "source_artifact_lifecycle"
+required-features = ["research"]
+
+[[test]]
+name = "search_public_surface"
+required-features = ["search"]
+
+[[test]]
+name = "source_artifact_write"
+required-features = ["research", "search"]
 
 # BDD runner for the public-API + TCK feature files (tests/features/).
 # A custom-harness target (cucumber drives its own main).

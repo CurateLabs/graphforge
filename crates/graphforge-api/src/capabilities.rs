@@ -8,6 +8,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_exec::{ExecutionResult, ExecutionStats};
+#[cfg(feature = "knowledge")]
 use graphforge_knowledge::EPISTEMIC_CAPABILITY_VERSION;
 use graphforge_storage::{
     ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
@@ -167,6 +168,7 @@ impl GraphForge {
         let root = self.resolved_generation.container_root();
         let parent = graphforge_storage::resolve_project_generation(root)?;
         parent.validate_complete_participant_inventory()?;
+        #[cfg(feature = "knowledge")]
         if request.capability_id == CapabilityId::ValidTime {
             parent.require_capability("epistemic", EPISTEMIC_CAPABILITY_VERSION)?;
         }
@@ -258,13 +260,16 @@ impl GraphForge {
 }
 
 fn supported_capability(capability_id: &str, version: u32) -> bool {
-    matches!(
-        (capability_id, version),
-        (
-            "graph" | "workspace" | "provenance" | "knowledge" | "valid_time",
-            1
-        ) | ("epistemic", EPISTEMIC_CAPABILITY_VERSION)
-    )
+    match (capability_id, version) {
+        ("graph" | "workspace", 1) => true,
+        #[cfg(feature = "provenance")]
+        ("provenance", 1) => true,
+        #[cfg(feature = "knowledge")]
+        ("knowledge" | "valid_time", 1) => true,
+        #[cfg(feature = "knowledge")]
+        ("epistemic", EPISTEMIC_CAPABILITY_VERSION) => true,
+        _ => false,
+    }
 }
 
 fn unsupported_capability(capability_id: &str, version: u32) -> GfError {
@@ -279,9 +284,13 @@ fn initial_capability_participants(
     version: u32,
 ) -> Result<Vec<ProjectParticipant>, GfError> {
     match (capability_id, version) {
+        #[cfg(feature = "provenance")]
         (CapabilityId::Provenance, 1) => crate::provenance::empty_participants(),
+        #[cfg(feature = "knowledge")]
         (CapabilityId::Knowledge, 1) => crate::knowledge::empty_participants(),
+        #[cfg(feature = "knowledge")]
         (CapabilityId::Epistemic, 1) => crate::knowledge::empty_epistemic_participants(),
+        #[cfg(feature = "knowledge")]
         (CapabilityId::ValidTime, 1) => crate::valid_time::empty_participants(),
         _ => Ok(Vec::new()),
     }
@@ -392,6 +401,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "knowledge")]
     #[test]
     fn capability_enable_is_atomic_and_idempotent() {
         let graph = GraphForge::new(None).unwrap();
@@ -434,6 +444,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "knowledge")]
     #[test]
     fn enabled_capability_is_selected_after_persistent_reopen() {
         let root = tempfile::tempdir().unwrap();
@@ -465,6 +476,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "knowledge")]
     #[test]
     fn operation_uuid_reuse_with_changed_context_conflicts() {
         let graph = GraphForge::new(None).unwrap();
@@ -494,6 +506,7 @@ mod tests {
         assert_eq!(error.code(), "GF_IDEMPOTENCY_CONFLICT");
     }
 
+    #[cfg(feature = "knowledge")]
     #[test]
     fn capability_transition_never_drops_untracked_graph_files() {
         let root = tempfile::tempdir().unwrap();
@@ -590,6 +603,7 @@ mod tests {
         assert_eq!(support.value(2), "supported");
     }
 
+    #[cfg(feature = "knowledge")]
     #[test]
     fn epistemic_v1_is_supported_but_future_versions_are_rejected() {
         let graph = GraphForge::new(None).unwrap();

@@ -2,6 +2,13 @@ name: Epistemic Contract Gate
 
 on:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      require_closure_report:
+        description: Build the SHA-bound evidence report when explicitly requested by a caller.
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -76,7 +83,7 @@ jobs:
 
   report:
     name: SHA-bound closure report
-    if: always()
+    if: always() && (github.event_name == 'workflow_dispatch' || inputs.require_closure_report)
     needs: [rust, python, node]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:

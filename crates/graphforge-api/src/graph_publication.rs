@@ -1,6 +1,6 @@
 //! Graph mutation publication, reconciliation, and in-memory reset.
 
-use super::{CompositionBindingContext, GfError, GraphForge, RuntimeCatalog, provenance};
+use super::{CompositionBindingContext, GfError, GraphForge, RuntimeCatalog};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -462,7 +462,8 @@ fn graph_publication_participants(
         }
     }
     if provenance_enabled {
-        participants.extend(provenance::merged_participants(
+        #[cfg(feature = "provenance")]
+        participants.extend(super::provenance::merged_participants(
             parent,
             receipt,
             operation_uuid,

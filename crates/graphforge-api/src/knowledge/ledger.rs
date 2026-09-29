@@ -11,6 +11,10 @@ use super::{
     Schema, SchemaRef, Sha256, SubjectKind, Uuid, fs, knowledge_error, provenance_error,
     schema_registry,
 };
+#[cfg(feature = "research")]
+use crate::research_claims::ledger::{encode_claims, encode_suppressions};
+#[cfg(feature = "research")]
+use graphforge_knowledge::research::{ResearchClaimLedger, ResearchSuppressionLedger};
 use graphforge_knowledge::{
     ArtifactDerivationLedger, ArtifactLedger, ArtifactPreferenceLedger, DerivationSubjectKind,
     RetentionDependencyLedger, SourceLedger,
@@ -43,12 +47,11 @@ pub(crate) fn empty_epistemic_participants() -> Result<Vec<ProjectParticipant>, 
     )?);
     participants.extend(crate::hypotheses::empty_participants()?);
     participants.extend(crate::belief_projection::empty_participants()?);
-    participants.extend(crate::research_claims::ledger::encode_claims(
-        &graphforge_knowledge::research::ResearchClaimLedger::default(),
-    )?);
-    participants.extend(crate::research_claims::ledger::encode_suppressions(
-        &graphforge_knowledge::research::ResearchSuppressionLedger::default(),
-    )?);
+    #[cfg(feature = "research")]
+    {
+        participants.extend(encode_claims(&ResearchClaimLedger::default())?);
+        participants.extend(encode_suppressions(&ResearchSuppressionLedger::default())?);
+    }
     Ok(participants)
 }
 

@@ -1,4 +1,4 @@
-use super::super::tests::community_ids;
+use super::super::community_ids;
 use super::super::*;
 use super::*;
 

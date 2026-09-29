@@ -1359,7 +1359,7 @@ fn storage_error(error: impl std::fmt::Display) -> GfError {
     GfError::Execution(error.to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "algorithms-extended"))]
 mod tests {
     use std::collections::HashMap;
 

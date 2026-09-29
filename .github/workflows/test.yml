@@ -32,6 +32,9 @@ jobs:
       pulumi: ${{ steps.filter.outputs.pulumi }}
       terraform: ${{ steps.filter.outputs.terraform }}
       bazel: ${{ steps.filter.outputs.bazel }}
+      epistemic_contract: ${{ steps.filter.outputs.epistemic_contract }}
+      knowledge_contract: ${{ steps.filter.outputs.knowledge_contract }}
+      non_cypher_surface: ${{ steps.filter.outputs.non_cypher_surface }}
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,6 +54,43 @@ jobs:
           scripts/ci/classify-changes.sh \
             "$BASE" \
             "${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+  epistemic-contract-gate:
+    name: Epistemic Contract Gate
+    needs: changes
+    if: needs.changes.outputs.epistemic_contract == 'true'
+    uses: ./.github/workflows/epistemic-contract-gate.yml
+
+  knowledge-contract-gate:
+    name: Knowledge Contract Gate
+    needs: changes
+    if: needs.changes.outputs.knowledge_contract == 'true'
+    uses: ./.github/workflows/knowledge-contract-gate.yml
+
+  non-cypher-surface-gate:
+    name: Rust Non-Cypher Surface Gate
+    needs: changes
+    if: needs.changes.outputs.non_cypher_surface == 'true'
+    uses: ./.github/workflows/non-cypher-surface-gate.yml
+
+  api-feature-boundary:
+    name: API and Executor Feature Boundary
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: changes
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
+        with:
+          toolchain: "1.96.0"
+      - name: Build and test the lean API and core executor
+        run: |
+          cargo build --locked -p graphforge-api --no-default-features
+          cargo test --locked -p graphforge-api --no-default-features
+          cargo build --locked -p graphforge-exec --no-default-features --features algorithms-core
+          cargo test --locked -p graphforge-exec --no-default-features --features algorithms-core
 
   policy:
     name: Repository Policy
@@ -1608,6 +1648,10 @@ jobs:
       - macos-graphforge-storage-durability
       - native-durability-aggregate
       - bazel-bootstrap
+      - epistemic-contract-gate
+      - knowledge-contract-gate
+      - non-cypher-surface-gate
+      - api-feature-boundary
     steps:
       - name: Checkout gate implementation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1629,3 +1673,7 @@ jobs:
           "${{ needs.macos-graphforge-storage-durability.result }}"
           "${{ needs.native-durability-aggregate.result }}"
           "${{ needs.bazel-bootstrap.result }}"
+          "${{ needs.epistemic-contract-gate.result }}"
+          "${{ needs.knowledge-contract-gate.result }}"
+          "${{ needs.non-cypher-surface-gate.result }}"
+          "${{ needs.api-feature-boundary.result }}"

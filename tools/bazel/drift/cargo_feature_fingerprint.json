@@ -1,11 +1,19 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "582bf4132835c94c0b5dfc1e581096727bed9cdd360b678065564b9c0de6dca3",
+  "sha256": "96c3e2a501d5e7aa4feff323d328b690b5ae830da1bcaaa2154ace45a5f4417b",
   "entries": [
     {
       "name": "graphforge-api",
       "version": "0.5.2",
-      "features": [],
+      "features": [
+        "default",
+        "discovery",
+        "knowledge",
+        "portable",
+        "provenance",
+        "research",
+        "search"
+      ],
       "dependencies": [
         {
           "name": "arrow",
@@ -106,7 +114,7 @@
           "name": "graphforge-discovery",
           "req": "^0.5.2",
           "features": [],
-          "optional": false,
+          "optional": true,
           "uses_default_features": true,
           "kind": null,
           "target": null
@@ -151,7 +159,7 @@
           "name": "graphforge-knowledge",
           "req": "^0.5.2",
           "features": [],
-          "optional": false,
+          "optional": true,
           "uses_default_features": true,
           "kind": null,
           "target": null
@@ -178,7 +186,7 @@
           "name": "graphforge-portable-oci",
           "req": "^0.5.2",
           "features": [],
-          "optional": false,
+          "optional": true,
           "uses_default_features": true,
           "kind": null,
           "target": null
@@ -187,7 +195,7 @@
           "name": "graphforge-provenance",
           "req": "^0.5.2",
           "features": [],
-          "optional": false,
+          "optional": true,
           "uses_default_features": true,
           "kind": null,
           "target": null
@@ -205,7 +213,7 @@
           "name": "graphforge-search",
           "req": "^0.5.2",
           "features": [],
-          "optional": false,
+          "optional": true,
           "uses_default_features": true,
           "kind": null,
           "target": null
@@ -406,9 +414,16 @@
         {
           "name": "graphforge-api",
           "req": "^0.5.2",
-          "features": [],
+          "features": [
+            "discovery",
+            "knowledge",
+            "portable",
+            "provenance",
+            "research",
+            "search"
+          ],
           "optional": false,
-          "uses_default_features": true,
+          "uses_default_features": false,
           "kind": null,
           "target": null
         },
@@ -518,9 +533,16 @@
         {
           "name": "graphforge-api",
           "req": "^0.5.2",
-          "features": [],
+          "features": [
+            "discovery",
+            "knowledge",
+            "portable",
+            "provenance",
+            "research",
+            "search"
+          ],
           "optional": false,
-          "uses_default_features": true,
+          "uses_default_features": false,
           "kind": null,
           "target": null
         },
@@ -619,9 +641,16 @@
         {
           "name": "graphforge-api",
           "req": "^0.5.2",
-          "features": [],
+          "features": [
+            "discovery",
+            "knowledge",
+            "portable",
+            "provenance",
+            "research",
+            "search"
+          ],
           "optional": false,
-          "uses_default_features": true,
+          "uses_default_features": false,
           "kind": null,
           "target": null
         },
@@ -924,6 +953,9 @@
       "name": "graphforge-exec",
       "version": "0.5.2",
       "features": [
+        "algorithms-core",
+        "algorithms-extended",
+        "default",
         "differential-testing"
       ],
       "dependencies": [

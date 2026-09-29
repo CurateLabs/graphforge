@@ -106,6 +106,7 @@ impl CheckpointView {
         self.graph.similar(label, options)
     }
     /// Run pinned search.
+    #[cfg(feature = "search")]
     pub fn find(&self, options: crate::FindOptions) -> Result<RecordBatch, GfError> {
         self.graph.find(options)
     }
@@ -121,6 +122,7 @@ impl CheckpointView {
         self.graph.embedding_space(display_name)
     }
     /// Inspect pinned embedding freshness.
+    #[cfg(feature = "search")]
     pub fn inspect_embedding_space_freshness(
         &self,
         display_name: Option<&str>,
@@ -130,6 +132,7 @@ impl CheckpointView {
             .inspect_embedding_space_freshness(display_name, force_stale)
     }
     /// Inspect pinned embedding refresh state.
+    #[cfg(feature = "search")]
     pub fn inspect_embedding_refresh(
         &self,
         display_name: Option<&str>,
@@ -360,6 +363,7 @@ impl CheckpointView {
         read_only()
     }
     /// Reject search-index publication before project access.
+    #[cfg(feature = "search")]
     pub fn index_search(
         &self,
         _: &str,

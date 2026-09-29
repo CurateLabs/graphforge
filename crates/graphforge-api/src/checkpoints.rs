@@ -303,14 +303,19 @@ impl GraphForge {
                 reopened.resolved_generation.generation_uuid(),
             );
         let procedures = Arc::clone(&self.procedures);
+        #[cfg(feature = "search")]
         let provider_refresh_runtimes = Arc::clone(&self.provider_refresh_runtimes);
+        #[cfg(feature = "search")]
         let provider_find_runtimes = Arc::clone(&self.provider_find_runtimes);
         reopened.path.clone_from(&self.path);
         reopened.tempdir.clone_from(&self.tempdir);
         reopened.clock = std::sync::Mutex::new(clock);
         reopened.procedures = procedures;
-        reopened.provider_refresh_runtimes = provider_refresh_runtimes;
-        reopened.provider_find_runtimes = provider_find_runtimes;
+        #[cfg(feature = "search")]
+        {
+            reopened.provider_refresh_runtimes = provider_refresh_runtimes;
+            reopened.provider_find_runtimes = provider_find_runtimes;
+        }
         *self = reopened;
         Ok(result)
     }

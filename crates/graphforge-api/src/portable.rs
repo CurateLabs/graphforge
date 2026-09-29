@@ -263,12 +263,18 @@ pub fn verify_portable_v2(
         cancelled,
     )?;
     if report.research_interchange {
+        #[cfg(feature = "research")]
         return graphforge_storage::validate_research_package(
             &request.input,
             request.limits,
             cancelled,
             &mut crate::research_interchange::validation::validate,
         );
+        #[cfg(not(feature = "research"))]
+        return Err(graphforge_core::portable::PortableV2Error::new(
+            graphforge_core::portable::PortableV2ErrorCode::Incompatible,
+            "research package validation requires the `research` feature",
+        ));
     }
     Ok(report)
 }
@@ -568,6 +574,17 @@ impl GraphForge {
     ) -> Result<PortableV2ImportResult, graphforge_core::portable::PortableV2Error> {
         let generation_uuid =
             graphforge_core::uuid::portable_v2_import_generation(&request.operation_id.0);
+        #[cfg(feature = "research")]
+        let mut validator = crate::research_interchange::validation::validate;
+        #[cfg(not(feature = "research"))]
+        let mut validator =
+            |_: &graphforge_storage::ResolvedProjectGeneration,
+             _: &graphforge_storage::research_versions::ResearchVersionRecord,
+             _: &graphforge_storage::research_versions::ResearchRegistry| {
+                Err(GfError::NotImplemented(
+                    "research package validation requires the `research` feature",
+                ))
+            };
         let receipt = graphforge_storage::import_complete_portable_v2_with_native_validation(
             &request.input,
             project_root,
@@ -578,7 +595,7 @@ impl GraphForge {
             cancelled,
             |_| {},
             allocation,
-            &mut crate::research_interchange::validation::validate,
+            &mut validator,
         )?;
         let committed = graphforge_core::portable::PortableV2CommittedImport {
             operation_uuid: receipt.publication.transaction_uuid,

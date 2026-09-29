@@ -293,8 +293,11 @@ impl GraphForge {
         prepared.clock =
             std::sync::Mutex::new(Arc::clone(&self.clock.lock().expect("clock lock poisoned")));
         prepared.procedures = Arc::clone(&self.procedures);
-        prepared.provider_refresh_runtimes = Arc::clone(&self.provider_refresh_runtimes);
-        prepared.provider_find_runtimes = Arc::clone(&self.provider_find_runtimes);
+        #[cfg(feature = "search")]
+        {
+            prepared.provider_refresh_runtimes = Arc::clone(&self.provider_refresh_runtimes);
+            prepared.provider_find_runtimes = Arc::clone(&self.provider_find_runtimes);
+        }
         *prepared
             .current_generation_uuid
             .lock()
