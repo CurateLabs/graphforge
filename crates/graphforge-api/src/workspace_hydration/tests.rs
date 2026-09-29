@@ -1,6 +1,8 @@
 use super::*;
 use arrow::array::Int64Array;
 
+mod placement;
+
 fn publish_compact_graph_workspace(project: &Path, workspace: &Path) {
     use graphforge_core::canonical::{CANONICAL_CONTRACT_VERSION, CanonicalDomain, fingerprint};
     use graphforge_storage::{
@@ -211,13 +213,17 @@ fn compact_graph_root_reopens_through_ordinary_api_and_rematerializes() {
 
 #[test]
 fn compact_graph_root_replays_authoritative_deltas_into_distinct_workspace() {
+    let project = tempfile::tempdir().unwrap();
+    exercise_compact_replay(project.path());
+}
+
+fn exercise_compact_replay(project: &Path) {
     use graphforge_storage::{
         GraphDeltaJournalLimits, GraphDeltaOp, GraphDeltaOpKind, GraphDeltaPayload,
         GraphDeltaPublishRequest,
     };
 
-    let project = tempfile::tempdir().unwrap();
-    let graph = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    let graph = GraphForge::new(Some(project.to_str().unwrap())).unwrap();
     graph.execute("CREATE (:Person {name: 'Ada'})").unwrap();
     let created = graph
         .execute("CREATE (n:Person) RETURN n.node_uuid")
@@ -230,7 +236,7 @@ fn compact_graph_root_replays_authoritative_deltas_into_distinct_workspace() {
     let node_uuid = uuid::Uuid::from_slice(ids.value(0)).unwrap().to_string();
     drop(graph);
     graphforge_storage::publish_graph_delta(
-        project.path(),
+        project,
         &GraphDeltaPublishRequest {
             transaction_uuid: uuid::Uuid::new_v4(),
             generation_uuid: uuid::Uuid::new_v4(),
@@ -252,12 +258,12 @@ fn compact_graph_root_replays_authoritative_deltas_into_distinct_workspace() {
         },
     )
     .unwrap();
-    let delta_generation = graphforge_storage::resolve_project_generation(project.path()).unwrap();
+    let delta_generation = graphforge_storage::resolve_project_generation(project).unwrap();
     assert!(delta_generation.graph_tree_root().join("deltas").is_dir());
-    publish_compact_graph_workspace(project.path(), &delta_generation.graph_tree_root());
+    publish_compact_graph_workspace(project, &delta_generation.graph_tree_root());
     drop(delta_generation);
 
-    let reopened = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    let reopened = GraphForge::new(Some(project.to_str().unwrap())).unwrap();
     let result = reopened
         .execute("MATCH (n) RETURN count(n) AS total")
         .unwrap();

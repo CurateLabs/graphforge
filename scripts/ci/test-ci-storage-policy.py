@@ -643,7 +643,11 @@ def validate_ci_gate_cutover(text: str) -> None:
     authoritative = [
         job_id
         for job_id, body in jobs.items()
-        if job_run_contains(body, "bazelisk test --config=ci --config=correctness //:ci_rust_tests")
+        if job_run_contains(
+            body,
+            "python3 scripts/test_environment.py -- "
+            "bazelisk test --config=ci --config=correctness //:ci_rust_tests",
+        )
     ]
     assert len(authoritative) == 1, (
         "exactly one Test Suite job must run authoritative bazelisk test //:ci_rust_tests"
@@ -719,7 +723,10 @@ def main() -> None:
         "-Cdebug-assertions=yes,-Coverflow-checks=yes"
     ) in bazel_config, "optimized correctness tests must retain Rust runtime checks"
     makefile = (ROOT / "Makefile").read_text()
-    assert "\tbazelisk test --config=correctness //:ci_rust_tests\n" in makefile
+    assert (
+        "\tpython3 scripts/test_environment.py -- "
+        "bazelisk test --config=correctness //:ci_rust_tests\n" in makefile
+    )
     jobs = workflow_jobs(test_suite)
     for job_id, runner in (
         ("windows-graphforge-storage-locks", "blacksmith-4vcpu-windows-2025"),

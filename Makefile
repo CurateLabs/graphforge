@@ -62,13 +62,13 @@ docstring-coverage:  ## Check docstring coverage (90% minimum)
 	uv run interrogate crates/graphforge-bindings-py/python/graphforge --fail-under 90 --quiet
 
 test:  ## Run all tests in parallel (excludes snap/network downloads)
-	uv run pytest tests/ -n $${PYTEST_WORKERS:-4} -m "not snap"
+	python3 scripts/test_environment.py -- uv run pytest tests/ -n $${PYTEST_WORKERS:-4} -m "not snap"
 
 test-unit:  ## Run unit tests in parallel
-	uv run pytest tests/unit -n $${PYTEST_WORKERS:-4}
+	python3 scripts/test_environment.py -- uv run pytest tests/unit -n $${PYTEST_WORKERS:-4}
 
 test-tck:  ## Run TCK compliance tests via Rust BDD runner
-	cargo test -p graphforge-api --test bdd
+	python3 scripts/test_environment.py -- cargo test -p graphforge-api --test bdd
 
 # Multi-surface coverage thresholds (#742 §2). Override per surface as needed.
 COVERAGE_FAIL_UNDER_RUST ?= 80
@@ -203,12 +203,13 @@ check-patch-coverage:  ## Validate patch coverage for changed files (90% thresho
 
 bazel-test:  ## Run authoritative Bazel Rust suite (//:ci_rust_tests); see docs/development/bazel.md
 	@command -v bazelisk >/dev/null || (echo "bazelisk is required on PATH; see docs/development/bazel.md"; exit 1)
-	bazelisk test --config=correctness //:ci_rust_tests
+	python3 scripts/test_environment.py -- bazelisk test --config=correctness //:ci_rust_tests
 
 pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstrings (no coverage, ~30s)
 	@echo "━━━ Committed Python lock ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@uv lock --check
 	@python3 scripts/ci/test-python-lock-policy.py
+	@python3 scripts/ci/test-test-environment.py
 	@echo "━━━ Bazelisk preflight + Cargo/Bazel drift ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@command -v bazelisk >/dev/null || (echo "bazelisk is required on PATH; see docs/development/bazel.md"; exit 1)
 	@python3 scripts/ci/cargo-bazel-drift-check.py
@@ -251,13 +252,13 @@ pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstr
 	@echo "✅ Fast checks passed! Run 'make pre-push' to include coverage."
 
 pre-push:  ## Run prerequisite-aware, resumable full local validation
-	@python3 scripts/pre_push_validation.py run
+	@python3 scripts/test_environment.py -- python3 scripts/pre_push_validation.py run
 
 pre-push-clean:  ## Discard local validation evidence and force a full revalidation
-	@python3 scripts/pre_push_validation.py run --force-clean
+	@python3 scripts/test_environment.py -- python3 scripts/pre_push_validation.py run --force-clean
 
 pre-push-preflight:  ## Check local pre-push prerequisites and disk before compilation
-	@python3 scripts/pre_push_validation.py preflight
+	@python3 scripts/test_environment.py -- python3 scripts/pre_push_validation.py preflight
 
 clean:  ## Clean up cache files
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
@@ -284,7 +285,7 @@ cargo-build:  ## Build all Rust workspace crates
 	cargo build --workspace
 
 cargo-test:  ## Run all Rust workspace tests
-	cargo test --workspace
+	python3 scripts/test_environment.py -- cargo test --workspace
 
 # Rust llvm-cov workspace coverage. Requires:
 #   cargo install cargo-llvm-cov

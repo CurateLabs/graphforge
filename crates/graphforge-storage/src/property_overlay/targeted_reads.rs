@@ -6,7 +6,7 @@ use super::{
     PROPERTY_TOMBSTONE_FIELD, PropertyOverlayLimits, PropertyOverlayMetrics, PropertyRouteKind,
     PropertySnapshotRow, ReadCounts, RecordBatch, TargetReadAdmission, Uuid, admit_target_footer,
     admitted_batch_rows, authenticated_arrow_error, charge_target_batch, corrupt,
-    decode_snapshot_batch, io_error, open_counted_retained_property_builder, parquet_error,
+    decode_snapshot_batch, open_counted_retained_property_builder, parquet_error,
     parquet_resource_admission, replay_decoder_limit, snapshot_charge, validate_fragment_schema,
     validate_parquet_resource_admission,
 };
@@ -222,17 +222,7 @@ pub(super) fn read_property_targets(
             metrics,
         });
     };
-    let root_path = inventory
-        .root_path
-        .as_deref()
-        .ok_or_else(|| corrupt("property inventory lacks its retained root path"))?;
-    let scratch_parent = root_path
-        .parent()
-        .ok_or_else(|| corrupt("property inventory root lacks a project-volume parent"))?;
-    let targeted_scratch = tempfile::Builder::new()
-        .prefix(".gf-property-targeted-")
-        .tempdir_in(scratch_parent)
-        .map_err(io_error)?;
+    let targeted_scratch = inventory.create_snapshot_scratch()?;
     for fragment in fragments.iter().rev() {
         let counts = Arc::new(ReadCounts::default());
         let opened = inventory.open_fragment(fragment, targeted_scratch.path())?;

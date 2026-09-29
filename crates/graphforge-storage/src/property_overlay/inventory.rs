@@ -172,6 +172,21 @@ impl AuthenticatedPropertyInventory {
         })
     }
 
+    // Authenticated snapshots require the source volume. Keep their temporary
+    // files outside immutable generations and outside enumerated graph trees.
+    pub(crate) fn create_snapshot_scratch(&self) -> Result<tempfile::TempDir, GfError> {
+        let parent = self
+            .generation_lease
+            .as_ref()
+            .map(crate::ResolvedProjectGeneration::container_root)
+            .or_else(|| self.root_path.as_deref().and_then(Path::parent))
+            .ok_or_else(|| corrupt("property inventory lacks a project-volume scratch parent"))?;
+        tempfile::Builder::new()
+            .prefix(".gf-property-scratch-")
+            .tempdir_in(parent)
+            .map_err(io_error)
+    }
+
     /// Narrow an already authenticated inventory to transaction-owned property
     /// fragments while retaining the complete graph and semantic-route admission.
     pub(crate) fn retain_property_fragment_paths(

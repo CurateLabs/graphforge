@@ -353,10 +353,16 @@ pub(super) fn adjacency_provider_for_graph(
     Ok(provider.with_rebuild_root(artifacts))
 }
 
-fn create_graph_workspace() -> Result<Arc<tempfile::TempDir>, GfError> {
+// Hydration hard-links immutable payloads. Its private mutable tree must live
+// on the project volume, never in ambient TMPDIR or an immutable generation.
+// The last retained owner removes this directory; opening another facade must
+// not sweep workspaces that may still belong to active readers.
+fn create_graph_workspace(
+    generation: &ResolvedProjectGeneration,
+) -> Result<Arc<tempfile::TempDir>, GfError> {
     tempfile::Builder::new()
         .prefix("graphforge-graph-workspace-")
-        .tempdir()
+        .tempdir_in(generation.container_root())
         .map(Arc::new)
         .map_err(|error| GfError::Storage(format!("failed to create graph workspace: {error}")))
 }
@@ -404,16 +410,7 @@ pub(super) fn hydrate_graph_workspace(
         )?
         .is_empty();
         if has_authoritative_deltas {
-            let workspace = Arc::new(
-                tempfile::Builder::new()
-                    .prefix("graphforge-graph-replay-")
-                    .tempdir()
-                    .map_err(|error| {
-                        GfError::Storage(format!(
-                            "failed to create graph replay workspace: {error}"
-                        ))
-                    })?,
-            );
+            let workspace = create_graph_workspace(generation)?;
             let (evidence, _replay) = graphforge_storage::materialize_replayed_graph_tree(
                 &tree,
                 &inventory,
@@ -437,13 +434,13 @@ pub(super) fn hydrate_graph_workspace(
                 graphforge_storage::pinned_open_evidence(&inventory),
             ));
         }
-        let workspace = create_graph_workspace()?;
+        let workspace = create_graph_workspace(generation)?;
         let evidence =
             graphforge_storage::materialize_graph_tree(&tree, &inventory, workspace.path())?;
         return Ok((workspace.path().to_path_buf(), workspace, evidence));
     }
 
-    let workspace = create_graph_workspace()?;
+    let workspace = create_graph_workspace(generation)?;
     let mut evidence = graphforge_storage::GraphFilesOpenEvidence {
         strategy: graphforge_storage::GraphFilesOpenStrategy::Empty,
         ..graphforge_storage::GraphFilesOpenEvidence::default()
@@ -496,14 +493,7 @@ fn hydrate_compact_graph_workspace(
     ),
     GfError,
 > {
-    let workspace = Arc::new(
-        tempfile::Builder::new()
-            .prefix("graphforge-graph-workspace-")
-            .tempdir()
-            .map_err(|error| {
-                GfError::Storage(format!("failed to create graph workspace: {error}"))
-            })?,
-    );
+    let workspace = create_graph_workspace(generation)?;
     let evidence = materialize_compact_graph_target(generation, inventory, workspace.path())?;
     Ok((workspace.path().to_path_buf(), workspace, evidence))
 }
@@ -525,14 +515,7 @@ fn materialize_compact_graph_target(
             target,
         );
     }
-    let source = tempfile::Builder::new()
-        .prefix("graphforge-graph-cas-source-")
-        .tempdir()
-        .map_err(|error| {
-            GfError::Storage(format!(
-                "failed to create graph CAS source workspace: {error}"
-            ))
-        })?;
+    let source = create_graph_workspace(generation)?;
     let reused = graphforge_storage::materialize_graph_objects(
         generation.container_root(),
         inventory,
