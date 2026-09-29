@@ -4,8 +4,9 @@ run-name: "Build lane ${{ inputs.runner }}/${{ inputs.cache }} ${{ inputs.ref }}
 # Issue #1618 measurement harness: times the Cargo compile+test lane on the
 # same runner class as the Bazel CI lane (blacksmith-4vcpu-ubuntu-2404).
 # `cargo-test` runs `cargo test --workspace --locked`, which executes test
-# binaries one after another; `nextest` runs every test binary concurrently
-# (`cargo nextest run`) plus the doctests `cargo nextest` does not execute. Manual dispatch only; it is not a
+# binaries one after another; `nextest` runs test binaries concurrently
+# (`cargo nextest run`), then the two custom-harness targets and the
+# doctests, which nextest cannot execute, under `cargo test`. Manual dispatch only; it is not a
 # gate and runs on no event other than workflow_dispatch.
 
 on:
@@ -148,7 +149,15 @@ jobs:
           start=$(date +%s)
           rc=0
           if [[ "${MEASURE_RUNNER}" == "nextest" ]]; then
-            cargo nextest run --workspace --locked --no-fail-fast 2>&1 | tee dist/cargo-lane-test.log || rc=$?
+            # Custom-harness targets (cucumber BDD, allocation probe) cannot
+            # answer nextest's --list protocol; they run under cargo test.
+            custom='(package(graphforge-api) & binary(bdd)) | (package(graphforge-observability) & binary(disabled_allocations))'
+            cargo nextest run --workspace --locked --no-fail-fast -E "not ($custom)" 2>&1 | tee dist/cargo-lane-test.log || rc=$?
+            for target in graphforge-api:bdd graphforge-observability:disabled_allocations; do
+              target_rc=0
+              cargo test --locked -p "${target%%:*}" --test "${target##*:}" 2>&1 | tee -a dist/cargo-lane-test.log || target_rc=$?
+              if [[ "$rc" -eq 0 ]]; then rc=$target_rc; fi
+            done
             doc_start=$(date +%s)
             doc_rc=0
             cargo test --workspace --locked --doc 2>&1 | tee -a dist/cargo-lane-test.log || doc_rc=$?
