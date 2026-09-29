@@ -1,0 +1,216 @@
+name: Build Lane Measurement
+
+# Issue #1618 measurement harness: times the Cargo compile+test lane
+# (`cargo test --workspace --locked`) on the same runner class as the Bazel
+# CI lane (blacksmith-4vcpu-ubuntu-2404). Manual dispatch only; it is not a
+# gate and runs on no event other than workflow_dispatch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit SHA to measure"
+        required: true
+        type: string
+      cache:
+        description: "Cache state for this run"
+        required: true
+        type: choice
+        default: sticky
+        options:
+          - cold
+          - sticky
+          - sccache
+      sticky_key:
+        description: "Sticky disk key (suffix to parallelize independent lanes)"
+        required: false
+        type: string
+        default: "cargo-lane-target-v1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-lane-measurement-${{ github.event.inputs.sticky_key }}
+  cancel-in-progress: false
+
+jobs:
+  cargo-lane:
+    name: Cargo Lane (${{ inputs.cache }})
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      SCCACHE_DIR: /home/runner/.cache/sccache
+    steps:
+      - name: Checkout measured ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      # Warm mechanism 1: persistent target/ volume (the Blacksmith Cargo
+      # cache pattern this repository already uses for coverage).
+      - name: Mount sticky target/ disk
+        if: inputs.cache == 'sticky'
+        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
+        with:
+          key: ${{ github.repository }}-${{ inputs.sticky_key }}
+          path: target
+
+      # Warm mechanism 2: sccache compile cache on its own sticky volume.
+      - name: Mount sticky sccache disk
+        if: inputs.cache == 'sccache'
+        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
+        with:
+          key: ${{ github.repository }}-${{ inputs.sticky_key }}-sccache
+          path: /home/runner/.cache/sccache
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
+        with:
+          toolchain: "1.96.0"
+
+      - name: Install sccache
+        if: inputs.cache == 'sccache'
+        uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2.87.15
+        with:
+          tool: sccache@0.9.1
+
+      - name: Set sccache wrapper
+        if: inputs.cache == 'sccache'
+        shell: bash
+        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+
+      - name: Record pre-run cache state
+        id: prestate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          state="empty"
+          if [[ -d target/debug ]] && [[ -n "$(ls -A target/debug 2>/dev/null)" ]]; then
+            state="populated"
+          fi
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --start-server >/dev/null 2>&1 || true
+            sccache --zero-stats >/dev/null 2>&1 || true
+          fi
+
+      - name: Cargo fetch (timed)
+        id: fetch
+        shell: bash
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          cargo fetch --locked
+          end=$(date +%s)
+          echo "seconds=$((end - start))" >> "$GITHUB_OUTPUT"
+
+      - name: Cargo test --workspace (timed)
+        id: test
+        shell: bash
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          rc=0
+          cargo test --workspace --locked 2>&1 | tee dist/cargo-lane-test.log || rc=$?
+          end=$(date +%s)
+          echo "seconds=$((end - start))" >> "$GITHUB_OUTPUT"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+
+      - name: Collect evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sccache_stats="disabled"
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats > dist/sccache-stats.txt 2>&1 || true
+            sccache_stats="collected"
+          fi
+          python3 - <<'PY'
+          import json, os, pathlib, socket, subprocess, datetime
+
+          payload = {
+              "schema": "graphforge.build-lane-measurement.v1",
+              "measured_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "ref_input": os.environ["MEASURE_REF"],
+              "resolved_sha": subprocess.run(
+                  ["git", "rev-parse", "HEAD"], capture_output=True, text=True
+              ).stdout.strip(),
+              "cache_mode": os.environ["MEASURE_CACHE"],
+              "sticky_key": os.environ["MEASURE_STICKY_KEY"],
+              "target_cache_state_before": os.environ["MEASURE_PRESTATE"],
+              "cargo": subprocess.run(
+                  ["cargo", "--version"], capture_output=True, text=True
+              ).stdout.strip(),
+              "host": socket.gethostname(),
+              "vcpus": os.cpu_count(),
+              "fetch_seconds": int(os.environ["MEASURE_FETCH_S"] or 0),
+              "test_seconds": int(os.environ["MEASURE_TEST_S"] or 0),
+              "test_exit_code": int(os.environ.get("MEASURE_TEST_RC") or 0),
+              "sccache": sccache_stats,
+          }
+          dist = pathlib.Path("dist")
+          dist.mkdir(exist_ok=True)
+          (dist / "lane-evidence.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+          print(json.dumps(payload, indent=2))
+          PY
+        env:
+          MEASURE_REF: ${{ inputs.ref }}
+          MEASURE_CACHE: ${{ inputs.cache }}
+          MEASURE_STICKY_KEY: ${{ inputs.sticky_key }}
+          MEASURE_PRESTATE: ${{ steps.prestate.outputs.state }}
+          MEASURE_FETCH_S: ${{ steps.fetch.outputs.seconds }}
+          MEASURE_TEST_S: ${{ steps.test.outputs.seconds }}
+          MEASURE_TEST_RC: ${{ steps.test.outputs.rc }}
+
+      - name: Summarize
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          p = pathlib.Path("dist/lane-evidence.json")
+          if not p.exists():
+              raise SystemExit(0)
+          d = json.loads(p.read_text())
+          lines = [
+              "### Build lane measurement",
+              "",
+              "| field | value |",
+              "| --- | --- |",
+              f"| ref | `{d['ref_input']}` |",
+              f"| resolved | `{d['resolved_sha'][:12]}` |",
+              f"| cache mode | {d['cache_mode']} (target/ before: {d['target_cache_state_before']}) |",
+              f"| fetch | {d['fetch_seconds']} s |",
+              f"| cargo test --workspace | {d['test_seconds']} s ({d['test_seconds']/60:.1f} min) |",
+          ]
+          pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text("\n".join(lines) + "\n")
+          PY
+
+      - name: Upload lane evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lane-evidence-${{ inputs.cache }}-${{ github.run_id }}
+          path: |
+            dist/lane-evidence.json
+            dist/sccache-stats.txt
+            dist/cargo-lane-test.log
+          if-no-files-found: error
+          retention-days: 1
