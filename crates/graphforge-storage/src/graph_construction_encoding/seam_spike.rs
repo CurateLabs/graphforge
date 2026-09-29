@@ -295,7 +295,7 @@ mod tests {
                 )
                 .unwrap(),
                 counter: super::super::IoCounter::default(),
-                digest: sha2::Sha256::new(),
+                digest: crate::concurrency_attribution::ObservedSha256::new(),
             },
             schema.clone(),
             None,

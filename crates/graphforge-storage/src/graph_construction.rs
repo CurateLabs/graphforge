@@ -96,6 +96,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use crate::construction_directory::ConstructionDirectory as StableDirectory;
 use arrow::array::{Array, FixedSizeBinaryArray, RecordBatch, StringArray, UInt32Array};
 use arrow::compute::take;
@@ -108,7 +109,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::{ChunkReader, Length};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::UuidIndexKind;

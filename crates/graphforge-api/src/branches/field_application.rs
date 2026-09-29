@@ -169,7 +169,8 @@ pub(crate) struct MutationContext {
 }
 
 pub(crate) fn identity(operation: uuid::Uuid, role: &str) -> uuid::Uuid {
-    use sha2::{Digest, Sha256};
+    use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+    use sha2::Digest;
     let mut digest = Sha256::new();
     digest.update(b"graphforge-native-field-mutation/1");
     digest.update(operation.as_bytes());

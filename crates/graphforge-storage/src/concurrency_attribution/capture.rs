@@ -22,6 +22,16 @@ pub struct RegionMeasurement {
     pub wall_ns: u64,
     /// Upper bound for the two sequential sampling windows, excluding CPU tick quantization.
     pub sampling_uncertainty_ns: u64,
+    /// Bytes accepted by process write syscalls, including worker threads (Linux wchar).
+    pub written_bytes: Option<u64>,
+    /// Input bytes passed to instrumented SHA-256 sites; see the diagnostic method.
+    pub hashed_bytes: Option<u64>,
+    /// Sum of SHA-256 update/finalize elapsed intervals across process threads.
+    pub hash_elapsed_ns: Option<u64>,
+    /// Instrumented file and directory barrier attempts across process threads.
+    pub fsync_calls: Option<u64>,
+    /// Sum of instrumented barrier elapsed intervals across process threads.
+    pub fsync_elapsed_ns: Option<u64>,
     /// All process threads, including unrelated work; Linux has 10 ms resolution.
     pub process_cpu_ns: Option<u64>,
     /// Calling-thread on-CPU runtime from Linux schedstat, not pool occupancy.
@@ -45,6 +55,12 @@ impl RegionMeasurement {
             .sampling_uncertainty_ns
             .saturating_add(other.sampling_uncertainty_ns);
         self.process_cpu_ns = add(self.process_cpu_ns, other.process_cpu_ns);
+        self.written_bytes = add(self.written_bytes, other.written_bytes);
+        self.hashed_bytes = add(self.hashed_bytes, other.hashed_bytes);
+        self.hash_elapsed_ns = add(self.hash_elapsed_ns, other.hash_elapsed_ns);
+        self.fsync_calls = add(self.fsync_calls, other.fsync_calls);
+        self.fsync_elapsed_ns = add(self.fsync_elapsed_ns, other.fsync_elapsed_ns);
+
         self.thread_running_ns = add(self.thread_running_ns, other.thread_running_ns);
         self.thread_runnable_ns = add(self.thread_runnable_ns, other.thread_runnable_ns);
         self.thread_sleeping_ns = add(self.thread_sleeping_ns, other.thread_sleeping_ns);
@@ -63,6 +79,12 @@ impl RegionMeasurement {
                 .sampling_uncertainty_ns
                 .saturating_add(children.sampling_uncertainty_ns),
             process_cpu_ns: subtract(self.process_cpu_ns, children.process_cpu_ns),
+            written_bytes: subtract(self.written_bytes, children.written_bytes),
+            hashed_bytes: subtract(self.hashed_bytes, children.hashed_bytes),
+            hash_elapsed_ns: subtract(self.hash_elapsed_ns, children.hash_elapsed_ns),
+            fsync_calls: subtract(self.fsync_calls, children.fsync_calls),
+            fsync_elapsed_ns: subtract(self.fsync_elapsed_ns, children.fsync_elapsed_ns),
+
             thread_running_ns: subtract(self.thread_running_ns, children.thread_running_ns),
             thread_runnable_ns: subtract(self.thread_runnable_ns, children.thread_runnable_ns),
             thread_sleeping_ns: subtract(self.thread_sleeping_ns, children.thread_sleeping_ns),
@@ -89,6 +111,12 @@ fn zero() -> RegionMeasurement {
         wall_ns: 0,
         sampling_uncertainty_ns: 0,
         process_cpu_ns: Some(0),
+        written_bytes: Some(0),
+        hashed_bytes: Some(0),
+        hash_elapsed_ns: Some(0),
+        fsync_calls: Some(0),
+        fsync_elapsed_ns: Some(0),
+
         thread_running_ns: Some(0),
         thread_runnable_ns: Some(0),
         thread_sleeping_ns: Some(0),
@@ -117,6 +145,8 @@ pub struct RegionSnapshot {
     /// Versioned observation contract.
     pub contract: &'static str,
     /// Process CPU is shared; worker thread scopes are not captured by this tree.
+    pub io_scope: &'static str,
+    /// Process CPU includes every thread.
     pub cpu_scope: &'static str,
     /// Scheduler counters cover the calling thread, not the process or PSI.
     pub scheduler_scope: &'static str,
@@ -137,22 +167,31 @@ struct State {
 
 /// Isolated, thread-bound capture of nested lifecycle regions.
 ///
-/// Nested captures restore the previous capture. Captures never reset or
-/// difference a global counter. Spawned worker threads are intentionally not
+/// Nested captures restore the previous capture. Captures never
+/// reset global counters. I/O samples difference shared process totals. Worker thread scopes are not
 /// attributed as though their process CPU deltas were disjoint.
 pub struct RegionCapture {
     state: Rc<RefCell<State>>,
     root: Option<CaptureRegion>,
+    _observation: graphforge_filesystem::observation::Observation,
+    _hash_observation: graphforge_core::hash_observation::HashObservation,
 }
 
 impl RegionCapture {
     /// Start a capture with a static root name. Finish after child guards drop.
     #[must_use]
     pub fn start(name: &'static str) -> Self {
+        let observation = graphforge_filesystem::observation::Observation::start();
+        let hash_observation = graphforge_core::hash_observation::HashObservation::start();
         let state = Rc::new(RefCell::new(State::default()));
         ACTIVE.with(|active| active.borrow_mut().push(state.clone()));
         let root = CaptureRegion::enter(name);
-        Self { state, root }
+        Self {
+            state,
+            root,
+            _observation: observation,
+            _hash_observation: hash_observation,
+        }
     }
 
     /// Finish the root and return the complete tree, including explicit residuals.
@@ -160,7 +199,8 @@ impl RegionCapture {
     pub fn finish(mut self) -> RegionSnapshot {
         drop(self.root.take());
         RegionSnapshot {
-            contract: "graphforge-region-diagnostics/1",
+            contract: "graphforge-region-diagnostics/2",
+            io_scope: "shared_process_inclusive_write_syscalls_instrumented_sha256_and_barriers",
             cpu_scope: "shared_process_inclusive_do_not_sum",
             scheduler_scope: "calling_thread_only_unknown_is_not_blocked_or_psi",
             regions: self.state.borrow().rows.clone(),
@@ -286,6 +326,9 @@ struct Sample {
     cpu: Option<u64>,
     scheduler: SchedulerSample,
     sampling_ns: u64,
+    writes: Option<u64>,
+    hashes: (u64, u64),
+    barriers: (u64, u64),
 }
 
 impl Sample {
@@ -293,10 +336,16 @@ impl Sample {
         let wall = Instant::now();
         let cpu = process_cpu_time().and_then(|d| u64::try_from(d.as_nanos()).ok());
         let scheduler = scheduler::sample();
+        let writes = process_written_bytes();
+        let hashes = graphforge_core::hash_observation::totals();
+        let barriers = graphforge_filesystem::observation::fsync_totals();
         Self {
             wall,
             cpu,
             scheduler,
+            writes,
+            hashes,
+            barriers,
             sampling_ns: u64::try_from(wall.elapsed().as_nanos()).unwrap_or(u64::MAX),
         }
     }
@@ -312,6 +361,11 @@ impl Sample {
             wall_ns,
             sampling_uncertainty_ns: self.sampling_ns.saturating_add(end.sampling_ns),
             process_cpu_ns: subtract(end.cpu, self.cpu),
+            written_bytes: subtract(end.writes, self.writes),
+            hashed_bytes: end.hashes.0.checked_sub(self.hashes.0),
+            hash_elapsed_ns: end.hashes.1.checked_sub(self.hashes.1),
+            fsync_calls: end.barriers.0.checked_sub(self.barriers.0),
+            fsync_elapsed_ns: end.barriers.1.checked_sub(self.barriers.1),
             thread_running_ns: running,
             thread_runnable_ns: runnable,
             thread_sleeping_ns: sleeping,
@@ -328,6 +382,19 @@ impl Sample {
             }),
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn process_written_bytes() -> Option<u64> {
+    let io = std::fs::read_to_string("/proc/self/io").ok()?;
+    io.lines().find_map(|line| {
+        line.strip_prefix("wchar: ")
+            .and_then(|n| n.trim().parse().ok())
+    })
+}
+#[cfg(not(target_os = "linux"))]
+fn process_written_bytes() -> Option<u64> {
+    None
 }
 
 #[cfg(test)]

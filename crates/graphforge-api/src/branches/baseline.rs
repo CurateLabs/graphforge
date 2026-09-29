@@ -9,13 +9,14 @@ use arrow::{
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::{
     ProjectParticipant, ProjectParticipantEncoding,
     research_versions::{
         PreparedBranchContent, ResearchParticipantKey, replace_prepared_branch_domains,
     },
 };
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,

@@ -1,5 +1,6 @@
 //! Durable per-lineage mutation evidence for embedding freshness.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -382,7 +383,7 @@ fn persist(path: &Path, bytes: &[u8]) -> Result<(), SearchArtifactError> {
     temp.write_all(bytes)
         .map_err(|source| io("write mutation journal", path, source))?;
     temp.as_file()
-        .sync_all()
+        .observed_sync_all()
         .map_err(|source| io("sync mutation journal", path, source))?;
     temp.persist(path)
         .map_err(|error| io("publish mutation journal", path, error.error))?;
@@ -483,7 +484,7 @@ fn decode<const N: usize>(path: &Path, value: &str) -> Result<[u8; N], SearchArt
 #[cfg(unix)]
 fn sync_dir(path: &Path) -> Result<(), SearchArtifactError> {
     File::open(path)
-        .and_then(|file| file.sync_all())
+        .and_then(|file| file.observed_sync_all())
         .map_err(|source| io("sync mutation journal directory", path, source))
 }
 

@@ -1,5 +1,6 @@
 //! Verification-first, bounded portable-v2 project import.
 
+use graphforge_filesystem::ObservedSync as _;
 mod native_validation;
 pub use native_validation::{
     NativeResearchValidator, import_complete_portable_v2_with_native_validation,
@@ -11,12 +12,13 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::GfError;
 use graphforge_ontology::{
     ActivationMode, ActivationRecord, ActivationScope, AuthoredModule, BridgeSetId,
     CompositionLimits, InventoryCompileRequest, OntologyModuleId, compile_inventory,
 };
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::project_portable::{prepare_import_target, semantically_pristine_generation};
@@ -853,7 +855,7 @@ fn claim_stage(
                 "cannot mark import staging ownership",
             )
         })?;
-        marker.sync_all().map_err(|_| {
+        marker.observed_sync_all().map_err(|_| {
             PortableV2Error::new(
                 PortableV2ErrorCode::Io,
                 "cannot sync import staging ownership",
@@ -881,7 +883,7 @@ fn sync_parent(path: &Path) -> Result<(), PortableV2Error> {
 
 #[cfg(not(windows))]
 fn sync_directory_handle(path: &Path) -> std::io::Result<()> {
-    fs::File::open(path)?.sync_all()
+    fs::File::open(path)?.observed_sync_all()
 }
 
 #[cfg(windows)]
@@ -892,7 +894,7 @@ fn sync_directory_handle(path: &Path) -> std::io::Result<()> {
         .write(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?
-        .sync_all()
+        .observed_sync_all()
 }
 
 #[expect(clippy::too_many_arguments, reason = "import authority is explicit")]
@@ -1457,7 +1459,7 @@ fn prepare_compact_import_graph_with_allocation(
     })?;
     participant.byte_length = bytes.len() as u64;
     participant.content_sha256 = Sha256::digest(&bytes).into();
-    file.sync_all().map_err(|_| {
+    file.observed_sync_all().map_err(|_| {
         PortableV2Error::new(
             PortableV2ErrorCode::Io,
             "cannot sync imported compact graph root",
@@ -1810,7 +1812,7 @@ fn persist_staged_composition(
             "cannot write composition candidate",
         )
     })?;
-    output.sync_all().map_err(|_| {
+    output.observed_sync_all().map_err(|_| {
         PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync composition candidate")
     })?;
     Ok((participant, source, bytes))
@@ -1841,7 +1843,7 @@ fn persist_composition_authority(
             "cannot write composition authority",
         )
     })?;
-    output.sync_all().map_err(|_| {
+    output.observed_sync_all().map_err(|_| {
         PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync composition authority")
     })?;
     Ok(ProjectFileParticipant {

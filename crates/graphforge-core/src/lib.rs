@@ -1271,3 +1271,6 @@ pub mod portable;
 
 /// Identity-free public storage receipts.
 pub mod storage_receipt;
+
+/// Optional process-wide SHA-256 work observation for engine diagnostics.
+pub mod hash_observation;

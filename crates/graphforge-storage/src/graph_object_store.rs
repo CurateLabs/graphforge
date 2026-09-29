@@ -3,6 +3,7 @@
 //! Manifest updates, authenticated materialization, installation, and collection
 //! have private owners. Shared leases and lifecycle locks stay here.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(windows)]
 use std::fs::OpenOptions;
@@ -10,8 +11,9 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::graph_manifest::verify_object_bytes;
@@ -516,7 +518,7 @@ pub fn begin_graph_object_publication(root: &Path) -> Result<GraphObjectPublicat
         .file
         .as_ref()
         .unwrap()
-        .sync_all()
+        .observed_sync_all()
         .map_err(|error| storage("sync graph object publication lease", root, error))?;
     returned_error_boundary("publication:lease-sync")?;
     cas.active

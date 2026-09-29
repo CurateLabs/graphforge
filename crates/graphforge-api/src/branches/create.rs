@@ -1,11 +1,12 @@
 //! Native creation from current, historical or Branch research.
 use super::{BranchSource, CreateResearchBranchRequest, publication, unavailable};
 use crate::{CancellationToken, GfError, GraphForge};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::research_versions::{
     RegisterResearchVersion, ResearchBranchRecord, ResearchEvidenceReference, ResearchMutation,
     ResearchOperationReceipt, prepare_branch_selection,
 };
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 

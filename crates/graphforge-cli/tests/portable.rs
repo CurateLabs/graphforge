@@ -584,9 +584,48 @@ fn import_operation_timings_survive_separate_cli_processes() {
     ));
     let regions = &validated["region_diagnostics"]["regions"];
     assert_eq!(validated["region_diagnostics"]["complete"], true);
-    assert!(regions["import_command/validate/seal/shaping"].is_object());
+    assert_eq!(validated["outcome"], "stage+seal");
+    assert_eq!(
+        validated["region_diagnostics"]["contract"],
+        "graphforge-region-diagnostics/2"
+    );
+    assert!(regions["import_command/stage+seal/append_nodes"].is_object());
+    assert!(regions["import_command/stage+seal/source_read"].is_object());
+    assert!(regions["import_command/stage+seal/manifest_persistence"].is_object());
+    for field in [
+        "hashed_bytes",
+        "hash_elapsed_ns",
+        "fsync_calls",
+        "fsync_elapsed_ns",
+    ] {
+        assert!(
+            regions["import_command/stage+seal"]["inclusive"][field]
+                .as_u64()
+                .unwrap()
+                > 0,
+            "missing {field}"
+        );
+        let measured = regions["import_command"]["inclusive"][field]
+            .as_u64()
+            .unwrap();
+        let residual: u64 = regions
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|row| row["residual"][field].as_u64().unwrap())
+            .sum();
+        assert_eq!(measured, residual, "{field} does not reconcile");
+    }
+    #[cfg(target_os = "linux")]
     assert!(
-        regions["import_command/validate/seal/canonical_encoding/adjacency_encoding"].is_object()
+        regions["import_command/stage+seal"]["inclusive"]["written_bytes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(regions["import_command/stage+seal/seal/shaping"].is_object());
+    assert!(
+        regions["import_command/stage+seal/seal/canonical_encoding/adjacency_encoding"].is_object()
     );
     let root = regions["import_command"]["inclusive"]["wall_ns"]
         .as_u64()

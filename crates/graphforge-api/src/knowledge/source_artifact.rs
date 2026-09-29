@@ -8,7 +8,8 @@ use graphforge_knowledge::{
     ArtifactPreferenceLedger, DerivationRole, DerivationSubjectKind, RETENTION_DEPENDENCY_SCHEMA,
     SOURCE_SCHEMA, Source, SourceKind, SourceLedger,
 };
-use sha2::{Digest, Sha256};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+use sha2::Digest;
 
 use super::ledger::{
     merged_artifact_provenance, merged_preference_provenance, merged_source_provenance,

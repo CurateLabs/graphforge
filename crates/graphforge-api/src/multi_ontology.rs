@@ -1356,7 +1356,8 @@ mod tests {
     use super::*;
     use crate::OperationId;
     use graphforge_ontology::{DiagnosticCode, EntityTypeDef, OntologyInventory};
-    use sha2::{Digest, Sha256};
+    use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+    use sha2::Digest;
     use std::sync::atomic::AtomicBool;
 
     fn document(ontology_id: &str, entity: &str) -> OntologyDoc {

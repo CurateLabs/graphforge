@@ -215,7 +215,8 @@ pub(crate) fn canonical(
     selected: Option<&Objects>,
 ) -> Result<(), GfError> {
     use graphforge_knowledge::research::ResearchDecisionKind;
-    use sha2::{Digest, Sha256};
+    use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+    use sha2::Digest;
     let Some(query) = query else { return Ok(()) };
     let scope =
         crate::research_claims::authority::resolve(current, &query.context, query.community_uuid)?;

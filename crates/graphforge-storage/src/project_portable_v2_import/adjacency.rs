@@ -188,9 +188,10 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::AtomicBool;
 
+    use crate::concurrency_attribution::ObservedSha256 as Sha256;
     use arrow::array::{ArrayRef, FixedSizeBinaryArray, StringArray};
     use arrow::record_batch::RecordBatch;
-    use sha2::{Digest, Sha256};
+    use sha2::Digest;
     use std::sync::Arc;
     use uuid::Uuid;
 

@@ -1,3 +1,4 @@
+use crate::ObservedSync as _;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
@@ -65,7 +66,7 @@ pub(super) fn create_cas_writer(path: &Path) -> io::Result<File> {
 }
 
 pub(super) fn seal_cas_writer(writer: &File) -> io::Result<()> {
-    writer.sync_all()?;
+    writer.observed_sync_all()?;
     let current_attributes = information(writer)?.dwFileAttributes;
     let mut basic = FILE_BASIC_INFO {
         CreationTime: 0,
@@ -89,7 +90,7 @@ pub(super) fn seal_cas_writer(writer: &File) -> io::Result<()> {
     }
 
     set_canonical_cas_dacl(writer)?;
-    writer.sync_all()
+    writer.observed_sync_all()
 }
 
 fn canonical_cas_descriptor() -> io::Result<PSECURITY_DESCRIPTOR> {
@@ -332,7 +333,9 @@ pub(super) fn replace_file(
     let target_path = directory_path.join(target_name);
     let source = open_rename_handle(&source_path).map_err(ReplaceFileError::NotReplaced)?;
     verify_open_regular(&source).map_err(ReplaceFileError::NotReplaced)?;
-    source.sync_all().map_err(ReplaceFileError::NotReplaced)?;
+    source
+        .observed_sync_all()
+        .map_err(ReplaceFileError::NotReplaced)?;
     let source_before = file_identity(&source).map_err(ReplaceFileError::NotReplaced)?;
     if expected_source.is_some_and(|expected| expected != source_before) {
         return Err(ReplaceFileError::NotReplaced(io::Error::other(
@@ -418,7 +421,7 @@ fn install_new_file_before_rename(
     let target_path = directory_path.join(target_name);
     let source = open_rename_handle(&source_path)?;
     verify_open_regular(&source)?;
-    source.sync_all()?;
+    source.observed_sync_all()?;
     let source_identity = file_identity(&source)?;
     if expected_source.is_some_and(|expected| expected != source_identity) {
         return Err(io::Error::other(
@@ -1085,7 +1088,7 @@ mod tests {
         std::fs::write(&source_path, b"new").unwrap();
         std::fs::write(&target_path, b"old").unwrap();
         let source = open_rename_handle(&source_path).unwrap();
-        source.sync_all().unwrap();
+        source.observed_sync_all().unwrap();
         let source_identity = file_identity(&source).unwrap();
         let old_target = open_identity_handle(&target_path).unwrap();
         let old_target_identity = file_identity(&old_target).unwrap();

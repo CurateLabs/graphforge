@@ -9,13 +9,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_ontology::{
     CompiledComposition, MigrationEngine, OntologyModuleId, QualifiedSymbol, SymbolKind,
     TransformKind,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::{GRAPH_CAPABILITY_ID, ProjectParticipant, ProjectParticipantEncoding};
 

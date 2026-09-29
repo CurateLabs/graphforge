@@ -5,6 +5,7 @@ use super::{
     VerifiedMaterialization, check_cancel, header_path, parse_octal, parse_pax,
     read_unhashed_payload, skip_padding, validate_path, verify_portable_v2, walk,
 };
+use graphforge_filesystem::ObservedSync as _;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -152,7 +153,7 @@ pub(super) fn materialize_expanded(
         refreshed?;
         read_bytes = read_bytes.saturating_add(bytes);
         read_operations = read_operations.saturating_add(operations);
-        let synced = output.sync_all().map_err(|_| {
+        let synced = output.observed_sync_all().map_err(|_| {
             PortableV2Error::at(PortableV2ErrorCode::Io, &relative, "cannot sync entry")
         });
         let refreshed = observed(&output_path, Some(&output));
@@ -239,7 +240,7 @@ pub(super) fn materialize_bundle(
             refreshed?;
             read_bytes = read_bytes.saturating_add(bytes);
             read_operations = read_operations.saturating_add(operations);
-            let synced = output.sync_all().map_err(|_| {
+            let synced = output.observed_sync_all().map_err(|_| {
                 PortableV2Error::at(PortableV2ErrorCode::Io, &path, "cannot sync entry")
             });
             let refreshed = observed(&output_path, Some(&output));

@@ -7,6 +7,7 @@
 //! Participant validation/staging and journal/atomic-file controls have private
 //! owners; commit sequencing, reconciliation, and mutation locks stay here.
 
+use graphforge_filesystem::ObservedSync as _;
 mod participants;
 use participants::{
     prepare_generation_directory, request_metadata_with_payloads, stage_optional_graph_tree,
@@ -39,9 +40,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::{ApiErrorCode, GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::project_failpoint;
@@ -1451,7 +1453,7 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
         .create_new(true)
         .open(&lease_path)
         .map_err(publication_io)?;
-    lease.sync_all().map_err(publication_io)?;
+    lease.observed_sync_all().map_err(publication_io)?;
     if let Some(allocation) = &staged.allocation {
         allocation.replace_file_at(&lease_path, &lease)?;
     }
@@ -1486,7 +1488,7 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
         "DURABLE",
         false,
     )?;
-    manifest_file.sync_all().map_err(publication_io)?;
+    manifest_file.observed_sync_all().map_err(publication_io)?;
     if let Some(allocation) = &staged.allocation {
         allocation.replace_file_at(&manifest_path, &manifest_file)?;
     }

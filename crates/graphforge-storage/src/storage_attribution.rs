@@ -1,5 +1,7 @@
 //! Non-enumerating storage attribution over the manifest-authenticated inventory of a committed project.
 
+#[cfg(test)]
+use graphforge_filesystem::ObservedSync as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::Path;
@@ -27,8 +29,9 @@ pub fn storage_attribution_receipt_from_snapshot(
     })
 }
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
+use sha2::Digest as _;
 
 use crate::{
     GraphConstructionEvidence, GraphFileEntry, GraphFilesParticipant, ResolvedProjectGeneration,
@@ -2359,7 +2362,7 @@ mod tests {
         let generation = crate::open_or_initialize_ephemeral_project(project.path()).unwrap();
         let artifact = tempfile::NamedTempFile::new().unwrap();
         artifact.as_file().write_all(b"shared").unwrap();
-        artifact.as_file().sync_all().unwrap();
+        artifact.as_file().observed_sync_all().unwrap();
         let mut accumulator = Accumulator::new(&generation);
         accumulator
             .add_logical(ArtifactCategory::TopologyNodes, 6)

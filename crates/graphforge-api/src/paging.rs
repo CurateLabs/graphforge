@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use graphforge_core::{ApiErrorCode, GfError};
-use sha2::{Digest, Sha256};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+use sha2::Digest;
 use uuid::Uuid;
 
 /// Default page size.

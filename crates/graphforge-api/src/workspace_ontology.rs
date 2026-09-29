@@ -7,12 +7,13 @@ use graphforge_ontology::{
     ActivationMode, AuthoredModule, CompositionLimits, InventoryCompileRequest, OntologyCompiler,
     OntologyHandle, OntologyLoader, OntologyModuleId, compile_inventory, module_document_digest,
 };
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::{
     GraphDirectedness, ProjectCapability, ProjectGenerationRequest, ProjectParticipant,
     ProjectParticipantEncoding, ProjectStageOutcome, WorkspaceConfiguration, WorkspaceOntology,
     WorkspaceOntologyMode, WorkspaceOntologySourceFormat,
 };
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::{GraphForge, WriteContext};
 

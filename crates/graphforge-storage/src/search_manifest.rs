@@ -7,8 +7,9 @@
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::GfError;
-use sha2::{Digest as _, Sha256};
+use sha2::Digest as _;
 
 use crate::catalog::AdmittedSourceFile;
 

@@ -959,12 +959,12 @@ impl StableDirectory {
                     "stable directory identity changed before sync",
                 ));
             }
-            directory.sync_all()?;
+            directory.observed_sync_all()?;
             self.revalidate_named()
         }
         #[cfg(not(windows))]
         {
-            self.file.sync_all()?;
+            self.file.observed_sync_all()?;
             self.revalidate_named()
         }
     }
@@ -1197,3 +1197,7 @@ fn verify_space_usage_metadata(metadata: &std::fs::Metadata) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+/// Optional, process-wide diagnostic work counters.
+pub mod observation;
+pub use observation::ObservedSync;

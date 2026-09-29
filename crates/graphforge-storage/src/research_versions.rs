@@ -8,9 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::{ApiErrorCode, GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 mod branch_content;

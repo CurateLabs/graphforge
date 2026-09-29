@@ -6,12 +6,13 @@ use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_ontology::{
     ActivationMode, MigrationEngine, OntologyDoc, ResolveRequest, SymbolKind, TransformKind,
 };
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::{
     WORKSPACE_CAPABILITY_ID, WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY, WorkspaceOntologyComposition,
     WorkspaceOntologyMode,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::{CancellationToken, GraphForge, WriteContext};

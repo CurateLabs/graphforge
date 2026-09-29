@@ -180,7 +180,8 @@ pub(super) fn validate(registry: &ResearchRegistry) -> Result<(), GfError> {
 // journals may stage another physical preparation for that logical request.
 pub(super) fn publication_fingerprint(request: &super::ResearchOperation) -> Option<[u8; 32]> {
     use super::ResearchMutation;
-    use sha2::{Digest, Sha256};
+    use crate::concurrency_attribution::ObservedSha256 as Sha256;
+    use sha2::Digest;
     match &request.mutation {
         ResearchMutation::PublishBranch { intent_sha256, .. }
         | ResearchMutation::SubmitProposal { intent_sha256, .. }

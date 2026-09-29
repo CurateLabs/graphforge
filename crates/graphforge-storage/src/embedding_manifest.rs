@@ -3,9 +3,10 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::{
     EmbeddingCompatibilityId, EmbeddingContentDigest, EmbeddingGenerationId,

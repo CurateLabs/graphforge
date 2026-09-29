@@ -1,5 +1,6 @@
 //! Bounded deterministic portable-project v2 complete-package export.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(windows)]
 use std::fs::OpenOptions;
@@ -655,7 +656,7 @@ fn sync_dir(p: &Path) -> Result<(), ExportError> {
 }
 #[cfg(not(windows))]
 fn sync_directory_handle(p: &Path) -> std::io::Result<()> {
-    File::open(p)?.sync_all()
+    File::open(p)?.observed_sync_all()
 }
 #[cfg(windows)]
 fn sync_directory_handle(p: &Path) -> std::io::Result<()> {
@@ -665,7 +666,7 @@ fn sync_directory_handle(p: &Path) -> std::io::Result<()> {
         .write(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(p)?
-        .sync_all()
+        .observed_sync_all()
 }
 fn remove(p: &Path) {
     if p.is_dir() {
@@ -711,6 +712,7 @@ mod tests {
     use super::planning::exact_identity;
     use super::transport::open_planned_source;
     use super::*;
+    use crate::concurrency_attribution::ObservedSha256 as Sha256;
     use crate::project_portable_v2::{
         PortableV2ExactIdentity, PortableV2OntologyComposition, canonical_json,
     };
@@ -718,7 +720,7 @@ mod tests {
         PortableV2SelectionProfile, PortableV2SelectionRequest, ResolvedProjectGeneration,
         preview_portable_v2_selection,
     };
-    use sha2::{Digest, Sha256};
+    use sha2::Digest;
     use std::io::{Read, Write};
 
     #[test]
@@ -1261,7 +1263,7 @@ mod tests {
         };
         allocation.register(&path, &file).unwrap();
         file.write_all(&vec![1_u8; 32768]).unwrap();
-        file.sync_all().unwrap();
+        file.observed_sync_all().unwrap();
         let actual = graphforge_filesystem::file_space_usage(&file)
             .unwrap()
             .allocated_bytes;

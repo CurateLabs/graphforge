@@ -1,12 +1,14 @@
 //! Crash-safe publication and reopen validation for complete embedding generations.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::{
     EmbeddingCompatibilityDescriptor, EmbeddingCompatibilityId, EmbeddingContentDigest,
@@ -747,7 +749,7 @@ fn persist_synced_file(path: &Path, prefix: &str, bytes: &[u8]) -> Result<(), Se
     temp.write_all(bytes)
         .map_err(|source| io("write embedding metadata temp", path, source))?;
     temp.as_file()
-        .sync_all()
+        .observed_sync_all()
         .map_err(|source| io("sync embedding metadata temp", path, source))?;
     temp.persist(path)
         .map_err(|error| io("publish embedding metadata", path, error.error))?;
@@ -762,7 +764,7 @@ fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), SearchArtifactErro
         .map_err(|source| io("create embedding generation file", path, source))?;
     file.write_all(bytes)
         .map_err(|source| io("write embedding generation file", path, source))?;
-    file.sync_all()
+    file.observed_sync_all()
         .map_err(|source| io("sync embedding generation file", path, source))
 }
 
@@ -818,7 +820,7 @@ fn sync_tree(root: &Path) -> Result<(), SearchArtifactError> {
             .read(true)
             .write(true)
             .open(&file)
-            .and_then(|file| file.sync_all())
+            .and_then(|file| file.observed_sync_all())
             .map_err(|source| io("sync embedding generation file", &file, source))?;
     }
     directories.sort_unstable_by_key(|path| std::cmp::Reverse(path.components().count()));
@@ -875,7 +877,7 @@ fn path_exists(path: &Path) -> Result<bool, SearchArtifactError> {
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), SearchArtifactError> {
     File::open(path)
-        .and_then(|file| file.sync_all())
+        .and_then(|file| file.observed_sync_all())
         .map_err(|source| io("sync embedding directory", path, source))
 }
 

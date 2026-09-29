@@ -1230,7 +1230,8 @@ mod tests {
     use std::process::Command;
     use std::time::{Duration, Instant};
 
-    use sha2::{Digest, Sha256};
+    use crate::concurrency_attribution::ObservedSha256 as Sha256;
+    use sha2::Digest;
 
     use super::*;
     use crate::project_fault_oracle::{

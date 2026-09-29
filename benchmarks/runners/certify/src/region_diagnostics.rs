@@ -67,7 +67,7 @@ fn cpu_sample() -> Option<(u64, u64)> {
     None
 }
 
-const MEASUREMENTS: [&str; 9] = [
+const MEASUREMENTS: [&str; 14] = [
     "wall_ns",
     "sampling_uncertainty_ns",
     "process_cpu_ns",
@@ -77,14 +77,24 @@ const MEASUREMENTS: [&str; 9] = [
     "thread_uninterruptible_ns",
     "thread_iowait_ns",
     "thread_unknown_ns",
+    "written_bytes",
+    "hashed_bytes",
+    "hash_elapsed_ns",
+    "fsync_calls",
+    "fsync_elapsed_ns",
 ];
-const REGIONS: [&str; 44] = [
+const REGIONS: [&str; 49] = [
     "import_command",
     "begin_import",
     "resume_import",
     "register_arrow",
     "register_parquet",
     "checkpoint",
+    "stage+seal",
+    "append_nodes",
+    "append_edges",
+    "source_read",
+    "manifest_persistence",
     "validate",
     "commit",
     "open_construction",
@@ -129,9 +139,18 @@ pub(crate) fn valid_snapshot(value: &Value) -> bool {
     let Some(object) = value.as_object() else {
         return false;
     };
-    if object.len() != 5
+    let legacy = value["contract"] == "graphforge-region-diagnostics/1";
+    let measurements = if legacy {
+        &MEASUREMENTS[..9]
+    } else {
+        &MEASUREMENTS[..]
+    };
+    if object.len() != if legacy { 5 } else { 6 }
         || value["complete"] != true
-        || value["contract"] != "graphforge-region-diagnostics/1"
+        || (!legacy
+            && (value["contract"] != "graphforge-region-diagnostics/2"
+                || value["io_scope"]
+                    != "shared_process_inclusive_write_syscalls_instrumented_sha256_and_barriers"))
         || value["cpu_scope"] != "shared_process_inclusive_do_not_sum"
         || value["scheduler_scope"] != "calling_thread_only_unknown_is_not_blocked_or_psi"
     {
@@ -145,7 +164,21 @@ pub(crate) fn valid_snapshot(value: &Value) -> bool {
         && regions.iter().all(|(path, row)| {
             path.starts_with("import_command")
                 && path.split('/').count() <= 16
-                && path.split('/').all(|part| REGIONS.contains(&part))
+                && path.split('/').all(|part| {
+                    REGIONS.contains(&part)
+                        && if legacy {
+                            !matches!(
+                                part,
+                                "stage+seal"
+                                    | "append_nodes"
+                                    | "append_edges"
+                                    | "source_read"
+                                    | "manifest_persistence"
+                            )
+                        } else {
+                            part != "validate"
+                        }
+                })
                 && row.as_object().is_some_and(|r| r.len() == 4)
                 && row["work"].as_object().is_some_and(|work| {
                     work.iter().all(|(k, v)| {
@@ -156,8 +189,8 @@ pub(crate) fn valid_snapshot(value: &Value) -> bool {
                 && row["calls"].as_u64().is_some_and(|n| n > 0)
                 && ["inclusive", "residual"].iter().all(|key| {
                     row[*key].as_object().is_some_and(|m| {
-                        m.len() == MEASUREMENTS.len()
-                            && MEASUREMENTS.iter().all(|field| {
+                        m.len() == measurements.len()
+                            && measurements.iter().all(|field| {
                                 m.get(*field).is_some_and(|n| {
                                     n.as_u64().is_some()
                                         || (!matches!(
@@ -199,9 +232,10 @@ mod tests {
     fn snapshot_contract_accepts_captured_encoding_lane_receipt() {
         // A `receipt-3-validate.json` captured by the #1600 encoding-lane
         // candidate run `curve-s18-c8-r1`; retained here as a contract fixture.
-        let receipt: Value =
-            serde_json::from_str(include_str!("../fixtures/region-diagnostics-receipt-1600.json"))
-                .unwrap();
+        let receipt: Value = serde_json::from_str(include_str!(
+            "../fixtures/region-diagnostics-receipt-1600.json"
+        ))
+        .unwrap();
         assert!(valid_snapshot(&receipt["region_diagnostics"]));
     }
 
@@ -209,12 +243,12 @@ mod tests {
     fn snapshot_contract_accepts_every_allowlisted_region_name() {
         let capture =
             graphforge_storage::concurrency_attribution::RegionCapture::start("import_command");
-        for name in REGIONS.iter().skip(1) {
+        for name in REGIONS.iter().skip(1).filter(|name| **name != "validate") {
             let _scope = graphforge_storage::concurrency_attribution::RegionScope::named(name);
         }
         let value = serde_json::to_value(capture.finish()).unwrap();
         assert!(valid_snapshot(&value));
-        for name in REGIONS.iter().skip(1) {
+        for name in REGIONS.iter().skip(1).filter(|name| **name != "validate") {
             assert!(
                 value["regions"][format!("import_command/{name}")].is_object(),
                 "{name} missing from the capture"
@@ -229,11 +263,19 @@ mod tests {
             "/../../schemas/certification-evidence.json"
         ))
         .unwrap();
-        let start = schema.find("^import_command(/(").unwrap() + "^import_command(/(".len();
-        let end = start + schema[start..].find("))").unwrap();
-        let mut schema_names: Vec<&str> = schema[start..end].split('|').collect();
+        let schema: Value = serde_json::from_str(&schema).unwrap();
+        let pattern = schema["$defs"]["regionDiagnosticsV2"]["properties"]["regions"]["propertyNames"]["pattern"]
+            .as_str().unwrap().replace("\\+", "+");
+        let start = "^import_command(/(".len();
+        let end = start + pattern[start..].find("))").unwrap();
+        let mut schema_names: Vec<&str> = pattern[start..end].split('|').collect();
         schema_names.sort_unstable();
-        let mut rust_names: Vec<&str> = REGIONS.iter().copied().skip(1).collect();
+        let mut rust_names: Vec<&str> = REGIONS
+            .iter()
+            .copied()
+            .skip(1)
+            .filter(|name| *name != "validate")
+            .collect();
         rust_names.sort_unstable();
         assert_eq!(schema_names, rust_names);
     }

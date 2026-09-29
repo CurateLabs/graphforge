@@ -1,5 +1,6 @@
 //! Durable, bounded staged graph-import sessions (#738).
 
+use graphforge_filesystem::ObservedSync as _;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
@@ -10,11 +11,12 @@ use arrow::ipc::writer::FileWriter as ArrowFileWriter;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use graphforge_core::GfError;
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::concurrency_attribution::RegionScope;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::{ChunkReader, Length};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::{BulkInputKind, CancellationToken, GraphConstructionBudgets, GraphForge, OperationId};
@@ -781,7 +783,7 @@ impl GraphImportSession {
         graph: &GraphForge,
         cancellation: Option<&CancellationToken>,
     ) -> Result<ImportProgress, GfError> {
-        let _region = RegionScope::named("validate");
+        let _region = RegionScope::named("stage+seal");
         self.operation_timings = ImportOperationTimings::default();
         self.ensure_open()?;
         self.ensure_base(graph)?;
@@ -820,7 +822,7 @@ impl GraphImportSession {
                         }
                         let chunk_id =
                             format!("import-{:020}-{:020}", source.sequence, batch_index);
-                        let region = RegionScope::named("append");
+                        let region = RegionScope::named(append_region_name(input_kind));
                         let started = CallStart::now();
                         let staged = match (input_kind, cancellation) {
                             (BulkInputKind::Node, Some(token)) => construction
@@ -1116,6 +1118,13 @@ fn unix_millis() -> Result<u64, GfError> {
     .unwrap_or(u64::MAX))
 }
 
+fn append_region_name(kind: BulkInputKind) -> &'static str {
+    match kind {
+        BulkInputKind::Node => "append_nodes",
+        BulkInputKind::Edge => "append_edges",
+    }
+}
+
 fn for_each_source_batch(
     root: &Path,
     source: &SourceRecord,
@@ -1173,7 +1182,15 @@ fn consume_source_batches(
     batches: impl Iterator<Item = Result<RecordBatch, GfError>>,
     consume: &mut impl FnMut(Option<RecordBatch>) -> Result<(), GfError>,
 ) -> Result<(), GfError> {
-    for batch in batches {
+    let mut batches = batches;
+    loop {
+        let batch = {
+            let _region = RegionScope::named("source_read");
+            batches.next()
+        };
+        let Some(batch) = batch else {
+            break;
+        };
         match batch {
             Ok(batch) => consume(Some(batch))?,
             Err(error) => {
@@ -1403,11 +1420,12 @@ fn write_manifest_with_allocation(
     manifest: &SessionManifest,
     allocation: Option<&graphforge_storage::StorageAllocationOperation>,
 ) -> Result<(), GfError> {
+    let _region = RegionScope::named("manifest_persistence");
     let temporary = root.join("manifest.tmp");
     let mut file = BufWriter::new(File::create(&temporary).map_err(storage)?);
     serde_json::to_writer(&mut file, manifest).map_err(storage)?;
     file.flush().map_err(storage)?;
-    file.get_ref().sync_all().map_err(storage)?;
+    file.get_ref().observed_sync_all().map_err(storage)?;
     let observed = if let Some(allocation) = allocation {
         allocation.replace_file_at(&temporary, file.get_ref())?;
         Some(file.get_ref().try_clone().map_err(storage)?)
@@ -2034,7 +2052,7 @@ mod tests {
             output.write_all(&chunk[..bytes]).unwrap();
             remaining -= bytes as u64;
         }
-        output.sync_all().unwrap();
+        output.observed_sync_all().unwrap();
         drop(output);
 
         let (copied, evidence) = copy_parquet_source(&source, &destination).unwrap();

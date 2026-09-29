@@ -6,6 +6,7 @@ use super::{
     RevertJournalExtension, Serialize, Sha256, StagedParticipant, Uuid, Write, project_error,
     project_failpoint, publication_io,
 };
+use graphforge_filesystem::ObservedSync as _;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -258,7 +259,7 @@ pub(crate) fn publish_atomic_bytes_with_allocation(
         written?;
         observed.map_err(std::io::Error::other)?;
         after_write()?;
-        temp.sync_all()?;
+        temp.observed_sync_all()?;
         if let Some(allocation) = allocation {
             allocation
                 .replace_file_at(&temp_path, &temp)
@@ -365,7 +366,7 @@ pub(super) fn publish_atomic_bytes_in(
         written?;
         observed.map_err(std::io::Error::other)?;
         after_write()?;
-        temp.sync_all()?;
+        temp.observed_sync_all()?;
         if let Some(allocation) = allocation {
             allocation
                 .replace_file_at(&temp_path, &temp)
@@ -568,7 +569,7 @@ pub(super) fn canonical_line<T: Serialize>(value: &T) -> Result<Vec<u8>, GfError
 pub(crate) fn sync_directory(path: &Path) -> Result<(), GfError> {
     let _wait = crate::concurrency_attribution::RegionScope::named("fsync");
     File::open(path)
-        .and_then(|directory| directory.sync_all())
+        .and_then(|directory| directory.observed_sync_all())
         .map_err(publication_io)
 }
 
@@ -586,7 +587,7 @@ pub(crate) fn sync_directory(path: &Path) -> Result<(), GfError> {
         .write(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)
-        .and_then(|directory| directory.sync_all())
+        .and_then(|directory| directory.observed_sync_all())
         .map_err(publication_io)
 }
 

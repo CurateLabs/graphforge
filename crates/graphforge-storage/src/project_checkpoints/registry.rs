@@ -7,6 +7,7 @@ use super::{
     acquire_mutation_locks, delete_request_digest_values, fs, project_error, project_failpoint,
     storage_io, sync_directory, validate_description, validate_name, validate_record_identity,
 };
+use graphforge_filesystem::ObservedSync as _;
 use sha2::Digest as _;
 use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
@@ -292,7 +293,7 @@ fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), GfError> {
     }
     let mut file = options.open(path).map_err(storage_io)?;
     file.write_all(bytes).map_err(storage_io)?;
-    file.sync_all().map_err(storage_io)
+    file.observed_sync_all().map_err(storage_io)
 }
 
 fn prepare_temp_path(path: &Path) -> Result<(), GfError> {

@@ -10,11 +10,12 @@ use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_exec::{ExecutionResult, ExecutionStats};
 #[cfg(feature = "knowledge")]
 use graphforge_knowledge::EPISTEMIC_CAPABILITY_VERSION;
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::{
     ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
     ProjectStageOutcome,
 };
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::GraphForge;

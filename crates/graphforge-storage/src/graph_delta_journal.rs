@@ -4,11 +4,13 @@
 //! inventory-verified graph generation. Derived adjacency deltas remain a
 //! separate rebuildable accelerator (`adjacency_delta`).
 
+use graphforge_filesystem::ObservedSync as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use arrow::array::{
     Array, FixedSizeBinaryArray, ListArray, StringArray, TimestampMicrosecondArray, UInt32Array,
     UInt64Array,
@@ -17,7 +19,7 @@ use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_ir::IrLiteral;
 use graphforge_value::{EntityTypeId, PrimaryEntityTypeId};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::graph_files::{
@@ -1748,7 +1750,7 @@ fn write_prepared_run(
         File::create(&new_path).map_err(|error| storage("create delta run", &new_path, error))?;
     file.write_all(run_bytes)
         .map_err(|error| storage("write delta run", &new_path, error))?;
-    file.sync_all()
+    file.observed_sync_all()
         .map_err(|error| storage("flush delta run", &new_path, error))?;
     Ok(())
 }

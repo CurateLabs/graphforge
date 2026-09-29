@@ -1,12 +1,13 @@
 //! Intent replay, optimistic CURRENT preconditions and post-publication reconciliation.
 use crate::{CancellationToken, GfError, GraphForge};
 use graphforge_core::ProjectErrorCode;
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::research_versions::{
     ResearchMutation, ResearchOperation, ResearchOperationReceipt, ResearchRegistry,
     read_research_registry,
 };
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::path::PathBuf;
 use uuid::Uuid;
 

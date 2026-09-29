@@ -1,11 +1,12 @@
 //! Bounded Arrow views of restore-independent review and accepted provenance.
 use super::{ResearchProposalHistoryDetail, ResearchProposalHistoryRequest, invalid, output::hex};
 use crate::{CancellationToken, ExecutionResult, GfError, GraphForge, branches::fields};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::research_versions::{
     ResearchProposalDecision, ResearchProposalDestination, ResearchProposalItem,
     ResearchProposalRecord, ResearchRegistry,
 };
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::BTreeMap;
 
 type Row = BTreeMap<&'static str, String>;

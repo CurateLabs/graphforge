@@ -136,9 +136,17 @@ gf_rust_integration_test(
     deps = _STORAGE_DEPS,
 )
 
+gf_rust_integration_test(
+    name = "region_work",
+    srcs = ["tests/region_work.rs"],
+    crate = ":graphforge_storage",
+    deps = _STORAGE_DEPS,
+)
+
 test_suite(
     name = "storage_integration_tests",
     tests = [
+        ":region_work",
         ":adjacency_delta_write",
         ":filtered_read",
         ":graph_delta_compaction",

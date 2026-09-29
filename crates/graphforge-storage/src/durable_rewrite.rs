@@ -5,15 +5,17 @@
 //! final authority switch.  Journal paths are bounded, canonical relative
 //! paths and every recovery input is authenticated before it is used.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::path::{Component, Path};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::GfError;
 use graphforge_filesystem::{FileIdentity, StableDirectory};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 static PROCESS_REWRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -340,7 +342,7 @@ fn acquire(root: &Path) -> Result<RewriteGuard, GfError> {
     let lock = directory
         .open_or_create_child_file(std::ffi::OsStr::new(LOCK))
         .map_err(|error| storage(format!("rewrite lock open failed: {error}")))?;
-    lock.sync_all()
+    lock.observed_sync_all()
         .map_err(|error| storage(format!("rewrite lock sync failed: {error}")))?;
     directory
         .sync()
@@ -425,7 +427,7 @@ fn publish_journal(root: &StableDirectory, intent: &Intent) -> Result<(), GfErro
         .create_replaceable_child_file(std::ffi::OsStr::new(&name))
         .map_err(storage)?;
     temp.write_all(&bytes)
-        .and_then(|()| temp.sync_all())
+        .and_then(|()| temp.observed_sync_all())
         .map_err(storage)?;
     let expected = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
     root.replace_child(
@@ -743,7 +745,7 @@ fn initialize_ordinal_writer_lock(root: &StableDirectory) -> Result<(), GfError>
         return Err(storage("ordinal writer lock has invalid link count"));
     }
     let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
-    file.sync_all().map_err(storage)?;
+    file.observed_sync_all().map_err(storage)?;
     directory.sync().map_err(storage)?;
     let named = directory
         .open_child_file(std::ffi::OsStr::new("ordinal-v4.lock"))
@@ -1166,7 +1168,7 @@ fn commit_locked(
         .map_err(storage)?;
     generation
         .write_all(&generation_bytes)
-        .and_then(|()| generation.as_file().sync_all())
+        .and_then(|()| generation.as_file().observed_sync_all())
         .map_err(storage)?;
     staged.push((generation, generation_path));
     if staged.len() > MAX_ENTRIES {
@@ -1177,7 +1179,7 @@ fn commit_locked(
         let relative = canonical_relative(root, destination)?;
         let (parent, target) = retained_parent_at(root, &guard.directory, &relative)?;
         let parent_identity = parent.identity();
-        temp.as_file().sync_all().map_err(storage)?;
+        temp.as_file().observed_sync_all().map_err(storage)?;
         let original = graphforge_filesystem::file_identity(temp.as_file()).map_err(storage)?;
         let durable = temp.path().to_path_buf();
         let temp_relative = canonical_relative(root, &durable)?;

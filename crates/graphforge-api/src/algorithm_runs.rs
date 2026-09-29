@@ -11,11 +11,12 @@ use graphforge_knowledge::{
 use graphforge_provenance::{
     EventKind, LineageRecord, LineageRole, ProvenanceEvent, ProvenanceLedger, SubjectKind,
 };
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::{
     ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectStageOutcome,
     ResolvedProjectGeneration,
 };
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::{Uuid, Version};
 
 use crate::knowledge::{

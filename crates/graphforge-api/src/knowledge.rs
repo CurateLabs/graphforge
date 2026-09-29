@@ -67,13 +67,14 @@ use graphforge_knowledge::{
 use graphforge_provenance::{
     EventKind, LineageRecord, LineageRole, ProvenanceEvent, ProvenanceLedger, SubjectKind,
 };
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::{
     ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
     ProjectStageOutcome, ResolvedProjectGeneration,
 };
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::{CancellationToken, GraphForge, OperationId, PageRequest, PageToken, WriteContext};

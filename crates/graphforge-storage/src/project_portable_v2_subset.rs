@@ -3,8 +3,9 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::graph_projection::{

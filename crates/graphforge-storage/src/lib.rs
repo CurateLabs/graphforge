@@ -137,7 +137,8 @@ pub fn install_project_object_bytes(
     root: &std::path::Path,
     bytes: &[u8],
 ) -> Result<([u8; 32], u64), GfError> {
-    use sha2::{Digest, Sha256};
+    use crate::concurrency_attribution::ObservedSha256 as Sha256;
+    use sha2::Digest;
 
     let digest = Sha256::digest(bytes).into();
     let length = u64::try_from(bytes.len())

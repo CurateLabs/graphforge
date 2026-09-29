@@ -15,9 +15,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::project_generation::{

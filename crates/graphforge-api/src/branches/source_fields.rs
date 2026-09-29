@@ -1,7 +1,8 @@
 //! Effective preference is a semantic value; immutable events retain its history.
 use super::fields::{Fields, Objects, insert};
 use crate::{CancellationToken, GfError, GraphForge};
-use sha2::{Digest, Sha256};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+use sha2::Digest;
 
 pub(super) fn read(
     graph: &GraphForge,

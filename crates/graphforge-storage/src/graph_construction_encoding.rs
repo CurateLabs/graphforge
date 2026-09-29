@@ -4,6 +4,7 @@
 //! It converts the shaper's authenticated, UUID-ordered streams into the exact
 //! ordinary storage schemas and prepares a streamed UUID-membership manifest.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs::File;
@@ -14,6 +15,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::cell::RefCell;
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use crate::construction_detail_codec::DetailCodec;
 use crate::construction_directory::ConstructionDirectory as StableDirectory;
 use arrow::array::{
@@ -31,7 +33,7 @@ use graphforge_ontology::{QualifiedSymbol, SymbolKind};
 use graphforge_value::{EntityTypeId, RelationTypeId, TaggedTypeId};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::graph_construction::{
@@ -2755,7 +2757,7 @@ fn install_json<T: Serialize>(
     serde_json::to_writer(&mut writer, value).map_err(storage)?;
     writer.flush().map_err(storage)?;
     drop(writer);
-    file.sync_all().map_err(storage)?;
+    file.observed_sync_all().map_err(storage)?;
     crate::graph_construction::construction_failpoint(&format!(
         "encode.control.after_temp_fsync.{name}"
     ));

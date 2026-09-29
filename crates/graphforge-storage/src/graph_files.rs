@@ -5,15 +5,17 @@
 //! lengths, digests, roles). Open paths validate inventory against that tree and
 //! never assemble the complete graph into one in-memory Arrow/binary payload.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::canonical::{CANONICAL_CONTRACT_VERSION, CanonicalDomain, fingerprint};
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::project_failpoint;
@@ -1331,7 +1333,7 @@ fn sync_file(path: &Path) -> Result<(), GfError> {
     #[cfg(windows)]
     let file = fs::OpenOptions::new().write(true).open(path);
     let file = file.map_err(|error| storage("open graph file for fsync", path, error))?;
-    file.sync_all()
+    file.observed_sync_all()
         .map_err(|error| storage("fsync graph file", path, error))
 }
 

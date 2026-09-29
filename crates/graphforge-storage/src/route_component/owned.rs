@@ -206,7 +206,8 @@ fn authenticate_staged_inventory_copy(
     source: &crate::graph_files::RetainedV1InventoryEntry,
     expected: &crate::GraphFileEntry,
 ) -> Result<(), GfError> {
-    use sha2::{Digest, Sha256};
+    use crate::concurrency_attribution::ObservedSha256 as Sha256;
+    use sha2::Digest;
     use std::io::Read;
     let current = crate::graph_files::resolve_v1_inventory_entry_retained(root, expected)?;
     if current.identity != source.identity {
@@ -856,7 +857,8 @@ impl PendingRoutes {
         root: &StableDirectory,
         batch: &mut crate::RewriteBatch,
     ) -> Result<Option<TablePrior>, GfError> {
-        use sha2::{Digest, Sha256};
+        use crate::concurrency_attribution::ObservedSha256 as Sha256;
+        use sha2::Digest;
         use std::io::Read;
         if self.routes.is_empty() {
             return Ok(None);
@@ -944,7 +946,8 @@ pub(crate) struct TablePrior {
 
 impl TablePrior {
     pub(crate) fn verify(&self, root: &StableDirectory) -> Result<(), GfError> {
-        use sha2::{Digest, Sha256};
+        use crate::concurrency_attribution::ObservedSha256 as Sha256;
+        use sha2::Digest;
         use std::io::Read;
         let file = root
             .open_child_file(std::ffi::OsStr::new(TABLE_FILE))

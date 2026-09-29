@@ -1,9 +1,10 @@
 //! Canonical content-addressed Patricia manifest for graph files.
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use crate::{GraphFileEntry, GraphFileRole};
 use graphforge_core::GfError;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Canonical v2 compact-root format identifier.

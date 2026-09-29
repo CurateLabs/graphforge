@@ -68,9 +68,10 @@
 use std::io::Read as _;
 use std::path::Path;
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::GfError;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
+use sha2::Digest as _;
 
 use crate::ResolvedProjectGeneration;
 

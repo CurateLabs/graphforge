@@ -297,7 +297,7 @@ fn staged_identity_records(
 
 fn sha256_of_body(body: &[u8]) -> String {
     use sha2::Digest;
-    super::hex(sha2::Sha256::digest(body).as_slice())
+    super::hex(crate::concurrency_attribution::ObservedSha256::digest(body).as_slice())
 }
 
 /// Remove every progress control. Only valid once the shape is complete and

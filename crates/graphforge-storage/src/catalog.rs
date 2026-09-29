@@ -26,6 +26,7 @@
 use self::filtered_parquet::FilteredReadKind;
 use self::filtered_parquet::read_parquet_filtered_u64;
 use self::filtered_parquet::read_required_edge_filtered;
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use crate::schemas::EXPLORATORY_EDGE_SCHEMA;
 use crate::schemas::TOPOLOGY_NODES_SCHEMA;
 use crate::schemas::TYPED_EDGE_SCHEMA;
@@ -50,7 +51,6 @@ use graphforge_value::RuntimeEntityId;
 use graphforge_value::RuntimeRelationId;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use sha2::Digest;
-use sha2::Sha256;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;

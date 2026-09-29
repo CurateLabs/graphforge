@@ -8,6 +8,7 @@ use super::{
     ensure_machine_directory, hex_digest, project_error, project_failpoint, publication_io,
     sync_directory, transaction_conflict,
 };
+use graphforge_filesystem::ObservedSync as _;
 
 pub(super) fn prepare_generation_directory(
     root: &Path,
@@ -307,7 +308,7 @@ pub(super) fn stage_participant_files(
             "STAGED",
             false,
         )?;
-        file.sync_all().map_err(publication_io)?;
+        file.observed_sync_all().map_err(publication_io)?;
         if let Some(allocation) = allocation {
             allocation.replace_file_at(&destination, &file)?;
         }

@@ -48,6 +48,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use arrow::array::{Array, BooleanArray, FixedSizeBinaryArray, RecordBatch};
 use bytes::Bytes;
 use graphforge_core::GfError;
@@ -57,7 +58,7 @@ use parquet::errors::ParquetError;
 use parquet::file::reader::{ChunkReader, Length};
 use parquet::thrift::TSerializable;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 /// On-disk property overlay format marker.

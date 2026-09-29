@@ -1,5 +1,6 @@
 //! Durable caller-facing names for compatibility-addressed embedding spaces.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -650,7 +651,7 @@ fn persist_synced_file(path: &Path, bytes: &[u8]) -> Result<(), SearchArtifactEr
     temp.write_all(bytes)
         .map_err(|source| io("write embedding catalog temp", path, source))?;
     temp.as_file()
-        .sync_all()
+        .observed_sync_all()
         .map_err(|source| io("sync embedding catalog temp", path, source))?;
     temp.persist(path)
         .map_err(|error| io("publish embedding space catalog", path, error.error))?;
@@ -660,7 +661,7 @@ fn persist_synced_file(path: &Path, bytes: &[u8]) -> Result<(), SearchArtifactEr
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), SearchArtifactError> {
     File::open(path)
-        .and_then(|directory| directory.sync_all())
+        .and_then(|directory| directory.observed_sync_all())
         .map_err(|source| io("sync embedding catalog directory", path, source))
 }
 
