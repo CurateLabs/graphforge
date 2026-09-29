@@ -2,6 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "search")]
 use graphforge_search::{
     LazyTextRequest, SearchIndexLimits, SearchIndexRequest, TextIndexFreshnessReason,
     TextIndexFreshnessState, inspect_text_index_freshness, prepare_search_index,
@@ -10,6 +11,7 @@ use graphforge_search::{
 use super::{CancellationToken, GfError, GraphForge, NodeSelector};
 
 /// Statically distinct text-build and vector-upsert options.
+#[cfg(feature = "search")]
 #[derive(Clone, Debug, PartialEq)]
 pub enum SearchIndexOptions {
     /// Build, reuse, or atomically replace a Tantivy text index.
@@ -32,6 +34,7 @@ pub enum SearchIndexOptions {
 }
 
 /// Canonical public text-index build receipt and freshness inspection.
+#[cfg(feature = "search")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextIndexInspection {
     /// Project generation containing the inspected graph/index snapshot.
@@ -75,6 +78,7 @@ pub struct AdjacencyInspection {
     pub reason: Option<graphforge_storage::adjacency::AdjacencyFreshnessReason>,
 }
 
+#[cfg(feature = "search")]
 impl SearchIndexOptions {
     /// Convert binding field presence into one statically distinct search-index variant.
     ///
@@ -128,6 +132,8 @@ impl GraphForge {
     /// unsupported selector, invalid text properties, vector, or space.
     /// Structured storage, execution, and lifecycle errors preserve backend
     /// cancellation, limits, corruption, locking, and concurrent mutation.
+    #[cfg(feature = "search")]
+    #[cfg(feature = "search")]
     pub fn index_search(
         &self,
         label: &str,
@@ -189,6 +195,8 @@ impl GraphForge {
     /// # Errors
     /// Returns structured selector, source, corruption, resource, cancellation,
     /// or repeated-concurrent-mutation errors.
+    #[cfg(feature = "search")]
+    #[cfg(feature = "search")]
     pub fn inspect_text_index(
         &self,
         label: &str,
@@ -512,7 +520,7 @@ fn validation(message: impl Into<String>) -> GfError {
     GfError::Validation(message.into())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "search"))]
 mod tests {
     use std::collections::HashMap;
 

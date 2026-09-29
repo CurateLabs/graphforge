@@ -245,5 +245,5 @@ pub(super) fn build_runtime(
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "knowledge", feature = "provenance"))]
 mod spill_tests;

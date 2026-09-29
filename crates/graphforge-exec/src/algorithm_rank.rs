@@ -10,35 +10,65 @@ mod degree;
 use degree::Degree;
 mod pagerank;
 use pagerank::PageRank;
+#[cfg(feature = "algorithms-extended")]
 mod betweenness;
+#[cfg(feature = "algorithms-extended")]
 use betweenness::Betweenness;
+#[cfg(feature = "algorithms-extended")]
 mod closeness;
+#[cfg(feature = "algorithms-extended")]
 use closeness::Closeness;
+#[cfg(feature = "algorithms-extended")]
 mod harmonic_closeness;
+#[cfg(feature = "algorithms-extended")]
 use harmonic_closeness::HarmonicCloseness;
+#[cfg(feature = "algorithms-extended")]
 mod eigenvector;
+#[cfg(feature = "algorithms-extended")]
 use eigenvector::Eigenvector;
+#[cfg(feature = "algorithms-extended")]
 mod article_rank;
+#[cfg(feature = "algorithms-extended")]
 use article_rank::ArticleRank;
+#[cfg(feature = "algorithms-extended")]
 mod hits;
+#[cfg(feature = "algorithms-extended")]
 use hits::{HitsAuthority, HitsHub};
+#[cfg(feature = "algorithms-extended")]
 mod celf;
+#[cfg(feature = "algorithms-extended")]
 use celf::Celf;
+#[cfg(feature = "algorithms-extended")]
 mod clustering_coefficient;
+#[cfg(feature = "algorithms-extended")]
 use clustering_coefficient::ClusteringCoefficient;
+#[cfg(feature = "algorithms-extended")]
 mod triangles;
+#[cfg(feature = "algorithms-extended")]
 use triangles::Triangles;
+#[cfg(feature = "algorithms-extended")]
 mod k_core;
+#[cfg(feature = "algorithms-extended")]
 use k_core::KCore;
+#[cfg(feature = "algorithms-extended")]
 mod preferential_attachment;
+#[cfg(feature = "algorithms-extended")]
 use preferential_attachment::PreferentialAttachment;
+#[cfg(feature = "algorithms-extended")]
 mod adamic_adar;
+#[cfg(feature = "algorithms-extended")]
 use adamic_adar::AdamicAdar;
+#[cfg(feature = "algorithms-extended")]
 mod common_neighbors;
+#[cfg(feature = "algorithms-extended")]
 use common_neighbors::CommonNeighbors;
+#[cfg(feature = "algorithms-extended")]
 mod resource_allocation;
+#[cfg(feature = "algorithms-extended")]
 use resource_allocation::ResourceAllocation;
+#[cfg(feature = "algorithms-extended")]
 mod total_neighbors;
+#[cfg(feature = "algorithms-extended")]
 use total_neighbors::TotalNeighbors;
 
 use graphforge_value::EntityTypeSelection;
@@ -60,8 +90,12 @@ use crate::algorithm_dispatch::{
     AlgorithmOutput, AlgorithmRegistry, AlgorithmValue, DependencyReview, RustAlgorithm,
 };
 use crate::algorithm_graph::{AdjacencyGraph, AdjacencySelection, export_adjacency};
+#[cfg(feature = "algorithms-extended")]
 use crate::algorithm_k_core::k_core_numbers;
-use crate::algorithm_neighbors::{simple_neighbors, simple_undirected_neighbors};
+#[cfg(feature = "algorithms-extended")]
+use crate::algorithm_neighbors::simple_neighbors;
+#[cfg(feature = "algorithms-extended")]
+use crate::algorithm_neighbors::simple_undirected_neighbors;
 use crate::algorithm_output::{
     materialize_node_properties_with_batch_size, shape_algorithm_output,
 };
@@ -301,22 +335,44 @@ pub(crate) fn register_rank_algorithms(
 ) -> Result<(), AlgorithmError> {
     registry.register(Arc::new(Degree))?;
     registry.register(Arc::new(PageRank))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(Betweenness))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(Closeness))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(HarmonicCloseness))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(Eigenvector))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(ArticleRank))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(HitsHub))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(HitsAuthority))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(Celf))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(ClusteringCoefficient))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(Triangles))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(KCore))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(PreferentialAttachment))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(AdamicAdar))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(CommonNeighbors))?;
+    #[cfg(feature = "algorithms-extended")]
     registry.register(Arc::new(ResourceAllocation))?;
-    registry.register(Arc::new(TotalNeighbors))
+    #[cfg(feature = "algorithms-extended")]
+    {
+        registry.register(Arc::new(TotalNeighbors))
+    }
+    #[cfg(not(feature = "algorithms-extended"))]
+    {
+        Ok(())
+    }
 }
 
 /// Execute a typed rank algorithm through Rust dispatch and return its
@@ -472,7 +528,7 @@ fn execution(message: impl Into<String>) -> AlgorithmError {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "algorithms-extended"))]
 mod tests {
     use super::*;
 

@@ -1,7 +1,7 @@
 # GraphForge Architecture Overview
 
 **Status:** v0.5.0 — Rust core shipped
-**Last Updated:** 2026-08-14
+**Last Updated:** 2026-09-29
 
 > **Implementation status legend** (used across architecture docs): **Shipped** = implemented and
 > tested on `main`; **Partially built** = some paths real, others stubbed; **Designed** = specified,
@@ -168,6 +168,28 @@ Project = Graph (topology + properties)          ← graph layer
 ---
 
 ## Crate dependencies and durable values
+
+### Cargo feature profiles
+
+`graphforge-api` keeps the complete facade enabled by default. Its opt-in surface
+features are `knowledge`, `provenance`, `search`, `portable`, `discovery`, and
+`research`; knowledge implies provenance, and research implies knowledge and
+portable package support. A no-default API build
+retains graph construction, Cypher execution, traversal, and the TCK while
+omitting those extension modules. The CLI and native binding crates explicitly
+enable the full feature set so their public behavior does not depend on Cargo's
+default-feature unification.
+
+`graphforge-exec` separates the rank and clustering registries into
+`algorithms-core` and `algorithms-extended`. The core profile registers Degree,
+PageRank, connected components, and every path algorithm. Extended rank and
+clustering algorithms remain enabled by default for existing consumers. A
+core-only executor returns the normal unavailable-algorithm error for entries
+that are not registered in that profile. CI builds and tests both the lean API
+and core-only executor profiles.
+
+Feature gates control Rust API compilation and algorithm registration; they do
+not change graph storage formats or the Cypher execution pipeline.
 
 The diagram above shows execution flow, not Cargo dependencies. Today storage
 also depends on IR and ontology: `IrLiteral`, tagged runtime IDs and the runtime

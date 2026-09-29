@@ -157,6 +157,7 @@ impl GraphForge {
                 )?;
                 current = self.generation_for_read()?;
             }
+            #[cfg(all(feature = "knowledge", feature = "provenance"))]
             if crate::composite_publish::administrative_contract(&current)?
                 != crate::composite_publish::administrative_contract(&parent)?
             {
@@ -203,7 +204,7 @@ impl GraphForge {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "knowledge", feature = "provenance"))]
 mod tests {
     use super::*;
     use std::collections::HashMap;

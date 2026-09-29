@@ -1015,7 +1015,7 @@ fn hex(bytes: &[u8]) -> String {
     output
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "knowledge", feature = "provenance"))]
 mod tests {
     use graphforge_ontology::{
         ActivationRecord, ActivationScope, AuthoredModule, BridgeAssertion, BridgeDocument,

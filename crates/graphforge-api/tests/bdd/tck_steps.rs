@@ -18,6 +18,22 @@ use cucumber::{given, then, when};
 
 use crate::GraphForgeWorld;
 
+/// The lean TCK runner omits API-only step definitions, so keep this shared
+/// graph fixture available when the optional search feature is disabled.
+#[cfg(not(feature = "search"))]
+#[given("an empty graph")]
+async fn given_empty_graph_without_api_steps(world: &mut GraphForgeWorld) {
+    crate::fixture::replace_with_fresh(&mut world.forge);
+    world.nodes.clear();
+    world.last_error = None;
+    world.last_compile_type_error = false;
+    world.last_names = None;
+    world.last_count = None;
+    world.last_explanation = None;
+    world.last_exec = None;
+    world.params.clear();
+}
+
 // ---------------------------------------------------------------------------
 // GIVEN
 // ---------------------------------------------------------------------------

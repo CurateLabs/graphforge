@@ -1504,7 +1504,7 @@ fn cancelled() -> GfError {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "portable"))]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;

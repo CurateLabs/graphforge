@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 arrow = { workspace = true }
-graphforge-api = { version = "0.5.2", path = "../graphforge-api" }
+graphforge-api = { version = "0.5.2", path = "../graphforge-api", default-features = false, features = ["knowledge", "search", "provenance", "portable", "discovery", "research"] }
 graphforge-discovery = { version = "0.5.2", path = "../graphforge-discovery" }
 clap = { workspace = true }
 fs4 = "1.1"

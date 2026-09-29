@@ -12,6 +12,9 @@ agent_skills=false
 pulumi=false
 terraform=false
 bazel=false
+epistemic_contract=false
+knowledge_contract=false
+non_cypher_surface=false
 
 emit() {
   printf 'rust=%s\n' "$rust"
@@ -22,6 +25,9 @@ emit() {
   printf 'pulumi=%s\n' "$pulumi"
   printf 'terraform=%s\n' "$terraform"
   printf 'bazel=%s\n' "$bazel"
+  printf 'epistemic_contract=%s\n' "$epistemic_contract"
+  printf 'knowledge_contract=%s\n' "$knowledge_contract"
+  printf 'non_cypher_surface=%s\n' "$non_cypher_surface"
 }
 
 enable_all() {
@@ -33,6 +39,9 @@ enable_all() {
   pulumi=true
   terraform=true
   bazel=true
+  epistemic_contract=true
+  knowledge_contract=true
+  non_cypher_surface=true
 }
 
 # Paths that do not affect CI Gate suites. Anything else unmatched must
@@ -97,6 +106,37 @@ if ! git diff --name-only -z "${base_sha}...${head_sha}" >"$changed_files"; then
 fi
 
 while IFS= read -r -d '' path; do
+  case "$path" in
+    crates/graphforge-knowledge/* | crates/graphforge-knowledge/**/* | \
+      crates/graphforge-api/src/knowledge.rs | crates/graphforge-api/src/knowledge/* | \
+      crates/graphforge-api/src/knowledge/**/* | crates/graphforge-api/src/capabilities.rs | \
+      crates/graphforge-bindings-py/src/knowledge* | crates/graphforge-bindings-node/src/knowledge*)
+      knowledge_contract=true
+      ;;
+  esac
+
+  case "$path" in
+    crates/graphforge-api/src/belief_projection.rs | \
+      crates/graphforge-api/src/epistemic_snapshot.rs | \
+      crates/graphforge-api/src/hypotheses.rs | \
+      crates/graphforge-api/src/valid_time.rs | \
+      crates/graphforge-api/src/research_* | crates/graphforge-api/src/research_*/* | \
+      crates/graphforge-api/src/branches/* | crates/graphforge-api/src/slices/* | \
+      crates/graphforge-bindings-py/src/research_* | \
+      crates/graphforge-bindings-node/src/research_*)
+      epistemic_contract=true
+      ;;
+  esac
+
+  case "$path" in
+    crates/graphforge-api/src/* | crates/graphforge-api/src/**/* | \
+      crates/graphforge-api/tests/* | crates/graphforge-api/tests/**/* | \
+      tests/contracts/non-cypher-rust-surface.json | \
+      scripts/ci/non-cypher-surface-gate.py | scripts/ci/test-non-cypher-surface-gate.py)
+      non_cypher_surface=true
+      ;;
+  esac
+
   case "$path" in
     .github/workflows/test.yml | scripts/ci/classify-changes.sh | \
       scripts/ci/test-classify-changes.sh | scripts/ci/require-gates.sh | \

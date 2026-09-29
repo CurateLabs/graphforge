@@ -168,7 +168,7 @@ impl FacadeMutationLifecycle<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "portable"))]
 mod tests {
     use super::*;
     use arrow::array::{FixedSizeBinaryArray, Float64Array, Int64Array};
@@ -497,7 +497,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "portable"))]
 mod recovery_tests {
     use super::*;
     use futures::StreamExt;

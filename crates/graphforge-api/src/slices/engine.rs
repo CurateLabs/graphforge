@@ -306,6 +306,7 @@ fn boundary(
     Ok(())
 }
 
+#[cfg(feature = "search")]
 fn search(
     view: &GraphForge,
     request: &SliceRequest,
@@ -372,4 +373,19 @@ fn search(
         )?;
     }
     Ok(())
+}
+
+#[cfg(not(feature = "search"))]
+fn search(
+    _: &GraphForge,
+    _: &SliceRequest,
+    _: &str,
+    _: &str,
+    _: u32,
+    _: &mut Selection,
+    _: &mut Budget<'_>,
+) -> Result<(), GfError> {
+    Err(GfError::NotImplemented(
+        "slice search requires the `search` feature",
+    ))
 }

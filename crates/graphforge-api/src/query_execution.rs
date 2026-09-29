@@ -506,6 +506,7 @@ impl GraphForge {
                 .as_ref()
                 .is_some_and(|effects| effects != &graphforge_exec::SideEffects::default())
         {
+            #[cfg(feature = "search")]
             self.notice_provider_embedding_mutation();
         }
         Ok(result)

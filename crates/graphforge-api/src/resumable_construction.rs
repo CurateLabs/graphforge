@@ -1,6 +1,6 @@
 //! Public Rust facade for resumable, bounded, disk-owned graph construction.
 
-#[cfg(test)]
+#[cfg(all(test, feature = "portable"))]
 mod codec_tests;
 
 use arrow::record_batch::RecordBatch;

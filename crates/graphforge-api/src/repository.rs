@@ -1151,7 +1151,15 @@ pub struct RepositoryRemoveReceipt {
 
 const DEFAULT_CONFIG: &str = "schema_version: 1\nproject:\n  ontology: .graphforge/ontology\n  schemas: .graphforge/schemas\n  seeds: .graphforge/seeds\n  migrations: .graphforge/migrations\ntargets:\n  local:\n    kind: embedded\n    artifact:\n      kind: native_binary\n      version: 0.5.0-dev\n      sha256: 0000000000000000000000000000000000000000000000000000000000000000\n    write: { mode: single_writer }\n    storage: { kind: local, persistent: true }\n";
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "knowledge",
+    feature = "provenance",
+    feature = "search",
+    feature = "portable",
+    feature = "discovery",
+    feature = "research"
+))]
 mod tests {
     use super::*;
 

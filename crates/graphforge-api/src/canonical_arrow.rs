@@ -433,7 +433,7 @@ pub(crate) enum CanonicalArrowError {
     Temporal,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "search"))]
 mod tests {
     use std::sync::Arc;
 

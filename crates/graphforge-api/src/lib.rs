@@ -16,6 +16,11 @@
 //! `workspace_hydration` owns authenticated read authority; `graph_publication`
 //! owns publication and reset; `runtime_ownership` owns runtime and query admission.
 //!
+//! Cargo defaults preserve the complete public facade. Consumers can use
+//! `--no-default-features` to omit knowledge, search, provenance, portable,
+//! discovery, and research surfaces; CLI and binding crates opt into all of
+//! them explicitly.
+//!
 //! # Milestone status
 //!
 //! - #716 — crate scaffold: [`GraphForge`] relocated here from `graphforge-core`; the
@@ -64,21 +69,30 @@ use sha2::Digest;
 
 #[cfg(test)]
 mod adjacency_rebuild_barrier;
+#[cfg(feature = "search")]
 mod algorithm_embedding_publication;
+#[cfg(all(feature = "knowledge", feature = "provenance"))]
 mod algorithm_runs;
 mod algorithm_writeback;
 mod analyst;
+#[cfg(all(feature = "knowledge", feature = "provenance"))]
 mod belief_projection;
 mod bulk_construction;
 mod canonical_arrow;
 mod capabilities;
+#[cfg(all(feature = "knowledge", feature = "provenance"))]
 mod checkpoint_graph_diff;
+#[cfg(all(feature = "knowledge", feature = "provenance"))]
 mod checkpoints;
+#[cfg(all(feature = "knowledge", feature = "provenance"))]
 mod composite_publish;
+#[cfg(all(feature = "knowledge", feature = "provenance"))]
 mod composite_receipt;
-#[cfg(test)]
+#[cfg(all(test, feature = "knowledge", feature = "provenance"))]
 mod composite_recovery_tests;
+#[cfg(all(feature = "knowledge", feature = "provenance"))]
 mod composite_transaction;
+#[cfg(feature = "knowledge")]
 mod composite_validation;
 #[cfg(test)]
 mod composition_binding_tests;
@@ -86,19 +100,24 @@ mod composition_binding_tests;
 #[doc(hidden)]
 pub mod concurrency_test_support;
 mod construction;
-#[cfg(test)]
+#[cfg(all(test, feature = "knowledge", feature = "provenance"))]
 mod construction_concurrency_tests;
 #[cfg(test)]
 mod construction_ordinal_tests;
 mod decision_results;
-#[cfg(test)]
+#[cfg(all(test, feature = "portable"))]
 mod durability_certification_tests;
+#[cfg(feature = "search")]
 mod embedding_freshness;
+#[cfg(feature = "search")]
 mod embedding_publication;
+#[cfg(feature = "search")]
 mod embedding_refresh;
 mod embedding_spaces;
+#[cfg(feature = "knowledge")]
 mod epistemic_snapshot;
 mod explanation;
+#[cfg(feature = "search")]
 mod find_execution;
 mod generation_diff;
 mod graph_inspection;
@@ -108,21 +127,25 @@ mod graph_snapshot;
 use graph_publication::participant_encoding;
 use graph_publication::{persist_runtime_catalog, system_time_micros};
 mod gsi_profiler;
+#[cfg(feature = "knowledge")]
 mod hypotheses;
 mod import_session;
 mod invocation_descriptor;
+#[cfg(feature = "knowledge")]
 mod knowledge;
 mod maintenance;
-#[cfg(test)]
+#[cfg(all(test, feature = "portable"))]
 mod mapped_portable_tests;
 #[cfg(test)]
 mod mapped_stream_tests;
+#[cfg(feature = "research")]
 mod multi_ontology;
 mod mutation_transaction;
-#[cfg(test)]
+#[cfg(all(test, feature = "knowledge", feature = "provenance"))]
 mod mutation_transaction_fault_tests;
 #[cfg(test)]
 mod permanent_parquet_test_support;
+#[cfg(feature = "research")]
 pub use multi_ontology::{
     ActivationProfileChangeRequest, BridgeAdoptionRequest, BridgeCandidate, BridgeDeleteRequest,
     BridgeUpdateRequest, CompositionValidationReceipt, ModuleAdoptionRequest, ModuleCandidate,
@@ -133,7 +156,7 @@ pub use multi_ontology::{
     OntologyAuthorityExpectation, OntologyAuthorityState, ResolutionExplainRequest,
     ResolutionExplanation,
 };
-#[cfg(test)]
+#[cfg(all(test, feature = "research"))]
 mod multi_process_publication_tests;
 mod node_selector;
 mod ontology_composition_lifecycle;
@@ -143,52 +166,80 @@ pub use ontology_composition_lifecycle::{
     CompositionChangeRequest, CompositionDataDisposition, CompositionPortableCompatibility,
     CompositionPortableReceipt,
 };
+#[cfg(all(feature = "discovery", feature = "portable"))]
 mod discovery_portable_v2;
 mod paging;
+#[cfg(all(feature = "discovery", feature = "portable"))]
 pub use discovery_portable_v2::{
     DiscoveredPortableV2, DiscoveryPortableV2Error, DiscoveryPortableV2Mismatch,
     DiscoveryPortableV2Request, verify_discovered_portable_v2,
 };
+#[cfg(feature = "research")]
 pub use research_project::{DiscoverResearchProjectsRequest, UpdateResearchMetadataRequest};
+#[cfg(feature = "research")]
 mod branches;
+#[cfg(feature = "portable")]
 mod portable;
+#[cfg(feature = "provenance")]
 mod provenance;
+#[cfg(feature = "search")]
 mod provider_embedding;
+#[cfg(feature = "search")]
 mod provider_embedding_execution;
+#[cfg(feature = "search")]
 mod provider_find;
+#[cfg(feature = "search")]
 mod provider_rerank;
+#[cfg(feature = "search")]
 mod provider_session;
 mod query_evidence;
 mod query_execution;
 mod repository;
+#[cfg(feature = "research")]
 mod research_claims;
+#[cfg(feature = "research")]
 mod research_comparison;
+#[cfg(feature = "research")]
 mod research_interchange;
+#[cfg(feature = "research")]
 mod research_proposals;
+#[cfg(feature = "research")]
 mod research_upstream;
+#[cfg(feature = "research")]
 pub use research_claims::{
     ChangeResearchBranchClaimRequest, CreateResearchClaimRequest, InspectResearchClaimsRequest,
     RecordResearchDecisionsRequest, RelateResearchClaimsRequest, ResearchAuthorityQuery,
     ResearchClaimChange, ResearchClaimDraft, ResearchClaimHistoryKind, ResearchClaimHistoryRequest,
     ResearchContext, ResearchDecisionInput,
 };
+#[cfg(feature = "research")]
 pub use research_comparison::*;
+#[cfg(feature = "research")]
 pub use research_interchange::*;
+#[cfg(feature = "research")]
 pub use research_proposals::*;
+#[cfg(feature = "research")]
 pub use research_upstream::*;
+#[cfg(feature = "research")]
 mod research_project;
+#[cfg(feature = "research")]
 mod research_versions;
+#[cfg(feature = "research")]
 pub use branches::{
     BranchSource, BringResearchBranchRequest, ChangeResearchBranchOntologyRequest,
     CreateResearchBranchRequest, ExecuteResearchBranchRequest, ReferenceResearchBranchRequest,
     ResearchBranchView, RestoreResearchBranchRequest, SuppressResearchBranchAssertionRequest,
 };
+#[cfg(feature = "research")]
 mod slices;
+#[cfg(feature = "research")]
 pub use graphforge_storage::research_versions::{
     ResearchMutation, ResearchOperation, ResearchOperationReceipt, ResearchRegistry,
     ResearchRetentionRoot, ResearchRootKind, ResearchVersionRecord,
 };
+#[cfg(feature = "research")]
 pub use research_versions::{PrepareResearchVersionRequest, ResearchVersionView};
+#[cfg(feature = "research")]
 pub use slices::{
     SliceDirection, SliceLimits, SliceMembers, SlicePageKind, SliceRequest, SliceRevisionRequest,
     SliceSelector, SliceSource,
@@ -201,16 +252,25 @@ mod result_shaping;
 mod resumable_construction;
 #[cfg(test)]
 mod same_process_concurrency_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "knowledge", feature = "provenance"))]
 mod schema_inventory;
+#[cfg(feature = "search")]
 mod search_find;
 mod search_index;
+#[cfg(feature = "search")]
 mod search_output;
 #[cfg(test)]
 mod shared_directory_semantics_tests;
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "knowledge",
+    feature = "provenance",
+    feature = "portable"
+))]
 mod stream_cancellation_isolation_tests;
+#[cfg(all(feature = "knowledge", feature = "provenance"))]
 mod transaction;
+#[cfg(feature = "knowledge")]
 mod valid_time;
 mod workspace_hydration;
 #[cfg(test)]
@@ -246,6 +306,8 @@ pub use graphforge_storage::{ProjectVerifyReport, VerifyCategoryCounts};
 pub use graphforge_storage::{
     SemanticMigrationOperation, WorkspaceOntologyComposition, WorkspacePortableOntologyStaging,
 };
+#[cfg(feature = "portable")]
+#[cfg(feature = "portable")]
 pub use portable::{
     PortableExportRequest, PortableExportResult, PortableImportRequest, PortableImportResult,
     PortableSelection, PortableV2ExportFacadeResult, PortableV2ExportReceiptView,
@@ -275,6 +337,7 @@ pub use bulk_construction::{
     ValidatedBulkEdges, ValidatedBulkNodes, bulk_edge_input_schema, bulk_node_input_schema,
     bulk_receipt_schema,
 };
+#[cfg(feature = "knowledge")]
 pub use epistemic_snapshot::EPISTEMIC_SNAPSHOT_POLICY_VERSION;
 pub use graphforge_core::algorithms::{
     Algorithm, AlgorithmField, AlgorithmFieldType, AlgorithmResultSchema, AlgorithmVerb,
@@ -324,9 +387,11 @@ pub use graphforge_storage::{
 };
 // Query parameter literal type (for `execute_with_params`), re-exported so the
 // language bindings can build params without depending on `graphforge-ir` directly.
+#[cfg(all(feature = "knowledge", feature = "provenance"))]
 pub use algorithm_runs::{
     AlgorithmId, ListAlgorithmRunsRequest, RecordedAlgorithmRequest, RecordedAlgorithmResult,
 };
+#[cfg(all(feature = "knowledge", feature = "provenance"))]
 pub use belief_projection::{
     AttachResolvedRunRequest, BELIEF_PROJECTION_POLICY_VERSION, BeliefProjectionPolicyV1,
     BeliefSubjectV1, HypothesisSelectionPolicyV1, ResolveBeliefProjectionRequest,
@@ -337,33 +402,40 @@ pub use belief_projection::{
 pub use capabilities::{
     CapabilityId, EnableCapabilityRequest, KNOWLEDGE_API_VERSION, OperationId, WriteContext,
 };
+#[cfg(all(feature = "knowledge", feature = "provenance"))]
 pub use checkpoints::{
     CheckpointDiffDetail, CheckpointDiffScope, CheckpointRequest, CheckpointSelector,
     CheckpointView, DeleteCheckpointRequest, DiffCheckpointsRequest, ListCheckpointsRequest,
     PreviewRevertCheckpointRequest, RevertCheckpointPreview, RevertCheckpointRequest,
     ShowCheckpointRequest,
 };
+#[cfg(all(feature = "knowledge", feature = "provenance"))]
 pub use composite_receipt::{
     authorize_composite_transaction, composite_generation_uuid, composite_receipt_schema,
 };
+#[cfg(all(feature = "knowledge", feature = "provenance"))]
 pub use composite_transaction::{
     COMPOSITE_KNOWLEDGE_PARTICIPANT_KINDS, COMPOSITE_TRANSACTION_CONTRACT_VERSION,
     CompositeGraphMutation, CompositeKnowledgeParticipants, CompositeTransactionRequest,
     MAX_COMPOSITE_TRANSACTION_ENTRIES,
 };
+#[cfg(feature = "knowledge")]
 pub use composite_validation::{CompositeOntologySnapshot, CompositeValidationSnapshot};
 pub use decision_results::{
     DECISION_BATCH_MAX_ROWS, DecisionBatchV1, DecisionConfidenceV1, DecisionInputIdentityV1,
     DecisionProducerV1, DecisionQuestionKindV1, DecisionQuestionV1, DecisionResultStatusV1,
     DecisionResultV1, DecisionValueV1,
 };
+#[cfg(feature = "search")]
 pub use embedding_freshness::{
     EmbeddingSpaceFreshnessInspection, EmbeddingSpaceFreshnessState, EmbeddingSpaceReadDecision,
 };
+#[cfg(feature = "search")]
 pub use embedding_publication::{
     CallerEmbeddingBatchRequest, CallerEmbeddingBatchRow, CallerEmbeddingDistance,
     CallerEmbeddingNormalization,
 };
+#[cfg(feature = "search")]
 pub use embedding_refresh::{
     EmbeddingRefreshInspection, EmbeddingRefreshWorkerInspection, EmbeddingRefreshWorkerState,
 };
@@ -371,10 +443,12 @@ pub use embedding_spaces::{
     ActiveEmbeddingGenerationInfo, EmbeddingChunkingInfo, EmbeddingSpaceInfo,
     EmbeddingSpaceProducer, EmbeddingTokenCountClass, EmbeddingTokenizerInfo,
 };
+#[cfg(feature = "search")]
 pub use find_execution::{
     FindDiagnostic, FindExecutionOptions, FindExecutionResult, FindRerankOptions,
 };
 pub use graphforge_ir::{IrLiteral, ProcedureDefinition, ProcedureField};
+#[cfg(feature = "knowledge")]
 pub use graphforge_knowledge::{
     ArtifactKind, Assertion, AssertionGraphRef, AssertionGraphRole, AssertionStatus,
     AssertionStatusEvent, AssertionSupersession, AssertionValidityEvent, ConfidenceAssessment,
@@ -384,9 +458,11 @@ pub use graphforge_knowledge::{
     ReasoningKind, ReasoningRecord, SourceKind,
 };
 pub use graphforge_ontology::OntologyDoc;
+#[cfg(feature = "provenance")]
 pub use graphforge_provenance::{
     EventKind, LineageRecord, LineageRole, ProvenanceError, ProvenanceEvent, SubjectKind,
 };
+#[cfg(feature = "search")]
 pub use graphforge_search::{
     CandidateReranker, DocumentEmbeddingOutput, DocumentEmbeddingProvider,
     DocumentEmbeddingRequest, OpenRouterWireLimits, ProviderBatchLimits, ProviderBatchShape,
@@ -396,6 +472,7 @@ pub use graphforge_search::{
     QueryEmbeddingRequest, RerankAdvisoryPolicy, RerankFailurePolicy, RerankOmissionAdvisory,
     RerankOutput, RerankStatus, RerankWorkShape, StandardProviderExecutionRuntime,
 };
+#[cfg(feature = "search")]
 pub use graphforge_search::{TextIndexFreshnessReason, TextIndexFreshnessState};
 pub use graphforge_storage::adjacency::{AdjacencyFreshnessReason, AdjacencyFreshnessState};
 pub use graphforge_storage::{
@@ -412,6 +489,7 @@ pub use graphforge_storage::{
     ProjectRecoveryGenerationClass, ProjectRetentionLimits, ProjectRetentionPolicy,
 };
 pub use gsi_profiler::{GraphScaleIndexProfile, GsiDirectedness, grade_gsi};
+#[cfg(feature = "knowledge")]
 pub use hypotheses::{
     CreateHypothesisGroupRequest, ListHypothesisGroupsRequest, ListHypothesisMembershipRequest,
     ListHypothesisSelectionRequest, RecordHypothesisMembershipRequest,
@@ -422,6 +500,7 @@ pub use invocation_descriptor::{
     InvocationDescriptorError, InvocationError, InvocationParameter,
     algorithm_descriptor_contracts,
 };
+#[cfg(feature = "knowledge")]
 pub use knowledge::{
     ArtifactPayloadRequest, AssertionGraphRefInput, AssessConfidenceRequest, AttachEvidenceRequest,
     ConfidencePolicyRequest, CreateAssertionRequest, CreateAssertionWithEvidenceRequest,
@@ -439,16 +518,21 @@ pub use ontology_lifecycle::{
     RuntimeCatalogSnapshot,
 };
 pub use paging::{CancellationToken, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageRequest, PageToken};
+#[cfg(feature = "provenance")]
 pub use provenance::ProvenanceHistoryRequest;
 pub use resource_policy::{
     ExecutionResourcePolicy, NormalizedResourcePolicy, ResourcePolicyDiagnostics,
     ResourcePolicyMode, SpillPolicy,
 };
-pub use search_index::{AdjacencyInspection, TextIndexInspection};
+pub use search_index::AdjacencyInspection;
+#[cfg(feature = "search")]
+pub use search_index::TextIndexInspection;
+#[cfg(all(feature = "knowledge", feature = "provenance"))]
 pub use transaction::{
     GraphTransaction, MutationFamily, TransactionCommitReceipt, TransactionPhase,
     TransactionStatus, TransactionSupport, transaction_support,
 };
+#[cfg(feature = "knowledge")]
 pub use valid_time::{
     ApplyValidTimeRequest, ListAssertionValidityRequest, RecordAssertionValidityRequest,
     VALID_TIME_POLICY_VERSION,
@@ -471,27 +555,34 @@ fn insert_usize(
     );
     Ok(())
 }
+#[cfg(feature = "search")]
 pub use algorithm_embedding_publication::{
     AlgorithmEmbeddingDistance, AlgorithmEmbeddingNormalization,
     AlgorithmEmbeddingPublicationRequest,
 };
+#[cfg(feature = "search")]
 pub use provider_embedding::{
     ProviderEmbeddingDistance, ProviderEmbeddingNormalization, ProviderEmbeddingPlanError,
     ProviderEmbeddingPlanInspection, ProviderEmbeddingPlanRequest, ProviderEmbeddingPlannedBatch,
 };
+#[cfg(feature = "search")]
 pub use provider_embedding_execution::{
     ProviderArtifactCheckpoint, ProviderEmbeddingExecution, ProviderEmbeddingExecutionError,
     ProviderTokenCounter,
 };
+#[cfg(feature = "search")]
 pub use provider_find::{
     ConfiguredProviderFindRuntime, ProviderFindError, ProviderFindExecution,
     ProviderQueryCostEstimator, ProviderQueryWorkShape,
 };
+#[cfg(feature = "search")]
 pub use provider_rerank::{
     ProviderRerankError, ProviderRerankExecution, ProviderRerankPlanInspection,
     ProviderRerankRequest, ProviderRerankedFindResult,
 };
+#[cfg(feature = "search")]
 pub use provider_session::{OpenRouterProviderSession, OpenRouterProviderSessionConfig};
+#[cfg(feature = "search")]
 pub use search_index::SearchIndexOptions;
 
 // ---------------------------------------------------------------------------
@@ -529,6 +620,7 @@ pub struct GraphForge {
     /// contract: keyed by `(generation_uuid, manifest_sha256)`, so a publish
     /// (which always mints a new `generation_uuid`) is a guaranteed cache
     /// miss rather than a stale hit.
+    #[cfg(feature = "knowledge")]
     epistemic_ledger_cache: Mutex<Option<epistemic_snapshot::EpistemicLedgerCache>>,
     /// Exact generation-pinned ordinal destination identity authority shared
     /// by every fixed-hop session.
@@ -573,10 +665,13 @@ pub struct GraphForge {
     /// Prevent adjacency readers from observing a staged directory swap.
     adjacency_visibility: Arc<std::sync::RwLock<()>>,
     /// Bounded worker state owned only by this exact embedded process.
+    #[cfg(feature = "search")]
     embedding_refresh_scheduler: Arc<Mutex<graphforge_search::EmbeddingRefreshScheduler>>,
     /// Monotonic origin shared by every process-local refresh notice and lease.
+    #[cfg(feature = "search")]
     embedding_refresh_epoch: Instant,
     /// Prevent freshness readers from observing publication/journal relinking mid-transition.
+    #[cfg(feature = "search")]
     embedding_refresh_visibility: Arc<Mutex<()>>,
     /// Pins the in-process graph view across descriptor comparison and
     /// execution, and serializes same-instance graph mutations against replay.
@@ -604,11 +699,14 @@ pub struct GraphForge {
     /// sharing it drops (#1595).
     query_spill: Arc<Mutex<Option<graphforge_storage::query_spill::QuerySpillDirectory>>>,
     /// Ensures mutation bursts share one bounded process-local driver thread.
+    #[cfg(feature = "search")]
     provider_refresh_driver_active: Arc<AtomicBool>,
     /// Runtime-only provider recipes capable of refreshing exact lineages.
+    #[cfg(feature = "search")]
     provider_refresh_runtimes:
         Arc<Mutex<Vec<Arc<provider_session::ConfiguredProviderRefreshRuntime>>>>,
     /// Runtime-only query providers keyed by exact persisted model identity.
+    #[cfg(feature = "search")]
     provider_find_runtimes:
         Arc<Mutex<Vec<Arc<Mutex<provider_find::ConfiguredProviderFindRuntime>>>>>,
     /// Long-lived Tokio runtime that drives the async DataFusion pipeline. Held
@@ -769,6 +867,7 @@ impl GraphForge {
             read_only: false,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
             uuid_membership_index: Mutex::new(None),
+            #[cfg(feature = "knowledge")]
             epistemic_ledger_cache: Mutex::new(None),
             ordinal_identities,
             clock: Mutex::new(Arc::new(system_time_micros)),
@@ -776,10 +875,13 @@ impl GraphForge {
                 adjacency_provider_for_graph(&dir, ontology_mode, Arc::clone(&property_inventory))?,
             ))),
             adjacency_visibility: Arc::new(std::sync::RwLock::new(())),
+            #[cfg(feature = "search")]
             embedding_refresh_scheduler: Arc::new(Mutex::new(
                 embedding_refresh::initialize_embedding_refresh_scheduler(&dir)?,
             )),
+            #[cfg(feature = "search")]
             embedding_refresh_epoch: Instant::now(),
+            #[cfg(feature = "search")]
             embedding_refresh_visibility: Arc::new(Mutex::new(())),
             #[cfg(test)]
             last_mutation_outcome: Mutex::new(None),
@@ -794,8 +896,11 @@ impl GraphForge {
             )?),
             construction_cpu_admission: resource_policy.construction_cpu_admission(),
             query_spill: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "search")]
             provider_refresh_driver_active: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "search")]
             provider_refresh_runtimes: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(feature = "search")]
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
             workspace_guard: Arc::new(RwLock::new(GraphWorkspace {
                 dir,
@@ -1009,15 +1114,19 @@ impl GraphForge {
             read_only,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
             uuid_membership_index: Mutex::new(None),
+            #[cfg(feature = "knowledge")]
             epistemic_ledger_cache: Mutex::new(None),
             ordinal_identities,
             clock: Mutex::new(Arc::new(system_time_micros)),
             adjacency_provider: Arc::new(std::sync::RwLock::new(Arc::new(adjacency_provider))),
             adjacency_visibility: Arc::new(std::sync::RwLock::new(())),
+            #[cfg(feature = "search")]
             embedding_refresh_scheduler: Arc::new(Mutex::new(
                 embedding_refresh::initialize_embedding_refresh_scheduler(&dir)?,
             )),
+            #[cfg(feature = "search")]
             embedding_refresh_epoch: Instant::now(),
+            #[cfg(feature = "search")]
             embedding_refresh_visibility: Arc::new(Mutex::new(())),
             #[cfg(test)]
             last_mutation_outcome: Mutex::new(None),
@@ -1029,8 +1138,11 @@ impl GraphForge {
             heavy_query_admission,
             construction_cpu_admission,
             query_spill: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "search")]
             provider_refresh_driver_active: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "search")]
             provider_refresh_runtimes: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(feature = "search")]
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
             workspace_guard: Arc::new(RwLock::new(GraphWorkspace {
                 dir,
@@ -1051,6 +1163,7 @@ impl GraphForge {
             ontology_mode,
             runtime,
         };
+        #[cfg(all(feature = "knowledge", feature = "provenance"))]
         if !read_only {
             graph.reconcile_algorithm_runs()?;
         }
@@ -1223,7 +1336,15 @@ impl GraphForge {
 // Free helpers
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "knowledge",
+    feature = "provenance",
+    feature = "search",
+    feature = "portable",
+    feature = "discovery",
+    feature = "research"
+))]
 mod tests {
     use super::*;
     use arrow::array::{
@@ -2565,16 +2686,22 @@ mod tests {
     }
 }
 
+#[cfg(feature = "portable")]
 mod portable_oci;
 
+#[cfg(feature = "portable")]
 pub use graphforge_core::portable::{
     PortableV2OciAuthenticityPolicy, PortableV2OciPhase, PortableV2OciProgress,
     PortableV2OciPullReceipt, PortableV2OciReference, PortableV2OciSignatureMaterial,
     PortableV2OciSignatureState,
 };
+#[cfg(feature = "portable")]
 pub use graphforge_portable_oci::{HttpOciRegistry, MemoryOciRegistry, PortableV2OciRegistry};
+#[cfg(feature = "portable")]
 pub use portable_oci::{PortableV2OciPublishRequest, PortableV2OciPullRequest};
 
+#[cfg(feature = "portable")]
 mod allocation_diagnostics;
 #[doc(hidden)]
+#[cfg(feature = "portable")]
 pub use allocation_diagnostics::StorageAllocationDiagnostics;
