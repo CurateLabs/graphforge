@@ -2094,11 +2094,16 @@ mod tests {
         );
         let durable = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
         let import_after = durable.ontology_authority_state().unwrap();
+        // Match the before-snapshot lifetime: an open facade owns a private
+        // hydration workspace in the container until its final handle drops.
+        drop(durable);
         let mut after_entries = std::fs::read_dir(project.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         after_entries.sort();
+        assert_eq!(after_entries, before_entries);
+        assert_eq!(import_after, import_before);
         cases.insert(
             "no_partial_import_or_authority_change".into(),
             serde_json::json!({

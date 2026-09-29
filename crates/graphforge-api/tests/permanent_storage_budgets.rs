@@ -3609,6 +3609,18 @@ fn clear_publication_files(root: &Path) -> BTreeMap<std::path::PathBuf, (String,
     while let Some(directory) = directories.pop() {
         for entry in std::fs::read_dir(directory).unwrap() {
             let path = entry.unwrap().path();
+            // Reader workspaces and per-query scratch now live on the project
+            // volume. They are not publication authority, and an active stream
+            // can remove its scratch while this durable-file snapshot runs.
+            if path.parent() == Some(root)
+                && path.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    name.starts_with("graphforge-graph-workspace-")
+                        || name.starts_with(".gf-property-scratch-")
+                })
+            {
+                continue;
+            }
             if path.is_dir() {
                 directories.push(path);
             } else {

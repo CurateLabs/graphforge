@@ -118,7 +118,9 @@ where
         &captured
     };
     let schema = inventory.route_schema(kind, stem);
-    let scratch = tempfile::tempdir().map_err(|error| io_err(&error))?;
+    let scratch = inventory
+        .create_snapshot_scratch()
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
     let mut rows = Vec::with_capacity(batch_size.max(1));
     let mut stopped = false;
     let metrics = inventory
@@ -294,7 +296,9 @@ where
         .routes(crate::property_overlay::PropertyRouteKind::Node)
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let scratch = tempfile::tempdir().map_err(|error| io_err(&error))?;
+    let scratch = inventory
+        .create_snapshot_scratch()
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
     let mut stopped = false;
     for route in routes {
         let mut rows = Vec::with_capacity(batch_size.max(1));
