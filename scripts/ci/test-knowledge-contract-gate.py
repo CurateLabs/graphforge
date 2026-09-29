@@ -37,7 +37,7 @@ def expect_gate_error(matrix: dict[str, object]) -> None:
 
 def main() -> None:
     validated = GATE.validate_matrix()
-    assert len(validated["matrix"]["cases"]) == 17
+    assert len(validated["matrix"]["cases"]) == 15
 
     missing = copy.deepcopy(validated["matrix"])
     missing["cases"].pop()
@@ -82,12 +82,12 @@ def main() -> None:
         GATE.build_report(sha, fragments, output)
         report = json.loads((output / "knowledge-contract-gate-report.json").read_text())
         assert report["commit_sha"] == sha
-        assert report["summary"] == {"total": 17, "passed": 17, "failed": 0}
+        assert report["summary"] == {"total": 15, "passed": 15, "failed": 0}
         assert all(case["outcome"] == "success" for case in report["cases"])
 
-        stale_fragment = json.loads((fragments / "node.json").read_text(encoding="utf-8"))
+        stale_fragment = json.loads((fragments / "rust.json").read_text(encoding="utf-8"))
         stale_fragment["commands"][0]["command"] = "stale command"
-        (fragments / "node.json").write_text(json.dumps(stale_fragment), encoding="utf-8")
+        (fragments / "rust.json").write_text(json.dumps(stale_fragment), encoding="utf-8")
         try:
             GATE.build_report(sha, fragments, output)
         except GATE.GateError:

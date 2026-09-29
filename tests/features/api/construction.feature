@@ -65,10 +65,3 @@ Feature: Graph Construction API
       | missing     |
       | ambiguous   |
       | cross-graph |
-
-  @binding-only
-  Scenario: Closed instances reject path selectors before coercion
-    Given Person nodes named "Alice" and "Bob"
-    And the forge instance is closed
-    When I request "bfs" paths using "UUID" selectors
-    Then a LifecycleError is raised

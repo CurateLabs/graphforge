@@ -1,20 +1,6 @@
 @api @lifecycle
 Feature: Lifecycle State
 
-  @binding-only
-  Scenario Outline: LifecycleError on <method> after close
-    Given a graph with a Person node named "Alice"
-    And the forge instance is closed
-    When I attempt to call <method>
-    Then a LifecycleError is raised
-
-    Examples:
-      | method                                    |
-      | execute with query "MATCH (n) RETURN n"   |
-      | rank with label "Person" by "pagerank"    |
-      | find with text "Alice" in label "Person"  |
-      | add_node with label "Person" named "Bob"  |
-
   Scenario: StorageError when clear is called on a persistent instance
     Given a persistent graph backed by Parquet
     When I call clear

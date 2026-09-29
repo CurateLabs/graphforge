@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MATRIX_PATH = ROOT / "tests/contracts/epistemic-contract-matrix.json"
 KNOWLEDGE_INVENTORY = ROOT / "docs/reference/knowledge-schema-inventory.json"
 EPISTEMIC_INVENTORY = ROOT / "docs/reference/epistemic-schema-inventory.json"
-GROUPS = {"rust", "python", "node"}
+GROUPS = {"rust"}
 KNOWLEDGE_BASELINE_SHA = "9ba4a3cd70b117e02c2494b68385a2b2f6308dc8"
 KNOWLEDGE_BASELINE_INVENTORY_SHA256 = (
     "49681ad89ba2840211bcb1619c5ff2a0ceb6d4f3c7b4e24d2098dd30f4f8c1d0"
@@ -132,7 +132,7 @@ def validate_matrix() -> dict[str, Any]:
         raise GateError("matrix knowledge baseline SHA drifted")
     commands = matrix.get("command_groups")
     if not isinstance(commands, dict) or set(commands) != GROUPS:
-        raise GateError("command groups must be exactly rust, python, and node")
+        raise GateError("command groups must be exactly rust")
     for group, entries in commands.items():
         if not isinstance(entries, list) or not entries:
             raise GateError(f"{group}: command group must be non-empty")
@@ -173,8 +173,8 @@ def validate_matrix() -> dict[str, Any]:
         if not isinstance(tests, list) or not tests:
             raise GateError(f"{case_id}: exact test IDs are required")
         test_ids[case_id] = [validate_test(test, case_id) for test in tests]
-    if not {"rust", "python", "node"} <= surfaces:
-        raise GateError("matrix omits a public binding surface")
+    if "rust" not in surfaces:
+        raise GateError("matrix omits the Rust behavior oracle")
     if not surfaces >= REQUIRED_ALGORITHM_SURFACES:
         raise GateError("matrix omits one or more public algorithm families")
     algorithm_case = next(case for case in cases if case["id"] == "algorithm-resolved-equivalence")

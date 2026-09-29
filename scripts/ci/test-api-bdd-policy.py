@@ -28,8 +28,6 @@ class ApiBddPolicyMutationTests(unittest.TestCase):
         for relative in (
             "tests/features/api",
             "tests/contracts/api-bdd-exclusions.json",
-            "tests/features/conftest.py",
-            "tests/features/steps/api_steps.py",
             "tests/features/node/step_definitions/api_steps.ts",
             "crates/graphforge-api/tests/bdd/api_steps.rs",
         ):
@@ -96,6 +94,15 @@ class ApiBddPolicyMutationTests(unittest.TestCase):
         path.write_text(json.dumps(inventory))
         self.assert_rejected("missing from inventory")
 
+    def test_api_scenarios_are_rust_only(self) -> None:
+        counts, errors = POLICY.validate(self.root)
+        self.assertEqual(errors, [])
+        binding_only = counts["binding_only_not_applicable_to_rust"]
+        self.assertEqual(binding_only, 0)
+        self.assertEqual(counts["required"]["python"], 0)
+        self.assertEqual(counts["required"]["node"], 0)
+        self.assertGreater(counts["required"]["rust"], 0)
+
     def test_inventory_must_be_an_object(self) -> None:
         path = self.root / "tests/contracts/api-bdd-exclusions.json"
         path.write_text("[]")
@@ -132,11 +139,6 @@ class ApiBddPolicyMutationTests(unittest.TestCase):
         path.write_text(path.read_text().replace("@api", "@api @binding-only", 1))
         self.assert_rejected("unapproved binding-only classification")
 
-    def test_python_not_implemented_conversion_is_rejected(self) -> None:
-        path = self.root / "tests/features/conftest.py"
-        path.write_text(path.read_text() + "\npytest.xfail('NotImplementedError')\n")
-        self.assert_rejected("forbidden fail-open pattern")
-
     def test_node_pending_result_is_rejected(self) -> None:
         path = self.root / "tests/features/node/step_definitions/api_steps.ts"
         path.write_text(path.read_text() + '\nreturn "pending";\n')
@@ -146,11 +148,6 @@ class ApiBddPolicyMutationTests(unittest.TestCase):
         path = self.root / "crates/graphforge-api/tests/bdd/api_steps.rs"
         path.write_text(path.read_text() + '\nworld.last_error = Some("not implemented".into());\n')
         self.assert_rejected("forbidden fail-open pattern")
-
-    def test_required_step_source_cannot_be_removed(self) -> None:
-        path = self.root / "tests/features/steps/api_steps.py"
-        path.unlink()
-        self.assert_rejected("required step source is missing")
 
 
 if __name__ == "__main__":

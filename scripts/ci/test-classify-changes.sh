@@ -31,7 +31,7 @@ assert_classification() {
     cd "$fixture"
     "$classifier" "$base" HEAD
   )
-  actual_core=$(printf '%s\n' "$actual" | sed -n '1,8p')
+  actual_core=$(printf '%s\n' "$actual" | sed -n '1,7p')
   if [[ "$actual_core" != "$expected" ]]; then
     printf 'unexpected classification for %s\nexpected:\n%s\nactual:\n%s\n' \
       "$path" "$expected" "$actual" >&2
@@ -53,7 +53,7 @@ assert_feature_classification() {
 
   actual=$(
     cd "$fixture"
-    "$classifier" "$base" HEAD | sed -n '9,11p'
+    "$classifier" "$base" HEAD | sed -n '8,10p'
   )
   if [[ "$actual" != "$expected" ]]; then
     printf 'unexpected feature classification for %s\nexpected:\n%s\nactual:\n%s\n' \
@@ -63,25 +63,24 @@ assert_feature_classification() {
   git -C "$fixture" reset --hard -q "$base"
 }
 
-none=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
+none=$'rust=false\npython=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
 # After #4 cutover, rust classification always enables Bazel authority.
-rust_only=$'rust=true\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
-python_only=$'rust=false\npython=true\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
-gherkin_rust=$'rust=true\npython=false\ngherkin=true\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
-binding_rust=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
-binding_python=$'rust=false\npython=true\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
-binding_rust_python=$'rust=true\npython=true\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
-binding_only=$'rust=false\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
-binding_agent_skills=$'rust=false\npython=false\ngherkin=false\nbindings=true\nagent_skills=true\npulumi=false\nterraform=false\nbazel=false'
-agent_skills_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=true\npulumi=false\nterraform=false\nbazel=false'
-pulumi_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=false\nbazel=false'
-terraform_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=true\nbazel=false'
-binding_iac=$'rust=false\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=true\nterraform=true\nbazel=false'
-rust_binding_iac=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=true\nterraform=true\nbazel=true'
-rust_iac=$'rust=true\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=true\nbazel=true'
-all=$'rust=true\npython=true\ngherkin=true\nbindings=true\nagent_skills=true\npulumi=true\nterraform=true\nbazel=true'
-bazel_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
-rust_bindings_bazel=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
+rust_only=$'rust=true\npython=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
+python_only=$'rust=false\npython=true\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
+binding_rust=$'rust=true\npython=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
+binding_python=$'rust=false\npython=true\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
+binding_rust_python=$'rust=true\npython=true\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
+binding_only=$'rust=false\npython=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
+binding_agent_skills=$'rust=false\npython=false\nbindings=true\nagent_skills=true\npulumi=false\nterraform=false\nbazel=false'
+agent_skills_only=$'rust=false\npython=false\nbindings=false\nagent_skills=true\npulumi=false\nterraform=false\nbazel=false'
+pulumi_only=$'rust=false\npython=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=false\nbazel=false'
+terraform_only=$'rust=false\npython=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=true\nbazel=false'
+binding_iac=$'rust=false\npython=false\nbindings=true\nagent_skills=false\npulumi=true\nterraform=true\nbazel=false'
+rust_binding_iac=$'rust=true\npython=false\nbindings=true\nagent_skills=false\npulumi=true\nterraform=true\nbazel=true'
+rust_iac=$'rust=true\npython=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=true\nbazel=true'
+all=$'rust=true\npython=true\nbindings=true\nagent_skills=true\npulumi=true\nterraform=true\nbazel=true'
+bazel_only=$'rust=false\npython=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
+rust_bindings_bazel=$'rust=true\npython=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
 
 assert_feature_classification $'epistemic_contract=false\nknowledge_contract=false\nnon_cypher_surface=false' \
   crates/graphforge-storage/src/lib.rs storage-only
@@ -103,7 +102,7 @@ assert_classification "$binding_only" \
 assert_classification "$binding_only" \
   scripts/ci/verify-node-cli-release-package.mjs cli-release-verifier
 assert_classification "$binding_rust" tests/contracts/checkpoint-recovery-matrix.json checkpoint-recovery-fixture
-assert_classification "$gherkin_rust" tests/features/tck/features/query.feature gherkin
+assert_classification "$rust_only" tests/features/api/errors.feature api-feature
 assert_classification "$binding_python" tests/unit/kernel_test.py python-test
 assert_classification "$python_only" scripts/some_tool.py python-only
 assert_classification "$binding_python" examples/basic_usage.py python-binding-example
@@ -193,7 +192,7 @@ git -C "$fixture" add Cargo.toml
 git -C "$fixture" commit -qm "change license metadata"
 metadata_actual=$(
   cd "$fixture"
-  "$classifier" "$base" HEAD | sed -n '1,8p'
+  "$classifier" "$base" HEAD | sed -n '1,7p'
 )
 [[ "$metadata_actual" == "$none" ]] || {
   printf 'license-only manifest edit must be metadata-only, got:\n%s\n' \
@@ -208,7 +207,7 @@ git -C "$fixture" add Cargo.toml
 git -C "$fixture" commit -qm "change dependency"
 manifest_actual=$(
   cd "$fixture"
-  "$classifier" "$base" HEAD | sed -n '1,8p'
+  "$classifier" "$base" HEAD | sed -n '1,7p'
 )
 [[ "$manifest_actual" == "$rust_bindings_bazel" ]] || {
   printf 'dependency manifest edit must run Rust, bindings, and Bazel drift, got:\n%s\n' \
@@ -219,7 +218,7 @@ git -C "$fixture" reset --hard -q "$base"
 
 missing=$(
   cd "$fixture"
-  "$classifier" deadbeef HEAD | sed -n '1,8p'
+  "$classifier" deadbeef HEAD | sed -n '1,7p'
 )
 [[ "$missing" == "$all" ]] || {
   printf 'missing base must fail safe, got:\n%s\n' "$missing" >&2
@@ -231,7 +230,7 @@ missing=$(
 grep -Fq '"${{ github.event.pull_request.base.sha }}"' "$workflow"
 empty=$(
   cd "$fixture"
-  "$classifier" "" HEAD | sed -n '1,8p'
+  "$classifier" "" HEAD | sed -n '1,7p'
 )
 [[ "$empty" == "$all" ]] || {
   printf 'empty base must fail safe, got:\n%s\n' "$empty" >&2

@@ -521,6 +521,7 @@ Graph9 - Retrieve all properties as a property map:66:[3] `properties()` on null
 Graph9 - Retrieve all properties as a property map:79:[4] `properties()` on a map
 Graph9 - Retrieve all properties as a property map:90:[5] `properties()` failing on an integer literal
 Graph9 - Retrieve all properties as a property map:98:[6] `properties()` failing on a string literal
+GraphForge Cypher result goldens:3:ordered property rows match the expected Arrow values
 List1 - Dynamic Element Access:112:[6] Fail when indexing a non-list #Example: boolean
 List1 - Dynamic Element Access:113:[6] Fail when indexing a non-list #Example: integer
 List1 - Dynamic Element Access:114:[6] Fail when indexing a non-list #Example: float

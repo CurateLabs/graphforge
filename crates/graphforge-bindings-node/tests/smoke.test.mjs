@@ -1,7 +1,16 @@
 // Minimal clean-build acceptance for the freshly built native addon.
 
 import assert from "node:assert/strict";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
+import { join } from "node:path";
 import { test } from "node:test";
 import { tableFromIPC } from "apache-arrow";
 import { GraphForge, version } from "../index.js";
@@ -33,13 +42,34 @@ function checkConstruction() {
 
 function checkConstructionError() {
   // A real fault preserves the Rust stable I/O code.
+  let missingPathError;
   try {
     new GraphForge("/no/such/dir/graphforge-node-smoke");
   } catch (e) {
-    assert.equal(e.code, "GF_IO", `got code=${e.code}`);
-    return;
+    missingPathError = e;
   }
-  throw new Error("expected GF_IO for a missing path");
+  assert.equal(
+    missingPathError?.code,
+    "GF_IO",
+    `got code=${missingPathError?.code}`,
+  );
+
+  // The stable legacy-format error must leave the old project untouched.
+  const project = mkdtempSync(join(process.cwd(), "graphforge-legacy-smoke-"));
+  try {
+    const topology = join(project, "topology");
+    mkdirSync(topology);
+    const nodes = join(topology, "nodes.parquet");
+    writeFileSync(nodes, "legacy");
+    assert.throws(
+      () => new GraphForge(project),
+      (error) => error.code === "GF_UNSUPPORTED_PROJECT_FORMAT",
+    );
+    assert.equal(readFileSync(nodes, "utf8"), "legacy");
+    assert.equal(existsSync(join(project, "FORMAT")), false);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
 }
 
 function checkExecute() {
@@ -313,6 +343,18 @@ function checkLifecycle() {
     () => forge.paths("not-a-uuid", null, "bfs"),
     (error) => error.code === "LifecycleError",
   );
+  assert.throws(
+    () => forge.execute("MATCH (n) RETURN n"),
+    (error) => error.code === "LifecycleError",
+  );
+  assert.throws(
+    () => forge.rank("Person", "pagerank"),
+    (error) => error.code === "LifecycleError",
+  );
+  assert.throws(
+    () => forge.find("Alice", "Person"),
+    (error) => error.code === "LifecycleError",
+  );
   try {
     forge.explain("MATCH (n) RETURN n.node_uuid AS id");
   } catch (e) {
@@ -322,11 +364,28 @@ function checkLifecycle() {
   throw new Error("expected LifecycleError after close()");
 }
 
+function checkTypeMapping() {
+  const forge = new GraphForge();
+  const alice = forge.addNode("Person", { name: "Alice" });
+  assert.throws(
+    () => forge.addEdge(1, "KNOWS", alice, {}),
+    (error) => error instanceof TypeError,
+  );
+  assert.throws(
+    () => forge.addEdge(alice, "KNOWS", 1, {}),
+    (error) => error instanceof TypeError,
+  );
+  assert.throws(
+    () => forge.addNode("Person", { unsupported: () => {} }),
+    (error) => error instanceof TypeError,
+  );
+}
+
 test("module interop", checkModuleInterop);
 test("version", checkVersion);
 test("construction", checkConstruction);
 test("construction error", checkConstructionError);
 test("execute", checkExecute);
 test("typed UUID parameters", checkTypedUuidParameters);
-test("project capabilities", checkProjectCapabilities);
 test("lifecycle", checkLifecycle);
+test("type mapping", checkTypeMapping);

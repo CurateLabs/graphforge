@@ -23,8 +23,6 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Prepare native test temporary storage
-        run: python3 scripts/test_environment.py --github-env "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
@@ -37,60 +35,10 @@ jobs:
           path: gate-fragments/
           key: epistemic-transfer-${{ github.run_id }}-rust
 
-  python:
-    name: Python contract rows
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Prepare native test temporary storage
-        run: python3 scripts/test_environment.py --github-env "$GITHUB_ENV"
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-        with:
-          enable-cache: true
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.13"
-      - name: Execute Python matrix group
-        run: python3 scripts/ci/epistemic-contract-gate.py run-group --group python --output gate-fragments
-      - name: Save Python evidence for report job
-        if: always()
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: gate-fragments/
-          key: epistemic-transfer-${{ github.run_id }}-python
-
-  node:
-    name: Node contract rows
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 35
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_PROFILE_DEV_DEBUG: 0
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Prepare native test temporary storage
-        run: python3 scripts/test_environment.py --github-env "$GITHUB_ENV"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "20"
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
-        with:
-          toolchain: "1.96.0"
-      - name: Execute Node matrix group
-        run: python3 scripts/ci/epistemic-contract-gate.py run-group --group node --output gate-fragments
-      - name: Save Node evidence for report job
-        if: always()
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: gate-fragments/
-          key: epistemic-transfer-${{ github.run_id }}-node
-
   report:
     name: SHA-bound closure report
     if: always() && (github.event_name == 'workflow_dispatch' || inputs.require_closure_report)
-    needs: [rust, python, node]
+    needs: [rust]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -98,16 +46,6 @@ jobs:
         with:
           path: gate-fragments
           key: epistemic-transfer-${{ github.run_id }}-rust
-          fail-on-cache-miss: true
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: gate-fragments
-          key: epistemic-transfer-${{ github.run_id }}-python
-          fail-on-cache-miss: true
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: gate-fragments
-          key: epistemic-transfer-${{ github.run_id }}-node
           fail-on-cache-miss: true
       - name: Build exact closure report
         run: >-

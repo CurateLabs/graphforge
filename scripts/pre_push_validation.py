@@ -686,26 +686,11 @@ def stages() -> tuple[Stage, ...]:
             profile_isolation=True,
         ),
         Stage(
-            "api-bdd-acceptance",
-            commands=(
-                ("uv", "run", "--no-sync", "python", "scripts/ci/test-api-bdd-mutations.py"),
-            ),
-            dependencies=("rust-tests-coverage-native", "policy-static"),
-            inputs=inputs(
-                "tests/**/*.py",
-                "tests/**/*.rs",
-                "tests/**/*.feature",
-                "scripts/ci/test-api-bdd-mutations.py",
-            ),
-            profile_isolation=True,
-        ),
-        Stage(
             "final-thresholds",
             commands=(("make", "check-coverage"),),
             dependencies=(
                 "python-wrapper-coverage",
                 "node-wrapper-coverage",
-                "api-bdd-acceptance",
             ),
             inputs=inputs("scripts/check-coverage-rust.sh"),
             profile_isolation=True,

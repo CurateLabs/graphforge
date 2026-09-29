@@ -1,7 +1,8 @@
 # openCypher TCK — vendored corpus
 
 Vendored snapshot of the openCypher Technology Compatibility Kit (TCK) Gherkin feature files.
-`tests/features/tck/features` symlinks here (`../../tck/features`).
+The canonical upstream corpus is `features/`; GraphForge-specific Cypher golden
+features live under `features/graphforge/` and run only in the Rust TCK harness.
 
 - **Source:** <https://github.com/opencypher/openCypher> (`tck/features/`)
 - **Pinned revision:** tag **`2024.3`** (commit `677cbaf`)
@@ -10,11 +11,15 @@ Vendored snapshot of the openCypher Technology Compatibility Kit (TCK) Gherkin f
 
 ## Local modification
 
-Every feature is tagged **`@skip-rust @skip-node`** at the feature level so the Rust
-(`crates/graphforge-api/tests/bdd/`) and Node (`tests/features/node/`) BDD suites treat all TCK scenarios as
-skipped until conformance tiers land (TCK conformance: #597–#601, #608). Tags are removed tier-by-tier as
-scenarios start passing. Files are otherwise upstream, except **line endings** normalized to LF
-(9 upstream files shipped as CRLF).
+Every upstream feature retains the snapshot's **`@skip-rust @skip-node`** tags.
+The Rust runner deliberately runs the full corpus and gates the passing set;
+Node does not load the TCK corpus. Upstream files are otherwise unchanged,
+except **line endings** normalized to LF (9 upstream files shipped as CRLF).
+
+GraphForge-specific goldens use the same TCK-style Gherkin and expected result
+tables, but live under `features/graphforge/` so they remain separate from the
+upstream snapshot. They are included by the Rust TCK runner and its passing
+scenario baseline; the Python and Node suites do not execute them.
 
 > **Gherkin-parser note (#886).** The Rust `gherkin` 0.14 parser rejects a scenario whose *first*
 > step uses the `And`/`But` continuation keyword (e.g. `Match5.feature`'s scenario-leading
@@ -25,13 +30,14 @@ scenarios start passing. Files are otherwise upstream, except **line endings** n
 
 ## Re-vendoring
 
-Bump the pinned tag, re-extract `tck/features/` from the upstream tarball into this directory, then
-re-apply the `@skip-rust @skip-node` feature tags:
+Bump the pinned tag, re-extract upstream `tck/features/` into `features/`, then
+re-apply the `@skip-rust @skip-node` feature tags. Do not replace or overwrite
+the GraphForge-specific `features/graphforge/` directory:
 
 ```bash
 gh api repos/opencypher/openCypher/tarball/<tag> | tar xz -C /tmp/oc
 cp -R /tmp/oc/opencypher-openCypher-*/tck/features/. tests/tck/features/
-find tests/tck/features -name '*.feature' -print0 | while IFS= read -r -d '' f; do
+find tests/tck/features -path 'tests/tck/features/graphforge' -prune -o -name '*.feature' -print0 | while IFS= read -r -d '' f; do
   awk 'BEGIN{d=0} /^Feature:/&&!d{print "@skip-rust @skip-node"; d=1} {print}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
 done
 ```
