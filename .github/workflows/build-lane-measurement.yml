@@ -54,7 +54,7 @@ jobs:
       # Warm mechanism 1: persistent target/ volume (the Blacksmith Cargo
       # cache pattern this repository already uses for coverage).
       - name: Mount sticky target/ disk
-        if: inputs.cache != 'cold'
+        if: inputs.cache == 'sticky'
         uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
         with:
           key: ${{ github.repository }}-${{ inputs.sticky_key }}
