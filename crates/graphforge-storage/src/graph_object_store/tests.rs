@@ -28,6 +28,78 @@ use crate::graph_object_store::read_graph_object_by_digest;
 use crate::graph_object_store::try_begin_graph_object_gc;
 use crate::graph_object_store::verify_graph_object;
 
+#[test]
+fn checksum_admission_hashes_no_payload_bytes_and_full_verification_keeps_sha256() {
+    let root = tempfile::tempdir().unwrap();
+    let payload = vec![0x5a; BUFFER_BYTES + 17];
+    let (digest, evidence) = install_graph_object_bytes(root.path(), &payload).unwrap();
+    let entry = crate::GraphFileEntry {
+        relative_path: "topology/nodes.parquet".into(),
+        byte_length: payload.len() as u64,
+        content_sha256: digest,
+        content_xxh64: evidence.content_xxh64,
+        role: crate::GraphFileRole::Topology,
+    };
+    assert_eq!(
+        entry.content_xxh64,
+        Some(crate::corruption_checksum::checksum(&payload))
+    );
+    crate::payload_digest::take_hashed_bytes();
+    admit_graph_object(root.path(), &entry).unwrap();
+    assert_eq!(crate::payload_digest::take_hashed_bytes(), 0);
+    verify_graph_object(root.path(), &entry.content_sha256, entry.byte_length).unwrap();
+    assert_eq!(
+        crate::payload_digest::take_hashed_bytes(),
+        entry.byte_length
+    );
+    let mut legacy = entry.clone();
+    legacy.content_xxh64 = None;
+    admit_graph_object(root.path(), &legacy).unwrap();
+    assert_eq!(
+        crate::payload_digest::take_hashed_bytes(),
+        entry.byte_length
+    );
+
+    let object = graph_object_path(root.path(), &entry.content_sha256).unwrap();
+    let identity = graphforge_filesystem::path_identity(&object).unwrap();
+    let mut corrupted = payload;
+    corrupted[BUFFER_BYTES] ^= 1;
+    corrupt_sealed_graph_object_for_test(&object, &corrupted);
+    assert_eq!(
+        graphforge_filesystem::path_identity(&object).unwrap(),
+        identity
+    );
+    assert_eq!(std::fs::metadata(&object).unwrap().len(), entry.byte_length);
+    assert!(admit_graph_object(root.path(), &entry).is_err());
+    assert_eq!(crate::payload_digest::take_hashed_bytes(), 0);
+    assert!(verify_graph_object(root.path(), &entry.content_sha256, entry.byte_length).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn file_install_captures_checksum_in_its_existing_single_payload_read_pass() {
+    let root = tempfile::tempdir().unwrap();
+    let source = tempfile::NamedTempFile::new().unwrap();
+    let payload = vec![0xa5; BUFFER_BYTES + 17];
+    fs::write(source.path(), &payload).unwrap();
+    let digest = hex_digest(Sha256::digest(&payload).into());
+    let lease = begin_graph_object_publication(root.path()).unwrap();
+    crate::payload_digest::take_hashed_bytes();
+    let installed =
+        install_graph_object_file_with_lease(&lease, source.path(), &digest, payload.len() as u64)
+            .unwrap();
+    assert_eq!(
+        crate::payload_digest::take_hashed_bytes(),
+        payload.len() as u64
+    );
+    assert_eq!(installed.read_calls, 2);
+    assert_eq!(installed.bytes_hashed, payload.len() as u64);
+    assert_eq!(
+        installed.content_xxh64,
+        Some(crate::corruption_checksum::checksum(&payload))
+    );
+}
+
 pub(super) fn assert_injected_error(error: GfError, boundary: &str) {
     match error {
         GfError::Storage(message) => assert_eq!(
@@ -242,6 +314,7 @@ fn pure_reads_require_only_existing_digest_namespace_and_never_create() {
             format: "graphforge-graph-files".into(),
             format_version: 1,
             files: vec![crate::GraphFileEntry {
+                content_xxh64: None,
                 relative_path: "payload.bin".into(),
                 byte_length: payload.len() as u64,
                 content_sha256: digest.clone(),

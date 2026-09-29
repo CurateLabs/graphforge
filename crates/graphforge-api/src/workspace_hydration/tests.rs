@@ -13,7 +13,8 @@ fn publish_compact_graph_workspace(project: &Path, workspace: &Path) {
     let lease = graphforge_storage::begin_graph_object_publication(project).unwrap();
     let mut state = graphforge_storage::GraphManifestState::empty();
     let (inventory, _) = graphforge_storage::capture_graph_files(workspace).unwrap();
-    let mapped = inventory.format_version == graphforge_storage::GRAPH_FILES_MAPPED_RECORD_VERSION;
+    let mapped =
+        inventory.format_version == graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION;
     let paths = inventory
         .files
         .into_iter()
@@ -23,7 +24,7 @@ fn publish_compact_graph_workspace(project: &Path, workspace: &Path) {
         graphforge_storage::append_graph_files_v2(&lease, workspace, &mut state, &paths, &[])
             .unwrap();
     if mapped {
-        root.format_version = graphforge_storage::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION;
+        root.format_version = graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION;
     }
     let participant = ProjectParticipant {
         capability_id: graphforge_storage::GRAPH_CAPABILITY_ID.into(),
@@ -34,7 +35,7 @@ fn publish_compact_graph_workspace(project: &Path, workspace: &Path) {
         schema_fingerprint: fingerprint(
             CanonicalDomain::Schema,
             CANONICAL_CONTRACT_VERSION,
-            if mapped { b"graphforge-graph-files-root/4|root_node_sha256|logical_file_count|logical_byte_length|semantic-routes/1" } else { b"graphforge-graph-files-root/2|root_node_sha256|logical_file_count|logical_byte_length" },
+            if mapped { b"graphforge-graph-files-root/8|root_node_sha256|logical_file_count|logical_byte_length|xxh64/1|semantic-routes/1" } else { b"graphforge-graph-files-root/6|root_node_sha256|logical_file_count|logical_byte_length|xxh64/1" },
         )
         .unwrap(),
         row_count: root.logical_file_count,

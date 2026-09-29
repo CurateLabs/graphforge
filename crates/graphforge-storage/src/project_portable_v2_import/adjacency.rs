@@ -45,6 +45,8 @@ pub(super) fn persist_import_adjacency(
         participant.participant.record_version,
         crate::GRAPH_FILES_V2_RECORD_VERSION
             | crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+            | crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+            | crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
     ) {
         return Ok(0);
     }

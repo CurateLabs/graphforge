@@ -53,6 +53,7 @@ Roadmap-only ADRs are not retained in this tree.
 | 0045 | [Ingest authentication regime — hash once on write, verify at trust boundaries](0045-ingest-authentication-regime.md) | `0045-ingest-authentication-regime.md` |
 | 0046 | [Construction keeps its own sorting, partitioning and admission; library reuse is bounded to named hybrids](0046-construction-reuse-decisions.md) | `0046-construction-reuse-decisions.md` |
 | 0047 | [Over-budget construction partitions succeed; one CPU budget per instance](0047-over-budget-partitions-and-instance-cpu-budget.md) | `0047-over-budget-partitions-and-instance-cpu-budget.md` |
+| 0048 | [Versioned checksums for published graph payload admission](0048-published-payload-checksums.md) | `0048-published-payload-checksums.md` |
 
 ## Superseded records
 

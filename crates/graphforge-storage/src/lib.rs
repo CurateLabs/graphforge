@@ -66,6 +66,7 @@ mod construction_record_layout;
 mod corruption_checksum;
 pub mod graph_construction;
 mod graph_construction_encoding;
+mod payload_digest;
 pub use graph_construction::cpu_admission::{ConstructionCpuAdmission, ConstructionCpuLease};
 pub use graph_construction::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkKind,
@@ -80,7 +81,9 @@ pub mod graph_files;
 #[cfg(test)]
 pub(crate) use graph_files::graph_files_root_participant;
 pub use graph_files::{
-    GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GRAPH_FILES_IO_BUFFER_BYTES,
+    GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_CHECKSUM_RECORD_VERSION,
+    GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION, GRAPH_FILES_FAMILY, GRAPH_FILES_IO_BUFFER_BYTES,
+    GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION, GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION,
     GRAPH_FILES_MAPPED_RECORD_VERSION, GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION,
     GRAPH_FILES_RECORD_VERSION, GRAPH_FILES_V2_RECORD_VERSION, GRAPH_TREE_DIR, GraphFileEntry,
     GraphFileRole, GraphFilesInventory, GraphFilesOpenEvidence, GraphFilesOpenStrategy,
@@ -98,11 +101,11 @@ mod graph_manifest;
 #[cfg(any(test, feature = "test-support"))]
 pub use graph_manifest::encode_root as encode_graph_files_root_v2;
 pub(crate) use graph_manifest::{
-    GRAPH_FILES_V2_FORMAT, GRAPH_FILES_V2_VERSION, GRAPH_MANIFEST_NODE_FORMAT,
-    GRAPH_MANIFEST_NODE_VERSION, GRAPH_RADIX_DEPTH, GraphFilesRootV2, GraphManifestLimits,
-    GraphManifestNode, GraphManifestNodeKind, GraphManifestResolveEvidence,
-    decode_node as decode_graph_manifest_node, decode_root as decode_graph_files_root_v2,
-    encode_node as encode_graph_manifest_node, resolve_manifest as resolve_graph_manifest,
+    GRAPH_FILES_V2_FORMAT, GRAPH_MANIFEST_NODE_FORMAT, GRAPH_MANIFEST_NODE_VERSION,
+    GRAPH_RADIX_DEPTH, GraphFilesRootV2, GraphManifestLimits, GraphManifestNode,
+    GraphManifestNodeKind, GraphManifestResolveEvidence, decode_node as decode_graph_manifest_node,
+    decode_root as decode_graph_files_root_v2, encode_node as encode_graph_manifest_node,
+    resolve_manifest as resolve_graph_manifest,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use graph_manifest::{

@@ -1308,12 +1308,14 @@ fn gapped_run_sequence_in_inventory_fails_closed() {
         format_version: 1,
         files: vec![
             GraphFileEntry {
+                content_xxh64: None,
                 relative_path: delta_run_relative_path(1),
                 byte_length: 1,
                 content_sha256: "a".repeat(64),
                 role: GraphFileRole::Delta,
             },
             GraphFileEntry {
+                content_xxh64: None,
                 relative_path: delta_run_relative_path(3),
                 byte_length: 2,
                 content_sha256: "b".repeat(64),

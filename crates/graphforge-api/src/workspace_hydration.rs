@@ -395,6 +395,8 @@ pub(super) fn hydrate_graph_workspace(
             files.record_version,
             graphforge_storage::GRAPH_FILES_V2_RECORD_VERSION
                 | graphforge_storage::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
         ) {
             let inventory = generation
                 .graph_files_inventory()?
@@ -471,7 +473,11 @@ fn validate_graph_files_snapshot(
             graphforge_storage::GRAPH_FILES_RECORD_VERSION
                 | graphforge_storage::GRAPH_FILES_V2_RECORD_VERSION
                 | graphforge_storage::GRAPH_FILES_MAPPED_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_CHECKSUM_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
                 | graphforge_storage::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
         )
         || files.encoding != "json"
     {
@@ -615,6 +621,8 @@ pub(crate) fn rematerialize_graph_workspace(
             files.record_version,
             graphforge_storage::GRAPH_FILES_V2_RECORD_VERSION
                 | graphforge_storage::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
         ) {
             let inventory = generation
                 .graph_files_inventory()?

@@ -16,9 +16,9 @@ use uuid::Uuid;
 
 use crate::graph_manifest::verify_object_bytes;
 use crate::{
-    GRAPH_FILES_V2_FORMAT, GRAPH_FILES_V2_VERSION, GRAPH_MANIFEST_NODE_FORMAT,
-    GRAPH_MANIFEST_NODE_VERSION, GRAPH_RADIX_DEPTH, GraphFilesInventory, GraphFilesOpenEvidence,
-    GraphFilesOpenStrategy, GraphFilesRootV2, GraphManifestNode, GraphManifestNodeKind,
+    GRAPH_FILES_V2_FORMAT, GRAPH_MANIFEST_NODE_FORMAT, GRAPH_MANIFEST_NODE_VERSION,
+    GRAPH_RADIX_DEPTH, GraphFilesInventory, GraphFilesOpenEvidence, GraphFilesOpenStrategy,
+    GraphFilesRootV2, GraphManifestNode, GraphManifestNodeKind,
 };
 use graphforge_filesystem::StableDirectory;
 use parquet::file::reader::{ChunkReader, Length};
@@ -587,6 +587,8 @@ pub fn graph_object_publication_is_live(root: &Path) -> Result<bool, GfError> {
 /// Exact application-observed work for one object installation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GraphObjectInstallEvidence {
+    /// XXH64 of the authenticated bytes, captured in an existing read pass.
+    pub content_xxh64: Option<u64>,
     /// Source payload bytes read and hashed.
     pub bytes_hashed: u64,
     /// Logical payload bytes newly installed into the object store.
@@ -928,6 +930,56 @@ pub fn read_graph_object(
 pub fn verify_graph_object(root: &Path, digest: &str, expected_length: u64) -> Result<(), GfError> {
     let cas = ReadOnlyCasRoot::open(root)?;
     verify_file(cas.open_digest(digest)?, digest, expected_length, root)
+}
+
+/// Admit a payload under its versioned corruption checksum. Legacy entries
+/// retain their explicit SHA-256 admission; full verify always uses SHA-256.
+pub(crate) fn admit_graph_object(
+    root: &Path,
+    entry: &crate::GraphFileEntry,
+) -> Result<(), GfError> {
+    let Some(expected) = entry.content_xxh64 else {
+        return verify_graph_object(root, &entry.content_sha256, entry.byte_length);
+    };
+    let cas = ReadOnlyCasRoot::open(root)?;
+    let file = cas.open_digest(&entry.content_sha256)?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| storage("inspect checksum payload", root, error))?;
+    if !metadata.is_file() || metadata.len() != entry.byte_length {
+        return Err(validation(
+            "graph payload length does not match checksum inventory",
+        ));
+    }
+    let mut file = graphforge_filesystem::FileCacheReleasingReader::new(file)
+        .map_err(|error| storage("open bounded checksum payload", root, error))?;
+    let checked = crate::graph_files::checksum_reader(&mut file, root);
+    let released = file
+        .finish()
+        .map_err(|error| storage("release checksum payload cache", root, error));
+    let (actual, calls) = match (checked, released) {
+        (Ok(value), Ok(_)) => value,
+        (Err(primary), Ok(_)) | (Ok(_), Err(primary)) => return Err(primary),
+        (Err(primary), Err(release)) => {
+            return Err(storage(
+                "checksum and release graph payload",
+                root,
+                format!("{primary}; {release}"),
+            ));
+        }
+    };
+    if actual != expected {
+        return Err(validation(
+            "graph payload XXH64 checksum does not match its inventory",
+        ));
+    }
+    crate::lifecycle_io::record_read(
+        crate::StorageIoPhase::HydrationVerification,
+        entry.byte_length,
+        calls,
+    );
+    crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
+    Ok(())
 }
 
 pub(crate) fn verify_graph_object_with_lease(
@@ -1379,6 +1431,7 @@ fn checked_read_io_sum(
     right: ReadIoEvidence,
 ) -> Result<ReadIoEvidence, GfError> {
     Ok(ReadIoEvidence {
+        content_xxh64: right.content_xxh64.or(left.content_xxh64),
         bytes: left
             .bytes
             .checked_add(right.bytes)
@@ -1403,6 +1456,7 @@ fn verify_file(
 struct ReadIoEvidence {
     bytes: u64,
     calls: u64,
+    content_xxh64: Option<u64>,
 }
 
 fn verify_file_counted(
@@ -1421,7 +1475,8 @@ fn verify_file_counted(
     }
     let mut file = graphforge_filesystem::FileCacheReleasingReader::new(file)
         .map_err(|error| storage("open bounded graph object handle", diagnostic, error))?;
-    let mut hasher = Sha256::new();
+    let mut hasher = crate::payload_digest::PayloadSha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut io = ReadIoEvidence::default();
     let mut buffer = vec![0_u8; BUFFER_BYTES];
     let verified = (|| -> Result<(), GfError> {
@@ -1444,10 +1499,12 @@ fn verify_file_counted(
                 .checked_add(1)
                 .ok_or_else(|| validation("object authentication read calls overflow"))?;
             hasher.update(&buffer[..read]);
+            checksum.update(&buffer[..read]);
         }
         if hex_digest(hasher.finalize().into()) != digest {
             return Err(validation("graph object digest does not match its address"));
         }
+        io.content_xxh64 = Some(checksum.finish());
         Ok(())
     })();
     let released = file.finish().map_err(|error| {
@@ -1492,7 +1549,8 @@ fn verify_stream_counted(
     expected_length: u64,
     diagnostic: &Path,
 ) -> Result<ReadIoEvidence, GfError> {
-    let mut hasher = Sha256::new();
+    let mut hasher = crate::payload_digest::PayloadSha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut total = 0_u64;
     let mut calls = 0_u64;
     let mut buffer = vec![0_u8; BUFFER_BYTES];
@@ -1513,6 +1571,7 @@ fn verify_stream_counted(
             .checked_add(1)
             .ok_or_else(|| validation("object stream call count overflows"))?;
         hasher.update(&buffer[..read]);
+        checksum.update(&buffer[..read]);
     }
     if total != expected_length || hex_digest(hasher.finalize().into()) != digest {
         return Err(validation("graph object digest does not match its address"));
@@ -1522,6 +1581,7 @@ fn verify_stream_counted(
     Ok(ReadIoEvidence {
         bytes: total,
         calls,
+        content_xxh64: Some(checksum.finish()),
     })
 }
 
@@ -1529,7 +1589,7 @@ fn hash_regular_file(path: &Path) -> Result<([u8; 32], ReadIoEvidence), GfError>
     let mut file =
         File::open(path).map_err(|error| storage("open sealed graph file", path, error))?;
     let mut io = ReadIoEvidence::default();
-    let mut hasher = Sha256::new();
+    let mut hasher = crate::payload_digest::PayloadSha256::new();
     let mut buffer = vec![0_u8; BUFFER_BYTES];
     loop {
         let read = file

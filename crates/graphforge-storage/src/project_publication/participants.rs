@@ -66,7 +66,11 @@ pub(super) fn stage_optional_graph_tree(
             crate::GRAPH_FILES_RECORD_VERSION
                 | crate::GRAPH_FILES_V2_RECORD_VERSION
                 | crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
+                | crate::graph_files::GRAPH_FILES_CHECKSUM_RECORD_VERSION
+                | crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
                 | crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+                | crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+                | crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
         )
         || files_participant.encoding != ProjectParticipantEncoding::Json.extension()
     {

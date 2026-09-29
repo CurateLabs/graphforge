@@ -227,13 +227,9 @@ pub(super) fn materialize_graph_snapshot(
     target: &Path,
 ) -> Result<(), GfError> {
     let (files, _) = graph_closure(root, graph.record_version, &graph.bytes, None)?;
-    let inventory_version = if matches!(
-        graph.record_version,
-        crate::GRAPH_FILES_MAPPED_RECORD_VERSION | crate::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
-    ) {
-        crate::GRAPH_FILES_MAPPED_RECORD_VERSION
-    } else {
-        crate::GRAPH_FILES_RECORD_VERSION
+    let inventory_version = match graph.record_version {
+        1 | 3 | 5 | 7 => graph.record_version,
+        version => crate::graph_files::expanded_version_for_root(version)?,
     };
     let inventory =
         crate::graph_files::inventory_from_entries_with_version(files, inventory_version)?;
@@ -276,7 +272,7 @@ pub(super) fn install_graph(
     workspace: &Path,
     inventory: &crate::GraphFilesInventory,
 ) -> Result<crate::GraphFilesRootV2, GfError> {
-    if inventory.format_version == crate::GRAPH_FILES_MAPPED_RECORD_VERSION {
+    if crate::graph_files::inventory_is_mapped(inventory.format_version) {
         let routes = crate::graph_files::authenticate_route_table(workspace, inventory)?;
         let paths = inventory
             .files

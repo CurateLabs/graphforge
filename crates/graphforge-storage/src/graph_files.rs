@@ -33,6 +33,14 @@ pub const GRAPH_FILES_V2_RECORD_VERSION: u32 = 2;
 pub const GRAPH_FILES_MAPPED_RECORD_VERSION: u32 = 3;
 /// Compact root with authenticated semantic route components.
 pub const GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION: u32 = 4;
+/// Expanded inventory carrying versioned payload corruption checksums.
+pub const GRAPH_FILES_CHECKSUM_RECORD_VERSION: u32 = 5;
+/// Compact root whose payload entries carry corruption checksums.
+pub const GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION: u32 = 6;
+/// Expanded checksum inventory with semantic routes.
+pub const GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION: u32 = 7;
+/// Compact checksum root with semantic routes.
+pub const GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION: u32 = 8;
 /// Generation-owned directory holding graph workspace files.
 pub const GRAPH_TREE_DIR: &str = "graph";
 
@@ -49,6 +57,51 @@ const GRAPH_FILES_V2_SCHEMA_CANONICAL_BYTES: &[u8] =
 const MAPPED_FILES_SCHEMA: &[u8] =
     b"graphforge-graph-files/3|relative_path|byte_length|content_sha256|role|semantic-routes/1";
 const MAPPED_ROOT_SCHEMA: &[u8] = b"graphforge-graph-files-root/4|root_node_sha256|logical_file_count|logical_byte_length|semantic-routes/1";
+const CHECKSUM_FILES_SCHEMA: &[u8] =
+    b"graphforge-graph-files/5|relative_path|byte_length|content_sha256|content_xxh64|role";
+const CHECKSUM_ROOT_SCHEMA: &[u8] = b"graphforge-graph-files-root/6|root_node_sha256|logical_file_count|logical_byte_length|xxh64/1";
+const MAPPED_CHECKSUM_FILES_SCHEMA: &[u8] = b"graphforge-graph-files/7|relative_path|byte_length|content_sha256|content_xxh64|role|semantic-routes/1";
+const MAPPED_CHECKSUM_ROOT_SCHEMA: &[u8] = b"graphforge-graph-files-root/8|root_node_sha256|logical_file_count|logical_byte_length|xxh64/1|semantic-routes/1";
+
+pub(crate) const fn inventory_has_checksums(version: u32) -> bool {
+    matches!(
+        version,
+        GRAPH_FILES_CHECKSUM_RECORD_VERSION | GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
+    )
+}
+
+pub(crate) const fn inventory_is_mapped(version: u32) -> bool {
+    matches!(
+        version,
+        GRAPH_FILES_MAPPED_RECORD_VERSION | GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
+    )
+}
+
+pub(crate) const fn root_has_checksums(version: u32) -> bool {
+    matches!(
+        version,
+        GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION | GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
+    )
+}
+
+pub(crate) const fn root_is_mapped(version: u32) -> bool {
+    matches!(
+        version,
+        GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION | GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
+    )
+}
+
+pub(crate) fn expanded_version_for_root(version: u32) -> Result<u32, GfError> {
+    match version {
+        GRAPH_FILES_V2_RECORD_VERSION => Ok(GRAPH_FILES_RECORD_VERSION),
+        GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION => Ok(GRAPH_FILES_MAPPED_RECORD_VERSION),
+        GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION => Ok(GRAPH_FILES_CHECKSUM_RECORD_VERSION),
+        GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION => {
+            Ok(GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION)
+        }
+        _ => Err(unsupported_version(version)),
+    }
+}
 
 /// Logical role inferred from a contained relative workspace path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -77,6 +130,14 @@ pub struct GraphFileEntry {
     pub byte_length: u64,
     /// SHA-256 of exact file bytes (64 lowercase hex characters).
     pub content_sha256: String,
+    /// XXH64, seed zero, for read-time corruption detection. Required by
+    /// checksum-format inventories; absent only in explicit legacy formats.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::corruption_checksum::optional_hex"
+    )]
+    pub content_xxh64: Option<u64>,
     /// Logical role for observability and validation.
     pub role: GraphFileRole,
 }
@@ -192,10 +253,11 @@ pub fn inventory_participant(
         schema_fingerprint: fingerprint(
             CanonicalDomain::Schema,
             CANONICAL_CONTRACT_VERSION,
-            if version == GRAPH_FILES_MAPPED_RECORD_VERSION {
-                MAPPED_FILES_SCHEMA
-            } else {
-                GRAPH_FILES_SCHEMA_CANONICAL_BYTES
+            match version {
+                GRAPH_FILES_CHECKSUM_RECORD_VERSION => CHECKSUM_FILES_SCHEMA,
+                GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION => MAPPED_CHECKSUM_FILES_SCHEMA,
+                GRAPH_FILES_MAPPED_RECORD_VERSION => MAPPED_FILES_SCHEMA,
+                _ => GRAPH_FILES_SCHEMA_CANONICAL_BYTES,
             },
         )
         .map_err(|error| GfError::Validation(error.to_string()))?,
@@ -217,10 +279,11 @@ pub(crate) fn graph_files_root_participant(
         schema_fingerprint: fingerprint(
             CanonicalDomain::Schema,
             CANONICAL_CONTRACT_VERSION,
-            if root.format_version == GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION {
-                MAPPED_ROOT_SCHEMA
-            } else {
-                GRAPH_FILES_V2_SCHEMA_CANONICAL_BYTES
+            match root.format_version {
+                GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION => CHECKSUM_ROOT_SCHEMA,
+                GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION => MAPPED_CHECKSUM_ROOT_SCHEMA,
+                GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION => MAPPED_ROOT_SCHEMA,
+                _ => GRAPH_FILES_V2_SCHEMA_CANONICAL_BYTES,
             },
         )
         .map_err(|error| GfError::Validation(error.to_string()))?,
@@ -271,8 +334,10 @@ pub(crate) fn decode_graph_files_participant(
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| validation("graph files participant format_version is missing"))?;
     match (format, version) {
-        (GRAPH_FILES_FORMAT, 1 | 3) => decode_inventory(bytes).map(GraphFilesParticipant::V1),
-        (crate::GRAPH_FILES_V2_FORMAT, 2 | 4) => {
+        (GRAPH_FILES_FORMAT, 1 | 3 | 5 | 7) => {
+            decode_inventory(bytes).map(GraphFilesParticipant::V1)
+        }
+        (crate::GRAPH_FILES_V2_FORMAT, 2 | 4 | 6 | 8) => {
             crate::decode_graph_files_root_v2(bytes).map(GraphFilesParticipant::V2)
         }
         _ => Err(GfError::Project {
@@ -495,7 +560,7 @@ pub fn verify_graph_tree(
             ));
         }
     }
-    if inventory.format_version == GRAPH_FILES_MAPPED_RECORD_VERSION {
+    if inventory_is_mapped(inventory.format_version) {
         authenticate_route_table(graph_root, inventory)?;
     }
     if observed != resolved {
@@ -513,7 +578,7 @@ pub(crate) fn authenticate_route_table(
 ) -> Result<crate::route_component::RouteTable, GfError> {
     use std::io::{Seek, SeekFrom};
     const MAX_TABLE_BYTES: u64 = 64 * 1024 * 1024;
-    if inventory.format_version != GRAPH_FILES_MAPPED_RECORD_VERSION {
+    if !inventory_is_mapped(inventory.format_version) {
         return Err(corrupt(
             "raw graph layout cannot authorize semantic route decoding",
         ));
@@ -823,16 +888,25 @@ fn build_inventory_for_owned_layout(
                 (*known_length == byte_length).then(|| known_digest.clone())
             },
         );
-        let content_sha256 = if let Some(digest) = reused_digest {
-            digest
+        let (content_sha256, content_xxh64) = if let Some(digest) = reused_digest {
+            let mut file =
+                File::open(&path).map_err(|error| storage("open graph file", &path, error))?;
+            let (checksum, calls) = checksum_reader(&mut file, &path)?;
+            read_calls = read_calls
+                .checked_add(calls)
+                .ok_or_else(|| resource_limit("graph files checksum read calls overflow"))?;
+            (digest, checksum)
         } else {
-            let (digest, file_read_calls) = hash_file_counted(&path)?;
+            let mut file =
+                File::open(&path).map_err(|error| storage("open graph file", &path, error))?;
+            let (digest, checksum, file_read_calls) = hash_reader_with_checksum(&mut file, &path)?;
             read_calls = read_calls
                 .checked_add(file_read_calls)
                 .ok_or_else(|| resource_limit("graph files authentication read calls overflow"))?;
-            hex_digest(digest)
+            (hex_digest(digest), checksum)
         };
         files.push(GraphFileEntry {
+            content_xxh64: Some(content_xxh64),
             relative_path: relative_text,
             byte_length,
             content_sha256,
@@ -845,16 +919,16 @@ fn build_inventory_for_owned_layout(
             .iter()
             .any(|entry| entry.relative_path == crate::route_component::TABLE_FILE)
         {
-            GRAPH_FILES_MAPPED_RECORD_VERSION
+            GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
         } else {
-            GRAPH_FILES_FORMAT_VERSION
+            GRAPH_FILES_CHECKSUM_RECORD_VERSION
         },
         file_count: u64::try_from(files.len()).unwrap_or(u64::MAX),
         total_byte_length: total,
         files,
     };
     validate_inventory_contract(&inventory)?;
-    if inventory.format_version == GRAPH_FILES_MAPPED_RECORD_VERSION {
+    if inventory_is_mapped(inventory.format_version) {
         authenticate_route_table(source_root, &inventory)?;
     }
     for (path, identity) in temporaries {
@@ -925,11 +999,14 @@ fn validate_inventory_contract(inventory: &GraphFilesInventory) -> Result<(), Gf
     }
     if !matches!(
         inventory.format_version,
-        GRAPH_FILES_FORMAT_VERSION | GRAPH_FILES_MAPPED_RECORD_VERSION
+        GRAPH_FILES_FORMAT_VERSION
+            | GRAPH_FILES_MAPPED_RECORD_VERSION
+            | GRAPH_FILES_CHECKSUM_RECORD_VERSION
+            | GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
     ) {
         return Err(unsupported_version(inventory.format_version));
     }
-    if inventory.format_version == GRAPH_FILES_FORMAT_VERSION
+    if !inventory_is_mapped(inventory.format_version)
         && inventory
             .files
             .iter()
@@ -939,7 +1016,7 @@ fn validate_inventory_contract(inventory: &GraphFilesInventory) -> Result<(), Gf
             "raw graph layout contains reserved semantic route authority",
         ));
     }
-    if inventory.format_version == GRAPH_FILES_MAPPED_RECORD_VERSION
+    if inventory_is_mapped(inventory.format_version)
         && !inventory
             .files
             .iter()
@@ -962,6 +1039,11 @@ fn validate_inventory_contract(inventory: &GraphFilesInventory) -> Result<(), Gf
     let mut seen = HashSet::new();
     let mut canonical_destinations = HashSet::new();
     for entry in &inventory.files {
+        if inventory_has_checksums(inventory.format_version) != entry.content_xxh64.is_some() {
+            return Err(corrupt(
+                "graph inventory version does not match its payload checksum metadata",
+            ));
+        }
         if previous.is_some_and(|value| value >= entry.relative_path.as_str()) {
             return Err(validation(
                 "graph files inventory paths are duplicate or non-canonical",
@@ -970,7 +1052,7 @@ fn validate_inventory_contract(inventory: &GraphFilesInventory) -> Result<(), Gf
         if !seen.insert(entry.relative_path.as_str()) {
             return Err(validation("graph files inventory contains duplicate paths"));
         }
-        let canonical_destination = if inventory.format_version == GRAPH_FILES_FORMAT_VERSION {
+        let canonical_destination = if !inventory_is_mapped(inventory.format_version) {
             let _ = inventory_relative_path_candidates(&entry.relative_path)?;
             legacy_route_destination(&entry.relative_path)?
         } else {
@@ -1248,7 +1330,7 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<CopyIoEvidence
 
 fn hash_file_io_counted(path: &Path) -> Result<([u8; 32], u64, u64), GfError> {
     let mut file = File::open(path).map_err(|error| storage("open graph file", path, error))?;
-    let mut digest = Sha256::new();
+    let mut digest = crate::payload_digest::PayloadSha256::new();
     let mut bytes = 0_u64;
     let mut calls = 0_u64;
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
@@ -1301,13 +1383,22 @@ fn hash_file(path: &Path) -> Result<[u8; 32], GfError> {
     hash_file_counted(path).map(|(digest, _)| digest)
 }
 
+#[cfg(test)]
 fn hash_file_counted(path: &Path) -> Result<([u8; 32], u64), GfError> {
     let mut file = File::open(path).map_err(|error| storage("open graph file", path, error))?;
     hash_reader(&mut file, path)
 }
 
 fn hash_reader(file: &mut File, path: &Path) -> Result<([u8; 32], u64), GfError> {
-    let mut hasher = Sha256::new();
+    hash_reader_with_checksum(file, path).map(|(digest, _, calls)| (digest, calls))
+}
+
+fn hash_reader_with_checksum(
+    file: &mut File,
+    path: &Path,
+) -> Result<([u8; 32], u64, u64), GfError> {
+    let mut hasher = crate::payload_digest::PayloadSha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut read_calls = 0_u64;
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
     loop {
@@ -1321,8 +1412,28 @@ fn hash_reader(file: &mut File, path: &Path) -> Result<([u8; 32], u64), GfError>
             .checked_add(1)
             .ok_or_else(|| resource_limit("graph file authentication read calls overflow"))?;
         hasher.update(&buffer[..read]);
+        checksum.update(&buffer[..read]);
     }
-    Ok((hasher.finalize().into(), read_calls))
+    Ok((hasher.finalize().into(), checksum.finish(), read_calls))
+}
+
+pub(crate) fn checksum_reader(file: &mut impl Read, path: &Path) -> Result<(u64, u64), GfError> {
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut calls = 0_u64;
+    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| storage("read graph payload checksum", path, error))?;
+        if read == 0 {
+            break;
+        }
+        checksum.update(&buffer[..read]);
+        calls = calls
+            .checked_add(1)
+            .ok_or_else(|| resource_limit("graph payload checksum read calls overflow"))?;
+    }
+    Ok((checksum.finish(), calls))
 }
 
 fn sync_file(path: &Path) -> Result<(), GfError> {
@@ -1535,9 +1646,12 @@ pub(crate) fn resolve_v1_inventory_entry_retained(
         if graphforge_filesystem::path_identity(&path).ok() != Some(identity) {
             continue;
         }
-        if hex_digest(hash_reader(&mut file, &path)?.0) == entry.content_sha256
-            && graphforge_filesystem::path_identity(&path).ok() == Some(identity)
-        {
+        let intact = if let Some(expected) = entry.content_xxh64 {
+            checksum_reader(&mut file, &path)?.0 == expected
+        } else {
+            hex_digest(hash_reader(&mut file, &path)?.0) == entry.content_sha256
+        };
+        if intact && graphforge_filesystem::path_identity(&path).ok() == Some(identity) {
             authenticated.push(RetainedV1InventoryEntry {
                 path,
                 file,
@@ -1675,6 +1789,82 @@ fn storage(action: &str, path: &Path, error: impl std::fmt::Display) -> GfError 
 #[cfg(test)]
 mod tests {
     #[test]
+    fn checksum_inventory_requires_versioned_metadata_and_admits_without_payload_sha256() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("topology")).unwrap();
+        let payload = b"versioned published topology payload";
+        fs::write(root.path().join("topology/nodes.parquet"), payload).unwrap();
+        crate::payload_digest::take_hashed_bytes();
+        let (inventory, participant) = capture_graph_files(root.path()).unwrap();
+        assert_eq!(
+            crate::payload_digest::take_hashed_bytes(),
+            payload.len() as u64
+        );
+        assert_eq!(
+            inventory.format_version,
+            GRAPH_FILES_CHECKSUM_RECORD_VERSION
+        );
+        assert_eq!(
+            participant.record_version,
+            GRAPH_FILES_CHECKSUM_RECORD_VERSION
+        );
+        assert_eq!(
+            inventory.files[0].content_xxh64,
+            Some(crate::corruption_checksum::checksum(payload))
+        );
+        assert_eq!(
+            inventory.files[0].content_sha256,
+            hex_digest(Sha256::digest(payload).into())
+        );
+        verify_graph_tree(root.path(), &inventory).unwrap();
+        assert_eq!(crate::payload_digest::take_hashed_bytes(), 0);
+        assert!(
+            decode_versioned_graph_files_participant(
+                GRAPH_FILES_RECORD_VERSION,
+                &participant.bytes
+            )
+            .is_err()
+        );
+
+        let mut legacy = inventory.clone();
+        legacy.format_version = GRAPH_FILES_RECORD_VERSION;
+        legacy.files[0].content_xxh64 = None;
+        let legacy_bytes = encode_inventory(&legacy).unwrap();
+        assert!(!String::from_utf8_lossy(&legacy_bytes).contains("content_xxh64"));
+        assert_eq!(decode_inventory(&legacy_bytes).unwrap(), legacy);
+        verify_graph_tree(root.path(), &legacy).unwrap();
+        assert_eq!(
+            crate::payload_digest::take_hashed_bytes(),
+            payload.len() as u64
+        );
+
+        let mut missing = inventory.clone();
+        missing.files[0].content_xxh64 = None;
+        assert!(encode_inventory(&missing).is_err());
+        let mut missing_bytes = serde_json::to_vec(&missing).unwrap();
+        missing_bytes.push(b'\n');
+        assert!(decode_inventory(&missing_bytes).is_err());
+        for malformed in [
+            serde_json::json!("bad"),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+        ] {
+            let mut value = serde_json::to_value(&inventory).unwrap();
+            value["files"][0]["content_xxh64"] = malformed;
+            let mut bytes = serde_json::to_vec(&value).unwrap();
+            bytes.push(b'\n');
+            assert!(decode_inventory(&bytes).is_err());
+        }
+        let mut mismatch = inventory.clone();
+        mismatch.files[0].content_xxh64 = Some(inventory.files[0].content_xxh64.unwrap() ^ 1);
+        assert!(verify_graph_tree(root.path(), &mismatch).is_err());
+        assert_eq!(crate::payload_digest::take_hashed_bytes(), 0);
+        let mut future = inventory;
+        future.format_version = 9;
+        assert!(encode_inventory(&future).is_err());
+    }
+
+    #[test]
     fn graph_file_copy_readonly_source_preserves_authority_and_barriers() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source");
@@ -1711,6 +1901,7 @@ mod tests {
         ]
         .into_iter()
         .map(|route| GraphFileEntry {
+            content_xxh64: None,
             relative_path: format!("properties/{route}.parquet"),
             byte_length: 1,
             content_sha256: "0".repeat(64),
@@ -1746,6 +1937,7 @@ mod tests {
             let path = source.path().join(&relative_path);
             fs::write(&path, route.as_bytes()).unwrap();
             files.push(GraphFileEntry {
+                content_xxh64: None,
                 relative_path,
                 byte_length: route.len() as u64,
                 content_sha256: hex_digest(hash_file(&path).unwrap()),
@@ -1785,7 +1977,10 @@ mod tests {
         )
         .unwrap();
         let (inventory, _) = build_inventory(source.path()).unwrap();
-        assert_eq!(inventory.format_version, GRAPH_FILES_MAPPED_RECORD_VERSION);
+        assert_eq!(
+            inventory.format_version,
+            GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
+        );
         let mut raw = inventory.clone();
         raw.format_version = GRAPH_FILES_RECORD_VERSION;
         assert!(authenticate_route_table(source.path(), &raw).is_err());
@@ -1795,11 +1990,14 @@ mod tests {
         let participant = inventory_participant(bytes.clone(), inventory.file_count).unwrap();
         assert_eq!(
             participant.record_version,
-            GRAPH_FILES_MAPPED_RECORD_VERSION
+            GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
         );
         assert!(
-            decode_versioned_graph_files_participant(GRAPH_FILES_MAPPED_RECORD_VERSION, &bytes)
-                .is_ok()
+            decode_versioned_graph_files_participant(
+                GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION,
+                &bytes
+            )
+            .is_ok()
         );
         assert!(
             decode_versioned_graph_files_participant(GRAPH_FILES_RECORD_VERSION, &bytes).is_err()
@@ -1917,14 +2115,16 @@ mod tests {
             ]
         );
         let expected = concat!(
-            "{\"format\":\"graphforge-graph-files\",\"format_version\":1,\"files\":[",
+            "{\"format\":\"graphforge-graph-files\",\"format_version\":5,\"files\":[",
             "{\"relative_path\":\"topology/uuid-membership/ordinal-v4-manifest.json\",",
             "\"byte_length\":8,\"content_sha256\":",
             "\"05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f\",",
+            "\"content_xxh64\":\"d96e6aeb1d6b5f70\",",
             "\"role\":\"topology\"},",
             "{\"relative_path\":\"topology/uuid-membership/ordinal-v4-receipt.json\",",
             "\"byte_length\":7,\"content_sha256\":",
             "\"6f32860910ca0fb2a20c7fda143666b09dbf8db5238195c90a586fb542ff0cad\",",
+            "\"content_xxh64\":\"85321a5f17c56483\",",
             "\"role\":\"topology\"}],\"file_count\":2,\"total_byte_length\":15}\n"
         );
         assert_eq!(participant.bytes, expected.as_bytes());
@@ -1944,6 +2144,7 @@ mod tests {
             format: GRAPH_FILES_FORMAT.into(),
             format_version: GRAPH_FILES_FORMAT_VERSION,
             files: vec![GraphFileEntry {
+                content_xxh64: None,
                 relative_path: "topology\\nodes.parquet".into(),
                 byte_length: 5,
                 content_sha256: digest,
@@ -1959,7 +2160,7 @@ mod tests {
         let (republished, participant) = capture_graph_files(private.path()).unwrap();
         assert_eq!(
             republished.format_version,
-            GRAPH_FILES_MAPPED_RECORD_VERSION
+            GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
         );
         assert_eq!(
             republished
@@ -1989,6 +2190,7 @@ mod tests {
             format: GRAPH_FILES_FORMAT.into(),
             format_version: GRAPH_FILES_FORMAT_VERSION,
             files: vec![GraphFileEntry {
+                content_xxh64: None,
                 relative_path: "topology\\nodes.parquet".into(),
                 byte_length: 5,
                 content_sha256: hex_digest(hash_file(&canonical).unwrap()),
@@ -2009,12 +2211,14 @@ mod tests {
             format_version: GRAPH_FILES_FORMAT_VERSION,
             files: vec![
                 GraphFileEntry {
+                    content_xxh64: None,
                     relative_path: "topology/nodes.parquet".into(),
                     byte_length: 5,
                     content_sha256: digest.clone(),
                     role: GraphFileRole::Topology,
                 },
                 GraphFileEntry {
+                    content_xxh64: None,
                     relative_path: "topology\\nodes.parquet".into(),
                     byte_length: 5,
                     content_sha256: digest,
@@ -2036,12 +2240,14 @@ mod tests {
             format_version: GRAPH_FILES_FORMAT_VERSION,
             files: vec![
                 GraphFileEntry {
+                    content_xxh64: None,
                     relative_path: "topology/Å.parquet".into(),
                     byte_length: 5,
                     content_sha256: digest.clone(),
                     role: GraphFileRole::Topology,
                 },
                 GraphFileEntry {
+                    content_xxh64: None,
                     relative_path: "topology/å.parquet".into(),
                     byte_length: 5,
                     content_sha256: digest,
@@ -2077,6 +2283,7 @@ mod tests {
             format: GRAPH_FILES_FORMAT.into(),
             format_version: GRAPH_FILES_FORMAT_VERSION,
             files: vec![GraphFileEntry {
+                content_xxh64: None,
                 relative_path: "topology\\nodes.parquet".into(),
                 byte_length: 5,
                 content_sha256: hex_digest(hash_file(&literal).unwrap()),
@@ -2295,7 +2502,7 @@ mod tests {
         let path = target.path().join("properties/Person.parquet");
         fs::write(&path, b"original").unwrap();
         let before = capture_graph_files(target.path()).unwrap().0;
-        assert_eq!(before.format_version, GRAPH_FILES_FORMAT_VERSION);
+        assert_eq!(before.format_version, GRAPH_FILES_CHECKSUM_RECORD_VERSION);
         let mut checkpoint = GraphWorkspaceCheckpoint::capture(target.path()).unwrap();
         fs::write(&path, b"changed").unwrap();
         checkpoint.restore(target.path()).unwrap();
@@ -2605,7 +2812,7 @@ mod tests {
         let v1 = encode_inventory(&inventory).unwrap();
         let v2 = crate::encode_graph_files_root_v2(&crate::GraphFilesRootV2 {
             format: crate::GRAPH_FILES_V2_FORMAT.into(),
-            format_version: crate::GRAPH_FILES_V2_VERSION,
+            format_version: GRAPH_FILES_V2_RECORD_VERSION,
             root_node_sha256: "0".repeat(64),
             logical_file_count: 0,
             logical_byte_length: 0,

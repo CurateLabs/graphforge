@@ -16,6 +16,87 @@ use crate::graph_object_store::read_graph_object_by_digest;
 use crate::graph_object_store::verify_graph_object;
 
 #[test]
+fn legacy_compact_publication_authenticates_and_upgrades_retained_payloads_once() {
+    let container = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let lease = begin_graph_object_publication(container.path()).unwrap();
+    let mut io = GraphPublicationIo::default();
+    let mut digest = install_manifest_node(&lease, &empty_branch(0), &mut io).unwrap();
+    let mut legacy_entries = Vec::new();
+    for ordinal in 0_u8..10 {
+        let payload = [ordinal; 7];
+        let (content_sha256, _) = install_graph_object_bytes_with_lease(&lease, &payload).unwrap();
+        let entry = crate::GraphFileEntry {
+            relative_path: format!("topology/payload-{ordinal}.parquet"),
+            byte_length: 7,
+            content_sha256,
+            content_xxh64: None,
+            role: crate::GraphFileRole::Topology,
+        };
+        digest = update_manifest_path(
+            &lease,
+            Some(&digest),
+            0,
+            &entry.relative_path,
+            Some(entry.clone()),
+            &mut io,
+        )
+        .unwrap()
+        .unwrap();
+        legacy_entries.push(entry);
+    }
+    let legacy = crate::GraphFilesRootV2 {
+        format: crate::GRAPH_FILES_V2_FORMAT.into(),
+        format_version: crate::GRAPH_FILES_V2_RECORD_VERSION,
+        root_node_sha256: digest,
+        logical_file_count: 10,
+        logical_byte_length: 70,
+    };
+    let (mut state, _) = GraphManifestState::open(
+        &lease,
+        legacy.clone(),
+        crate::GraphManifestLimits::default(),
+    )
+    .unwrap();
+    // A damaged legacy object must not acquire trusted checksum metadata.
+    let object = graph_object_path(container.path(), &legacy_entries[0].content_sha256).unwrap();
+    crate::graph_object_store::corrupt_sealed_graph_object_for_test(&object, &[0xff; 7]);
+    assert!(append_graph_files_v2(&lease, workspace.path(), &mut state, &[], &[]).is_err());
+    assert_eq!(state.root(), Some(&legacy));
+    fs::write(&object, [0; 7]).unwrap();
+    let mut permissions = fs::metadata(&object).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&object, permissions).unwrap();
+    let deleted = legacy_entries[1].relative_path.clone();
+    let (upgraded, evidence) = append_graph_files_v2(
+        &lease,
+        workspace.path(),
+        &mut state,
+        &[],
+        &[deleted.clone()],
+    )
+    .unwrap();
+    assert_eq!(
+        upgraded.format_version,
+        crate::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+    );
+    assert_eq!(upgraded.logical_file_count, 9);
+    assert_eq!(upgraded.logical_byte_length, 63);
+    assert_eq!(evidence.publication_io.payload.read_bytes, 63);
+    let (entries, _) =
+        crate::resolve_graph_manifest(&upgraded, crate::GraphManifestLimits::default(), |digest| {
+            read_graph_object_by_digest(container.path(), digest, 1024 * 1024)
+        })
+        .unwrap();
+    assert!(entries.iter().all(|entry| entry.content_xxh64.is_some()));
+    assert!(!entries.iter().any(|entry| entry.relative_path == deleted));
+    let (_, repeated) =
+        append_graph_files_v2(&lease, workspace.path(), &mut state, &[], &[]).unwrap();
+    assert_eq!(repeated.publication_io.payload.read_bytes, 0);
+    assert_eq!(repeated.prior_entries_examined, 0);
+}
+
+#[test]
 fn migrates_v1_tree_once_and_reopens_from_compact_root() {
     let container = tempfile::tempdir().unwrap();
     let graph = tempfile::tempdir().unwrap();
@@ -50,6 +131,7 @@ fn migrates_windows_authored_v1_path_into_canonical_v2_manifest() {
         format: "graphforge-graph-files".into(),
         format_version: 1,
         files: vec![crate::GraphFileEntry {
+            content_xxh64: None,
             relative_path: "topology\\nodes.parquet".into(),
             byte_length: 5,
             content_sha256: hex_digest(Sha256::digest(b"nodes").into()),

@@ -372,44 +372,13 @@ impl ResolvedProjectGeneration {
                         )
                     },
                 )?;
-                // Full presence, length AND content admission, once per
-                // resolved generation. #1425/cd964b69 (O3) deleted the
-                // `verify_graph_object` call below on the theory that every
-                // real consumer re-authenticates lazily on first touch via
-                // `open_graph_object_by_digest`/`read_graph_object_by_digest`
-                // (`graph_object_store.rs`). That is false for Topology-role
-                // objects: after hydration, the query engine
-                // (`PersistentAdjacencyProvider`, Parquet reads) opens the
-                // materialized workspace files by path, never by CAS digest
-                // lookup, so neither of those functions is ever called on
-                // the ordinary query path — confirmed empirically by
-                // `hardlinked_topology_payload_corruption_is_refused`
-                // (workspace_hydration/tests.rs), which flips one byte in a
-                // hardlinked `topology/nodes.parquet` (same inode, same
-                // length) and shows a fresh open plus an ordinary
-                // `MATCH (n) RETURN count(n)` both succeeding, silently,
-                // over the corrupted data, with O3 applied. Properties-role
-                // objects happened to stay covered only because
-                // `property_overlay::inventory` independently re-hashes
-                // every property/edge_properties route file on every open —
-                // a wholly separate mechanism this function does not call
-                // and that does not reach Topology.
-                //
-                // Restored: this is #1388's O1 (memoization, kept — see
-                // `graph_files_inventory`'s doc comment) doing the real work.
-                // Before O1, this full sweep ran 3-4 times per open because
-                // `hydrate_graph_workspace` and
-                // `property_and_graph_inventory_for_hydrated_generation`
-                // both called `graph_files_inventory()` independently. With
-                // O1, `get_or_init` means it runs exactly once per resolved
-                // generation regardless of how many call sites ask — the
-                // same reduction #1425 was chasing, achieved without
-                // deleting the only check that ever covered Topology data.
-                // `entry.content_sha256` is this object's content-addressed
-                // CAS lookup key, not merely a corruption checksum, so this
-                // stays a full cryptographic digest rather than becoming a
-                // fast checksum (that tradeoff, and the durable-format work
-                // it needs, belongs to #1417, not here).
+                // Authenticate content once per resolved generation before
+                // exposing any reader. Current formats compare the persisted
+                // XXH64 and length; explicit legacy formats retain SHA-256.
+                // This replaces, rather than removes, the only topology check
+                // exercised by the same-inode corruption regression (#1435).
+                // Content-addressed names remain SHA-256, formed at publication
+                // and cryptographically rechecked by explicit full verify.
                 for entry in &files {
                     let path =
                         crate::graph_object_path(self.container_root(), &entry.content_sha256)?;
@@ -424,11 +393,7 @@ impl ResolvedProjectGeneration {
                             "graph payload object length does not match manifest".into(),
                         ));
                     }
-                    crate::verify_graph_object(
-                        self.container_root(),
-                        &entry.content_sha256,
-                        entry.byte_length,
-                    )?;
+                    crate::graph_object_store::admit_graph_object(self.container_root(), entry)?;
                 }
                 crate::route_component::authenticate_manifest_routes(
                     root.format_version,
@@ -443,13 +408,7 @@ impl ResolvedProjectGeneration {
                 )?;
                 crate::graph_files::inventory_from_entries_with_version(
                     files,
-                    if root.format_version
-                        == crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
-                    {
-                        crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
-                    } else {
-                        crate::GRAPH_FILES_RECORD_VERSION
-                    },
+                    crate::graph_files::expanded_version_for_root(root.format_version)?,
                 )
                 .map(Some)
             }
@@ -485,6 +444,10 @@ impl ResolvedProjectGeneration {
                     | crate::GRAPH_FILES_V2_RECORD_VERSION
                     | crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
                     | crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+                    | crate::graph_files::GRAPH_FILES_CHECKSUM_RECORD_VERSION
+                    | crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+                    | crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
+                    | crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
             )
             || snapshot.encoding != "json"
         {

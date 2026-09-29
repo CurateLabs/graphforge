@@ -281,16 +281,20 @@ authenticates an existing inventory once per publication sequence; individual
 updates cannot substitute a caller-owned cache and do not rescan all prior
 descriptors. Open resolves the bounded manifest and verifies every selected
 payload before exposing the generation. Ordinary API open and restore dispatch
-on the declared participant version. Expanded inventories use version 1 for
-legacy raw routes and version 3 for mapped routes; compact CAS roots use
-version 2 for raw routes and version 4 for mapped routes. The descriptor and
-payload must agree. Immutable generations remain unchanged while a writable
-facade materializes an authenticated private workspace.
+on the declared participant version. Legacy expanded inventories use versions
+1/3 for raw/mapped routes, and legacy compact CAS roots use versions 2/4.
+Current expanded inventories use versions 5/7 and compact roots use versions
+6/8, with a required seed-zero XXH64 checksum beside every SHA-256 payload
+name. The descriptor and payload must agree. Immutable generations remain
+unchanged while a writable facade materializes a private workspace.
 
 The graph-files role is inferred from the relative path. It does not select a
-different integrity policy: V2/V4 open verifies the full SHA-256 and length of
-**every** CAS payload before exposing the inventory. V1/V3 open verifies the
-expanded graph tree. The V2/V4 same-inode, same-length corruption test in
+different integrity policy: current-format admission checks XXH64 and exact
+length of **every** selected payload without a payload SHA-256 pass. Legacy
+versions retain their SHA-256 admission. SHA-256 still names CAS objects and
+authenticates control metadata; explicit `graphforge verify` audits CAS names
+and retained objects on demand. See [ADR 0048](../../adr/0048-published-payload-checksums.md)
+for compatibility and trust assumptions. The same-inode, same-length corruption test in
 `graphforge-api/src/workspace_hydration/tests.rs` covers every role, including
 real adjacency and search index publications:
 
@@ -917,16 +921,18 @@ manifest digests. If the ordinal facet is absent while current v3 is canonical,
 discovery returns a typed rebuild requirement. A present ordinal path must pass
 authenticated open and never falls back to v3 when malformed or substituted.
 
-New mapped publications use a compact version-4 `graph/files` root, retaining
-the version-2 radix representation with explicit mapped-route authority. Payloads and
-compressed node-v3 radix nodes live once in the project content-addressed object
+New mapped publications use a compact version-8 `graph/files` root with
+explicit mapped-route authority and required payload corruption checksums.
+Payloads, node-v3 branches and node-v4 checksum buckets live in the content-addressed object
 store; a generation stores only its root reference and logical totals. Updates
 copy a bounded SHA-256 nibble path and split or collapse bounded buckets,
 so publication never scans or recopies the entire prior file inventory. The private
 workspace commit boundary records revision-identified sealed and tombstone
 descriptors before mutations become visible; they are acknowledged only after
-CURRENT advances. Reopen traverses the authenticated radix and hashes every
-selected payload object. Post-CURRENT GC traces every remaining generation
+CURRENT advances. Reopen authenticates radix control objects and checksums
+every selected payload. A legacy checksum upgrade authenticates retained
+payload SHA-256 identities and rebuilds manifest metadata once; subsequent
+updates retain bounded path-copy publication. Post-CURRENT GC traces every remaining generation
 root and defers while an optimistic attempt or CAS publication lease is live.
 Legacy expanded and compact inventories remain readable. A writable facade
 migrates their raw routes in its private workspace before publishing the mapped

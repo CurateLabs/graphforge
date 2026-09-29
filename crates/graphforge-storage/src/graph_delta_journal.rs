@@ -1497,14 +1497,13 @@ impl DeltaReplaySource {
                 // workspace is byte-for-byte and path-for-path identical to
                 // `parent_inventory` and a second full-tree rehash here would
                 // just repeat work already done inside `materialize_graph_objects`.
-                let inventory = if parent_inventory.format_version
-                    == crate::GRAPH_FILES_MAPPED_RECORD_VERSION
-                {
-                    parent_inventory.clone()
-                } else {
-                    let (inventory, _) = capture_graph_files(workspace.path())?;
-                    inventory
-                };
+                let inventory =
+                    if crate::graph_files::inventory_is_mapped(parent_inventory.format_version) {
+                        parent_inventory.clone()
+                    } else {
+                        let (inventory, _) = capture_graph_files(workspace.path())?;
+                        inventory
+                    };
                 Ok(Self {
                     root: workspace.path().to_owned(),
                     inventory,
@@ -1642,6 +1641,8 @@ fn prepare_graph_delta_inner(
     extended_files.insert(
         run_relative_path.clone(),
         GraphFileEntry {
+            content_xxh64: crate::graph_files::inventory_has_checksums(base_format_version)
+                .then(|| crate::corruption_checksum::checksum(&run_bytes)),
             relative_path: run_relative_path,
             byte_length: run_byte_length,
             // Hashed once, in memory, from the exact bytes just written
@@ -2350,6 +2351,7 @@ mod crash_oracle_tests {
             format: "graphforge-graph-files".to_owned(),
             format_version: 1,
             files: vec![GraphFileEntry {
+                content_xxh64: None,
                 relative_path: relative_path.to_owned(),
                 byte_length: 7,
                 content_sha256: digest.to_owned(),
@@ -2757,7 +2759,7 @@ mod crash_oracle_tests {
         let (inventory, _) = capture_graph_files(source_files.path()).unwrap();
         assert_eq!(
             inventory.format_version,
-            crate::GRAPH_FILES_RECORD_VERSION,
+            crate::GRAPH_FILES_CHECKSUM_RECORD_VERSION,
             "fixture must be the raw, non-mapped layout"
         );
         let lease = crate::begin_graph_object_publication(root.path()).unwrap();
@@ -2799,9 +2801,8 @@ mod crash_oracle_tests {
 
         let resolved = resolve_project_generation(root.path()).unwrap();
         let parent_inventory = resolved.graph_files_inventory().unwrap().unwrap();
-        assert_ne!(
-            parent_inventory.format_version,
-            crate::GRAPH_FILES_MAPPED_RECORD_VERSION,
+        assert!(
+            !crate::graph_files::inventory_is_mapped(parent_inventory.format_version),
             "this base must exercise the non-mapped fallback in DeltaReplaySource::open"
         );
 
