@@ -4,6 +4,17 @@ use super::super::*;
 use super::*;
 use crate::CapabilityId;
 
+#[cfg(feature = "research")]
+#[test]
+fn empty_epistemic_participants_include_research_families() {
+    let participants = empty_epistemic_participants().unwrap();
+    for family in ["research_claims", "claim_relations", "claim_suppressions"] {
+        assert!(participants.iter().any(|participant| {
+            participant.capability_id == "epistemic" && participant.record_family_id == family
+        }));
+    }
+}
+
 #[test]
 fn empty_ledger_codecs_and_participant_contracts_are_exact() {
     let assertion = AssertionLedger::default();

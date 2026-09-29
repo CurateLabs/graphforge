@@ -41,9 +41,21 @@ _API_DEPS = [
     "//crates/graphforge-storage:graphforge_storage",
 ]
 
+# Cargo's defaults expose the full public facade. rules_rust does not enable
+# Cargo default features implicitly, so mirror that contract explicitly.
+_API_CARGO_FEATURES = [
+    "knowledge",
+    "provenance",
+    "search",
+    "portable",
+    "discovery",
+    "research",
+]
+
 gf_rust_library(
     name = "graphforge_api",
     compile_data = _API_COMPILE_DATA,
+    crate_features = _API_CARGO_FEATURES,
     deps = _API_DEPS,
 )
 
@@ -51,6 +63,7 @@ gf_rust_test(
     name = "graphforge_api_test",
     crate = ":graphforge_api",
     compile_data = _API_COMPILE_DATA,
+    crate_features = _API_CARGO_FEATURES,
     # Runtime reads via env!("CARGO_MANIFEST_DIR")/../../docs/reference/...
     # Bake a workspace-relative manifest dir so runfiles layout resolves.
     data = ["//docs/reference:schema_inventory_fixtures"],
