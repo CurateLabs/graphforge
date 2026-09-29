@@ -46,6 +46,11 @@ Consequences:
   engine (Cypher parse → IR → plan → rel → exec → Arrow) entirely in memory.
 - **Point `TMPDIR` at a supported volume** before running CLI or binding tests
   on a host whose `/tmp` is `tmpfs`, for example `TMPDIR=$HOME/tmp`.
+- **Point `TMPDIR` at the same volume as the project for durable ingests.**
+  Reader-workspace hydration hard-links content-store objects, and a hard
+  link cannot cross filesystems: with `TMPDIR` on `tmpfs` while the project
+  is on `ext4`, `gf import-session commit` fails with an EXDEV publication
+  error that names this fix.
 - **Durable-project tests fail on unsupported roots.** The Python unit suite
   and the Node binding suite each contain tests that open a durable project.
   On an overlay root those tests fail, and `node --test` over the full binding

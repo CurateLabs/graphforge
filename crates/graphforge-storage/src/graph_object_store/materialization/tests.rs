@@ -218,3 +218,36 @@ fn materialization_rejects_substituted_cas_source_and_removes_destination() {
     assert!(link_materialized_object(&directory, &source, "payload.bin", &digest, 7).is_err());
     assert!(!second_target.join("payload.bin").exists());
 }
+
+#[test]
+fn cross_device_install_names_the_tmpdir_requirement_inside_the_redaction_window() {
+    let error = materialization_install_error(
+        std::io::Error::from_raw_os_error(18),
+        Path::new("/project/volume"),
+    );
+    let text = error.to_string();
+    assert!(text.contains("TMPDIR"), "guidance missing: {text}");
+    // Publication errors redact their cause with this exact filter and cut it
+    // at 96 characters; the guidance must survive both.
+    let redacted: String = text
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || "_ -".contains(*character))
+        .collect();
+    assert!(redacted.len() <= 96, "cause truncates: {redacted}");
+    assert!(
+        redacted.contains("TMPDIR"),
+        "guidance truncated: {redacted}"
+    );
+}
+
+#[test]
+fn other_install_errors_keep_the_contextual_storage_shape() {
+    let error =
+        materialization_install_error(std::io::Error::other("boom"), Path::new("/project/volume"));
+    let text = error.to_string();
+    assert!(
+        text.contains("install stable materialized object at /project/volume"),
+        "context lost: {text}"
+    );
+    assert!(text.contains("boom"), "cause lost: {text}");
+}

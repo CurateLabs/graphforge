@@ -120,6 +120,21 @@ pub fn materialize_graph_objects(
     Ok(evidence)
 }
 
+/// Explain the one reachable cross-volume hardlink failure instead of a
+/// truncated `Invalid cross-device link`: hydration hard links content-store
+/// objects, and a link cannot cross filesystems, so a reader workspace under a
+/// `TMPDIR` on another volume fail-closes the commit. The guidance must stay
+/// short enough to survive publication-error redaction and free of paths,
+/// which redaction strips.
+fn materialization_install_error(error: std::io::Error, root: &Path) -> GfError {
+    if error.kind() == std::io::ErrorKind::CrossesDevices {
+        return GfError::Storage(
+            "hard link crossed filesystems (EXDEV); set TMPDIR onto the project volume".to_string(),
+        );
+    }
+    storage("install stable materialized object", root, error)
+}
+
 fn materialize_from_cas(
     cas: &CasRoot,
     target: &StableDirectory,
@@ -162,13 +177,7 @@ fn materialize_from_cas(
             }
             let (installed, installed_identity) = bucket
                 .link_child_into(source_name, &source, source_identity, parent, name)
-                .map_err(|error| {
-                    storage(
-                        "install stable materialized object",
-                        &cas.diagnostic_root,
-                        error,
-                    )
-                })?;
+                .map_err(|error| materialization_install_error(error, &cas.diagnostic_root))?;
             let verified = verify_hardlinked_materialization(
                 &installed,
                 installed_identity,
