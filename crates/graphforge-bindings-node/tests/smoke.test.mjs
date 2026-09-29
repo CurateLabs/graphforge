@@ -1,7 +1,14 @@
 // Minimal clean-build acceptance for the freshly built native addon.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -41,7 +48,11 @@ function checkConstructionError() {
   } catch (e) {
     missingPathError = e;
   }
-  assert.equal(missingPathError?.code, "GF_IO", `got code=${missingPathError?.code}`);
+  assert.equal(
+    missingPathError?.code,
+    "GF_IO",
+    `got code=${missingPathError?.code}`,
+  );
 
   // The stable legacy-format error must leave the old project untouched.
   const project = mkdtempSync(join(process.cwd(), "graphforge-legacy-smoke-"));
