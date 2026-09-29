@@ -99,6 +99,7 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "m6-memory-${{ github.sha }}-blacksmith-4vcpu-ubuntu-2404": 1,
         "ingest-floor-gate-${{ needs.nightly.outputs.sha }}": 1,
         "native-local-admission-${{ matrix.authority }}-${{ github.sha }}": 1,
+        "lane-evidence-${{ inputs.cache }}-${{ github.run_id }}": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(
@@ -129,9 +130,10 @@ EXPECTED_DEPENDENCY_KEYS = Counter(
     {
         # test.yml: policy + rust-lint + python/node binding + Windows/macOS
         # durability (6);
-        # Binding RC: 3; coverage-baseline post-merge ledger: 1.
+        # Binding RC: 3; coverage-baseline post-merge ledger: 1;
+        # build-lane-measurement harness: 1.
         # PR Cargo sticky disks retired after #4 cutover.
-        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 10,
+        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 11,
         "${{ runner.os }}-snap-ego-facebook-v1": 1,
         "${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}": 1,
     }
@@ -157,6 +159,10 @@ EXPECTED_STICKY_KEYS = Counter(
             "${{ github.repository }}-coverage-rust-1.96.0-${{ hashFiles('Cargo.lock') }}-target-v1"
         ): 1,
         "${{ github.repository }}-bazel-disk-cache-v1": 1,
+        # build-lane-measurement harness: target/ and sccache volumes are
+        # caller-keyed per lane so independent chains never share a volume.
+        "${{ github.repository }}-${{ inputs.sticky_key }}": 1,
+        "${{ github.repository }}-${{ inputs.sticky_key }}-sccache": 1,
     }
 )
 EXPECTED_STICKY_DELETES = Counter(
