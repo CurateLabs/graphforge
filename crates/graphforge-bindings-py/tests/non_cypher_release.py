@@ -326,8 +326,7 @@ def _classification_report() -> dict[str, object]:
                 node.func.id if isinstance(node.func, ast.Name) else node.func.attr
                 for executable in executable_nodes
                 for node in ast.walk(executable)
-                if isinstance(node, ast.Call)
-                and isinstance(node.func, (ast.Name, ast.Attribute))
+                if isinstance(node, ast.Call) and isinstance(node.func, (ast.Name, ast.Attribute))
             }
             not_invoked = sorted(set(symbols) - {"main"} - invoked)
             assert not not_invoked, (
