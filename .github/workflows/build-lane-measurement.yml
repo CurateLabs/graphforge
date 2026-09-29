@@ -213,4 +213,4 @@ jobs:
             dist/sccache-stats.txt
             dist/cargo-lane-test.log
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1

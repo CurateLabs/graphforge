@@ -300,6 +300,9 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             "examples/visualization/stress/results/",
             "dist/cargo-bazel-parity-evidence.json",
             (
+                "dist/lane-evidence.json\ndist/sccache-stats.txt\ndist/cargo-lane-test.log"
+            ),
+            (
                 "dist/bazel-warm-observation.json\n"
                 "dist/bazel-affected-inputs.json\n"
                 "dist/bazel-cache-perf-ci-observation.json\n"
