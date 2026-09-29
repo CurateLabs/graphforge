@@ -7,7 +7,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNNER="$ROOT/scripts/coverage-rust.sh"
 CUCUMBER_JS="$ROOT/tests/features/node/cucumber.js"
 NODE_PACKAGE="$ROOT/tests/features/node/package.json"
-WORKFLOW="$ROOT/.github/workflows/test.yml"
 
 bash -n "$RUNNER"
 
@@ -15,8 +14,8 @@ grep -Fq 'CORE_COVERAGE_ARGS="${COVERAGE_RUST_ARGS} --release"' "$RUNNER"
 grep -Fq 'cargo llvm-cov ${CORE_COVERAGE_ARGS} --no-report' "$RUNNER"
 grep -Fq 'if [[ "$HTML_REPORT" == "1" ]]; then' "$RUNNER"
 grep -Fq 'xargs -0 -n 1 -P "$PYTHON_BINDING_WORKERS"' "$RUNNER"
-grep -Fq 'run_python_acceptance' "$RUNNER"
-grep -Fq 'run_node_acceptance' "$RUNNER"
+grep -Fq 'run_python_coverage_probes' "$RUNNER"
+grep -Fq 'run_node_coverage_probes' "$RUNNER"
 grep -Fq 'wait "$python_pid"' "$RUNNER"
 grep -Fq 'wait "$node_pid"' "$RUNNER"
 grep -Fq 'stamp_matches()' "$RUNNER"
@@ -103,8 +102,8 @@ if failed:
 print("rust coverage pull-request policy: ok")
 COVPOLICY
 
-# Package dependencies and Cucumber loader flags must not drift across entry points.
-python3 - "$ROOT" "$RUNNER" "$CUCUMBER_JS" "$NODE_PACKAGE" "$WORKFLOW" <<'PY'
+# Package dependencies and Cucumber loader flags must not drift across coverage entry points.
+python3 - "$ROOT" "$RUNNER" "$CUCUMBER_JS" "$NODE_PACKAGE" <<'PY'
 from __future__ import annotations
 
 import json
@@ -112,7 +111,7 @@ import re
 import sys
 from pathlib import Path
 
-root, runner_path, cucumber_path, package_path, workflow_path = map(Path, sys.argv[1:])
+root, runner_path, cucumber_path, package_path = map(Path, sys.argv[1:])
 
 SUPPORTED = "tsx/cjs"
 FORBIDDEN_PACKAGE = "ts-node"
@@ -145,7 +144,6 @@ def cucumber_loaders(text: str) -> list[str]:
 
 runner = runner_path.read_text(encoding="utf-8")
 cucumber = cucumber_path.read_text(encoding="utf-8")
-workflow = workflow_path.read_text(encoding="utf-8")
 package = json.loads(package_path.read_text(encoding="utf-8"))
 deps = {
     **package.get("dependencies", {}),
@@ -155,7 +153,6 @@ deps = {
 entry_loaders: dict[str, list[str]] = {
     str(runner_path.relative_to(root)): flag_loaders(runner, source=str(runner_path)),
     str(cucumber_path.relative_to(root)): cucumber_loaders(cucumber),
-    str(workflow_path.relative_to(root)): flag_loaders(workflow, source=str(workflow_path)),
 }
 
 for source, loaders in entry_loaders.items():
