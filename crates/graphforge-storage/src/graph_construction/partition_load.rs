@@ -409,7 +409,7 @@ where
         for _ in 0..window {
             scope.spawn(|| {
                 let _lifecycle_capture = lifecycle_context.attach();
-                worker(&shared, partitions, window, weights, weight_budget, &load)
+                worker(&shared, partitions, window, weights, weight_budget, &load);
             });
         }
         let _stop = StopOnExit(&shared);

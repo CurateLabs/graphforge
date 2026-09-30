@@ -640,11 +640,11 @@ impl IoCounter {
         Self { state: None }
     }
     pub(crate) fn account(&self, bytes: usize) {
-        if let Some(state) = &self.state {
-            if bytes != 0 {
-                state.0.fetch_add(bytes as u64, Ordering::Relaxed);
-                state.1.fetch_add(1, Ordering::Relaxed);
-            }
+        if let Some(state) = &self.state
+            && bytes != 0
+        {
+            state.0.fetch_add(bytes as u64, Ordering::Relaxed);
+            state.1.fetch_add(1, Ordering::Relaxed);
         }
     }
     pub(super) fn add_to(&self, evidence: &mut GraphConstructionEvidence) -> Result<(), GfError> {

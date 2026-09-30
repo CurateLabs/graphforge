@@ -2414,8 +2414,8 @@ fn retire_segments(
     std::thread::scope(|scope| {
         for _ in 0..lanes {
             scope.spawn(|| {
-                let _lifecycle_capture = lifecycle_context.attach();
                 use std::sync::atomic::Ordering;
+                let _lifecycle_capture = lifecycle_context.attach();
                 loop {
                     let index = super::lane_job(
                         next.fetch_add(1, Ordering::AcqRel),

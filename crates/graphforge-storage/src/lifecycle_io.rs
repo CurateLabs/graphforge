@@ -113,7 +113,7 @@ impl CaptureContext {
     #[must_use]
     pub fn attach(&self) -> CaptureScope {
         let previous = Self::current();
-        CAPTURE.with(|slot| *slot.borrow_mut() = self.state.clone());
+        CAPTURE.with(|slot| slot.borrow_mut().clone_from(&self.state));
         ACTIVE_PHASE.with(|phase| phase.set(self.phase));
         CaptureScope {
             state: self.state.clone(),
@@ -122,12 +122,12 @@ impl CaptureContext {
         }
     }
     fn record(&self, default: StorageIoPhase, apply: impl FnOnce(&PhaseCounters)) {
-        if let Some(state) = &self.state {
-            if !state.invalid.load(Ordering::Relaxed) {
-                #[cfg(any(test, feature = "test-support"))]
-                observe_work(1);
-                apply(&state.rows[self.phase.unwrap_or(default).lifecycle_index()]);
-            }
+        if let Some(state) = &self.state
+            && !state.invalid.load(Ordering::Relaxed)
+        {
+            #[cfg(any(test, feature = "test-support"))]
+            observe_work(1);
+            apply(&state.rows[self.phase.unwrap_or(default).lifecycle_index()]);
         }
     }
 }
@@ -167,7 +167,7 @@ impl Drop for CaptureScope {
                 _ => false,
             };
             if ordered {
-                *active = self.previous.state.clone();
+                active.clone_from(&self.previous.state);
                 ACTIVE_PHASE.with(|phase| phase.set(self.previous.phase));
             } else {
                 if let Some(state) = &self.state {
@@ -244,12 +244,12 @@ pub fn effective_phase(default: StorageIoPhase) -> StorageIoPhase {
 fn record(default: StorageIoPhase, apply: impl FnOnce(&PhaseCounters)) {
     // No Arc clone or phase lookup on the inactive production path.
     CAPTURE.with(|slot| {
-        if let Some(state) = slot.borrow().as_ref() {
-            if !state.invalid.load(Ordering::Relaxed) {
-                #[cfg(any(test, feature = "test-support"))]
-                observe_work(1);
-                apply(&state.rows[effective_phase(default).lifecycle_index()]);
-            }
+        if let Some(state) = slot.borrow().as_ref()
+            && !state.invalid.load(Ordering::Relaxed)
+        {
+            #[cfg(any(test, feature = "test-support"))]
+            observe_work(1);
+            apply(&state.rows[effective_phase(default).lifecycle_index()]);
         }
     });
 }
