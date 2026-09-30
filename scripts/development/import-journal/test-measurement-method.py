@@ -389,3 +389,36 @@ with tempfile.TemporaryDirectory(prefix="gf1624-runexec-probe-") as probe:
             else:
                 raise AssertionError("failed real workload admitted")
 print("PASS: real runexec process exit 0 with workload exit 7 refused; workload exit 0 admitted")
+
+# Every entrypoint must refuse optimized Python before argparse or any raw
+# evidence writes. --help gives a safe normal-mode success control.
+with tempfile.TemporaryDirectory(prefix="gf1624-optimization-probe-") as temporary:
+    probe = Path(temporary)
+    ordinary_env = os.environ.copy()
+    ordinary_env.pop("PYTHONOPTIMIZE", None)
+    for name in ("measure-lane.py", "compare-pair.py", "verify-reopen.py"):
+        ordinary = subprocess.run(
+            [sys.executable, str(ROOT / name), "--help"],
+            cwd=probe,
+            env=ordinary_env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        assert ordinary.returncode == 0
+        for flags, environment in (
+            (["-O"], ordinary_env),
+            ([], {**ordinary_env, "PYTHONOPTIMIZE": "1"}),
+        ):
+            optimized = subprocess.run(
+                [sys.executable, *flags, str(ROOT / name), "--help"],
+                cwd=probe,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            assert optimized.returncode != 0 and "requires assertions" in optimized.stderr
+            assert not list(probe.rglob("qualification.json"))
+            assert not list(probe.rglob("proof.json"))
+print("PASS: all three entrypoints refuse -O and inherited PYTHONOPTIMIZE before evidence writes")

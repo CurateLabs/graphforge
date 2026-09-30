@@ -330,31 +330,30 @@ build/input identities and workload log by SHA-256. The comparator requires
 both completed, qualified lanes and matching ambient resource settings. It
 reparses BenchExec's workload `returnvalue`, signal and termination fields:
 the `runexec` process's successful exit alone cannot qualify a failed ingest.
+Optimized Python (`-O` or `PYTHONOPTIMIZE`) is refused at shared-module import
+before any lane work; qualification assertions cannot be disabled.
 Missing/unavailable measurements and nested persistence rows are refused.
 Manifest checkpoint, journal append, sync and namespace costs are reported
 separately and summed only as disjoint leaves.
 
-After each measurement, use a new CLI process to open that lane's project and
-execute node and directed-edge count queries into external Parquet sinks.
-With `task_lane_root="$task_evidence/pair-$task_pair/$task_lane"`, run:
+After each measurement, use the [reopen verifier](../../scripts/development/import-journal/verify-reopen.py)
+from a Python environment with PyArrow installed:
 
 ```bash
-"$task_target/release/gf" --json --project "$task_lane_root/project" query \
-  --cypher 'MATCH (n) RETURN count(n) AS nodes' --output "$task_lane_root/nodes.parquet" \
-  --cypher 'MATCH ()-[e]->() RETURN count(e) AS edges' --output "$task_lane_root/edges.parquet" \
-  --cypher 'MATCH (n) RETURN n LIMIT 1' --output "$task_lane_root/sample.parquet" \
-  > "$task_lane_root/reopen-query.jsonl" 2> "$task_lane_root/reopen-query.stderr"
-python3 - "$task_lane_root" > "$task_lane_root/reopen-counts.txt" <<'PY'
-from pathlib import Path
-import sys
-import pyarrow.parquet as pq
-root = Path(sys.argv[1])
-assert pq.read_table(root / "nodes.parquet").column("nodes").to_pylist() == [4194304]
-assert pq.read_table(root / "edges.parquet").column("edges").to_pylist() == [67108864]
-assert pq.read_table(root / "sample.parquet").num_rows == 1
-print("PASS: fresh-process reopen, node/edge counts and non-count query")
-PY
+python3 "$task_methods/verify-reopen.py" --lane "$task_lane" --pair "$task_pair" \
+  --worktree "$task_worktree" --binary "$task_target/release/gf" \
+  --evidence-root "$task_evidence"
 ```
+
+It starts a new CLI process against the measured project and runs node and
+directed-edge count queries plus one bounded non-count query into external
+Parquet sinks. It requires one-row integer counts of exactly 4,194,304 nodes
+and 67,108,864 edges, and one sample row. The lane's `reopen/proof.json` records
+completion/verification, the exact command, query exit status, source/binary
+and input identities, counts, and the SHA-256 of each output/receipt/log. A
+failed query or count check retains a refused proof; existing proof directories
+are never overwritten. The verifier checks the measured lane's qualification
+and the unchanged binary/source before opening the project.
 
 Keep these reopening/query proofs outside the measured workflow. A qualified
 timing comparison alone does not establish published graph correctness.
@@ -367,11 +366,19 @@ Method SHA-256 pins:
 | --- | --- |
 | `driver.sh` | `a011e6b682c49a59d08ef919cca6997971f3cbb0d52ff27fa0c2dd0e4aa8a498` |
 | `measure-lane.py` | `ec96354470b6d3b96d06717f4d3fae8c7cf4cb44ce33a8edd35d3ad7c0e2693d` |
-| `measurement_contract.py` | `25a6468dbda2ec56f558ee6d51dd48c47f66c9c5bb5940a6fe09e31943de5de7` |
+| `measurement_contract.py` | `9a6807e2f2f82758fc2a739728bfb334bab9247f02c308a86402941248426bf0` |
 | `compare-pair.py` | `2c034851bac427b0b87d3bd56bc1fdd239d58571efe152cac1bde53622e7dd8b` |
-| `test-measurement-method.py` | `7f9e9647217098714bcb9c8a74ba2a0c5f331a56684ba73dc47b4019091abe75` |
+| `test-measurement-method.py` | `5f6e8a44babf11d58e585a7e73e3fcdee22e6d17942c8c95a4935f58fe34bbd0` |
+| `verify-reopen.py` | `6cb6da70c9a0d7ee2d0f1d2debb3c39838daaa44c35a3d04b3e5b4caf937e3a5` |
+| `test-reopen-method.py` | `ce22331249b55d5bb56f907f727c8ff98892b2c4aa0ee44cdfcaf1833dfb7d1e` |
 
 The [method regression](../../scripts/development/import-journal/test-measurement-method.py)
 runs with `python3 scripts/development/import-journal/test-measurement-method.py`.
 It uses synthetic lanes plus tiny shell exit probes; it never resets caches,
 builds GraphForge or imports the S22 inputs.
+
+The [reopen-method regression](../../scripts/development/import-journal/test-reopen-method.py)
+runs with `python3 scripts/development/import-journal/test-reopen-method.py` in
+the same PyArrow environment. It decodes tiny real Parquet query-result
+fixtures and checks persisted positive/refused proofs; GraphForge invocation
+is replaced by a fixture producer, so it does not claim actual reopen evidence.

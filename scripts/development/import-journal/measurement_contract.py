@@ -7,6 +7,9 @@ import os
 from pathlib import Path
 import resource
 
+if not __debug__:
+    raise RuntimeError("measurement qualification requires assertions; disable Python optimization")
+
 CONTRACT = "graphforge-import-journal-measurement/1"
 BUILD_NAMES = {
     "cargo",
