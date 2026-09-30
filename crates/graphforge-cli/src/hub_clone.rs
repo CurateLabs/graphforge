@@ -1024,11 +1024,11 @@ fn run_clone_profiled(
         json,
         output,
         runtime,
-        CloneDelays::default(),
+        &CloneDelays::default(),
     )
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct CloneDelays {
     clock: CloneClock,
     verification: Duration,
@@ -1042,7 +1042,7 @@ fn run_clone_profiled_with_delays(
     json: bool,
     output: &mut dyn Write,
     runtime: &TelemetryRuntime,
-    delays: CloneDelays,
+    delays: &CloneDelays,
 ) -> Result<(), graphforge_api::GfError> {
     let mut profile = CloneProfile::new(runtime);
     #[cfg(test)]
@@ -1060,7 +1060,7 @@ fn run_clone_job(
     transport: &dyn Transport,
     args: CloneArgs,
     profile: &mut CloneProfile<'_>,
-    delays: CloneDelays,
+    delays: &CloneDelays,
 ) -> Result<CloneResult, graphforge_api::GfError> {
     let (identity, base, destination) = profile.stage(
         Stage::IdentityValidation,
@@ -2219,7 +2219,7 @@ mod tests {
                 true,
                 &mut output,
                 &runtime,
-                delays,
+                &delays,
             )
             .unwrap();
             let clone_elapsed = clone_started.elapsed();
