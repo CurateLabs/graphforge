@@ -152,23 +152,9 @@ pub fn capture_graph_read_inventory(root: &Path) -> Result<GraphReadInventory, G
 /// for the whole capture; any other unregistered file is refused as usual.
 pub(crate) fn capture_graph_read_inventory_excluding(
     root: &Path,
-    excluded: &std::collections::BTreeMap<std::path::PathBuf, graphforge_filesystem::FileIdentity>,
+    excluded: &Exclusions,
 ) -> Result<GraphReadInventory, GfError> {
-    let mut paths = Vec::new();
-    crate::graph_files::collect_source_files(root, &mut paths)?;
-    let mut retained = Vec::with_capacity(paths.len());
-    for path in paths {
-        match excluded.get(&path) {
-            Some(identity)
-                if graphforge_filesystem::path_identity(&path).ok() != Some(*identity) =>
-            {
-                return Err(corrupt_temporary());
-            }
-            Some(_) => {}
-            None => retained.push(path),
-        }
-    }
-    let paths = retained;
+    let paths = paths_outside_exclusions(root, excluded)?;
     if paths.len() > crate::graph_files::MAX_GRAPH_FILES {
         return Err(invalid("graph read file count exceeds limit"));
     }
@@ -263,12 +249,43 @@ pub(crate) fn capture_graph_read_inventory_excluding(
         .files
         .sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     inventory.file_count = inventory.files.len() as u64;
+    verify_exclusions(excluded)?;
+    Ok(inventory)
+}
+
+type Exclusions =
+    std::collections::BTreeMap<std::path::PathBuf, graphforge_filesystem::FileIdentity>;
+
+/// Every file under `root` except identity-pinned exclusions, which must
+/// still name their recorded file.
+fn paths_outside_exclusions(
+    root: &Path,
+    excluded: &Exclusions,
+) -> Result<Vec<std::path::PathBuf>, GfError> {
+    let mut paths = Vec::new();
+    crate::graph_files::collect_source_files(root, &mut paths)?;
+    let mut retained = Vec::with_capacity(paths.len());
+    for path in paths {
+        match excluded.get(&path) {
+            Some(identity)
+                if graphforge_filesystem::path_identity(&path).ok() != Some(*identity) =>
+            {
+                return Err(corrupt_temporary());
+            }
+            Some(_) => {}
+            None => retained.push(path),
+        }
+    }
+    Ok(retained)
+}
+
+fn verify_exclusions(excluded: &Exclusions) -> Result<(), GfError> {
     for (path, identity) in excluded {
         if graphforge_filesystem::path_identity(path).ok() != Some(*identity) {
             return Err(corrupt_temporary());
         }
     }
-    Ok(inventory)
+    Ok(())
 }
 
 fn corrupt_temporary() -> GfError {

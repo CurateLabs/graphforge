@@ -1301,8 +1301,9 @@ fn publish_attachment(
         (&left.capability_id, &left.record_family_id)
             .cmp(&(&right.capability_id, &right.record_family_id))
     });
-    let request = graphforge_storage::PreparedGenerationRequest::new(
-        transaction_uuid,
+    let request = crate::knowledge::prepare_knowledge_request(
+        b"belief-projection-attachment",
+        crate::OperationId(transaction_uuid),
         parent
             .capabilities()
             .into_iter()
@@ -1312,20 +1313,8 @@ fn publish_attachment(
             })
             .collect(),
         participants,
-        |participants, content_sha256| {
-            crate::knowledge::knowledge_generation_uuid(
-                b"belief-projection-attachment",
-                crate::OperationId(transaction_uuid),
-                participants,
-                content_sha256,
-            )
-        },
     )?;
-    // A generation that carries a compact graph root forward is published
-    // under a CAS lease held from before staging through CURRENT.
-    let graph_objects = graphforge_storage::begin_graph_object_publication(
-        graph.resolved_generation.container_root(),
-    )?;
+    let graph_objects = graph.begin_graph_object_publication()?;
     let receipt = match graph.stage_project_generation(&request)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => staged

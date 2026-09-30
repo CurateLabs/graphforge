@@ -12,6 +12,17 @@ pub(super) type BoundGenerationStorage = (
 );
 
 impl GraphForge {
+    /// Take the graph object lease a publication holds from before staging
+    /// through `CURRENT`, so a generation that carries a compact graph root
+    /// forward publishes whether or not the parent is compact.
+    pub(crate) fn begin_graph_object_publication(
+        &self,
+    ) -> Result<graphforge_storage::GraphObjectPublicationLease, GfError> {
+        graphforge_storage::begin_graph_object_publication(
+            self.resolved_generation.container_root(),
+        )
+    }
+
     pub(crate) fn stage_project_generation<'r>(
         &self,
         request: impl Into<graphforge_storage::StageRequest<'r>>,

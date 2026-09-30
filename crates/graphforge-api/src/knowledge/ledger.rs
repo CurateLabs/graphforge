@@ -1041,6 +1041,24 @@ pub(crate) fn knowledge_generation_uuid(
     graphforge_core::canonical::uuid_v8(hasher.finalize().into())
 }
 
+/// A knowledge publication whose participant identities are computed once and
+/// reused by both its generation UUID and staging.
+pub(crate) fn prepare_knowledge_request(
+    operation: &[u8],
+    operation_uuid: OperationId,
+    capabilities: Vec<graphforge_storage::ProjectCapability>,
+    participants: Vec<ProjectParticipant>,
+) -> Result<graphforge_storage::PreparedGenerationRequest, GfError> {
+    graphforge_storage::PreparedGenerationRequest::new(
+        operation_uuid.0,
+        capabilities,
+        participants,
+        |participants, content_sha256| {
+            knowledge_generation_uuid(operation, operation_uuid, participants, content_sha256)
+        },
+    )
+}
+
 /// Exact-byte SHA-256 of participants that a generation identity covers but
 /// that are not the staged request itself (a subset later merged with parent
 /// participants). Staging hashes the merged request independently.

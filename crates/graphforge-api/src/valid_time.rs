@@ -389,24 +389,13 @@ fn publish(
             capability_version: entry.capability_version,
         })
         .collect();
-    let request = graphforge_storage::PreparedGenerationRequest::new(
-        context.operation_uuid.0,
+    let request = crate::knowledge::prepare_knowledge_request(
+        b"valid-time",
+        context.operation_uuid,
         capabilities,
         participants,
-        |participants, content_sha256| {
-            crate::knowledge::knowledge_generation_uuid(
-                b"valid-time",
-                context.operation_uuid,
-                participants,
-                content_sha256,
-            )
-        },
     )?;
-    // A generation that carries a compact graph root forward is published
-    // under a CAS lease held from before staging through CURRENT.
-    let graph_objects = graphforge_storage::begin_graph_object_publication(
-        graph.resolved_generation.container_root(),
-    )?;
+    let graph_objects = graph.begin_graph_object_publication()?;
     let receipt = match graph.stage_project_generation(&request)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => staged

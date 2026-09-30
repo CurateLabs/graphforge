@@ -520,11 +520,7 @@ fn publish(
             .collect(),
         participants,
     };
-    // A generation that carries a compact graph root forward is published
-    // under a CAS lease held from before staging through CURRENT.
-    let graph_objects = graphforge_storage::begin_graph_object_publication(
-        graph.resolved_generation.container_root(),
-    )?;
+    let graph_objects = graph.begin_graph_object_publication()?;
     let receipt = match graph.stage_project_generation(&request)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => staged

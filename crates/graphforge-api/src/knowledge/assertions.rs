@@ -10,8 +10,8 @@ use super::{
     ProjectParticipant, ProjectStageOutcome, ProvenanceLedger, RecordAssertionStatusRequest,
     RecordBatch, ResolvedProjectGeneration, SupersedeAssertionRequest, Uuid,
     assertion_publication_participants, assertion_result, assertion_status_bundle_participants,
-    concat_or_empty, knowledge_error, knowledge_generation_uuid, lock_graph_visibility,
-    merged_provenance, not_found, not_found_kind, read_confidence_ledger, read_ledger,
+    concat_or_empty, knowledge_error, lock_graph_visibility, merged_provenance, not_found,
+    not_found_kind, prepare_knowledge_request, read_confidence_ledger, read_ledger,
     read_reasoning_ledger, read_status_ledger, read_supersession_ledger, require_uuid,
     staged_assertion, status_publication_participants, supersession_publication_participants,
     transaction_conflict, validate_graph_refs, validate_write_context, with_next_token,
@@ -34,18 +34,11 @@ fn publish_status(
             capability_version: entry.capability_version,
         })
         .collect();
-    let publication = graphforge_storage::PreparedGenerationRequest::new(
-        request.context.operation_uuid.0,
+    let publication = prepare_knowledge_request(
+        b"assertion-status",
+        request.context.operation_uuid,
         capabilities,
         participants,
-        |participants, content_sha256| {
-            knowledge_generation_uuid(
-                b"assertion-status",
-                request.context.operation_uuid,
-                participants,
-                content_sha256,
-            )
-        },
     )?;
     let graph_objects = graphforge_storage::begin_graph_object_publication(
         graph.resolved_generation.container_root(),
@@ -91,18 +84,11 @@ fn publish_supersession(
             capability_version: entry.capability_version,
         })
         .collect();
-    let publication = graphforge_storage::PreparedGenerationRequest::new(
-        request.context.operation_uuid.0,
+    let publication = prepare_knowledge_request(
+        b"assertion-supersession",
+        request.context.operation_uuid,
         capabilities,
         participants,
-        |participants, content_sha256| {
-            knowledge_generation_uuid(
-                b"assertion-supersession",
-                request.context.operation_uuid,
-                participants,
-                content_sha256,
-            )
-        },
     )?;
     let graph_objects = graphforge_storage::begin_graph_object_publication(
         graph.resolved_generation.container_root(),
@@ -159,24 +145,13 @@ fn publish_assertion_status_bundle(
             capability_version: entry.capability_version,
         })
         .collect();
-    let publication = graphforge_storage::PreparedGenerationRequest::new(
-        request.assertion.context.operation_uuid.0,
+    let publication = prepare_knowledge_request(
+        b"assertion-status-bundle",
+        request.assertion.context.operation_uuid,
         capabilities,
         participants,
-        |participants, content_sha256| {
-            knowledge_generation_uuid(
-                b"assertion-status-bundle",
-                request.assertion.context.operation_uuid,
-                participants,
-                content_sha256,
-            )
-        },
     )?;
-    // A generation that carries a compact graph root forward is published
-    // under a CAS lease held from before staging through CURRENT.
-    let graph_objects = graphforge_storage::begin_graph_object_publication(
-        graph.resolved_generation.container_root(),
-    )?;
+    let graph_objects = graph.begin_graph_object_publication()?;
     let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => staged
@@ -287,6 +262,23 @@ fn validate_status_references(
     Ok(())
 }
 
+/// An assertion publication whose participant identities are computed once and
+/// reused by both its generation UUID and staging.
+fn prepare_assertion_request(
+    operation_uuid: OperationId,
+    capabilities: Vec<ProjectCapability>,
+    participants: Vec<ProjectParticipant>,
+) -> Result<graphforge_storage::PreparedGenerationRequest, GfError> {
+    graphforge_storage::PreparedGenerationRequest::new(
+        operation_uuid.0,
+        capabilities,
+        participants,
+        |participants, content_sha256| {
+            assertion_generation_uuid(operation_uuid, participants, content_sha256)
+        },
+    )
+}
+
 fn assertion_generation_uuid(
     operation_uuid: OperationId,
     participants: &[ProjectParticipant],
@@ -373,23 +365,9 @@ impl GraphForge {
                 capability_version: entry.capability_version,
             })
             .collect();
-        let publication = graphforge_storage::PreparedGenerationRequest::new(
-            request.context.operation_uuid.0,
-            capabilities,
-            participants,
-            |participants, content_sha256| {
-                assertion_generation_uuid(
-                    request.context.operation_uuid,
-                    participants,
-                    content_sha256,
-                )
-            },
-        )?;
-        // A generation that carries a compact graph root forward is published
-        // under a CAS lease held from before staging through CURRENT.
-        let graph_objects = graphforge_storage::begin_graph_object_publication(
-            self.resolved_generation.container_root(),
-        )?;
+        let publication =
+            prepare_assertion_request(request.context.operation_uuid, capabilities, participants)?;
+        let graph_objects = self.begin_graph_object_publication()?;
         let receipt = match self.stage_project_generation(&publication)? {
             ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
             ProjectStageOutcome::Staged(staged_generation) => staged_generation

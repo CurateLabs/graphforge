@@ -17,11 +17,11 @@ use super::ledger::{
 use super::{
     ApiErrorCode, EventKind, GfError, GraphForge, PageRequest, ProjectCapability,
     ProjectStageOutcome, ProvenanceEvent, ResolvedProjectGeneration, Uuid, WriteContext,
-    assertion_result, concat_or_empty, knowledge_error, knowledge_generation_uuid,
-    lock_graph_visibility, match_requested_edge_uuids, match_requested_node_uuids, not_found_kind,
-    provenance_error, read_artifact_ledger, read_derivation_ledger, read_evidence_ledger,
-    read_ledger, read_source_ledger, require_uuid, transaction_conflict, validate_write_context,
-    with_next_token,
+    assertion_result, concat_or_empty, knowledge_error, lock_graph_visibility,
+    match_requested_edge_uuids, match_requested_node_uuids, not_found_kind,
+    prepare_knowledge_request, provenance_error, read_artifact_ledger, read_derivation_ledger,
+    read_evidence_ledger, read_ledger, read_source_ledger, require_uuid, transaction_conflict,
+    validate_write_context, with_next_token,
 };
 use crate::PageToken;
 use crate::algorithm_runs::read_ledger as read_algorithm_run_ledger;
@@ -772,24 +772,13 @@ fn publish_source_artifact(
             capability_version: entry.capability_version,
         })
         .collect();
-    let publication = graphforge_storage::PreparedGenerationRequest::new(
-        context.operation_uuid.0,
+    let publication = prepare_knowledge_request(
+        b"source_artifact",
+        context.operation_uuid,
         capabilities,
         participants,
-        |participants, content_sha256| {
-            knowledge_generation_uuid(
-                b"source_artifact",
-                context.operation_uuid,
-                participants,
-                content_sha256,
-            )
-        },
     )?;
-    // A generation that carries a compact graph root forward is published
-    // under a CAS lease held from before staging through CURRENT.
-    let graph_objects = graphforge_storage::begin_graph_object_publication(
-        graph.resolved_generation.container_root(),
-    )?;
+    let graph_objects = graph.begin_graph_object_publication()?;
     let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => {

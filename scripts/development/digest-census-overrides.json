@@ -1407,7 +1407,7 @@
       "role": "control_authentication",
       "input_contract": "Conditional constructor callback runs only for the exact semantic route table path, bounded to 64 MiB; it hashes route authority JSON while other retained payloads, excluding a rewrite's identity-pinned temporaries, receive XXH64 checksums.",
       "function_bodies_sha256": [
-        "a0537eaa317d402aee13fcbbbfb8eee68ff4d987c0b968fdcefd0ea3bcd3a045"
+        "da0237d957e344130e6641962db7fc444d2f93e3da4c80de059a8717d7ba5699"
       ]
     },
     {
