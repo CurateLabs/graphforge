@@ -32,7 +32,6 @@ mod research_cli;
 mod research_versions_cli;
 mod source_artifact_cli;
 mod storage_attribution_cli;
-mod verify_cli;
 
 const MAX_SKILL_MANIFEST_BYTES: u64 = 256 * 1024;
 const MAX_SKILL_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -333,9 +332,6 @@ enum Command {
     Recovery,
     /// Emit authenticated, identity-free retained storage attribution.
     StorageAttribution(storage_attribution_cli::StorageAttributionArgs),
-    /// Explicitly re-authenticate the retained store on demand. Read-only;
-    /// never runs as part of ingest.
-    Verify,
 }
 
 #[derive(Args)]
@@ -1350,9 +1346,6 @@ fn run_with_allocation(
             )
             .map(|()| 0)
             .map_err(Into::into);
-        }
-        Command::Verify => {
-            return verify_cli::run_verify(&graph, cli.json, output).map_err(Into::into);
         }
         Command::Transaction { command } => {
             return maintenance_cli::run_transaction(&graph, command, cli.json, output)
@@ -2996,3 +2989,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod command_retirement_tests;

@@ -102,9 +102,9 @@ mod compact_details {
             else {
                 panic!("compact publication required")
             };
-            assert_eq!(compact.format_version, 4);
+            assert_eq!(compact.format_version, crate::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION);
             let inventory = selected.graph_files_inventory().unwrap().unwrap();
-            assert_eq!(inventory.format_version, 3);
+            assert_eq!(inventory.format_version, crate::GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION);
             let admitted =
                 crate::AuthenticatedPropertyInventory::from_resolved_generation(&selected).unwrap();
             let edges = crate::read_edges_from_inventory(
@@ -203,7 +203,7 @@ mod compact_details {
             drop(session);
             let selected = crate::resolve_project_generation(root.path()).unwrap();
             let current = selected.graph_files_inventory().unwrap().unwrap();
-            assert_eq!(current.format_version, 3);
+            assert_eq!(current.format_version, crate::GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION);
             table
                 .validate_paths(
                     current

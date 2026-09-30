@@ -207,32 +207,13 @@ fn materialize_from_cas(
 /// a file in place (same length, same inode) is invisible to it and to the
 /// checks below.
 ///
-/// This function is deliberately *not* self-sufficient authentication. It
-/// is safe to skip a re-hash here only because every real caller of
-/// [`materialize_graph_objects`] obtains its `inventory` argument from
-/// `ResolvedProjectGeneration::graph_files_inventory` (`project_generation.rs`),
-/// whose V2 loop performs a full streamed SHA-256 admission of every
-/// declared object's *content* against `entry.content_sha256` — memoized
-/// once per resolved generation, but a real check, not a presence check —
-/// before this function ever runs, in the same open, against the same CAS
-/// bytes this hardlink points at. The original version of this comment
-/// claimed the source's bytes were "authenticated once already... lazily
-/// on first real read via `open_graph_object_by_digest`/
-/// `read_graph_object_by_digest`" and cited that as why a hard link could
-/// never install different bytes than an already-authenticated inode. That
-/// claim was wrong for Topology-role objects: after materialization, the
-/// ordinary query path (`PersistentAdjacencyProvider`, Parquet reads) opens
-/// these files by path, never by CAS digest lookup, so neither function is
-/// ever called on them again. See
-/// `hardlinked_topology_payload_corruption_is_refused`
-/// (`graphforge-api`'s `workspace_hydration/tests.rs`) for the mutation
-/// proof: with the V2-loop hash deleted (as it was in #1425/cd964b69) and
-/// only this function's checks in place, a same-inode same-length byte
-/// flip in a hardlinked `topology/nodes.parquet` was accepted at open and
-/// an ordinary query silently returned a result over the corrupted data.
-/// If a future caller ever materializes an inventory that did not just
-/// come from a `graph_files_inventory()` call on the same resolved
-/// generation, this function alone will not catch content corruption.
+/// Every real caller obtains its inventory from this generation's
+/// `graph_files_inventory` admission. That streams each current-format
+/// payload against its required XXH64 checksum and exact length.
+/// Inode identity alone cannot detect an
+/// in-place byte mutation. The topology and all-role mutation tests in
+/// `workspace_hydration/tests.rs` therefore remain required. SHA-256 still
+/// names the object and remains required at installation and trust boundaries.
 /// This keeps the checks that stay meaningful after the hardlink: identity
 /// (defense in depth — cheap, `stat`-only, even though `link_child_into`
 /// already enforced it), declared length (mirrors `verify_file_counted`'s

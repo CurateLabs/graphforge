@@ -346,9 +346,9 @@ impl ResolvedProjectGeneration {
     }
 
     /// Uncached body of [`Self::graph_files_inventory`]. Every call performs
-    /// the full manifest decode plus, for the V2/mapped-root participant, a
-    /// presence-and-length check and a full streamed SHA-256 admission per
-    /// declared graph payload object. Call only through the memoized public
+    /// full manifest decode and checks each declared graph payload against
+    /// its required checksum and exact length. Control nodes retain SHA-256
+    /// authentication. Call only through the memoized public
     /// method above.
     fn compute_graph_files_inventory(&self) -> Result<Option<crate::GraphFilesInventory>, GfError> {
         let Some(participant) = self.declared_graph_files_participant()? else {
@@ -372,44 +372,11 @@ impl ResolvedProjectGeneration {
                         )
                     },
                 )?;
-                // Full presence, length AND content admission, once per
-                // resolved generation. #1425/cd964b69 (O3) deleted the
-                // `verify_graph_object` call below on the theory that every
-                // real consumer re-authenticates lazily on first touch via
-                // `open_graph_object_by_digest`/`read_graph_object_by_digest`
-                // (`graph_object_store.rs`). That is false for Topology-role
-                // objects: after hydration, the query engine
-                // (`PersistentAdjacencyProvider`, Parquet reads) opens the
-                // materialized workspace files by path, never by CAS digest
-                // lookup, so neither of those functions is ever called on
-                // the ordinary query path — confirmed empirically by
-                // `hardlinked_topology_payload_corruption_is_refused`
-                // (workspace_hydration/tests.rs), which flips one byte in a
-                // hardlinked `topology/nodes.parquet` (same inode, same
-                // length) and shows a fresh open plus an ordinary
-                // `MATCH (n) RETURN count(n)` both succeeding, silently,
-                // over the corrupted data, with O3 applied. Properties-role
-                // objects happened to stay covered only because
-                // `property_overlay::inventory` independently re-hashes
-                // every property/edge_properties route file on every open —
-                // a wholly separate mechanism this function does not call
-                // and that does not reach Topology.
-                //
-                // Restored: this is #1388's O1 (memoization, kept — see
-                // `graph_files_inventory`'s doc comment) doing the real work.
-                // Before O1, this full sweep ran 3-4 times per open because
-                // `hydrate_graph_workspace` and
-                // `property_and_graph_inventory_for_hydrated_generation`
-                // both called `graph_files_inventory()` independently. With
-                // O1, `get_or_init` means it runs exactly once per resolved
-                // generation regardless of how many call sites ask — the
-                // same reduction #1425 was chasing, achieved without
-                // deleting the only check that ever covered Topology data.
-                // `entry.content_sha256` is this object's content-addressed
-                // CAS lookup key, not merely a corruption checksum, so this
-                // stays a full cryptographic digest rather than becoming a
-                // fast checksum (that tradeoff, and the durable-format work
-                // it needs, belongs to #1417, not here).
+                // Refuse payload corruption before exposing any reader by
+                // comparing required XXH64 and exact length. The same-inode
+                // topology regression (#1435) continues to exercise this check.
+                // SHA-256 names are authenticated at installation and existing
+                // trust boundaries; legacy formats and standalone audits are retired.
                 for entry in &files {
                     let path =
                         crate::graph_object_path(self.container_root(), &entry.content_sha256)?;
@@ -424,11 +391,7 @@ impl ResolvedProjectGeneration {
                             "graph payload object length does not match manifest".into(),
                         ));
                     }
-                    crate::verify_graph_object(
-                        self.container_root(),
-                        &entry.content_sha256,
-                        entry.byte_length,
-                    )?;
+                    crate::graph_object_store::admit_graph_object(self.container_root(), entry)?;
                 }
                 crate::route_component::authenticate_manifest_routes(
                     root.format_version,
@@ -443,13 +406,7 @@ impl ResolvedProjectGeneration {
                 )?;
                 crate::graph_files::inventory_from_entries_with_version(
                     files,
-                    if root.format_version
-                        == crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
-                    {
-                        crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
-                    } else {
-                        crate::GRAPH_FILES_RECORD_VERSION
-                    },
+                    crate::graph_files::expanded_version_for_root(root.format_version)?,
                 )
                 .map(Some)
             }
@@ -481,10 +438,10 @@ impl ResolvedProjectGeneration {
         if snapshot.capability_version != crate::GRAPH_CAPABILITY_VERSION
             || !matches!(
                 snapshot.record_version,
-                crate::GRAPH_FILES_RECORD_VERSION
-                    | crate::GRAPH_FILES_V2_RECORD_VERSION
-                    | crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
-                    | crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+                crate::graph_files::GRAPH_FILES_CHECKSUM_RECORD_VERSION
+                    | crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+                    | crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
+                    | crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
             )
             || snapshot.encoding != "json"
         {
@@ -1587,6 +1544,13 @@ fn validate_manifest(manifest: &GenerationManifest, expected: Uuid) -> Result<()
     for participant in &manifest.participants {
         validate_machine_id(&participant.capability_id)?;
         validate_machine_id(&participant.record_family_id)?;
+        if participant.capability_id == crate::GRAPH_CAPABILITY_ID
+            && participant.record_family_id == "snapshot"
+        {
+            return Err(GfError::Validation(
+                "unsupported legacy graph snapshot format; recreate the pre-v1 project".into(),
+            ));
+        }
         if participant.capability_version == 0 || participant.record_version == 0 {
             return Err(corrupt("participant contract versions must be positive"));
         }
@@ -2108,8 +2072,7 @@ mod tests {
         let participant = if compact {
             let lease = crate::begin_graph_object_publication(root).unwrap();
             let (compact_root, _) =
-                crate::graph_object_store::migrate_graph_files_v1_to_v2(&lease, &graph, &inventory)
-                    .unwrap();
+                crate::graph_object_store::compact_graph_files(&lease, &graph, &inventory).unwrap();
             crate::graph_files_root_participant(&compact_root).unwrap()
         } else {
             expanded

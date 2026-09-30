@@ -5,7 +5,6 @@ use super::BTreeMap;
 use super::BTreeSet;
 use super::Digest;
 use super::GRAPH_FILES_V2_FORMAT;
-use super::GRAPH_FILES_V2_VERSION;
 use super::GRAPH_MANIFEST_NODE_FORMAT;
 use super::GRAPH_MANIFEST_NODE_VERSION;
 use super::GRAPH_RADIX_DEPTH;
@@ -312,7 +311,7 @@ pub(crate) fn append_authenticated_mapped_graph_files(
     if staged
         .root
         .as_ref()
-        .is_some_and(|root| root.format_version == GRAPH_FILES_V2_VERSION)
+        .is_some_and(|root| !crate::graph_files::root_is_mapped(root.format_version))
     {
         let mut rebuilt = BTreeMap::new();
         let mut expected = crate::route_component::RouteTable::default();
@@ -353,7 +352,7 @@ pub(crate) fn append_authenticated_mapped_graph_files(
         staged.entries = rebuilt;
         let root = staged.root.as_mut().expect("legacy parent root exists");
         root.root_node_sha256 = digest;
-        root.format_version = crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION;
+        root.format_version = crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION;
     }
     let paths = sealed_files
         .iter()
@@ -464,6 +463,9 @@ fn append_graph_files_v2_inner(
             .ok_or_else(|| validation("sealed graph path is not UTF-8"))?
             .to_owned();
         let entry = crate::GraphFileEntry {
+            content_xxh64: installed.content_xxh64.ok_or_else(|| {
+                validation("graph object installation omitted its payload checksum")
+            })?,
             relative_path: relative_path.clone(),
             byte_length: expected_length,
             content_sha256: digest,
@@ -527,7 +529,7 @@ fn append_graph_files_v2_inner(
     evidence.publication_io.changed_paths = evidence.changed_entries_examined;
     let mut root_digest = match state.root.as_ref() {
         Some(previous) => previous.root_node_sha256.clone(),
-        None => install_manifest_node(lease, &empty_branch(0), &mut evidence.publication_io)?,
+        _ => install_manifest_node(lease, &empty_branch(0), &mut evidence.publication_io)?,
     };
     for entry in &additions {
         let relative_path = entry.relative_path.clone();
@@ -573,9 +575,9 @@ fn append_graph_files_v2_inner(
     let root = GraphFilesRootV2 {
         format: GRAPH_FILES_V2_FORMAT.into(),
         format_version: if mapped_routes.is_some() {
-            crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+            crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
         } else {
-            GRAPH_FILES_V2_VERSION
+            crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
         },
         root_node_sha256: root_digest,
         logical_file_count: u64::try_from(logical_file_count)
@@ -605,8 +607,8 @@ fn append_graph_files_v2_inner(
     Ok((root, evidence))
 }
 
-/// Import a verified v1 graph tree into a self-contained v2 radix root.
-pub fn migrate_graph_files_v1_to_v2(
+/// Convert a current expanded graph inventory into a self-contained compact radix root.
+pub fn compact_graph_files(
     lease: &GraphObjectPublicationLease,
     graph_root: &Path,
     inventory: &GraphFilesInventory,
@@ -616,6 +618,7 @@ pub fn migrate_graph_files_v1_to_v2(
     crate::encode_inventory(inventory)?;
     validate_publication_identity(lease)?;
     let mut evidence = GraphFilesMigrationEvidence::default();
+    let mut installed_checksums = BTreeMap::new();
     for entry in &inventory.files {
         let source = crate::graph_files::resolve_v1_inventory_entry(graph_root, entry)?;
         let installed = install_graph_object_file_with_lease(
@@ -624,6 +627,12 @@ pub fn migrate_graph_files_v1_to_v2(
             &entry.content_sha256,
             entry.byte_length,
         )?;
+        installed_checksums.insert(
+            entry.relative_path.clone(),
+            installed.content_xxh64.ok_or_else(|| {
+                validation("graph object installation omitted its payload checksum")
+            })?,
+        );
         evidence.payload_objects = evidence
             .payload_objects
             .checked_add(1)
@@ -641,6 +650,7 @@ pub fn migrate_graph_files_v1_to_v2(
     let mut root_digest = install_manifest_node(lease, &empty_branch(0), &mut publication_io)?;
     for entry in &inventory.files {
         let mut canonical_entry = entry.clone();
+        canonical_entry.content_xxh64 = installed_checksums[&entry.relative_path];
         canonical_entry.relative_path =
             crate::graph_files::canonical_inventory_relative_text(&entry.relative_path)?;
         let canonical_path = canonical_entry.relative_path.clone();
@@ -661,7 +671,11 @@ pub fn migrate_graph_files_v1_to_v2(
     Ok((
         GraphFilesRootV2 {
             format: GRAPH_FILES_V2_FORMAT.into(),
-            format_version: GRAPH_FILES_V2_VERSION,
+            format_version: if crate::graph_files::inventory_is_mapped(inventory.format_version) {
+                crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
+            } else {
+                crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+            },
             root_node_sha256: root_digest,
             logical_file_count: inventory.file_count,
             logical_byte_length: inventory.total_byte_length,
@@ -909,7 +923,7 @@ fn bucket_node(
 ) -> Result<GraphManifestNode, GfError> {
     Ok(GraphManifestNode {
         format: GRAPH_MANIFEST_NODE_FORMAT.into(),
-        format_version: GRAPH_MANIFEST_NODE_VERSION,
+        format_version: crate::graph_manifest::GRAPH_MANIFEST_CHECKSUM_NODE_VERSION,
         depth,
         prefix: crate::graph_manifest::bucket_prefix(depth, &entries)?,
         kind: GraphManifestNodeKind::Bucket { entries },

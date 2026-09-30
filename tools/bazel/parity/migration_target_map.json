@@ -834,16 +834,6 @@
     },
     {
       "package": "graphforge-cli",
-      "target": "verify",
-      "class": "integration-test",
-      "source": "crates/graphforge-cli/tests/verify.rs",
-      "status": "mapped",
-      "bazel_label": "//crates/graphforge-cli:verify",
-      "exception_id": null,
-      "notes": "#1384 explicit out-of-band project verify command"
-    },
-    {
-      "package": "graphforge-cli",
       "target": "research_versions",
       "class": "integration-test",
       "source": "crates/graphforge-cli/tests/research_versions.rs",

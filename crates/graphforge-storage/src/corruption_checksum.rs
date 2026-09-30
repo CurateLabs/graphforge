@@ -190,15 +190,70 @@ pub(crate) fn hex(value: u64) -> String {
 }
 
 /// The checksum of a complete payload already held in memory.
-#[cfg(test)]
 pub(crate) fn checksum(bytes: &[u8]) -> u64 {
     let mut checksum = Checksum::new();
     checksum.update(bytes);
     checksum.finish()
 }
 
+/// Canonical fixed-width wire encoding for published checksums.
+/// Canonical required checksum field; null and missing fields are refused.
+pub(crate) mod wire_hex {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "Serde field adapters require a reference to the field"
+    )]
+    pub(crate) fn serialize<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&super::hex(*value))
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        if value.len() != 16
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(serde::de::Error::custom(
+                "XXH64 must be 16 lowercase hexadecimal digits",
+            ));
+        }
+        u64::from_str_radix(&value, 16).map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn published_checksum_wire_has_fixed_width_and_refuses_noncanonical_values() {
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Wire {
+            #[serde(with = "super::wire_hex")]
+            checksum: u64,
+        }
+        for checksum in [0, 1, u64::MAX] {
+            let bytes = serde_json::to_vec(&Wire { checksum }).unwrap();
+            assert_eq!(bytes.len(), 31);
+            assert_eq!(
+                serde_json::from_slice::<Wire>(&bytes).unwrap().checksum,
+                checksum
+            );
+        }
+        for value in [
+            "0",
+            "FFFFFFFFFFFFFFFF",
+            "0xffffffffffffffff",
+            "gggggggggggggggg",
+        ] {
+            assert!(
+                serde_json::from_value::<Wire>(serde_json::json!({"checksum": value})).is_err()
+            );
+        }
+        assert!(serde_json::from_value::<Wire>(serde_json::json!({"checksum": 1})).is_err());
+    }
+
     use super::{Checksum, checksum, hex};
 
     #[test]
