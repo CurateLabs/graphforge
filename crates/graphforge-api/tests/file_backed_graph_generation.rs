@@ -10,9 +10,6 @@
 //!  cargo test -p graphforge-api --test file_backed_graph_generation \
 //!  oversize_file_backed_generation_exceeds_legacy_snapshot_envelope -- --ignored --nocapture`
 
-#[path = "support/project_fixture.rs"]
-mod project_fixture;
-
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -661,32 +658,98 @@ fn portable_export_of_file_backed_generation_is_structured_unsupported() {
 }
 
 #[test]
-fn legacy_snapshot_generations_remain_readable() {
+fn legacy_snapshot_publication_is_refused_without_changing_current() {
+    use std::sync::Arc;
+
+    use arrow::array::{ArrayRef, BinaryArray, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::ipc::writer::FileWriter;
+    use arrow::record_batch::RecordBatch;
+    use graphforge_core::canonical::{CANONICAL_CONTRACT_VERSION, CanonicalDomain, fingerprint};
+    use graphforge_storage::{
+        ProjectParticipant, ProjectParticipantEncoding, stage_project_generation,
+    };
+
     let root = tempfile::tempdir().unwrap();
-    let workspace = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(workspace.path().join("topology")).unwrap();
-    std::fs::write(workspace.path().join("topology/nodes.parquet"), b"legacy").unwrap();
-    project_fixture::publish_graph_workspace(root.path(), workspace.path());
+    let path = root.path().to_str().unwrap();
+    let graph = GraphForge::new(Some(path)).unwrap();
+    graph.execute("CREATE (:Person {name: 'Ada'})").unwrap();
+    drop(graph);
+    let generation_uuid = resolve_project_generation(root.path())
+        .unwrap()
+        .generation_uuid();
+    let current = fs::read(root.path().join(graphforge_storage::CURRENT_FILE)).unwrap();
 
-    let generation = resolve_project_generation(root.path()).unwrap();
-    assert!(
-        generation
-            .participant_snapshot("graph", "snapshot")
-            .unwrap()
-            .is_some()
-    );
-    assert!(
-        generation
-            .participant_snapshot("graph", GRAPH_FILES_FAMILY)
-            .unwrap()
-            .is_none()
-    );
-
-    let opened = GraphForge::new(Some(root.path().to_str().unwrap())).unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("relative_path", DataType::Utf8, false),
+        Field::new("content", DataType::Binary, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(StringArray::from(vec!["topology/nodes.parquet"])) as ArrayRef,
+            Arc::new(BinaryArray::from_vec(vec![b"legacy".as_slice()])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let mut bytes = Vec::new();
+    {
+        let mut writer = FileWriter::try_new(&mut bytes, &schema).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+    }
+    let snapshot = ProjectParticipant {
+        capability_id: GRAPH_CAPABILITY_ID.into(),
+        capability_version: GRAPH_CAPABILITY_VERSION,
+        record_family_id: "snapshot".into(),
+        record_version: 1,
+        encoding: ProjectParticipantEncoding::Arrow,
+        schema_fingerprint: fingerprint(
+            CanonicalDomain::Schema,
+            CANONICAL_CONTRACT_VERSION,
+            b"graph_snapshot/1|relative_path:utf8:not-null|content:binary:not-null",
+        )
+        .unwrap(),
+        row_count: 1,
+        bytes,
+    };
+    let mut participants = empty_workspace_participants().unwrap();
+    participants.insert(0, snapshot);
+    let request = ProjectGenerationRequest {
+        transaction_uuid: Uuid::now_v7(),
+        generation_uuid: Uuid::now_v7(),
+        capabilities: vec![
+            ProjectCapability {
+                capability_id: GRAPH_CAPABILITY_ID.into(),
+                capability_version: GRAPH_CAPABILITY_VERSION,
+            },
+            ProjectCapability {
+                capability_id: "workspace".into(),
+                capability_version: 1,
+            },
+        ],
+        participants,
+    };
+    let error = match stage_project_generation(root.path(), &request) {
+        Ok(_) => panic!("legacy snapshot publication must be refused"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains("unsupported"), "{message}");
+    assert!(message.contains("snapshot"), "{message}");
     assert_eq!(
-        opened.graph_open_evidence().strategy,
-        GraphFilesOpenStrategy::LegacySnapshotHydrate
+        fs::read(root.path().join(graphforge_storage::CURRENT_FILE)).unwrap(),
+        current,
+        "refused snapshot must not replace CURRENT"
     );
+    assert_eq!(
+        resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid(),
+        generation_uuid
+    );
+    let reopened = GraphForge::new(Some(path)).unwrap();
+    assert_eq!(reopened.node_count("Person").unwrap(), 1);
 }
 
 #[test]
@@ -790,10 +853,6 @@ fn oversize_file_backed_generation_exceeds_legacy_snapshot_envelope() {
     let rss_before_open = peak_rss_bytes();
     let reopened = GraphForge::new(Some(path)).unwrap();
     let open_evidence = reopened.graph_open_evidence().clone();
-    assert_ne!(
-        open_evidence.strategy,
-        GraphFilesOpenStrategy::LegacySnapshotHydrate
-    );
     assert!(open_evidence.bytes_validated > LEGACY_SNAPSHOT_ENVELOPE_BYTES);
     assert_eq!(open_evidence.bytes_validated, inventory.total_byte_length);
     assert_eq!(

@@ -283,10 +283,11 @@ fn compact_fixture_path(root: &Path, value: &str, legacy_path: &str) -> String {
     let digest = hex(&Sha256::digest(&bytes).into());
     let inventory = crate::GraphFilesInventory {
         format: "graphforge-graph-files".into(),
-        format_version: 1,
+        format_version: crate::GRAPH_FILES_CHECKSUM_RECORD_VERSION,
         file_count: 1,
         total_byte_length: bytes.len() as u64,
         files: vec![crate::GraphFileEntry {
+            content_xxh64: crate::corruption_checksum::checksum(&bytes),
             relative_path: legacy_path.into(),
             byte_length: bytes.len() as u64,
             content_sha256: digest.clone(),
@@ -294,12 +295,9 @@ fn compact_fixture_path(root: &Path, value: &str, legacy_path: &str) -> String {
         }],
     };
     let lease = crate::begin_graph_object_publication(root).unwrap();
-    let (graph, _) = crate::graph_object_store::migrate_graph_files_v1_to_v2(
-        &lease,
-        workspace.path(),
-        &inventory,
-    )
-    .unwrap();
+    let (graph, _) =
+        crate::graph_object_store::compact_graph_files(&lease, workspace.path(), &inventory)
+            .unwrap();
     let mut participants = vec![crate::graph_files::graph_files_root_participant(&graph).unwrap()];
     let mut capabilities = vec![ProjectCapability {
         capability_id: "graph".into(),
