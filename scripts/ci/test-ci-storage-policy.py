@@ -80,6 +80,7 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "binding-rc-report-${{ github.run_id }}-${{ matrix.report_target }}": 1,
         "binding-rc-wheel-${{ github.run_id }}-${{ matrix.target }}": 1,
         "binding-rc-addon-${{ github.run_id }}-${{ matrix.target }}": 1,
+        "binding-rc-node-loaders-${{ github.run_id }}": 1,
         "Rust-Non-Cypher-${{ env.EVIDENCE_SHA }}": 1,
         "Binding-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
         "Release-Load-${{ github.run_id }}": 1,
@@ -107,6 +108,7 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
         "binding-rc-report-${{ github.run_id }}-*": 1,
         "binding-rc-wheel-${{ github.run_id }}-*": 1,
         "binding-rc-addon-${{ github.run_id }}-*": 1,
+        "binding-rc-node-loaders-${{ github.run_id }}": 1,
         "Rust-Non-Cypher-${{ needs.validate_source.outputs.evidence_sha }}": 1,
         "Binding-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
         "Release-Load-${{ github.run_id }}": 1,
@@ -145,7 +147,7 @@ EXPECTED_STICKY_KEYS = Counter(
         (
             "${{ github.repository }}-binding-rc-linux-rust-1.96.0-"
             "${{ hashFiles('Cargo.lock') }}-release-target-v1"
-        ): 2,
+        ): 1,
         (
             "${{ github.repository }}-release_candidate-rust-1.96.0-"
             "${{ hashFiles('Cargo.lock') }}-release-target-v1"
@@ -280,6 +282,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             "binding-rc-reports/${{ matrix.report_target }}.json",
             "dist/*.whl",
             "crates/graphforge-bindings-node/*.node",
+            "crates/graphforge-bindings-node/index.js\ncrates/graphforge-bindings-node/index.d.ts",
             (
                 "crates/graphforge-bindings-node/*.node\n"
                 "crates/graphforge-bindings-node/index.js\n"
@@ -337,6 +340,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             "native/windows",
             "native/macos",
             "${{ runner.temp }}",
+            "${{ runner.temp }}/node-loaders",
         }, f"artifact download path drift: {selector}"
         if pattern is not None:
             assert field(step, "merge-multiple") == "true", (
