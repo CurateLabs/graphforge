@@ -63,24 +63,23 @@ assert_feature_classification() {
   git -C "$fixture" reset --hard -q "$base"
 }
 
-none=$'rust=false\npython=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
-# After #4 cutover, rust classification always enables Bazel authority.
-rust_only=$'rust=true\npython=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
-python_only=$'rust=false\npython=true\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
-binding_rust=$'rust=true\npython=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
-binding_python=$'rust=false\npython=true\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
-binding_rust_python=$'rust=true\npython=true\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
-binding_only=$'rust=false\npython=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
-binding_agent_skills=$'rust=false\npython=false\nbindings=true\nagent_skills=true\npulumi=false\nterraform=false\nbazel=false'
-agent_skills_only=$'rust=false\npython=false\nbindings=false\nagent_skills=true\npulumi=false\nterraform=false\nbazel=false'
-pulumi_only=$'rust=false\npython=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=false\nbazel=false'
-terraform_only=$'rust=false\npython=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=true\nbazel=false'
-binding_iac=$'rust=false\npython=false\nbindings=true\nagent_skills=false\npulumi=true\nterraform=true\nbazel=false'
-rust_binding_iac=$'rust=true\npython=false\nbindings=true\nagent_skills=false\npulumi=true\nterraform=true\nbazel=true'
-rust_iac=$'rust=true\npython=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=true\nbazel=true'
-all=$'rust=true\npython=true\nbindings=true\nagent_skills=true\npulumi=true\nterraform=true\nbazel=true'
-bazel_only=$'rust=false\npython=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
-rust_bindings_bazel=$'rust=true\npython=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
+none=$'rust=false\npython=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nrust_tests=false'
+# Every Rust classification also runs the Cargo Rust test suite (ADR 0048).
+rust_only=$'rust=true\npython=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nrust_tests=true'
+python_only=$'rust=false\npython=true\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nrust_tests=false'
+binding_rust=$'rust=true\npython=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nrust_tests=true'
+binding_python=$'rust=false\npython=true\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nrust_tests=false'
+binding_rust_python=$'rust=true\npython=true\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nrust_tests=true'
+binding_only=$'rust=false\npython=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nrust_tests=false'
+binding_agent_skills=$'rust=false\npython=false\nbindings=true\nagent_skills=true\npulumi=false\nterraform=false\nrust_tests=false'
+agent_skills_only=$'rust=false\npython=false\nbindings=false\nagent_skills=true\npulumi=false\nterraform=false\nrust_tests=false'
+pulumi_only=$'rust=false\npython=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=false\nrust_tests=false'
+terraform_only=$'rust=false\npython=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=true\nrust_tests=false'
+binding_iac=$'rust=false\npython=false\nbindings=true\nagent_skills=false\npulumi=true\nterraform=true\nrust_tests=false'
+rust_binding_iac=$'rust=true\npython=false\nbindings=true\nagent_skills=false\npulumi=true\nterraform=true\nrust_tests=true'
+rust_iac=$'rust=true\npython=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=true\nrust_tests=true'
+all=$'rust=true\npython=true\nbindings=true\nagent_skills=true\npulumi=true\nterraform=true\nrust_tests=true'
+rust_bindings_tests=$'rust=true\npython=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nrust_tests=true'
 
 assert_feature_classification $'epistemic_contract=false\nknowledge_contract=false\nnon_cypher_surface=false' \
   crates/graphforge-storage/src/lib.rs storage-only
@@ -140,29 +139,31 @@ assert_classification "$all" ".github/workflows/test.yml" workflow
 assert_classification "$all" scripts/ci/require-gates.sh aggregate-gate
 assert_classification "$all" scripts/ci/concurrency-short-gate.py concurrency-short-gate
 assert_classification "$all" tests/contracts/concurrency-short-matrix.json concurrency-short-matrix
-assert_classification "$bazel_only" MODULE.bazel bazel-module
-assert_classification "$bazel_only" tools/bazel/smoke/src/lib.rs bazel-smoke
-assert_classification "$bazel_only" scripts/ci/cargo-bazel-drift-check.py bazel-drift-check
-assert_classification "$bazel_only" cargo-bazel-lock.json bazel-crate-universe-lock
-assert_classification "$bazel_only" crates/graphforge-core/BUILD.bazel bazel-crate-build
-assert_classification "$bazel_only" docs/reference/BUILD.bazel bazel-docs-reference-build
-assert_classification "$bazel_only" docs/contracts/examples/BUILD.bazel bazel-docs-contracts-build
-assert_classification "$bazel_only" scripts/ci/assemble_bazel_binding_packages.py bazel-binding-packaging
-assert_classification "$bazel_only" tools/bazel/bindings/BUILD.bazel bazel-bindings-handoff
-assert_classification "$bazel_only" tests/features/BUILD.bazel bazel-features-build
-assert_classification "$bazel_only" tests/tck/BUILD.bazel bazel-tck-build
-assert_classification "$bazel_only" examples/agent_grounding/BUILD.bazel bazel-notebook-build
-assert_classification "$bazel_only" platforms/BUILD.bazel bazel-release-platforms
-assert_classification "$bazel_only" tests/release_workflows/BUILD.bazel bazel-release-workflow-inputs
-assert_classification "$bazel_only" scripts/ci/cargo-bazel-parity-check.py bazel-parity-check
-assert_classification "$bazel_only" scripts/ci/bazel-migration-ledger-check.py bazel-ledger-check
-assert_classification "$bazel_only" docs/development/bazel-migration.md bazel-migration-doc
-assert_classification "$bazel_only" scripts/ci/bazel-cache-perf.py bazel-cache-perf-harness
-assert_classification "$bazel_only" \
+# Bazel build descriptions feed no CI Gate lane after ADR 0048 (#1644).
+assert_classification "$none" MODULE.bazel bazel-module
+assert_classification "$none" tools/bazel/smoke/src/lib.rs bazel-smoke
+assert_classification "$none" cargo-bazel-lock.json bazel-crate-universe-lock
+assert_classification "$none" crates/graphforge-core/BUILD.bazel bazel-crate-build
+assert_classification "$none" docs/reference/BUILD.bazel bazel-docs-reference-build
+assert_classification "$none" docs/contracts/examples/BUILD.bazel bazel-docs-contracts-build
+assert_classification "$none" tools/bazel/bindings/BUILD.bazel bazel-bindings-handoff
+assert_classification "$none" tests/features/BUILD.bazel bazel-features-build
+assert_classification "$none" tests/tck/BUILD.bazel bazel-tck-build
+assert_classification "$none" examples/agent_grounding/BUILD.bazel bazel-notebook-build
+assert_classification "$none" platforms/BUILD.bazel bazel-release-platforms
+assert_classification "$none" tests/release_workflows/BUILD.bazel bazel-release-workflow-inputs
+assert_classification "$none" \
   tools/bazel/migration-evidence/perf-sample.json bazel-cache-perf-evidence
+# Bazel scripts are ordinary Python and Bazel docs are ordinary docs.
+assert_classification "$python_only" scripts/ci/cargo-bazel-drift-check.py bazel-drift-check
+assert_classification "$python_only" scripts/ci/bazel-cache-perf.py bazel-cache-perf-harness
+assert_classification "$none" docs/development/bazel-migration.md bazel-migration-doc
+# Docs-only changes skip the Rust test lane (#1644 acceptance criterion).
 assert_classification "$none" "docs/a file with spaces.md" docs-only
+assert_classification "$none" docs/book/architecture/ast-and-planning.md book-docs-only
+assert_classification "$none" README.md readme-only
 
-# Fail-closed: formerly inert Bazel-mapped test data must enable Rust+Bazel.
+# Fail-closed: Rust test data must enable the Rust test lane.
 assert_classification "$rust_only" \
   tests/tck/features/clauses/match/Match1.feature tck-feature
 assert_classification "$rust_only" \
@@ -171,7 +172,7 @@ assert_classification "$rust_only" \
   crates/graphforge-ontology/tests/fixtures/hr.json ontology-fixture
 assert_classification "$rust_only" \
   crates/graphforge-cypher/tests/corpus/valid.json cypher-corpus
-# Binding-crate fixtures must still enable authoritative Rust/Bazel (not
+# Binding-crate fixtures must still enable the Rust test lane (not
 # bindings-only from the later crate glob).
 assert_classification "$binding_rust" \
   crates/graphforge-api/tests/fixtures/x.json api-fixture
@@ -209,8 +210,8 @@ manifest_actual=$(
   cd "$fixture"
   "$classifier" "$base" HEAD | sed -n '1,7p'
 )
-[[ "$manifest_actual" == "$rust_bindings_bazel" ]] || {
-  printf 'dependency manifest edit must run Rust, bindings, and Bazel drift, got:\n%s\n' \
+[[ "$manifest_actual" == "$rust_bindings_tests" ]] || {
+  printf 'dependency manifest edit must run Rust, bindings, and Rust tests, got:\n%s\n' \
     "$manifest_actual" >&2
   exit 1
 }
@@ -236,6 +237,14 @@ empty=$(
   printf 'empty base must fail safe, got:\n%s\n' "$empty" >&2
   exit 1
 }
+
+# The Cargo Rust test lane must consume the rust_tests output (#1644).
+grep -Fq 'rust_tests: ${{ steps.filter.outputs.rust_tests }}' "$workflow"
+grep -Fq "needs.changes.outputs.rust_tests == 'true'" "$workflow"
+if grep -Fq 'outputs.bazel' "$workflow"; then
+  echo "test.yml must not consume the retired bazel classifier output" >&2
+  exit 1
+fi
 
 # Reusable contract lanes must consume the feature-specific classifier outputs.
 for feature in epistemic_contract knowledge_contract non_cypher_surface; do
