@@ -410,8 +410,8 @@ export default defineConfig({
                   slug: 'adr/0047-over-budget-partitions-and-instance-cpu-budget',
                 },
                 {
-                  label: '0048 — Versioned checksums for published graph payload admission',
-                  slug: 'adr/0048-published-payload-checksums',
+                  label: '0049 — Versioned checksums for published graph payload admission',
+                  slug: 'adr/0049-published-payload-checksums',
                 },
                 // END generated ADR records
               ],

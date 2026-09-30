@@ -295,7 +295,7 @@ length of **every** selected payload without a payload SHA-256 pass. SHA-256
 still names CAS objects and authenticates control metadata and existing
 trust boundaries. The standalone `graphforge verify` command and whole-store
 forensic scanner are retired. Portable package verification remains required.
-See [ADR 0048](../../adr/0048-published-payload-checksums.md) for the pre-v1
+See [ADR 0049](../../adr/0049-published-payload-checksums.md) for the pre-v1
 format policy and trust assumptions. The same-inode, same-length corruption test in
 `graphforge-api/src/workspace_hydration/tests.rs` covers every role, including
 real adjacency and search index publications:

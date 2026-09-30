@@ -1,13 +1,13 @@
 ---
-title: "ADR 0048: Versioned checksums for published graph payload admission"
-adr: "0048"
+title: "ADR 0049: Versioned checksums for published graph payload admission"
+adr: "0049"
 status: "Accepted"
 date: "2026-09-29"
 superseded_by: null
 revisit_when: "The same-identity adversary assumption changes, or published graph payloads move to a substrate with authoritative data checksums"
 ---
 
-# ADR 0048: Versioned checksums for published graph payload admission
+# ADR 0049: Versioned checksums for published graph payload admission
 
 ## Context
 
