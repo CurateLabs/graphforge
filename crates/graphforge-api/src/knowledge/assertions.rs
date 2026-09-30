@@ -172,6 +172,11 @@ fn publish_assertion_status_bundle(
             )
         },
     )?;
+    // A generation that carries a compact graph root forward is published
+    // under a CAS lease held from before staging through CURRENT.
+    let graph_objects = graphforge_storage::begin_graph_object_publication(
+        graph.resolved_generation.container_root(),
+    )?;
     let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => staged
@@ -186,7 +191,7 @@ fn publish_assertion_status_bundle(
                     Ok(())
                 },
             )?
-            .publish()?,
+            .publish_with_graph_objects(&graph_objects)?,
     };
     *graph
         .current_generation_uuid
@@ -380,6 +385,11 @@ impl GraphForge {
                 )
             },
         )?;
+        // A generation that carries a compact graph root forward is published
+        // under a CAS lease held from before staging through CURRENT.
+        let graph_objects = graphforge_storage::begin_graph_object_publication(
+            self.resolved_generation.container_root(),
+        )?;
         let receipt = match self.stage_project_generation(&publication)? {
             ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
             ProjectStageOutcome::Staged(staged_generation) => staged_generation
@@ -396,7 +406,7 @@ impl GraphForge {
                         Ok(())
                     },
                 )?
-                .publish()?,
+                .publish_with_graph_objects(&graph_objects)?,
         };
         *self
             .current_generation_uuid

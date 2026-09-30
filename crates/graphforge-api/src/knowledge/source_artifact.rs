@@ -785,6 +785,11 @@ fn publish_source_artifact(
             )
         },
     )?;
+    // A generation that carries a compact graph root forward is published
+    // under a CAS lease held from before staging through CURRENT.
+    let graph_objects = graphforge_storage::begin_graph_object_publication(
+        graph.resolved_generation.container_root(),
+    )?;
     let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => {
@@ -822,7 +827,7 @@ fn publish_source_artifact(
                             Ok(())
                         },
                     )?
-                    .publish()?
+                    .publish_with_graph_objects(&graph_objects)?
             }
         }
     };

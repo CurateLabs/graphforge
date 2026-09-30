@@ -104,6 +104,11 @@ fn publish_confidence(
             )
         },
     )?;
+    // A generation that carries a compact graph root forward is published
+    // under a CAS lease held from before staging through CURRENT.
+    let graph_objects = graphforge_storage::begin_graph_object_publication(
+        graph.resolved_generation.container_root(),
+    )?;
     let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged_generation) => staged_generation
@@ -118,7 +123,7 @@ fn publish_confidence(
                     Ok(())
                 },
             )?
-            .publish()?,
+            .publish_with_graph_objects(&graph_objects)?,
     };
     *graph
         .current_generation_uuid
@@ -169,6 +174,11 @@ fn publish_evidence(
             )
         },
     )?;
+    // A generation that carries a compact graph root forward is published
+    // under a CAS lease held from before staging through CURRENT.
+    let graph_objects = graphforge_storage::begin_graph_object_publication(
+        graph.resolved_generation.container_root(),
+    )?;
     let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged_generation) => staged_generation
@@ -183,7 +193,7 @@ fn publish_evidence(
                     Ok(())
                 },
             )?
-            .publish()?,
+            .publish_with_graph_objects(&graph_objects)?,
     };
     *graph
         .current_generation_uuid
@@ -233,6 +243,11 @@ fn publish_assertion_evidence(
             )
         },
     )?;
+    // A generation that carries a compact graph root forward is published
+    // under a CAS lease held from before staging through CURRENT.
+    let graph_objects = graphforge_storage::begin_graph_object_publication(
+        graph.resolved_generation.container_root(),
+    )?;
     let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged_generation) => staged_generation
@@ -247,7 +262,7 @@ fn publish_assertion_evidence(
                     Ok(())
                 },
             )?
-            .publish()?,
+            .publish_with_graph_objects(&graph_objects)?,
     };
     *graph
         .current_generation_uuid

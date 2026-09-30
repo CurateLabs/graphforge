@@ -284,14 +284,20 @@ fn compact_cas_republication_does_not_rehash_inherited_objects() {
 
 #[cfg(feature = "knowledge")]
 #[test]
-fn knowledge_publication_hashes_only_newly_published_payload() {
+fn knowledge_publication_on_a_bulk_imported_project_hashes_only_new_payload() {
     use graphforge_api::{
         AssertionGraphRefInput, AssertionGraphRole, CapabilityId, CreateAssertionRequest,
         EnableCapabilityRequest, GraphObjectKind, WriteContext,
     };
     let root = tempfile::tempdir().unwrap();
-    let graph = GraphForge::new(root.path().to_str()).unwrap();
+    let path = root.path().to_str();
+    let graph = GraphForge::new(path).unwrap();
+    // Bulk import publishes a compact graph root. Every later generation that
+    // carries it forward must publish under its CAS lease (#1691).
+    bulk_load(&graph, NODES, 1);
     for capability_id in [CapabilityId::Provenance, CapabilityId::Knowledge] {
+        let before = inodes(root.path());
+        let capture = PayloadDigestCapture::start();
         graph
             .enable_capability(EnableCapabilityRequest {
                 context: WriteContext {
@@ -302,14 +308,14 @@ fn knowledge_publication_hashes_only_newly_published_payload() {
                 capability_version: 1,
             })
             .unwrap();
+        let work = capture.snapshot();
+        drop(capture);
+        assert_bounded(
+            &format!("enable {capability_id:?}"),
+            work,
+            newly_published_bytes(root.path(), &before),
+        );
     }
-    // Bulk-imported compact projects currently refuse knowledge publication
-    // (the compact graph lease is not carried through CURRENT), so this graph
-    // is built through the facade's own mutation path.
-    graph
-        .execute("UNWIND range(1, 2000) AS i CREATE (:Person {i: i})")
-        .unwrap();
-    let subject = graph.add_node("Person", &HashMap::new()).unwrap();
     let before = inodes(root.path());
     let capture = PayloadDigestCapture::start();
     graph
@@ -321,7 +327,7 @@ fn knowledge_publication_hashes_only_newly_published_payload() {
             assertion_uuid: uuid::Uuid::now_v7(),
             claim: "Person exists".into(),
             graph_refs: vec![AssertionGraphRefInput {
-                graph_uuid: subject.uuid,
+                graph_uuid: v7(1),
                 graph_kind: GraphObjectKind::Node,
                 role: AssertionGraphRole::Subject,
                 ordinal: 0,
@@ -334,5 +340,21 @@ fn knowledge_publication_hashes_only_newly_published_payload() {
         "knowledge assertion",
         work,
         newly_published_bytes(root.path(), &before),
+    );
+    drop(graph);
+    let reopened = GraphForge::new(path).unwrap();
+    assert_eq!(
+        reopened
+            .list_assertions(graphforge_api::ListAssertionsRequest::default())
+            .unwrap()
+            .batches
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
+    assert_eq!(
+        reopened.node_count("Person").unwrap(),
+        u64::try_from(NODES).unwrap()
     );
 }

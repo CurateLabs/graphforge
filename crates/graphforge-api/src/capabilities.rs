@@ -231,6 +231,11 @@ impl GraphForge {
             capabilities,
             participants,
         };
+        // A generation that carries a compact graph root forward is published
+        // under a CAS lease held from before staging through CURRENT.
+        let graph_objects = graphforge_storage::begin_graph_object_publication(
+            self.resolved_generation.container_root(),
+        )?;
         let generation_uuid = match self.stage_project_generation(&publication)? {
             ProjectStageOutcome::AlreadyPublished(receipt) => receipt.generation_uuid,
             ProjectStageOutcome::Staged(staged) => {
@@ -248,7 +253,7 @@ impl GraphForge {
                             Ok(())
                         },
                     )?
-                    .publish()?
+                    .publish_with_graph_objects(&graph_objects)?
                     .generation_uuid
             }
         };
