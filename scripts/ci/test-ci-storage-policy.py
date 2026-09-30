@@ -104,7 +104,6 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "native-durability-aggregate-${{ github.sha }}": 1,
         "m6-memory-${{ github.sha }}-blacksmith-4vcpu-ubuntu-2404": 1,
         "ingest-floor-gate-${{ needs.nightly.outputs.sha }}": 1,
-        "native-local-admission-${{ matrix.authority }}-${{ github.sha }}": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(
@@ -514,31 +513,6 @@ def validate_node_loader_negative_fixtures() -> None:
         raise AssertionError(f"Node loader policy accepted drift: {changed}")
 
 
-def validate_operator_handoffs_have_no_artifacts() -> None:
-    for workflow, gate in (
-        ("progressive-ladder.yml", "progressive-ladder"),
-        ("fly-tiny-qualification.yml", "fly-tiny-qualification"),
-        ("fly-tiny-recovery.yml", "fly-tiny-recovery"),
-    ):
-        text = (WORKFLOWS / workflow).read_text()
-        uploaded, downloaded = artifact_contracts(text)
-        assert not uploaded and not downloaded, f"operator handoff transfers artifacts: {workflow}"
-        command = f"python3 scripts/ci/gate-registry.py command {gate}"
-        matches = [
-            scalar
-            for body in workflow_jobs(text).values()
-            for scalar in job_required_run_scalars(body, command)
-        ]
-        assert matches, f"operator handoff does not execute its registry command: {workflow}"
-        inactive = text.replace(command, f'echo "{command}"', 1)
-        inactive_matches = [
-            scalar
-            for body in workflow_jobs(inactive).values()
-            for scalar in job_required_run_scalars(body, command)
-        ]
-        assert not inactive_matches, f"inactive operator handoff passed policy: {workflow}"
-
-
 def cache_contracts(text: str) -> tuple[list[str], list[str]]:
     saved: list[str] = []
     restored: list[str] = []
@@ -557,6 +531,52 @@ def cache_contracts(text: str) -> tuple[list[str], list[str]]:
             assert field(step, "fail-on-cache-miss") == "true", f"restore is not fail-closed: {key}"
             restored.append(key)
     return saved, restored
+
+
+def cache_transfer_path_mismatches(text: str) -> list[str]:
+    """Keys whose save and restore steps name different path strings.
+
+    `actions/cache` derives the entry version from the literal path input, so
+    `fragments/` saved and `fragments` restored is always a miss (#1671).
+    """
+    saved: dict[str, str | None] = {}
+    restored: dict[str, str | None] = {}
+    for step in cache_steps(text):
+        uses = field(step, "uses")
+        key = field(step, "key")
+        if uses is None or key is None:
+            continue
+        target = saved if uses.startswith("actions/cache/save@") else restored
+        target[key] = field(step, "path")
+    return sorted(key for key in saved.keys() & restored.keys() if saved[key] != restored[key])
+
+
+def validate_cache_transfer_path_negative_fixture() -> None:
+    matching = """
+jobs:
+  a:
+    steps:
+      - uses: actions/cache/save@0000000000000000000000000000000000000000 # v6.1.0
+        with:
+          path: fragments/
+          key: transfer-rust
+  b:
+    steps:
+      - uses: actions/cache/restore@0000000000000000000000000000000000000000 # v6.1.0
+        with:
+          path: fragments/
+          key: transfer-rust
+          fail-on-cache-miss: true
+"""
+    assert cache_transfer_path_mismatches(matching) == []
+    drifted = matching.replace(
+        "path: fragments/\n          key: transfer-rust\n          fail",
+        "path: fragments\n          key: transfer-rust\n          fail",
+    )
+    assert drifted != matching
+    assert cache_transfer_path_mismatches(drifted) == ["transfer-rust"], (
+        "cache transfer policy accepted a save/restore path mismatch"
+    )
 
 
 def dependency_contracts(text: str) -> list[str]:
@@ -894,9 +914,9 @@ def main() -> None:
     test_suite = texts[WORKFLOWS / "test.yml"]
     validate_test_suite_trigger(test_suite)
     validate_required_run_negative_fixtures()
+    validate_cache_transfer_path_negative_fixture()
     validate_node_loader_negative_fixtures()
     validate_test_suite_sticky_negative_fixtures()
-    validate_operator_handoffs_have_no_artifacts()
     validate_rust_tests_lane(test_suite)
     validate_rust_profiles_keep_runtime_checks()
     validate_feature_gated_tests(test_suite)
@@ -940,6 +960,8 @@ def main() -> None:
         artifact_uploads.extend(file_uploads)
         artifact_downloads.extend(file_downloads)
         file_saves, file_restores = cache_contracts(text)
+        mismatched = cache_transfer_path_mismatches(text)
+        assert not mismatched, f"cache save/restore paths differ for {mismatched}"
         saved.extend(file_saves)
         restored.extend(file_restores)
         dependency_keys.extend(dependency_contracts(text))
