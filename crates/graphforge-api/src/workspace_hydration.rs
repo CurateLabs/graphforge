@@ -2,7 +2,7 @@
 
 use super::{
     CompositionBindingContext, CompositionBindingLimits, GfError, GraphForge, OntologyDoc,
-    OntologyHandle, OntologyMode, ResolvedProjectGeneration, RuntimeCatalog, graph_snapshot,
+    OntologyHandle, OntologyMode, ResolvedProjectGeneration, RuntimeCatalog,
 };
 use graphforge_ontology::OntologyCompiler;
 use sha2::{Digest, Sha256};
@@ -281,8 +281,8 @@ pub(super) fn property_and_graph_inventory_for_hydrated_generation(
         .is_empty(),
         None => false,
     };
-    // Snapshot-only generations have no graph-files inventory; hydration has
-    // authenticated their snapshot payload into this private workspace.
+    // Empty initial generations have no graph-files inventory; replayed
+    // generations require a fresh inventory of their effective workspace.
     let (admitted, effective) = match inventory {
         Some(inventory) if !has_deltas => (
             graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
@@ -382,19 +382,14 @@ pub(super) fn hydrate_graph_workspace(
         graphforge_storage::GRAPH_CAPABILITY_ID,
         graphforge_storage::GRAPH_FILES_FAMILY,
     )?;
-    let snapshot = generation.participant_snapshot("graph", "snapshot")?;
-    if files.is_some() && snapshot.is_some() {
-        return Err(GfError::Validation(
-            "graph generation cannot declare both snapshot and files participants".into(),
-        ));
-    }
+    reject_legacy_graph_snapshot(generation)?;
 
     if let Some(files) = files {
         validate_graph_files_snapshot(&files)?;
         if matches!(
             files.record_version,
-            graphforge_storage::GRAPH_FILES_V2_RECORD_VERSION
-                | graphforge_storage::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+            graphforge_storage::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
         ) {
             let inventory = generation
                 .graph_files_inventory()?
@@ -441,25 +436,23 @@ pub(super) fn hydrate_graph_workspace(
     }
 
     let workspace = create_graph_workspace(generation)?;
-    let mut evidence = graphforge_storage::GraphFilesOpenEvidence {
+    let evidence = graphforge_storage::GraphFilesOpenEvidence {
         strategy: graphforge_storage::GraphFilesOpenStrategy::Empty,
         ..graphforge_storage::GraphFilesOpenEvidence::default()
     };
-    if let Some(snapshot) = snapshot {
-        if snapshot.capability_version != 1
-            || snapshot.record_version != 1
-            || snapshot.encoding != "arrow"
-        {
-            return Err(GfError::Validation(
-                "unsupported graph snapshot participant contract".into(),
-            ));
-        }
-        graph_snapshot::hydrate(&snapshot.bytes, workspace.path())?;
-        evidence.strategy = graphforge_storage::GraphFilesOpenStrategy::LegacySnapshotHydrate;
-        evidence.bytes_copied = u64::try_from(snapshot.bytes.len()).unwrap_or(u64::MAX);
-        evidence.files_copied = 1;
-    }
     Ok((workspace.path().to_path_buf(), workspace, evidence))
+}
+
+fn reject_legacy_graph_snapshot(generation: &ResolvedProjectGeneration) -> Result<(), GfError> {
+    if generation
+        .participant_snapshot("graph", "snapshot")?
+        .is_some()
+    {
+        return Err(GfError::Validation(
+            "unsupported legacy graph snapshot format; recreate the pre-v1 project".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_graph_files_snapshot(
@@ -468,10 +461,10 @@ fn validate_graph_files_snapshot(
     if files.capability_version != graphforge_storage::GRAPH_CAPABILITY_VERSION
         || !matches!(
             files.record_version,
-            graphforge_storage::GRAPH_FILES_RECORD_VERSION
-                | graphforge_storage::GRAPH_FILES_V2_RECORD_VERSION
-                | graphforge_storage::GRAPH_FILES_MAPPED_RECORD_VERSION
-                | graphforge_storage::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+            graphforge_storage::GRAPH_FILES_CHECKSUM_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
         )
         || files.encoding != "json"
     {
@@ -580,6 +573,14 @@ pub(crate) fn rematerialize_graph_workspace(
     generation: &ResolvedProjectGeneration,
     target: &std::path::Path,
 ) -> Result<(), GfError> {
+    reject_legacy_graph_snapshot(generation)?;
+    let files = generation.participant_snapshot(
+        graphforge_storage::GRAPH_CAPABILITY_ID,
+        graphforge_storage::GRAPH_FILES_FAMILY,
+    )?;
+    if let Some(files) = &files {
+        validate_graph_files_snapshot(files)?;
+    }
     if target.exists() {
         for entry in std::fs::read_dir(target).map_err(|error| {
             GfError::Storage(format!(
@@ -606,15 +607,11 @@ pub(crate) fn rematerialize_graph_workspace(
             }
         }
     }
-    if let Some(files) = generation.participant_snapshot(
-        graphforge_storage::GRAPH_CAPABILITY_ID,
-        graphforge_storage::GRAPH_FILES_FAMILY,
-    )? {
-        validate_graph_files_snapshot(&files)?;
+    if let Some(files) = files {
         if matches!(
             files.record_version,
-            graphforge_storage::GRAPH_FILES_V2_RECORD_VERSION
-                | graphforge_storage::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+            graphforge_storage::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
         ) {
             let inventory = generation
                 .graph_files_inventory()?
@@ -629,17 +626,6 @@ pub(crate) fn rematerialize_graph_workspace(
             )?;
         }
         return Ok(());
-    }
-    if let Some(snapshot) = generation.participant_snapshot("graph", "snapshot")? {
-        if snapshot.capability_version != 1
-            || snapshot.record_version != 1
-            || snapshot.encoding != "arrow"
-        {
-            return Err(GfError::Validation(
-                "unsupported graph snapshot participant contract".into(),
-            ));
-        }
-        graph_snapshot::hydrate(&snapshot.bytes, target)?;
     }
     Ok(())
 }

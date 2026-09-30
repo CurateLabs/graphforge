@@ -231,7 +231,7 @@ pub(crate) fn authenticate_manifest_routes(
     entries: &[crate::GraphFileEntry],
     read: impl FnOnce(&crate::GraphFileEntry) -> Result<Vec<u8>, GfError>,
 ) -> Result<Option<RouteTable>, GfError> {
-    if matches!(version, 3 | 4) {
+    if matches!(version, 7 | 8) {
         for entry in entries {
             crate::graph_files::wire_relative_path(&entry.relative_path)?;
         }
@@ -240,11 +240,11 @@ pub(crate) fn authenticate_manifest_routes(
         .iter()
         .find(|entry| entry.relative_path == TABLE_FILE);
     match (version, table_entry) {
-        (1 | 2, None) => Ok(None),
-        (1 | 2, Some(_)) => Err(invalid(
+        (5 | 6, None) => Ok(None),
+        (5 | 6, Some(_)) => Err(invalid(
             "raw graph layout contains reserved semantic route authority",
         )),
-        (3 | 4, Some(entry)) => {
+        (7 | 8, Some(entry)) => {
             const MAX_BYTES: u64 = 64 * 1024 * 1024;
             const HEX: &[u8; 16] = b"0123456789abcdef";
             if entry.byte_length > MAX_BYTES {
@@ -267,7 +267,7 @@ pub(crate) fn authenticate_manifest_routes(
             table.validate_paths(entries.iter().map(|entry| entry.relative_path.as_str()))?;
             Ok(Some(table))
         }
-        (3 | 4, None) => Err(invalid(
+        (7 | 8, None) => Err(invalid(
             "mapped graph layout lacks semantic route authority",
         )),
         _ => Err(invalid("unsupported graph route layout")),
@@ -442,12 +442,13 @@ mod tests {
     #[test]
     fn mapped_manifest_refuses_hidden_backslash_routes_before_table_read() {
         let entries = vec![crate::GraphFileEntry {
+            content_xxh64: 0,
             relative_path: "properties\\r-hidden.parquet".into(),
             byte_length: 1,
             content_sha256: "0".repeat(64),
             role: crate::GraphFileRole::Properties,
         }];
-        for version in [3, 4] {
+        for version in [7, 8] {
             assert!(
                 authenticate_manifest_routes(version, &entries, |_| {
                     panic!("invalid mapped paths must fail before table IO")
