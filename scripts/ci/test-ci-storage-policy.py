@@ -533,6 +533,52 @@ def cache_contracts(text: str) -> tuple[list[str], list[str]]:
     return saved, restored
 
 
+def cache_transfer_path_mismatches(text: str) -> list[str]:
+    """Keys whose save and restore steps name different path strings.
+
+    `actions/cache` derives the entry version from the literal path input, so
+    `fragments/` saved and `fragments` restored is always a miss (#1671).
+    """
+    saved: dict[str, str | None] = {}
+    restored: dict[str, str | None] = {}
+    for step in cache_steps(text):
+        uses = field(step, "uses")
+        key = field(step, "key")
+        if uses is None or key is None:
+            continue
+        target = saved if uses.startswith("actions/cache/save@") else restored
+        target[key] = field(step, "path")
+    return sorted(key for key in saved.keys() & restored.keys() if saved[key] != restored[key])
+
+
+def validate_cache_transfer_path_negative_fixture() -> None:
+    matching = """
+jobs:
+  a:
+    steps:
+      - uses: actions/cache/save@0000000000000000000000000000000000000000 # v6.1.0
+        with:
+          path: fragments/
+          key: transfer-rust
+  b:
+    steps:
+      - uses: actions/cache/restore@0000000000000000000000000000000000000000 # v6.1.0
+        with:
+          path: fragments/
+          key: transfer-rust
+          fail-on-cache-miss: true
+"""
+    assert cache_transfer_path_mismatches(matching) == []
+    drifted = matching.replace(
+        "path: fragments/\n          key: transfer-rust\n          fail",
+        "path: fragments\n          key: transfer-rust\n          fail",
+    )
+    assert drifted != matching
+    assert cache_transfer_path_mismatches(drifted) == ["transfer-rust"], (
+        "cache transfer policy accepted a save/restore path mismatch"
+    )
+
+
 def dependency_contracts(text: str) -> list[str]:
     keys: list[str] = []
     for step in action_steps(text, "actions/cache@"):
@@ -868,6 +914,7 @@ def main() -> None:
     test_suite = texts[WORKFLOWS / "test.yml"]
     validate_test_suite_trigger(test_suite)
     validate_required_run_negative_fixtures()
+    validate_cache_transfer_path_negative_fixture()
     validate_node_loader_negative_fixtures()
     validate_test_suite_sticky_negative_fixtures()
     validate_rust_tests_lane(test_suite)
@@ -913,6 +960,8 @@ def main() -> None:
         artifact_uploads.extend(file_uploads)
         artifact_downloads.extend(file_downloads)
         file_saves, file_restores = cache_contracts(text)
+        mismatched = cache_transfer_path_mismatches(text)
+        assert not mismatched, f"cache save/restore paths differ for {mismatched}"
         saved.extend(file_saves)
         restored.extend(file_restores)
         dependency_keys.extend(dependency_contracts(text))

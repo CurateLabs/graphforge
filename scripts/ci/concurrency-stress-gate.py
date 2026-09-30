@@ -22,6 +22,10 @@ DEFAULT_ITERATIONS = 24
 DEFAULT_TIMEOUT_SECONDS = 900
 RSS_GROWTH_BOUND_BYTES = 512 * 1024 * 1024
 FD_GROWTH_BOUND = 256
+# Mirrors `JournalPhase` in graphforge-storage's publication control; the test
+# suite fails when the product vocabulary and these sets diverge (#1671).
+TERMINAL_JOURNAL_PHASES = frozenset({"PUBLISHED", "ABORTED"})
+IN_FLIGHT_JOURNAL_PHASES = frozenset({"PREPARING", "STAGED", "VALIDATED", "DURABLE"})
 
 
 class GateError(RuntimeError):
@@ -112,6 +116,19 @@ def run_rust_case(case: str, env: dict[str, str], timeout: int) -> dict[str, Any
     }
 
 
+def require_terminal_journals(project: Path) -> None:
+    """After a clean close and reopen, no transaction journal may be left in flight."""
+    transactions = project / "transactions"
+    for journal in sorted(transactions.glob("*.json")) if transactions.is_dir() else []:
+        try:
+            payload = json.loads(journal.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            raise GateError(f"unreadable journal path={journal}: {error}") from error
+        phase = payload.get("phase")
+        if phase not in TERMINAL_JOURNAL_PHASES:
+            raise GateError(f"unexpected journal phase={phase!r} path={journal}")
+
+
 def mixed_python_workload(
     seed: int, iterations: int, work: Path, timeout: int = DEFAULT_TIMEOUT_SECONDS
 ) -> dict[str, Any]:
@@ -176,15 +193,7 @@ print("python-stress-ok")
     live_locks = [name for name in leftover_locks if name.endswith(".lock")]
     if live_locks:
         raise GateError(f"python stress leaked locks: {live_locks}")
-    transactions = project / "transactions"
-    for journal in sorted(transactions.glob("*.json")) if transactions.is_dir() else []:
-        try:
-            payload = json.loads(journal.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as error:
-            raise GateError(f"unreadable journal path={journal}: {error}") from error
-        phase = payload.get("phase")
-        if phase not in {"COMMITTED", "ABORTED"}:
-            raise GateError(f"unexpected journal phase={phase!r} path={journal}")
+    require_terminal_journals(project)
     return {
         "case": "python-mixed-workload",
         "seed": seed,
