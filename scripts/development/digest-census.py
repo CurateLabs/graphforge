@@ -700,7 +700,10 @@ for c in d["delegate_candidates"]:
                 "crates/graphforge-ontology/src/composition/canonical.rs",
                 "domain_digest",
             ),
-            "hash_reader": ("crates/graphforge-storage/src/durable_rewrite.rs", "hash_reader"),
+            "participant_content_sha256": (
+                "crates/graphforge-api/src/knowledge/ledger.rs",
+                "participant_content_sha256",
+            ),
             "category_map_authority_sha256": (
                 "crates/graphforge-storage/src/storage_attribution.rs",
                 "category_map_authority_sha256",

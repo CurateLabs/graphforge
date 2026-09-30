@@ -1402,12 +1402,9 @@ fn hash_reader_with_checksum(
     path: &Path,
     domain: graphforge_core::hash_observation::HashDomain,
 ) -> Result<([u8; 32], u64, u64), GfError> {
-    // Artifact identities keep the payload producer and its test accounting;
-    // other domains (a temporary view's contract fingerprint) are observed as
-    // themselves.
-    let mut payload = (domain == ARTIFACT_IDENTITY).then(crate::payload_digest::PayloadSha256::new);
-    let mut other = (domain != ARTIFACT_IDENTITY)
-        .then(|| graphforge_core::hash_observation::ObservedSha256::for_domain(domain));
+    // Published captures name artifact payload; a temporary replay view's
+    // capture feeds only a contract fingerprint and is observed as that domain.
+    let mut hasher = crate::payload_digest::PayloadSha256::for_domain(domain);
     let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut read_calls = 0_u64;
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
@@ -1421,20 +1418,10 @@ fn hash_reader_with_checksum(
         read_calls = read_calls
             .checked_add(1)
             .ok_or_else(|| resource_limit("graph file authentication read calls overflow"))?;
-        if let Some(hasher) = &mut payload {
-            hasher.update(&buffer[..read]);
-        }
-        if let Some(hasher) = &mut other {
-            sha2::Digest::update(hasher, &buffer[..read]);
-        }
+        hasher.update(&buffer[..read]);
         checksum.update(&buffer[..read]);
     }
-    let digest: [u8; 32] = match (payload, other) {
-        (Some(hasher), _) => hasher.finalize().into(),
-        (None, Some(hasher)) => sha2::Digest::finalize(hasher).into(),
-        (None, None) => unreachable!("exactly one identity producer is constructed"),
-    };
-    Ok((digest, checksum.finish(), read_calls))
+    Ok((hasher.finalize().into(), checksum.finish(), read_calls))
 }
 
 pub(crate) fn checksum_reader(file: &mut impl Read, path: &Path) -> Result<(u64, u64), GfError> {

@@ -186,9 +186,9 @@ python3 scripts/development/digest-census.py --repo . --output /tmp/gf-digest-ce
 
 The method and reviewed classification inputs are pinned by SHA-256:
 `digest-census.py` is
-`066813e6666c1a77782402cee7ae957b450ccd47a7e14874c4e47b996aabb0eb`;
+`4407bd9648ddcd03c08d901adaf0cf3e485cf1c720a7f766e7fb26f31956bd4b`;
 `digest-census-overrides.json` is
-`7e6904dfc1a3cbcf9b06bcd69e046aa7ac3b40c4b1cfa88c1ea3d8b48f236553`.
+`262b18887599b5b2beb9e62d26e9d6d657fe2da3f8e3bbbec9468800e2c478eb`.
 Run the parser and stale-review regression fixtures with
 `python3 scripts/development/test-digest-census.py`. Reviewed function bodies
 are pinned individually; changed inputs, added producers in the same function,

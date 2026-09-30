@@ -293,9 +293,9 @@
       "path": "crates/graphforge-api/src/graph_publication.rs",
       "function": "mutation_generation_uuid",
       "role": "contract_identity",
-      "input_contract": "Domain plus mutation operation UUID and participant descriptors determine generation identity; inner participant digest distinguished separately.",
+      "input_contract": "Domain plus mutation operation UUID, participant descriptors and each participant's exact-byte SHA-256 supplied by PreparedGenerationRequest determine generation identity; the participant digest is computed once and reused by staging.",
       "function_bodies_sha256": [
-        "cdd820bc4cd2955e7095e28d05161b45c8675a5a9cd747104065780309c94c4c"
+        "7fcf6056cab971068219146d9770c877a23493e261947bdaa3eb4e9626a2c943"
       ]
     },
     {
@@ -311,18 +311,27 @@
       "path": "crates/graphforge-api/src/knowledge/assertions.rs",
       "function": "assertion_generation_uuid",
       "role": "contract_identity",
-      "input_contract": "Assertion operation and participant descriptors determine generation UUID; inner participant digest distinguished separately.",
+      "input_contract": "Assertion operation, participant descriptors and each participant's exact-byte SHA-256 supplied by PreparedGenerationRequest determine generation UUID; the participant digest is computed once and reused by staging.",
       "function_bodies_sha256": [
-        "6c541f35504ce0736031a7eeb2ab3505fba2e9860f4aa49af5b6d4e4df762aad"
+        "e37e9fadb62f27177cca7a3198dde3107f93f20c6f2e1a4102a33e8e7790ab73"
       ]
     },
     {
       "path": "crates/graphforge-api/src/knowledge/ledger.rs",
       "function": "knowledge_generation_uuid",
       "role": "contract_identity",
-      "input_contract": "Knowledge mutation operation and participant descriptors determine generation UUID; inner participant digest distinguished separately.",
+      "input_contract": "Knowledge mutation operation, participant descriptors and each participant's exact-byte SHA-256 supplied by the caller determine generation UUID; publishers obtain the digests from PreparedGenerationRequest, which staging reuses.",
       "function_bodies_sha256": [
-        "f6d343fcf47a40b5d17c020e7bf02148515c064c7e73c1b0161f54a231024d83"
+        "e265ac01d0f8452a6dcce79f76590b9a297bede7dfa6d82c811f3ce3cd062394"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/knowledge/ledger.rs",
+      "function": "participant_content_sha256",
+      "role": "durable_artifact",
+      "input_contract": "Exact bytes of a replacement-participant subset covered by a research generation UUID; staging hashes the merged request independently.",
+      "function_bodies_sha256": [
+        "6af95ffd1f38e857779c92baabc38214c5889e107281b712cc3fdb22d01bf4ce"
       ]
     },
     {
@@ -917,16 +926,7 @@
       "role": "control_authentication",
       "input_contract": "Canonical rewrite intent JSON body is authenticated in its envelope.",
       "function_bodies_sha256": [
-        "115f588ef1242b93bdaec5a03592469a73b3f17f15201f00608bfcf6c5edfd16"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/durable_rewrite.rs",
-      "function": "hash_reader",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Full rewritten file bytes authenticate staged/published replacement identity.",
-      "function_bodies_sha256": [
-        "b2736257434cd2b6912478aa8e682c7b527f0d3e5f810ca41c8a85f7c42393d1"
+        "5c754402f0f43e32e034573cf5986ee7886977ea98fdced08d5efc1d48017674"
       ]
     },
     {
@@ -1241,9 +1241,9 @@
       "path": "crates/graphforge-storage/src/graph_delta_journal.rs",
       "function": "bounded_materialized_fingerprint",
       "role": "contract_identity",
-      "input_contract": "Materialized inventory paths, lengths and recorded content digests define graph state identity without fresh file SHA.",
+      "input_contract": "Materialized inventory paths, lengths and content digests define graph state identity; replay-rewritten files of the temporary view are hashed once as contract identity and unchanged files reuse inventory digests only when their fresh XXH64 matches.",
       "function_bodies_sha256": [
-        "2bf65b447195cbca2cf21d437cdcc1f46a47a42455b16e8b6580dba1d805777d"
+        "7459c88b354812b040dfda0fdefe95a5569b9c949a5ac67304188710a7b4b403"
       ]
     },
     {
@@ -1275,20 +1275,11 @@
     },
     {
       "path": "crates/graphforge-storage/src/graph_files.rs",
-      "function": "hash_file_io_counted",
-      "role": "durable_artifact",
-      "input_contract": "Complete source file stream receives mandatory construction/write-admission artifact identity.",
-      "function_bodies_sha256": [
-        "ff4ce05220a0ced3f9954fb29a465d6ce69ab5db90ef45c0d19643fe89750394"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_files.rs",
       "function": "hash_reader_with_checksum",
-      "role": "durable_artifact",
-      "input_contract": "Complete source stream receives mandatory SHA address and corruption checksum in one write-admission pass.",
+      "role": "caller_selected",
+      "input_contract": "Complete source stream receives one SHA-256 in the caller-selected domain (artifact identity for published captures, contract identity for a temporary replay view) and its corruption checksum in the same pass.",
       "function_bodies_sha256": [
-        "0cdbd8f82540f3605eb46a737849010a69e430ed8c83eab0167cb2a936bf758c"
+        "ce71ec96b1b4440abd648e212b75a4ec2b4d0999dd1a88b1ce3708ef9d7f7821"
       ]
     },
     {
@@ -1316,15 +1307,6 @@
       "input_contract": "Complete newly sealed graph artifact bytes define required CAS address.",
       "function_bodies_sha256": [
         "8b704c6b2d93054556a44af031d6050d7a8c11ea15095cf3c20dbaf242331ac3"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_object_store.rs",
-      "function": "open_for_construction",
-      "role": "durable_artifact",
-      "input_contract": "Complete retained graph artifact bytes authenticate named object at construction boundary.",
-      "function_bodies_sha256": [
-        "693638a75767f019b7c9f63c04157cf7a254033add549601497c226bddd4dbff"
       ]
     },
     {
@@ -1376,9 +1358,9 @@
       "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
       "function": "install_graph_object_bytes_with_lease",
       "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Artifact bytes define CAS object address during installation.",
+      "input_contract": "Resident artifact bytes define the CAS object address during installation; the writer authenticates the temporary from those bytes, so no pre-seal re-hash follows.",
       "function_bodies_sha256": [
-        "b416603a50e5fb2fd783e58e85bcb097786de534be58371471f3b90b8d772318"
+        "67cf7f51153c7d40235e37943460c23bbe1d317fb9f4448cfdcb97fbd9dbf5b1"
       ]
     },
     {
@@ -1421,11 +1403,11 @@
     },
     {
       "path": "crates/graphforge-storage/src/graph_read_inventory.rs",
-      "function": "capture_graph_read_inventory",
+      "function": "capture_graph_read_inventory_excluding",
       "role": "control_authentication",
-      "input_contract": "Conditional constructor callback runs only for the exact semantic route table path, bounded to 64 MiB; it hashes route authority JSON while other retained payloads receive XXH64 checksums.",
+      "input_contract": "Conditional constructor callback runs only for the exact semantic route table path, bounded to 64 MiB; it hashes route authority JSON while other retained payloads, excluding a rewrite's identity-pinned temporaries, receive XXH64 checksums.",
       "function_bodies_sha256": [
-        "0628d979ce707613b45d24c749d64a8af63d561105e78e5f36ea6399288c941b"
+        "a0537eaa317d402aee13fcbbbfb8eee68ff4d987c0b968fdcefd0ea3bcd3a045"
       ]
     },
     {
@@ -1466,11 +1448,20 @@
     },
     {
       "path": "crates/graphforge-storage/src/payload_digest.rs",
+      "function": "for_domain",
+      "role": "caller_selected",
+      "input_contract": "File payload bytes streamed into one SHA-256 of the caller's domain: artifact payload for published identities, contract identity for a temporary replay view.",
+      "function_bodies_sha256": [
+        "ba0bfd80b4487533920d6a202b517b64618627e78bbe38537566fcd501340846"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/payload_digest.rs",
       "function": "new",
       "role": "producer_delegate",
-      "input_contract": "PayloadSha256 compatibility wrapper delegates to ObservedSha256::for_domain(ArtifactPayload); not a second producer implementation or byte pass.",
+      "input_contract": "PayloadSha256::new delegates to for_domain(ArtifactPayload); not a second producer implementation or byte pass.",
       "function_bodies_sha256": [
-        "4b79b353b4a1209ac8811ec3673e10dd47e494ebcde5466863bc81939625d1b9"
+        "49c228de92b9938cb12345fe1ef9c8f26b38d1f80e89c63119fe178a8d9ff715"
       ]
     },
     {
@@ -1945,6 +1936,15 @@
     },
     {
       "path": "crates/graphforge-storage/src/project_publication.rs",
+      "function": "compute",
+      "role": "durable_artifact",
+      "input_contract": "Exact in-memory participant bytes receive their artifact SHA-256 and XXH64 once; generation UUID derivation and staging reuse the identity.",
+      "function_bodies_sha256": [
+        "ca9a064e1df80e7dd8be5668471d4a7240ab2c91b92f0bf87b8f0074c8998012"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_publication.rs",
       "function": "handle_existing_journal",
       "role": "control_authentication",
       "input_contract": "Published generation manifest JSON authenticates durable transaction journal commitment.",
@@ -1983,9 +1983,9 @@
       "path": "crates/graphforge-storage/src/project_publication/participants.rs",
       "function": "request_metadata_with_payloads",
       "role": "contract_identity",
-      "input_contract": "Canonical publication fingerprint request metadata defines idempotent publication identity; inner participant byte digest distinguished separately.",
+      "input_contract": "Canonical publication fingerprint request metadata defines idempotent publication identity; in-memory participant identities are reused from PreparedGenerationRequest after exact length and XXH64 binding, otherwise the participant bytes are hashed once here.",
       "function_bodies_sha256": [
-        "b96ebb12bf46a8dd4f3478a081009346894d61300a20a1d48a945083beb6c545"
+        "fdcd7554b16a9e66081f516f41c08550439bb9facb17eaa650a7d71a67c2b2e2"
       ]
     },
     {
@@ -1994,16 +1994,7 @@
       "role": "durable_artifact_or_trust_boundary",
       "input_contract": "Staged participant bytes are authenticated against expected artifact SHA during publication.",
       "function_bodies_sha256": [
-        "aba269ccebf01796849956da2a0500b639a6319e205103806bf3cdce065659b5"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/project_publication/participants.rs",
-      "function": "verify_participant_file",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Staged participant bytes are authenticated against expected artifact SHA during publication.",
-      "function_bodies_sha256": [
-        "7cf17102d52852dbe23044569cde18f7821d425460d2f0f197c4c9218ec57036"
+        "5dbbdfd61f53f7ab70339adf3c983c8b6fd798ed433422d997768ef8ff7ed12b"
       ]
     },
     {

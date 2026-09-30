@@ -1757,6 +1757,39 @@ mod tests {
     }
 
     #[test]
+    fn same_inode_same_length_corrupted_temporary_fails_closed_by_checksum() {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+        let root = TempDir::new().unwrap();
+        let value = leave_durable_intent(root.path());
+        assert_eq!(value.version, 3);
+        assert!(value.entries.iter().all(|entry| entry.xxh64.is_some()));
+        let data = value
+            .entries
+            .iter()
+            .find(|entry| entry.class == EntryClass::Data)
+            .unwrap();
+        let temporary = root.path().join(&data.temporary);
+        let before = graphforge_filesystem::path_identity(&temporary).unwrap();
+        let mut bytes = std::fs::read(&temporary).unwrap();
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 0x5a;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&temporary)
+            .unwrap();
+        file.seek(SeekFrom::Start(middle as u64)).unwrap();
+        file.write_all(&bytes[middle..=middle]).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        assert_eq!(
+            graphforge_filesystem::path_identity(&temporary).unwrap(),
+            before
+        );
+        assert_eq!(std::fs::metadata(&temporary).unwrap().len(), data.bytes);
+        assert_recovery_fails_before_authority(root.path());
+    }
+
+    #[test]
     fn byte_identical_final_substitution_fails_closed() {
         let root = TempDir::new().unwrap();
         let value = leave_durable_intent(root.path());

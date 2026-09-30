@@ -416,9 +416,11 @@ fn concurrent_winner_reuse_retains_the_losing_install_work() {
         assert_eq!(loser.file_fsync_calls, 1);
         assert_eq!(loser.directory_fsync_calls, 2);
         assert_eq!(loser.fsync_calls, 3);
-        // Windows authenticates the protected sealed handle after closing
-        // the writable handle, in addition to a file source-copy pass.
-        let read_passes = 2 + u64::from(cfg!(windows) && file_backed);
+        // Reuse verifies the concurrent winner once. A file source adds its
+        // copy pass. Windows authenticates the protected sealed handle after
+        // closing the writable handle. Resident bytes named in memory are not
+        // read back before sealing (#1691).
+        let read_passes = 1 + u64::from(file_backed) + u64::from(cfg!(windows));
         assert_eq!(loser.read_calls, read_passes);
         assert_eq!(loser.bytes_hashed, read_passes * payload.len() as u64);
         assert_eq!(
@@ -497,10 +499,13 @@ fn file_install_receipts_count_actual_cache_window_synchronizations() {
 fn installs_once_reuses_exact_object_and_rejects_tampering() {
     let root = tempfile::tempdir().unwrap();
     let (digest, first) = install_graph_object_bytes(root.path(), b"payload").unwrap();
-    assert_eq!(first.bytes_hashed, 7);
+    // Resident bytes are named in memory and not read back before sealing
+    // (#1691); Windows still authenticates its protected sealed handle.
+    let sealed_reads = u64::from(cfg!(windows));
+    assert_eq!(first.bytes_hashed, 7 * sealed_reads);
     assert_eq!(first.bytes_installed, 7);
     assert!(!first.reused_existing);
-    assert_eq!(first.read_calls, 1);
+    assert_eq!(first.read_calls, sealed_reads);
     assert_eq!(first.write_bytes, 7);
     assert_eq!(first.write_calls, 1);
     assert_eq!(first.fsync_calls, 3);

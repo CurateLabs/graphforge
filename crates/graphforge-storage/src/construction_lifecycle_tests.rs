@@ -392,11 +392,10 @@ mod lifecycle_budget {
                 .publish_canonical(&encoding, target, transaction)
                 .map(|_| ()),
         ] {
+            let error = result.unwrap_err().to_string();
             assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("digest does not match its address")
+                error.contains("construction object checksum does not match its inventory"),
+                "{error}"
             );
         }
         drop(session);
@@ -408,11 +407,11 @@ mod lifecycle_budget {
             GraphConstructionBudgets::default(),
         )
         .err()
-        .unwrap();
+        .unwrap()
+        .to_string();
         assert!(
-            error
-                .to_string()
-                .contains("digest does not match its address")
+            error.contains("construction object checksum does not match its inventory"),
+            "{error}"
         );
         assert_eq!(
             std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
