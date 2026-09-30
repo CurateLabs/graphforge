@@ -240,10 +240,15 @@ outcome. These paths are ignored by Git and the evidence contains no command
 output or secrets. The instrumented Rust coverage run executes the full Rust
 corpus once and builds each native artifact once; later acceptance stages reuse
 those exact artifact identities.
-Compatible Cargo dependency compilation is shared beneath the common Git
-metadata directory (`graphforge-validation-cache/cargo`, one target directory
-per manifest, toolchain, and heavy-profile identity), while evidence and native
-binding artifacts stay scoped to their individual worktree. Each heavy stage
+Cargo targets live beneath the common Git metadata directory
+(`graphforge-validation-cache/cargo`, one target directory per canonical
+worktree, manifest, toolchain, and heavy-profile identity). Ordinary source
+edits reuse that worktree's target; distinct worktrees never share first-party
+artifacts because Cargo timestamp fingerprints can accept stale metadata from
+another root. The root identity is hashed internally, and absolute paths are
+not recorded in evidence. A versioned heavy-stage cache contract invalidates
+receipts produced under the earlier cross-worktree policy. Evidence and native
+binding artifacts also stay scoped to their individual worktree. Each heavy stage
 records its use and, while holding the shared heavy-build lock, evicts the
 least-recently-used target directories so at most six remain
 (`GF_PRE_PUSH_CACHE_KEEP_ENTRIES` overrides the six). The directories the
