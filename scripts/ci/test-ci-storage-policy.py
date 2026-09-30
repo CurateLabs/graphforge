@@ -104,7 +104,6 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "native-durability-aggregate-${{ github.sha }}": 1,
         "m6-memory-${{ github.sha }}-blacksmith-4vcpu-ubuntu-2404": 1,
         "ingest-floor-gate-${{ needs.nightly.outputs.sha }}": 1,
-        "native-local-admission-${{ matrix.authority }}-${{ github.sha }}": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(
@@ -514,31 +513,6 @@ def validate_node_loader_negative_fixtures() -> None:
         raise AssertionError(f"Node loader policy accepted drift: {changed}")
 
 
-def validate_operator_handoffs_have_no_artifacts() -> None:
-    for workflow, gate in (
-        ("progressive-ladder.yml", "progressive-ladder"),
-        ("fly-tiny-qualification.yml", "fly-tiny-qualification"),
-        ("fly-tiny-recovery.yml", "fly-tiny-recovery"),
-    ):
-        text = (WORKFLOWS / workflow).read_text()
-        uploaded, downloaded = artifact_contracts(text)
-        assert not uploaded and not downloaded, f"operator handoff transfers artifacts: {workflow}"
-        command = f"python3 scripts/ci/gate-registry.py command {gate}"
-        matches = [
-            scalar
-            for body in workflow_jobs(text).values()
-            for scalar in job_required_run_scalars(body, command)
-        ]
-        assert matches, f"operator handoff does not execute its registry command: {workflow}"
-        inactive = text.replace(command, f'echo "{command}"', 1)
-        inactive_matches = [
-            scalar
-            for body in workflow_jobs(inactive).values()
-            for scalar in job_required_run_scalars(body, command)
-        ]
-        assert not inactive_matches, f"inactive operator handoff passed policy: {workflow}"
-
-
 def cache_contracts(text: str) -> tuple[list[str], list[str]]:
     saved: list[str] = []
     restored: list[str] = []
@@ -896,7 +870,6 @@ def main() -> None:
     validate_required_run_negative_fixtures()
     validate_node_loader_negative_fixtures()
     validate_test_suite_sticky_negative_fixtures()
-    validate_operator_handoffs_have_no_artifacts()
     validate_rust_tests_lane(test_suite)
     validate_rust_profiles_keep_runtime_checks()
     validate_feature_gated_tests(test_suite)

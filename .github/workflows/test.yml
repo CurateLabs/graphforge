@@ -159,6 +159,21 @@ jobs:
       - name: Test Fly qualification safety contract
         run: python3 scripts/ci/test-fly-filesystem-safety-contract.py
 
+      # These suites' subjects are live, but nothing ran them until #1671.
+      # `test-gate-registry.py` now fails when a scripts/ci suite is unreached.
+      - name: Test publish-track and binding parity policy suites
+        run: |
+          python3 scripts/ci/test-publish-track.py
+          python3 scripts/ci/test-binding-parity-policy.py
+
+      - name: Test release workflow, Fly qualification, and G500 validator suites
+        run: |
+          uv sync --locked --no-install-project --extra dev
+          uv run --no-sync pytest -q -p no:cacheprovider \
+            scripts/ci/test-release-workflows.py \
+            scripts/ci/test-fly-filesystem-qualification.py \
+            scripts/ci/test-validate-g500-certification.py
+
       - name: Test progressive qualification image contract
         run: python3 scripts/ci/test-progressive-qualification-image.py
 

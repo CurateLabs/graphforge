@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import sys
 import urllib.request
 import zipfile
@@ -19,6 +20,9 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 MANIFEST_PATH = HERE / "MANIFEST.json"
 DEFAULT_CACHE = ROOT / ".cache"
+# The host answers urllib's default agent with 403 Forbidden, so name one.
+USER_AGENT = "graphforge-visualization-example/1 (+https://github.com/CurateLabs/graphforge)"
+DOWNLOAD_TIMEOUT_SECONDS = 60
 
 
 def _sha256(path: Path) -> str:
@@ -47,7 +51,12 @@ def fetch_dataset(cache_dir: Path | None = None, *, force: bool = False) -> Path
     if force or not archive_path.is_file() or _sha256(archive_path) != expected_archive:
         url = manifest["source_url"]
         print(f"Downloading {url} -> {archive_path}", file=sys.stderr)
-        urllib.request.urlretrieve(url, archive_path)
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with (
+            urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response,
+            archive_path.open("wb") as archive,
+        ):
+            shutil.copyfileobj(response, archive)
 
     actual = _sha256(archive_path)
     if actual != expected_archive:
