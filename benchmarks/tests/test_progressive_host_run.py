@@ -33,6 +33,7 @@ from graphforge_bench.progressive_host_run import (
     run as host_run,
 )
 from graphforge_bench.progressive_run import Executables
+
 from tests.host_run_fixture import executables as fixture_executables
 from tests.host_run_fixture import write_host_bundle
 from tests.test_progressive_run import passed_rung as local_passed_rung

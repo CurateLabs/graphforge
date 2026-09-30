@@ -14,6 +14,7 @@ from graphforge_bench.progressive_provider_plan import (
     plan_provider_ladder,
     require_execution_authority,
 )
+
 from tests.lifecycle_storage_fixture import retained_owners
 
 ROOT = Path(__file__).resolve().parents[1]

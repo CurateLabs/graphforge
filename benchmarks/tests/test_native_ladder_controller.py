@@ -14,6 +14,7 @@ from graphforge_bench.progressive_host_run import (
     measure_host_capacity,
     validated_host_rung,
 )
+
 from tests.host_run_fixture import ROOT, executables, write_host_bundle
 from tests.test_progressive_host_run import COMMIT, WORK_PARENT, sha256
 
@@ -208,6 +209,7 @@ class NativeLadderControllerTests(unittest.TestCase):
 
     def test_native_projection_uses_free_capacity_and_preserves_rss_refusal(self) -> None:
         from graphforge_bench.progressive_qualification import load_profiles, project
+
         from tests.test_progressive_host_run import passed_rung
 
         profile = next(p for p in load_profiles() if p.scale == 20)
@@ -293,6 +295,7 @@ class NativeLadderControllerTests(unittest.TestCase):
 
     def test_zero_cached_reads_and_fractional_rates_do_not_invent_capacity_refusals(self) -> None:
         from graphforge_bench.progressive_qualification import load_profiles, project
+
         from tests.test_progressive_host_run import passed_rung
 
         profile = next(p for p in load_profiles() if p.scale == 20)

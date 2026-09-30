@@ -39,6 +39,7 @@ from graphforge_bench.progressive_run import (
     write_plan,
     write_s20_projection,
 )
+
 from tests.lifecycle_storage_fixture import retained_owners
 
 ROOT = Path(__file__).resolve().parents[1]

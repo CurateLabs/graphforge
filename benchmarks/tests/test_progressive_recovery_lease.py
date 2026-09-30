@@ -13,6 +13,7 @@ from graphforge_bench.progressive_recovery_lease import (
     load_recovery_lease,
     save_recovery_lease,
 )
+
 from tests.test_progressive_provider_attempt import APP, authorization
 
 NOW = datetime(2026, 6, 1, tzinfo=timezone.utc)
