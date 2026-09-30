@@ -1,4 +1,4 @@
-.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-clean pre-push-preflight pre-push-fast bazel-test clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-build-walltime codspeed-run bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal bench-m4-entry bench-adjacency-200m m4-entry-matrix-check durability-isolation-check native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
+.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-clean pre-push-preflight pre-push-fast clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-build-walltime codspeed-run bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal bench-m4-entry bench-adjacency-200m m4-entry-matrix-check durability-isolation-check native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -203,18 +203,12 @@ check-patch-coverage:  ## Validate patch coverage for changed files (90% thresho
 		echo "✅ Patch coverage meets 90% threshold"; \
 	fi
 
-bazel-test:  ## Run authoritative Bazel Rust suite (//:ci_rust_tests); see docs/development/bazel.md
-	@command -v bazelisk >/dev/null || (echo "bazelisk is required on PATH; see docs/development/bazel.md"; exit 1)
-	python3 scripts/test_environment.py -- bazelisk test --config=correctness //:ci_rust_tests
-
 pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstrings (no coverage, ~30s)
 	@echo "━━━ Committed Python lock ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@uv lock --check
 	@python3 scripts/ci/test-python-lock-policy.py
 	@python3 scripts/ci/test-test-environment.py
-	@echo "━━━ Bazelisk preflight + Cargo/Bazel drift ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@command -v bazelisk >/dev/null || (echo "bazelisk is required on PATH; see docs/development/bazel.md"; exit 1)
-	@python3 scripts/ci/cargo-bazel-drift-check.py
+	@echo "━━━ Cargo metadata + Python build mode ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@cargo metadata --locked --manifest-path benchmarks/Cargo.toml --format-version 1 >/dev/null
 	@python3 scripts/ci/python-build-mode-check.py
 	@python3 scripts/ci/test-python-build-mode-check.py

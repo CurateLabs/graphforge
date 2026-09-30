@@ -58,19 +58,6 @@ def environment(root: Path) -> dict[str, str]:
     return dict(os.environ, **{name: str(root) for name in TEMP_VARIABLES})
 
 
-def command_with_environment(command: list[str], root: Path) -> list[str]:
-    """Bazel isolates test environments and needs explicit writable storage."""
-    if len(command) >= 2 and Path(command[0]).name in {"bazel", "bazelisk"}:
-        if command[1] == "test":
-            return (
-                command[:2]
-                + [f"--test_env={name}={root}" for name in TEMP_VARIABLES]
-                + [f"--test_tmpdir={root / 'bazel'}", f"--sandbox_writable_path={root}"]
-                + command[2:]
-            )
-    return command
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path)
@@ -88,9 +75,7 @@ def main() -> int:
         if command[:1] == ["--"]:
             command = command[1:]
         if command:
-            return subprocess.run(
-                command_with_environment(command, root), env=environment(root), check=False
-            ).returncode
+            return subprocess.run(command, env=environment(root), check=False).returncode
         return 0
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"GraphForge test filesystem preflight failed: {error}", file=sys.stderr)
