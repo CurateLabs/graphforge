@@ -33,11 +33,7 @@ DEFAULT_BRANCH_INCLUDE = "~DEFAULT_BRANCH"
 PRESERVED_RULE_TYPES = frozenset({"deletion", "non_fast_forward"})
 DEFAULT_OWNER = "CurateLabs"
 DEFAULT_REPO = "graphforge"
-DEFAULT_FIXTURE = (
-    Path(__file__).resolve().parents[2]
-    / "config"
-    / "ci-gate-ruleset-19988544.json"
-)
+DEFAULT_FIXTURE = Path(__file__).resolve().parents[2] / "config" / "ci-gate-ruleset-19988544.json"
 
 
 class EnforcementError(Exception):

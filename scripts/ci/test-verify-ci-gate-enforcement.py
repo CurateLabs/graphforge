@@ -17,11 +17,7 @@ assert SPEC and SPEC.loader
 vce = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(vce)
 
-FIXTURE = (
-    Path(__file__).resolve().parents[2]
-    / "config"
-    / "ci-gate-ruleset-19988544.json"
-)
+FIXTURE = Path(__file__).resolve().parents[2] / "config" / "ci-gate-ruleset-19988544.json"
 
 
 def good_ruleset() -> dict:
