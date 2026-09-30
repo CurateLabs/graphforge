@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import fcntl
 import importlib.util
+import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 SCRIPT = Path(__file__).parents[1] / "pre_push_validation.py"
 SPEC = importlib.util.spec_from_file_location("pre_push_validation", SCRIPT)
@@ -381,7 +383,11 @@ class PrePushValidationTests(unittest.TestCase):
             with (
                 patch.object(GATE.shutil, "which", return_value="/bin/tool"),
                 patch.object(GATE.shutil, "disk_usage", return_value=usage),
-                self.assertRaisesRegex(GATE.ValidationError, "make clean-builds"),
+                self.assertRaisesRegex(
+                    GATE.ValidationError,
+                    "make clean-builds.*graphforge-validation-cache.*"
+                    "GF_PRE_PUSH_CACHE_KEEP_ENTRIES",
+                ),
             ):
                 coordinator.run_preflight({"GF_VALIDATION_ROOT": str(root)})
 
@@ -414,6 +420,157 @@ class PrePushValidationTests(unittest.TestCase):
             ):
                 coordinator.run_preflight({"GF_VALIDATION_ROOT": str(root)})
             self.assertEqual(coordinator.estimated_required_gib, 20)
+
+    def heavy_cache(self, root: Path, keep: int) -> tuple[object, object, Path]:
+        self.make_root(root)
+        stage = GATE.Stage("heavy", commands=(("cargo",),), heavy=True)
+        coordinator = GATE.Coordinator(
+            root, (stage,), cache_stages=(stage,), cache_keep_entries=keep
+        )
+        coordinator.command_versions = lambda _stage: {"tool": "test"}
+        return coordinator, stage, coordinator.shared_cache_root / "cargo"
+
+    def cache_entry(self, cargo: Path, name: str, last_used: float | None) -> Path:
+        entry = cargo / name
+        entry.mkdir(parents=True)
+        (entry / "fingerprint").write_text("warm", encoding="utf-8")
+        if last_used is not None:
+            marker = entry / GATE.CACHE_LAST_USED
+            marker.touch()
+            os.utime(marker, (last_used, last_used))
+        return entry
+
+    def entries(self, cargo: Path) -> set[str]:
+        return {entry.name for entry in cargo.iterdir()}
+
+    def preflight_patches(self, free_gib: int) -> tuple[object, ...]:
+        usage = type("DiskUsage", (), {"free": free_gib * 1024**3})()
+
+        def successful_run(*_args: object, **_kwargs: object) -> object:
+            return type("Completed", (), {"returncode": 0})()
+
+        return (
+            patch.object(GATE.shutil, "which", return_value="/bin/tool"),
+            patch.object(GATE.shutil, "disk_usage", return_value=usage),
+            patch.object(GATE.subprocess, "run", side_effect=successful_run),
+            patch.object(
+                GATE.subprocess,
+                "check_output",
+                return_value="llvm-tools-preview-aarch64 installed\n",
+            ),
+        )
+
+    def test_cache_prune_evicts_least_recently_used_beyond_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            coordinator, stage, cargo = self.heavy_cache(Path(raw), keep=3)
+            live = self.cache_entry(cargo, coordinator.cargo_cache_path(stage).name, 1.0)
+            for name, used in (("a", 400.0), ("b", 100.0), ("c", 300.0), ("d", 200.0)):
+                self.cache_entry(cargo, name, used)
+            with coordinator.heavy_lock():
+                evicted = coordinator.prune_cargo_cache()
+            # One live entry plus the two most recently used others fill the bound of three,
+            # even though the live entry is the least recently used of all.
+            self.assertEqual(evicted, ["b", "d"])
+            self.assertEqual(self.entries(cargo), {live.name, "a", "c"})
+
+    def test_cache_prune_never_evicts_live_entries_below_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            coordinator, stage, cargo = self.heavy_cache(Path(raw), keep=0)
+            live = self.cache_entry(cargo, coordinator.cargo_cache_path(stage).name, None)
+            self.cache_entry(cargo, "recent", 500.0)
+            with coordinator.heavy_lock():
+                self.assertEqual(coordinator.prune_cargo_cache(), ["recent"])
+            self.assertEqual(self.entries(cargo), {live.name})
+
+    def test_cache_prune_ranks_unrecorded_entries_least_recent(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            coordinator, stage, cargo = self.heavy_cache(Path(raw), keep=2)
+            live = coordinator.cargo_cache_path(stage).name
+            legacy = self.cache_entry(cargo, "legacy", None)
+            os.utime(legacy, (10_000.0, 10_000.0))
+            self.cache_entry(cargo, "recorded", 1.0)
+            with coordinator.heavy_lock():
+                self.assertEqual(coordinator.prune_cargo_cache(), ["legacy"])
+            self.assertEqual(self.entries(cargo), {"recorded"})
+            self.assertNotIn(live, self.entries(cargo))
+
+    def test_heavy_stage_records_use_and_prunes_while_holding_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            coordinator, stage, cargo = self.heavy_cache(root, keep=1)
+            self.cache_entry(cargo, "stale", 1.0)
+            observed: list[bool] = []
+
+            def runner(_command: tuple[str, ...], environment: dict[str, str]) -> None:
+                target = Path(environment["CARGO_TARGET_DIR"])
+                observed.append((target / GATE.CACHE_LAST_USED).is_file())
+                observed.append(not (cargo / "stale").exists())
+                lock_path = coordinator.shared_cache_root / "heavy-build.lock"
+                with (
+                    lock_path.open("a", encoding="utf-8") as other,
+                    self.assertRaises(BlockingIOError),
+                ):
+                    fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                observed.append(True)
+
+            coordinator.runner = runner
+            coordinator.collect_artifacts = lambda _stage: []
+            coordinator.run_stage(stage)
+            self.assertEqual(observed, [True, True, True])
+            self.assertEqual(self.entries(cargo), {coordinator.cargo_cache_path(stage).name})
+
+    def test_preflight_prunes_before_disk_check_when_lock_is_free(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            coordinator, _stage, cargo = self.heavy_cache(Path(raw), keep=1)
+            self.cache_entry(cargo, "stale", 1.0)
+            patches = self.preflight_patches(free_gib=500)
+            with patches[0], patches[1], patches[2], patches[3]:
+                coordinator.run_preflight({"GF_VALIDATION_ROOT": raw})
+            self.assertEqual(self.entries(cargo), set())
+            self.assertEqual(coordinator.estimated_required_gib, GATE.MIN_FREE_GIB)
+
+    def test_preflight_neither_blocks_nor_prunes_while_lock_is_held(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            coordinator, _stage, cargo = self.heavy_cache(Path(raw), keep=1)
+            self.cache_entry(cargo, "stale", 1.0)
+            lock_path = coordinator.shared_cache_root / "heavy-build.lock"
+            patches = self.preflight_patches(free_gib=500)
+            with lock_path.open("a", encoding="utf-8") as holder:
+                fcntl.flock(holder, fcntl.LOCK_EX)
+                with patches[0], patches[1], patches[2], patches[3]:
+                    coordinator.run_preflight({"GF_VALIDATION_ROOT": raw})
+            self.assertEqual(self.entries(cargo), {"stale"})
+
+    def test_recorded_use_alone_does_not_count_as_warm_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            coordinator, stage, _cargo = self.heavy_cache(Path(raw), keep=1)
+            with coordinator.heavy_lock():
+                coordinator.mark_cache_used(stage)
+            patches = self.preflight_patches(free_gib=500)
+            with patches[0], patches[1], patches[2], patches[3]:
+                coordinator.run_preflight({"GF_VALIDATION_ROOT": raw})
+            self.assertEqual(coordinator.estimated_required_gib, GATE.MIN_FREE_GIB)
+
+    def test_cache_keep_entries_environment_override(self) -> None:
+        for raw_value in ("-1", "six"):
+            with (
+                patch.dict(os.environ, {"GF_PRE_PUSH_CACHE_KEEP_ENTRIES": raw_value}),
+                patch.object(GATE, "Coordinator") as constructed,
+                patch("sys.stderr"),
+            ):
+                self.assertEqual(GATE.main(["preflight"]), 1)
+                constructed.assert_not_called()
+        instance = MagicMock(root=Path("/repository"))
+        instance.run.return_value = []
+        instance.write_summary.return_value = Path("/repository/summary.json")
+        for raw_value, expected in (("2", 2), ("", GATE.CACHE_KEEP_ENTRIES)):
+            with (
+                patch.dict(os.environ, {"GF_PRE_PUSH_CACHE_KEEP_ENTRIES": raw_value}),
+                patch.object(GATE, "Coordinator", return_value=instance) as constructed,
+                patch("sys.stdout"),
+            ):
+                self.assertEqual(GATE.main(["preflight"]), 0)
+            self.assertEqual(constructed.call_args.kwargs["cache_keep_entries"], expected)
 
     def test_default_graph_executes_full_rust_corpus_once(self) -> None:
         commands = [command for stage in GATE.stages() for command in stage.commands]

@@ -9,7 +9,7 @@ not transmit data or record command output, tokens, user names, or absolute path
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import fcntl
@@ -25,6 +25,10 @@ import time
 
 SCHEMA = "graphforge-pre-push-validation/v1"
 MIN_FREE_GIB = 80
+# Each distinct manifest/toolchain state needs one target directory per heavy profile
+# (debug, coverage); keep room for three concurrent states before evicting.
+CACHE_KEEP_ENTRIES = 6
+CACHE_LAST_USED = ".graphforge-last-used"
 IGNORED_PARTS = {".git", ".graphforge", ".venv", "build", "target", "node_modules"}
 Command = tuple[str, ...]
 CommandRunner = Callable[[Command, Mapping[str, str]], None]
@@ -95,6 +99,7 @@ class Coordinator:
         minimum_free_gib: int = MIN_FREE_GIB,
         force_clean: bool = False,
         cache_stages: Iterable[Stage] | None = None,
+        cache_keep_entries: int = CACHE_KEEP_ENTRIES,
     ) -> None:
         self.root = root.resolve()
         selected_stages = tuple(stages)
@@ -102,6 +107,7 @@ class Coordinator:
         self.cache_stages = tuple(cache_stages) if cache_stages is not None else selected_stages
         self.runner = runner
         self.minimum_free_gib = minimum_free_gib
+        self.cache_keep_entries = cache_keep_entries
         self.force_clean = force_clean
         self.evidence_root = self.root / ".graphforge" / "validation" / "v1"
         self.shared_cache_root = self.common_git_dir() / "graphforge-validation-cache"
@@ -327,12 +333,14 @@ class Coordinator:
                 + ". Install the pinned toolchain described in docs/development/contributing.md "
                 "(Bazelisk: docs/development/bazel.md)."
             )
+        # Never wait here: another worktree's heavy build holds the lock and prunes itself.
+        with self.heavy_lock(blocking=False) as held:
+            if held:
+                self.prune_cargo_cache()
         heavy_stages = tuple(stage for stage in self.cache_stages if stage.heavy)
         warm_cache = bool(heavy_stages) and all(
-            (
-                cache := self.shared_cache_root / "cargo" / self.cargo_cache_digest(stage)[:24]
-            ).is_dir()
-            and any(cache.iterdir())
+            (cache := self.cargo_cache_path(stage)).is_dir()
+            and any(child.name != CACHE_LAST_USED for child in cache.iterdir())
             for stage in heavy_stages
         )
         self.estimated_required_gib = (
@@ -345,7 +353,11 @@ class Coordinator:
                 f"{self.estimated_required_gib} GiB estimated need "
                 f"({'compatible cache present' if warm_cache else 'cold cache'}). "
                 "Safe cleanup options: "
-                "make clean-builds (stale artifacts) or make clean-builds-all (all Rust artifacts)."
+                "make clean-builds (stale artifacts) or make clean-builds-all "
+                "(all Rust artifacts). Neither touches the shared pre-push Cargo cache "
+                "(graphforge-validation-cache in the Git common directory); it is pruned to "
+                f"{self.cache_keep_entries} target directories, always keeping those this run "
+                "needs, and GF_PRE_PUSH_CACHE_KEEP_ENTRIES lowers that bound."
             )
         llvm_cov = subprocess.run(
             ("cargo", "llvm-cov", "--version"), cwd=self.root, capture_output=True, check=False
@@ -414,10 +426,11 @@ class Coordinator:
         # Cargo fingerprints first-party units inside one target directory. Key only on
         # toolchain/profile/manifest inputs that make a target directory incompatible.
         if stage.heavy:
-            environment["CARGO_TARGET_DIR"] = str(
-                self.shared_cache_root / "cargo" / self.cargo_cache_digest(stage)[:24]
-            )
+            environment["CARGO_TARGET_DIR"] = str(self.cargo_cache_path(stage))
         return environment
+
+    def cargo_cache_path(self, stage: Stage) -> Path:
+        return self.shared_cache_root / "cargo" / self.cargo_cache_digest(stage)[:24]
 
     def cargo_cache_digest(self, stage: Stage) -> str:
         profile = "coverage" if stage.name == "rust-tests-coverage-native" else "release"
@@ -445,16 +458,63 @@ class Coordinator:
         )
 
     @contextmanager
-    def heavy_lock(self) -> Iterable[None]:
-        """Serialise heavy compilation across worktrees (stricter than the two-build cap)."""
+    def heavy_lock(self, *, blocking: bool = True) -> Iterator[bool]:
+        """Serialise heavy compilation across worktrees (stricter than the two-build cap).
+
+        Yields whether the lock is held; a non-blocking attempt yields False while another
+        worktree holds it.
+        """
         self.shared_cache_root.mkdir(parents=True, exist_ok=True)
         lock_path = self.shared_cache_root / "heavy-build.lock"
         with lock_path.open("w", encoding="utf-8") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
             try:
-                yield
+                fcntl.flock(lock, fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+                return
+            try:
+                yield True
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def mark_cache_used(self, stage: Stage) -> None:
+        """Record that a heavy stage is using its target directory (caller holds the lock)."""
+        path = self.cargo_cache_path(stage)
+        path.mkdir(parents=True, exist_ok=True)
+        (path / CACHE_LAST_USED).touch()
+
+    def prune_cargo_cache(self) -> list[str]:
+        """Evict least-recently-used target directories beyond the bound (caller holds the lock).
+
+        Every heavy stage builds under the lock, so no evicted directory can be in use. The
+        directories this invocation's heavy stages need are always kept; entries with no
+        recorded use rank as least recent.
+        """
+        root = self.shared_cache_root / "cargo"
+        if not root.is_dir():
+            return []
+        live = {self.cargo_cache_path(stage).name for stage in self.cache_stages if stage.heavy}
+
+        def last_used(entry: Path) -> float:
+            try:
+                return (entry / CACHE_LAST_USED).stat().st_mtime
+            except FileNotFoundError:
+                return 0.0
+
+        candidates = sorted(
+            (
+                entry
+                for entry in root.iterdir()
+                if entry.is_dir() and not entry.is_symlink() and entry.name not in live
+            ),
+            key=lambda entry: (last_used(entry), entry.name),
+            reverse=True,
+        )
+        evicted = candidates[max(self.cache_keep_entries - len(live), 0) :]
+        for entry in evicted:
+            shutil.rmtree(entry)
+            print(f"pre-push cache: evicted {entry.name}", flush=True)
+        return sorted(entry.name for entry in evicted)
 
     def write_evidence(self, stage: Stage, value: Mapping[str, object]) -> None:
         path = self.evidence_path(stage, str(value["digest"]))
@@ -502,6 +562,8 @@ class Coordinator:
                 self.run_preflight(environment)
             elif stage.heavy:
                 with self.heavy_lock():
+                    self.mark_cache_used(stage)
+                    self.prune_cargo_cache()
                     for command in stage.commands:
                         self.runner(command, environment)
             else:
@@ -708,6 +770,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    raw_keep = os.environ.get("GF_PRE_PUSH_CACHE_KEEP_ENTRIES")
+    try:
+        cache_keep_entries = int(raw_keep) if raw_keep else CACHE_KEEP_ENTRIES
+    except ValueError:
+        cache_keep_entries = -1
+    if cache_keep_entries < 0:
+        print(
+            f"GF_PRE_PUSH_CACHE_KEEP_ENTRIES must be a non-negative integer; got {raw_keep!r}",
+            file=sys.stderr,
+        )
+        return 1
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("preflight", "run"))
     parser.add_argument(
@@ -729,6 +802,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         force_clean=args.force_clean,
         minimum_free_gib=args.minimum_free_gib,
         cache_stages=all_stages,
+        cache_keep_entries=cache_keep_entries,
     )
     filename = "preflight-summary.json" if args.command == "preflight" else "summary.json"
     try:
