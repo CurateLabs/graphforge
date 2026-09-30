@@ -54,6 +54,23 @@ pub fn resolve_existing_edge_property_owners(
     inventory: &crate::AuthenticatedPropertyInventory,
     owners: &mut BTreeMap<Uuid, String>,
 ) -> Result<EdgeOwnerProbeWork, GfError> {
+    resolve_edge_property_owners(inventory, owners, true)
+}
+
+/// Resolve physical property ownership without optional work observations.
+#[doc(hidden)]
+pub fn resolve_existing_edge_property_owner_data(
+    inventory: &crate::AuthenticatedPropertyInventory,
+    owners: &mut BTreeMap<Uuid, String>,
+) -> Result<(), GfError> {
+    resolve_edge_property_owners(inventory, owners, crate::lifecycle_io::is_active()).map(|_| ())
+}
+
+fn resolve_edge_property_owners(
+    inventory: &crate::AuthenticatedPropertyInventory,
+    owners: &mut BTreeMap<Uuid, String>,
+    collect: bool,
+) -> Result<EdgeOwnerProbeWork, GfError> {
     use crate::PropertyRouteKind;
     let mut candidates = BTreeMap::<String, BTreeSet<[u8; 16]>>::new();
     for (uuid, route) in owners.iter() {
@@ -71,34 +88,40 @@ pub fn resolve_existing_edge_property_owners(
         }
     }
     let mut resolved = BTreeMap::new();
-    let mut total = EdgeOwnerProbeWork {
-        candidate_routes: candidates.len(),
-        target_memberships: candidates.values().map(BTreeSet::len).sum(),
-        route_name_bytes: candidates.keys().map(String::len).sum(),
-        ..EdgeOwnerProbeWork::default()
-    };
+    let mut total = EdgeOwnerProbeWork::default();
+    if collect {
+        total.candidate_routes = candidates.len();
+        total.target_memberships = candidates.values().map(BTreeSet::len).sum();
+        total.route_name_bytes = candidates.keys().map(String::len).sum();
+    }
     for (route, targets) in &candidates {
-        let (present, work) = crate::read_authenticated_property_presence_for_inventory(
+        let result = read_property_targets(
             inventory,
             PropertyRouteKind::Edge,
             route,
             targets,
+            None,
+            collect,
         )?;
-        total.physical_bytes += work.physical_bytes;
-        total.authentication_bytes += work.authentication_bytes;
-        total.authenticated_snapshot_bytes += work.authenticated_snapshot_bytes;
-        total.authenticated_snapshot_peak_bytes = total
-            .authenticated_snapshot_peak_bytes
-            .max(work.authenticated_snapshot_peak_bytes);
-        total.physical_rows += work.physical_rows;
-        total.physical_blocks += work.physical_blocks;
-        total.fragments_considered += work.fragments_considered;
-        total.row_groups_considered += work.row_groups_considered;
-        total.row_groups_selected += work.row_groups_selected;
-        total.decoder_peak_bytes = total.decoder_peak_bytes.max(work.decoder_peak_bytes);
-        total.decoder_page_reservation_bytes = total
-            .decoder_page_reservation_bytes
-            .max(work.decoder_page_reservation_bytes);
+        let present = targets.difference(&result.unresolved).copied();
+        if collect {
+            let work = result.metrics;
+            total.physical_bytes += work.physical_bytes;
+            total.authentication_bytes += work.authentication_bytes;
+            total.authenticated_snapshot_bytes += work.authenticated_snapshot_bytes;
+            total.authenticated_snapshot_peak_bytes = total
+                .authenticated_snapshot_peak_bytes
+                .max(work.authenticated_snapshot_peak_bytes);
+            total.physical_rows += work.physical_rows;
+            total.physical_blocks += work.physical_blocks;
+            total.fragments_considered += work.fragments_considered;
+            total.row_groups_considered += work.row_groups_considered;
+            total.row_groups_selected += work.row_groups_selected;
+            total.decoder_peak_bytes = total.decoder_peak_bytes.max(work.decoder_peak_bytes);
+            total.decoder_page_reservation_bytes = total
+                .decoder_page_reservation_bytes
+                .max(work.decoder_page_reservation_bytes);
+        }
         for uuid in present {
             if resolved
                 .insert(Uuid::from_bytes(uuid), route.as_str())
@@ -112,7 +135,9 @@ pub fn resolve_existing_edge_property_owners(
     }
     // No property row means ordinary writer ownership, already derived from
     // topology. Same-request creations are added by the caller afterwards.
-    total.resolved_targets = resolved.len();
+    if collect {
+        total.resolved_targets = resolved.len();
+    }
     for (uuid, route) in resolved {
         owners.insert(uuid, route.to_owned());
     }
@@ -189,6 +214,25 @@ pub fn read_authenticated_property_target_data_for_inventory(
     })
 }
 
+/// Read logical replacement snapshots without optional returned-work observations.
+#[doc(hidden)]
+pub fn read_authenticated_property_snapshot_data_for_inventory(
+    inventory: &AuthenticatedPropertyInventory,
+    kind: PropertyRouteKind,
+    route: &str,
+    targets: &BTreeSet<[u8; 16]>,
+) -> Result<BTreeMap<[u8; 16], PropertySnapshotRow>, GfError> {
+    read_property_targets(
+        inventory,
+        kind,
+        route,
+        targets,
+        None,
+        crate::lifecycle_io::is_active(),
+    )
+    .map(|result| result.rows)
+}
+
 /// Resolve authenticated target row presence, including newest tombstones.
 /// Unlike live snapshot reads, a removed row still proves its physical owner.
 /// Uses the same schema, UUID ordering, tombstone-value and resource validation.
@@ -201,6 +245,24 @@ pub fn read_authenticated_property_presence_for_inventory(
     let result = read_property_targets(inventory, kind, route, targets, None, true)?;
     let present = targets.difference(&result.unresolved).copied().collect();
     Ok((present, result.metrics))
+}
+
+/// Internal ownership admission without an exact-work return contract.
+pub(crate) fn read_property_presence_data_for_inventory(
+    inventory: &AuthenticatedPropertyInventory,
+    kind: PropertyRouteKind,
+    route: &str,
+    targets: &BTreeSet<[u8; 16]>,
+) -> Result<BTreeSet<[u8; 16]>, GfError> {
+    let result = read_property_targets(
+        inventory,
+        kind,
+        route,
+        targets,
+        None,
+        crate::lifecycle_io::is_active(),
+    )?;
+    Ok(targets.difference(&result.unresolved).copied().collect())
 }
 
 pub(crate) fn read_replay_property_targets(
@@ -222,7 +284,7 @@ pub(crate) fn read_replay_property_targets(
         route,
         targets,
         Some(max_memory_bytes),
-        true,
+        crate::lifecycle_io::is_active(),
     )?;
     Ok((result.rows, result.metrics))
 }

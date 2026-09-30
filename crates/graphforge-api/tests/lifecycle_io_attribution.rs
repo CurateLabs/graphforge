@@ -140,6 +140,47 @@ fn default_filtered_and_targeted_property_queries_allocate_no_optional_counters(
     assert!(lifecycle_io_snapshot().is_none());
 }
 
+#[test]
+fn default_edge_replacement_preserves_ownership_and_keys_without_optional_counters() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("state");
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    forge
+        .execute("CREATE (:Leaf {value: 1})-[:LINK {weight: 7, old: 42}]->(:Leaf {value: 2})")
+        .unwrap();
+    drop(forge);
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let before = graphforge_storage::lifecycle_io::observer_work();
+    forge
+        .execute("MATCH ()-[r:LINK]->() SET r = {weight: 9}")
+        .unwrap();
+    let query = "MATCH ()-[r:LINK]->() RETURN r.weight AS weight, r.old AS old";
+    let changed = forge.execute(query).unwrap();
+    let batch = &changed.batches[0];
+    assert_eq!(batch.num_rows(), 1);
+    assert_eq!(
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        9
+    );
+    assert!(
+        batch
+            .column(1)
+            .logical_nulls()
+            .is_some_and(|nulls| nulls.is_null(0))
+    );
+    assert_eq!(graphforge_storage::lifecycle_io::observer_work(), before);
+    assert!(lifecycle_io_snapshot().is_none());
+    drop(forge);
+    let reopened = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let persisted = reopened.execute(query).unwrap();
+    assert_eq!(persisted.batches[0].columns(), batch.columns());
+}
+
 const ORDERED_ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.value AS id ORDER BY id LIMIT 10";
 const EDGE_RECOUNT: &str = "MATCH ()-[r]->() RETURN count(*)";
 

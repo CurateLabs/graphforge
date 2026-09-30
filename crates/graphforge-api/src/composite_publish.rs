@@ -614,7 +614,7 @@ fn require_capabilities(
     Ok(())
 }
 
-use graphforge_storage::resolve_existing_edge_property_owners;
+use graphforge_storage::resolve_existing_edge_property_owner_data;
 
 #[allow(clippy::too_many_lines)]
 fn build_validation_snapshot(
@@ -759,7 +759,7 @@ fn build_validation_snapshot(
             }
         }
     }
-    resolve_existing_edge_property_owners(
+    resolve_existing_edge_property_owner_data(
         &graph.property_inventory_for_session(),
         &mut routes.edges,
     )?;

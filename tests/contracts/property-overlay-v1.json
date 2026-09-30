@@ -32,6 +32,7 @@
       "read_authenticated_property_snapshots_for_inventory",
       "read_authenticated_property_targets_for_inventory", "PropertyTargetSnapshots",
       "read_authenticated_property_target_data_for_inventory", "PropertyTargetData",
+      "read_authenticated_property_snapshot_data_for_inventory", "resolve_existing_edge_property_owner_data",
       "visit_authenticated_property_snapshots"
     ],
     "property_overlay_module": [
@@ -54,7 +55,8 @@
       "read_authenticated_property_presence_for_inventory",
       "read_authenticated_property_snapshots_for_inventory",
       "read_authenticated_property_targets_for_inventory", "PropertyTargetSnapshots",
-      "read_authenticated_property_target_data_for_inventory", "PropertyTargetData", "PropertyTargetSnapshots::edge_batch", "PropertyTargetData::edge_batch",
+      "read_authenticated_property_target_data_for_inventory", "PropertyTargetData",
+      "read_authenticated_property_snapshot_data_for_inventory", "resolve_existing_edge_property_owner_data", "PropertyTargetSnapshots::edge_batch", "PropertyTargetData::edge_batch",
       "visit_authenticated_property_snapshots"
     ],
     "authenticated_staging": [

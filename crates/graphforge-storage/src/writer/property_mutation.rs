@@ -186,8 +186,8 @@ fn stage_set_node_properties_from_inventory(
         )?;
         &owned_inventory
     };
-    let (mut existing, _) =
-        crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+    let mut existing =
+        crate::property_overlay::read_authenticated_property_snapshot_data_for_inventory(
             inventory,
             crate::PropertyRouteKind::Node,
             stem,
@@ -312,8 +312,8 @@ fn stage_remove_node_properties_from_inventory(
         )?;
         &owned_inventory
     };
-    let (mut existing, _) =
-        crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+    let mut existing =
+        crate::property_overlay::read_authenticated_property_snapshot_data_for_inventory(
             inventory,
             crate::PropertyRouteKind::Node,
             stem,
@@ -404,8 +404,8 @@ fn stage_set_edge_properties_from_inventory(
         )?;
         &owned_inventory
     };
-    let (mut existing, _) =
-        crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+    let mut existing =
+        crate::property_overlay::read_authenticated_property_snapshot_data_for_inventory(
             inventory,
             crate::PropertyRouteKind::Edge,
             rel_stem,
@@ -493,8 +493,8 @@ fn stage_remove_edge_properties_from_inventory(
         )?;
         &owned_inventory
     };
-    let (mut existing, _) =
-        crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+    let mut existing =
+        crate::property_overlay::read_authenticated_property_snapshot_data_for_inventory(
             inventory,
             crate::PropertyRouteKind::Edge,
             rel_stem,
@@ -619,14 +619,13 @@ pub(crate) fn stage_promoted_properties(
     let inventory =
         crate::property_overlay::authenticated_property_inventory_for_route(dir, kind, stem)?;
     let targets = source.keys().copied().collect();
-    let (before, _) = crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+    let before = crate::property_overlay::read_authenticated_property_snapshot_data_for_inventory(
         &inventory, kind, stem, &targets,
     )?;
     if kind == crate::PropertyRouteKind::Edge {
-        let (present, _) =
-            crate::property_overlay::read_authenticated_property_presence_for_inventory(
-                &inventory, kind, stem, &targets,
-            )?;
+        let present = crate::property_overlay::read_property_presence_data_for_inventory(
+            &inventory, kind, stem, &targets,
+        )?;
         if !present.is_empty() {
             return Err(GfError::Validation(
                 "ontology promotion has overlapping edge property owners".into(),
@@ -893,7 +892,7 @@ pub(super) fn complete_node_property_window(
         route,
         staged,
     )?;
-    let (mut complete, _) = crate::read_authenticated_property_snapshots_for_inventory(
+    let mut complete = crate::read_authenticated_property_snapshot_data_for_inventory(
         &inventory,
         crate::PropertyRouteKind::Node,
         route,
@@ -964,7 +963,7 @@ pub(super) fn complete_edge_property_window(
         route,
         staged,
     )?;
-    let (mut complete, _) = crate::read_authenticated_property_snapshots_for_inventory(
+    let mut complete = crate::read_authenticated_property_snapshot_data_for_inventory(
         &inventory,
         crate::PropertyRouteKind::Edge,
         route,
@@ -1054,8 +1053,8 @@ fn stage_property_tombstones_from_inventory<S: std::hash::BuildHasher>(
     uuids: &HashSet<[u8; 16], S>,
 ) -> Result<(), GfError> {
     let targets = uuids.iter().copied().collect::<BTreeSet<_>>();
-    let (mut before, _) =
-        crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+    let mut before =
+        crate::property_overlay::read_authenticated_property_snapshot_data_for_inventory(
             inventory, kind, route, &targets,
         )?;
     before.extend(pending_property_snapshots(staged, dir, kind, route)?);

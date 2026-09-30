@@ -22,12 +22,16 @@ pub use projected_reads::{
 };
 mod targeted_reads;
 use targeted_reads::read_property_targets;
-pub(crate) use targeted_reads::read_replay_property_targets;
 pub use targeted_reads::{
     EdgeOwnerProbeWork, PropertyTargetData, PropertyTargetSnapshots,
     read_authenticated_property_presence_for_inventory,
+    read_authenticated_property_snapshot_data_for_inventory,
     read_authenticated_property_target_data_for_inventory,
-    read_authenticated_property_targets_for_inventory, resolve_existing_edge_property_owners,
+    read_authenticated_property_targets_for_inventory, resolve_existing_edge_property_owner_data,
+    resolve_existing_edge_property_owners,
+};
+pub(crate) use targeted_reads::{
+    read_property_presence_data_for_inventory, read_replay_property_targets,
 };
 mod parquet_budget;
 pub(crate) use parquet_budget::replay_parquet_reader_reservation;
