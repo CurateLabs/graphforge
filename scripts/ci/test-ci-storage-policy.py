@@ -24,8 +24,9 @@ Still forbidden
   partitions (1-day transfer vs 30-day publication groups).
 
 Expected Binding RC Linux sticky keys use repository + lane + rustc +
-Cargo.lock hash + ``release-target-v1``. After #4 cutover, Test Suite no longer
-mounts PR job-isolated Cargo ``target/`` sticky disks; Binding RC / fuzz / release-certification
+Cargo.lock hash + ``release-target-v1``. Test Suite mounts exactly one Cargo
+``target/`` sticky disk, for the CI Gate Rust Tests lane (ADR 0048, #1644); #4's
+PR job-isolated Cargo volumes stay retired. Binding RC / fuzz / release-certification
 release-load retain sticky for packaging and retained-tool lanes.
 
 This module inventories workflow storage steps and fails closed on drift.
@@ -36,6 +37,7 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 import re
+import tomllib
 
 from workflow_policy import (
     job_needs,
@@ -90,8 +92,6 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "visualization-limits-stress-${{ github.sha }}": 1,
         "pr-python-wheel-${{ github.sha }}": 1,
         "pr-node-addon-${{ github.sha }}": 1,
-        "cargo-bazel-parity-evidence-${{ github.run_id }}": 1,
-        "bazel-cache-perf-evidence-${{ github.run_id }}": 1,
         "durability-certification-evidence-${{ github.sha }}": 1,
         "native-oracle-windows-${{ github.sha }}": 1,
         "native-oracle-macos-${{ github.sha }}": 1,
@@ -129,18 +129,19 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
 EXPECTED_DEPENDENCY_KEYS = Counter(
     {
         # test.yml: policy + rust-lint + python/node binding + Windows/macOS
-        # durability (6);
+        # durability + Rust Tests (7);
         # Binding RC: 3; coverage-baseline post-merge ledger: 1;
         # build-lane-measurement harness: 1.
-        # PR Cargo sticky disks retired after #4 cutover.
-        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 11,
+        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 12,
         "${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}": 1,
     }
 )
 EXPECTED_STICKY_KEYS = Counter(
     {
-        # PR job-isolated Cargo target/ sticky disks retired after #4.
+        # Test Suite: the CI Gate Rust Tests lane's shared target/ (#1644).
+        # PR job-isolated Cargo target/ sticky disks stay retired after #4.
         # Binding RC / fuzz / release-certification / release-load retain sticky packaging.
+        "${{ github.repository }}-rust-tests-rust-1.96.0-target-v1": 1,
         (
             "${{ github.repository }}-binding-rc-linux-rust-1.96.0-"
             "${{ hashFiles('Cargo.lock') }}-release-target-v1"
@@ -157,7 +158,6 @@ EXPECTED_STICKY_KEYS = Counter(
         (
             "${{ github.repository }}-coverage-rust-1.96.0-${{ hashFiles('Cargo.lock') }}-target-v1"
         ): 1,
-        "${{ github.repository }}-bazel-disk-cache-v1": 1,
         # build-lane-measurement harness: target/ and sccache volumes are
         # caller-keyed per lane so independent chains never share a volume.
         "${{ github.repository }}-${{ inputs.sticky_key }}": 1,
@@ -295,16 +295,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             ("candidate/release-artifacts/evidence/\ncandidate/release-artifacts/node-addons/"),
             "reconciliation/summary.json",
             "examples/visualization/stress/results/",
-            "dist/cargo-bazel-parity-evidence.json",
             ("dist/lane-evidence.json\ndist/sccache-stats.txt\ndist/cargo-lane-test.log"),
-            (
-                "dist/bazel-warm-observation.json\n"
-                "dist/bazel-affected-inputs.json\n"
-                "dist/bazel-cache-perf-ci-observation.json\n"
-                "dist/bazel-representative-build.summary.json\n"
-                "dist/perf-sample-collected.json\n"
-                "tools/bazel/migration-evidence/perf-sample.json"
-            ),
             "${{ runner.temp }}/durability-certification-evidence",
             "native/native-durability-aggregate.json",
             "replay-memory.txt\ncompaction-memory.txt",
@@ -515,7 +506,7 @@ def validate_test_suite_trigger(text: str) -> None:
 
 def validate_required_run_negative_fixtures() -> None:
     """Required command matching rejects common shell failure suppression."""
-    command = "python3 scripts/ci/cargo-bazel-parity-check.py --mode inventory"
+    command = "python3 scripts/test_environment.py -- cargo nextest run --workspace --locked"
     fixture = f"""jobs:
   probe:
     steps:
@@ -576,127 +567,140 @@ def validate_required_run_negative_fixtures() -> None:
     assert job_run_contains(workflow_jobs(separated_jobs)["probe"], command)
 
 
-BAZEL_DISK_CACHE_KEYS = frozenset({"${{ github.repository }}-bazel-disk-cache-v1"})
+RUST_TESTS_JOB = "rust-tests"
+RUST_TESTS_TARGET_KEY = "${{ github.repository }}-rust-tests-rust-1.96.0-target-v1"
+NEXTEST_COMMAND = (
+    "python3 scripts/test_environment.py -- cargo nextest run --workspace --locked --no-fail-fast"
+)
+CUSTOM_HARNESS_COMMAND = (
+    "python3 scripts/test_environment.py -- "
+    "cargo test --workspace --locked --test bdd --test disabled_allocations"
+)
+DOCTEST_COMMAND = "python3 scripts/test_environment.py -- cargo test --workspace --locked --doc"
 
 
-def assert_no_cargo_sticky(job_id: str, body: str) -> None:
-    """#4 retired per-PR Cargo target volumes, not Bazel's content-addressed cache.
+def assert_test_suite_sticky(job_id: str, body: str) -> None:
+    """Only the CI Gate Rust Tests lane mounts a Cargo volume, at ``target``.
 
-    Bazel serves the CI Gate authority that cutover established, and its disk
-    cache is content-addressed, so a stale entry is never read rather than
-    trusted. Cargo target volumes stay refused.
+    #4 retired per-PR job-isolated Cargo target volumes. ADR 0048 (#1644) adds
+    one shared, toolchain-keyed ``target/`` for the Rust Tests lane; Cargo
+    fingerprints every unit, so a stale artifact is rebuilt, not trusted.
     """
-    mounted, _ = sticky_contracts(body)
-    cargo = [key for key in mounted if key not in BAZEL_DISK_CACHE_KEYS]
-    assert not cargo, f"Test Suite job {job_id!r} must not mount Cargo sticky disks (#4): {cargo}"
+    steps = action_steps(body, "useblacksmith/stickydisk")
+    mounted = [field(step, "key") for step in steps]
+    if job_id != RUST_TESTS_JOB:
+        assert not mounted, f"Test Suite job {job_id!r} must not mount sticky disks: {mounted}"
+        return
+    assert mounted == [RUST_TESTS_TARGET_KEY], (
+        f"{RUST_TESTS_JOB} must mount exactly its target/ volume, got {mounted}"
+    )
+    assert field(steps[0], "path") == "target", f"{RUST_TESTS_JOB} sticky disk must mount target"
 
 
-def validate_cargo_sticky_negative_fixtures() -> None:
-    """The narrowed rule still refuses every Cargo volume #4 retired."""
+def validate_test_suite_sticky_negative_fixtures() -> None:
+    """The rule still refuses every volume #4 retired and the retired Bazel cache."""
 
-    def fixture(key: str) -> str:
+    def fixture(job_id: str, key: str, path: str = "target") -> str:
         return f"""jobs:
-  probe:
+  {job_id}:
     steps:
-      - uses: useblacksmith/stickydisk@74f3f01ab1392726dd6ee06904f0452b0ec1e151 # v1.6.0
+      - uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
         with:
           key: {key}
-          path: some/path
+          path: {path}
 """
 
-    allowed = "${{ github.repository }}-bazel-disk-cache-v1"
-    assert_no_cargo_sticky("probe", workflow_jobs(fixture(allowed))["probe"])
-
-    for retired in (
-        "${{ github.repository }}-pr-rust-target-v1",
-        "${{ github.repository }}-binding-rc-linux-rust-1.96.0-release-target-v1",
-        "${{ github.repository }}-bazel-disk-cache-v2",
-    ):
+    assert_test_suite_sticky(
+        RUST_TESTS_JOB, workflow_jobs(fixture(RUST_TESTS_JOB, RUST_TESTS_TARGET_KEY))[RUST_TESTS_JOB]
+    )
+    hostile = (
+        ("probe", RUST_TESTS_TARGET_KEY, "target"),
+        (RUST_TESTS_JOB, "${{ github.repository }}-pr-rust-target-v1", "target"),
+        (RUST_TESTS_JOB, "${{ github.repository }}-bazel-disk-cache-v1", ".bazel-disk-cache"),
+        (
+            RUST_TESTS_JOB,
+            "${{ github.repository }}-binding-rc-linux-rust-1.96.0-release-target-v1",
+            "target",
+        ),
+        (RUST_TESTS_JOB, RUST_TESTS_TARGET_KEY, "some/path"),
+    )
+    for job_id, key, path in hostile:
         try:
-            assert_no_cargo_sticky("probe", workflow_jobs(fixture(retired))["probe"])
+            assert_test_suite_sticky(job_id, workflow_jobs(fixture(job_id, key, path))[job_id])
         except AssertionError:
             continue
-        raise AssertionError(f"retired Cargo sticky disk {retired!r} must stay refused (#4)")
+        raise AssertionError(f"sticky disk {key!r} at {path!r} in {job_id!r} must stay refused")
 
 
-def validate_ci_gate_cutover(text: str) -> None:
-    """#4: Bazel authority under CI Gate; Cargo rust-test + PR sticky retired."""
+def validate_rust_tests_lane(text: str) -> None:
+    """ADR 0048: Cargo with nextest is the CI Gate Rust lane; no Bazel job runs."""
     jobs = workflow_jobs(text)
-    assert "rust-test" not in jobs, (
-        "Cargo rust-test job must stay retired after CI Gate cutover (#4)"
-    )
     for job_id, body in jobs.items():
-        assert job_scalar(body, "name") != "Rust Tests", (
-            f"job {job_id!r} must not restore retired Cargo Rust Tests display name"
+        assert "bazel" not in job_id, f"Test Suite must not run a Bazel job: {job_id!r}"
+        assert "bazelisk" not in "\n".join(job_run_scalars(body)), (
+            f"Test Suite job {job_id!r} must not run bazelisk (ADR 0048)"
         )
-        assert_no_cargo_sticky(job_id, body)
+        assert_test_suite_sticky(job_id, body)
 
-    authoritative = [
-        job_id
-        for job_id, body in jobs.items()
-        if job_run_contains(
-            body,
-            "python3 scripts/test_environment.py -- "
-            "bazelisk test --config=ci --config=correctness //:ci_rust_tests",
-        )
-    ]
-    assert len(authoritative) == 1, (
-        "exactly one Test Suite job must run authoritative bazelisk test //:ci_rust_tests"
+    lanes = [job_id for job_id, body in jobs.items() if job_run_contains(body, NEXTEST_COMMAND)]
+    assert lanes == [RUST_TESTS_JOB], (
+        f"exactly {RUST_TESTS_JOB!r} must run the workspace nextest suite, got {lanes}"
     )
-    auth_job = authoritative[0]
+    lane = jobs[RUST_TESTS_JOB]
+    assert job_scalar(lane, "runs-on") == "blacksmith-4vcpu-ubuntu-2404"
+    assert job_scalar(lane, "if") == "needs.changes.outputs.rust_tests == 'true'"
+    for command in (CUSTOM_HARNESS_COMMAND, DOCTEST_COMMAND):
+        assert job_runs_exact(lane, command), f"{RUST_TESTS_JOB} must run: {command}"
+    assert job_run_contains(lane, "python3 scripts/test_environment.py --github-env"), (
+        f"{RUST_TESTS_JOB} must prepare native test temporary storage"
+    )
+    for scalar in job_run_scalars(lane):
+        assert "--release" not in scalar and "--profile" not in scalar, (
+            f"{RUST_TESTS_JOB} must keep the dev/test profile (debug assertions, overflow checks)"
+        )
+    assert "cargo-nextest@0.9.145" in lane, "cargo-nextest must stay pinned"
+    assert "CARGO_PROFILE_DEV_DEBUG_ASSERTIONS" not in text
+    assert "CARGO_PROFILE_TEST_DEBUG_ASSERTIONS" not in text
+    assert "CARGO_PROFILE_DEV_OVERFLOW_CHECKS" not in text
+    assert "CARGO_PROFILE_TEST_OVERFLOW_CHECKS" not in text
 
     gate_jobs = [job_id for job_id, body in jobs.items() if job_scalar(body, "name") == "CI Gate"]
     assert len(gate_jobs) == 1, "required check context must remain exactly one CI Gate job"
-    gate_id = gate_jobs[0]
-    gate_body = jobs[gate_id]
-    needed = job_needs(gate_body)
-    assert auth_job in needed, (
-        f"CI Gate must depend on authoritative Bazel job {auth_job!r} (needs={sorted(needed)})"
-    )
-    assert "rust-test" not in needed, "CI Gate must not aggregate the retired rust-test job"
-    assert "bazel-diagnostics" not in needed, (
-        "CI Gate must not require bazel-diagnostics (non-required diagnostic lane)"
-    )
+    gate_body = jobs[gate_jobs[0]]
+    assert RUST_TESTS_JOB in job_needs(gate_body), f"CI Gate must depend on {RUST_TESTS_JOB}"
     gate_runs = [
         normalize_run(scalar)
         for scalar in job_required_run_scalars(gate_body, "scripts/ci/require-gates.sh")
         if normalize_run(scalar).startswith("scripts/ci/require-gates.sh ")
     ]
     assert len(gate_runs) == 1, "CI Gate must have one active require-gates.sh run scalar"
-    gate_run = gate_runs[0]
-    assert f"needs.{auth_job}.result" in gate_run, (
-        f"CI Gate must require {auth_job}.result via require-gates.sh"
+    assert f"needs.{RUST_TESTS_JOB}.result" in gate_runs[0], (
+        f"CI Gate must require {RUST_TESTS_JOB}.result via require-gates.sh"
     )
-    assert "needs.rust-test.result" not in gate_run, (
-        "CI Gate must not reference needs.rust-test.result"
+    # Every job CI Gate needs must reach require-gates.sh, and nothing else.
+    needed = job_needs(gate_body) - {"changes", "policy"}
+    referenced = set(re.findall(r"needs\.([A-Za-z0-9_-]+)\.result", gate_runs[0])) - {
+        "changes",
+        "policy",
+    }
+    assert needed == referenced, (
+        f"CI Gate needs and require-gates.sh arguments differ: {sorted(needed ^ referenced)}"
     )
-    assert "needs.bazel-diagnostics.result" not in gate_run, (
-        "CI Gate must not reference needs.bazel-diagnostics.result"
-    )
-    assert "bazel-diagnostics" in jobs, "diagnostic dual-build/cache observe job must exist"
-    diag_body = jobs["bazel-diagnostics"]
-    assert job_run_contains(diag_body, "python3 scripts/ci/cargo-bazel-parity-check.py"), (
-        "bazel-diagnostics must run dual-build parity"
-    )
-    assert "|| echo" not in diag_body, (
-        "bazel-diagnostics must fail closed; no fabricated zero-hit JSON fallback"
-    )
-    assert not job_run_contains(
-        jobs[auth_job], "python3 scripts/ci/cargo-bazel-parity-check.py --mode all"
-    ), "authoritative bazel-bootstrap must not run dual-build parity"
-    assert job_run_contains(
-        jobs[auth_job], "python3 scripts/ci/cargo-bazel-parity-check.py --mode inventory"
-    ), "authoritative bazel-bootstrap must run live suite-membership inventory"
-    inventory_lines = [
-        line
-        for scalar in job_run_scalars(jobs[auth_job])
-        for line in scalar.splitlines()
-        if "cargo-bazel-parity-check.py --mode inventory" in line
-    ]
-    assert inventory_lines, "live inventory command line must be present in bazel-bootstrap"
-    assert all("--skip-label-query" not in line for line in inventory_lines), (
-        "authoritative bazel-bootstrap inventory must not skip bazelisk label query"
-    )
+
+
+def validate_rust_profiles_keep_runtime_checks() -> None:
+    """Bazel's --config=correctness forced these on; Cargo dev/test have them by default."""
+    manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    profiles = manifest.get("profile", {})
+    for name in ("dev", "test"):
+        profile = profiles.get(name, {})
+        for setting in ("debug-assertions", "overflow-checks"):
+            assert profile.get(setting, True) is True, (
+                f"[profile.{name}] {setting} must stay on for the Rust Tests lane"
+            )
+        assert profile.get("inherits") in {None, "dev", "test"}, (
+            f"[profile.{name}] must not inherit a release profile"
+        )
 
 
 def main() -> None:
@@ -704,20 +708,10 @@ def main() -> None:
     test_suite = texts[WORKFLOWS / "test.yml"]
     validate_test_suite_trigger(test_suite)
     validate_required_run_negative_fixtures()
-    validate_cargo_sticky_negative_fixtures()
+    validate_test_suite_sticky_negative_fixtures()
     validate_operator_handoffs_have_no_artifacts()
-    validate_ci_gate_cutover(test_suite)
-    bazel_config = (ROOT / ".bazelrc").read_text().splitlines()
-    assert "build:correctness --compilation_mode=opt" in bazel_config
-    assert (
-        "build:correctness --@rules_rust//rust/settings:extra_rustc_flags="
-        "-Cdebug-assertions=yes,-Coverflow-checks=yes"
-    ) in bazel_config, "optimized correctness tests must retain Rust runtime checks"
-    makefile = (ROOT / "Makefile").read_text()
-    assert (
-        "\tpython3 scripts/test_environment.py -- "
-        "bazelisk test --config=correctness //:ci_rust_tests\n" in makefile
-    )
+    validate_rust_tests_lane(test_suite)
+    validate_rust_profiles_keep_runtime_checks()
     jobs = workflow_jobs(test_suite)
     for job_id, runner in (
         ("windows-graphforge-storage-locks", "blacksmith-4vcpu-windows-2025"),
