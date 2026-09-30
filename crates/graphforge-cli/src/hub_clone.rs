@@ -50,8 +50,48 @@ pub(crate) struct CloneArgs {
     pub telemetry_endpoint: Option<String>,
 }
 
+#[derive(Clone, Default)]
+enum CloneClock {
+    #[default]
+    Monotonic,
+    #[cfg(test)]
+    Manual(std::rc::Rc<std::cell::Cell<Instant>>),
+}
+
+impl CloneClock {
+    fn now(&self) -> Instant {
+        match self {
+            Self::Monotonic => Instant::now(),
+            #[cfg(test)]
+            Self::Manual(clock) => clock.get(),
+        }
+    }
+
+    fn elapsed_since(&self, started: Instant) -> Duration {
+        match self {
+            Self::Monotonic => started.elapsed(),
+            #[cfg(test)]
+            Self::Manual(clock) => clock.get().duration_since(started),
+        }
+    }
+
+    fn wait(&self, duration: Duration) {
+        match self {
+            Self::Monotonic => std::thread::sleep(duration),
+            #[cfg(test)]
+            Self::Manual(clock) => clock.set(clock.get() + duration),
+        }
+    }
+
+    #[cfg(test)]
+    fn manual() -> Self {
+        Self::Manual(std::rc::Rc::new(std::cell::Cell::new(Instant::now())))
+    }
+}
+
 struct CloneProfile<'a> {
     runtime: &'a TelemetryRuntime,
+    clock: CloneClock,
     started: Option<Instant>,
     cursor_ns: u64,
     stages: Vec<JobStage>,
@@ -62,6 +102,7 @@ impl<'a> CloneProfile<'a> {
     fn new(runtime: &'a TelemetryRuntime) -> Self {
         Self {
             runtime,
+            clock: CloneClock::default(),
             started: None,
             cursor_ns: 0,
             stages: Vec::new(),
@@ -97,8 +138,9 @@ impl<'a> CloneProfile<'a> {
         attempt: u32,
         operation: impl FnOnce() -> Result<(T, Option<u64>, Option<u64>), graphforge_api::GfError>,
     ) -> Result<T, graphforge_api::GfError> {
-        let origin = *self.started.get_or_insert_with(Instant::now);
-        let operation_start_ns = u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let origin = *self.started.get_or_insert_with(|| self.clock.now());
+        let operation_start_ns =
+            u64::try_from(self.clock.elapsed_since(origin).as_nanos()).unwrap_or(u64::MAX);
         if !self.stages.is_empty() && operation_start_ns > self.cursor_ns {
             let duration_ns = operation_start_ns - self.cursor_ns;
             self.stages.push(JobStage {
@@ -117,9 +159,9 @@ impl<'a> CloneProfile<'a> {
             });
             self.cursor_ns = operation_start_ns;
         }
-        let started = Instant::now();
+        let started = self.clock.now();
         let result = operation();
-        let duration_ns = u64::try_from(started.elapsed().as_nanos())
+        let duration_ns = u64::try_from(self.clock.elapsed_since(started).as_nanos())
             .unwrap_or(u64::MAX)
             .max(1);
         let (bytes, records) = result
@@ -149,7 +191,7 @@ impl<'a> CloneProfile<'a> {
 
     fn finish(mut self, result: &Result<(), graphforge_api::GfError>) {
         let elapsed_ns = self.started.map_or(0, |started| {
-            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+            u64::try_from(self.clock.elapsed_since(started).as_nanos()).unwrap_or(u64::MAX)
         });
         if elapsed_ns > self.cursor_ns {
             let duration_ns = elapsed_ns - self.cursor_ns;
@@ -982,12 +1024,13 @@ fn run_clone_profiled(
         json,
         output,
         runtime,
-        CloneDelays::default(),
+        &CloneDelays::default(),
     )
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Default)]
 struct CloneDelays {
+    clock: CloneClock,
     verification: Duration,
     import: Duration,
     reopen: Duration,
@@ -999,9 +1042,13 @@ fn run_clone_profiled_with_delays(
     json: bool,
     output: &mut dyn Write,
     runtime: &TelemetryRuntime,
-    delays: CloneDelays,
+    delays: &CloneDelays,
 ) -> Result<(), graphforge_api::GfError> {
     let mut profile = CloneProfile::new(runtime);
+    #[cfg(test)]
+    {
+        profile.clock = delays.clock.clone();
+    }
     let result = run_clone_job(transport, args, &mut profile, delays)
         .and_then(|result| write_clone_result(&result, json, output));
     profile.finish(&result);
@@ -1013,7 +1060,7 @@ fn run_clone_job(
     transport: &dyn Transport,
     args: CloneArgs,
     profile: &mut CloneProfile<'_>,
-    delays: CloneDelays,
+    delays: &CloneDelays,
 ) -> Result<CloneResult, graphforge_api::GfError> {
     let (identity, base, destination) = profile.stage(
         Stage::IdentityValidation,
@@ -1162,7 +1209,7 @@ fn run_clone_job(
         None,
         1,
         || {
-            std::thread::sleep(delays.verification);
+            delays.clock.wait(delays.verification);
             verify_discovered_portable_v2(&DiscoveryPortableV2Request {
                 manifest_json: &manifest_bytes,
                 refs_json: &refs_bytes,
@@ -1200,7 +1247,7 @@ fn run_clone_job(
         None,
         1,
         || {
-            std::thread::sleep(delays.import);
+            delays.clock.wait(delays.import);
             GraphForge::import_portable_v2(
                 &destination,
                 &PortableV2ImportRequest {
@@ -1254,7 +1301,7 @@ fn run_clone_job(
         None,
         1,
         || {
-            std::thread::sleep(delays.reopen);
+            delays.clock.wait(delays.reopen);
             Ok(((), None, None))
         },
     )?;
@@ -1430,6 +1477,7 @@ mod tests {
 
     struct DelayedTransport {
         inner: Scripted,
+        clock: CloneClock,
         discovery: Duration,
         download: Duration,
     }
@@ -1451,7 +1499,7 @@ mod tests {
             } else {
                 self.discovery
             };
-            std::thread::sleep(delay);
+            self.clock.wait(delay);
             self.inner.get(url, range, if_range, limit)
         }
     }
@@ -2120,8 +2168,17 @@ mod tests {
                 })
                 .unwrap(),
             };
+            // The five attribution cases execute real imports, but only their
+            // injected work advances this isolated clock. Filesystem latency
+            // and unrelated tests cannot change which stage dominates.
+            let clock = if index >= 4 {
+                CloneClock::manual()
+            } else {
+                CloneClock::default()
+            };
             let transport = DelayedTransport {
                 inner: clone_script(&bundle, &report.package_digest),
+                clock: clock.clone(),
                 discovery: if index == 4 {
                     Duration::from_secs(2)
                 } else {
@@ -2134,6 +2191,7 @@ mod tests {
                 },
             };
             let delays = CloneDelays {
+                clock,
                 verification: if index == 6 {
                     Duration::from_secs(2)
                 } else {
@@ -2161,7 +2219,7 @@ mod tests {
                 true,
                 &mut output,
                 &runtime,
-                delays,
+                &delays,
             )
             .unwrap();
             let clone_elapsed = clone_started.elapsed();
@@ -2244,6 +2302,13 @@ mod tests {
             ComponentKind::PortableImport,
             ComponentKind::Recovery,
         ]) {
+            // Real work takes zero manual time, retaining the one-nanosecond
+            // stage minimum without reversing offsets or overlapping stages.
+            assert!(job.stages.windows(2).all(|pair| {
+                pair[0].start_offset_ns + pair[0].duration_ns <= pair[1].start_offset_ns
+            }));
+            let last = job.stages.last().unwrap();
+            assert_eq!(job.finished_ns, last.start_offset_ns + last.duration_ns);
             let dominant = job
                 .stages
                 .iter()
@@ -2251,6 +2316,7 @@ mod tests {
                 .max_by_key(|stage| stage.duration_ns)
                 .unwrap();
             assert_eq!(dominant.component, expected);
+            assert_eq!(dominant.duration_ns, 2_000_000_000);
         }
     }
 
