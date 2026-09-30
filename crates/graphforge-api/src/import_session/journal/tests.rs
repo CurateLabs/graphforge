@@ -64,7 +64,7 @@ fn append_before_fsync_recovers_complete_and_torn_unflushed_tails() {
 
 #[test]
 fn accepted_chunk_without_durable_progress_replays_once() {
-    let (_directory, graph, mut session) = staged_fixture();
+    let (directory, graph, mut session) = staged_fixture();
     let id = session.session_uuid();
     let root = session.root.clone();
     inject("accepted_before_progress");
@@ -84,6 +84,8 @@ fn accepted_chunk_without_durable_progress_replays_once() {
         .unwrap()
         .set_len(0)
         .unwrap();
+    drop(graph);
+    let graph = crate::GraphForge::new(directory.path().join("project").to_str()).unwrap();
     let mut resumed = graph.resume_import_session(id).unwrap();
     let progress = resumed.validate(&graph).unwrap();
     assert_eq!(progress.rows_accepted, 2);
@@ -96,7 +98,7 @@ fn accepted_chunk_without_durable_progress_replays_once() {
 
 #[test]
 fn fsync_before_seal_recovers_durable_progress_without_duplicate_rows() {
-    let (_directory, graph, mut session) = staged_fixture();
+    let (directory, graph, mut session) = staged_fixture();
     let id = session.session_uuid();
     inject("fsync_before_seal");
     assert!(
@@ -108,6 +110,8 @@ fn fsync_before_seal_recovers_durable_progress_without_duplicate_rows() {
     );
     assert_eq!(session.manifest.phase, super::super::ImportPhase::Open);
     drop(session);
+    drop(graph);
+    let graph = crate::GraphForge::new(directory.path().join("project").to_str()).unwrap();
     let mut resumed = graph.resume_import_session(id).unwrap();
     assert_eq!(resumed.status().1.rows_accepted, 2);
     let progress = resumed.validate(&graph).unwrap();
