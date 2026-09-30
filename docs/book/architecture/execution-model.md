@@ -143,20 +143,37 @@ already flattened errors can be reconstructed.
 
 ## Custom Graph Execution Nodes
 
-GraphForge registers custom `ExecutionPlan` implementations with DataFusion for operators
-that cannot be faithfully expressed as relational algebra:
+GraphForge registers custom `ExecutionPlan` implementations with DataFusion, planned from
+`graphforge-plan` logical extension nodes by `GraphForgeExtensionPlanner` or substituted by
+physical rewrite rules:
 
 | Node | Description |
-| -------------------- | -------------------------------------------------------------------------- |
-| `VarLenExpand` | Iterative or recursive expansion for `*min..max` path patterns |
-| `OptionalMatch` | Left-join semantics with Cypher null-shaping (distinct from SQL LEFT JOIN) |
-| `PathUnique` | Path isomorphism/homomorphism enforcement |
-| `ProvenanceSemijoin` | Semijoin with confidence propagation |
-| `OntologyInfer` | Transitive/symmetric closure materialization |
-| `GraphMerge` | Partial MERGE upsert (standalone new node or referenced-endpoint relationship) with write-path locking |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `ExpandExec` | Adjacency-backed single hop; one per hop for fixed multi-hop patterns (see below) |
+| `VarLenExpandExec` | Breadth-first expansion for `*min..max` patterns with relationship isomorphism |
+| `OntologyInferExec` | Pass-through that carries the inference rule into the plan and `explain()` |
+| `OptionalMatchExec` | Left-join semantics with Cypher null-shaping (distinct from SQL LEFT JOIN) |
+| `UnwindExec` | Cypher list unwinding |
+| `EdgeCountExec` | `count(r)` answered from the adjacency edge-entry count |
+| `OrderedOneHopExec` | One hop `ORDER BY` destination UUID `LIMIT k`, emitted in ordinal order |
+| `OrderedTwoHopPathCountExec` | Two-hop equivalent, counting path multiplicity per destination |
+| `SortRunCoalesceExec` | Coalesces sort input into memory-pool-sized runs ahead of `SortExec` |
+| `DemandGuardExec` | Cancels traversal once a terminal `LIMIT` is satisfied |
 
-All other operators (scan, filter, project, aggregate, sort, limit) run through standard
-DataFusion physical nodes.
+Storage contributes the scan nodes `GraphForgeParquetExec`, `OrderedPartitionStreamExec`,
+and `PropertyOverlayExec`. Writes plan into `GraphCreateExec`, `GraphDeleteExec`,
+`GraphSetExec`, and `GraphRemoveExec`.
+
+`EdgeCountExec` and the two ordered nodes are not lowered directly: the physical rule
+`FixedHopDemandRule` substitutes them when it recognizes the physical plan shape, and leaves
+the plan unchanged when it does not. A physical shape change therefore removes these fast
+paths without an error; `regression1513_fast_paths_survive_multi_file_node_tables` guards
+the known shapes.
+
+Filter, project, aggregate, sort, limit, joins, union, and Cartesian products run through
+standard DataFusion physical nodes. The full operator and rewrite inventory, with source
+locations, stock DataFusion candidates, and memory-pool accounting, is in
+[cypher-read-path-inventory.md](../../development/cypher-read-path-inventory.md) (#1619).
 
 ---
 
@@ -175,7 +192,7 @@ execution paths consume it through a single `AdjacencyProvider` abstraction:
 | Node | Description |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `VarLenExpandExec` | Iterative BFS over the `AdjacencyProvider` for `*min..max` patterns (replaces the per-query in-memory adjacency build) |
-| `ExpandExec` | Adjacency-backed single-hop expansion: chosen at lowering time when the provider reports a `hit` for a typed relation (any direction; undirected wraps in `DISTINCT`, mirroring the join path's union+distinct). Exploratory single-hop and uncovered patterns keep the DataFusion join chain. |
+| `ExpandExec` | Adjacency-backed single-hop expansion: chosen at lowering time for every project-backed hop whose relationship is not already bound; the provider owns hit, miss, and building fallback. Undirected hops read the merged adjacency view and drop a repeated edge within each source row. Schema-only lowering, an already-bound relationship, and an unknown relationship type keep the DataFusion join chain. |
 
 `ExpandExec` receives exact physical column demand through projections, filters,
 sorts, and limits; unknown or multi-input physical operators are conservative
