@@ -3,10 +3,8 @@
 
 from __future__ import annotations
 
-import contextlib
 import copy
 import importlib.util
-import io
 import json
 import os
 from pathlib import Path
@@ -33,7 +31,6 @@ README = ROOT / "README.md"
 PUBLISH_WORKFLOW = ROOT / ".github/workflows/publish.yaml"
 ARTIFACT_VALIDATOR = ROOT / "scripts/ci/validate-napi-artifacts.py"
 WRAPPER_PREPARER = ROOT / "scripts/ci/prepare-rustc-wrapper.py"
-BAZEL_NATIVE = ROOT / "scripts/ci/binding_rc_bazel_native.py"
 STRICT_ADD_NODE = ROOT / "crates/graphforge-bindings-py/tests/strict_add_node.py"
 SHA = "a" * 40
 ARTIFACT_COMMAND = "pnpm exec napi artifacts --output-dir artifacts --npm-dir npm"
@@ -41,14 +38,6 @@ ARTIFACT_COMMAND = "pnpm exec napi artifacts --output-dir artifacts --npm-dir np
 
 def load_validator():
     spec = importlib.util.spec_from_file_location("binding_rc_validator", VALIDATOR)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def load_bazel_native():
-    spec = importlib.util.spec_from_file_location("binding_rc_bazel_native", BAZEL_NATIVE)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -507,9 +496,7 @@ def validate_python_evidence_policy(workflow_text: str) -> None:
         python_job.count("PYTHON_RC_EVIDENCE_DIR: ${{ runner.temp }}/graphforge-python-rc-evidence")
         == 4
     )
-    assert "binding_rc_bazel_native.py python" in python_job
-    assert "native_builder: bazel" in python_job
-    assert "native_builder: maturin" in python_job
+    validate_python_native_build_policy(python_job)
     _, maturin_found, post_maturin = python_job.partition("uses: PyO3/maturin-action@")
     assert maturin_found, "missing maturin build marker"
     assert (
@@ -608,7 +595,7 @@ def validate_windows_node_cold_start_policy(workflow_text: str) -> None:
     assert node_job.count("actions/cache@") == 1
     assert "actions/cache/restore@" not in node_job
     assert "actions/cache/save@" not in node_job
-    assert node_job.count("actions/upload-artifact@") == 2
+    assert node_job.count("actions/upload-artifact@") == 3
     assert_active_lines(
         node_job,
         "name: binding-rc-report-${{ github.run_id }}-${{ matrix.report_target }}",
@@ -625,9 +612,7 @@ def validate_windows_node_cold_start_policy(workflow_text: str) -> None:
     )
     assert "path: target" not in workflow_step(node_job, "name: Cache Cargo registry")
     assert "key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}" in node_job
-    assert "binding_rc_bazel_native.py node" in node_job
-    assert "native_builder: bazel" in node_job
-    assert "native_builder: napi" in node_job
+    validate_node_native_build_policy(workflow_text, node_job)
     assert node_job.index("uses: dtolnay/rust-toolchain@") < node_job.index(
         "pnpm --filter @curatelabs/graphforge exec napi build --platform --release"
     )
@@ -635,7 +620,6 @@ def validate_windows_node_cold_start_policy(workflow_text: str) -> None:
     assert_active_lines(
         node_job,
         "pnpm --filter @curatelabs/graphforge exec napi build --platform --release",
-        "python3 scripts/ci/binding_rc_bazel_native.py node \\",
         "pnpm --filter @curatelabs/graphforge test:smoke",
         "tests/non-cypher-release-parity.test.mjs \\",
         "tests/async-errors.test.mjs",
@@ -713,65 +697,100 @@ def rejected_post_merge_source_policy(workflow_text: str, mutation: str) -> None
     raise AssertionError(f"workflow accepted non-main RC source drift: {mutation}")
 
 
-def validate_bazelisk_guard_scope() -> None:
-    """Only the subcommands that run `bazelisk build` may require it (#1372).
+def validate_python_native_build_policy(python_job: str) -> None:
+    """Every Python lane builds with maturin and asserts its declared wheel tag (#1645).
 
-    The release-candidate assembly job calls `emit-node-loaders` and installs no
-    bazelisk, so a guard above the subcommand dispatch fails that job for a tool
-    the command never invokes.
+    The Linux lane must build inside the manylinux2014 container and pass
+    maturin's own `--compatibility manylinux_2_17` audit, so the wheel is never
+    labelled with a tag its linked glibc floor does not satisfy.
     """
-    module = load_bazel_native()
-    assert set(module.BAZELISK_COMMANDS) == {"python", "node"}
+    assert python_job.count("uses: PyO3/maturin-action@") == 1
+    build = workflow_step(python_job, "uses: PyO3/maturin-action@")
+    assert "if:" not in build, "the maturin build must run on every Python lane"
+    assert_active_lines(
+        build,
+        "--release --manifest-path crates/graphforge-bindings-py/Cargo.toml",
+        "--out dist ${{ matrix.maturin_args }}",
+        'manylinux: "2014"',
+    )
+    linux = [line for line in python_job.splitlines() if "target: python-ubuntu" in line]
+    assert len(linux) == 1
+    assert "wheel_tag: cp310-abi3-manylinux_2_17_x86_64" in linux[0]
+    assert 'maturin_args: "--compatibility manylinux_2_17"' in linux[0]
+    for target, tag in (
+        ("python-macos", "cp310-abi3-macosx_11_0_arm64"),
+        ("python-windows", "cp310-abi3-win_amd64"),
+    ):
+        entries = [line for line in python_job.splitlines() if f"target: {target}" in line]
+        assert len(entries) == 1 and f"wheel_tag: {tag}" in entries[0], target
+    tag_step = workflow_step(python_job, "name: Require the declared wheel platform tag")
+    assert "if:" not in tag_step, "every wheel must prove its declared tag"
+    assert_active_lines(
+        tag_step,
+        "WHEEL_TAG: ${{ matrix.wheel_tag }}",
+        '*"-${WHEEL_TAG}.whl") ;;',
+        "if tags != [expected]:",
+    )
+    assert (
+        python_job.index("uses: PyO3/maturin-action@")
+        < python_job.index("- name: Require the declared wheel platform tag")
+        < python_job.index("- name: Clean-install and execute native contract")
+    )
 
-    with tempfile.TemporaryDirectory(prefix="gf-bazelisk-guard-") as tmp:
-        scratch = Path(tmp)
-        empty_bin = scratch / "bin"
-        empty_bin.mkdir()
-        assert shutil.which("bazelisk", path=str(empty_bin)) is None
 
-        addon = scratch / "graphforge.linux-x64-gnu.node"
-        addon.write_bytes(b"retained addon; the assembler only copies and hashes it")
-        out_dir = scratch / "loaders"
+def validate_node_native_build_policy(workflow_text: str, node_job: str) -> None:
+    """Every Node lane builds with napi; one Linux lane hands its loaders on (#1645)."""
+    assert "native_builder" not in node_job
+    build = workflow_step(node_job, "name: Build declared publish target")
+    assert "if:" not in build, "the napi build must run on every Node lane"
+    assert node_job.count("- name: Build declared publish target") == 1
+    publishers = [
+        entry
+        for entry in node_matrix_entries(RC_WORKFLOW, workflow_text)
+        if 'publishes_loaders: "true"' in entry
+    ]
+    assert len(publishers) == 1
+    assert "target: x86_64-unknown-linux-gnu" in publishers[0]
+    assert "execution_mode: native" in publishers[0]
+    loaders = workflow_step(
+        node_job, "name: Save tested Node loaders for release-candidate assembly"
+    )
+    assert_active_lines(
+        loaders,
+        "if: matrix.publishes_loaders == 'true'",
+        "name: binding-rc-node-loaders-${{ github.run_id }}",
+        "crates/graphforge-bindings-node/index.js",
+        "crates/graphforge-bindings-node/index.d.ts",
+        "if-no-files-found: error",
+    )
+    # The loaders leave the lane only after its native contract ran against them.
+    assert node_job.index("- name: Execute native parity and smoke contract") < node_job.index(
+        "- name: Save tested Node loaders for release-candidate assembly"
+    )
 
-        original_path = os.environ["PATH"]
-        os.environ["PATH"] = str(empty_bin)
-        try:
-            # emit-node-loaders shells out to the assembler only; it must run.
-            stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout):
-                exit_code = module.main(
-                    [
-                        "emit-node-loaders",
-                        "--addon",
-                        str(addon),
-                        "--out-dir",
-                        str(out_dir),
-                        "--platform-tag",
-                        "linux-x64-gnu",
-                    ]
-                )
-            assert exit_code == 0
-            evidence = json.loads(stdout.getvalue().strip().splitlines()[-1])
-            assert evidence == {"language": "node", "loaders": "emitted", "recompiled": "false"}
-            assert (out_dir / "index.js").is_file()
-            assert (out_dir / "index.d.ts").is_file()
 
-            # python/node still refuse, fail-closed, with the original message.
-            for command, extra in (
-                ("python", ["--out", str(scratch / "wheel")]),
-                ("node", ["--out-dir", str(scratch / "node")]),
-            ):
-                stderr = io.StringIO()
-                try:
-                    with contextlib.redirect_stderr(stderr):
-                        module.main([command, *extra])
-                except SystemExit as refusal:
-                    assert refusal.code == 2, command
-                else:
-                    raise AssertionError(f"{command} ran without bazelisk on PATH")
-                assert "bazelisk is required on PATH" in stderr.getvalue(), command
-        finally:
-            os.environ["PATH"] = original_path
+def validate_release_candidate_loader_policy(release_candidate_job: str) -> None:
+    """Assembly packs the tested napi loaders; it neither recompiles nor synthesizes them."""
+    download = workflow_step(release_candidate_job, "name: Download exact-run tested Node loaders")
+    assert_active_lines(
+        download,
+        "name: binding-rc-node-loaders-${{ github.run_id }}",
+        "path: ${{ runner.temp }}/node-loaders",
+    )
+    assemble = workflow_step(release_candidate_job, "name: Assemble and pack every npm package")
+    assert_active_lines(
+        assemble,
+        "test ! -e crates/graphforge-bindings-node/index.js",
+        "test ! -e crates/graphforge-bindings-node/index.d.ts",
+        'cp "$RUNNER_TEMP/node-loaders/index.js" "$RUNNER_TEMP/node-loaders/index.d.ts" \\',
+        "test -f index.js",
+        "test -f index.d.ts",
+    )
+    assert "emit-node-loaders" not in release_candidate_job
+    assert "napi build" not in release_candidate_job
+    assert release_candidate_job.index("- name: Download exact-run tested Node loaders") < (
+        release_candidate_job.index("- name: Assemble and pack every npm package")
+    )
 
 
 def main() -> None:
@@ -841,10 +860,6 @@ def main() -> None:
         (
             "pnpm --filter @curatelabs/graphforge exec napi build --platform --release",
             "false # disabled napi build",
-        ),
-        (
-            "binding_rc_bazel_native.py node",
-            "false # disabled bazel node build",
         ),
         ("tests/non-cypher-release-parity.test.mjs", "tests/skipped-parity.test.mjs"),
         ("cmp built-addon.sha256 tested-addon.sha256", "true"),
@@ -946,7 +961,8 @@ def main() -> None:
         "  python:\n",
         "  node:\n",
         "uses: PyO3/maturin-action@",
-        "binding_rc_bazel_native.py python",
+        "--compatibility manylinux_2_17",
+        "Require the declared wheel platform tag",
         "Prepare writable Python RC evidence directory",
         "Clean-install and execute native contract",
         "Write target evidence",
@@ -969,7 +985,7 @@ def main() -> None:
     assert 'test "$CARGO_TARGET_DIR" = "$GITHUB_WORKSPACE/target"' in python_job_body
     assert "cargo_target_state=unwritable" in python_job_body
     assert "cargo_target_state=ready" in python_job_body
-    # Bazelisk install uses sudo install -m 0755; forbid chmod on the Cargo sticky reclaim path.
+    # Forbid chmod on the Cargo target reclaim path; ownership is reclaimed, not widened.
     maturin_lane = python_job_body.split("uses: PyO3/maturin-action@", 1)[1]
     assert "chmod" not in maturin_lane
     assert python_job_body.count('sudo chown -R "$(id -u):$(id -g)" "$CARGO_TARGET_DIR"') == 1
@@ -977,8 +993,7 @@ def main() -> None:
     assert "|| true" not in python_job_body
     assert "retry" not in python_job_body.lower()
     assert "if: false" not in python_job_body
-    assert "if: matrix.native_builder == 'maturin'" in python_job_body
-    assert "if: matrix.native_builder == 'bazel'" in python_job_body
+    assert "native_builder" not in python_job_body
     strict_add_node_text = STRICT_ADD_NODE.read_text()
     cargo_invocation = strict_add_node_text.split('"cargo",', 1)[1].split("check=True,", 1)[0]
     assert "env=" not in cargo_invocation
@@ -994,9 +1009,6 @@ def main() -> None:
     assert "project_generation::tests::" not in python_job
     assert "Clean-install and execute native contract" in python_job
     assert "uses: PyO3/maturin-action@" in python_job
-    assert "binding_rc_bazel_native.py python" in python_job
-    assert "native_builder: bazel" in python_job
-    assert "native_builder: maturin" in python_job
     test_workflow_text = (ROOT / ".github/workflows/test.yml").read_text()
     validate_native_test_workflow(test_workflow_text)
     validate_native_workflow_negative_fixtures()
@@ -1008,23 +1020,23 @@ def main() -> None:
     assert "architecture: ${{ matrix.node_arch }}" in rc_workflow_text
     assert 'test "$(node -p \'process.arch\')" = "$EXPECTED_NODE_ARCH"' in rc_workflow_text
     assert "scripts/ci/prepare-rustc-wrapper.py" in rc_workflow_text
-    assert rc_workflow_text.count("uses: useblacksmith/stickydisk@") == 3
+    assert rc_workflow_text.count("uses: useblacksmith/stickydisk@") == 2
     assert rc_workflow_text.count("uses: actions/cache@") == 3
     shared_linux_key = (
         "${{ github.repository }}-binding-rc-linux-rust-1.96.0-"
         "${{ hashFiles('Cargo.lock') }}-release-target-v1"
     )
-    assert rc_workflow_text.count(shared_linux_key) == 2
+    assert rc_workflow_text.count(shared_linux_key) == 1
     assert (
         "${{ github.repository }}-release_candidate-rust-1.96.0-"
         "${{ hashFiles('Cargo.lock') }}-release-target-v1"
     ) in rc_workflow_text
     assert 'sccache: "true"' not in rc_workflow_text
     assert "path: target\n          key: ${{ runner.os }}-cargo-registry" not in rc_workflow_text
-    assert "Reclaim sticky-disk ownership after maturin" in rc_workflow_text
-    assert (
-        "matrix.native_builder == 'maturin' && matrix.sticky_target == 'true'" in rc_workflow_text
+    reclaim = workflow_step(
+        python_job_body, "name: Reclaim Cargo target ownership after manylinux maturin"
     )
+    assert_active_lines(reclaim, "if: runner.os == 'Linux'")
     package_validation_step = rc_workflow_text.split("- name: Validate cross-built package", 1)[
         1
     ].split("- name: Write target evidence", 1)[0]
@@ -1058,12 +1070,10 @@ def main() -> None:
     assert (
         "pnpm exec napi build --platform --release --target x86_64-unknown-linux-gnu"
         not in release_candidate_job
-    ), "assemble must not recompile natives; emit loaders from retained addon"
-    assert "binding_rc_bazel_native.py" in release_candidate_job
-    assert "emit-node-loaders" in release_candidate_job
-    # The assembly job installs no bazelisk and must never need one (#1372).
-    assert "bazelisk" not in release_candidate_job
-    validate_bazelisk_guard_scope()
+    ), "assemble must not recompile natives; pack the loaders the Linux lane tested"
+    validate_release_candidate_loader_policy(release_candidate_job)
+    # Binding RC builds every native with maturin or napi (ADR 0048, #1645).
+    assert not re.search(r"(?i)bazel", rc_workflow_text)
     # Tarball guards must mean "exactly one existing file" (#1374). Without
     # nullglob a non-matching pattern survives as a one-element array.
     assert "shopt -s nullglob" in release_candidate_job

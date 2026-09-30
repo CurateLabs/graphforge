@@ -216,13 +216,20 @@ npm, and crates.io surfaces, records four non-overlapping artifact groups, and
 reopens every archive with `graphforge-release-candidate-v2` completeness
 validation. A checksum-valid archive with missing entrypoints, types, native
 modules, dependency metadata, or legal files is rejected.
-Linux Binding RC build cells mount a shared release-profile `target/` sticky
-disk keyed by repository, RC Linux target family, Rust 1.96.0, and `Cargo.lock`;
-the Python Ubuntu and Linux Node cells share it because their Cargo artifacts
-are target-qualified. The release-assembly cell has its own equivalent sticky
-disk. Registry and git dependencies use colocated `actions/cache@v6` on every
-RC OS; no cache action transfers `target/`. macOS and Windows use larger
-Blacksmith runners (12-vCPU macOS, 8-vCPU Windows) rather than sticky disks.
+Every native is built by maturin (Python) or napi (Node); Binding RC has no
+Bazel step (ADR 0048). The Linux wheel is built inside maturin-action's
+manylinux2014 container with `--compatibility manylinux_2_17`, so maturin's
+own audit refuses the wheel instead of relabelling it if any symbol needs a
+glibc newer than 2.17, and every Python lane then checks that the wheel file
+name and `WHEEL` `Tag:` carry its declared tag. The Linux x64 Node lane uploads
+the napi-generated `index.js` / `index.d.ts` its native contract executed, and
+the release assembly packs exactly those loaders rather than recompiling.
+Only the cross-built aarch64 Linux Node cell mounts a release-profile `target/`
+sticky disk, keyed by repository, RC Linux target family, Rust 1.96.0, and
+`Cargo.lock`; the release-assembly cell has its own equivalent sticky disk.
+Registry and git dependencies use colocated `actions/cache@v6` on every RC OS;
+no cache action transfers `target/`. macOS and Windows use larger Blacksmith
+runners (12-vCPU macOS, 8-vCPU Windows) rather than sticky disks.
 
 RC is intentionally slimmer than the PR suite: PR CI owns broad Linux binding
 acceptance, while RC runs only clean-install smoke plus publish-critical native
