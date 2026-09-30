@@ -107,11 +107,17 @@ python3 scripts/test_environment.py -- \
 python3 scripts/test_environment.py -- \
   cargo test --workspace --locked --test bdd --test disabled_allocations
 python3 scripts/test_environment.py -- cargo test --workspace --locked --doc
+python3 scripts/test_environment.py -- \
+  cargo nextest run --locked --no-fail-fast \
+  -p graphforge-exec --features differential-testing --test differential_traversal
 ```
 
 The `-E` filterset is required: `bdd` (cucumber) and `disabled_allocations`
 are custom-harness targets that cannot answer nextest's `--list` protocol, so
-they run under `cargo test` instead. Install nextest with
+they run under `cargo test` instead. The last command runs a test target whose
+required feature is outside its package's default set, which the workspace run
+skips; `scripts/ci/test-ci-storage-policy.py` requires such a run for every
+target like it. Install nextest with
 `cargo install --locked cargo-nextest` (CI pins the version in the job). The
 lane uses the dev/test profile, which keeps debug assertions and overflow
 checks on; do not substitute a release profile.

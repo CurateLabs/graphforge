@@ -807,6 +807,80 @@ def validate_rust_tests_lane(text: str) -> None:
     )
 
 
+def default_feature_closure(features: dict[str, list[str]]) -> set[str]:
+    """Features a package enables by default, following only its own feature names."""
+    enabled: set[str] = set()
+    pending = list(features.get("default", []))
+    while pending:
+        name = pending.pop()
+        if name in enabled or name not in features:
+            continue
+        enabled.add(name)
+        pending.extend(item for item in features[name] if "/" not in item and ":" not in item)
+    return enabled
+
+
+def feature_gated_test_targets(root: Path) -> list[tuple[str, str, list[str]]]:
+    """Workspace test targets the plain workspace run skips for missing features."""
+    workspace = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+    members: list[Path] = []
+    for pattern in workspace["workspace"]["members"]:
+        members.extend(sorted(root.glob(pattern)))
+    gated: list[tuple[str, str, list[str]]] = []
+    for member in members:
+        manifest_path = member / "Cargo.toml"
+        if not manifest_path.is_file():
+            continue
+        manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+        defaults = default_feature_closure(manifest.get("features", {}))
+        for target in manifest.get("test", []):
+            missing = sorted(set(target.get("required-features", [])) - defaults)
+            if missing:
+                gated.append((manifest["package"]["name"], target["name"], missing))
+    return gated
+
+
+def assert_feature_gated_tests_run(lane: str, gated: list[tuple[str, str, list[str]]]) -> None:
+    """Every feature-gated test target runs in the Rust Tests lane with its features."""
+    runs = [normalize_run(scalar) for scalar in job_run_scalars(lane)]
+    for package, target, features in gated:
+        tokens = (f"-p {package}", f"--features {','.join(features)}", f"--test {target}")
+        assert any(
+            run.startswith("python3 scripts/test_environment.py -- cargo nextest run --locked")
+            and all(token in run for token in tokens)
+            for run in runs
+        ), (
+            f"{RUST_TESTS_JOB} must run {package}::{target} with features {features}; "
+            "the workspace run skips it"
+        )
+
+
+def validate_feature_gated_tests(text: str) -> None:
+    """#1662: a required feature outside the default set must not drop a test from CI."""
+    gated = feature_gated_test_targets(ROOT)
+    assert ("graphforge-exec", "differential_traversal", ["differential-testing"]) in gated, (
+        "feature-gated target discovery no longer finds the differential oracle"
+    )
+    lane = workflow_jobs(text)[RUST_TESTS_JOB]
+    assert_feature_gated_tests_run(lane, gated)
+    step = (
+        "python3 scripts/test_environment.py -- cargo nextest run --locked --no-fail-fast "
+        "-p graphforge-exec --features differential-testing --test differential_traversal"
+    )
+    for hostile in (
+        lane.replace("--features differential-testing ", ""),
+        lane.replace("--test differential_traversal", "--test read_execution"),
+        lane.replace("-p graphforge-exec --features", "-p graphforge-rel --features"),
+        "\n".join(line for line in lane.splitlines() if "differential" not in line),
+    ):
+        try:
+            assert_feature_gated_tests_run(hostile, gated)
+        except AssertionError:
+            continue
+        raise AssertionError("a lane without the feature-gated run must stay refused")
+    assert job_runs_exact(lane, step), f"{RUST_TESTS_JOB} must run: {step}"
+
+
 def validate_rust_profiles_keep_runtime_checks() -> None:
     """Cargo dev/test profiles keep debug assertions and overflow checks on by default."""
     manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
@@ -832,6 +906,7 @@ def main() -> None:
     validate_operator_handoffs_have_no_artifacts()
     validate_rust_tests_lane(test_suite)
     validate_rust_profiles_keep_runtime_checks()
+    validate_feature_gated_tests(test_suite)
     jobs = workflow_jobs(test_suite)
     for job_id, runner in (
         ("windows-graphforge-storage-locks", "blacksmith-4vcpu-windows-2025"),
