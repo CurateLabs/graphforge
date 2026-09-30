@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://graphforge.dev/schemas/g500-ladder-qualification-3.json",
+  "schema": "graphforge-g500-ladder-qualification-schema/4",
   "type": "object", "additionalProperties": false,
   "required": ["schema", "rungs", "projection"],
   "properties": {
