@@ -192,14 +192,24 @@ by more than that metric's margin is an **unbanked gain** — the gate fails and
 prints the exact constant to write, so an improvement cannot land without the
 pull request that won it recording the new constant. Margins are per metric,
 from each metric's recorded reproducibility (bytes and the growth ratio
-reproduce to the byte: 10%; CPU moves ±15% under load: 25%); wall-clock
-throughput is excluded from the ratchet side until its baseline is banked from
-the isolated `codspeed-macro` runner. Each banked constant documents its host
-class, build profile and the change that set it, and every metric records its
-execution scope, denominator and units — do not transfer a number between
-scopes. The gate's judgment is unit-tested in `tests/ingest_gate_verdict.rs`:
-a deliberate regression and a deliberate improvement must each fail in the
-expected direction before a clean pass is trusted.
+reproduce to the byte: 10%; CPU: 25%; wall-clock throughput on its own runner:
+40%). Each banked constant documents its host class, build profile and the
+change that set it, and every metric records its execution scope, denominator
+and units — do not transfer a number between scopes. The gate's judgment is
+unit-tested in `tests/ingest_gate_verdict.rs`: a deliberate regression and a
+deliberate improvement must each fail in the expected direction before a clean
+pass is trusted.
+
+Two of the four limits are **host-bound**. The throughput floor and the CPU
+ceiling are banked from the isolated `codspeed-macro` runner the nightly runs
+on, which is an ARM64 machine bound by its device rather than its CPU; its
+numbers say nothing about an x86_64 development host, and the reverse. The
+nightly declares the host with `GF_INGEST_GATE_BANKED_HOST=codspeed-macro` and
+both limits are judged there. Run anywhere else, as in the command above, they
+are printed as `not judged` notes and only the two deterministic byte-counter
+limits can fail. Do not set that variable on another machine, and do not bank a
+throughput or CPU constant from a local run: re-bank from scheduled nightlies
+and put the table on the issue.
 
 Per-region wall, CPU, fsync, and byte attribution for one import comes from the
 stock receipt's `region_diagnostics` tree; see

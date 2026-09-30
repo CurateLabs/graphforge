@@ -20,11 +20,15 @@ mod ingest_gate;
 use std::time::Duration;
 
 use ingest_gate::{
-    GateLimits, GateVerdict, IngestObservation, RatchetPolicy, THROUGHPUT_RATCHET_EXCLUSION,
+    GateLimits, GateVerdict, HostBoundJudgment, IngestObservation, RatchetPolicy,
     evaluate_ingest_gate,
 };
 
-/// The production policy the bench wires in `gate_limits()`.
+/// The pre-#1672 policy, banked on the shared development host with
+/// throughput excluded from the ratchet side. The engine tests below were
+/// written against these figures and keep them, judged as on the banked host,
+/// so the engine's behaviour is pinned independently of whichever constants
+/// the bench currently banks.
 fn production_limits() -> GateLimits {
     GateLimits {
         floor_edges_per_second: 15_000.0,
@@ -32,12 +36,67 @@ fn production_limits() -> GateLimits {
         ceiling_cpu_micros_per_edge: 14.0,
         max_read_degradation_ratio: 1.20,
         ratchet_edges_per_second: RatchetPolicy::Excluded {
-            reason: THROUGHPUT_RATCHET_EXCLUSION,
+            reason: "baseline not yet banked from the isolated codspeed-macro runner",
         },
         ratchet_bytes_read_per_edge: RatchetPolicy::Margin(0.10),
         ratchet_cpu_micros_per_edge: RatchetPolicy::Margin(0.25),
         ratchet_read_degradation_ratio: RatchetPolicy::Margin(0.10),
+        host_bound: HostBoundJudgment::Judged,
     }
+}
+
+/// The limits #1672 banked from the `codspeed-macro` nightlies, throughput
+/// two-sided. This is a frozen record of that banking decision, proved against
+/// the nights it was made from; it deliberately does not follow later
+/// re-banks, which change one constant in the bench and nothing here.
+fn runner_limits() -> GateLimits {
+    GateLimits {
+        floor_edges_per_second: 9_000.0,
+        ceiling_bytes_read_per_edge: 1_325.0,
+        ceiling_cpu_micros_per_edge: 25.0,
+        max_read_degradation_ratio: 1.070,
+        ratchet_edges_per_second: RatchetPolicy::Margin(0.40),
+        ratchet_bytes_read_per_edge: RatchetPolicy::Margin(0.10),
+        ratchet_cpu_micros_per_edge: RatchetPolicy::Margin(0.25),
+        ratchet_read_degradation_ratio: RatchetPolicy::Margin(0.10),
+        host_bound: HostBoundJudgment::Judged,
+    }
+}
+
+/// The same limits as any host other than the banked runner sees them.
+fn off_host_limits() -> GateLimits {
+    GateLimits {
+        host_bound: HostBoundJudgment::ReportOnly {
+            reason: "banked from the codspeed-macro runner",
+        },
+        ..runner_limits()
+    }
+}
+
+/// The twelve scheduled `codspeed-macro` nightlies the constants were banked
+/// from (2026-09-19 through 2026-09-30, tabulated on #1672), as
+/// `(edges/sec, cpu us/edge)` at the 524,288-edge rung then the
+/// 8,388,608-edge rung. Bytes read per edge were 1,238 and 1,261 every night.
+const BANKING_NIGHTS: [[(f64, f64); 2]; 12] = [
+    [(9_959.0, 23.79), (17_083.0, 17.80)],
+    [(10_950.0, 23.46), (18_250.0, 17.98)],
+    [(11_169.0, 23.57), (16_673.0, 18.71)],
+    [(10_361.0, 23.56), (16_458.0, 19.27)],
+    [(10_301.0, 23.63), (16_568.0, 19.38)],
+    [(10_556.0, 23.63), (15_732.0, 19.42)],
+    [(11_035.0, 23.84), (17_692.0, 19.53)],
+    [(10_458.0, 23.95), (17_338.0, 19.50)],
+    [(10_438.0, 23.94), (18_959.0, 19.52)],
+    [(10_646.0, 23.81), (16_515.0, 19.33)],
+    [(11_954.0, 23.72), (17_101.0, 19.31)],
+    [(11_106.0, 23.98), (16_655.0, 19.43)],
+];
+
+fn banking_night(night: &[(f64, f64); 2]) -> Vec<IngestObservation> {
+    vec![
+        observation(524_288, 1_238.0, night[0].1, night[0].0),
+        observation(8_388_608, 1_261.0, night[1].1, night[1].0),
+    ]
 }
 
 /// Production limits with exactly one ratchet side armed, so each metric's
@@ -321,4 +380,133 @@ fn suggestion_snapping_is_boundary_safe() {
     assert!((ingest_gate::snap_floor(35_000.000_000_000_01, 0) - 35_000.0).abs() < 1e-9);
     assert!((ingest_gate::snap_floor(1_999.6, 0) - 1_999.0).abs() < 1e-9);
     assert!((ingest_gate::snap_floor(10.125, 2) - 10.12).abs() < 1e-9);
+}
+
+/// Every night the constants were banked from passes both sides on the banked
+/// runner: the limits describe the runner, not one lucky run (#1672).
+#[test]
+fn every_banking_night_passes_on_the_runner() {
+    for night in &BANKING_NIGHTS {
+        let verdict = evaluate_ingest_gate(&banking_night(night), &runner_limits());
+        assert!(!verdict.must_fail(), "{night:?}: {verdict:?}");
+        assert!(verdict.notes.is_empty(), "{night:?}: {:?}", verdict.notes);
+    }
+}
+
+/// The runner-banked limits still catch a regression and an unbanked gain on
+/// each host-bound metric, in the expected direction.
+#[test]
+fn runner_limits_fail_both_sides_of_the_host_bound_metrics() {
+    let slow = vec![
+        observation(524_288, 1_238.0, 23.7, 8_500.0),
+        observation(8_388_608, 1_261.0, 19.4, 16_500.0),
+    ];
+    let verdict = evaluate_ingest_gate(&slow, &runner_limits());
+    assert!(
+        joined(&verdict.breaches).contains("8500 edges/sec is below the 9000 edges/sec floor"),
+        "{verdict:?}"
+    );
+
+    let costly = vec![
+        observation(524_288, 1_238.0, 25.6, 10_600.0),
+        observation(8_388_608, 1_261.0, 19.4, 16_500.0),
+    ];
+    let verdict = evaluate_ingest_gate(&costly, &runner_limits());
+    assert!(
+        joined(&verdict.breaches).contains("25.60 us CPU per edge exceeds the 25.00 us ceiling"),
+        "{verdict:?}"
+    );
+
+    let faster = vec![
+        observation(524_288, 1_238.0, 23.7, 13_000.0),
+        observation(8_388_608, 1_261.0, 19.4, 20_000.0),
+    ];
+    let verdict = evaluate_ingest_gate(&faster, &runner_limits());
+    assert!(verdict.breaches.is_empty(), "{verdict:?}");
+    assert!(
+        joined(&verdict.ratchet_breaches)
+            .contains("write const INGEST_FLOOR_EDGES_PER_SECOND: f64 = 10400.0;"),
+        "{verdict:?}"
+    );
+
+    let cheaper = vec![
+        observation(524_288, 1_238.0, 18.0, 10_600.0),
+        observation(8_388_608, 1_261.0, 15.0, 16_500.0),
+    ];
+    let verdict = evaluate_ingest_gate(&cheaper, &runner_limits());
+    assert!(verdict.breaches.is_empty(), "{verdict:?}");
+    assert!(
+        joined(&verdict.ratchet_breaches)
+            .contains("write const INGEST_CEILING_CPU_MICROS_PER_EDGE: f64 = 20.25;"),
+        "{verdict:?}"
+    );
+}
+
+/// Off the banked host the host-bound limits never fail the gate in either
+/// direction; each finding is reported as a note that names the reason.
+#[test]
+fn host_bound_limits_are_report_only_off_the_banked_host() {
+    // A development machine: far faster wall clock and far cheaper CPU than the
+    // runner's constants, which judged would be two unbanked gains.
+    let development_host = vec![
+        observation(524_288, 1_238.0, 11.9, 40_000.0),
+        observation(8_388_608, 1_261.0, 11.9, 40_000.0),
+    ];
+    let verdict = evaluate_ingest_gate(&development_host, &off_host_limits());
+    assert!(!verdict.must_fail(), "{verdict:?}");
+    let notes = joined(&verdict.notes);
+    assert!(
+        notes.contains("not judged (banked from the codspeed-macro runner)"),
+        "{notes}"
+    );
+    assert!(notes.contains("INGEST_FLOOR_EDGES_PER_SECOND"), "{notes}");
+    assert!(
+        notes.contains("INGEST_CEILING_CPU_MICROS_PER_EDGE"),
+        "{notes}"
+    );
+    assert_eq!(
+        evaluate_ingest_gate(&development_host, &runner_limits())
+            .ratchet_breaches
+            .len(),
+        2,
+        "the same run is two unbanked gains when judged"
+    );
+
+    // A loaded machine: slower and costlier than the runner's constants.
+    let loaded_host = vec![
+        observation(524_288, 1_238.0, 30.0, 5_000.0),
+        observation(8_388_608, 1_261.0, 30.0, 5_000.0),
+    ];
+    let verdict = evaluate_ingest_gate(&loaded_host, &off_host_limits());
+    assert!(!verdict.must_fail(), "{verdict:?}");
+    assert_eq!(verdict.notes.len(), 4, "{:?}", verdict.notes);
+}
+
+/// The deterministic byte-counter limits are judged on every host: report-only
+/// covers the host-bound metrics and nothing else.
+#[test]
+fn deterministic_limits_are_judged_off_the_banked_host() {
+    let more_reads = vec![
+        observation(524_288, 1_400.0, 11.9, 40_000.0),
+        observation(8_388_608, 1_600.0, 11.9, 40_000.0),
+    ];
+    let verdict = evaluate_ingest_gate(&more_reads, &off_host_limits());
+    let breaches = joined(&verdict.breaches);
+    assert!(
+        breaches.contains("bytes read per edge exceeds the 1325 byte ceiling"),
+        "{breaches}"
+    );
+    assert!(breaches.contains("over the 1.07x limit"), "{breaches}");
+
+    let fewer_reads = vec![
+        observation(524_288, 1_000.0, 11.9, 40_000.0),
+        observation(8_388_608, 1_010.0, 11.9, 40_000.0),
+    ];
+    let verdict = evaluate_ingest_gate(&fewer_reads, &off_host_limits());
+    assert!(verdict.breaches.is_empty(), "{verdict:?}");
+    assert!(
+        joined(&verdict.ratchet_breaches)
+            .contains("write const INGEST_CEILING_BYTES_READ_PER_EDGE: f64 ="),
+        "{verdict:?}"
+    );
 }

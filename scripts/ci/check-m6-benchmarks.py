@@ -94,6 +94,34 @@ if "mode: simulation" not in simulation_job:
 if 'GF_INGEST_FLOOR_GATE: "1"' not in walltime_job:
     raise SystemExit("m6-walltime must run the ingest floor gate")
 
+# The throughput floor and the CPU ceiling are banked from the runner this job
+# runs on, and the gate judges them only where the run names that host (#1672).
+# A job that stops naming it would pass with both limits report-only.
+banked_host = re.search(
+    r'(?m)^const\s+INGEST_BANKED_HOST\s*:\s*&str\s*=\s*"([^"]+)"', walltime_source
+)
+if banked_host is None:
+    raise SystemExit("ingest floor gate does not name the host its constants are banked on")
+if f"runs-on: {banked_host.group(1)}" not in walltime_job:
+    raise SystemExit("m6-walltime does not run on the host the ingest constants are banked on")
+if f"GF_INGEST_GATE_BANKED_HOST: {banked_host.group(1)}" not in walltime_job:
+    raise SystemExit("m6-walltime must declare the banked host so its limits are judged")
+
+# Cargo runs the bench from its package directory; a relative report path is
+# written there and the upload step, which reads the workspace root, finds
+# nothing.
+if "GF_INGEST_FLOOR_GATE_JSON: ${{ github.workspace }}/ingest-floor-gate.json" not in walltime_job:
+    raise SystemExit("the ingest gate report path must be absolute under the workspace")
+
+# A gate breach must not erase the walltime series that explains it.
+series_steps = [
+    block
+    for block in re.split(r"(?m)^      - ", walltime_job)
+    if "cargo codspeed build" in block or "CodSpeedHQ/action@" in block
+]
+if len(series_steps) != 2 or any("if: ${{ !cancelled() }}" not in block for block in series_steps):
+    raise SystemExit("the walltime build and run must execute even when the ingest gate fails")
+
 INGEST_GATES = (
     "INGEST_FLOOR_EDGES_PER_SECOND",
     "INGEST_CEILING_BYTES_READ_PER_EDGE",

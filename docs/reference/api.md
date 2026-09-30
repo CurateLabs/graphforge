@@ -166,10 +166,16 @@ duplicating normalization behavior in JavaScript.
 The former Node convenience stubs were removed as an intentional compile-time
 break; callers migrate directly to the two `publishBulk*` methods.
 
-#### `add_node(label, **props)` → `NodeHandle`
+#### `add_node(label, /, **props)` → `NodeHandle`
 
 Add a single node. Returns a `NodeHandle` exposing stable `.uuid` identity and
 primary-label metadata without a numeric storage surrogate.
+
+`label` is positional-only, and so are `src`, `rel_type` and `dst` of
+`add_edge`. Every keyword is therefore a property, including one named `label`:
+`forge.add_node("Member", label="M1")` creates a `Member` node whose `label`
+property is `"M1"`. Passing the node label by keyword, `add_node(label="Member")`,
+is a `TypeError`.
 
 ```python
 alice = forge.add_node("Person", name="Alice", age=30)
@@ -200,7 +206,7 @@ receipt = forge.add_nodes(
 )
 ```
 
-#### `add_edge(src, rel_type, dst, **props)` → `EdgeHandle`
+#### `add_edge(src, rel_type, dst, /, **props)` → `EdgeHandle`
 
 Add a single directed relationship. Returns an `EdgeHandle` exposing stable
 `.uuid` identity and relationship-type metadata without a numeric storage surrogate.
