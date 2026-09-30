@@ -7,6 +7,8 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -65,8 +67,52 @@ def journal_phase_tests() -> None:
             raise AssertionError("unreadable journal was accepted")
 
 
+def memory_measurement_tests() -> None:
+    """A large earlier child must not leak into a later child's measurement."""
+    megabyte = 1024 * 1024
+    large = GATE.run_measured(
+        [sys.executable, "-c", "block = bytearray(256 * 1024 * 1024); print(len(block))"],
+        cwd=ROOT,
+        env=None,
+        timeout=60,
+    )
+    small = GATE.run_measured([sys.executable, "-c", "print('ok')"], cwd=ROOT, env=None, timeout=60)
+    assert large.returncode == 0 and small.returncode == 0
+    assert small.stdout.strip() == "ok"
+    assert large.peak_rss_bytes >= 256 * megabyte, large.peak_rss_bytes
+    assert small.peak_rss_bytes < 128 * megabyte, (
+        f"a later workload inherited an earlier child's peak: {small.peak_rss_bytes}"
+    )
+    failed = GATE.run_measured(
+        [sys.executable, "-c", "import sys; sys.stderr.write('boom'); sys.exit(3)"],
+        cwd=ROOT,
+        env=None,
+        timeout=60,
+    )
+    assert failed.returncode == 3 and failed.stderr == "boom"
+    try:
+        GATE.run_measured(
+            [sys.executable, "-c", "import time; time.sleep(30)"], cwd=ROOT, env=None, timeout=1
+        )
+    except subprocess.TimeoutExpired:
+        pass
+    else:
+        raise AssertionError("a hung workload was not timed out")
+    bound = GATE.RSS_GROWTH_BOUND_BYTES
+    GATE.require_bounded_rss([{"case": "within", "peak_rss_bytes": bound}])
+    try:
+        GATE.require_bounded_rss(
+            [{"case": "within", "peak_rss_bytes": 1}, {"case": "over", "peak_rss_bytes": bound + 1}]
+        )
+    except GATE.GateError as error:
+        assert "case=over" in str(error)
+    else:
+        raise AssertionError("an over-bound workload was accepted")
+
+
 def main() -> None:
     journal_phase_tests()
+    memory_measurement_tests()
     GATE.validate_config(GATE.DEFAULT_SEED, GATE.DEFAULT_ITERATIONS, GATE.DEFAULT_TIMEOUT_SECONDS)
     try:
         GATE.validate_config(

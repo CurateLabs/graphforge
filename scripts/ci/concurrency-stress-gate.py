@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import platform
-import resource
 import shutil
 import subprocess
 import sys
@@ -36,10 +35,60 @@ def _rss_scale() -> int:
     return 1 if sys.platform == "darwin" else 1024
 
 
-def peak_rss_bytes(who: int = resource.RUSAGE_CHILDREN) -> int:
-    """Peak RSS in bytes for reaped child workloads (not this gate process)."""
-    usage = resource.getrusage(who)
-    return int(usage.ru_maxrss) * _rss_scale()
+class MeasuredRun:
+    """One reaped workload with its own peak RSS, not the gate's cumulative children."""
+
+    def __init__(self, returncode: int, stdout: str, stderr: str, peak_rss_bytes: int) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.peak_rss_bytes = peak_rss_bytes
+
+
+def run_measured(
+    argv: list[str], *, cwd: Path, env: dict[str, str] | None, timeout: int
+) -> MeasuredRun:
+    """Run one workload and return the peak RSS of that process tree alone.
+
+    `RUSAGE_CHILDREN` is the maximum over every child the gate has ever reaped,
+    so one compiler invocation would mask or fail every later workload (#1671).
+    `wait4` reports the usage of exactly the process it reaps.
+    """
+    with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
+        process = subprocess.Popen(argv, cwd=cwd, env=env, stdout=out, stderr=err, text=True)
+        deadline = time.monotonic() + timeout
+        while True:
+            pid, status, usage = os.wait4(process.pid, os.WNOHANG)
+            if pid:
+                break
+            if time.monotonic() > deadline:
+                process.kill()
+                os.wait4(process.pid, 0)
+                process.returncode = -9
+                raise subprocess.TimeoutExpired(argv, timeout)
+            time.sleep(0.05)
+        process.returncode = os.waitstatus_to_exitcode(status)
+        out.seek(0)
+        err.seek(0)
+        return MeasuredRun(
+            process.returncode, out.read(), err.read(), int(usage.ru_maxrss) * _rss_scale()
+        )
+
+
+def prebuild_rust_cases(env: dict[str, str], timeout: int) -> None:
+    """Compile the stress test binary before any workload is measured."""
+    argv = ["cargo", "test", "-p", "graphforge-api", "--lib", "--no-run"]
+    try:
+        completed = subprocess.run(
+            argv, cwd=ROOT, env=env, text=True, capture_output=True, timeout=timeout, check=False
+        )
+    except subprocess.TimeoutExpired as error:
+        raise GateError(f"stress test build: hang detected after {error.timeout}s") from error
+    if completed.returncode != 0:
+        raise GateError(
+            f"stress test build failed exit={completed.returncode}\n"
+            f"{(completed.stderr or '')[-1500:]}"
+        )
 
 
 def open_fd_count() -> int | None:
@@ -82,18 +131,9 @@ def run_rust_case(case: str, env: dict[str, str], timeout: int) -> dict[str, Any
         "--exact",
     ]
     started = time.monotonic()
-    before_rss = peak_rss_bytes()
     before_fd = open_fd_count()
     try:
-        completed = subprocess.run(
-            argv,
-            cwd=ROOT,
-            env=env,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
+        completed = run_measured(argv, cwd=ROOT, env=env, timeout=timeout)
     except subprocess.TimeoutExpired as error:
         raise GateError(f"{case}: hang detected after {error.timeout}s") from error
     duration_ms = int((time.monotonic() - started) * 1000)
@@ -102,18 +142,27 @@ def run_rust_case(case: str, env: dict[str, str], timeout: int) -> dict[str, Any
             f"{case}: stress case failed exit={completed.returncode}\n"
             f"{(completed.stdout or '')[-1500:]}\n{(completed.stderr or '')[-1500:]}"
         )
-    after_rss = peak_rss_bytes()
     after_fd = open_fd_count()
     return {
         "case": case,
         "argv": argv,
         "duration_ms": duration_ms,
-        "peak_rss_bytes": max(before_rss, after_rss),
+        "peak_rss_bytes": completed.peak_rss_bytes,
         "open_fds_before": before_fd,
         "open_fds_after": after_fd,
         "outcome": "ok",
         "reproduction": " ".join(argv),
     }
+
+
+def require_bounded_rss(results: list[dict[str, Any]]) -> None:
+    """No stress workload's own process tree may exceed the memory bound."""
+    for item in results:
+        if item["peak_rss_bytes"] > RSS_GROWTH_BOUND_BYTES:
+            raise GateError(
+                f"RSS exceeded bound case={item['case']} "
+                f"peak={item['peak_rss_bytes']} bound={RSS_GROWTH_BOUND_BYTES}"
+            )
 
 
 def require_terminal_journals(project: Path) -> None:
@@ -169,16 +218,10 @@ reopened.close()
 print("python-stress-ok")
 """
     started = time.monotonic()
-    before_rss = peak_rss_bytes()
     before_fd = open_fd_count()
     try:
-        completed = subprocess.run(
-            [sys.executable, "-c", script],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
+        completed = run_measured(
+            [sys.executable, "-c", script], cwd=ROOT, env=None, timeout=timeout
         )
     except subprocess.TimeoutExpired as error:
         raise GateError(f"python-mixed-workload: hang detected after {error.timeout}s") from error
@@ -199,7 +242,7 @@ print("python-stress-ok")
         "seed": seed,
         "iterations": iterations,
         "duration_ms": duration_ms,
-        "peak_rss_bytes": max(before_rss, peak_rss_bytes()),
+        "peak_rss_bytes": completed.peak_rss_bytes,
         "open_fds_before": before_fd,
         "open_fds_after": open_fd_count(),
         "outcome": "ok",
@@ -268,7 +311,8 @@ def write_stress_report(
             "This lane is bounded-resource correctness evidence. Throughput "
             "or latency numbers are non-blocking observations and must not "
             "greenwash a failed required short concurrency matrix. "
-            "peak_rss_bytes uses RUSAGE_CHILDREN (max over reaped workloads). "
+            "peak_rss_bytes is each workload's own process-tree peak from wait4; "
+            "compilation is done before measurement and is not included. "
             "open_fds_* is a gate-process self-check, not child FD accounting."
         ),
     }
@@ -295,7 +339,8 @@ def run_stress(output: Path, seed: int, iterations: int, timeout: int) -> int:
     env["TEMP"] = str(work)
     env["TMP"] = str(work)
     started = time.monotonic()
-    baseline_rss = peak_rss_bytes()
+    # Each case reports its own process tree's peak, so there is no shared baseline.
+    baseline_rss = 0
     baseline_fd = open_fd_count()
     cases = [
         "same_process_concurrency_tests::independent_instances_and_one_instance_reads_are_deterministic",
@@ -307,12 +352,11 @@ def run_stress(output: Path, seed: int, iterations: int, timeout: int) -> int:
     results: list[dict[str, Any]] = []
     failure: str | None = None
     try:
+        prebuild_rust_cases(env, timeout)
         for case in cases:
             results.append(run_rust_case(case, env, timeout))
         results.append(mixed_python_workload(seed, iterations, work, timeout))
-        peak_rss = max(item["peak_rss_bytes"] for item in results)
-        if peak_rss - baseline_rss > RSS_GROWTH_BOUND_BYTES:
-            raise GateError(f"RSS growth exceeded bound baseline={baseline_rss} peak={peak_rss}")
+        require_bounded_rss(results)
         final_fd = open_fd_count()
         if (
             baseline_fd is not None
