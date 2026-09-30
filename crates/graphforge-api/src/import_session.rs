@@ -1,5 +1,6 @@
 //! Durable, bounded staged graph-import sessions (#738).
 
+#[cfg(test)]
 use graphforge_filesystem::ObservedSync as _;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -23,9 +24,10 @@ use crate::{BulkInputKind, CancellationToken, GraphConstructionBudgets, GraphFor
 
 #[cfg(test)]
 mod cpu_budget_report;
+mod journal;
 mod normalization;
 
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const SESSION_DIR: &str = "import-sessions";
 const MANIFEST: &str = "manifest.json";
 
@@ -332,6 +334,7 @@ struct SourceRecord {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SessionManifest {
     format_version: u32,
+    journal_sequence: u64,
     session_uuid: Uuid,
     operation_uuid: Uuid,
     base_generation_uuid: Uuid,
@@ -448,6 +451,7 @@ pub struct GraphImportSession {
     manifest: SessionManifest,
     observed: Instant,
     operation_timings: ImportOperationTimings,
+    journal: journal::Journal,
 }
 
 impl GraphForge {
@@ -469,6 +473,7 @@ impl GraphForge {
         fs::create_dir_all(root.join("sources")).map_err(storage)?;
         let manifest = SessionManifest {
             format_version: FORMAT_VERSION,
+            journal_sequence: 0,
             session_uuid,
             operation_uuid: operation_uuid.0,
             base_generation_uuid: *self
@@ -485,9 +490,11 @@ impl GraphForge {
             construction_session_uuid: None,
             updated_unix_millis: unix_millis()?,
         };
+        let journal = journal::Journal::open(&root, &manifest, self.allocation_operation.as_ref())?;
         write_manifest_with_allocation(&root, &manifest, self.allocation_operation.as_ref())?;
         Ok(GraphImportSession {
             allocation_operation: self.allocation_operation.clone(),
+            journal,
             root,
             manifest,
             observed: Instant::now(),
@@ -511,6 +518,7 @@ impl GraphForge {
         }
         Ok(GraphImportSession {
             allocation_operation: self.allocation_operation.clone(),
+            journal: journal::Journal::open(&root, &manifest, self.allocation_operation.as_ref())?,
             root,
             manifest,
             observed: Instant::now(),
@@ -560,6 +568,11 @@ impl GraphForge {
             }
             GraphImportSession {
                 allocation_operation: self.allocation_operation.clone(),
+                journal: journal::Journal::open(
+                    &root,
+                    &manifest,
+                    self.allocation_operation.as_ref(),
+                )?,
                 root,
                 manifest,
                 observed: Instant::now(),
@@ -580,40 +593,31 @@ impl GraphImportSession {
         self.operation_timings
     }
     fn publish_source(&self, temporary: &Path, destination: &Path) -> Result<(), GfError> {
-        let observed = if let Some(allocation) = &self.allocation_operation {
-            let directory = graphforge_filesystem::StableDirectory::open(
-                temporary
-                    .parent()
-                    .ok_or_else(|| storage("import temporary has no parent"))?,
-            )
-            .map_err(storage)?;
-            let file = directory
-                .open_child_file(
-                    temporary
-                        .file_name()
-                        .ok_or_else(|| storage("import temporary has no name"))?,
-                )
-                .map_err(storage)?;
-            allocation.replace_file_at(temporary, &file)?;
-            Some(file)
-        } else {
-            None
-        };
-        fs::rename(temporary, destination).map_err(storage)?;
-        if let (Some(allocation), Some(file)) = (&self.allocation_operation, observed) {
-            allocation.remove_file_at(destination)?;
-            allocation.replace_file_at(destination, &file)?;
-            allocation.remove_file_at(temporary)?;
-        }
-        Ok(())
+        journal::publish_source(temporary, destination, self.allocation_operation.as_ref())
     }
 
     fn persist_manifest(&self) -> Result<(), GfError> {
+        self.journal.sync(self.allocation_operation.as_ref())?;
         write_manifest_with_allocation(
             &self.root,
             &self.manifest,
             self.allocation_operation.as_ref(),
         )
+    }
+
+    fn persist_progress(&mut self, source_index: usize) -> Result<(), GfError> {
+        self.journal.append(
+            &mut self.manifest,
+            source_index,
+            self.allocation_operation.as_ref(),
+        )?;
+        #[cfg(test)]
+        journal::failure("append_before_fsync")?;
+        #[cfg(test)]
+        if self.manifest.sources[source_index].inflight_batch.is_none() {
+            journal::failure("completed_before_fsync")?;
+        }
+        Ok(())
     }
 
     fn cleanup_source(&self, destination: &Path) -> Result<(), GfError> {
@@ -804,85 +808,118 @@ impl GraphImportSession {
                     self.manifest.operation_uuid,
                     cancellation,
                     |index, batch| {
-                        let mut batch_index = index;
-                        if cancellation.is_some_and(CancellationToken::is_cancelled) {
-                            return Err(cancelled());
-                        }
-                        if batch.num_rows() == 0 {
-                            batch_index += 1;
-                            self.manifest.sources[source_index].batches_staged = batch_index;
-                            self.manifest.sources[source_index].inflight_batch = None;
-                            self.persist_manifest()?;
-                            return Ok(());
-                        }
-                        let recovering = source.inflight_batch == Some(batch_index);
-                        if !recovering {
-                            self.manifest.sources[source_index].inflight_batch = Some(batch_index);
-                            self.persist_manifest()?;
-                        }
-                        let chunk_id =
-                            format!("import-{:020}-{:020}", source.sequence, batch_index);
-                        let region = RegionScope::named(append_region_name(input_kind));
-                        let started = CallStart::now();
-                        let staged = match (input_kind, cancellation) {
-                            (BulkInputKind::Node, Some(token)) => construction
-                                .append_nodes_with_cancellation(&chunk_id, &batch, token),
-                            (BulkInputKind::Node, None) => {
-                                construction.append_nodes(&chunk_id, &batch)
-                            }
-                            (BulkInputKind::Edge, Some(token)) => construction
-                                .append_edges_with_cancellation(&chunk_id, &batch, token),
-                            (BulkInputKind::Edge, None) => {
-                                construction.append_edges(&chunk_id, &batch)
-                            }
-                        };
-                        self.operation_timings
-                            .append
-                            .record(started, staged.is_err());
-                        if staged.is_ok() {
-                            RegionScope::record_work("rows", batch.num_rows() as u64);
-                        }
-                        drop(region);
-                        if let Err(error) = staged {
-                            self.manifest.sources[source_index].inflight_batch = None;
-                            let remaining = self
-                                .manifest
-                                .limits
-                                .max_rejected_rows
-                                .saturating_sub(self.manifest.progress.rows_rejected);
-                            self.manifest.progress.rows_rejected = self
-                                .manifest
-                                .progress
-                                .rows_rejected
-                                .saturating_add((batch.num_rows() as u64).min(remaining));
-                            self.persist_manifest()?;
-                            return Err(error);
-                        }
-                        batch_index += 1;
-                        self.manifest.sources[source_index].batches_staged = batch_index;
-                        self.manifest.sources[source_index].inflight_batch = None;
-                        self.manifest.progress.rows_accepted = self
-                            .manifest
-                            .progress
-                            .rows_accepted
-                            .saturating_add(batch.num_rows() as u64);
-                        self.manifest.progress.peak_batch_rows = self
-                            .manifest
-                            .progress
-                            .peak_batch_rows
-                            .max(batch.num_rows() as u64);
-                        self.update_construction_progress(&construction.progress())?;
-                        self.persist_manifest()?;
-                        Ok(())
+                        self.append_source_batch(
+                            &mut construction,
+                            source_index,
+                            index,
+                            &batch,
+                            cancellation,
+                        )
                     },
                 )?;
                 self.manifest.sources[source_index].staged = true;
                 self.manifest.progress.files_pending =
                     self.manifest.progress.files_pending.saturating_sub(1);
+                self.persist_progress(source_index)?;
+            }
+            // Construction refuses new nodes after accepting its first edge.
+            // Make the node prefix a durable checkpoint before that boundary,
+            // so losing the edge-phase tail never replays a node after edges.
+            if input_kind == BulkInputKind::Node {
                 self.persist_manifest()?;
             }
         }
         self.seal_construction(&mut construction, cancellation)
+    }
+
+    fn append_source_batch(
+        &mut self,
+        construction: &mut crate::GraphConstructionSession<'_>,
+        source_index: usize,
+        index: u64,
+        batch: &RecordBatch,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), GfError> {
+        let input_kind = self.manifest.sources[source_index].kind.input_kind();
+        let mut batch_index = index;
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err(cancelled());
+        }
+        if batch.num_rows() == 0 {
+            batch_index += 1;
+            self.manifest.sources[source_index].batches_staged = batch_index;
+            self.manifest.sources[source_index].inflight_batch = None;
+            self.persist_progress(source_index)?;
+            return Ok(());
+        }
+        let recovering = self.manifest.sources[source_index].inflight_batch == Some(batch_index);
+        if !recovering {
+            self.manifest.sources[source_index].inflight_batch = Some(batch_index);
+            self.persist_progress(source_index)?;
+        }
+        let chunk_id = format!(
+            "import-{:020}-{:020}",
+            self.manifest.sources[source_index].sequence, batch_index
+        );
+        let region = RegionScope::named(append_region_name(input_kind));
+        let started = CallStart::now();
+        let staged = match (input_kind, cancellation) {
+            (BulkInputKind::Node, Some(token)) => {
+                construction.append_nodes_with_cancellation(&chunk_id, batch, token)
+            }
+            (BulkInputKind::Node, None) => construction.append_nodes(&chunk_id, batch),
+            (BulkInputKind::Edge, Some(token)) => {
+                construction.append_edges_with_cancellation(&chunk_id, batch, token)
+            }
+            (BulkInputKind::Edge, None) => construction.append_edges(&chunk_id, batch),
+        };
+        self.operation_timings
+            .append
+            .record(started, staged.is_err());
+        if staged.is_ok() {
+            RegionScope::record_work("rows", batch.num_rows() as u64);
+        }
+        drop(region);
+        if let Err(error) = staged {
+            self.manifest.sources[source_index].inflight_batch = None;
+            let remaining = self
+                .manifest
+                .limits
+                .max_rejected_rows
+                .saturating_sub(self.manifest.progress.rows_rejected);
+            self.manifest.progress.rows_rejected = self
+                .manifest
+                .progress
+                .rows_rejected
+                .saturating_add((batch.num_rows() as u64).min(remaining));
+            self.persist_progress(source_index)?;
+            // Refusal is an explicit operation boundary: retain
+            // diagnostics even if the caller never checkpoints.
+            self.persist_manifest()?;
+            return Err(error);
+        }
+        #[cfg(test)]
+        journal::failure("accepted_before_progress")?;
+        #[cfg(test)]
+        if input_kind == BulkInputKind::Edge {
+            journal::failure("edge_accepted_before_progress")?;
+        }
+        batch_index += 1;
+        self.manifest.sources[source_index].batches_staged = batch_index;
+        self.manifest.sources[source_index].inflight_batch = None;
+        self.manifest.progress.rows_accepted = self
+            .manifest
+            .progress
+            .rows_accepted
+            .saturating_add(batch.num_rows() as u64);
+        self.manifest.progress.peak_batch_rows = self
+            .manifest
+            .progress
+            .peak_batch_rows
+            .max(batch.num_rows() as u64);
+        self.update_construction_progress(&construction.progress())?;
+        self.persist_progress(source_index)?;
+        Ok(())
     }
 
     fn seal_construction(
@@ -891,6 +928,9 @@ impl GraphImportSession {
         cancellation: Option<&CancellationToken>,
     ) -> Result<ImportProgress, GfError> {
         let _region = RegionScope::named("seal");
+        self.persist_manifest()?;
+        #[cfg(test)]
+        journal::failure("fsync_before_seal")?;
         let started = CallStart::now();
         let sealed = construction.validate_and_seal(cancellation);
         self.operation_timings.seal.record(started, sealed.is_err());
@@ -1420,27 +1460,7 @@ fn write_manifest_with_allocation(
     manifest: &SessionManifest,
     allocation: Option<&graphforge_storage::StorageAllocationOperation>,
 ) -> Result<(), GfError> {
-    let _region = RegionScope::named("manifest_persistence");
-    let temporary = root.join("manifest.tmp");
-    let mut file = BufWriter::new(File::create(&temporary).map_err(storage)?);
-    serde_json::to_writer(&mut file, manifest).map_err(storage)?;
-    file.flush().map_err(storage)?;
-    file.get_ref().observed_sync_all().map_err(storage)?;
-    let observed = if let Some(allocation) = allocation {
-        allocation.replace_file_at(&temporary, file.get_ref())?;
-        Some(file.get_ref().try_clone().map_err(storage)?)
-    } else {
-        None
-    };
-    drop(file);
-    let target = root.join(MANIFEST);
-    fs::rename(&temporary, &target).map_err(storage)?;
-    if let (Some(allocation), Some(file)) = (allocation, observed) {
-        allocation.remove_file_at(&target)?;
-        allocation.replace_file_at(&target, &file)?;
-        allocation.remove_file_at(&temporary)?;
-    }
-    Ok(())
+    journal::write_checkpoint(root, manifest, allocation)
 }
 
 fn read_manifest(root: &Path) -> Result<SessionManifest, GfError> {
@@ -1448,6 +1468,10 @@ fn read_manifest(root: &Path) -> Result<SessionManifest, GfError> {
         File::open(root.join(MANIFEST)).map_err(storage)?,
     ))
     .map_err(storage)?;
+    if manifest.format_version != FORMAT_VERSION {
+        return Err(validation("incompatible import manifest format"));
+    }
+    journal::replay(root, &mut manifest)?;
     if let Some(construction) = manifest.progress.construction.as_mut()
         && construction.publication_work.contract.is_empty()
     {
@@ -1543,7 +1567,7 @@ mod tests {
         )
     }
 
-    fn nodes(values: &[Uuid]) -> RecordBatch {
+    pub(super) fn nodes(values: &[Uuid]) -> RecordBatch {
         RecordBatch::try_new(
             bulk_node_input_schema(Vec::new()).unwrap(),
             vec![
@@ -1554,7 +1578,7 @@ mod tests {
         .unwrap()
     }
 
-    fn edges(edge: Uuid, source: Uuid, target: Uuid) -> RecordBatch {
+    pub(super) fn edges(edge: Uuid, source: Uuid, target: Uuid) -> RecordBatch {
         RecordBatch::try_new(
             bulk_edge_input_schema(Vec::new()).unwrap(),
             vec![
@@ -1567,7 +1591,7 @@ mod tests {
         .unwrap()
     }
 
-    fn fixture() -> (tempfile::TempDir, PathBuf, GraphForge) {
+    pub(super) fn fixture() -> (tempfile::TempDir, PathBuf, GraphForge) {
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("project");
         fs::create_dir(&project).unwrap();
