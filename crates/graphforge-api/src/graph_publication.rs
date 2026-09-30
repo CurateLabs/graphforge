@@ -1,7 +1,6 @@
 //! Graph mutation publication, reconciliation, and in-memory reset.
 
 use super::{CompositionBindingContext, GfError, GraphForge, RuntimeCatalog};
-use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use sha2::Digest;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,9 +12,9 @@ pub(super) type BoundGenerationStorage = (
 );
 
 impl GraphForge {
-    pub(crate) fn stage_project_generation(
+    pub(crate) fn stage_project_generation<'r>(
         &self,
-        request: &graphforge_storage::ProjectGenerationRequest,
+        request: impl Into<graphforge_storage::StageRequest<'r>>,
     ) -> Result<graphforge_storage::ProjectStageOutcome, GfError> {
         graphforge_storage::stage_project_generation_with_graph_tree_mode(
             self.resolved_generation.container_root(),
@@ -111,9 +110,7 @@ impl GraphForge {
         recorded_at_micros: i64,
         candidate_bindings: Option<&graphforge_storage::SemanticStorageBindings>,
     ) -> Result<(), GfError> {
-        use graphforge_storage::{
-            ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
-        };
+        use graphforge_storage::{ProjectCapability, ProjectStageOutcome};
 
         let root = self.resolved_generation.container_root();
         let parent = graphforge_storage::resolve_project_generation(root)?;
@@ -134,7 +131,7 @@ impl GraphForge {
                 graphforge_storage::UuidIndexBuildLimits::default(),
             )?;
         }
-        let graph = graphforge_storage::capture_graph_files(&self.dir())?.1;
+        let graph = graphforge_storage::capture_graph_files_over_parent(&self.dir(), &parent)?.1;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let installed_bindings = self
             .semantic_storage_bindings
@@ -159,13 +156,15 @@ impl GraphForge {
                 capability_version: capability.capability_version,
             })
             .collect::<Vec<_>>();
-        let generation_uuid = mutation_generation_uuid(operation_uuid, &participants);
-        let request = ProjectGenerationRequest {
-            transaction_uuid: operation_uuid,
-            generation_uuid,
+        let request = graphforge_storage::PreparedGenerationRequest::new(
+            operation_uuid,
             capabilities,
             participants,
-        };
+            |participants, content_sha256| {
+                mutation_generation_uuid(operation_uuid, participants, content_sha256)
+            },
+        )?;
+        let generation_uuid = request.generation_uuid;
         let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
             root,
             &request,
@@ -234,7 +233,7 @@ impl GraphForge {
                 graphforge_storage::UuidIndexBuildLimits::default(),
             )?;
         }
-        let graph = graphforge_storage::capture_graph_files(&self.dir())?.1;
+        let graph = graphforge_storage::capture_graph_files_over_parent(&self.dir(), &parent)?.1;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let participants = graph_publication_participants(
             &parent,
@@ -479,19 +478,22 @@ fn graph_publication_participants(
     Ok(participants)
 }
 
+/// Generation identity over the operation and each participant's exact-byte
+/// SHA-256, computed once by [`graphforge_storage::PreparedGenerationRequest`].
 fn mutation_generation_uuid(
     operation_uuid: uuid::Uuid,
     participants: &[graphforge_storage::ProjectParticipant],
+    content_sha256: &[[u8; 32]],
 ) -> uuid::Uuid {
-    let mut hasher = Sha256::new();
+    let mut hasher = graphforge_core::hash_observation::ContractSha256::default();
     hasher.update(b"graphforge-graph-mutation-generation/1");
     hasher.update(operation_uuid.as_bytes());
-    for participant in participants {
+    for (participant, digest) in participants.iter().zip(content_sha256) {
         hasher.update(participant.capability_id.as_bytes());
         hasher.update([0]);
         hasher.update(participant.record_family_id.as_bytes());
         hasher.update([0]);
-        hasher.update(Sha256::digest(&participant.bytes));
+        hasher.update(digest);
     }
     let digest: [u8; 32] = hasher.finalize().into();
     graphforge_core::canonical::uuid_v8(digest)

@@ -191,8 +191,10 @@ fn verify_compact_graph_root(
             MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
         )
     })?;
-    for entry in files {
-        crate::verify_graph_object(container_root, &entry.content_sha256, entry.byte_length)?;
+    // CAS names were authenticated when each object was installed. Staging
+    // admits every named payload by exact length and checksum, once.
+    for entry in &files {
+        crate::graph_object_store::admit_graph_object(container_root, entry)?;
     }
     Ok(())
 }
@@ -203,25 +205,21 @@ fn verify_compact_graph_root_with_lease(
 ) -> Result<(), GfError> {
     let (files, _) =
         crate::resolve_graph_manifest(root, crate::GraphManifestLimits::default(), |digest| {
-            crate::graph_object_store::read_graph_object_by_digest_with_lease(
+            crate::graph_object_store::read_graph_control_object_by_digest_with_lease(
                 lease,
                 digest,
                 crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
             )
         })?;
     crate::route_component::authenticate_manifest_routes(root.format_version, &files, |entry| {
-        crate::graph_object_store::read_graph_object_by_digest_with_lease(
+        crate::graph_object_store::read_graph_control_object_by_digest_with_lease(
             lease,
             &entry.content_sha256,
             MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
         )
     })?;
-    for entry in files {
-        crate::graph_object_store::verify_graph_object_with_lease(
-            lease,
-            &entry.content_sha256,
-            entry.byte_length,
-        )?;
+    for entry in &files {
+        crate::graph_object_store::admit_graph_object_with_lease(lease, entry)?;
     }
     Ok(())
 }
@@ -260,7 +258,7 @@ pub(super) fn stage_participant_files(
             .map_err(publication_io)?;
         let write_result = (|| -> Result<(), GfError> {
             match payloads {
-                ParticipantPayloads::Memory => {
+                ParticipantPayloads::Memory(_) => {
                     file.write_all(&input.bytes).map_err(publication_io)?;
                 }
                 ParticipantPayloads::Files(files, cancelled, copy_buffer_bytes) => {
@@ -409,7 +407,7 @@ pub(super) fn validate_request(request: &ProjectGenerationRequest) -> Result<(),
 pub(super) fn request_metadata(
     request: &ProjectGenerationRequest,
 ) -> Result<(Vec<ProjectCapability>, Vec<StagedParticipant>, String), GfError> {
-    request_metadata_with_payloads(request, ParticipantPayloads::Memory)
+    request_metadata_with_payloads(request, ParticipantPayloads::Memory(None))
 }
 
 #[expect(
@@ -442,20 +440,48 @@ pub(super) fn request_metadata_with_payloads(
             "every generation must declare graph capability version 1",
         ));
     }
+    if let ParticipantPayloads::Memory(Some(identities)) = payloads
+        && identities.0.len() != request.participants.len()
+    {
+        return Err(project_error(
+            ProjectErrorCode::PublicationFailed,
+            "prepared participant identities do not match the request",
+        ));
+    }
     let mut participants = Vec::with_capacity(request.participants.len());
     for (index, participant) in request.participants.iter().enumerate() {
         let (byte_length, content_sha256, content_xxh64) = match payloads {
-            ParticipantPayloads::Memory => (
-                u64::try_from(participant.bytes.len()).map_err(|_| {
+            ParticipantPayloads::Memory(identities) => {
+                let byte_length = u64::try_from(participant.bytes.len()).map_err(|_| {
                     project_error(
                         ProjectErrorCode::PublicationFailed,
                         "participant byte length exceeds u64",
                     )
-                })?,
-                graphforge_core::hash_observation::ArtifactSha256::digest(&participant.bytes)
+                })?;
+                let content_xxh64 = crate::corruption_checksum::checksum(&participant.bytes);
+                let content_sha256 = match identities.map(|identities| identities.0[index]) {
+                    // The prepared SHA-256 describes these exact bytes: its
+                    // length and checksum were computed over them in the same
+                    // pass and still match.
+                    Some(identity)
+                        if identity.byte_length == byte_length
+                            && identity.content_xxh64 == content_xxh64 =>
+                    {
+                        identity.content_sha256
+                    }
+                    Some(_) => {
+                        return Err(project_error(
+                            ProjectErrorCode::PublicationFailed,
+                            "prepared participant identity does not match its bytes",
+                        ));
+                    }
+                    None => graphforge_core::hash_observation::ArtifactSha256::digest(
+                        &participant.bytes,
+                    )
                     .into(),
-                crate::corruption_checksum::checksum(&participant.bytes),
-            ),
+                };
+                (byte_length, content_sha256, content_xxh64)
+            }
             ParticipantPayloads::Files(files, cancelled, _) => {
                 let file = files.get(index).ok_or_else(|| {
                     project_error(
@@ -591,21 +617,32 @@ pub(super) fn verify_participant_file(
             "staged participant byte length changed",
         ));
     }
-    let mut file = File::open(path).map_err(publication_io)?;
-    let mut hasher = graphforge_core::hash_observation::ArtifactSha256::new();
+    // The participant's SHA-256 identity was captured from the exact bytes
+    // that staging wrote. Later boundaries refuse corruption by exact length
+    // and the mandatory XXH64 recorded beside that identity.
+    let file = File::open(path).map_err(publication_io)?;
+    let bound = expected.byte_length.checked_add(1).ok_or_else(|| {
+        project_error(
+            ProjectErrorCode::PublicationFailed,
+            "staged participant length overflow",
+        )
+    })?;
+    let mut reader = file.take(bound);
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut count = 0_u64;
     let mut buffer = [0_u8; 8192];
     loop {
-        let read = std::io::Read::read(&mut file, &mut buffer).map_err(publication_io)?;
+        let read = reader.read(&mut buffer).map_err(publication_io)?;
         if read == 0 {
             break;
         }
-        hasher.update(&buffer[..read]);
+        count += read as u64;
+        checksum.update(&buffer[..read]);
     }
-    let actual: [u8; 32] = hasher.finalize().into();
-    if hex_digest(actual) != expected.content_sha256 {
+    if count != expected.byte_length || checksum.finish() != expected.content_xxh64 {
         return Err(project_error(
             ProjectErrorCode::PublicationFailed,
-            "staged participant digest changed",
+            "staged participant checksum changed",
         ));
     }
     Ok(())

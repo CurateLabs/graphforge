@@ -112,7 +112,12 @@ struct Entry {
     parent_volume: u64,
     parent_file: String,
     bytes: u64,
+    /// Versions 1 and 2 prove content by SHA-256.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     sha256: String,
+    /// Versions 3 and 4 prove content by exact length and XXH64.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    xxh64: Option<u64>,
     temporary_volume: u64,
     temporary_file: String,
     prior_destination: Option<AuthenticatedFile>,
@@ -125,7 +130,10 @@ struct AuthenticatedFile {
     volume: u64,
     file: String,
     bytes: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    xxh64: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -275,10 +283,6 @@ fn decoded_journal_path(value: &str) -> Result<String, GfError> {
     normalize_journal_path(value, cfg!(windows))
 }
 
-fn hash_reader(file: File) -> Result<(u64, String), GfError> {
-    hash_reader_in_domain(file, HashDomain::ArtifactPayload)
-}
-
 fn rewrite_file_domain(relative: &str) -> HashDomain {
     match relative {
         "semantic-routes.json" | "topology/generation.json" => HashDomain::ControlAuthentication,
@@ -304,22 +308,72 @@ fn hash_reader_in_domain(mut file: File, domain: HashDomain) -> Result<(u64, Str
     Ok((bytes, hex(&hash.finalize())))
 }
 
-fn authenticated_file(file: &File) -> Result<AuthenticatedFile, GfError> {
-    authenticated_file_in_domain(file, HashDomain::ArtifactPayload)
+/// Exact length and XXH64 over a whole file, from its start.
+fn checksum_reader(mut file: File) -> Result<(u64, u64), GfError> {
+    file.rewind().map_err(storage)?;
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut bytes = 0_u64;
+    let mut buffer = vec![0_u8; 1024 * 1024].into_boxed_slice();
+    loop {
+        let count = file.read(&mut buffer).map_err(storage)?;
+        if count == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(count as u64)
+            .ok_or_else(|| storage("rewrite byte count overflow"))?;
+        checksum.update(&buffer[..count]);
+    }
+    Ok((bytes, checksum.finish()))
 }
 
-fn authenticated_file_in_domain(
-    file: &File,
+/// Whether `file` carries the content proof its intent version recorded.
+/// Versions 3 and 4 record exact length and XXH64; versions 1 and 2, written
+/// by earlier releases and replayed only after a crash, recorded SHA-256.
+fn content_matches(
+    file: File,
+    bytes: u64,
+    sha256: &str,
+    xxh64: Option<u64>,
     domain: HashDomain,
-) -> Result<AuthenticatedFile, GfError> {
+) -> Result<bool, GfError> {
+    match xxh64 {
+        Some(expected) => Ok(checksum_reader(file)? == (bytes, expected)),
+        None => Ok(hash_reader_in_domain(file, domain)? == (bytes, sha256.to_owned())),
+    }
+}
+
+/// Identity and checksum proof for a file this release records in an intent.
+fn authenticated_file(file: &File) -> Result<AuthenticatedFile, GfError> {
     let identity = graphforge_filesystem::file_identity(file).map_err(storage)?;
-    let (bytes, sha256) = hash_reader_in_domain(file.try_clone().map_err(storage)?, domain)?;
+    let (bytes, xxh64) = checksum_reader(file.try_clone().map_err(storage)?)?;
     Ok(AuthenticatedFile {
         volume: identity.volume_serial,
         file: hex(&identity.file_id),
         bytes,
-        sha256,
+        sha256: String::new(),
+        xxh64: Some(xxh64),
     })
+}
+
+/// Whether `file` still has the identity and recorded content of `expected`.
+fn matches_authenticated(
+    file: &File,
+    expected: &AuthenticatedFile,
+    domain: HashDomain,
+) -> Result<bool, GfError> {
+    let identity = graphforge_filesystem::file_identity(file).map_err(storage)?;
+    Ok(
+        (identity.volume_serial, hex(&identity.file_id))
+            == (expected.volume, expected.file.clone())
+            && content_matches(
+                file.try_clone().map_err(storage)?,
+                expected.bytes,
+                &expected.sha256,
+                expected.xxh64,
+                domain,
+            )?,
+    )
 }
 
 struct RewriteGuard {
@@ -424,6 +478,7 @@ fn checksum(intent: &Intent) -> Result<String, GfError> {
                 parent_file: e.parent_file.clone(),
                 bytes: e.bytes,
                 sha256: e.sha256.clone(),
+                xxh64: e.xxh64,
                 temporary_volume: e.temporary_volume,
                 temporary_file: e.temporary_file.clone(),
                 prior_destination: e.prior_destination.as_ref().map(|prior| AuthenticatedFile {
@@ -431,6 +486,7 @@ fn checksum(intent: &Intent) -> Result<String, GfError> {
                     file: prior.file.clone(),
                     bytes: prior.bytes,
                     sha256: prior.sha256.clone(),
+                    xxh64: prior.xxh64,
                 }),
             })
             .collect(),
@@ -520,11 +576,13 @@ fn authenticate_staged_file(file: &File, entry: &Entry) -> Result<(), GfError> {
     {
         return Err(storage("rewrite temporary identity changed"));
     }
-    if hash_reader_in_domain(
+    if !content_matches(
         file.try_clone().map_err(storage)?,
+        entry.bytes,
+        &entry.sha256,
+        entry.xxh64,
         rewrite_file_domain(&entry.destination),
-    )? != (entry.bytes, entry.sha256.clone())
-    {
+    )? {
         return Err(storage("rewrite recovery input is missing or corrupt"));
     }
     Ok(())
@@ -540,10 +598,7 @@ fn authenticate_prior_destination(
         (Err(error), None) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         (Ok(file), Some(prior)) => {
             let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
-            if (identity.volume_serial, hex(&identity.file_id))
-                != (prior.volume, prior.file.clone())
-                || hash_reader_in_domain(file, domain)? != (prior.bytes, prior.sha256.clone())
-            {
+            if !matches_authenticated(&file, prior, domain)? {
                 return Err(storage("rewrite destination changed after intent"));
             }
             Ok(Some(identity))
@@ -565,8 +620,13 @@ fn authenticate_installed_destination(
     let identity = graphforge_filesystem::file_identity(&destination).map_err(storage)?;
     if (identity.volume_serial, hex(&identity.file_id))
         != (entry.temporary_volume, entry.temporary_file.clone())
-        || hash_reader_in_domain(destination, rewrite_file_domain(&entry.destination))?
-            != (entry.bytes, entry.sha256.clone())
+        || !content_matches(
+            destination,
+            entry.bytes,
+            &entry.sha256,
+            entry.xxh64,
+            rewrite_file_domain(&entry.destination),
+        )?
     {
         return Err(storage(
             "installed rewrite destination failed authentication",
@@ -638,7 +698,7 @@ fn recover_locked(
     };
     let intent: Intent = serde_json::from_slice(&bytes)
         .map_err(|e| storage(format!("corrupt rewrite journal: {e}")))?;
-    if !matches!(intent.version, 1 | 2)
+    if !matches!(intent.version, 1..=4)
         || intent.entries.len() > MAX_ENTRIES
         || checksum(&intent)? != intent.checksum
     {
@@ -856,6 +916,45 @@ fn verify_generation_authority(
     Ok(())
 }
 
+/// Every recorded file carries the content proof its version declares.
+/// Versions 3 and 4 always record XXH64; only an auxiliary receipt entry also
+/// records the control SHA-256 that binds the receipt. Versions 1 and 2
+/// record SHA-256 alone.
+fn validate_content_proofs(intent: &Intent) -> Result<(), GfError> {
+    let checksummed = matches!(intent.version, 3 | 4);
+    let proves = |sha256: &str, xxh64: Option<u64>| {
+        if checksummed {
+            xxh64.is_some()
+        } else {
+            !sha256.is_empty() && xxh64.is_none()
+        }
+    };
+    for entry in &intent.entries {
+        let mut files = vec![(entry.sha256.as_str(), entry.xxh64)];
+        files.extend(
+            entry
+                .prior_destination
+                .iter()
+                .map(|prior| (prior.sha256.as_str(), prior.xxh64)),
+        );
+        files.extend(
+            entry
+                .source
+                .iter()
+                .map(|source| (source.original.sha256.as_str(), source.original.xxh64)),
+        );
+        if !files
+            .into_iter()
+            .all(|(sha256, xxh64)| proves(sha256, xxh64))
+        {
+            return Err(storage(
+                "rewrite journal content proof does not match its version",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_intent(intent: &Intent) -> Result<(), GfError> {
     validate_intent_for_platform(intent, cfg!(windows))
 }
@@ -865,6 +964,7 @@ fn validate_intent_for_platform(
     allow_legacy_windows: bool,
 ) -> Result<(), GfError> {
     moves::validate(intent)?;
+    validate_content_proofs(intent)?;
     let mut destinations = std::collections::HashSet::new();
     let mut temporaries = std::collections::HashSet::new();
     for entry in &intent.entries {
@@ -1223,15 +1323,26 @@ fn commit_locked(
             return Err(storage("rewrite temporary identity changed before intent"));
         }
         parent.sync().map_err(storage)?;
-        let (bytes, sha256) = hash_reader_in_domain(
-            temp.as_file().try_clone().map_err(storage)?,
-            rewrite_file_domain(&relative),
-        )?;
+        // The rewritten file's published identity is captured once with its
+        // generation inventory. The intent records only the exact length and
+        // XXH64 that replay needs to refuse a missing or corrupt input.
+        let (bytes, xxh64) = checksum_reader(temp.as_file().try_clone().map_err(storage)?)?;
+        // An auxiliary receipt is a control object named by its SHA-256, and
+        // the intent binds that digest to the staged receipt bytes.
+        let sha256 = if auxiliary
+            .as_ref()
+            .is_some_and(|receipt| receipt.path == relative)
+        {
+            hash_reader_in_domain(
+                temp.as_file().try_clone().map_err(storage)?,
+                HashDomain::ControlAuthentication,
+            )?
+            .1
+        } else {
+            String::new()
+        };
         let prior_destination = match parent.open_child_file(&target) {
-            Ok(file) => Some(authenticated_file_in_domain(
-                &file,
-                rewrite_file_domain(&relative),
-            )?),
+            Ok(file) => Some(authenticated_file(&file)?),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(storage(error)),
         };
@@ -1249,6 +1360,7 @@ fn commit_locked(
             parent_file: hex(&parent_identity.file_id),
             bytes,
             sha256,
+            xxh64: Some(xxh64),
             temporary_volume: original.volume_serial,
             temporary_file: hex(&original.file_id),
             prior_destination,
@@ -1259,9 +1371,9 @@ fn commit_locked(
     }
     let mut intent = Intent {
         version: if entries.iter().any(|entry| entry.source.is_some()) {
-            2
+            4
         } else {
-            1
+            3
         },
         state: IntentState::Preparing,
         transaction,
@@ -1410,6 +1522,7 @@ mod tests {
             parent_file: "01".to_owned(),
             bytes: 2,
             sha256: "aa".repeat(32),
+            xxh64: None,
             temporary_volume: 1,
             temporary_file: "02".to_owned(),
             prior_destination: None,

@@ -381,7 +381,6 @@ pub(crate) fn stage_graph_tree_with_allocation(
                 .map_err(|error| storage("create graph tree directory", parent, error))?;
         }
         let copied = copy_regular_file_with_allocation(&source, &destination, allocation)?;
-        let digest = copied.digest;
         evidence.application_read_bytes = evidence
             .application_read_bytes
             .checked_add(copied.read_bytes)
@@ -406,9 +405,11 @@ pub(crate) fn stage_graph_tree_with_allocation(
             .file_fsync_calls
             .checked_add(copied.fsync_calls)
             .ok_or_else(|| validation("graph staging file barrier count overflows"))?;
-        if hex_digest(digest) != entry.content_sha256 {
+        // The inventory captured this file's SHA-256 identity and XXH64 in one
+        // pass. The staged copy is admitted by exact length and checksum.
+        if copied.read_bytes != entry.byte_length || copied.checksum != entry.content_xxh64 {
             return Err(validation(
-                "graph tree source digest does not match inventory",
+                "graph tree source checksum does not match inventory",
             ));
         }
         evidence.files_validated = evidence
@@ -743,13 +744,60 @@ pub fn infer_role(relative: &Path) -> GraphFileRole {
 }
 
 fn build_inventory(source_root: &Path) -> Result<(GraphFilesInventory, u64), GfError> {
-    build_inventory_for_owned_layout(source_root, false, None, None)
+    build_inventory_for_owned_layout(source_root, false, None, ARTIFACT_IDENTITY)
+}
+
+const ARTIFACT_IDENTITY: graphforge_core::hash_observation::HashDomain =
+    graphforge_core::hash_observation::HashDomain::ArtifactPayload;
+
+/// An already-authenticated graph file identity that a later capture may reuse.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct KnownGraphFile {
+    pub(crate) byte_length: u64,
+    pub(crate) content_sha256: String,
+    pub(crate) content_xxh64: u64,
+}
+
+impl From<&GraphFileEntry> for KnownGraphFile {
+    fn from(entry: &GraphFileEntry) -> Self {
+        Self {
+            byte_length: entry.byte_length,
+            content_sha256: entry.content_sha256.clone(),
+            content_xxh64: entry.content_xxh64,
+        }
+    }
+}
+
+/// Capture a private workspace for publication over `parent`, reusing the
+/// parent's authenticated SHA-256 for every file whose path, exact length and
+/// freshly computed XXH64 all match the parent inventory. Changed and new
+/// files are hashed once. Only newly written bytes pay for a new identity.
+///
+/// # Errors
+/// Rejects links, special files, unsafe relative paths, duplicates, and
+/// inventory size overflow, and propagates parent inventory admission errors.
+pub fn capture_graph_files_over_parent(
+    source_root: &Path,
+    parent: &crate::ResolvedProjectGeneration,
+) -> Result<(GraphFilesInventory, ProjectParticipant), GfError> {
+    let known = parent
+        .graph_files_inventory()?
+        .map(|inventory| {
+            inventory
+                .files
+                .iter()
+                .map(|entry| (entry.relative_path.clone(), KnownGraphFile::from(entry)))
+                .collect::<std::collections::HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    capture_graph_files_reusing_digests(source_root, &known, ARTIFACT_IDENTITY)
 }
 
 /// Build a canonical inventory and participant from a private workspace root,
 /// like [`capture_graph_files`], but skip hashing any file whose relative
-/// path appears in `known` at the same byte length — reusing that entry's
-/// already-authenticated digest instead. Every other file (new, resized, or
+/// path appears in `known` at the same byte length and whose freshly computed
+/// XXH64 equals the known checksum — reusing that entry's already-authenticated
+/// digest instead. Every other file (new, resized, or
 /// simply absent from `known`) is still walked, opened, and hashed exactly as
 /// `capture_graph_files` would. This never trusts a stat alone as proof of
 /// content: a reused digest is only ever one the caller already verified for
@@ -761,9 +809,10 @@ fn build_inventory(source_root: &Path) -> Result<(GraphFilesInventory, u64), GfE
 /// inventory size overflow.
 pub(crate) fn capture_graph_files_reusing_digests(
     source_root: &Path,
-    known: &std::collections::HashMap<String, (u64, String)>,
+    known: &std::collections::HashMap<String, KnownGraphFile>,
+    domain: graphforge_core::hash_observation::HashDomain,
 ) -> Result<(GraphFilesInventory, ProjectParticipant), GfError> {
-    let (inventory, _) = build_inventory_for_owned_layout(source_root, false, None, Some(known))?;
+    let (inventory, _) = build_inventory_for_owned_layout(source_root, false, Some(known), domain)?;
     let bytes = encode_inventory(&inventory)?;
     let participant = inventory_participant(bytes, inventory.file_count)?;
     Ok((inventory, participant))
@@ -774,32 +823,18 @@ pub(crate) fn capture_graph_files_reusing_digests(
 pub(crate) fn capture_owned_route_migration_inventory(
     source_root: &Path,
 ) -> Result<GraphFilesInventory, GfError> {
-    build_inventory_for_owned_layout(source_root, true, None, None).map(|(inventory, _)| inventory)
+    build_inventory_for_owned_layout(source_root, true, None, ARTIFACT_IDENTITY)
+        .map(|(inventory, _)| inventory)
 }
 
 fn build_inventory_for_owned_layout(
     source_root: &Path,
     admit_raw_routes: bool,
-    rewrite: Option<&crate::RewriteBatch>,
-    reuse: Option<&std::collections::HashMap<String, (u64, String)>>,
+    reuse: Option<&std::collections::HashMap<String, KnownGraphFile>>,
+    domain: graphforge_core::hash_observation::HashDomain,
 ) -> Result<(GraphFilesInventory, u64), GfError> {
     let mut paths = Vec::new();
     collect_source_files(source_root, &mut paths)?;
-    let temporaries = rewrite
-        .map(crate::RewriteBatch::retained_temporary_identities)
-        .transpose()?
-        .unwrap_or_default();
-    let mut retained_paths = Vec::with_capacity(paths.len());
-    for path in paths {
-        if let Some(identity) = temporaries.get(&path) {
-            if graphforge_filesystem::path_identity(&path).ok() != Some(*identity) {
-                return Err(corrupt("rewrite temporary changed during baseline capture"));
-            }
-        } else {
-            retained_paths.push(path);
-        }
-    }
-    let paths = retained_paths;
     if paths.len() > MAX_GRAPH_FILES {
         return Err(resource_limit("graph files count exceeds limit"));
     }
@@ -838,13 +873,11 @@ fn build_inventory_for_owned_layout(
         total = total
             .checked_add(byte_length)
             .ok_or_else(|| resource_limit("graph files total size overflow"))?;
-        let reused_digest = reuse.and_then(|known| known.get(&relative_text)).and_then(
-            |(known_length, known_digest)| {
-                (*known_length == byte_length).then(|| known_digest.clone())
-            },
-        );
+        let reused = reuse
+            .and_then(|known| known.get(&relative_text))
+            .filter(|known| known.byte_length == byte_length);
         let (content_sha256, content_xxh64, calls) =
-            capture_payload_identity(&path, reused_digest)?;
+            capture_payload_identity(&path, reused, domain)?;
         read_calls = read_calls
             .checked_add(calls)
             .ok_or_else(|| resource_limit("graph files authentication read calls overflow"))?;
@@ -874,26 +907,31 @@ fn build_inventory_for_owned_layout(
     if inventory_is_mapped(inventory.format_version) {
         authenticate_route_table(source_root, &inventory)?;
     }
-    for (path, identity) in temporaries {
-        if graphforge_filesystem::path_identity(&path).ok() != Some(identity) {
-            return Err(corrupt("rewrite temporary changed during baseline capture"));
-        }
-    }
     Ok((inventory, read_calls))
 }
 
 fn capture_payload_identity(
     path: &Path,
-    reused_digest: Option<String>,
+    reused: Option<&KnownGraphFile>,
+    domain: graphforge_core::hash_observation::HashDomain,
 ) -> Result<(String, u64, u64), GfError> {
     let mut file = File::open(path).map_err(|error| storage("open graph file", path, error))?;
-    if let Some(digest) = reused_digest {
+    let mut prior_calls = 0;
+    if let Some(known) = reused {
+        // Reuse the authenticated identity only when these exact bytes still
+        // carry its checksum. A mismatch is a change, never a stale reuse.
         let (checksum, calls) = checksum_reader(&mut file, path)?;
-        Ok((digest, checksum, calls))
-    } else {
-        let (digest, checksum, calls) = hash_reader_with_checksum(&mut file, path)?;
-        Ok((hex_digest(digest), checksum, calls))
+        if checksum == known.content_xxh64 {
+            return Ok((known.content_sha256.clone(), checksum, calls));
+        }
+        prior_calls = calls;
+        file = File::open(path).map_err(|error| storage("reopen graph file", path, error))?;
     }
+    let (digest, checksum, calls) = hash_reader_with_checksum(&mut file, path, domain)?;
+    let calls = calls
+        .checked_add(prior_calls)
+        .ok_or_else(|| resource_limit("graph file authentication read calls overflow"))?;
+    Ok((hex_digest(digest), checksum, calls))
 }
 
 pub(crate) fn owned_inventory_path_text(
@@ -919,11 +957,20 @@ pub(crate) fn owned_inventory_path_text(
     }
 }
 
+/// Read authority for a private workspace a rewrite is about to change. The
+/// rewrite reads existing files; it never publishes this inventory, so it
+/// admits them by exact length and XXH64 and names nothing by SHA-256.
 pub(crate) fn capture_rewrite_baseline(
     root: &Path,
     rewrite: &crate::RewriteBatch,
-) -> Result<(GraphFilesInventory, u64), GfError> {
-    build_inventory_for_owned_layout(root, false, Some(rewrite), None)
+) -> Result<crate::GraphReadInventory, GfError> {
+    let inventory = crate::graph_read_inventory::capture_graph_read_inventory_excluding(
+        root,
+        &rewrite.retained_temporary_identities()?,
+    )?;
+    // Refuse unregistered or unmapped files at the baseline, as before.
+    inventory.authenticate_routes(root)?;
+    Ok(inventory)
 }
 
 #[cfg(test)]
@@ -1203,7 +1250,7 @@ fn ensure_empty_directory(target: &Path) -> Result<(), GfError> {
 }
 
 struct CopyIoEvidence {
-    digest: [u8; 32],
+    checksum: u64,
     read_bytes: u64,
     read_calls: u64,
     write_bytes: u64,
@@ -1250,7 +1297,7 @@ fn copy_regular_file_with_allocation(
 fn copy_regular_file(source: &Path, destination: &Path) -> Result<CopyIoEvidence, GfError> {
     reject_link(source)?;
     // Prefer filesystem copy so sparse/holey sources stay sparse when the OS
-    // supports it (Linux copy_file_range). Digest the destination so staged
+    // supports it (Linux copy_file_range). Checksum the destination so staged
     // bytes remain verified without assembling them into one buffer.
     let copied = fs::copy(source, destination)
         .map_err(|error| storage("copy graph source file", destination, error))?;
@@ -1265,7 +1312,7 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<CopyIoEvidence
         fs::set_permissions(destination, permissions)
             .map_err(|error| storage("make copied graph writable", destination, error))?;
     }
-    let (digest, read_bytes, read_calls) = hash_file_io_counted(destination)?;
+    let (checksum, read_bytes, read_calls) = checksum_file_io_counted(destination)?;
     sync_file(destination)?;
     crate::lifecycle_io::record_write(
         crate::StorageIoPhase::HydrationVerification,
@@ -1274,7 +1321,7 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<CopyIoEvidence
     );
     crate::lifecycle_io::record_fsync(crate::StorageIoPhase::HydrationVerification, 1);
     Ok(CopyIoEvidence {
-        digest,
+        checksum,
         read_bytes,
         read_calls,
         write_bytes: copied,
@@ -1283,9 +1330,9 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<CopyIoEvidence
     })
 }
 
-fn hash_file_io_counted(path: &Path) -> Result<([u8; 32], u64, u64), GfError> {
+fn checksum_file_io_counted(path: &Path) -> Result<(u64, u64, u64), GfError> {
     let mut file = File::open(path).map_err(|error| storage("open graph file", path, error))?;
-    let mut digest = crate::payload_digest::PayloadSha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut bytes = 0_u64;
     let mut calls = 0_u64;
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
@@ -1296,17 +1343,17 @@ fn hash_file_io_counted(path: &Path) -> Result<([u8; 32], u64, u64), GfError> {
         if read == 0 {
             break;
         }
-        digest.update(&buffer[..read]);
+        checksum.update(&buffer[..read]);
         bytes = bytes
             .checked_add(read as u64)
-            .ok_or_else(|| validation("graph file hash byte count overflows"))?;
+            .ok_or_else(|| validation("graph file checksum byte count overflows"))?;
         calls = calls
             .checked_add(1)
-            .ok_or_else(|| validation("graph file hash call count overflows"))?;
+            .ok_or_else(|| validation("graph file checksum call count overflows"))?;
     }
     crate::lifecycle_io::record_read(crate::StorageIoPhase::HydrationVerification, bytes, calls);
     crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
-    Ok((digest.finalize().into(), bytes, calls))
+    Ok((checksum.finish(), bytes, calls))
 }
 
 #[cfg(unix)]
@@ -1346,14 +1393,21 @@ fn hash_file_counted(path: &Path) -> Result<([u8; 32], u64), GfError> {
 
 #[cfg(test)]
 fn hash_reader(file: &mut File, path: &Path) -> Result<([u8; 32], u64), GfError> {
-    hash_reader_with_checksum(file, path).map(|(digest, _, calls)| (digest, calls))
+    hash_reader_with_checksum(file, path, ARTIFACT_IDENTITY)
+        .map(|(digest, _, calls)| (digest, calls))
 }
 
 fn hash_reader_with_checksum(
     file: &mut File,
     path: &Path,
+    domain: graphforge_core::hash_observation::HashDomain,
 ) -> Result<([u8; 32], u64, u64), GfError> {
-    let mut hasher = crate::payload_digest::PayloadSha256::new();
+    // Artifact identities keep the payload producer and its test accounting;
+    // other domains (a temporary view's contract fingerprint) are observed as
+    // themselves.
+    let mut payload = (domain == ARTIFACT_IDENTITY).then(crate::payload_digest::PayloadSha256::new);
+    let mut other = (domain != ARTIFACT_IDENTITY)
+        .then(|| graphforge_core::hash_observation::ObservedSha256::for_domain(domain));
     let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut read_calls = 0_u64;
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
@@ -1367,10 +1421,20 @@ fn hash_reader_with_checksum(
         read_calls = read_calls
             .checked_add(1)
             .ok_or_else(|| resource_limit("graph file authentication read calls overflow"))?;
-        hasher.update(&buffer[..read]);
+        if let Some(hasher) = &mut payload {
+            hasher.update(&buffer[..read]);
+        }
+        if let Some(hasher) = &mut other {
+            sha2::Digest::update(hasher, &buffer[..read]);
+        }
         checksum.update(&buffer[..read]);
     }
-    Ok((hasher.finalize().into(), checksum.finish(), read_calls))
+    let digest: [u8; 32] = match (payload, other) {
+        (Some(hasher), _) => hasher.finalize().into(),
+        (None, Some(hasher)) => sha2::Digest::finalize(hasher).into(),
+        (None, None) => unreachable!("exactly one identity producer is constructed"),
+    };
+    Ok((digest, checksum.finish(), read_calls))
 }
 
 pub(crate) fn checksum_reader(file: &mut impl Read, path: &Path) -> Result<(u64, u64), GfError> {
@@ -1837,7 +1901,10 @@ mod tests {
             fs::read(&destination).unwrap(),
             b"authenticated graph payload"
         );
-        assert_eq!(copied.digest, hash_file(&source).unwrap());
+        assert_eq!(
+            copied.checksum,
+            crate::corruption_checksum::checksum(&fs::read(&source).unwrap())
+        );
         assert_eq!(copied.write_bytes, 27);
         assert_eq!(copied.read_bytes, 27);
         assert_eq!(copied.fsync_calls, 1);

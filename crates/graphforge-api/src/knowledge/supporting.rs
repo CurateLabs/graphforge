@@ -6,11 +6,11 @@ use super::{
     CreateAssertionWithEvidenceRequest, EPISTEMIC_CAPABILITY_VERSION, EventKind, EvidenceLedger,
     EvidenceLink, EvidenceSourceKind, GfError, GraphForge, HashSet,
     ListConfidenceAssessmentsRequest, ListEvidenceLinksRequest, ListReasoningRequest, PageRequest,
-    PageToken, ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome, ProvenanceEvent,
-    ProvenanceLedger, ReasoningLedger, ReasoningRecord, RecordReasoningRequest,
-    ResolvedProjectGeneration, Uuid, assertion_evidence_publication_participants, assertion_result,
-    concat_or_empty, confidence_publication_participants, evidence_publication_participants,
-    knowledge_error, knowledge_generation_uuid, lock_graph_visibility, match_requested_edge_uuids,
+    PageToken, ProjectCapability, ProjectStageOutcome, ProvenanceEvent, ProvenanceLedger,
+    ReasoningLedger, ReasoningRecord, RecordReasoningRequest, ResolvedProjectGeneration, Uuid,
+    assertion_evidence_publication_participants, assertion_result, concat_or_empty,
+    confidence_publication_participants, evidence_publication_participants, knowledge_error,
+    knowledge_generation_uuid, lock_graph_visibility, match_requested_edge_uuids,
     match_requested_node_uuids, merged_assertion_evidence_provenance, merged_confidence_provenance,
     merged_evidence_provenance, not_found_kind, provenance_error, read_artifact_ledger,
     read_confidence_ledger, read_evidence_ledger, read_ledger, read_reasoning_ledger,
@@ -34,16 +34,19 @@ fn publish_reasoning(
             capability_version: entry.capability_version,
         })
         .collect();
-    let publication = ProjectGenerationRequest {
-        transaction_uuid: request.context.operation_uuid.0,
-        generation_uuid: knowledge_generation_uuid(
-            b"reasoning",
-            request.context.operation_uuid,
-            &participants,
-        ),
+    let publication = graphforge_storage::PreparedGenerationRequest::new(
+        request.context.operation_uuid.0,
         capabilities,
         participants,
-    };
+        |participants, content_sha256| {
+            knowledge_generation_uuid(
+                b"reasoning",
+                request.context.operation_uuid,
+                participants,
+                content_sha256,
+            )
+        },
+    )?;
     let graph_objects = graphforge_storage::begin_graph_object_publication(
         graph.resolved_generation.container_root(),
     )?;
@@ -88,14 +91,19 @@ fn publish_confidence(
             capability_version: entry.capability_version,
         })
         .collect();
-    let generation_uuid =
-        knowledge_generation_uuid(b"confidence", request.context.operation_uuid, &participants);
-    let publication = ProjectGenerationRequest {
-        transaction_uuid: request.context.operation_uuid.0,
-        generation_uuid,
+    let publication = graphforge_storage::PreparedGenerationRequest::new(
+        request.context.operation_uuid.0,
         capabilities,
         participants,
-    };
+        |participants, content_sha256| {
+            knowledge_generation_uuid(
+                b"confidence",
+                request.context.operation_uuid,
+                participants,
+                content_sha256,
+            )
+        },
+    )?;
     let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged_generation) => staged_generation
@@ -148,16 +156,19 @@ fn publish_evidence(
             capability_version: entry.capability_version,
         })
         .collect();
-    let publication = ProjectGenerationRequest {
-        transaction_uuid: request.context.operation_uuid.0,
-        generation_uuid: knowledge_generation_uuid(
-            b"evidence",
-            request.context.operation_uuid,
-            &participants,
-        ),
+    let publication = graphforge_storage::PreparedGenerationRequest::new(
+        request.context.operation_uuid.0,
         capabilities,
         participants,
-    };
+        |participants, content_sha256| {
+            knowledge_generation_uuid(
+                b"evidence",
+                request.context.operation_uuid,
+                participants,
+                content_sha256,
+            )
+        },
+    )?;
     let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged_generation) => staged_generation
@@ -209,16 +220,19 @@ fn publish_assertion_evidence(
             capability_version: entry.capability_version,
         })
         .collect();
-    let publication = ProjectGenerationRequest {
-        transaction_uuid: request.assertion.context.operation_uuid.0,
-        generation_uuid: knowledge_generation_uuid(
-            b"assertion-evidence",
-            request.assertion.context.operation_uuid,
-            &participants,
-        ),
+    let publication = graphforge_storage::PreparedGenerationRequest::new(
+        request.assertion.context.operation_uuid.0,
         capabilities,
         participants,
-    };
+        |participants, content_sha256| {
+            knowledge_generation_uuid(
+                b"assertion-evidence",
+                request.assertion.context.operation_uuid,
+                participants,
+                content_sha256,
+            )
+        },
+    )?;
     let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged_generation) => staged_generation

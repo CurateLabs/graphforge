@@ -11,7 +11,7 @@ pub(crate) struct SourceRetirement {
     root_file: String,
     parent_volume: u64,
     parent_file: String,
-    original: AuthenticatedFile,
+    pub(super) original: AuthenticatedFile,
 }
 
 impl SourceRetirement {
@@ -126,7 +126,7 @@ fn parent(
 
 fn authenticate(file: &File, expected: &AuthenticatedFile) -> Result<(), GfError> {
     if graphforge_filesystem::file_link_count(file).map_err(storage)? != 1
-        || authenticated_file(file)? != *expected
+        || !matches_authenticated(file, expected, HashDomain::ArtifactPayload)?
     {
         return Err(storage("rewrite move source identity or content changed"));
     }
@@ -190,8 +190,13 @@ pub(crate) fn stage_retained(
     std::io::copy(&mut input, &mut temporary).map_err(storage)?;
     temporary.as_file().observed_sync_all().map_err(storage)?;
     authenticate(&source, &original)?;
-    let (bytes, digest) = hash_reader(temporary.as_file().try_clone().map_err(storage)?)?;
-    if bytes != original.bytes || digest != original.sha256 {
+    if !content_matches(
+        temporary.as_file().try_clone().map_err(storage)?,
+        original.bytes,
+        &original.sha256,
+        original.xxh64,
+        HashDomain::ArtifactPayload,
+    )? {
         return Err(storage("rewrite move staged copy differs from source"));
     }
     source_parent.revalidate_named().map_err(storage)?;
@@ -217,9 +222,9 @@ pub(super) fn validate(intent: &Intent) -> Result<(), GfError> {
         .iter()
         .filter_map(|entry| entry.source.as_ref())
         .collect::<Vec<_>>();
-    if !matches!(intent.version, 1 | 2)
-        || (intent.version == 1 && !moves.is_empty())
-        || (intent.version == 2 && moves.is_empty())
+    if !matches!(intent.version, 1..=4)
+        || (matches!(intent.version, 1 | 3) && !moves.is_empty())
+        || (matches!(intent.version, 2 | 4) && moves.is_empty())
     {
         return Err(storage(
             "rewrite intent version does not match move semantics",
@@ -240,6 +245,7 @@ pub(super) fn validate(intent: &Intent) -> Result<(), GfError> {
             || source.root_file != intent.root_file
             || source.original.bytes != entry.bytes
             || source.original.sha256 != entry.sha256
+            || source.original.xxh64 != entry.xxh64
             || !paths.insert(path.clone())
             || !identities.insert((source.original.volume, &source.original.file))
             || path == JOURNAL
@@ -619,7 +625,31 @@ mod tests {
         assert!(commit(batch, root.path(), false, false, false, None).is_err());
         let bytes = std::fs::read(root.path().join(JOURNAL)).unwrap();
         let captured: Intent = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(captured.version, 1);
+        // This release writes checksum-proven intents. A genuine version-1
+        // intent written by an earlier release recorded SHA-256 over the same
+        // staged and prior files; rebuild that wire form from disk.
+        assert_eq!(captured.version, 3);
+        assert!(captured.entries.iter().all(|entry| entry.xxh64.is_some()));
+        let sha = |relative: &str| {
+            hex(&Sha256::digest(
+                std::fs::read(root.path().join(relative)).unwrap(),
+            ))
+        };
+        let staged_sha = captured
+            .entries
+            .iter()
+            .map(|entry| sha(&entry.temporary))
+            .collect::<Vec<_>>();
+        let prior_sha = captured
+            .entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .prior_destination
+                    .as_ref()
+                    .map(|_| sha(&entry.destination))
+            })
+            .collect::<Vec<_>>();
         let mut legacy = LegacyIntent {
             version: 1,
             state: "durable",
@@ -640,7 +670,8 @@ mod tests {
             entries: captured
                 .entries
                 .iter()
-                .map(|entry| LegacyEntry {
+                .enumerate()
+                .map(|(index, entry)| LegacyEntry {
                     class: if entry.class == EntryClass::Data {
                         "data"
                     } else {
@@ -651,23 +682,21 @@ mod tests {
                     parent_volume: entry.parent_volume,
                     parent_file: &entry.parent_file,
                     bytes: entry.bytes,
-                    sha256: &entry.sha256,
+                    sha256: &staged_sha[index],
                     temporary_volume: entry.temporary_volume,
                     temporary_file: &entry.temporary_file,
                     prior_destination: entry.prior_destination.as_ref().map(|prior| LegacyFile {
                         volume: prior.volume,
                         file: &prior.file,
                         bytes: prior.bytes,
-                        sha256: &prior.sha256,
+                        sha256: prior_sha[index].as_deref().unwrap(),
                     }),
                 })
                 .collect(),
             checksum: String::new(),
         };
         legacy.checksum = hex(&Sha256::digest(serde_json::to_vec(&legacy).unwrap()));
-        assert_eq!(legacy.checksum, captured.checksum);
         let original_wire = serde_json::to_vec(&legacy).unwrap();
-        assert_eq!(original_wire, bytes);
         std::fs::write(root.path().join(JOURNAL), original_wire).unwrap();
         recover(root.path()).unwrap();
         recover(root.path()).unwrap();

@@ -673,7 +673,7 @@ mod tests {
     fn rewrite_baseline_excludes_only_exact_retained_temporary_routes() {
         let root = tempfile::tempdir().unwrap();
         admit_owned_workspace(root.path()).unwrap();
-        let before = crate::capture_graph_files(root.path()).unwrap().0;
+        let before = crate::capture_graph_read_inventory(root.path()).unwrap();
         let mut batch = crate::RewriteBatch::new();
         let component = batch.route_component(root.path(), "CON").unwrap();
         let output = root
@@ -682,9 +682,7 @@ mod tests {
             .join(format!("{component}.parquet"));
         batch.stage_bytes(&output, b"payload").unwrap();
         assert_eq!(
-            crate::graph_files::capture_rewrite_baseline(root.path(), &batch)
-                .unwrap()
-                .0,
+            crate::graph_files::capture_rewrite_baseline(root.path(), &batch).unwrap(),
             before
         );
         let temporary = batch.staged_temp(&output).unwrap().to_path_buf();

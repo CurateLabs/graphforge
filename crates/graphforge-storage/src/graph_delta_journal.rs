@@ -1390,11 +1390,16 @@ fn bounded_materialized_fingerprint(
         }
         known_unchanged.insert(
             entry.relative_path.clone(),
-            (entry.byte_length, entry.content_sha256.clone()),
+            crate::graph_files::KnownGraphFile::from(entry),
         );
     }
-    let (materialized, _) =
-        crate::graph_files::capture_graph_files_reusing_digests(target.path(), &known_unchanged)?;
+    // The materialized view is temporary and never published. Its per-file
+    // identities feed only the delta's contract state fingerprint.
+    let (materialized, _) = crate::graph_files::capture_graph_files_reusing_digests(
+        target.path(),
+        &known_unchanged,
+        graphforge_core::hash_observation::HashDomain::ContractIdentity,
+    )?;
     let mut hasher = Sha256::new();
     hasher.update(b"graphforge-materialized-graph-tree/1\n");
     for entry in materialized.files {

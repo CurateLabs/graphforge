@@ -980,9 +980,31 @@ pub(crate) fn admit_graph_object(
     root: &Path,
     entry: &crate::GraphFileEntry,
 ) -> Result<(), GfError> {
-    let expected = entry.content_xxh64;
     let cas = ReadOnlyCasRoot::open(root)?;
-    let file = cas.open_digest(&entry.content_sha256)?;
+    admit_checksum_file(cas.open_digest(&entry.content_sha256)?, entry, root)
+}
+
+/// Admit a payload by checksum while the publication lease pins its CAS root.
+/// CAS names were authenticated when each object was installed; the commit
+/// boundary refuses corruption by exact length and XXH64 without re-hashing.
+pub(crate) fn admit_graph_object_with_lease(
+    lease: &GraphObjectPublicationLease,
+    entry: &crate::GraphFileEntry,
+) -> Result<(), GfError> {
+    lease.cas.revalidate_named()?;
+    admit_checksum_file(
+        lease.cas.open_digest(&entry.content_sha256)?,
+        entry,
+        &lease.cas.diagnostic_root,
+    )
+}
+
+fn admit_checksum_file(
+    file: File,
+    entry: &crate::GraphFileEntry,
+    root: &Path,
+) -> Result<(), GfError> {
+    let expected = entry.content_xxh64;
     let metadata = file
         .metadata()
         .map_err(|error| storage("inspect checksum payload", root, error))?;
@@ -1020,20 +1042,6 @@ pub(crate) fn admit_graph_object(
     );
     crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
     Ok(())
-}
-
-pub(crate) fn verify_graph_object_with_lease(
-    lease: &GraphObjectPublicationLease,
-    digest: &str,
-    expected_length: u64,
-) -> Result<(), GfError> {
-    lease.cas.revalidate_named()?;
-    verify_file(
-        lease.cas.open_digest(digest)?,
-        digest,
-        expected_length,
-        &lease.cas.diagnostic_root,
-    )
 }
 
 /// Read an object whose digest is known before its declared logical length.
@@ -1092,10 +1100,13 @@ pub(crate) fn begin_graph_object_read(root: &Path) -> Result<GraphObjectReadLeas
 
 impl GraphObjectReadLease {
     /// Authenticate only a construction compaction input, retaining its CAS lease.
+    /// Pin one construction input by its CAS address and admit it by exact
+    /// length and XXH64. The CAS name was authenticated at installation.
     pub(crate) fn open_for_construction(
         &self,
         digest: &str,
         expected_length: u64,
+        expected_xxh64: u64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<
         (
@@ -1127,7 +1138,7 @@ impl GraphObjectReadLease {
                 storage("bound construction input", &self.cas.diagnostic_root, error)
             })?;
         let mut totals = GraphObjectIoTotals::default();
-        let mut digest_state = Sha256::new();
+        let mut checksum = crate::corruption_checksum::Checksum::new();
         let mut buffer = vec![0; 64 * 1024];
         let verified = (|| {
             loop {
@@ -1152,13 +1163,11 @@ impl GraphObjectReadLease {
                     .read_calls
                     .checked_add(1)
                     .ok_or_else(|| validation("construction read calls overflow"))?;
-                digest_state.update(&buffer[..count]);
+                checksum.update(&buffer[..count]);
             }
-            if totals.read_bytes != expected_length
-                || hex_digest(digest_state.finalize().into()) != digest
-            {
+            if totals.read_bytes != expected_length || checksum.finish() != expected_xxh64 {
                 return Err(validation(
-                    "construction object digest does not match its address",
+                    "construction object checksum does not match its inventory",
                 ));
             }
             Ok(())
@@ -1550,13 +1559,22 @@ fn read_graph_object_by_digest_file_counted_in_domain(
     Ok((bytes, io))
 }
 
-pub(crate) fn read_graph_object_by_digest_with_lease(
+/// Authenticate only graph manifest nodes or semantic route control tables
+/// while the publication lease pins the CAS root.
+pub(crate) fn read_graph_control_object_by_digest_with_lease(
     lease: &GraphObjectPublicationLease,
     digest: &str,
     max_length: u64,
 ) -> Result<Vec<u8>, GfError> {
     lease.cas.revalidate_named()?;
-    read_graph_object_by_digest_from_cas(&lease.cas, digest, max_length)
+    read_graph_object_by_digest_file_counted_in_domain(
+        lease.cas.open_digest(digest)?,
+        digest,
+        max_length,
+        &lease.cas.diagnostic_root,
+        graphforge_core::hash_observation::HashDomain::ControlAuthentication,
+    )
+    .map(|(bytes, _)| bytes)
 }
 
 fn checked_read_io_sum(

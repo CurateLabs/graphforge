@@ -233,6 +233,7 @@ impl GraphConstructionSession {
         let (_manifest, work, released) = lease.open_for_construction(
             &manifest.content_sha256,
             manifest.byte_length,
+            manifest.content_xxh64,
             cancelled,
         )?;
         self.record_supersession_reads(work.read_bytes, work.read_calls)?;
@@ -267,8 +268,12 @@ impl GraphConstructionSession {
             {
                 return Err(storage("supersession retained parent artifact changed"));
             }
-            let (file, work, released) =
-                lease.open_for_construction(&entry.content_sha256, entry.byte_length, cancelled)?;
+            let (file, work, released) = lease.open_for_construction(
+                &entry.content_sha256,
+                entry.byte_length,
+                entry.content_xxh64,
+                cancelled,
+            )?;
             let identity = file_identity(file.as_ref()).map_err(storage)?;
             if identity.volume_serial != retained.source_volume
                 || hex(&identity.file_id) != retained.source_file_id
@@ -479,8 +484,12 @@ pub(super) fn authenticate_public_successor(
         inventory.ok_or_else(|| storage("published supersession successor is not compact"))?;
     let lease = crate::graph_object_store::begin_graph_object_read(target.container_root())?;
     for entry in &inventory.files {
-        let (_file, io, released) =
-            lease.open_for_construction(&entry.content_sha256, entry.byte_length, cancelled)?;
+        let (_file, io, released) = lease.open_for_construction(
+            &entry.content_sha256,
+            entry.byte_length,
+            entry.content_xxh64,
+            cancelled,
+        )?;
         work.bytes = work
             .bytes
             .checked_add(io.read_bytes)

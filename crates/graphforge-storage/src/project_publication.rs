@@ -141,8 +141,126 @@ pub(crate) struct ProjectFileParticipant {
 
 #[derive(Clone, Copy)]
 enum ParticipantPayloads<'a> {
-    Memory,
+    Memory(Option<&'a ParticipantIdentities>),
     Files(&'a [ProjectFileParticipant], Option<&'a AtomicBool>, usize),
+}
+
+/// Exact-byte identity of one in-memory participant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParticipantIdentity {
+    byte_length: u64,
+    content_sha256: [u8; 32],
+    content_xxh64: u64,
+}
+
+/// Exact-byte identities of in-memory participants, computed once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParticipantIdentities(Vec<ParticipantIdentity>);
+
+impl ParticipantIdentities {
+    fn compute(participants: &[ProjectParticipant]) -> Result<Self, GfError> {
+        participants
+            .iter()
+            .map(|participant| {
+                Ok(ParticipantIdentity {
+                    byte_length: u64::try_from(participant.bytes.len()).map_err(|_| {
+                        project_error(
+                            ProjectErrorCode::PublicationFailed,
+                            "participant byte length exceeds u64",
+                        )
+                    })?,
+                    content_sha256: graphforge_core::hash_observation::ArtifactSha256::digest(
+                        &participant.bytes,
+                    )
+                    .into(),
+                    content_xxh64: crate::corruption_checksum::checksum(&participant.bytes),
+                })
+            })
+            .collect::<Result<_, _>>()
+            .map(Self)
+    }
+}
+
+/// An immutable publication request whose participant identities were
+/// computed once, before the caller derived its generation UUID from them.
+///
+/// Staging reuses these identities instead of hashing participant bytes again.
+/// Fields are private and there is no mutable access, so an identity can never
+/// describe bytes other than the request's own.
+#[derive(Debug, Clone)]
+pub struct PreparedGenerationRequest {
+    request: ProjectGenerationRequest,
+    identities: ParticipantIdentities,
+}
+
+impl PreparedGenerationRequest {
+    /// Compute each participant's SHA-256 and XXH64 once, then derive the
+    /// generation UUID from the participants and their SHA-256 digests.
+    ///
+    /// # Errors
+    /// Returns a publication error when a participant length exceeds `u64`.
+    pub fn new(
+        transaction_uuid: Uuid,
+        capabilities: Vec<ProjectCapability>,
+        participants: Vec<ProjectParticipant>,
+        generation_uuid: impl FnOnce(&[ProjectParticipant], &[[u8; 32]]) -> Uuid,
+    ) -> Result<Self, GfError> {
+        let identities = ParticipantIdentities::compute(&participants)?;
+        let digests = identities
+            .0
+            .iter()
+            .map(|identity| identity.content_sha256)
+            .collect::<Vec<_>>();
+        let generation_uuid = generation_uuid(&participants, &digests);
+        Ok(Self {
+            request: ProjectGenerationRequest {
+                transaction_uuid,
+                generation_uuid,
+                capabilities,
+                participants,
+            },
+            identities,
+        })
+    }
+
+    /// The immutable request.
+    #[must_use]
+    pub fn request(&self) -> &ProjectGenerationRequest {
+        &self.request
+    }
+}
+
+impl std::ops::Deref for PreparedGenerationRequest {
+    type Target = ProjectGenerationRequest;
+
+    fn deref(&self) -> &Self::Target {
+        &self.request
+    }
+}
+
+/// A staging input: a plain request, or one with precomputed identities.
+#[derive(Clone, Copy)]
+pub struct StageRequest<'a> {
+    request: &'a ProjectGenerationRequest,
+    identities: Option<&'a ParticipantIdentities>,
+}
+
+impl<'a> From<&'a ProjectGenerationRequest> for StageRequest<'a> {
+    fn from(request: &'a ProjectGenerationRequest) -> Self {
+        Self {
+            request,
+            identities: None,
+        }
+    }
+}
+
+impl<'a> From<&'a PreparedGenerationRequest> for StageRequest<'a> {
+    fn from(prepared: &'a PreparedGenerationRequest) -> Self {
+        Self {
+            request: &prepared.request,
+            identities: Some(&prepared.identities),
+        }
+    }
 }
 
 /// Safe participant metadata available to domain validators.
@@ -310,9 +428,9 @@ pub struct ValidatedProjectGeneration(StagedProjectGeneration);
 /// # Errors
 /// Returns a stable project error for a busy writer, malformed participant,
 /// conflicting transaction replay, corrupt parent, or I/O failure.
-pub fn stage_project_generation(
+pub fn stage_project_generation<'r>(
     container_root: impl AsRef<Path>,
-    request: &ProjectGenerationRequest,
+    request: impl Into<StageRequest<'r>>,
 ) -> Result<ProjectStageOutcome, GfError> {
     stage_project_generation_with_graph_tree(container_root, request, None)
 }
@@ -325,9 +443,9 @@ pub fn stage_project_generation(
 ///
 /// # Errors
 /// Returns the same stable staging errors as [`stage_project_generation`].
-pub fn stage_project_generation_with_graph_tree(
+pub fn stage_project_generation_with_graph_tree<'r>(
     container_root: impl AsRef<Path>,
-    request: &ProjectGenerationRequest,
+    request: impl Into<StageRequest<'r>>,
     graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
     stage_project_generation_with_graph_tree_mode(
@@ -347,14 +465,15 @@ pub fn stage_project_generation_with_graph_tree(
 /// # Errors
 /// Returns the same stable staging errors as
 /// [`stage_project_generation_with_graph_tree`].
-pub fn stage_project_generation_with_graph_tree_mode(
+pub fn stage_project_generation_with_graph_tree_mode<'r>(
     container_root: impl AsRef<Path>,
-    request: &ProjectGenerationRequest,
+    request: impl Into<StageRequest<'r>>,
     graph_tree: Option<&Path>,
     mode: crate::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<ProjectStageOutcome, GfError> {
-    stage_project_generation_inner(container_root.as_ref(), request, graph_tree, mode)
-        .map_err(|error| map_stage_error(request, error))
+    let stage = request.into();
+    stage_project_generation_inner(container_root.as_ref(), stage, graph_tree, mode)
+        .map_err(|error| map_stage_error(stage.request, error))
 }
 
 /// Stage a complete private generation while allowing other transaction
@@ -368,9 +487,9 @@ pub fn stage_project_generation_with_graph_tree_mode(
 ///
 /// # Errors
 /// Returns a stable busy, idempotency, validation, corruption, or storage error.
-pub fn stage_project_generation_optimistic(
+pub fn stage_project_generation_optimistic<'r>(
     container_root: impl AsRef<Path>,
-    request: &ProjectGenerationRequest,
+    request: impl Into<StageRequest<'r>>,
     operation_fingerprint: [u8; 32],
 ) -> Result<ProjectStageOutcome, GfError> {
     stage_project_generation_optimistic_with_graph_tree(
@@ -386,9 +505,9 @@ pub fn stage_project_generation_optimistic(
 /// # Errors
 /// Returns the same stable staging errors as
 /// [`stage_project_generation_optimistic`].
-pub fn stage_project_generation_optimistic_with_graph_tree(
+pub fn stage_project_generation_optimistic_with_graph_tree<'r>(
     container_root: impl AsRef<Path>,
-    request: &ProjectGenerationRequest,
+    request: impl Into<StageRequest<'r>>,
     operation_fingerprint: [u8; 32],
     graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
@@ -407,21 +526,22 @@ pub fn stage_project_generation_optimistic_with_graph_tree(
 /// # Errors
 /// Returns the same stable staging errors as
 /// [`stage_project_generation_optimistic_with_graph_tree`].
-pub fn stage_project_generation_optimistic_with_graph_tree_mode(
+pub fn stage_project_generation_optimistic_with_graph_tree_mode<'r>(
     container_root: impl AsRef<Path>,
-    request: &ProjectGenerationRequest,
+    request: impl Into<StageRequest<'r>>,
     operation_fingerprint: [u8; 32],
     graph_tree: Option<&Path>,
     mode: crate::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<ProjectStageOutcome, GfError> {
+    let stage = request.into();
     stage_project_generation_optimistic_inner(
         container_root.as_ref(),
-        request,
+        stage,
         operation_fingerprint,
         graph_tree,
         mode,
     )
-    .map_err(|error| map_stage_error(request, error))
+    .map_err(|error| map_stage_error(stage.request, error))
 }
 
 /// Stage against one caller-prepared, lifetime-pinned CURRENT generation.
@@ -494,7 +614,7 @@ pub(crate) fn stage_project_generation_from_admitted_parent_with_fingerprint(
             None,
             operation_fingerprint,
             graph_tree,
-            ParticipantPayloads::Memory,
+            ParticipantPayloads::Memory(None),
             allocation,
         )
     })();
@@ -563,10 +683,11 @@ fn map_stage_error(request: &ProjectGenerationRequest, error: GfError) -> GfErro
 
 fn stage_project_generation_inner(
     container_root: &Path,
-    request: &ProjectGenerationRequest,
+    stage: StageRequest<'_>,
     graph_tree: Option<&Path>,
     mode: crate::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<ProjectStageOutcome, GfError> {
+    let request = stage.request;
     // Reject malformed contracts before taking the writer lock so concurrent
     // readers/writers are never blocked by validation-only failures.
     validate_request(request)?;
@@ -596,18 +717,19 @@ fn stage_project_generation_inner(
         None,
         None,
         graph_tree,
-        ParticipantPayloads::Memory,
+        ParticipantPayloads::Memory(stage.identities),
         None,
     )
 }
 
 fn stage_project_generation_optimistic_inner(
     container_root: &Path,
-    request: &ProjectGenerationRequest,
+    stage: StageRequest<'_>,
     operation_fingerprint: [u8; 32],
     graph_tree: Option<&Path>,
     mode: crate::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<ProjectStageOutcome, GfError> {
+    let request = stage.request;
     validate_request(request)?;
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         container_root,
@@ -628,7 +750,7 @@ fn stage_project_generation_optimistic_inner(
         None,
         Some(operation_fingerprint),
         graph_tree,
-        ParticipantPayloads::Memory,
+        ParticipantPayloads::Memory(stage.identities),
         None,
     )
 }
@@ -657,7 +779,7 @@ pub(crate) fn stage_project_generation_with_lock(
         revert,
         None,
         graph_tree,
-        ParticipantPayloads::Memory,
+        ParticipantPayloads::Memory(None),
         None,
     )
 }

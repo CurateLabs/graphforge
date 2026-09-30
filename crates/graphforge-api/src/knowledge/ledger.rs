@@ -8,8 +8,7 @@ use super::{
     GraphObjectKind, LineageRecord, LineageRole, OperationId, PageToken,
     ParquetRecordBatchReaderBuilder, ProjectParticipant, ProjectParticipantEncoding,
     ProvenanceEvent, ProvenanceLedger, ReasoningLedger, RecordBatch, ResolvedProjectGeneration,
-    Schema, SchemaRef, Sha256, SubjectKind, Uuid, fs, knowledge_error, provenance_error,
-    schema_registry,
+    Schema, SchemaRef, SubjectKind, Uuid, fs, knowledge_error, provenance_error, schema_registry,
 };
 #[cfg(feature = "research")]
 use crate::research_claims::ledger::{encode_claims, encode_suppressions};
@@ -1018,26 +1017,40 @@ pub(crate) fn participant(
     })
 }
 
+/// Generation identity over the operation and each participant's exact-byte
+/// SHA-256. Publishers obtain `content_sha256` from
+/// [`graphforge_storage::PreparedGenerationRequest`], which staging reuses.
 pub(crate) fn knowledge_generation_uuid(
     operation: &[u8],
     operation_uuid: OperationId,
     participants: &[ProjectParticipant],
+    content_sha256: &[[u8; 32]],
 ) -> Uuid {
-    let mut hasher = Sha256::new();
+    let mut hasher = graphforge_core::hash_observation::ContractSha256::default();
     hasher.update(b"graphforge-knowledge-generation/1");
     hasher.update(operation);
     hasher.update([0]);
     hasher.update(operation_uuid.0.as_bytes());
-    for participant in participants {
+    for (participant, digest) in participants.iter().zip(content_sha256) {
         hasher.update(participant.capability_id.as_bytes());
         hasher.update([0]);
         hasher.update(participant.record_family_id.as_bytes());
         hasher.update([0]);
-        hasher.update(graphforge_core::hash_observation::ArtifactSha256::digest(
-            &participant.bytes,
-        ));
+        hasher.update(digest);
     }
     graphforge_core::canonical::uuid_v8(hasher.finalize().into())
+}
+
+/// Exact-byte SHA-256 of participants that a generation identity covers but
+/// that are not the staged request itself (a subset later merged with parent
+/// participants). Staging hashes the merged request independently.
+pub(crate) fn participant_content_sha256(participants: &[ProjectParticipant]) -> Vec<[u8; 32]> {
+    participants
+        .iter()
+        .map(|participant| {
+            graphforge_core::hash_observation::ArtifactSha256::digest(&participant.bytes).into()
+        })
+        .collect()
 }
 
 pub(crate) fn snapshot_to_participant(

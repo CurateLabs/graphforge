@@ -216,8 +216,12 @@ fn suppress(
         .map_err(knowledge_error)?;
     let replacements = ledger::encode_suppressions(&merged)?;
     let operation = step(request, b"suppression");
-    let generation =
-        k::knowledge_generation_uuid(b"claim_suppression", OperationId(operation), &replacements);
+    let generation = k::knowledge_generation_uuid(
+        b"claim_suppression",
+        OperationId(operation),
+        &replacements,
+        &k::participant_content_sha256(&replacements),
+    );
     publication::publish(
         graph,
         &parent,

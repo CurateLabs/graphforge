@@ -64,7 +64,10 @@ pub(super) fn install_graph_object_bytes_with_lease(
     let digest = hex_digest(Sha256::digest(bytes).into());
     let expected_length =
         u64::try_from(bytes.len()).map_err(|_| validation("graph object bytes exceed u64"))?;
-    install_object(&lease.cas, &digest, expected_length, false, |file| {
+    // The name was computed from these exact resident bytes, which are then
+    // written and synchronized, so the writer authenticates the temporary as
+    // the streamed file install does. Readers admit it by length and XXH64.
+    install_object(&lease.cas, &digest, expected_length, true, |file| {
         file.write_all(bytes).map_err(|error| {
             storage(
                 "write temporary graph object",

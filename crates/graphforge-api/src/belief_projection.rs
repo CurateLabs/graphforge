@@ -22,8 +22,7 @@ use graphforge_provenance::{
     EventKind, LineageRecord, LineageRole, ProvenanceEvent, ProvenanceLedger, SubjectKind,
 };
 use graphforge_storage::{
-    ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectStageOutcome,
-    ResolvedProjectGeneration,
+    ProjectCapability, ProjectParticipant, ProjectStageOutcome, ResolvedProjectGeneration,
 };
 use uuid::Uuid;
 
@@ -1302,14 +1301,9 @@ fn publish_attachment(
         (&left.capability_id, &left.record_family_id)
             .cmp(&(&right.capability_id, &right.record_family_id))
     });
-    let request = ProjectGenerationRequest {
+    let request = graphforge_storage::PreparedGenerationRequest::new(
         transaction_uuid,
-        generation_uuid: crate::knowledge::knowledge_generation_uuid(
-            b"belief-projection-attachment",
-            crate::OperationId(transaction_uuid),
-            &participants,
-        ),
-        capabilities: parent
+        parent
             .capabilities()
             .into_iter()
             .map(|entry| ProjectCapability {
@@ -1318,7 +1312,15 @@ fn publish_attachment(
             })
             .collect(),
         participants,
-    };
+        |participants, content_sha256| {
+            crate::knowledge::knowledge_generation_uuid(
+                b"belief-projection-attachment",
+                crate::OperationId(transaction_uuid),
+                participants,
+                content_sha256,
+            )
+        },
+    )?;
     let receipt = match graph.stage_project_generation(&request)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => staged

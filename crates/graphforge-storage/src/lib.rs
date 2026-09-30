@@ -90,9 +90,9 @@ pub use graph_files::{
     GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION, GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION,
     GRAPH_TREE_DIR, GraphFileEntry, GraphFileRole, GraphFilesInventory, GraphFilesOpenEvidence,
     GraphFilesOpenStrategy, GraphWorkspaceCheckpoint, GraphWorkspaceRestoration,
-    capture_graph_files, decode_inventory, encode_inventory, graph_tree_root,
-    inventory_participant, materialize_graph_tree, pinned_open_evidence, stage_graph_tree,
-    verify_graph_tree,
+    capture_graph_files, capture_graph_files_over_parent, decode_inventory, encode_inventory,
+    graph_tree_root, inventory_participant, materialize_graph_tree, pinned_open_evidence,
+    stage_graph_tree, verify_graph_tree,
 };
 pub(crate) use graph_files::{GraphFilesParticipant, decode_versioned_graph_files_participant};
 pub use graph_read_inventory::{
@@ -224,10 +224,11 @@ pub use project_checkpoints::{
 
 pub mod project_publication;
 pub use project_publication::{
-    ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
-    ProjectPublicationReceipt, ProjectStageOutcome, StagedParticipant, StagedProjectGeneration,
-    ValidatedProjectGeneration, published_project_transaction, stage_project_generation,
-    stage_project_generation_optimistic, stage_project_generation_optimistic_with_graph_tree,
+    PreparedGenerationRequest, ProjectCapability, ProjectGenerationRequest, ProjectParticipant,
+    ProjectParticipantEncoding, ProjectPublicationReceipt, ProjectStageOutcome, StageRequest,
+    StagedParticipant, StagedProjectGeneration, ValidatedProjectGeneration,
+    published_project_transaction, stage_project_generation, stage_project_generation_optimistic,
+    stage_project_generation_optimistic_with_graph_tree,
     stage_project_generation_optimistic_with_graph_tree_mode,
     stage_project_generation_with_graph_tree, stage_project_generation_with_graph_tree_mode,
 };
