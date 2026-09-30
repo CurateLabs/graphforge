@@ -2389,8 +2389,12 @@ mod tests {
         .unwrap();
         assert_eq!(opened.strategy, GraphFilesOpenStrategy::PrivateMaterialize);
         assert_eq!(opened.files_copied, 2);
-        assert_eq!(opened.application_read_bytes, inventory.total_byte_length);
-        assert_eq!(opened.application_read_calls, 2);
+        // Count the bounded source stream and destination checksum readback.
+        assert_eq!(
+            opened.application_read_bytes,
+            2 * inventory.total_byte_length
+        );
+        assert_eq!(opened.application_read_calls, 4);
         let table_bytes =
             fs::read(private.path().join(crate::route_component::TABLE_FILE)).unwrap();
         assert_eq!(
