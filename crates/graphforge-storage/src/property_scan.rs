@@ -39,9 +39,9 @@ pub(crate) struct PropertyOverlayExec {
     batch_size: usize,
     row_upper_bound: Option<usize>,
     props: Arc<PlanProperties>,
-    metrics: ExecutionPlanMetricsSet,
-    work_counts: [Count; 3],
-    decoder_peak: Gauge,
+    metrics: Option<ExecutionPlanMetricsSet>,
+    work_counts: Option<([Count; 3], Gauge)>,
+    lifecycle_context: crate::lifecycle_io::CaptureContext,
 }
 
 impl fmt::Debug for PropertyOverlayExec {
@@ -104,14 +104,19 @@ impl PropertyOverlayExec {
             // backpressured channel, so polling never blocks the async worker.
             .with_scheduling_type(SchedulingType::Cooperative),
         );
-        let metrics = ExecutionPlanMetricsSet::new();
-        let work_counts = [
-            "property_spill_bytes",
-            "property_authentication_bytes",
-            "property_physical_rows",
-        ]
-        .map(|name| MetricBuilder::new(&metrics).counter(name, 0));
-        let decoder_peak = MetricBuilder::new(&metrics).gauge("property_decoder_peak_bytes", 0);
+        let (metrics, work_counts) = if crate::lifecycle_io::is_active() {
+            let metrics = ExecutionPlanMetricsSet::new();
+            let work_counts = [
+                "property_spill_bytes",
+                "property_authentication_bytes",
+                "property_physical_rows",
+            ]
+            .map(|name| MetricBuilder::new(&metrics).counter(name, 0));
+            let decoder_peak = MetricBuilder::new(&metrics).gauge("property_decoder_peak_bytes", 0);
+            (Some(metrics), Some((work_counts, decoder_peak)))
+        } else {
+            (None, None)
+        };
         Ok(Self {
             project,
             inventory,
@@ -125,7 +130,7 @@ impl PropertyOverlayExec {
             props,
             metrics,
             work_counts,
-            decoder_peak,
+            lifecycle_context: crate::lifecycle_io::CaptureContext::current(),
         })
     }
 }
@@ -189,7 +194,9 @@ impl ExecutionPlan for PropertyOverlayExec {
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
-        Some(self.metrics.clone_inner())
+        self.metrics
+            .as_ref()
+            .map(ExecutionPlanMetricsSet::clone_inner)
     }
 
     fn execute(
@@ -211,8 +218,9 @@ impl ExecutionPlan for PropertyOverlayExec {
         let mut remaining = self.limit;
         let batch_size = self.batch_size;
         let work_counts = self.work_counts.clone();
-        let decoder_peak = self.decoder_peak.clone();
+        let lifecycle_context = self.lifecycle_context.clone();
         tokio::task::spawn_blocking(move || {
+            let _lifecycle_capture = lifecycle_context.attach();
             let selected_properties = projection
                 .as_ref()
                 .map(|names| names.iter().cloned().collect());
@@ -255,6 +263,9 @@ impl ExecutionPlan for PropertyOverlayExec {
                 },
             );
             let result = result.and_then(|work| {
+                let Some((work_counts, decoder_peak)) = work_counts else {
+                    return Ok(());
+                };
                 // Completed reader work only; these logical counters are not native RSS.
                 let measured = |value| {
                     usize::try_from(value).map_err(|_| {

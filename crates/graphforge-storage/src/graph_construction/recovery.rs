@@ -1324,7 +1324,7 @@ fn remove_unrecorded_artifact(
         return Err(storage("unrecorded artifact has unexpected links"));
     }
     if name.ends_with(".parquet") {
-        let chunk_reader = CountingChunkReader::new(file, IoCounter::default());
+        let chunk_reader = CountingChunkReader::new(file, IoCounter::disabled());
         let cache_release = chunk_reader.cache_release_tracker();
         let validated = (|| -> Result<(), GfError> {
             let builder =

@@ -7,7 +7,6 @@
 use std::ffi::OsStr;
 use std::io::{Read, Seek};
 use std::path::Path;
-use std::sync::atomic::Ordering;
 
 use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use arrow::array::{Array, StringArray};
@@ -469,11 +468,11 @@ pub(super) fn load_parent_runtime_catalog(
     merge_cache_release_evidence(&mut work.cache_release, cache_release.evidence())?;
     work.bytes = work
         .bytes
-        .checked_add(counter.bytes.load(Ordering::Relaxed))
+        .checked_add(counter.values().0)
         .ok_or_else(|| storage("parent catalog Parquet read bytes overflow"))?;
     work.operations = work
         .operations
-        .checked_add(counter.operations.load(Ordering::Relaxed))
+        .checked_add(counter.values().1)
         .ok_or_else(|| storage("parent catalog Parquet read operations overflow"))?;
     let named = topology
         .open_child_file(OsStr::new("runtime_catalog.parquet"))
@@ -559,8 +558,8 @@ where
         cache_release.check_error().map_err(storage),
         "compact parent runtime catalog",
     )?;
-    let bytes = counter.bytes.load(Ordering::Relaxed);
-    let operations = counter.operations.load(Ordering::Relaxed);
+    let bytes = counter.values().0;
+    let operations = counter.values().1;
     if !is_canonical_sha256(digest) {
         return Err(storage("parent runtime catalog CAS authority changed"));
     }

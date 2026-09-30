@@ -27,20 +27,22 @@ struct StorageAttributionCommandReceipt {
     reopen_agrees: bool,
     /// Per-phase application I/O this command performed, in the same shape the
     /// construction path emits on an import receipt (#1389).
-    application_io: graphforge_api::LifecyclePhaseAttribution,
+    application_io: Option<graphforge_api::LifecyclePhaseAttribution>,
 }
 
-/// Per-phase application I/O this process has performed so far.
+/// Per-phase application I/O of the explicitly requested operation, if active.
 ///
 /// One `gf` invocation is one lifecycle phase, so the process-wide counters are
-/// exactly that phase's attribution (`gf query` splits them per statement so
+/// explicitly captured phase's attribution (`gf query` splits them per statement so
 /// its receipts still sum to the process). The document carries no paths,
 /// identifiers, query text or graph content — only the closed phase inventory
 /// and its counters.
 pub(crate) fn lifecycle_application_io()
--> Result<graphforge_api::LifecyclePhaseAttribution, graphforge_api::GfError> {
+-> Result<Option<graphforge_api::LifecyclePhaseAttribution>, graphforge_api::GfError> {
     let attribution = graphforge_api::lifecycle_io_snapshot();
-    attribution.validate_for_qualification()?;
+    if let Some(attribution) = &attribution {
+        attribution.validate_for_qualification()?;
+    }
     Ok(attribution)
 }
 

@@ -1599,7 +1599,7 @@ fn ingest_subphase() -> &'static str {
 }
 
 fn storage_io_value() -> Value {
-    let io = graphforge_storage::io_stats::snapshot();
+    let io = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
     json!({
         "node_full_reads": io.node_full_reads,
         "node_full_rows": io.node_full_rows,
@@ -1807,6 +1807,7 @@ fn run_rung(
         let ingest_started = Instant::now();
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
             .expect("open GraphForge for ingest");
+        let _io_capture = graphforge_storage::io_stats::CaptureScope::install();
         graphforge_storage::io_stats::reset();
         INGEST_CHUNK_INDEX.store(0, Ordering::Relaxed);
         INGEST_SUBPHASE.store(1, Ordering::Relaxed);

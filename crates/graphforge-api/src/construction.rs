@@ -384,11 +384,13 @@ mod tests {
         let source = graph.add_node("Person", &HashMap::new()).unwrap();
         let target = graph.add_node("Person", &HashMap::new()).unwrap();
 
+        let _io_capture = graphforge_storage::io_stats::CaptureScope::install();
+
         graphforge_storage::io_stats::reset();
         graph
             .add_edge(&source, "KNOWS", &target, &HashMap::new())
             .unwrap();
-        let io = graphforge_storage::io_stats::snapshot();
+        let io = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
         assert_eq!(io.node_full_reads, 0, "endpoint resolution decoded nodes");
         assert_eq!(io.edge_full_reads, 0, "endpoint resolution decoded edges");
     }

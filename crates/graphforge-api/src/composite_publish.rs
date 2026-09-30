@@ -1590,6 +1590,7 @@ mod tests {
         let same_request = uuid7(181);
         let endpoints = BTreeSet::from([existing, same_request]);
         let same_request_nodes = BTreeSet::from([same_request]);
+        let _io_capture = graphforge_storage::io_stats::CaptureScope::install();
         graphforge_storage::io_stats::reset();
         let mut writer =
             graphforge_storage::GraphWriter::open_at(directory.path(), OntologyMode::Strict, 2)
@@ -1601,7 +1602,7 @@ mod tests {
             &same_request_nodes,
         )
         .unwrap();
-        let io = graphforge_storage::io_stats::snapshot();
+        let io = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
         assert_eq!(io.node_full_reads, 0);
         assert_eq!(io.node_filtered_reads, 0);
 

@@ -1243,13 +1243,14 @@ migrations: []
 
         // Reopening and probing the generation-carried UUID authority must not
         // decode the topology that reconciliation just rewrote.
+        let _io_capture = crate::io_stats::CaptureScope::install();
         crate::io_stats::reset();
         let mut writer =
             crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Exploratory, 2)
                 .unwrap();
         let work = writer.register_existing_endpoints(&endpoints).unwrap();
         assert_eq!(work.found, 2);
-        let io = crate::io_stats::snapshot();
+        let io = crate::io_stats::snapshot().expect("requested I/O statistics");
         assert_eq!(io.node_full_reads, 0);
         assert_eq!(io.node_filtered_reads, 0);
 

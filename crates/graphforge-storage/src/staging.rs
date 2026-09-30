@@ -1176,6 +1176,8 @@ mod tests {
         first.stage(&path, Arc::clone(&schema), &initial).unwrap();
         first.commit_unsealed_for_test().unwrap();
 
+        let _io_capture = crate::io_stats::CaptureScope::install();
+
         crate::io_stats::reset();
         let (_, appended) = int_batch(&[900_001, 900_002, 900_003]);
         let mut rewrite = RewriteBatch::new();
@@ -1185,7 +1187,7 @@ mod tests {
         rewrite.commit_unsealed_for_test().unwrap();
 
         assert_eq!(existing, initial_values.len() as u64);
-        let io = crate::io_stats::snapshot();
+        let io = crate::io_stats::snapshot().expect("requested I/O statistics");
         assert_eq!(io.topology_rewrite_peak_batch_rows, ROW_GROUP_SIZE as u64);
         let values = read_values(&path);
         assert_eq!(&values[..initial_values.len()], initial_values.as_slice());

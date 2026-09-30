@@ -428,6 +428,8 @@ stop_tree(int(sys.argv[1]))
                 executable = args.generator if phase["phase"] == "generate" else args.gf
                 if phase["phase"] == "generate":
                     command[command.index("--scale") + 1] = str(case["scale"])
+                elif (args.instrument or args.suite == "diagnostic") and command != ["--info"]:
+                    command.append("--diagnostics")
                 run(f"{tag}-{phase['phase']}-{index}", [executable, *command], phase["phase"], case)
         if boundary:
             topology = [

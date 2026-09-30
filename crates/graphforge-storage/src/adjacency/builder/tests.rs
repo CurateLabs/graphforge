@@ -542,9 +542,12 @@ fn the_lazy_rebuilds_reads_and_writes_reach_the_lifecycle_counters() {
     write_diamond(dir.path()); // I/O before the capture; only the build is measured.
 
     let _capture = crate::lifecycle_io::CaptureScope::install();
-    let before = crate::lifecycle_io::snapshot();
+    let before = crate::lifecycle_io::snapshot().expect("requested lifecycle measurement");
     build_adjacency_index(dir.path(), BUILD_TS).unwrap();
-    let region = crate::lifecycle_io::snapshot().since(&before).unwrap();
+    let region = crate::lifecycle_io::snapshot()
+        .expect("requested lifecycle measurement")
+        .since(&before)
+        .unwrap();
     region.validate_for_qualification().unwrap();
 
     // #1449: the rebuild used to read every edge table and write its spill
@@ -571,7 +574,7 @@ fn spill_runs_are_counted_in_both_directions_of_their_lifetime() {
         ..AdjacencyBuildOptions::default()
     };
     let _capture = crate::lifecycle_io::CaptureScope::install();
-    let before = crate::lifecycle_io::snapshot();
+    let before = crate::lifecycle_io::snapshot().expect("requested lifecycle measurement");
     build_adjacency_index_into_with_options(
         dir.path(),
         stage.path(),
@@ -580,7 +583,10 @@ fn spill_runs_are_counted_in_both_directions_of_their_lifetime() {
         || Ok(()),
     )
     .unwrap();
-    let region = crate::lifecycle_io::snapshot().since(&before).unwrap();
+    let region = crate::lifecycle_io::snapshot()
+        .expect("requested lifecycle measurement")
+        .since(&before)
+        .unwrap();
 
     let scan = &region.phases[&crate::StorageIoPhase::ReadPathScan];
     assert!(
@@ -602,9 +608,12 @@ fn a_publish_style_scope_moves_the_build_out_of_the_read_path_row() {
     let _scope = crate::lifecycle_io::PhaseScope::enter(
         crate::StorageIoPhase::EncodeWritePostwriteAuthentication,
     );
-    let before = crate::lifecycle_io::snapshot();
+    let before = crate::lifecycle_io::snapshot().expect("requested lifecycle measurement");
     build_adjacency_index(dir.path(), BUILD_TS).unwrap();
-    let region = crate::lifecycle_io::snapshot().since(&before).unwrap();
+    let region = crate::lifecycle_io::snapshot()
+        .expect("requested lifecycle measurement")
+        .since(&before)
+        .unwrap();
 
     assert_eq!(
         region.phases[&crate::StorageIoPhase::ReadPathScan],

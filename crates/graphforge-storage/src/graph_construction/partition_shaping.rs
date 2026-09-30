@@ -1316,9 +1316,11 @@ fn seal_on_lanes<'r>(
     let reversed = super::lane_jobs_reversed();
     let sealed = std::sync::Mutex::new(Vec::with_capacity(jobs.len()));
     let lane_batches = std::sync::Mutex::new(Vec::new());
+    let lifecycle_context = crate::lifecycle_io::CaptureContext::current();
     std::thread::scope(|scope| {
         for _ in 0..lanes.get() {
             scope.spawn(|| {
+                let _lifecycle_capture = lifecycle_context.attach();
                 let mut lane_batch = SealDirectoryBatch::new(root);
                 loop {
                     let index = super::lane_job(

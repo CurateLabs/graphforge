@@ -5,15 +5,97 @@
 //! cost from execution cost. The ignored report prints the per-phase table this
 //! issue was opened to produce, plus the instrumentation's own overhead.
 
-use std::sync::Mutex;
 use std::time::Instant;
 
 use arrow::array::Int64Array;
-use graphforge_api::{GraphForge, LifecyclePhaseAttribution, lifecycle_io_snapshot};
+use graphforge_api::{
+    GraphForge, LifecycleIoCapture, LifecyclePhaseAttribution, lifecycle_io_snapshot,
+};
 use graphforge_storage::StorageIoPhase;
 
-/// Serializes the process-global lifecycle counters used by the assertions.
-static LIFECYCLE_IO_LOCK: Mutex<()> = Mutex::new(());
+#[test]
+fn default_reopen_and_query_do_no_optional_observation_work() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("state");
+    seed_project(&path, 16);
+    let before = graphforge_storage::lifecycle_io::observer_work();
+    let clocks = graphforge_storage::concurrency_attribution::observer_samples();
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    assert!(forge.open_io_attribution().is_none());
+    assert_eq!(scalar_count(&forge, EDGE_RECOUNT), 16);
+    let result = forge.execute(ORDERED_ONE_HOP).unwrap();
+    assert_eq!(
+        result.batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+        10
+    );
+    assert!(lifecycle_io_snapshot().is_none());
+    assert!(graphforge_storage::io_stats::snapshot().is_none());
+    assert!(graphforge_storage::concurrency_attribution::snapshot().is_none());
+    assert_eq!(graphforge_storage::lifecycle_io::observer_work(), before);
+    assert_eq!(
+        graphforge_storage::concurrency_attribution::observer_samples(),
+        clocks
+    );
+    drop(forge);
+
+    let _requested = LifecycleIoCapture::install();
+    let measured = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    assert!(measured.open_io_attribution().unwrap().totals.read_bytes > 0);
+    let before_query = lifecycle_io_snapshot().unwrap();
+    assert_eq!(scalar_count(&measured, EDGE_RECOUNT), 16);
+    let query = lifecycle_io_snapshot()
+        .unwrap()
+        .since(&before_query)
+        .unwrap();
+    assert!(query.totals.read_bytes > 0);
+    assert!(query.totals.read_calls > 0);
+    let work = graphforge_storage::lifecycle_io::observer_work();
+    assert!(work.0 > before.0 && work.1 > before.1 && work.2 > before.2);
+}
+
+#[test]
+fn explicit_demand_capture_collects_property_work_and_preserves_query_rows() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("state");
+    seed_project(&path, 16);
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let ordinary = forge.execute(ORDERED_ONE_HOP).unwrap();
+    assert!(lifecycle_io_snapshot().is_none());
+    let (requested, work) = graphforge_exec::demand::capture(|| forge.execute(ORDERED_ONE_HOP));
+    assert_eq!(requested.unwrap().batches, ordinary.batches);
+    assert!(!work.property_overlays.is_empty());
+    assert!(
+        work.property_overlays
+            .iter()
+            .any(|overlay| overlay.physical_rows > 0)
+    );
+    assert!(
+        lifecycle_io_snapshot().is_none(),
+        "demand guard retires its collector"
+    );
+}
+
+#[test]
+fn requested_query_capture_survives_an_ambient_tokio_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("state");
+    seed_project(&path, 16);
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let _capture = LifecycleIoCapture::install();
+        let before = lifecycle_io_snapshot().unwrap();
+        let result = forge.execute(ORDERED_ONE_HOP).unwrap();
+        assert_eq!(
+            result.batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+            10
+        );
+        let query = lifecycle_io_snapshot().unwrap().since(&before).unwrap();
+        assert!(query.totals.read_bytes > 0);
+        assert!(query.totals.read_calls > 0);
+    });
+    assert!(lifecycle_io_snapshot().is_none());
+}
 
 const ORDERED_ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.value AS id ORDER BY id LIMIT 10";
 const EDGE_RECOUNT: &str = "MATCH ()-[r]->() RETURN count(*)";
@@ -52,11 +134,13 @@ struct Region {
 }
 
 fn measure<T>(work: impl FnOnce() -> T) -> (T, Region) {
-    let before = lifecycle_io_snapshot();
+    let _capture = LifecycleIoCapture::install();
+    let before = lifecycle_io_snapshot().expect("requested observation");
     let started = Instant::now();
     let value = work();
     let elapsed_micros = started.elapsed().as_micros();
     let attribution = lifecycle_io_snapshot()
+        .expect("requested observation")
         .since(&before)
         .expect("region attribution");
     attribution
@@ -93,7 +177,7 @@ fn measure_lifecycle(edges: usize) -> Lifecycle {
         GraphForge::new(Some(path.to_str().expect("utf-8 project path"))).expect("project reopens")
     });
     // The facade reports the same region for itself, without a caller snapshot.
-    assert_eq!(forge.open_io_attribution(), &open.attribution);
+    assert_eq!(forge.open_io_attribution(), Some(&open.attribution));
 
     let (counted, recount) = measure(|| scalar_count(&forge, EDGE_RECOUNT));
     assert_eq!(counted, i64::try_from(edges).expect("edge count fits i64"));
@@ -120,7 +204,6 @@ fn measure_lifecycle(edges: usize) -> Lifecycle {
 
 #[test]
 fn every_lifecycle_phase_reports_reconciled_per_phase_application_io() {
-    let _guard = LIFECYCLE_IO_LOCK.lock().expect("lifecycle I/O lock");
     let lifecycle = measure_lifecycle(64);
 
     // 1. Opening a project reads and authenticates committed data, and the
@@ -197,7 +280,9 @@ fn the_lifecycle_inventory_extends_the_construction_inventory_without_changing_i
     assert!(!StorageIoPhase::ALL.contains(&StorageIoPhase::ReadPathScan));
     assert_eq!(StorageIoPhase::LIFECYCLE.len(), 10);
 
-    let encoded = serde_json::to_value(lifecycle_io_snapshot()).expect("attribution serializes");
+    let _capture = LifecycleIoCapture::install();
+    let encoded =
+        serde_json::to_value(lifecycle_io_snapshot().unwrap()).expect("attribution serializes");
     let phases = encoded["phases"].as_object().expect("phase map");
     assert_eq!(phases.len(), 10);
     assert!(phases.contains_key("read_path_scan"));
@@ -213,7 +298,6 @@ fn the_lifecycle_inventory_extends_the_construction_inventory_without_changing_i
 #[test]
 #[ignore = "reporting run; prints the per-phase table rather than asserting"]
 fn report_lifecycle_io_attribution() {
-    let _guard = LIFECYCLE_IO_LOCK.lock().expect("lifecycle I/O lock");
     for edges in [1_024_usize, 4_096, 16_384] {
         let lifecycle = measure_lifecycle(edges);
         print_lifecycle(&lifecycle);
@@ -274,6 +358,7 @@ fn print_lifecycle(lifecycle: &Lifecycle) {
 /// Cost of the recording itself, measured against the number of record calls a
 /// lifecycle actually makes.
 fn report_instrumentation_overhead() {
+    let _capture = LifecycleIoCapture::install();
     const SAMPLES: u64 = 10_000_000;
     let started = Instant::now();
     for _ in 0..SAMPLES {

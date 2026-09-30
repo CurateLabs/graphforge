@@ -533,14 +533,17 @@ fn property_authentication_reaches_the_lifecycle_counters() {
     // the inventory's own metrics but never into the lifecycle phase rows, so
     // a property-bearing open under-reported its verification work.
     let _capture = crate::lifecycle_io::CaptureScope::install();
-    let before = crate::lifecycle_io::snapshot();
+    let before = crate::lifecycle_io::snapshot().expect("requested lifecycle measurement");
     let admitted = AuthenticatedPropertyInventory::from_inventory_at_root(
         dir.path(),
         inventory,
         Some((PropertyRouteKind::Node, "CON")),
     )
     .unwrap();
-    let region = crate::lifecycle_io::snapshot().since(&before).unwrap();
+    let region = crate::lifecycle_io::snapshot()
+        .expect("requested lifecycle measurement")
+        .since(&before)
+        .unwrap();
     region.validate_for_qualification().unwrap();
 
     let hydration = &region.phases[&crate::StorageIoPhase::HydrationVerification];

@@ -198,6 +198,7 @@ fn reopen_recovers_surrogate_tails_without_full_topology_reads() {
     assert!(dir.path().join(SURROGATE_TAILS_FILE).is_file());
 
     let _measurement = crate::io_stats::test_measurement_guard();
+    let _io_capture = crate::io_stats::CaptureScope::install();
     crate::io_stats::reset();
     let mut reopened = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
     assert_eq!(
@@ -214,7 +215,7 @@ fn reopen_recovers_surrogate_tails_without_full_topology_reads() {
             .unwrap(),
         2
     );
-    let io = crate::io_stats::snapshot();
+    let io = crate::io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(
         io.node_full_reads, 0,
         "writer reopen must use bounded tails"
@@ -262,6 +263,8 @@ fn authenticated_endpoint_registration_decodes_zero_topology_rows() {
     )
     .unwrap();
 
+    let _io_capture = crate::io_stats::CaptureScope::install();
+
     crate::io_stats::reset();
     let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS + 1).unwrap();
     let metrics = writer.register_existing_endpoints(&[left, right]).unwrap();
@@ -274,7 +277,7 @@ fn authenticated_endpoint_registration_decodes_zero_topology_rows() {
     writer
         .create_edge(new_v7(), "KNOWS", &left, &right)
         .unwrap();
-    let io = crate::io_stats::snapshot();
+    let io = crate::io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(io.node_full_reads, 0);
     assert_eq!(io.node_filtered_reads, 0);
 }
@@ -891,6 +894,7 @@ fn cumulative_topology_and_index_work_doubles_with_bounded_windows() {
 
     fn run(batches: u64) -> (u64, u64, u64, u64, u64, u64, TopologyWriteWork) {
         let dir = TempDir::new().unwrap();
+        let _io_capture = crate::io_stats::CaptureScope::install();
         crate::io_stats::reset();
         let mut aggregate = TopologyWriteWork::default();
         for batch in 0..batches {
@@ -952,7 +956,7 @@ fn cumulative_topology_and_index_work_doubles_with_bounded_windows() {
                 .saturating_add(work.uuid_validation_bytes);
             aggregate.uuid_validation_random_seeks += work.uuid_validation_random_seeks;
         }
-        let io = crate::io_stats::snapshot();
+        let io = crate::io_stats::snapshot().expect("requested I/O statistics");
         (
             retained_bytes(dir.path()),
             aggregate.output_bytes,
