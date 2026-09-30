@@ -28,10 +28,10 @@ use graphforge_storage::{
 use uuid::Uuid;
 
 use crate::GraphForge;
-use crate::composite_receipt::{
-    authorize_composite_transaction, composite_generation_uuid, composite_receipt_schema,
+use crate::composite_receipt::{authorize_composite_transaction, composite_receipt_schema};
+use crate::composite_transaction::{
+    CompositeGraphMutation, CompositeTransactionRequest, PreparedCompositeOperation,
 };
-use crate::composite_transaction::{CompositeGraphMutation, CompositeTransactionRequest};
 use crate::composite_validation::{CompositeOntologySnapshot, CompositeValidationSnapshot};
 use crate::construction::prop_literal;
 
@@ -156,9 +156,9 @@ impl GraphForge {
         request: CompositeTransactionRequest,
     ) -> Result<RecordBatch, GfError> {
         let root = self.resolved_generation.container_root();
-        let content_fingerprint = request.canonical_fingerprint()?;
-        let generation_uuid =
-            composite_generation_uuid(request.context.operation_uuid.0, content_fingerprint);
+        let prepared = PreparedCompositeOperation::new(&request)?;
+        let content_fingerprint = prepared.fingerprint();
+        let generation_uuid = prepared.generation_uuid();
         let transaction_uuid = request.context.operation_uuid.0;
 
         if let Some(published) =
@@ -173,7 +173,7 @@ impl GraphForge {
             }
             // Exact published retry must not re-validate identities against CURRENT;
             // those identities are now occupied by this same committed generation.
-            return crate::composite_receipt::build_composite_receipt(&request);
+            return prepared.receipt();
         }
 
         let optimistic =
@@ -206,8 +206,9 @@ impl GraphForge {
             }
 
             let (snapshot, routes) = build_validation_snapshot(self, &parent, &request)?;
-            let receipt =
-                authorize_composite_transaction(&request, &snapshot, None).map_err(|error| {
+            let receipt = prepared
+                .authorize_pre_staging(&snapshot, None)
+                .map_err(|error| {
                     if (reconciled || rebases > 0) && error.code() == "GF_IDENTITY_CONFLICT" {
                         write_conflict("concurrent operation occupied a requested identity")
                     } else {
@@ -1922,9 +1923,12 @@ mod tests {
             .lock()
             .expect("generation UUID lock poisoned");
         let request = publish_request();
+        let capture = graphforge_core::hash_observation::operation::Capture::start();
         let receipt = graph
             .publish_composite_transaction(request.clone())
             .unwrap();
+        assert_eq!(capture.snapshot().composite_request_fingerprints, 1);
+        drop(capture);
         assert_eq!(
             receipt.schema().as_ref(),
             composite_receipt_schema().as_ref()
@@ -1956,7 +1960,9 @@ mod tests {
             .unwrap();
         assert_eq!(assertions.batches[0].num_rows(), 1);
 
+        let capture = graphforge_core::hash_observation::operation::Capture::start();
         let replay = graph.publish_composite_transaction(request).unwrap();
+        assert_eq!(capture.snapshot().composite_request_fingerprints, 1);
         for index in 0..receipt.num_columns() {
             assert_eq!(
                 receipt.column(index).as_ref(),
@@ -2158,9 +2164,11 @@ mod tests {
         AFTER_PROPERTY_INVENTORY_CAPTURE.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move || {
                 assert!(observed.get().is_none(), "hook must run once");
+                let capture = graphforge_core::hash_observation::operation::Capture::start();
                 competitor
                     .publish_composite_transaction(graph_request(153, 154, "Grace"))
                     .unwrap();
+                assert_eq!(capture.snapshot().composite_request_fingerprints, 1);
                 let winner = graphforge_storage::resolve_project_generation(&root)
                     .unwrap()
                     .generation_uuid();
@@ -2169,7 +2177,10 @@ mod tests {
             }));
         });
         let request = graph_request(151, 152, "Ada");
+        let capture = graphforge_core::hash_observation::operation::Capture::start();
         let result = graph.publish_composite_transaction(request.clone());
+        assert_eq!(capture.snapshot().composite_request_fingerprints, 1);
+        drop(capture);
         let winner = captured
             .get()
             .expect("competitor published after inventory capture");

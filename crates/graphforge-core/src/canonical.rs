@@ -387,7 +387,13 @@ pub fn fingerprint(
     contract_version: u32,
     payload: &[u8],
 ) -> Result<[u8; 32], CanonicalError> {
-    Ok(Sha256::digest(fingerprint_preimage(domain, contract_version, payload)?).into())
+    let preimage = fingerprint_preimage(domain, contract_version, payload)?;
+    let digest = Sha256::digest(preimage).into();
+    #[cfg(any(test, feature = "test-support"))]
+    if domain == CanonicalDomain::CompositeRequest {
+        crate::hash_observation::record_composite_request_fingerprint();
+    }
+    Ok(digest)
 }
 
 /// Project a full canonical fingerprint into an RFC 9562 UUIDv8.
