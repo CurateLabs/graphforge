@@ -652,12 +652,12 @@ impl GraphImportSession {
         // still absent from the prior checkpoint: cleaning it is completion of
         // the failed operation, never admission of a new session mutation.
         // Once replacement was attempted, the source may be authoritative.
-        let cleanup = if !publication_started {
+        let cleanup = if publication_started {
+            Ok(None)
+        } else {
             unpublished_source
                 .map(|source| journal::cleanup_source(source, self.allocation_operation.as_ref()))
                 .transpose()
-        } else {
-            Ok(None)
         };
         self.journal.poison();
         match cleanup {
