@@ -13,64 +13,22 @@
 
 #[cfg(feature = "search")]
 mod api_steps;
+mod corpus;
 mod fixture;
 mod tck_steps;
 mod timing;
+mod world;
 
 use cucumber::{World, WriterExt};
 use futures::FutureExt;
+
+use corpus::{copy_features_normalized, tck_only_filter};
+use world::GraphForgeWorld;
 
 use timing::{
     ScenarioTimer, ScenarioTiming, Suite, annotation_messages, baseline_candidate, build_report,
     escape_github_command, load_baseline, load_policy, non_passing_scenario_keys, write_artifacts,
 };
-
-/// Shared cucumber [`World`] for the GraphForge BDD suites (public API + TCK).
-#[derive(Debug, Default, World)]
-pub struct GraphForgeWorld {
-    /// The forge instance under test (None until a Given step creates it).
-    pub forge: Option<graphforge_api::GraphForge>,
-    /// Owns a persistent-project fixture directory for lifecycle scenarios.
-    pub persistent_fixture: Option<tempfile::TempDir>,
-    /// Owns an ontology fixture directory for load scenarios.
-    pub ontology_fixture: Option<tempfile::TempDir>,
-    /// Ontology fixture path selected by the Given step.
-    pub ontology_path: Option<std::path::PathBuf>,
-    /// Last error returned by a When step.
-    pub last_error: Option<String>,
-    /// Stable public code for the last typed Rust facade error.
-    pub last_error_code: Option<&'static str>,
-    /// Typed planning InvalidType rejection; its public code is GF_VALIDATION.
-    pub last_compile_type_error: bool,
-    /// Last metadata collection returned by labels or relationship_types.
-    pub last_names: Option<Vec<String>>,
-    /// Last scalar returned by node_count.
-    pub last_count: Option<u64>,
-    /// Last explanation returned by explain.
-    pub last_explanation: Option<String>,
-    /// Last Arrow-backed result returned by `execute()`.
-    pub last_exec: Option<graphforge_api::ExecutionResult>,
-    /// Most recent Arrow result returned by an analyst verb.
-    pub last_algorithm_result: Option<arrow::record_batch::RecordBatch>,
-    /// Previous analyst result, retained for comparison scenarios.
-    pub previous_algorithm_result: Option<arrow::record_batch::RecordBatch>,
-    /// Query parameters bound by openCypher TCK `And parameters are:` steps.
-    pub params: std::collections::HashMap<String, graphforge_api::IrLiteral>,
-    /// Node handles by name.
-    pub nodes: std::collections::HashMap<String, graphforge_api::NodeHandle>,
-    /// Most recently created node handle for result-focused assertions.
-    pub last_node_handle: Option<graphforge_api::NodeHandle>,
-    /// Most recently created edge handle for result-focused assertions.
-    pub last_edge_handle: Option<graphforge_api::EdgeHandle>,
-    /// Number of explicit public index calls made in this scenario.
-    pub index_calls: usize,
-    /// Stored query/index vector for find/index scenarios.
-    pub stored_vector: Option<Vec<f32>>,
-    /// Caller-defined vector space used by find/index fixtures.
-    pub stored_space: Option<String>,
-    /// Stored node UUID (hex or hyphenated) for index upsert scenarios.
-    pub stored_paper_id: Option<String>,
-}
 
 #[tokio::main]
 async fn main() {
@@ -454,19 +412,11 @@ impl cucumber::Writer<GraphForgeWorld> for ScenarioCollector {
             Feature::Rule(_, Rule::Scenario(scenario, retry)) => (scenario, retry),
             _ => return,
         };
-        let key = format!(
-            "{}:{}:{}",
-            feature.name, scenario.position.line, scenario.name
-        );
+        let key = corpus::scenario_key(&feature.name, scenario.position.line, &scenario.name);
         let attempt = retry.retries.map_or(0, |retries| retries.current);
         let active_key = (key.clone(), attempt);
         match retry.event {
             Scenario::Started => {
-                // Key by FEATURE NAME (unique per TCK file) + line + scenario
-                // name. Deliberately NOT the file path: the normalized corpus
-                // lives under a temp dir whose canonicalization differs by
-                // platform (macOS `/private` symlinks), which would make keys —
-                // and thus the baseline — non-portable between local and CI.
                 self.timer
                     .start(
                         self.suite,
@@ -576,85 +526,4 @@ fn load_passing_baseline(path: &std::path::Path) -> std::collections::BTreeSet<S
         .filter(|l| !l.is_empty())
         .map(ToOwned::to_owned)
         .collect()
-}
-
-/// Recursively copy the vendored TCK feature tree from `src` into `dst`, rewriting
-/// only block-leading `And`/`But` continuation keywords to `Given` (see
-/// [`normalize_leading_continuations`]). The vendored source files are never modified.
-/// The `TCK_ONLY` local-iteration substring filter, or `None` if unset/empty.
-/// An empty value is treated as unset so a stray `TCK_ONLY=` can't silently
-/// bypass the baseline gate (`contains("")` is always true).
-fn tck_only_filter() -> Option<String> {
-    std::env::var("TCK_ONLY")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-}
-
-fn copy_features_normalized(src: &std::path::Path, dst: &std::path::Path) {
-    for entry in std::fs::read_dir(src).expect("read TCK feature dir") {
-        let path = entry.expect("dir entry").path();
-        let target = dst.join(path.file_name().expect("entry file name"));
-        if path.is_dir() {
-            std::fs::create_dir_all(&target).expect("create temp subdir");
-            copy_features_normalized(&path, &target);
-        } else if path.extension().is_some_and(|e| e == "feature") {
-            // Local iteration: `TCK_ONLY=<substr>` restricts the corpus to
-            // feature files whose path contains `<substr>` (e.g.
-            // `TCK_ONLY=Temporal`) for a fast subset run. Unset in CI → the
-            // whole corpus. The baseline gate is skipped when set (see `main`),
-            // since a subset can't satisfy the whole-corpus baseline.
-            if let Some(filter) = tck_only_filter()
-                && !path.to_string_lossy().contains(&filter)
-            {
-                continue;
-            }
-            let content = std::fs::read_to_string(&path).expect("read feature file");
-            std::fs::write(&target, normalize_leading_continuations(&content))
-                .expect("write temp feature");
-        }
-    }
-}
-
-/// Rewrite a step that is the FIRST step of its `Scenario`/`Scenario Outline`/
-/// `Background`/`Rule`/`Example` block and uses the `And`/`But` continuation keyword
-/// into `Given`. The Rust `gherkin` parser rejects a block-leading `And`/`But`, while
-/// cucumber-js accepts it; semantics are unchanged (the continuation inherits `Given`).
-/// Only block-leading steps are touched — `And`/`But` after a concrete step are left as-is.
-fn normalize_leading_continuations(content: &str) -> String {
-    let mut out = String::with_capacity(content.len() + 64);
-    let mut awaiting_first_step = false;
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        let is_header = trimmed.starts_with("Scenario:")
-            || trimmed.starts_with("Scenario Outline:")
-            || trimmed.starts_with("Background:")
-            || trimmed.starts_with("Rule:")
-            || trimmed.starts_with("Example:");
-        let is_step = ["Given ", "When ", "Then ", "And ", "But "]
-            .iter()
-            .any(|kw| trimmed.starts_with(kw));
-        if is_header {
-            awaiting_first_step = true;
-            out.push_str(line);
-        } else if awaiting_first_step
-            && (trimmed.starts_with("And ") || trimmed.starts_with("But "))
-        {
-            let indent = &line[..line.len() - trimmed.len()];
-            let rest = trimmed
-                .strip_prefix("And ")
-                .or_else(|| trimmed.strip_prefix("But "))
-                .expect("And/But prefix present");
-            out.push_str(indent);
-            out.push_str("Given ");
-            out.push_str(rest);
-            awaiting_first_step = false;
-        } else {
-            if is_step {
-                awaiting_first_step = false;
-            }
-            out.push_str(line);
-        }
-        out.push('\n');
-    }
-    out
 }
