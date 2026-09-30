@@ -1,8 +1,12 @@
 name: Build Lane Measurement
+run-name: "Build lane ${{ inputs.runner }}/${{ inputs.cache }} ${{ inputs.ref }} [${{ inputs.sticky_key }}]"
 
-# Issue #1618 measurement harness: times the Cargo compile+test lane
-# (`cargo test --workspace --locked`) on the same runner class as the Bazel
-# CI lane (blacksmith-4vcpu-ubuntu-2404). Manual dispatch only; it is not a
+# Issue #1618 measurement harness: times the Cargo compile+test lane on the
+# same runner class as the Bazel CI lane (blacksmith-4vcpu-ubuntu-2404).
+# `cargo-test` runs `cargo test --workspace --locked`, which executes test
+# binaries one after another; `nextest` runs test binaries concurrently
+# (`cargo nextest run`), then the two custom-harness targets and the
+# doctests, which nextest cannot execute, under `cargo test`. Manual dispatch only; it is not a
 # gate and runs on no event other than workflow_dispatch.
 
 on:
@@ -21,6 +25,14 @@ on:
           - cold
           - sticky
           - sccache
+      runner:
+        description: "Test runner for the Cargo lane"
+        required: false
+        type: choice
+        default: cargo-test
+        options:
+          - cargo-test
+          - nextest
       sticky_key:
         description: "Sticky disk key (suffix to parallelize independent lanes)"
         required: false
@@ -36,7 +48,7 @@ concurrency:
 
 jobs:
   cargo-lane:
-    name: Cargo Lane (${{ inputs.cache }})
+    name: Cargo Lane (${{ inputs.runner }}, ${{ inputs.cache }})
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 120
     env:
@@ -93,6 +105,12 @@ jobs:
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           echo "CARGO_BUILD_RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
+      - name: Install cargo-nextest
+        if: inputs.runner == 'nextest'
+        uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2.87.15
+        with:
+          tool: cargo-nextest@0.9.145
+
       - name: Cache Cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -130,11 +148,31 @@ jobs:
           set -euo pipefail
           start=$(date +%s)
           rc=0
-          cargo test --workspace --locked 2>&1 | tee dist/cargo-lane-test.log || rc=$?
+          if [[ "${MEASURE_RUNNER}" == "nextest" ]]; then
+            # Custom-harness targets (cucumber BDD, allocation probe) cannot
+            # answer nextest's --list protocol; they run under cargo test.
+            custom='(package(graphforge-api) & binary(bdd)) | (package(graphforge-observability) & binary(disabled_allocations))'
+            cargo nextest run --workspace --locked --no-fail-fast -E "not ($custom)" 2>&1 | tee dist/cargo-lane-test.log || rc=$?
+            # --workspace keeps workspace feature unification, so these reuse
+            # the nextest build instead of recompiling under per-package features.
+            custom_rc=0
+            cargo test --workspace --locked --test bdd --test disabled_allocations 2>&1 | tee -a dist/cargo-lane-test.log || custom_rc=$?
+            if [[ "$rc" -eq 0 ]]; then rc=$custom_rc; fi
+            doc_start=$(date +%s)
+            doc_rc=0
+            cargo test --workspace --locked --doc 2>&1 | tee -a dist/cargo-lane-test.log || doc_rc=$?
+            if [[ "$rc" -eq 0 ]]; then rc=$doc_rc; fi
+            echo "doc_seconds=$(( $(date +%s) - doc_start ))" >> "$GITHUB_OUTPUT"
+          else
+            cargo test --workspace --locked 2>&1 | tee dist/cargo-lane-test.log || rc=$?
+            echo "doc_seconds=0" >> "$GITHUB_OUTPUT"
+          fi
           end=$(date +%s)
           echo "seconds=$((end - start))" >> "$GITHUB_OUTPUT"
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
           exit "$rc"
+        env:
+          MEASURE_RUNNER: ${{ inputs.runner }}
 
 
       - name: Collect evidence
@@ -164,6 +202,7 @@ jobs:
                   ["git", "rev-parse", "HEAD"], capture_output=True, text=True
               ).stdout.strip(),
               "cache_mode": os.environ["MEASURE_CACHE"],
+              "runner": os.environ["MEASURE_RUNNER"],
               "sticky_key": os.environ["MEASURE_STICKY_KEY"],
               "target_cache_state_before": os.environ["MEASURE_PRESTATE"],
               "cargo": subprocess.run(
@@ -173,6 +212,7 @@ jobs:
               "vcpus": os.cpu_count(),
               "fetch_seconds": int(os.environ["MEASURE_FETCH_S"] or 0),
               "test_seconds": int(os.environ["MEASURE_TEST_S"] or 0),
+              "doc_test_seconds": int(os.environ["MEASURE_DOC_S"] or 0),
               "test_exit_code": int(os.environ.get("MEASURE_TEST_RC") or 0),
               "sccache": os.environ["MEASURE_SCCACHE_STATS"],
           }
@@ -184,6 +224,8 @@ jobs:
         env:
           MEASURE_REF: ${{ inputs.ref }}
           MEASURE_CACHE: ${{ inputs.cache }}
+          MEASURE_RUNNER: ${{ inputs.runner }}
+          MEASURE_DOC_S: ${{ steps.test.outputs.doc_seconds }}
           MEASURE_STICKY_KEY: ${{ inputs.sticky_key }}
           MEASURE_PRESTATE: ${{ steps.prestate.outputs.state }}
           MEASURE_FETCH_S: ${{ steps.fetch.outputs.seconds }}
@@ -207,9 +249,10 @@ jobs:
               "| --- | --- |",
               f"| ref | `{d['ref_input']}` |",
               f"| resolved | `{d['resolved_sha'][:12]}` |",
+              f"| runner | {d['runner']} |",
               f"| cache mode | {d['cache_mode']} (target/ before: {d['target_cache_state_before']}) |",
               f"| fetch | {d['fetch_seconds']} s |",
-              f"| cargo test --workspace | {d['test_seconds']} s ({d['test_seconds']/60:.1f} min) |",
+              f"| test lane (incl. {d['doc_test_seconds']} s doctests) | {d['test_seconds']} s ({d['test_seconds']/60:.1f} min) |",
           ]
           pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text("\n".join(lines) + "\n")
           PY

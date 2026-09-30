@@ -74,12 +74,18 @@ def uses_approved(uses: str | None, action: str, *tags: str) -> bool:
 
 
 WORKFLOWS = ROOT / ".github" / "workflows"
+BINDING_RC_NODE_LOADERS = "binding-rc-node-loaders-${{ github.run_id }}"
+BINDING_RC_NODE_LOADER_PATHS = (
+    "crates/graphforge-bindings-node/index.js\ncrates/graphforge-bindings-node/index.d.ts"
+)
+BINDING_RC_NODE_LOADER_DESTINATION = "${{ runner.temp }}/node-loaders"
 EXPECTED_ARTIFACT_UPLOADS = Counter(
     {
         "binding-rc-report-${{ github.run_id }}-${{ matrix.target }}": 1,
         "binding-rc-report-${{ github.run_id }}-${{ matrix.report_target }}": 1,
         "binding-rc-wheel-${{ github.run_id }}-${{ matrix.target }}": 1,
         "binding-rc-addon-${{ github.run_id }}-${{ matrix.target }}": 1,
+        "binding-rc-node-loaders-${{ github.run_id }}": 1,
         "Rust-Non-Cypher-${{ env.EVIDENCE_SHA }}": 1,
         "Binding-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
         "Release-Load-${{ github.run_id }}": 1,
@@ -107,6 +113,7 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
         "binding-rc-report-${{ github.run_id }}-*": 1,
         "binding-rc-wheel-${{ github.run_id }}-*": 1,
         "binding-rc-addon-${{ github.run_id }}-*": 1,
+        "binding-rc-node-loaders-${{ github.run_id }}": 1,
         "Rust-Non-Cypher-${{ needs.validate_source.outputs.evidence_sha }}": 1,
         "Binding-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
         "Release-Load-${{ github.run_id }}": 1,
@@ -145,7 +152,7 @@ EXPECTED_STICKY_KEYS = Counter(
         (
             "${{ github.repository }}-binding-rc-linux-rust-1.96.0-"
             "${{ hashFiles('Cargo.lock') }}-release-target-v1"
-        ): 2,
+        ): 1,
         (
             "${{ github.repository }}-release_candidate-rust-1.96.0-"
             "${{ hashFiles('Cargo.lock') }}-release-target-v1"
@@ -247,6 +254,21 @@ def field(step: list[str], name: str) -> str | None:
     return matched
 
 
+def action_input(step: list[str], name: str) -> str | None:
+    """Read an action input without mistaking a step's display name for it."""
+    for index, line in enumerate(step):
+        if line.strip() != "with:":
+            continue
+        indent = len(line) - len(line.lstrip())
+        inputs: list[str] = []
+        for follow in step[index + 1 :]:
+            if follow.strip() and len(follow) - len(follow.lstrip()) <= indent:
+                break
+            inputs.append(follow)
+        return field(inputs, name)
+    return None
+
+
 def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
     uploaded: list[str] = []
     downloaded: list[str] = []
@@ -255,7 +277,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
         assert uses_approved(uses, "actions/upload-artifact", "v7"), (
             f"unapproved artifact action: {uses}"
         )
-        name = field(step, "name")
+        name = action_input(step, "name")
         assert name is not None, "artifact upload has no exact name"
         assert field(step, "if-no-files-found") == "error", (
             f"artifact upload is not fail-closed: {name}"
@@ -275,6 +297,13 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             f"artifact retention drift: {name}"
         )
         path = field(step, "path")
+        if name.startswith("binding-rc-node-loaders-"):
+            assert name == BINDING_RC_NODE_LOADERS, "Node loader upload must name the current run"
+            assert path == BINDING_RC_NODE_LOADER_PATHS, (
+                "Node loader upload must contain only index.js and index.d.ts"
+            )
+            uploaded.append(name)
+            continue
         assert path in {
             "binding-rc-reports/${{ matrix.target }}.json",
             "binding-rc-reports/${{ matrix.report_target }}.json",
@@ -317,10 +346,21 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             f"unapproved artifact action: {uses}"
         )
         pattern = field(step, "pattern")
-        name = field(step, "name")
+        name = action_input(step, "name")
         selector = pattern if pattern is not None else name
         assert selector is not None
         path = field(step, "path")
+        if selector.startswith("binding-rc-node-loaders-"):
+            assert pattern == BINDING_RC_NODE_LOADERS and name is None, (
+                "Node loader download must select the exact current-run artifact"
+            )
+            assert path == BINDING_RC_NODE_LOADER_DESTINATION, "Node loader download path drift"
+            assert field(step, "merge-multiple") == "true", "Node loader transfer must merge files"
+            assert all(
+                field(step, key) is None for key in ("run-id", "repository", "github-token")
+            ), "Node loader download must remain within the current workflow run"
+            downloaded.append(selector)
+            continue
         assert path in {
             "binding-rc-reports",
             "candidate/release-artifacts/python",
@@ -396,6 +436,89 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
                 )
         downloaded.append(selector)
     return uploaded, downloaded
+
+
+def validate_node_loader_negative_fixtures() -> None:
+    """Loader transfer permits two generated files, never a build tree or another run."""
+    fixture = """jobs:
+  node:
+    steps:
+      - name: Save generated loaders
+        uses: actions/upload-artifact@v7
+        with:
+          name: binding-rc-node-loaders-${{ github.run_id }}
+          path: |
+            crates/graphforge-bindings-node/index.js
+            crates/graphforge-bindings-node/index.d.ts
+          if-no-files-found: error
+          retention-days: 1
+  candidate:
+    steps:
+      - name: Download generated loaders
+        uses: actions/download-artifact@v8
+        with:
+          pattern: binding-rc-node-loaders-${{ github.run_id }}
+          path: ${{ runner.temp }}/node-loaders
+          merge-multiple: true
+"""
+    assert artifact_contracts(fixture) == ([BINDING_RC_NODE_LOADERS], [BINDING_RC_NODE_LOADERS])
+    mutations = (
+        (BINDING_RC_NODE_LOADER_PATHS.replace("\n", "\n            "), "target/"),
+        (
+            BINDING_RC_NODE_LOADER_PATHS.replace("\n", "\n            "),
+            "crates/graphforge-bindings-node/",
+        ),
+        ("crates/graphforge-bindings-node/index.d.ts", "crates/graphforge-bindings-node/*.node"),
+        (
+            "crates/graphforge-bindings-node/index.d.ts",
+            "crates/graphforge-bindings-node/index.d.ts\n            target/release/",
+        ),
+        ("retention-days: 1", "retention-days: 30"),
+        ("if-no-files-found: error", "if-no-files-found: warn"),
+        (
+            f"name: {BINDING_RC_NODE_LOADERS}",
+            "name: binding-rc-node-loaders-${{ github.sha }}",
+        ),
+        (
+            f"name: {BINDING_RC_NODE_LOADERS}",
+            "name: binding-rc-addon-${{ github.run_id }}-${{ matrix.target }}",
+        ),
+        (f"          name: {BINDING_RC_NODE_LOADERS}\n", ""),
+        (
+            f"pattern: {BINDING_RC_NODE_LOADERS}",
+            "pattern: binding-rc-node-loaders-*",
+        ),
+        (
+            f"pattern: {BINDING_RC_NODE_LOADERS}",
+            "pattern: binding-rc-node-loaders-${{ inputs.source_run_id }}",
+        ),
+        (
+            f"pattern: {BINDING_RC_NODE_LOADERS}",
+            f"pattern: {BINDING_RC_NODE_LOADERS}\n          name: another-artifact",
+        ),
+        (BINDING_RC_NODE_LOADER_DESTINATION, "dist"),
+        ("merge-multiple: true", "merge-multiple: false"),
+        (
+            "merge-multiple: true",
+            "merge-multiple: true\n          run-id: ${{ inputs.source_run_id }}",
+        ),
+        ("merge-multiple: true", "merge-multiple: true\n          run-id: ${{ github.run_id }}"),
+        (
+            "merge-multiple: true",
+            "merge-multiple: true\n          repository: unrelated/repository",
+        ),
+        (
+            "merge-multiple: true",
+            "merge-multiple: true\n          github-token: ${{ github.token }}",
+        ),
+    )
+    for original, changed in mutations:
+        assert original in fixture, f"Node loader negative fixture does not mutate {original!r}"
+        try:
+            artifact_contracts(fixture.replace(original, changed, 1))
+        except AssertionError:
+            continue
+        raise AssertionError(f"Node loader policy accepted drift: {changed}")
 
 
 def validate_operator_handoffs_have_no_artifacts() -> None:
@@ -709,6 +832,7 @@ def main() -> None:
     test_suite = texts[WORKFLOWS / "test.yml"]
     validate_test_suite_trigger(test_suite)
     validate_required_run_negative_fixtures()
+    validate_node_loader_negative_fixtures()
     validate_test_suite_sticky_negative_fixtures()
     validate_operator_handoffs_have_no_artifacts()
     validate_rust_tests_lane(test_suite)
