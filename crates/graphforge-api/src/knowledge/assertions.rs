@@ -404,7 +404,7 @@ impl GraphForge {
         ))
     }
 
-    /// Atomically create a Bazel-migration0 assertion and its first explicit epistemic status.
+    /// Atomically create a knowledge assertion and its first explicit epistemic status.
     #[allow(
         clippy::needless_pass_by_value,
         reason = "graphforge-epistemic-api/1 freezes owned request structs"

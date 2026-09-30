@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import copy
 import importlib.util
 from pathlib import Path
 import unittest
@@ -37,25 +36,10 @@ def metadata(*, extension: bool = False) -> dict:
     }
 
 
-def bazel_lock() -> dict:
-    return {
-        "crates": {
-            name: {
-                "name": name,
-                "build_script_attrs": {
-                    "build_script_env": {"common": {CHECK.EXTENSION_ENV: "1"}, "selects": {}}
-                },
-            }
-            for name in CHECK.PYO3_CRATES
-        }
-    }
-
-
 class BuildModeTests(unittest.TestCase):
     def test_distinct_test_and_distribution_modes(self) -> None:
         CHECK.validate_metadata(metadata(), extension=False)
         CHECK.validate_metadata(metadata(extension=True), extension=True)
-        CHECK.validate_bazel(bazel_lock())
 
     def test_unconditional_or_indirect_extension_feature_fails_tests(self) -> None:
         # Resolved nodes expose both direct dependency features and default/alias
@@ -88,26 +72,6 @@ class BuildModeTests(unittest.TestCase):
         graph["packages"][-1]["targets"][0]["test"] = False
         with self.assertRaisesRegex(ValueError, "Rust lib tests must remain enabled"):
             CHECK.validate_metadata(graph, extension=False)
-
-    def test_bazel_requires_every_extension_build_script(self) -> None:
-        good = bazel_lock()
-        for name in CHECK.PYO3_CRATES:
-            with self.subTest(crate=name):
-                missing = copy.deepcopy(good)
-                missing["crates"][name]["build_script_attrs"].clear()
-                with self.assertRaisesRegex(ValueError, "lacks explicit extension mode"):
-                    CHECK.validate_bazel(missing)
-        missing = copy.deepcopy(good)
-        missing["crates"].pop("pyo3-ffi")
-        with self.assertRaisesRegex(ValueError, "missing PyO3"):
-            CHECK.validate_bazel(missing)
-
-    def test_bazel_extension_environment_is_enabled_by_presence(self) -> None:
-        lock = bazel_lock()
-        lock["crates"]["pyo3-ffi"]["build_script_attrs"]["build_script_env"]["common"][
-            CHECK.EXTENSION_ENV
-        ] = "0"
-        CHECK.validate_bazel(lock)
 
 
 if __name__ == "__main__":

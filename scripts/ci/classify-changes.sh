@@ -162,21 +162,6 @@ while IFS= read -r -d '' path; do
       rust_tests=true
       ;;
 
-    # Bazel build descriptions feed no CI Gate lane: Cargo is the only build
-    # description the gate compiles (ADR 0048). They stay in the tree until
-    # #1646 deletes them. The Bazel scripts and docs fall through to the
-    # ordinary Python and documentation rules below.
-    MODULE.bazel | MODULE.bazel.lock | BUILD.bazel | .bazelrc | .bazelversion | \
-      cargo-bazel-lock.json | tools/bazel/* | tools/bazel/**/* | \
-      platforms/BUILD.bazel | \
-      crates/BUILD.bazel | crates/*/BUILD.bazel | \
-      docs/contracts/examples/BUILD.bazel | docs/reference/BUILD.bazel | \
-      tests/features/BUILD.bazel | tests/tck/BUILD.bazel | \
-      tests/release_workflows/BUILD.bazel | \
-      examples/agent_grounding/BUILD.bazel | \
-      scripts/ci/BUILD.bazel)
-      ;;
-
     tests/features/api/* | tests/features/api/**/* | \
       crates/graphforge-api/tests/bdd/* | crates/graphforge-api/tests/bdd/**/*)
       rust=true

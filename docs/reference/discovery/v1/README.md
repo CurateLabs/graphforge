@@ -23,7 +23,7 @@ GRAPHFORGE_UPDATE_DISCOVERY_ARTIFACTS=1 \
 
 Running the same test without that environment variable compares generated
 bytes with the checked-in files and validates every corpus case through the
-public Rust parser. Cargo and Bazel CI therefore fail when artifacts drift.
+public Rust parser. CI therefore fails when artifacts drift.
 
 Downstream TypeScript may package these JSON files, use a JSON Schema validator
 for early structural feedback, and run the conformance corpus against an HTTP

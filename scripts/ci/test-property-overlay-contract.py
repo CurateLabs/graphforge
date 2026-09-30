@@ -105,8 +105,8 @@ def check_module_discovery(root: Path) -> None:
     expect_failure("orphan cannot supply root authority", check)
     child.write_text(files[child], encoding="utf-8")
 
-    # Bazel may expose each source as a separate symlink beneath real
-    # runfiles directories; containment follows the resolved authority root.
+    # Each source may be a separate symlink beneath a real directory tree;
+    # containment follows the resolved authority root.
     runfiles = root / "runfiles"
     for source in files:
         destination = runfiles / source.relative_to(root)
@@ -127,6 +127,83 @@ def check_module_discovery(root: Path) -> None:
     )
 
 
+def mutate(path: Path, before: str, after: str, label: str, check) -> None:
+    """Apply one textual mutation, require the gate to refuse it, then restore."""
+    source = path.read_text(encoding="utf-8")
+    if before not in source:
+        raise AssertionError(f"missing mutation marker: {label}")
+    path.write_text(source.replace(before, after, 1), encoding="utf-8")
+    expect_failure(label, check)
+    path.write_text(source, encoding="utf-8")
+
+
+def check_scale_target_selection(root: Path, contract_path: Path) -> None:
+    """The production scale test must stay built by Cargo and selected by CI nextest."""
+
+    def check() -> None:
+        GATE.validate(root, contract_path)
+
+    storage = root / "crates/graphforge-storage/Cargo.toml"
+    package = "autobenches = false\n"
+    mutate(storage, package, package + "autotests = false\n", "test autodiscovery off", check)
+    features = "[features]\n"
+    for label, declaration in (
+        ("feature-gated scale target", 'required-features = ["test-support"]\n'),
+        ("scale target not a test", "test = false\n"),
+        ("scale target custom harness", "harness = false\n"),
+    ):
+        mutate(
+            storage,
+            features,
+            '[[test]]\nname = "property_overlay_scale"\n'
+            'path = "tests/property_overlay_scale.rs"\n' + declaration + "\n" + features,
+            label,
+            check,
+        )
+    mutate(
+        storage,
+        features,
+        '[[test]]\nname = "renamed_scale"\npath = "tests/property_overlay_scale.rs"\n\n' + features,
+        "renamed scale binary",
+        check,
+    )
+    mutate(
+        root / "Cargo.toml",
+        '  "crates/graphforge-storage",\n',
+        "",
+        "storage left workspace",
+        check,
+    )
+
+    workflow = root / ".github/workflows/test.yml"
+    nextest = "cargo nextest run --workspace --locked --no-fail-fast"
+    exclusion = "(package(graphforge-observability) and binary(disabled_allocations))"
+    for label, before, after in (
+        ("not workspace-wide", nextest, nextest.replace(" --workspace", "")),
+        ("excluded storage package", nextest, f"{nextest} --exclude graphforge-storage"),
+        ("single package", nextest, f"{nextest} -p graphforge-api"),
+        ("test-name filter", nextest, f"{nextest} graph_construction"),
+        (
+            "filterset excludes scale binary",
+            exclusion,
+            f"{exclusion} or (package(graphforge-storage) and binary(property_overlay_scale))",
+        ),
+        (
+            "unrecognised filterset",
+            exclusion,
+            f"{exclusion} or binary(/overlay/)",
+        ),
+    ):
+        mutate(workflow, before, after, label, check)
+
+    config = root / ".config/nextest.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text('[profile.default]\ndefault-filter = "not package(x)"\n', encoding="utf-8")
+    expect_failure("nextest default-filter", check)
+    config.unlink()
+    check()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="gf-property-overlay-contract-") as directory:
         root = Path(directory)
@@ -137,8 +214,9 @@ def main() -> None:
             "crates/graphforge-storage/src/lib.rs",
             "crates/graphforge-storage/src/writer.rs",
             "crates/graphforge-storage/tests/property_overlay_scale.rs",
-            "crates/graphforge-storage/BUILD.bazel",
-            "BUILD.bazel",
+            "crates/graphforge-storage/Cargo.toml",
+            "Cargo.toml",
+            ".github/workflows/test.yml",
         ):
             destination = root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -300,40 +378,7 @@ def main() -> None:
         expect_failure("comment-only total read bound", lambda: GATE.validate(root, contract_path))
         scale.write_text(scale_source, encoding="utf-8")
 
-        storage_build = root / "crates/graphforge-storage/BUILD.bazel"
-        build_source = storage_build.read_text(encoding="utf-8")
-        storage_build.write_text(
-            build_source.replace('\n        ":property_overlay_scale",', "", 1),
-            encoding="utf-8",
-        )
-        expect_failure("scale Bazel mapping", lambda: GATE.validate(root, contract_path))
-        storage_build.write_text(
-            build_source.replace(
-                '":property_overlay_scale",',
-                '# ":property_overlay_scale",',
-                1,
-            ),
-            encoding="utf-8",
-        )
-        expect_failure("comment-only Bazel mapping", lambda: GATE.validate(root, contract_path))
-        storage_build.write_text(build_source, encoding="utf-8")
-
-        root_build = root / "BUILD.bazel"
-        root_build_source = root_build.read_text(encoding="utf-8")
-        root_build.write_text(
-            root_build_source.replace(
-                '"//crates/graphforge-storage:storage_integration_tests",',
-                "",
-                1,
-            ),
-            encoding="utf-8",
-        )
-        expect_failure("root integration suite mapping", lambda: GATE.validate(root, contract_path))
-        root_build.write_text(
-            root_build_source.replace('\n        ":integration_tests",', "", 1),
-            encoding="utf-8",
-        )
-        expect_failure("ci Rust suite mapping", lambda: GATE.validate(root, contract_path))
+        check_scale_target_selection(root, contract_path)
 
     print("property overlay contract mutation tests passed")
 

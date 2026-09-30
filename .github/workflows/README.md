@@ -216,8 +216,7 @@ npm, and crates.io surfaces, records four non-overlapping artifact groups, and
 reopens every archive with `graphforge-release-candidate-v2` completeness
 validation. A checksum-valid archive with missing entrypoints, types, native
 modules, dependency metadata, or legal files is rejected.
-Every native is built by maturin (Python) or napi (Node); Binding RC has no
-Bazel step (ADR 0048). The Linux wheel is built inside maturin-action's
+Every native is built by maturin (Python) or napi (Node) (ADR 0048). The Linux wheel is built inside maturin-action's
 manylinux2014 container with `--manylinux 2_17`, so maturin's own audit
 refuses the wheel instead of relabelling it if any symbol needs a glibc newer
 than 2.17. maturin names the wheel with the PEP 600 tag and its

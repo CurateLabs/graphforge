@@ -18,12 +18,11 @@ repository-maintained change history file.
 
 ## 2. Prove the candidate
 
-CI Rust compilation and the mapped test graph are Bazel-owned under required
-check **`CI Gate`** (see [bazel.md](bazel.md) and
-[bazel-migration.md § CI Gate cutover (#4)](bazel-migration.md#ci-gate-cutover-4)). Binding RC and publish
-lanes must consume Bazel-built (or equivalent) natives rather than silently
-recompiling a different native graph. Publish credentials and OIDC stay in
-release workflows — never in cacheable Bazel actions.
+CI Rust compilation and tests are Cargo-owned (Cargo with nextest, ADR 0048)
+under required check **`CI Gate`** (see
+[agent-environment.md](agent-environment.md#rust-test-gate)). Binding RC builds
+the Python wheel with maturin and the Node addon with napi. Publish credentials
+and OIDC stay in release workflows.
 
 The Binding Release Candidate workflow must retain the manifest, Python, npm,
 crates, and evidence partitions for the same commit. Before any registry write,

@@ -168,8 +168,7 @@ fail once a source fits the default. No transitional exemptions apply.
   `lifecycle` owners. Complete annotated methods, wrappers and async tasks move
   together. Facade identity, runtime ownership, constructors and registration stay
   in the roots; public paths and field/drop order remain unchanged.
-- Pinned PyO3 uses `multiple-pymethods`, with Cargo/Bazel dependency state updated
-  together. Python stub, parity and GIL source checks follow declared production
+- Pinned PyO3 uses `multiple-pymethods`, declared in the Cargo dependency state. Python stub, parity and GIL source checks follow declared production
   modules. This corrects the old scanner's omission of eight already-registered
   import-session members without changing the actual API or frozen Rust digests.
   The expanded GIL check also requires two existing certification-report inputs

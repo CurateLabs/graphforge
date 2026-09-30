@@ -8,7 +8,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 fn gf_bin() -> std::path::PathBuf {
-    // Bazel/cargo may provide a relative binary path; canonicalize before changing cwd.
+    // The binary path may be relative; canonicalize before changing cwd.
     fs::canonicalize(env!("CARGO_BIN_EXE_gf")).expect("resolve same-build gf binary")
 }
 
@@ -467,7 +467,7 @@ fn portable_facade_and_same_binary_preserve_complete_receipts() {
 #[test]
 fn shared_verification_golden_matches_real_facade_and_cli() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    // Bazel runfiles are links; verifier inputs must be ordinary owned files.
+    // Verifier inputs must be ordinary owned files, never links into the tree.
     let fixture = root.join("tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb");
     let materialized = tempfile::tempdir().unwrap();
     let package = materialized.path().join("openalex-openalex.gfpb");

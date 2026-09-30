@@ -1,9 +1,8 @@
 //! Embed the canonical project-local skill bundle in the Rust-owned CLI.
 //!
-//! Skill files are copied into `OUT_DIR` before `include_bytes!` so the same
-//! build script works under Cargo and Bazel (`cargo_build_script`), where the
-//! original tree may only be available as a declared `data` input during the
-//! build-script action.
+//! Skill files are copied into `OUT_DIR` and embedded with `include_bytes!`
+//! paths relative to the generated module, so the compiled bytes come from one
+//! build-script snapshot of the canonical `project-skills/` tree.
 
 use std::env;
 use std::fmt::Write as _;
@@ -29,23 +28,10 @@ fn rust_string(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-fn project_skills_root(manifest_dir: &Path) -> PathBuf {
-    // Bazel `cargo_build_script` sets this to the declared manifest input so the
-    // skill tree is resolved from runfiles/data rather than a source-tree walk.
-    if let Some(manifest) = env::var_os("GRAPHFORGE_PROJECT_SKILLS_MANIFEST") {
-        return PathBuf::from(manifest)
-            .parent()
-            .expect("project-skills manifest path has a parent directory")
-            .to_path_buf();
-    }
-    manifest_dir.join("../../project-skills")
-}
-
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("out dir"));
-    let root = project_skills_root(&manifest_dir);
-    println!("cargo:rerun-if-env-changed=GRAPHFORGE_PROJECT_SKILLS_MANIFEST");
+    let root = manifest_dir.join("../../project-skills");
     println!("cargo:rerun-if-changed={}", root.display());
 
     let manifest = root.join("manifest.json");
@@ -79,8 +65,7 @@ fn main() {
         embedded_relatives.push(relative);
     }
 
-    // Prefer paths relative to this generated file so Bazel sandboxed rustc can
-    // resolve `include_bytes!` against the cargo_build_script OUT_DIR tree.
+    // Paths are relative to this generated file, which lives in OUT_DIR.
     let manifest_literal = rust_string("project_skills_embed/manifest.json");
     let mut generated =
         format!("const PROJECT_SKILL_MANIFEST: &[u8] = include_bytes!({manifest_literal});\n");
