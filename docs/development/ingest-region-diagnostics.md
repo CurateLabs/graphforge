@@ -197,7 +197,8 @@ covers bounded normalization windows. Appends are split into `append_nodes`
 and `append_edges`; `manifest_persistence` covers complete manifest checkpoints
 including their barriers and installs. Import progress journal work uses the
 disjoint `journal_append`, `journal_sync`, and `journal_namespace_publication`
-leaves. Seal, encoding, hydration and commit retain
+leaves. `source_publication` covers the source rename and its retained parent
+barrier. Seal, encoding, hydration and commit retain
 their existing boundaries. Reader setup and uninstrumented work stay in the
 reported residual; do not call the entire residual hashing or source reading.
 
@@ -333,8 +334,18 @@ the `runexec` process's successful exit alone cannot qualify a failed ingest.
 Optimized Python (`-O` or `PYTHONOPTIMIZE`) is refused at shared-module import
 before any lane work; qualification assertions cannot be disabled.
 Missing/unavailable measurements and nested persistence rows are refused.
-Manifest checkpoint, journal append, sync and namespace costs are reported
-separately and summed only as disjoint leaves.
+Manifest checkpoint, journal append, sync, journal namespace and source
+publication costs are reported separately as disjoint leaves, including the
+startup namespace barriers. The baseline source-publication helper is pinned
+to its reviewed body digest
+`30f1a0bf1ff07ab1ecfe842a3f6b57dd6cd3a165af234b7d801375d686b71637`;
+unknown helper bodies are refused before assuming zero namespace barriers.
+The baseline already renames each source without a measured source-publication
+leaf, so its new directory-barrier count/time are known zero, while rename
+wall/CPU and other unobserved costs remain unavailable. All candidate leaf
+costs and the complete barrier count/time delta are included. Whole-persistence
+wall comparison remains unavailable; manifest-checkpoint wall deltas retain
+matched boundaries and remain comparable.
 
 After each measurement, use the [reopen verifier](../../scripts/development/import-journal/verify-reopen.py)
 from a Python environment with PyArrow installed:
@@ -366,9 +377,9 @@ Method SHA-256 pins:
 | --- | --- |
 | `driver.sh` | `a011e6b682c49a59d08ef919cca6997971f3cbb0d52ff27fa0c2dd0e4aa8a498` |
 | `measure-lane.py` | `ec96354470b6d3b96d06717f4d3fae8c7cf4cb44ce33a8edd35d3ad7c0e2693d` |
-| `measurement_contract.py` | `9a6807e2f2f82758fc2a739728bfb334bab9247f02c308a86402941248426bf0` |
-| `compare-pair.py` | `2c034851bac427b0b87d3bd56bc1fdd239d58571efe152cac1bde53622e7dd8b` |
-| `test-measurement-method.py` | `5f6e8a44babf11d58e585a7e73e3fcdee22e6d17942c8c95a4935f58fe34bbd0` |
+| `measurement_contract.py` | `4fe3c7df6004efe47df055f4580209dde0cf6e9868ed9cde77886fd13c1bdef1` |
+| `compare-pair.py` | `e948cd34b6b3a4b16778f1afc3644f22806c1fd5e6676c47f8cdf70c276079a3` |
+| `test-measurement-method.py` | `9e281f483f8f1d7f37facc85225acfb96ce52a7f150eb4ad859d20a2cdd38a45` |
 | `verify-reopen.py` | `6cb6da70c9a0d7ee2d0f1d2debb3c39838daaa44c35a3d04b3e5b4caf937e3a5` |
 | `test-reopen-method.py` | `ce22331249b55d5bb56f907f727c8ff98892b2c4aa0ee44cdfcaf1833dfb7d1e` |
 

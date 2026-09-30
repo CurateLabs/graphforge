@@ -25,6 +25,35 @@ from measurement_contract import (
 ROOT = Path(__file__).resolve().parent
 MEASURE = ROOT / "measure-lane.py"
 COMPARE = ROOT / "compare-pair.py"
+BASELINE_SOURCE = """
+    fn publish_source(&self, temporary: &Path, destination: &Path) -> Result<(), GfError> {
+        let observed = if let Some(allocation) = &self.allocation_operation {
+            let directory = graphforge_filesystem::StableDirectory::open(
+                temporary
+                    .parent()
+                    .ok_or_else(|| storage("import temporary has no parent"))?,
+            )
+            .map_err(storage)?;
+            let file = directory
+                .open_child_file(
+                    temporary
+                        .file_name()
+                        .ok_or_else(|| storage("import temporary has no name"))?,
+                )
+                .map_err(storage)?;
+            allocation.replace_file_at(temporary, &file)?;
+            Some(file)
+        } else {
+            None
+        };
+        fs::rename(temporary, destination).map_err(storage)?;
+        if let (Some(allocation), Some(file)) = (&self.allocation_operation, observed) {
+            allocation.remove_file_at(destination)?;
+            allocation.replace_file_at(destination, &file)?;
+            allocation.remove_file_at(temporary)?;
+        }
+        Ok(())
+    }"""
 VALUES = {
     "wall_ns": 1,
     "process_cpu_ns": 1,
@@ -40,10 +69,18 @@ def regions(lane, index):
     rows = {"root/manifest_persistence": {"calls": 1, "inclusive": VALUES.copy()}}
     if lane == "candidate":
         rows["root/journal_sync"] = {"calls": 1, "inclusive": VALUES.copy()}
+        if index in (1, 2):
+            rows["root/source_publication"] = {"calls": 1, "inclusive": VALUES.copy()}
         if index == 0:
-            rows["root/journal_namespace_publication"] = {"calls": 1, "inclusive": VALUES.copy()}
+            rows["root/journal_namespace_publication"] = {
+                "calls": 1,
+                "inclusive": {**VALUES, "fsync_calls": 3, "fsync_elapsed_ns": 9, "wall_ns": 7},
+            }
         if index == 3:
-            rows["root/journal_append"] = {"calls": 1, "inclusive": VALUES.copy()}
+            rows["root/journal_append"] = {
+                "calls": 1,
+                "inclusive": {**VALUES, "fsync_calls": 0, "fsync_elapsed_ns": 0},
+            }
     return {
         "region_diagnostics": {
             "complete": True,
@@ -181,7 +218,7 @@ with tempfile.TemporaryDirectory(prefix="gf1624-method-fixtures-") as tmp:
                     raise
         return evidence / f"pair-{pair}" / name
 
-    def compare(pair):
+    def compare(pair, source=BASELINE_SOURCE):
         arguments = [
             str(COMPARE),
             "--pair",
@@ -195,7 +232,11 @@ with tempfile.TemporaryDirectory(prefix="gf1624-method-fixtures-") as tmp:
             patch.object(sys, "argv", arguments),
             patch(
                 "subprocess.check_output",
-                return_value="crates/graphforge-api/src/import_session/journal.rs\n",
+                side_effect=lambda command, **_kwargs: (
+                    source
+                    if command[1] == "show"
+                    else "crates/graphforge-api/src/import_session/journal.rs\n"
+                ),
             ),
             contextlib.redirect_stdout(io.StringIO()),
         ):
@@ -217,11 +258,29 @@ with tempfile.TemporaryDirectory(prefix="gf1624-method-fixtures-") as tmp:
     output = read_json(container / "evidence/pair-1/comparison.json")
     before, after = output["lanes"]
     assert before["persistence_totals"]["fsync_calls"] == 5
-    assert after["persistence_totals"]["fsync_calls"] == 12
+    assert after["persistence_totals"]["fsync_calls"] == 15
     assert after["by_category"]["manifest_checkpoint"]["fsync_calls"] == 5
     assert after["by_category"]["journal_sync"]["fsync_calls"] == 5
-    assert after["by_category"]["journal_namespace"]["fsync_calls"] == 1
-    assert output["persistence_delta_candidate_minus_baseline"]["fsync_calls"] == 7
+    assert after["by_category"]["journal_namespace"]["fsync_calls"] == 3
+    assert output["persistence_delta_candidate_minus_baseline"]["fsync_calls"] == 10
+
+    assert after["by_category"]["source_publication"]["fsync_calls"] == 2
+    assert after["by_category"]["journal_namespace"]["fsync_elapsed_ns"] == 9
+    assert after["by_category"]["journal_namespace"]["wall_ns"] == 7
+    assert after["by_category"]["journal_append"]["fsync_calls"] == 0
+    assert before["by_category"]["source_publication"]["fsync_calls"] == 0
+    assert before["by_category"]["source_publication"]["wall_ns"] is None
+    assert before["persistence_totals"]["wall_ns"] is None
+    assert after["persistence_totals"]["wall_ns"] == 20
+    assert output["persistence_delta_candidate_minus_baseline"]["wall_ns"] is None
+    assert output["manifest_checkpoint_delta_candidate_minus_baseline"]["wall_ns"] == 0
+    assert "wall_ns" in output["persistence_non_comparable_fields"]
+    try:
+        compare(1, BASELINE_SOURCE.replace("fs::rename", "directory.sync()?; fs::rename"))
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("unreviewed baseline barrier admitted as zero")
 
     for pair, case in enumerate(
         (
@@ -333,24 +392,42 @@ with tempfile.TemporaryDirectory(prefix="gf1624-method-fixtures-") as tmp:
         lane(7, "candidate")
     refused(7)
     # Even rebinding the receipt hash cannot admit nested or null measurements.
-    for case in ("nested", "unavailable", "missing_manifest"):
-        receipt = json.loads(original)
+    for case in (
+        "nested",
+        "unavailable",
+        "missing_manifest",
+        "source_missing",
+        "source_nested",
+        "source_unavailable",
+    ):
+        target = candidate / f"run/{RECEIPTS[1]}" if case.startswith("source_") else changed
+        prior_receipt = target.read_text()
+        receipt = json.loads(prior_receipt)
         rows = receipt["region_diagnostics"]["regions"]
         if case == "nested":
             rows["root/journal_append/journal_sync"] = {"calls": 1, "inclusive": VALUES.copy()}
         elif case == "unavailable":
             rows["root/journal_sync"]["inclusive"]["fsync_calls"] = None
-        else:
+        elif case == "missing_manifest":
             del rows["root/manifest_persistence"]
-        write_json(changed, receipt)
+        elif case == "source_missing":
+            del rows["root/source_publication"]
+        elif case == "source_nested":
+            rows["root/source_publication/journal_sync"] = {"calls": 1, "inclusive": VALUES.copy()}
+        else:
+            rows["root/source_publication"]["inclusive"]["fsync_calls"] = None
+        write_json(target, receipt)
         status = json.loads(original_q)
-        status["artifact_sha256"][f"run/{RECEIPTS[3]}"] = digest(changed)
+        status["artifact_sha256"][f"run/{target.name}"] = digest(target)
         write_json(qpath, status)
         refused(1)
+        target.write_text(prior_receipt)
+        qpath.write_text(original_q)
     print(
         "PASS: saved positive completion; runexec/workload/termination/compiler/busy refusal; "
         "incomplete/missing qualification refusal; "
-        "artifact tampering, build/resource mismatch, nested/null/missing regions; disjoint sums"
+        "artifact tampering, build/resource mismatch, nested/null/missing regions; "
+        "source barriers included, unobserved baseline wall unavailable; disjoint sums"
     )
 
 # Real, tiny BenchExec regression: its successful process exit cannot qualify an

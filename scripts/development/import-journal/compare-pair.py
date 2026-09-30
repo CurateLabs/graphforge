@@ -6,7 +6,12 @@ import json
 from pathlib import Path
 import subprocess
 
-from measurement_contract import RECEIPTS, require_external_output, validate_qualification
+from measurement_contract import (
+    RECEIPTS,
+    baseline_source_publication,
+    require_external_output,
+    validate_qualification,
+)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--pair", required=True, type=int)
@@ -61,6 +66,17 @@ allowed = {
     "crates/graphforge-api/src/import_session/journal/tests.rs",
 }
 assert set(changes) <= allowed and changes, ("non-journal runtime delta", changes)
+baseline_namespace = baseline_source_publication(
+    subprocess.check_output(
+        [
+            "git",
+            "show",
+            f"{identities[0]['source_sha']}:crates/graphforge-api/src/import_session.rs",
+        ],
+        cwd=args.repository,
+        text=True,
+    )
+)
 fields = (
     "wall_ns",
     "process_cpu_ns",
@@ -75,6 +91,7 @@ categories = {
     "journal_append": "journal_append",
     "journal_sync": "journal_sync",
     "journal_namespace_publication": "journal_namespace",
+    "source_publication": "source_publication",
 }
 
 
@@ -87,6 +104,24 @@ def totals(selected):
             row,
         )
     return {field: sum(row[field] for row in selected) for field in fields}
+
+
+def combine(costs):
+    return {
+        field: None
+        if any(cost[field] is None for cost in costs)
+        else sum(cost[field] for cost in costs)
+        for field in fields
+    }
+
+
+def delta(before, after):
+    return {
+        field: None
+        if before[field] is None or after[field] is None
+        else after[field] - before[field]
+        for field in fields
+    }
 
 
 rows = []
@@ -127,18 +162,35 @@ for lane in ("baseline", "candidate"):
                 "baseline already contains journal change"
             )
         persistence.extend(selected)
+        registration = path.name in RECEIPTS[1:3]
+        source_rows = [row for row in selected if row["category"] == "source_publication"]
+        if lane == "candidate":
+            assert len(source_rows) == (1 if registration else 0), (
+                "source-publication scope missing"
+            )
+            if registration:
+                assert source_rows[0]["calls"] == 1, "unexpected source-publication call count"
+        command_categories = {
+            kind: totals([row for row in selected if row["category"] == kind])
+            for kind in categories.values()
+        }
+        if lane == "baseline" and registration:
+            # No namespace barrier exists at this reviewed baseline boundary.
+            # Rename wall/CPU/writes/hash cost was not observed as a leaf.
+            command_categories["source_publication"] = {
+                field: 0 if field in baseline_namespace["known_zero_fields"] else None
+                for field in fields
+            }
         commands.append(
             {
                 "command": path.name,
-                "persistence": totals(selected),
-                "by_category": {
-                    kind: totals([row for row in selected if row["category"] == kind])
-                    for kind in categories.values()
-                },
+                "persistence": combine(list(command_categories.values())),
+                "observed_leaf_totals": totals(selected),
+                "by_category": command_categories,
             }
         )
     by_category = {
-        kind: totals([row for row in persistence if row["category"] == kind])
+        kind: combine([command["by_category"][kind] for command in commands])
         for kind in categories.values()
     }
     if lane == "candidate":
@@ -153,7 +205,8 @@ for lane in ("baseline", "candidate"):
             "qualification": qualifications[len(rows)],
             "commands": commands,
             "persistence_regions": persistence,
-            "persistence_totals": totals(persistence),
+            "persistence_totals": combine(list(by_category.values())),
+            "observed_leaf_totals": totals(persistence),
             "by_category": by_category,
             "manifest_checkpoint_calls": sum(
                 row["calls"] for row in persistence if row["category"] == "manifest_checkpoint"
@@ -164,15 +217,16 @@ comparison = {
     "pair": args.pair,
     "runtime_diff_paths": changes,
     "lanes": rows,
-    "persistence_delta_candidate_minus_baseline": {
-        field: rows[1]["persistence_totals"][field] - rows[0]["persistence_totals"][field]
-        for field in fields
-    },
-    "manifest_checkpoint_delta_candidate_minus_baseline": {
-        field: rows[1]["by_category"]["manifest_checkpoint"][field]
-        - rows[0]["by_category"]["manifest_checkpoint"][field]
-        for field in fields
-    },
+    "baseline_source_publication_semantics": baseline_namespace,
+    "persistence_delta_candidate_minus_baseline": delta(
+        rows[0]["persistence_totals"], rows[1]["persistence_totals"]
+    ),
+    "persistence_non_comparable_fields": [
+        field for field in fields if rows[0]["persistence_totals"][field] is None
+    ],
+    "manifest_checkpoint_delta_candidate_minus_baseline": delta(
+        rows[0]["by_category"]["manifest_checkpoint"], rows[1]["by_category"]["manifest_checkpoint"]
+    ),
 }
 (base / "comparison.json").write_text(json.dumps(comparison, indent=2) + "\n")
 print(

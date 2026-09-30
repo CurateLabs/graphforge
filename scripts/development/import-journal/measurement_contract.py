@@ -91,6 +91,36 @@ BUILD_SETTINGS = (
 )
 
 
+def baseline_source_publication(source):
+    """Admit zero new namespace barriers only for the reviewed baseline helper.
+
+    The brace scan only locates the pinned function bytes; unknown bodies fail
+    the content pin and must be reviewed before changing this specific method.
+    CLI allocation diagnostics are absent, so the reviewed helper does only
+    the rename at this boundary, with no file/directory durability barrier.
+    """
+    start = source.index("    fn publish_source(")
+    opening = source.index("{", start)
+    depth = 0
+    body = None
+    for end in range(opening, len(source)):
+        depth += (source[end] == "{") - (source[end] == "}")
+        if depth == 0:
+            body = source[start : end + 1]
+            break
+    assert body is not None
+    checksum = hashlib.sha256(body.encode()).hexdigest()
+    assert checksum == "30f1a0bf1ff07ab1ecfe842a3f6b57dd6cd3a165af234b7d801375d686b71637", (
+        "unreviewed baseline source-publication semantics",
+        checksum,
+    )
+    return {
+        "function_body_sha256": checksum,
+        "known_zero_fields": ["fsync_calls", "fsync_elapsed_ns"],
+        "unavailable_cost_reason": "baseline rename has no measured source_publication leaf",
+    }
+
+
 def require_external_output(output, repository, method_root):
     """Refuse raw output inside either the source or stored-method repository."""
     roots = [Path(repository).resolve()]
