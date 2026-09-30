@@ -218,10 +218,12 @@ validation. A checksum-valid archive with missing entrypoints, types, native
 modules, dependency metadata, or legal files is rejected.
 Every native is built by maturin (Python) or napi (Node); Binding RC has no
 Bazel step (ADR 0048). The Linux wheel is built inside maturin-action's
-manylinux2014 container with `--compatibility manylinux_2_17`, so maturin's
-own audit refuses the wheel instead of relabelling it if any symbol needs a
-glibc newer than 2.17, and every Python lane then checks that the wheel file
-name and `WHEEL` `Tag:` carry its declared tag. The Linux x64 Node lane uploads
+manylinux2014 container with `--manylinux 2_17`, so maturin's own audit
+refuses the wheel instead of relabelling it if any symbol needs a glibc newer
+than 2.17. maturin names the wheel with the PEP 600 tag and its
+`manylinux2014` alias (`cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64`),
+and every Python lane checks that the wheel file name and its `WHEEL` `Tag:`
+lines carry exactly the declared tag set. The Linux x64 Node lane uploads
 the napi-generated `index.js` / `index.d.ts` its native contract executed, and
 the release assembly packs exactly those loaders rather than recompiling.
 Only the cross-built aarch64 Linux Node cell mounts a release-profile `target/`

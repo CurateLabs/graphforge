@@ -701,22 +701,20 @@ def validate_python_native_build_policy(python_job: str) -> None:
     """Every Python lane builds with maturin and asserts its declared wheel tag (#1645).
 
     The Linux lane must build inside the manylinux2014 container and pass
-    maturin's own `--compatibility manylinux_2_17` audit, so the wheel is never
-    labelled with a tag its linked glibc floor does not satisfy.
+    maturin's own `--manylinux 2_17` audit, so the wheel is never labelled with
+    a tag its linked glibc floor does not satisfy.
     """
     assert python_job.count("uses: PyO3/maturin-action@") == 1
     build = workflow_step(python_job, "uses: PyO3/maturin-action@")
     assert "if:" not in build, "the maturin build must run on every Python lane"
     assert_active_lines(
         build,
-        "--release --manifest-path crates/graphforge-bindings-py/Cargo.toml",
-        "--out dist ${{ matrix.maturin_args }}",
-        'manylinux: "2014"',
+        "args: --release --manifest-path crates/graphforge-bindings-py/Cargo.toml --out dist",
+        'manylinux: "2_17"',
     )
     linux = [line for line in python_job.splitlines() if "target: python-ubuntu" in line]
     assert len(linux) == 1
-    assert "wheel_tag: cp310-abi3-manylinux_2_17_x86_64" in linux[0]
-    assert 'maturin_args: "--compatibility manylinux_2_17"' in linux[0]
+    assert "wheel_tag: cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64 " in linux[0]
     for target, tag in (
         ("python-macos", "cp310-abi3-macosx_11_0_arm64"),
         ("python-windows", "cp310-abi3-win_amd64"),
@@ -729,7 +727,7 @@ def validate_python_native_build_policy(python_job: str) -> None:
         tag_step,
         "WHEEL_TAG: ${{ matrix.wheel_tag }}",
         '*"-${WHEEL_TAG}.whl") ;;',
-        "if tags != [expected]:",
+        "if tags != expected:",
     )
     assert (
         python_job.index("uses: PyO3/maturin-action@")
@@ -961,7 +959,7 @@ def main() -> None:
         "  python:\n",
         "  node:\n",
         "uses: PyO3/maturin-action@",
-        "--compatibility manylinux_2_17",
+        '\n          manylinux: "2_17"',
         "Require the declared wheel platform tag",
         "Prepare writable Python RC evidence directory",
         "Clean-install and execute native contract",

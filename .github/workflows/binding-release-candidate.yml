@@ -50,13 +50,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux builds inside maturin-action's manylinux2014 container, the
-          # only place glibc 2.17 is the linked floor. `--compatibility` makes
-          # maturin's own auditwheel check refuse the wheel rather than relabel
-          # it if any symbol needs a newer glibc (#1645).
-          - { os: blacksmith-4vcpu-ubuntu-2404, target: python-ubuntu, wheel_tag: cp310-abi3-manylinux_2_17_x86_64, maturin_args: "--compatibility manylinux_2_17" }
-          - { os: blacksmith-12vcpu-macos-15, target: python-macos, wheel_tag: cp310-abi3-macosx_11_0_arm64, maturin_args: "" }
-          - { os: blacksmith-8vcpu-windows-2025, target: python-windows, wheel_tag: cp310-abi3-win_amd64, maturin_args: "" }
+          # `manylinux: "2_17"` builds Linux inside maturin-action's manylinux2014
+          # (glibc 2.17) container and passes `--manylinux 2_17`, so maturin's
+          # own audit refuses the wheel rather than relabel it if any symbol
+          # needs a newer glibc (#1645). maturin writes the PEP 600 tag and its
+          # manylinux2014 alias, which name the same platform.
+          - { os: blacksmith-4vcpu-ubuntu-2404, target: python-ubuntu, wheel_tag: cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64 }
+          - { os: blacksmith-12vcpu-macos-15, target: python-macos, wheel_tag: cp310-abi3-macosx_11_0_arm64 }
+          - { os: blacksmith-8vcpu-windows-2025, target: python-windows, wheel_tag: cp310-abi3-win_amd64 }
     env:
       CARGO_INCREMENTAL: 0
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
@@ -90,10 +91,9 @@ jobs:
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           command: build
-          args: >-
-            --release --manifest-path crates/graphforge-bindings-py/Cargo.toml
-            --out dist ${{ matrix.maturin_args }}
-          manylinux: "2014"
+          args: --release --manifest-path crates/graphforge-bindings-py/Cargo.toml --out dist
+          # Linux only; macOS and Windows ignore it.
+          manylinux: "2_17"
           sccache: "false"
 
       - name: Require the declared wheel platform tag
@@ -108,19 +108,25 @@ jobs:
             *) printf 'wheel %s does not carry tag %s\n' "${wheels[0]}" "$WHEEL_TAG" >&2; exit 1 ;;
           esac
           python3 - "${wheels[0]}" "$WHEEL_TAG" <<'PY'
+          import itertools
           import sys
           import zipfile
-          wheel, expected = sys.argv[1], sys.argv[2]
+          wheel, declared = sys.argv[1], sys.argv[2]
+          # A compressed tag set (PEP 425) expands to one Tag: line per member.
+          expected = sorted(
+              "-".join(parts)
+              for parts in itertools.product(*(part.split(".") for part in declared.split("-")))
+          )
           with zipfile.ZipFile(wheel) as archive:
               [name] = [n for n in archive.namelist() if n.endswith(".dist-info/WHEEL")]
-              tags = [
+              tags = sorted(
                   line.removeprefix("Tag: ")
                   for line in archive.read(name).decode("utf-8").splitlines()
                   if line.startswith("Tag: ")
-              ]
-          if tags != [expected]:
-              raise SystemExit(f"{name} declares {tags}, expected [{expected!r}]")
-          print(f"wheel_tag={expected}")
+              )
+          if tags != expected:
+              raise SystemExit(f"{name} declares {tags}, expected {expected}")
+          print(f"wheel_tag={declared}")
           PY
 
       # The manylinux container writes target/ as root; reclaim it before the
