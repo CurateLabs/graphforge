@@ -39,6 +39,8 @@ pub(crate) struct PropertyOverlayExec {
     batch_size: usize,
     row_upper_bound: Option<usize>,
     props: Arc<PlanProperties>,
+    #[cfg(any(test, feature = "test-support"))]
+    digest_context: graphforge_core::hash_observation::operation::Context,
     metrics: Option<ExecutionPlanMetricsSet>,
     work_counts: Option<([Count; 3], Gauge)>,
     lifecycle_context: crate::lifecycle_io::CaptureContext,
@@ -130,6 +132,8 @@ impl PropertyOverlayExec {
             props,
             metrics,
             work_counts,
+            #[cfg(any(test, feature = "test-support"))]
+            digest_context: graphforge_core::hash_observation::operation::Context::capture(),
             lifecycle_context: crate::lifecycle_io::CaptureContext::current(),
         })
     }
@@ -218,8 +222,12 @@ impl ExecutionPlan for PropertyOverlayExec {
         let mut remaining = self.limit;
         let batch_size = self.batch_size;
         let work_counts = self.work_counts.clone();
+        #[cfg(any(test, feature = "test-support"))]
+        let digest_context = self.digest_context.clone();
         let lifecycle_context = self.lifecycle_context.clone();
         tokio::task::spawn_blocking(move || {
+            #[cfg(any(test, feature = "test-support"))]
+            let _digest_guard = digest_context.attach();
             let _lifecycle_capture = lifecycle_context.attach();
             let selected_properties = projection
                 .as_ref()

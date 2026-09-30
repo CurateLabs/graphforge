@@ -66,7 +66,10 @@ mod construction_record_layout;
 mod corruption_checksum;
 pub mod graph_construction;
 mod graph_construction_encoding;
+#[cfg(not(any(test, feature = "test-support")))]
 mod payload_digest;
+#[cfg(any(test, feature = "test-support"))]
+pub mod payload_digest;
 pub use graph_construction::cpu_admission::{ConstructionCpuAdmission, ConstructionCpuLease};
 pub use graph_construction::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkKind,
@@ -78,6 +81,7 @@ pub use graph_construction::{
 };
 
 pub mod graph_files;
+mod graph_read_inventory;
 #[cfg(test)]
 pub(crate) use graph_files::graph_files_root_participant;
 pub use graph_files::{
@@ -91,6 +95,9 @@ pub use graph_files::{
     verify_graph_tree,
 };
 pub(crate) use graph_files::{GraphFilesParticipant, decode_versioned_graph_files_participant};
+pub use graph_read_inventory::{
+    GraphReadFileEntry, GraphReadInventory, capture_graph_read_inventory,
+};
 
 #[allow(
     dead_code,
@@ -128,7 +135,8 @@ pub use graph_object_store::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use graph_object_store::{
-    GraphManifestState, append_graph_files_v2, install_graph_object_bytes, read_graph_object,
+    GraphManifestState, append_graph_files_v2, compact_graph_files, install_graph_object_bytes,
+    read_graph_object,
 };
 pub(crate) use graph_object_store::{
     graph_object_publication_is_live, read_graph_object_by_digest, verify_graph_object,
@@ -139,7 +147,7 @@ pub fn install_project_object_bytes(
     root: &std::path::Path,
     bytes: &[u8],
 ) -> Result<([u8; 32], u64), GfError> {
-    use crate::concurrency_attribution::ObservedSha256 as Sha256;
+    use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
     use sha2::Digest;
 
     let digest = Sha256::digest(bytes).into();

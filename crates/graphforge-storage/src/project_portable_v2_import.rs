@@ -2265,7 +2265,7 @@ mod tests {
     }
 
     fn write_identity_delta(tree: &Path, raw: u32) {
-        const RECORD_START: usize = 84;
+        const RECORD_START: usize = 60;
         const PAYLOAD_LENGTH: usize = RECORD_START + 25;
         let op = crate::GraphDeltaOp {
             operation_uuid: Uuid::now_v7(),
@@ -2297,9 +2297,9 @@ mod tests {
         framed[RECORD_START + 22] = crate::GraphDeltaOpKind::UpsertNode as u8;
         framed.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
         framed.extend_from_slice(&payload);
-        let checksum = Sha256::digest(&framed[RECORD_START..]);
+        let checksum = crate::corruption_checksum::checksum(&framed[RECORD_START..]).to_le_bytes();
         framed.extend_from_slice(&checksum);
-        let checksum = Sha256::digest(&framed);
+        let checksum = crate::corruption_checksum::checksum(&framed).to_le_bytes();
         framed.extend_from_slice(&checksum);
         let path = tree.join(crate::delta_run_relative_path(1));
         fs::create_dir_all(path.parent().unwrap()).unwrap();

@@ -5,7 +5,7 @@
 //! identities. See `docs/book/architecture/canonical-fingerprints-v1.md`,
 //! "Ontology document compatibility boundary", for the byte rules and rationale.
 
-use graphforge_core::hash_observation::ObservedSha256 as Sha256;
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use serde_json::Value;
 use sha2::Digest;
 

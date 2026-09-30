@@ -9,6 +9,7 @@ use super::TopologyIndexReceipt;
 use super::UuidIndexOrphanGcWork;
 use super::V4_ORDINAL_MANIFEST;
 use super::V4_ORDINAL_RECEIPT;
+use super::decode_manifest;
 use super::storage_err;
 use super::topology_delta::hex_sha256;
 use super::topology_delta::read_bounded;
@@ -221,7 +222,7 @@ pub(crate) fn maintain_uuid_membership_orphans_with_ordinal_authority(
 ) -> Result<UuidIndexOrphanGcWork, GfError> {
     let manifest_bytes =
         fs::read(project_dir.join(INDEX_DIR).join(MANIFEST)).map_err(storage_err)?;
-    let manifest: Manifest = serde_json::from_slice(&manifest_bytes).map_err(storage_err)?;
+    let manifest = decode_manifest(&manifest_bytes)?;
     let membership_authority = AuthenticatedV3MembershipAuthority {
         topology_generation: manifest.current_generation,
         manifest_sha256: hex_sha256(&manifest_bytes),
@@ -284,7 +285,7 @@ pub(super) fn collect_uuid_orphans_locked(
             "UUID membership manifest differs from selected generation authority",
         ));
     }
-    let manifest: Manifest = serde_json::from_slice(&manifest_bytes).map_err(storage_err)?;
+    let manifest = decode_manifest(&manifest_bytes)?;
     if manifest.current_generation != membership_authority.topology_generation {
         return Err(storage_err(
             "UUID membership generation differs from selected generation authority",

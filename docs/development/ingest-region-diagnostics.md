@@ -175,6 +175,71 @@ These are calibration observations, not ingest performance thresholds. In the
 last row process CPU includes both threads; the scheduler row observes only the
 capturing thread.
 
+## Digest inventory and isolated read-path accounting
+
+The digest census method is `scripts/development/digest-census.py`. Run it on
+an identified source tree, writing results outside the repository:
+
+```bash
+python3 scripts/development/digest-census.py --repo . --output /tmp/gf-digest-census
+```
+
+The method and reviewed classification inputs are pinned by SHA-256:
+`digest-census.py` is
+`066813e6666c1a77782402cee7ae957b450ccd47a7e14874c4e47b996aabb0eb`;
+`digest-census-overrides.json` is
+`7e6904dfc1a3cbcf9b06bcd69e046aa7ac3b40c4b1cfa88c1ea3d8b48f236553`.
+Run the parser and stale-review regression fixtures with
+`python3 scripts/development/test-digest-census.py`. Reviewed function bodies
+are pinned individually; changed inputs, added producers in the same function,
+missing review pins, and unknown digest algorithms make a strict run fail.
+Refresh a classification only after reviewing its actual inputs and consumers.
+
+The method records the source revision, source-file SHA-256 digests, the working
+diff digest when present, and digests of the method and semantic override inputs.
+Post the generated producer/delegate inventories and review disposition on the
+owning issue. Refresh after the final source edit. Results and per-run tables do
+not belong in this page or elsewhere under `docs/`.
+
+Production producer sites exclude test-only items and descendants. A constructor
+or static digest invocation is a producer site; calls into a digest-owning helper
+form a separate delegate population. Do not add wrapper levels to infer runtime
+passes. The semantic input and consumer, rather than an alias name, determine
+classification: durable artifact/trust-boundary work, contract identity, or
+optional evidence. Required control authentication is recorded separately within
+the trust-boundary category. Mixed helpers list their input-specific callers.
+The method refuses unresolved or stale classifications by default and records
+its lexical limitations. Resolve remaining candidates against current source;
+a text match alone is neither a runtime hash pass nor proof of exhaustiveness.
+
+`graphforge_core::hash_observation::operation::Capture` is test-only scoped
+accounting. It counts actual SHA update input bytes by artifact payload,
+contract identity, control authentication, optional evidence, and unclassified
+producer; actual XXH64 input is counted separately. Worker jobs capture and
+attach the current operation context. Nested operations and unrelated parallel
+tests retain separate collectors; there is no process-wide reset. Production
+context wrappers are zero-sized when test support is disabled.
+
+The actual facade regressions are in
+`crates/graphforge-api/tests/facade_checksum_admission.rs`, identified by SHA-256
+`0a9ac8fa6785ad0702e3de0be34f6d461ad122e6e32331ee4617377a9f4ddc56`.
+They include a nonempty published semantic binding participant, qualified
+property writes, fresh durable reopen and an actual qualified query. Required
+ontology, schema and route identities are measured separately from graph payload.
+Run them with the admitted test environment:
+
+```bash
+python3 scripts/test_environment.py -- cargo test -p graphforge-api --test facade_checksum_admission
+```
+
+Default read/query assertions require both artifact-payload and unclassified
+SHA bytes to be zero. Nonzero checksum bytes prove that payload admission still
+runs. Bounded control authentication and existing logical identity commitments
+remain distinct work. Same-inode, same-length mutation tests target the owning
+admission boundary. A full import/query/export accounting test additionally
+bounds payload SHA input by actual published/exported bytes; standalone region
+hash totals mix domains and cannot prove that bound.
+
 ## Written and hashed bytes and barriers
 
 Stock `gf --json --diagnostics import-session validate --session-uuid UUID` stages and seals

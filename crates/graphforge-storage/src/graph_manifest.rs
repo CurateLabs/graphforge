@@ -1,8 +1,8 @@
 //! Canonical content-addressed Patricia manifest for graph files.
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use crate::{GraphFileEntry, GraphFileRole};
 use graphforge_core::GfError;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
@@ -308,7 +308,7 @@ pub fn object_digest(bytes: &[u8]) -> String {
 #[must_use]
 /// Hash canonical logical-path UTF-8 bytes for radix routing.
 pub fn logical_path_digest(path: &str) -> [u8; 32] {
-    Sha256::digest(path.as_bytes()).into()
+    graphforge_core::hash_observation::ContractSha256::digest(path.as_bytes()).into()
 }
 #[must_use]
 /// Select one high/low SHA-256 nibble at `depth`.

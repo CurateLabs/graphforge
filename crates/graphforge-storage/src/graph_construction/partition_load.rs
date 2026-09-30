@@ -404,10 +404,14 @@ where
         changed: Condvar::new(),
         stop: AtomicBool::new(false),
     };
+    #[cfg(any(test, feature = "test-support"))]
+    let digest_context = graphforge_core::hash_observation::operation::Context::capture();
     let lifecycle_context = crate::lifecycle_io::CaptureContext::current();
     std::thread::scope(|scope| {
         for _ in 0..window {
             scope.spawn(|| {
+                #[cfg(any(test, feature = "test-support"))]
+                let _digest_guard = digest_context.attach();
                 let _lifecycle_capture = lifecycle_context.attach();
                 worker(&shared, partitions, window, weights, weight_budget, &load);
             });

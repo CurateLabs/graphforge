@@ -149,3 +149,52 @@ fn orphan_maintenance_is_bounded_and_preserves_linked_and_live_runs() {
     assert!(!orphan_one.exists());
     assert!(!orphan_two.exists());
 }
+
+#[test]
+fn orphan_collection_refuses_unsupported_manifest_before_deleting_any_file() {
+    let (dir, _, _) = fixture();
+    rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+    let root = dir.path().join(INDEX_DIR);
+    let path = root.join(MANIFEST);
+    let original = fs::read(&path).unwrap();
+    let mut manifest: Manifest = serde_json::from_slice(&original).unwrap();
+    let orphan = root.join("identities-v5-orphan-0000000000000001.uuidx");
+    fs::write(&orphan, b"must survive unsupported metadata").unwrap();
+    manifest.format_version = 7;
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    let authority = super::AuthenticatedV3MembershipAuthority {
+        topology_generation: manifest.current_generation,
+        manifest_sha256: hex_sha256(&bytes),
+    };
+    let error = super::maintain_uuid_membership_orphans_with_authorities(
+        dir.path(),
+        16,
+        Some(&authority),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("unsupported UUID membership format version 7"),
+        "{error}"
+    );
+    assert!(error.contains("recreate the index"), "{error}");
+    assert_eq!(
+        fs::read(&orphan).unwrap(),
+        b"must survive unsupported metadata"
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let error = super::super::validate_run_descriptors(&manifest)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("unsupported UUID membership format version 7"),
+        "{error}"
+    );
+    fs::write(&path, original).unwrap();
+    let work =
+        maintain_uuid_membership_orphans_with_ordinal_authority(dir.path(), 16, None).unwrap();
+    assert_eq!(work.removed, 1);
+    assert!(!orphan.exists());
+}

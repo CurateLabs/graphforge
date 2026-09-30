@@ -1578,7 +1578,10 @@ fn completed_encoding_replay_reauthenticates_retained_parent_payload() {
         .find(|artifact| artifact.bytes > 0)
         .unwrap();
     let path = std::path::Path::new(&retained.source_root).join(&retained.source_path);
-    let original_permissions = std::fs::metadata(&path).unwrap().permissions();
+    let original_metadata = std::fs::metadata(&path).unwrap();
+    let original_identity =
+        graphforge_filesystem::file_identity(&std::fs::File::open(&path).unwrap()).unwrap();
+    let original_permissions = original_metadata.permissions();
     let mut permissions = original_permissions.clone();
     #[cfg(unix)]
     {
@@ -1595,8 +1598,21 @@ fn completed_encoding_replay_reauthenticates_retained_parent_payload() {
     file.sync_all().unwrap();
     drop(file);
     std::fs::set_permissions(&path, original_permissions).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        original_metadata.len()
+    );
+    assert_eq!(
+        graphforge_filesystem::file_identity(&std::fs::File::open(&path).unwrap()).unwrap(),
+        original_identity,
+    );
     let error = session.encode_canonical(&shape, 3).unwrap_err();
-    assert!(error.to_string().contains("digest"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("graph payload XXH64 checksum does not match its inventory"),
+        "{error}"
+    );
 }
 
 #[test]

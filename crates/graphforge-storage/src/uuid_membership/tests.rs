@@ -84,6 +84,7 @@ pub(super) fn write_v4_test_artifact(
         generation,
         bytes: u64::try_from(bytes.len()).unwrap(),
         sha256: hex_sha256(bytes),
+        xxh64: crate::corruption_checksum::checksum(bytes),
     }
 }
 
@@ -407,6 +408,7 @@ pub(super) fn install_test_v4_facet(
             generation,
             bytes: forward_bytes.len() as u64,
             sha256: forward_digest,
+            xxh64: crate::corruption_checksum::checksum(&forward_bytes),
         }],
         ordinal_ranges: vec![crate::V4OrdinalRange {
             first_node_id: 1,
@@ -417,11 +419,13 @@ pub(super) fn install_test_v4_facet(
                 generation,
                 bytes: ordinal_bytes.len() as u64,
                 sha256: ordinal_digest,
+                xxh64: crate::corruption_checksum::checksum(&ordinal_bytes),
             },
             blocks: vec![crate::V4OrdinalBlock {
                 offset: 0,
                 count: nodes.len() as u64,
                 sha256: hex_sha256(&ordinal_bytes),
+                xxh64: crate::corruption_checksum::checksum(&ordinal_bytes),
             }],
         }],
         tombstones: vec![crate::V4OrdinalTombstones {
@@ -432,6 +436,7 @@ pub(super) fn install_test_v4_facet(
                 generation,
                 bytes: 8,
                 sha256: tombstone_digest.clone(),
+                xxh64: crate::corruption_checksum::checksum(&tombstone_bytes),
             },
             blocks: vec![crate::V4OrdinalTombstoneBlock {
                 offset: 0,
@@ -439,6 +444,7 @@ pub(super) fn install_test_v4_facet(
                 first: nodes.len() as u64,
                 last: nodes.len() as u64,
                 sha256: tombstone_digest,
+                xxh64: crate::corruption_checksum::checksum(&tombstone_bytes),
             }],
         }],
     };
@@ -1141,7 +1147,7 @@ fn v4_rebuild_subprocess_crash_retry_selects_one_complete_authority() {
                 generation,
                 generation,
                 &crate::AuxiliaryReceipt {
-                    kind: "uuid-membership/v4".to_owned(),
+                    kind: "uuid-membership/ordinal-v5".to_owned(),
                     schema_version: crate::ORDINAL_IDENTITY_V4,
                     path: format!("{INDEX_DIR}/{V4_ORDINAL_RECEIPT}"),
                     digest: hex_sha256(&receipt_bytes),

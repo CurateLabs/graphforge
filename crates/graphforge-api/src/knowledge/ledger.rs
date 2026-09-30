@@ -1033,7 +1033,9 @@ pub(crate) fn knowledge_generation_uuid(
         hasher.update([0]);
         hasher.update(participant.record_family_id.as_bytes());
         hasher.update([0]);
-        hasher.update(Sha256::digest(&participant.bytes));
+        hasher.update(graphforge_core::hash_observation::ArtifactSha256::digest(
+            &participant.bytes,
+        ));
     }
     graphforge_core::canonical::uuid_v8(hasher.finalize().into())
 }

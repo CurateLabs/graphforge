@@ -815,6 +815,7 @@ mod tests {
             byte_length: 1,
             row_count: 1,
             schema_fingerprint: "schema".into(),
+            content_xxh64: 0,
             content_sha256: "content".into(),
         }
     }

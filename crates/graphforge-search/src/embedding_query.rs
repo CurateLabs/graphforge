@@ -48,6 +48,23 @@ pub fn search_embedding_generation<C>(
     project_dir: &Path,
     request: EmbeddingGenerationQuery<'_>,
     limits: VectorLifecycleLimits,
+    checkpoint: C,
+) -> Result<Vec<VectorSearchHit>, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    search_embedding_generation_with_projection(project_dir, request, limits, None, checkpoint)
+}
+
+/// Search a complete generation while reusing admitted facade label membership.
+///
+/// # Errors
+/// Returns the ordinary embedding query errors and refuses a changed projection generation.
+pub fn search_embedding_generation_with_projection<C>(
+    project_dir: &Path,
+    request: EmbeddingGenerationQuery<'_>,
+    limits: VectorLifecycleLimits,
+    admitted: Option<&crate::vector_lifecycle::LabelMemberProjection>,
     mut checkpoint: C,
 ) -> Result<Vec<VectorSearchHit>, SearchArtifactError>
 where
@@ -68,8 +85,19 @@ where
     })?;
 
     for attempt in 1_u8..=2 {
-        let projection =
-            project_label_members_snapshot(project_dir, request.label_id, limits, &mut checkpoint)?;
+        let captured;
+        let projection = if let Some(projection) = admitted {
+            projection.validate_binding(project_dir, request.label_id)?;
+            projection
+        } else {
+            captured = project_label_members_snapshot(
+                project_dir,
+                request.label_id,
+                limits,
+                &mut checkpoint,
+            )?;
+            &captured
+        };
         let expected_generation = projection.snapshot.generation;
 
         let rows =

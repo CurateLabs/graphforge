@@ -4,11 +4,19 @@
 use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use sha2::Digest;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use graphforge_core::hash_observation::operation::{
+    Capture as PayloadDigestCapture, Context as PayloadDigestContext,
+    Snapshot as PayloadDigestSnapshot,
+};
+
 pub(crate) struct PayloadSha256(Sha256);
 
 impl PayloadSha256 {
     pub(crate) fn new() -> Self {
-        Self(Sha256::new())
+        Self(Sha256::for_domain(
+            graphforge_core::hash_observation::HashDomain::ArtifactPayload,
+        ))
     }
 
     pub(crate) fn update(&mut self, bytes: impl AsRef<[u8]>) {
@@ -27,6 +35,12 @@ impl PayloadSha256 {
 
     pub(crate) fn finalize(self) -> sha2::digest::Output<sha2::Sha256> {
         self.0.finalize()
+    }
+
+    pub(crate) fn digest(bytes: impl AsRef<[u8]>) -> sha2::digest::Output<sha2::Sha256> {
+        let mut hasher = Self::new();
+        hasher.update(bytes);
+        hasher.finalize()
     }
 }
 

@@ -570,7 +570,7 @@ pub(super) fn replace_private_replay_route_table(
         properties_changed,
         None,
     )?;
-    crate::capture_graph_files(target)?;
+    crate::capture_graph_read_inventory(target)?;
     Ok(())
 }
 

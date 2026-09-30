@@ -4,8 +4,8 @@ use std::fmt::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_core::{ApiErrorCode, GfError};
-use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use sha2::Digest;
 use uuid::Uuid;
 
@@ -282,6 +282,27 @@ fn page_error(code: ApiErrorCode, message: impl Into<String>) -> GfError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_token_digest_accounts_control_authentication_preimage() {
+        use graphforge_core::hash_observation::operation::{Capture, Snapshot};
+        let payload = format!(
+            "checkpoint-diff:{}:{}:10:4:{}",
+            Uuid::from_u128(2),
+            Uuid::from_u128(1),
+            "03".repeat(32)
+        );
+        let expected = hex(&sha2::Sha256::digest(payload.as_bytes()));
+        let capture = Capture::start();
+        assert_eq!(digest_hex(payload.as_bytes()), expected);
+        assert_eq!(
+            capture.snapshot(),
+            Snapshot {
+                control_authentication_sha256_bytes: payload.len() as u64,
+                ..Snapshot::default()
+            }
+        );
+    }
 
     #[test]
     fn token_is_generation_bound_and_cancellation_is_shared() {

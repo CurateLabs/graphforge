@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -326,7 +326,7 @@ pub(crate) fn encode_relative_route(
 
 pub(crate) fn component(route: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut digest = Sha256::new();
+    let mut digest = graphforge_core::hash_observation::ContractSha256::new();
     digest.update(b"graphforge-semantic-route/1\0");
     digest.update(route.as_bytes());
     let mut component = String::with_capacity(PREFIX.len() + 64);
@@ -363,6 +363,30 @@ fn limit(message: &str) -> GfError {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn route_component_accounts_exact_utf8_contract_identity() {
+        use graphforge_core::hash_observation::operation::{Capture, Snapshot};
+        let route = "Rélates";
+        let mut preimage = b"graphforge-semantic-route/1\0".to_vec();
+        preimage.extend_from_slice(route.as_bytes());
+        let expected = format!(
+            "r-{}",
+            sha2::Sha256::digest(&preimage)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        let capture = Capture::start();
+        assert_eq!(component(route), expected);
+        assert_eq!(
+            capture.snapshot(),
+            Snapshot {
+                contract_identity_sha256_bytes: preimage.len() as u64,
+                ..Snapshot::default()
+            }
+        );
+    }
 
     #[test]
     fn exact_semantics_survive_portable_lookup_and_long_names() {

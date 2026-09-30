@@ -20,6 +20,7 @@ use super::V4_ORDINAL_RECEIPT;
 use super::V4OrdinalBuildMetrics;
 use super::V4OrdinalRebuildDisposition;
 use super::V4OrdinalRebuildEvidence;
+use super::decode_manifest;
 #[cfg(test)]
 use super::describe_blocks;
 use super::describe_staged_data;
@@ -222,7 +223,7 @@ pub fn rebuild_v4_ordinal_identity_with_evidence(
             // generation record remains the durable transaction's last switch.
             batch.move_staged_destination_to_end(&manifest_path);
             Ok(Some(crate::AuxiliaryReceipt {
-                kind: "uuid-membership/v4".to_owned(),
+                kind: "uuid-membership/ordinal-v5".to_owned(),
                 schema_version: crate::ORDINAL_IDENTITY_V4,
                 path: format!("{INDEX_DIR}/{V4_ORDINAL_RECEIPT}"),
                 digest: hex_sha256(&receipt_bytes),
@@ -451,7 +452,7 @@ fn migrate_uuid_membership_indexes(
                 &receipt_bytes,
             )?;
             Ok(Some(crate::AuxiliaryReceipt {
-                kind: "uuid-membership/v5".to_owned(),
+                kind: "uuid-membership/v6".to_owned(),
                 schema_version: FORMAT_VERSION,
                 path: format!("{INDEX_DIR}/{TOPOLOGY_RECEIPT}"),
                 digest: hex_sha256(&receipt_bytes),
@@ -603,9 +604,9 @@ pub(super) fn manifest_generation(project_dir: &Path) -> Result<Option<u64>, GfE
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(storage_err(error)),
     };
-    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(storage_err)?;
+    let manifest = decode_manifest(&bytes)?;
     validate_run_descriptors(&manifest)?;
-    Ok((manifest.format_version == FORMAT_VERSION).then_some(manifest.current_generation))
+    Ok(Some(manifest.current_generation))
 }
 
 fn scan_to_runs(

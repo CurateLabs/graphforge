@@ -1048,7 +1048,8 @@ impl GraphForge {
                 )
             })?;
             bindings.validate_against(context.composition())?;
-            bindings.validate_physical_routes_with_inventory(&dir, Some(&hydrated_inventory))?;
+            bindings
+                .validate_physical_routes_with_read_inventory(&dir, Some(&hydrated_inventory))?;
         }
         let default_composition_context =
             match (default_composition_context, &semantic_storage_bindings) {

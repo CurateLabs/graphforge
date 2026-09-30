@@ -20,19 +20,19 @@ use super::GraphPublicationIo;
 use super::Path;
 use super::PathBuf;
 use super::ReadIoEvidence;
-use super::Sha256;
 use super::fs;
 use super::hash_regular_file;
 use super::hex_digest;
 use super::install_graph_object_bytes_with_lease;
 use super::install_graph_object_file_with_lease;
-use super::read_graph_object_by_digest_file_counted;
+use super::read_graph_object_by_digest_file_counted_in_domain;
 use super::returned_error_boundary;
 use super::storage;
 use super::validate_digest;
 use super::validate_logical_path;
 use super::validate_publication_identity;
 use super::validation;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 
 /// Storage-owned, root-bound state for a sequence of path-copy publications.
 ///
@@ -65,11 +65,12 @@ impl GraphManifestState {
         validate_publication_identity(lease)?;
         let mut read_calls = 0_u64;
         let (entries, mut evidence) = crate::resolve_graph_manifest(&root, limits, |digest| {
-            let (bytes, io) = read_graph_object_by_digest_file_counted(
+            let (bytes, io) = read_graph_object_by_digest_file_counted_in_domain(
                 lease.cas.open_digest(digest)?,
                 digest,
                 crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
                 &lease.cas.diagnostic_root,
+                graphforge_core::hash_observation::HashDomain::ControlAuthentication,
             )?;
             read_calls = read_calls
                 .checked_add(io.calls)
@@ -81,11 +82,12 @@ impl GraphManifestState {
             root.format_version,
             &entries,
             |entry| {
-                let (bytes, io) = read_graph_object_by_digest_file_counted(
+                let (bytes, io) = read_graph_object_by_digest_file_counted_in_domain(
                     lease.cas.open_digest(&entry.content_sha256)?,
                     &entry.content_sha256,
                     64 * 1024 * 1024,
                     &lease.cas.diagnostic_root,
+                    graphforge_core::hash_observation::HashDomain::ControlAuthentication,
                 )?;
                 authority_read_bytes = authority_read_bytes
                     .checked_add(io.bytes)
@@ -713,11 +715,12 @@ fn load_manifest_node(
     expected_depth: u8,
     publication_io: &mut GraphPublicationIo,
 ) -> Result<GraphManifestNode, GfError> {
-    let (bytes, io) = read_graph_object_by_digest_file_counted(
+    let (bytes, io) = read_graph_object_by_digest_file_counted_in_domain(
         lease.cas.open_digest(digest)?,
         digest,
         crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
         &lease.cas.diagnostic_root,
+        graphforge_core::hash_observation::HashDomain::ControlAuthentication,
     )?;
     publication_io.manifest_reads.add_read(io)?;
     let node = crate::decode_graph_manifest_node(&bytes)?;

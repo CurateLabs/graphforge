@@ -5,17 +5,14 @@
 //! immutable base plus size-tiered delta runs. Each run contains a unified
 //! UUID-sorted identity file and a node-only surrogate-sorted reverse file.
 //! Readers verify version, topology generation, framing, canonical ordering,
-//! counts, and SHA-256 before serving bounded binary-search probes.
+//! counts, and corruption checksums before serving bounded binary-search probes.
 
 use self::probing::ProbeFileKind;
 use self::probing::authenticated_probe_block;
-use self::topology_delta::hex_sha256;
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::GfError;
 use graphforge_filesystem::ObservedSync as _;
 use serde::Deserialize;
 use serde::Serialize;
-use sha2::Digest;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -69,7 +66,7 @@ pub(crate) use topology_delta::prepare_v4_ordinal_delta;
 
 mod identity_codec;
 
-const FORMAT_VERSION: u32 = 5;
+const FORMAT_VERSION: u32 = 6;
 const NODE_LOOKUP_RECORD_BYTES: u64 = 24;
 const IDENTITY_RECORD_BYTES: u64 = 25;
 const NODE_LOOKUP_RECORD_WIDTH: usize = 24;
@@ -376,6 +373,8 @@ struct BlockRecord {
     first_key: String,
     last_key: String,
     sha256: String,
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    xxh64: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -682,7 +681,7 @@ pub struct AuthenticatedUuidIndexSnapshot {
     runs: Vec<AuthenticatedRun>,
     authenticated_bytes: u64,
     authenticated_blocks: u64,
-    cas_source_paths: Option<BTreeMap<String, (String, String, u64)>>,
+    cas_source_paths: Option<BTreeMap<String, (String, String, u64, u64)>>,
     _cas_leases: Vec<crate::graph_object_store::AuthenticatedGraphObject>,
 }
 
@@ -828,13 +827,35 @@ pub fn uuid_membership_index_is_fresh(project_dir: &Path) -> Result<bool, GfErro
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(storage_err(error)),
     };
-    let manifest: Manifest = serde_json::from_slice(&body).map_err(storage_err)?;
-    Ok(manifest.format_version == FORMAT_VERSION
-        && manifest.current_generation == crate::read_topology_generation(project_dir)?)
+    let manifest = decode_manifest(&body)?;
+    Ok(manifest.current_generation == crate::read_topology_generation(project_dir)?)
 }
 
 const TOPOLOGY_RECEIPT: &str = "topology-receipt.json";
 const MAX_MANIFEST_BYTES: u64 = 1 << 20;
+
+fn validate_manifest_version(version: u32) -> Result<(), GfError> {
+    if version != FORMAT_VERSION {
+        return Err(storage_err(format!(
+            "unsupported UUID membership format version {version}; recreate the index"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse retired or future schemas before decoding current checksum fields.
+fn decode_manifest(bytes: &[u8]) -> Result<Manifest, GfError> {
+    #[derive(Deserialize)]
+    struct Header {
+        format_version: u32,
+    }
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(storage_err("UUID membership manifest exceeds size limit"));
+    }
+    let header: Header = serde_json::from_slice(bytes).map_err(storage_err)?;
+    validate_manifest_version(header.format_version)?;
+    serde_json::from_slice(bytes).map_err(storage_err)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TopologyIndexReceipt {
@@ -935,7 +956,7 @@ fn block_layout(bytes: &[u8], width: usize) -> Result<(u64, &[u8], &[u8]), GfErr
 
 fn block_matches(bytes: &[u8], block: &BlockRecord, width: usize) -> bool {
     block_layout(bytes, width).is_ok_and(|(_, first, last)| {
-        hex_sha256(bytes) == block.sha256
+        crate::corruption_checksum::checksum(bytes) == block.xxh64
             && hex_sha256_key(first) == block.first_key
             && hex_sha256_key(last) == block.last_key
     })
@@ -966,7 +987,6 @@ fn authenticate_file_blocks(
     mut work: Option<&mut UuidIndexAppendMetrics>,
 ) -> Result<(), GfError> {
     validate_block_records(record, record_bytes)?;
-    let mut whole = Sha256::new();
     let mut count = 0_u64;
     for block in &record.blocks {
         file.seek(SeekFrom::Start(block.offset))
@@ -981,7 +1001,6 @@ fn authenticate_file_blocks(
         count = count
             .checked_add(block_layout(&bytes, width)?.0)
             .ok_or_else(|| storage_err("record count overflow"))?;
-        whole.update(&bytes);
         if let Some(metrics) = work.as_deref_mut() {
             metrics.validation_scan_bytes = metrics
                 .validation_scan_bytes
@@ -989,8 +1008,9 @@ fn authenticate_file_blocks(
             metrics.validation_scan_blocks = metrics.validation_scan_blocks.saturating_add(1);
         }
     }
-    let digest = hex_bytes(&whole.finalize());
-    if digest != record.sha256 || count != record.count {
+    if file.metadata().map_err(storage_err)?.len() != record_length(record, record_bytes)?
+        || count != record.count
+    {
         return Err(storage_err("UUID run authentication failed"));
     }
     Ok(())
@@ -1019,6 +1039,10 @@ fn validate_block_records(record: &FileRecord, record_bytes: u64) -> Result<(), 
             || block.last_key.len() != key_hex_len
             || block.first_key > block.last_key
             || block.sha256.len() != 64
+            || !block
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
             return Err(storage_err("UUID run block table is not canonical"));
         }
@@ -1082,7 +1106,7 @@ fn describe_stream(
     let mut carried = 0;
     let mut offset = 0_u64;
     let mut count = 0_u64;
-    let mut whole = Sha256::new();
+    let mut whole = crate::payload_digest::PayloadSha256::new();
     let mut blocks = Vec::new();
     loop {
         let mut filled = carried;
@@ -1128,7 +1152,8 @@ fn describe_stream(
             len: u32::try_from(valid).map_err(storage_err)?,
             first_key: hex_sha256_key(first),
             last_key: hex_sha256_key(last),
-            sha256: hex_sha256(bytes),
+            sha256: hex_bytes(&crate::payload_digest::PayloadSha256::digest(bytes)),
+            xxh64: crate::corruption_checksum::checksum(bytes),
         });
         offset = offset
             .checked_add(valid as u64)
@@ -1185,6 +1210,7 @@ impl PreparedUuidIndexDelta {
 }
 
 fn validate_run_descriptors(manifest: &Manifest) -> Result<(), GfError> {
+    validate_manifest_version(manifest.format_version)?;
     for record in manifest.runs.iter().flat_map(|run| {
         [
             (&run.identities, IDENTITY_RECORD_BYTES),

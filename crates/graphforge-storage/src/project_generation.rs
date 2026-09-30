@@ -15,7 +15,7 @@ use std::sync::{Arc, OnceLock};
 #[cfg(windows)]
 use std::sync::{Condvar, Mutex};
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -27,6 +27,8 @@ use crate::project_failpoint;
 pub const FORMAT_FILE: &str = "FORMAT";
 /// Sole committed-generation pointer path.
 pub const CURRENT_FILE: &str = "CURRENT";
+pub(crate) const GENERATION_MANIFEST_VERSION: u32 = 2;
+
 /// Exact bytes accepted for a v0.5 project container.
 pub const PROJECT_FORMAT_BYTES: &[u8] = b"graphforge-project/v1\n";
 
@@ -148,7 +150,7 @@ impl ResolvedProjectGeneration {
                     root,
                     crate::GraphManifestLimits::default(),
                     |digest| {
-                        crate::read_graph_object_by_digest(
+                        crate::graph_object_store::read_graph_control_object_by_digest(
                             self.container_root(),
                             digest,
                             crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
@@ -169,10 +171,9 @@ impl ResolvedProjectGeneration {
                     (retained.file, None)
                 }
                 crate::GraphFilesParticipant::V2(_) => {
-                    let lease = crate::graph_object_store::open_graph_object_by_digest(
+                    let lease = crate::graph_object_store::open_graph_object_with_checksum(
                         self.container_root(),
-                        &entry.content_sha256,
-                        entry.byte_length,
+                        &entry,
                     )?;
                     let file = lease.try_clone_file().map_err(|error| {
                         GfError::Storage(format!("retain authenticated graph object: {error}"))
@@ -255,7 +256,7 @@ impl ResolvedProjectGeneration {
                     limits,
                     state,
                     |digest| {
-                        crate::graph_object_store::read_graph_object_counted(
+                        crate::graph_object_store::read_graph_control_object_counted(
                             self.container_root(),
                             digest,
                             crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
@@ -279,7 +280,7 @@ impl ResolvedProjectGeneration {
                 read_stable_graph_control(&graph_root, relative, entry.byte_length, maximum, io)?
             }
             crate::GraphFilesParticipant::V2(_) => {
-                crate::graph_object_store::read_graph_object_counted(
+                crate::graph_object_store::read_graph_control_object_counted(
                     self.container_root(),
                     &entry.content_sha256,
                     maximum,
@@ -367,7 +368,7 @@ impl ResolvedProjectGeneration {
                     &root,
                     crate::GraphManifestLimits::default(),
                     |digest| {
-                        crate::read_graph_object_by_digest(
+                        crate::graph_object_store::read_graph_control_object_by_digest(
                             self.container_root(),
                             digest,
                             crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
@@ -399,7 +400,7 @@ impl ResolvedProjectGeneration {
                     root.format_version,
                     &files,
                     |entry| {
-                        crate::read_graph_object_by_digest(
+                        crate::graph_object_store::read_graph_control_object_by_digest(
                             self.container_root(),
                             &entry.content_sha256,
                             MAX_SEGMENT_BYTES,
@@ -646,8 +647,12 @@ impl ResolvedProjectGeneration {
         let path =
             self.participant_path(&descriptor.capability_id, &descriptor.record_family_id)?;
         let bytes = read_exact_participant(&path, descriptor.byte_length)?;
-        let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        if digest != parse_sha256(&descriptor.content_sha256)? {
+        if crate::corruption_checksum::checksum(&bytes) != descriptor.content_xxh64 {
+            return Err(corrupt("participant checksum does not match manifest"));
+        }
+        if descriptor.encoding == "json"
+            && <[u8; 32]>::from(Sha256::digest(&bytes)) != parse_sha256(&descriptor.content_sha256)?
+        {
             return Err(corrupt(
                 "participant content digest does not match manifest",
             ));
@@ -777,6 +782,8 @@ struct ParticipantDescriptor {
     row_count: u64,
     schema_fingerprint: String,
     content_sha256: String,
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    content_xxh64: u64,
 }
 
 /// Resolve exactly the generation named by `CURRENT`.
@@ -845,7 +852,7 @@ pub fn resolve_project_generation(
             ));
         }
         let manifest: GenerationManifest =
-            parse_canonical_json_line(&manifest_bytes, "generation manifest")?;
+            parse_generation_manifest(&manifest_bytes, "generation manifest")?;
         validate_manifest(&manifest, generation_uuid)?;
         reject_exact_directory(&selected_dir.join(PARTICIPANTS_DIR))?;
 
@@ -895,7 +902,7 @@ pub fn resolve_verified_generation(
         ));
     }
     let manifest: GenerationManifest =
-        parse_canonical_json_line(&manifest_bytes, "generation manifest")?;
+        parse_generation_manifest(&manifest_bytes, "generation manifest")?;
     validate_manifest(&manifest, generation_uuid)?;
     reject_exact_directory(&selected_dir.join(PARTICIPANTS_DIR))?;
     Ok(ResolvedProjectGeneration {
@@ -1258,7 +1265,7 @@ fn initialize_empty_generation(
     )?;
     let manifest = GenerationManifest {
         format: "graphforge-generation".into(),
-        format_version: 1,
+        format_version: GENERATION_MANIFEST_VERSION,
         generation_uuid: generation_uuid.hyphenated().to_string(),
         parent_generation_uuid: None,
         transaction_uuid: transaction_uuid.hyphenated().to_string(),
@@ -1339,6 +1346,7 @@ fn install_empty_workspace_participants(
             row_count: participant.row_count,
             schema_fingerprint: sha256_hex(participant.schema_fingerprint),
             content_sha256: sha256_hex(Sha256::digest(&participant.bytes).into()),
+            content_xxh64: crate::corruption_checksum::checksum(&participant.bytes),
         });
     }
     descriptors.sort_by(|left, right| {
@@ -1447,7 +1455,8 @@ fn lock_project_root(path: &Path) -> Result<WindowsProjectRootLock, GfError> {
     let canonical = std::fs::canonicalize(path)
         .map_err(|error| GfError::Storage(format!("failed to lock project root: {error}")))?;
     let identity = canonical.as_os_str().to_string_lossy().to_lowercase();
-    let digest: [u8; 32] = Sha256::digest(identity.as_bytes()).into();
+    let digest: [u8; 32] =
+        graphforge_core::hash_observation::ContractSha256::digest(identity.as_bytes()).into();
     let name = format!("GraphForge.ProjectRoot.{}", sha256_hex(digest));
     let local = acquire_local_project_root_lock(&name);
     let lock = named_lock::NamedLock::create(&name)
@@ -1492,8 +1501,13 @@ fn validate_format(format: &str, version: u32) -> Result<(), GfError> {
 }
 
 fn validate_manifest(manifest: &GenerationManifest, expected: Uuid) -> Result<(), GfError> {
-    if manifest.format != "graphforge-generation" || manifest.format_version != 1 {
+    if manifest.format != "graphforge-generation" {
         return Err(corrupt("generation manifest format is invalid"));
+    }
+    if manifest.format_version != GENERATION_MANIFEST_VERSION {
+        return Err(unsupported(
+            "generation manifest version is not supported; recreate the pre-v1 project",
+        ));
     }
     if parse_canonical_uuid(&manifest.generation_uuid)? != expected {
         return Err(corrupt("generation manifest UUID does not match CURRENT"));
@@ -1600,7 +1614,7 @@ fn validated_generation_metadata(
         read_bounded_regular_file(&generation_root.join(MANIFEST_FILE), MAX_MANIFEST_BYTES)
             .map_err(|_| corrupt("retained ancestor manifest is missing or invalid"))?;
     let manifest: GenerationManifest =
-        parse_canonical_json_line(&manifest_bytes, "retained ancestor manifest")?;
+        parse_generation_manifest(&manifest_bytes, "retained ancestor manifest")?;
     validate_manifest(&manifest, generation_uuid)?;
     let parent = manifest
         .parent_generation_uuid
@@ -1608,6 +1622,27 @@ fn validated_generation_metadata(
         .map(parse_canonical_uuid)
         .transpose()?;
     Ok((parent, Sha256::digest(&manifest_bytes).into()))
+}
+
+fn parse_generation_manifest(bytes: &[u8], name: &str) -> Result<GenerationManifest, GfError> {
+    // Check the version before decoding required current-format participant fields.
+    // Retired projects must fail clearly rather than appear to be malformed v2 data.
+    #[derive(Deserialize)]
+    struct Header {
+        format: String,
+        format_version: u32,
+    }
+    let header: Header =
+        serde_json::from_slice(bytes).map_err(|_| corrupt(format!("{name} is invalid JSON")))?;
+    if header.format != "graphforge-generation" {
+        return Err(corrupt("generation manifest format is invalid"));
+    }
+    if header.format_version != GENERATION_MANIFEST_VERSION {
+        return Err(unsupported(
+            "generation manifest version is not supported; recreate the pre-v1 project",
+        ));
+    }
+    parse_canonical_json_line(bytes, name)
 }
 
 fn parse_canonical_json_line<T>(bytes: &[u8], name: &str) -> Result<T, GfError>
@@ -1938,7 +1973,7 @@ mod tests {
         fs::write(generation_root.join(LEASE_FILE), []).unwrap();
         let manifest = GenerationManifest {
             format: "graphforge-generation".into(),
-            format_version: 1,
+            format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: generation_uuid.hyphenated().to_string(),
             parent_generation_uuid: None,
             transaction_uuid: Uuid::now_v7().hyphenated().to_string(),
@@ -1961,6 +1996,54 @@ mod tests {
             generation_manifest_sha256: sha256_hex(digest),
         };
         fs::write(root.join(CURRENT_FILE), canonical_line(&current)).unwrap();
+    }
+
+    #[test]
+    fn checksum_generation_manifest_refuses_legacy_missing_and_malformed_participant_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let generation = open_or_initialize_project(root.path()).unwrap();
+        let path = generation.generation_root().join(MANIFEST_FILE);
+        let bytes = fs::read(&path).unwrap();
+        let current: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(!current["participants"].as_array().unwrap().is_empty());
+        for mode in ["legacy", "future", "missing", "malformed"] {
+            let mut value = current.clone();
+            match mode {
+                "legacy" | "future" => {
+                    value["format_version"] =
+                        serde_json::json!(if mode == "legacy" { 1 } else { 3 });
+                    value["participants"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("content_xxh64");
+                }
+                "missing" => {
+                    value["participants"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("content_xxh64");
+                }
+                "malformed" => {
+                    value["participants"][0]["content_xxh64"] = serde_json::json!("ABCDEF")
+                }
+                _ => unreachable!(),
+            }
+            let error = parse_generation_manifest(&canonical_line(&value), "generation manifest")
+                .and_then(|manifest| validate_manifest(&manifest, generation.generation_uuid()))
+                .unwrap_err();
+            if matches!(mode, "legacy" | "future") {
+                assert!(
+                    error.to_string().contains("version is not supported"),
+                    "{error}"
+                );
+                assert!(error.to_string().contains("recreate"), "{error}");
+            }
+        }
+        validate_manifest(
+            &serde_json::from_slice::<GenerationManifest>(&bytes).unwrap(),
+            generation.generation_uuid(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2099,10 +2182,11 @@ mod tests {
             row_count: participant.row_count,
             schema_fingerprint: sha256_hex(participant.schema_fingerprint),
             content_sha256: sha256_hex(Sha256::digest(&participant.bytes).into()),
+            content_xxh64: crate::corruption_checksum::checksum(&participant.bytes),
         };
         let manifest = GenerationManifest {
             format: "graphforge-generation".into(),
-            format_version: 1,
+            format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: generation_uuid.hyphenated().to_string(),
             parent_generation_uuid: None,
             transaction_uuid: Uuid::now_v7().hyphenated().to_string(),
@@ -2861,7 +2945,7 @@ mod tests {
             .join(generation.hyphenated().to_string());
         let manifest = GenerationManifest {
             format: "graphforge-generation".into(),
-            format_version: 1,
+            format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: generation.hyphenated().to_string(),
             parent_generation_uuid: None,
             transaction_uuid: Uuid::now_v7().hyphenated().to_string(),
@@ -2880,6 +2964,7 @@ mod tests {
                 row_count: 0,
                 schema_fingerprint: "0".repeat(64),
                 content_sha256: "0".repeat(64),
+                content_xxh64: 0,
             }],
         };
         let bytes = canonical_line(&manifest);
@@ -2900,7 +2985,7 @@ mod tests {
             .join(generation.hyphenated().to_string());
         let manifest = GenerationManifest {
             format: "graphforge-generation".into(),
-            format_version: 1,
+            format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: generation.hyphenated().to_string(),
             parent_generation_uuid: None,
             transaction_uuid: Uuid::now_v7().hyphenated().to_string(),
@@ -2925,6 +3010,7 @@ mod tests {
                 row_count: 1,
                 schema_fingerprint: "0".repeat(64),
                 content_sha256: "0".repeat(64),
+                content_xxh64: 0,
             }],
         };
         let bytes = canonical_line(&manifest);
@@ -2992,7 +3078,7 @@ mod tests {
 
         let base = GenerationManifest {
             format: "graphforge-generation".into(),
-            format_version: 1,
+            format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: expected.hyphenated().to_string(),
             parent_generation_uuid: None,
             transaction_uuid: Uuid::now_v7().hyphenated().to_string(),
@@ -3005,7 +3091,7 @@ mod tests {
         assert!(validate_manifest(&base, expected).is_ok());
         let mutations: Vec<Box<dyn Fn(&mut GenerationManifest)>> = vec![
             Box::new(|manifest| manifest.format = "future".into()),
-            Box::new(|manifest| manifest.format_version = 2),
+            Box::new(|manifest| manifest.format_version = 1),
             Box::new(|manifest| manifest.generation_uuid = Uuid::now_v7().to_string()),
             Box::new(|manifest| manifest.transaction_uuid = "bad".into()),
             Box::new(|manifest| manifest.capabilities[0].capability_id = "Upper".into()),
@@ -3029,6 +3115,7 @@ mod tests {
             row_count: 0,
             schema_fingerprint: "0".repeat(64),
             content_sha256: "0".repeat(64),
+            content_xxh64: 0,
         };
         let participant_mutations: Vec<Box<dyn Fn(&mut ParticipantDescriptor)>> = vec![
             Box::new(|entry| entry.capability_id = "missing".into()),

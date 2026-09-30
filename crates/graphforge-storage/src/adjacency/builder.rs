@@ -1060,8 +1060,12 @@ fn finish_groups_on_lanes(
             let next = &next;
             let stop = &stop;
             let results = &results;
+            #[cfg(any(test, feature = "test-support"))]
+            let digest_context = graphforge_core::hash_observation::operation::Context::capture();
             let lifecycle_context = crate::lifecycle_io::CaptureContext::current();
             scope.spawn(move || {
+                #[cfg(any(test, feature = "test-support"))]
+                let _digest_guard = digest_context.attach();
                 let _lifecycle_capture = lifecycle_context.attach();
                 let _phase = crate::lifecycle_io::PhaseScope::enter(phase);
                 loop {
@@ -1161,8 +1165,12 @@ fn sorted_directions(
     };
     let incoming = if lease.is_some() {
         std::thread::scope(|scope| {
+            #[cfg(any(test, feature = "test-support"))]
+            let digest_context = graphforge_core::hash_observation::operation::Context::capture();
             let lifecycle_context = crate::lifecycle_io::CaptureContext::current();
             let worker = scope.spawn(move || {
+                #[cfg(any(test, feature = "test-support"))]
+                let _digest_guard = digest_context.attach();
                 let _lifecycle_capture = lifecycle_context.attach();
                 incoming()
             });
@@ -1220,8 +1228,12 @@ fn for_each_admitted_edge_batch(
     let phase = crate::lifecycle_io::effective_phase(crate::StorageIoPhase::ReadPathScan);
     std::thread::scope(|scope| {
         let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        #[cfg(any(test, feature = "test-support"))]
+        let digest_context = graphforge_core::hash_observation::operation::Context::capture();
         let lifecycle_context = crate::lifecycle_io::CaptureContext::current();
         let worker = scope.spawn(move || {
+            #[cfg(any(test, feature = "test-support"))]
+            let _digest_guard = digest_context.attach();
             let _lifecycle_capture = lifecycle_context.attach();
             let _phase = crate::lifecycle_io::PhaseScope::enter(phase);
             for_each_adjacency_edge_path(edge_files, batch_size, &mut |stem, exploratory, batch| {

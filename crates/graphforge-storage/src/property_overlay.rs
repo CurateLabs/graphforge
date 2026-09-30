@@ -53,17 +53,20 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use arrow::array::{Array, BooleanArray, FixedSizeBinaryArray, RecordBatch};
 use bytes::Bytes;
 use graphforge_core::GfError;
+#[cfg(test)]
+use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use graphforge_ir::IrLiteral;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::errors::ParquetError;
 use parquet::file::reader::{ChunkReader, Length};
 use parquet::thrift::TSerializable;
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use sha2::Digest;
+
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// On-disk property overlay format marker.
@@ -221,7 +224,7 @@ pub struct PropertyInventoryOpenMetrics {
 struct AuthenticatedPropertyFragment {
     id: PropertyFragmentId,
     layout: PropertyFragmentLayout,
-    entry: crate::GraphFileEntry,
+    entry: crate::GraphReadFileEntry,
     physical_relative: PathBuf,
     identity: graphforge_filesystem::FileIdentity,
     physical_rows: usize,
@@ -297,7 +300,7 @@ pub struct PropertyOverlayMetrics {
     pub physical_rows: u64,
     /// Total authentication plus decoder bytes read.
     pub physical_bytes: u64,
-    /// Full-file bytes read for SHA-256 authentication. Cached inventories
+    /// Full-file bytes read for checksum admission and control authentication. Cached inventories
     /// stream each bounded on-demand handle into an authenticated immutable snapshot.
     pub authentication_bytes: u64,
     /// Raw graph-files authority bytes included in authentication bytes.

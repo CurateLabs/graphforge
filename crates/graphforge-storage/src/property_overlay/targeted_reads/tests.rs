@@ -144,6 +144,7 @@ fn targeted_presence_retains_removed_owner_without_reviving_values() {
     let bytes = fs::read(&path).unwrap();
     last.byte_length = bytes.len() as u64;
     last.content_sha256 = digest_hex(&Sha256::digest(&bytes));
+    last.content_xxh64 = crate::corruption_checksum::checksum(&bytes);
     let inventory =
         AuthenticatedPropertyInventory::from_entries_at_root(root.path(), entries).unwrap();
     let error = read_authenticated_property_presence_for_inventory(
