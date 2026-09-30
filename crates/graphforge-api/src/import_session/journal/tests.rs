@@ -210,6 +210,31 @@ fn checkpointed_journal_corruption_is_refused() {
 
 #[test]
 fn byte_cadence_flushes_journal_without_replacing_manifest() {
+    const CHILD: &str = "GF_TEST_IMPORT_JOURNAL_BYTE_CADENCE";
+    const VERIFIED: &str = "import journal byte cadence verified";
+    if std::env::var_os(CHILD).is_none() {
+        // Region counters are process-wide. Keep the exact barrier proof
+        // independent of unrelated API tests running in this test process.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "import_session::journal::tests::byte_cadence_flushes_journal_without_replacing_manifest",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // A successful harness exit alone could also mean the exact filter
+        // selected no test. Require completion of the real journal proof.
+        assert!(stdout.lines().any(|line| line == VERIFIED), "{stdout}");
+        return;
+    }
     let (_directory, _graph, mut session) = staged_fixture();
     let checkpoint = std::fs::read(session.root.join(MANIFEST)).unwrap();
     let capture = graphforge_storage::concurrency_attribution::RegionCapture::start("cadence");
@@ -250,11 +275,19 @@ fn byte_cadence_flushes_journal_without_replacing_manifest() {
             .regions
             .contains_key("cadence/manifest_persistence")
     );
+    assert!(
+        !snapshot
+            .regions
+            .contains_key("cadence/journal_namespace_publication")
+    );
     assert_eq!(
         std::fs::read(session.root.join(MANIFEST)).unwrap(),
         checkpoint
     );
     assert_eq!(session.manifest.sources[0].batches_staged, 0);
+    // Single-thread libtest output can leave its test-name prefix on the same
+    // line. Give the completion marker its own line in either harness mode.
+    println!("\n{VERIFIED}");
 }
 
 #[test]
