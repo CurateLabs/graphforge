@@ -1,5 +1,6 @@
 //! Import-only progress records. Batch records are buffered by the filesystem;
-//! explicit checkpoints and phase transitions own the durability barriers.
+//! framed bytes bound the flush cadence, and checkpoints/phase transitions
+//! always cross durability barriers without rewriting the manifest per batch.
 //! Construction's authenticated chunk receipts remain the row authority when
 //! a crash loses the unflushed progress tail. This is not a durability API.
 
@@ -21,6 +22,7 @@ const MAGIC: &[u8; 8] = b"GFIMPJ01";
 const HEADER: usize = 24;
 const DIGEST: usize = 32;
 const MAX_RECORD: u64 = 16 * 1024 * 1024;
+const SYNC_BYTES: u64 = 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,7 +37,8 @@ struct Record {
 pub(super) struct Journal {
     file: File,
     path: PathBuf,
-    failed_append: bool,
+    failed_write: bool,
+    pending_bytes: u64,
 }
 
 impl Journal {
@@ -56,7 +59,11 @@ impl Journal {
                     .create_unpublished_replaceable_child(OsStr::new(&temporary))
                     .map_err(storage)?;
                 let file = guard.take_file().map_err(storage)?;
-                file.observed_sync_all().map_err(storage)?;
+                {
+                    let _region = RegionScope::named("journal_sync");
+                    file.observed_sync_all().map_err(storage)?;
+                }
+                let _region = RegionScope::named("journal_namespace_publication");
                 guard.install_child(OsStr::new(NAME)).map_err(storage)?;
                 guard.sync_parent().map_err(storage)?;
                 guard.commit().map_err(storage)?;
@@ -80,7 +87,8 @@ impl Journal {
         };
         // A crash may leave a partial final append. Never append a valid frame
         // behind that tail: subsequent recovery would stop at the old tear.
-        if file.metadata().map_err(storage)?.len() != valid_len {
+        let truncated = file.metadata().map_err(storage)?.len() != valid_len;
+        if truncated {
             file.set_len(valid_len).map_err(storage)?;
         }
         file.seek(SeekFrom::End(0)).map_err(storage)?;
@@ -88,11 +96,19 @@ impl Journal {
         if let Some(allocation) = allocation {
             allocation.replace_file_at(&path, &file)?;
         }
-        Ok(Self {
+        let mut journal = Self {
             file,
             path,
-            failed_append: false,
-        })
+            failed_write: false,
+            pending_bytes: 0,
+        };
+        // Complete recovered frames may never have crossed a barrier, and a
+        // torn tail may have been truncated. Establish one durable writer
+        // prefix before resetting the byte cadence on this fresh handle.
+        if truncated || valid_len != 0 {
+            journal.sync(allocation)?;
+        }
+        Ok(journal)
     }
 
     pub(super) fn append(
@@ -101,9 +117,11 @@ impl Journal {
         source_index: usize,
         allocation: Option<&graphforge_storage::StorageAllocationOperation>,
     ) -> Result<(), GfError> {
-        let _region = RegionScope::named("manifest_persistence");
-        if self.failed_append {
-            return Err(storage("resume import journal after a failed append"));
+        let region = RegionScope::named("journal_append");
+        if self.failed_write {
+            return Err(storage(
+                "resume import journal after a failed write or sync",
+            ));
         }
         let sequence = manifest
             .journal_sequence
@@ -130,30 +148,47 @@ impl Journal {
         frame.extend_from_slice(&bytes);
         let digest = Sha256::digest(&frame);
         frame.extend_from_slice(&digest);
-        self.failed_append = true;
+        let pending_bytes = self
+            .pending_bytes
+            .checked_add(u64::try_from(frame.len()).map_err(storage)?)
+            .ok_or_else(|| storage("import journal unflushed byte count overflow"))?;
+        self.failed_write = true;
         self.file.write_all(&frame).map_err(storage)?;
-        self.failed_append = false;
         manifest.journal_sequence = sequence;
+        self.pending_bytes = pending_bytes;
         if let Some(allocation) = allocation {
             allocation.replace_file_at(&self.path, &self.file)?;
+        }
+        self.failed_write = false;
+        // The append and barrier scopes are disjoint for honest attribution.
+        drop(region);
+        if self.pending_bytes >= SYNC_BYTES {
+            self.sync(allocation)?;
         }
         Ok(())
     }
 
     pub(super) fn sync(
-        &self,
+        &mut self,
         allocation: Option<&graphforge_storage::StorageAllocationOperation>,
     ) -> Result<(), GfError> {
-        let _region = RegionScope::named("manifest_persistence");
-        if self.failed_append {
-            return Err(storage("resume import journal after a failed append"));
+        let _region = RegionScope::named("journal_sync");
+        if self.failed_write {
+            return Err(storage(
+                "resume import journal after a failed write or sync",
+            ));
         }
+        // Any failed barrier leaves durability uncertain. Only replay on a
+        // fresh handle can admit the actual complete/torn tail before retry.
+        self.failed_write = true;
         #[cfg(test)]
         failure("sync")?;
         self.file.observed_sync_all().map_err(storage)?;
+        self.pending_bytes = 0;
         if let Some(allocation) = allocation {
             allocation.replace_file_at(&self.path, &self.file)?;
         }
+        self.failed_write = false;
         Ok(())
     }
 }

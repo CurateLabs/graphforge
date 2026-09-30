@@ -32,7 +32,7 @@ fn staged_fixture() -> (
 #[test]
 fn append_before_fsync_recovers_complete_and_torn_unflushed_tails() {
     for tear in [false, true] {
-        let (_directory, graph, mut session) = staged_fixture();
+        let (directory, graph, mut session) = staged_fixture();
         let id = session.session_uuid();
         let root = session.root.clone();
         inject("append_before_fsync");
@@ -53,6 +53,8 @@ fn append_before_fsync_recovers_complete_and_torn_unflushed_tails() {
                 .set_len(7)
                 .unwrap();
         }
+        drop(graph);
+        let graph = crate::GraphForge::new(directory.path().join("project").to_str()).unwrap();
         let mut resumed = graph.resume_import_session(id).unwrap();
         let progress = resumed.validate(&graph).unwrap();
         assert_eq!(progress.rows_accepted, 2);
@@ -207,26 +209,121 @@ fn checkpointed_journal_corruption_is_refused() {
 }
 
 #[test]
-fn batch_progress_does_not_cross_a_durability_barrier() {
+fn byte_cadence_flushes_journal_without_replacing_manifest() {
     let (_directory, _graph, mut session) = staged_fixture();
-    inject("sync");
-    for index in 0..1_000 {
-        session.manifest.sources[0].batches_staged = index;
+    let checkpoint = std::fs::read(session.root.join(MANIFEST)).unwrap();
+    let capture = graphforge_storage::concurrency_attribution::RegionCapture::start("cadence");
+    let mut barriers = 0;
+    let mut written_since_sync = 0;
+    while barriers < 2 {
+        let before = session.journal.file.metadata().unwrap().len();
         session
             .journal
             .append(&mut session.manifest, 0, None)
             .unwrap();
+        let framed_bytes = session.journal.file.metadata().unwrap().len() - before;
+        written_since_sync += framed_bytes;
+        if written_since_sync >= SYNC_BYTES {
+            assert_eq!(session.journal.pending_bytes, 0);
+            barriers += 1;
+            written_since_sync = 0;
+        } else {
+            assert_eq!(session.journal.pending_bytes, written_since_sync);
+        }
     }
-    // The injected barrier is still pending after one thousand appends.
+    let snapshot = capture.finish();
+    assert!(snapshot.complete);
+    assert_eq!(
+        snapshot.regions["cadence/journal_sync"]
+            .inclusive
+            .fsync_calls,
+        Some(2)
+    );
+    assert_eq!(
+        snapshot.regions["cadence/journal_append"]
+            .inclusive
+            .fsync_calls,
+        Some(0)
+    );
+    assert!(
+        !snapshot
+            .regions
+            .contains_key("cadence/manifest_persistence")
+    );
+    assert_eq!(
+        std::fs::read(session.root.join(MANIFEST)).unwrap(),
+        checkpoint
+    );
+    assert_eq!(session.manifest.sources[0].batches_staged, 0);
+}
+
+#[test]
+fn failed_cadence_sync_blocks_writes_until_fresh_format_aware_reopen() {
+    let (directory, graph, mut session) = staged_fixture();
+    let id = session.session_uuid();
+    let checkpoint = std::fs::read(session.root.join(MANIFEST)).unwrap();
+    inject("sync");
+    loop {
+        let pending_before = session.journal.pending_bytes;
+        let file_before = session.journal.file.metadata().unwrap().len();
+        let appended = session.journal.append(&mut session.manifest, 0, None);
+        let framed_bytes = session.journal.file.metadata().unwrap().len() - file_before;
+        if pending_before + framed_bytes >= SYNC_BYTES {
+            assert!(
+                appended
+                    .unwrap_err()
+                    .to_string()
+                    .contains("injected import journal sync")
+            );
+            break;
+        }
+        appended.unwrap();
+    }
+    let retained_pending = session.journal.pending_bytes;
+    assert!(retained_pending >= SYNC_BYTES);
+    let complete_length = session.journal.file.metadata().unwrap().len();
+    assert!(
+        session
+            .journal
+            .append(&mut session.manifest, 0, None)
+            .unwrap_err()
+            .to_string()
+            .contains("failed write or sync")
+    );
     assert!(
         session
             .journal
             .sync(None)
             .unwrap_err()
             .to_string()
-            .contains("sync")
+            .contains("failed write or sync")
     );
-    session.journal.sync(None).unwrap();
+    assert_eq!(session.journal.pending_bytes, retained_pending);
+    assert_eq!(
+        session.journal.file.metadata().unwrap().len(),
+        complete_length
+    );
+    assert_eq!(
+        std::fs::read(session.root.join(MANIFEST)).unwrap(),
+        checkpoint
+    );
+    drop(session);
+    drop(graph);
+    let graph = crate::GraphForge::new(directory.path().join("project").to_str()).unwrap();
+    let mut resumed = graph.resume_import_session(id).unwrap();
+    assert_eq!(resumed.journal.pending_bytes, 0);
+    resumed
+        .journal
+        .append(&mut resumed.manifest, 0, None)
+        .unwrap();
+    assert!(resumed.journal.pending_bytes > 0);
+    resumed.journal.sync(None).unwrap();
+    assert_eq!(resumed.journal.pending_bytes, 0);
+    let progress = resumed.validate(&graph).unwrap();
+    assert_eq!(progress.rows_accepted, 2);
+    assert_eq!(progress.construction.unwrap().accepted_chunks, 2);
+    resumed.commit(&graph, None).unwrap();
+    assert_eq!(graph.node_count("Person").unwrap(), 2);
 }
 
 #[test]
@@ -307,7 +404,7 @@ fn legacy_or_missing_journal_state_is_refused() {
 
 #[test]
 fn checkpoint_failure_cleans_preparation_without_replacing_manifest() {
-    let (_directory, _graph, session) = staged_fixture();
+    let (_directory, _graph, mut session) = staged_fixture();
     let prior = std::fs::read(session.root.join(MANIFEST)).unwrap();
     inject("checkpoint_before_sync");
     assert!(

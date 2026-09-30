@@ -596,7 +596,7 @@ impl GraphImportSession {
         journal::publish_source(temporary, destination, self.allocation_operation.as_ref())
     }
 
-    fn persist_manifest(&self) -> Result<(), GfError> {
+    fn persist_manifest(&mut self) -> Result<(), GfError> {
         self.journal.sync(self.allocation_operation.as_ref())?;
         write_manifest_with_allocation(
             &self.root,
