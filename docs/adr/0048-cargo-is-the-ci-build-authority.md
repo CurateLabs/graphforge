@@ -11,7 +11,7 @@ revisit_when: "Merge-queue Rust reruns dominate CI Gate latency, a Cargo lane me
 
 **Status:** Accepted
 
-**Implementation:** #1644 (CI Gate Rust lane), #1645 (Binding RC Linux
+**Implementation:** #1648 (this record), #1644 (CI Gate Rust lane), #1645 (Binding RC Linux
 wheel and addon), #1646 (Bazel removal).
 
 **Build target:** v0.6.0
@@ -46,21 +46,42 @@ class. The results tables and run ids are on #1618. The Cargo side comes from
 `.github/workflows/build-lane-measurement.yml`, which is dispatch-only and has
 a `runner` input of `cargo-test` or `nextest`.
 
-- **Bazel, Rust-changing PRs** (50 runs): job wall p50 22.4 min. The
-  authoritative test step p50 is 1114 s. Only 8 of the 50 replayed their
-  tests from cache.
-- **Bazel, non-Rust changes** (39 runs): job wall p50 about 4.4 min. The test
-  step replays in about 25 s. A fixed lifecycle-producer step of about 165 s
-  makes up most of that time.
-- **Bazel, Rust-changing merge groups** (33 runs): 15 replayed a tree already
-  tested on the PR (wall p50 3.7 min). The other 18 reran (wall p50 25.4 min).
-- **Cargo + nextest, warm `target/` volume** (9 runs): test step p50 996 s
-  (843–1235 s), compile included. Paired with the Bazel lane on four
-  Rust-changing PR SHAs, nextest took a median of 964 s against 1045 s and was
-  faster in 3 of 4 pairs. Run-to-run variation is about ±150 s, so the
-  difference is within noise.
-- **`cargo test`, warm**: 1388–1754 s on the same SHAs, 1.4–1.8× both of the
-  above.
+Three different quantities appear below, and they are not interchangeable:
+
+- the **test step**: compile plus test execution, the part the two build
+  systems actually do differently;
+- the **Bazel job wall**: the test step plus about 4 min of steps a Cargo lane
+  would also run, mostly the lifecycle producer (p50 about 165 s) and setup;
+- **CI Gate or merge latency**: set by the slowest required job of the run.
+  Nothing here measures it.
+
+Bazel, from CI history (the last 150 `test.yml` runs):
+
+- **Rust-changing PRs** (50 runs): test step p50 1114 s, job wall p50
+  22.4 min. Only 8 of the 50 replayed their tests from cache.
+- **Non-Rust changes** (39 runs): the test step replays in about 25 s, and the
+  job wall p50 is about 4.4 min.
+- **Rust-changing merge groups** (33 runs): 15 replayed a tree already tested
+  on the PR (job wall p50 3.7 min). The other 18 reran (job wall p50
+  25.4 min).
+
+Cargo, from the dispatch harness (test step only):
+
+- **nextest, warm `target/` volume** (9 runs on the final harness): p50 996 s
+  (843–1235 s). One of the nine, `fc09f6a1`, had one failing test (#1643);
+  it still executed the whole suite and its 926 s is included. Paired with the
+  Bazel test step on four Rust-changing PR SHAs, all of which passed, nextest
+  took a median of 964 s against 1045 s and was faster in 3 of 4 pairs.
+  Run-to-run variation is about ±150 s, so the difference is within noise.
+- **nextest, empty `target/`** (2 runs): 1412 s and 954 s.
+- **`cargo test`, warm**: 1388–1754 s on the same PR SHAs, 1.4–1.8× both of
+  the above.
+- **Excluded samples**: fifteen earlier nextest runs on superseded harness
+  commits. Ten, on `5bbf944e`, failed before running any test because nextest
+  could not list a custom-harness target. Five, on `59e91659`, ran the suite
+  but rebuilt the custom-harness targets under per-package features, adding
+  1–3 min. Two of those five were the first run on an empty cache volume.
+  #1618 lists every run with its harness commit.
 - **sccache**: it received zero compile requests in three attempts on these
   runners, so it is not a usable cache mechanism here.
 - **Maintenance**: over the trailing 90 days (2026-07-01 → 2026-09-29), 98 of
@@ -107,10 +128,13 @@ a `runner` input of `cargo-test` or `nextest`.
 - Adding a file, test, crate, feature, or dependency edits Cargo only. The
   drift check, the parity inventory, and the `MODULE.bazel` release version
   (#1398) go away.
-- Rust-changing PRs keep roughly the same gate latency, and non-Rust changes
-  get faster.
-- Rust merge groups that Bazel would have replayed now rerun, costing about
-  16 min each for roughly half of Rust merges.
+- Projected, not measured: on Rust-changing PRs the Rust lane's test step
+  stays about the same, and the lane's job wall stays near Bazel's once the
+  shared steps are added back. Non-Rust changes skip the lane. Whether CI Gate
+  latency changes depends on which job is slowest, which #1644 will observe.
+- Projected: Rust merge groups that Bazel would have replayed now rerun. At the
+  measured test-step p50 of 996 s, that adds about 16 min to the lane for
+  roughly half of Rust merge groups.
 - nextest runs test binaries concurrently. That exposed one intermittent
   product failure in 14 runs (#1643). Concurrent execution is the intended
   gate condition, so the fix belongs in the product (#1643), not in the lane.
