@@ -209,7 +209,11 @@ async fn run_steps(
 }
 
 /// Execute one whole scenario and return its verdict.
+///
+/// A test-only fault injection (`tests/bdd/fault.rs`) that targets this
+/// scenario delays it here, inside the timed region.
 pub fn execute(case: &ScenarioCase) -> Result<(), ScenarioFailure> {
+    crate::fault::inject(&case.key);
     runtime().block_on(async {
         let mut world = GraphForgeWorld::new()
             .await

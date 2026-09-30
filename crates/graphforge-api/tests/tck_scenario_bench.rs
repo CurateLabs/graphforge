@@ -17,6 +17,8 @@
 mod api_steps;
 #[path = "bdd/corpus.rs"]
 mod corpus;
+#[path = "bdd/fault.rs"]
+mod fault;
 #[path = "bdd/fixture.rs"]
 mod fixture;
 #[path = "../benches/tck_scenarios/runner.rs"]
@@ -101,6 +103,10 @@ impl ChildRun {
 }
 
 fn run_child(mode: &str, feature: &str) -> ChildRun {
+    run_child_with(mode, feature, &[])
+}
+
+fn run_child_with(mode: &str, feature: &str, env: &[(&str, &str)]) -> ChildRun {
     let scratch = tempfile::TempDir::new().expect("scratch dir");
     let corpus = scratch.path().join("features");
     let workspace = scratch.path().join("workspace");
@@ -108,7 +114,14 @@ fn run_child(mode: &str, feature: &str) -> ChildRun {
     std::fs::create_dir_all(&workspace).expect("workspace dir");
     std::fs::write(corpus.join("BenchFault.feature"), feature).expect("write feature");
 
-    let output = Command::new(std::env::current_exe().expect("test binary"))
+    let mut command = Command::new(std::env::current_exe().expect("test binary"));
+    command
+        .env_remove(fault::DELAY_ENV)
+        .env_remove(fault::SCENARIO_ENV);
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let output = command
         .args([
             "divan_child",
             "--exact",
@@ -215,4 +228,47 @@ fn scenario_keys_match_the_cucumber_runner() {
     let cases = runner::load_scenarios(scratch.path());
     let keys: Vec<String> = cases.iter().map(ToString::to_string).collect();
     assert_eq!(keys, [PASSING_KEY, FAILING_KEY]);
+}
+
+/// The #1654 known positive at the Divan boundary: a test-only injected delay
+/// lands inside the timed region, so every sample is at least that long, and
+/// the injection is announced for the driver to record.
+#[test]
+fn fault_injection_delays_the_named_scenario_inside_the_timed_region() {
+    const DELAY_MS: u32 = 250;
+    let delay = DELAY_MS.to_string();
+    let run = run_child_with(
+        "bench",
+        PASSING_SCENARIO,
+        &[
+            (fault::DELAY_ENV, &delay),
+            (fault::SCENARIO_ENV, PASSING_KEY),
+        ],
+    );
+    let stderr = run.stderr();
+    assert!(run.output.status.success(), "bench failed:\n{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "TCK PERF FAULT INJECTION: delay_ms={DELAY_MS} scenario={PASSING_KEY}"
+        )),
+        "the injection must be announced:\n{stderr}"
+    );
+    let min_ns = run.raw_results[0]["stats"]["min_ns"]
+        .as_f64()
+        .expect("min_ns");
+    assert!(
+        min_ns >= f64::from(DELAY_MS) * 1_000_000.0,
+        "every sample must include the injected delay, min_ns={min_ns}"
+    );
+}
+
+#[test]
+fn fault_injection_misconfiguration_aborts_the_bench() {
+    let run = run_child_with("bench", PASSING_SCENARIO, &[(fault::DELAY_ENV, "5")]);
+    assert!(
+        !run.output.status.success(),
+        "a half-configured injection must not run uninjected"
+    );
+    assert!(run.stderr().contains("needs both"), "{}", run.stderr());
+    assert!(run.raw_results.is_empty());
 }

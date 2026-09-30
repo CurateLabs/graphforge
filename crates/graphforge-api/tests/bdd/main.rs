@@ -14,6 +14,7 @@
 #[cfg(feature = "search")]
 mod api_steps;
 mod corpus;
+mod fault;
 mod fixture;
 mod tck_steps;
 mod timing;
@@ -26,8 +27,8 @@ use corpus::{copy_features_normalized, tck_only_filter};
 use world::GraphForgeWorld;
 
 use timing::{
-    ScenarioTimer, ScenarioTiming, Suite, annotation_messages, baseline_candidate, build_report,
-    escape_github_command, load_baseline, load_policy, non_passing_scenario_keys, write_artifacts,
+    LegacyFile, ScenarioTimer, ScenarioTiming, Suite, build_report, legacy_notice, load_legacy,
+    non_passing_scenario_keys, write_artifacts,
 };
 
 #[tokio::main]
@@ -100,6 +101,8 @@ async fn main() {
     let root = normalized.path().to_path_buf();
     let passing = std::sync::Arc::new(std::sync::Mutex::new(ScenarioOutcomes::default()));
     let fixture_guard = fixture::activate();
+    // Announce (or reject) a test-only fault injection before the TCK starts.
+    fault::active();
     // `with_default_cli()` MUST come AFTER `with_writer()`: `with_writer` resets the
     // builder's parsed CLI to `None` (the CLI type depends on the writer), and a
     // `None` CLI makes `run()` fall back to parsing the process argv. That parse
@@ -109,6 +112,12 @@ async fn main() {
     // last skips the argv parse entirely (we scope scenarios by corpus path, not CLI).
     GraphForgeWorld::cucumber()
         .max_concurrent_scenarios(fixture::TCK_CONCURRENCY)
+        // Test-only #1654 known positive: delay the targeted scenario inside
+        // the process BenchExec measures. A no-op unless GF_TCK_PERF_FAULT_* is set.
+        .before(|feature, _, scenario, _| {
+            let key = corpus::scenario_key(&feature.name, scenario.position.line, &scenario.name);
+            async move { fault::inject(&key) }.boxed_local()
+        })
         .after(|_, _, _, _, world| {
             async move {
                 if let Some(world) = world {
@@ -271,19 +280,17 @@ fn write_timing_report(
     records: &[ScenarioTiming],
     partial: bool,
 ) {
-    let policy_path = workspace_root.join("tests/tck/performance_policy.json");
-    let baseline_path = workspace_root.join("tests/tck/performance_baseline.json");
-    let policy = load_policy(&policy_path).unwrap_or_else(|error| panic!("{error}"));
-    assert_eq!(
-        policy.tck_concurrency,
-        fixture::TCK_CONCURRENCY,
-        "timing policy concurrency must match the cucumber fixture profile"
-    );
-    let baseline = load_baseline(&baseline_path, policy.baseline_required && !partial)
-        .unwrap_or_else(|error| panic!("{error}"));
-    let report = build_report(records, &policy, baseline.as_ref(), partial)
-        .unwrap_or_else(|error| panic!("failed to build BDD timing report: {error}"));
-    let candidate = baseline_candidate(records, partial, &policy);
+    // The pre-#1654 schema-2 policy and baseline still load, as diagnostic
+    // context only: one notice, never a comparison and never a panic.
+    let legacy: Vec<(&str, LegacyFile)> = [
+        "tests/tck/performance_policy.json",
+        "tests/tck/performance_baseline.json",
+    ]
+    .into_iter()
+    .map(|name| (name, load_legacy(&workspace_root.join(name))))
+    .collect();
+    let notice = legacy_notice(&legacy);
+    let report = build_report(records, partial, fixture::TCK_CONCURRENCY, notice.clone());
     let configured = std::env::var_os("BDD_TIMING_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("target/bdd-timings"));
@@ -292,18 +299,10 @@ fn write_timing_report(
     } else {
         workspace_root.join(configured)
     };
-    let markdown =
-        write_artifacts(&output_dir, &report, &candidate).unwrap_or_else(|error| panic!("{error}"));
+    let markdown = write_artifacts(&output_dir, &report).unwrap_or_else(|error| panic!("{error}"));
     eprintln!("\n{markdown}");
-
-    for message in annotation_messages(&report, policy.max_warning_annotations) {
-        eprintln!("TCK PERF WARNING: {message}");
-        if std::env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true") {
-            eprintln!(
-                "::warning title=TCK performance::{}",
-                escape_github_command(&message)
-            );
-        }
+    if let Some(notice) = notice {
+        eprintln!("TCK PERF NOTICE: {notice}");
     }
 }
 

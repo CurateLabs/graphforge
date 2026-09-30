@@ -269,8 +269,17 @@ jobs:
             target: x86_64-unknown-linux-gnu
             report_target: node-x86_64-unknown-linux-gnu
             execution_mode: native
-            cross_args: ""
+            # The napi cross toolchain links against glibc 2.17, the floor the
+            # Linux wheel and the aarch64 addon already meet; a native build on
+            # this Ubuntu 24.04 runner required glibc 2.39 (#1670). Its
+            # toolchain unpacker needs Node 22 (see the aarch64 lane), so the
+            # lane builds on Node 22 and executes the addon on the Node 20
+            # `engines.node` floor.
+            cross_args: --use-napi-cross
             node_arch: x64
+            node_version: "22"
+            runtime_node_version: "20"
+            glibc_floor: "2.17"
             sticky_target: "false"
             # The release-candidate job packs this lane's napi-generated
             # index.js / index.d.ts, the loaders its native contract executed.
@@ -282,6 +291,7 @@ jobs:
             cross_args: --use-napi-cross
             arm_cflags: -D__ARM_ARCH=8
             node_arch: x64
+            glibc_floor: "2.17"
             sticky_target: "true"
             # `--use-napi-cross` unpacks its gcc toolchain with `@napi-rs/lzma`,
             # whose native binding declares `engines.node: ^22.20 || ^24.12 ||
@@ -379,6 +389,43 @@ jobs:
         run: >-
           pnpm --filter @curatelabs/graphforge exec napi build --platform --release
           --target ${{ matrix.target }} ${{ matrix.cross_args }}
+
+      - name: Require the declared glibc floor
+        if: matrix.glibc_floor != ''
+        shell: bash
+        env:
+          GLIBC_FLOOR: ${{ matrix.glibc_floor }}
+        run: |
+          set -euo pipefail
+          addons=(crates/graphforge-bindings-node/*.node)
+          test "${#addons[@]}" -eq 1
+          # readelf reads the dynamic symbol table of any ELF architecture, so
+          # the cross-built aarch64 addon is checked on the x64 host too.
+          required=$(readelf --dyn-syms --wide "${addons[0]}" \
+            | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)*' | sed 's/^GLIBC_//' | sort -V | tail -n 1)
+          test -n "$required"
+          highest=$(printf '%s\n%s\n' "$required" "$GLIBC_FLOOR" | sort -V | tail -n 1)
+          if [[ "$highest" != "$GLIBC_FLOOR" ]]; then
+            printf '%s needs glibc %s, above the declared floor %s\n' \
+              "${addons[0]}" "$required" "$GLIBC_FLOOR" >&2
+            exit 1
+          fi
+          echo "glibc_required=$required floor=$GLIBC_FLOOR"
+
+      - name: Execute the addon on the Node engines floor
+        if: matrix.runtime_node_version != ''
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.runtime_node_version }}
+          architecture: ${{ matrix.node_arch }}
+
+      - name: Verify runtime Node version
+        if: matrix.runtime_node_version != ''
+        shell: bash
+        env:
+          RUNTIME_NODE_VERSION: ${{ matrix.runtime_node_version }}
+        run: |
+          test "$(node -p 'process.versions.node.split(".")[0]')" = "$RUNTIME_NODE_VERSION"
 
       - name: Execute native parity and smoke contract
         if: matrix.execution_mode == 'native'
