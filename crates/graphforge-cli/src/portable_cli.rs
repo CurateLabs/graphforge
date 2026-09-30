@@ -887,6 +887,7 @@ mod lifecycle_storage_tests {
                 ("stage".to_owned(), 6),
             ]),
             materialized_cleanup_parent_sync_confirmed: true,
+            observed_transient_peak_allocated_bytes: 20,
         }
     }
 
