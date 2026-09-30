@@ -30,7 +30,7 @@ jobs:
       agent_skills: ${{ steps.filter.outputs.agent_skills }}
       pulumi: ${{ steps.filter.outputs.pulumi }}
       terraform: ${{ steps.filter.outputs.terraform }}
-      bazel: ${{ steps.filter.outputs.bazel }}
+      rust_tests: ${{ steps.filter.outputs.rust_tests }}
       epistemic_contract: ${{ steps.filter.outputs.epistemic_contract }}
       knowledge_contract: ${{ steps.filter.outputs.knowledge_contract }}
       non_cypher_surface: ${{ steps.filter.outputs.non_cypher_surface }}
@@ -883,7 +883,7 @@ jobs:
           --output "${{ runner.temp }}/concurrency-short-evidence"
 
   # #[cfg(windows)] project-root lock unit tests in graphforge-storage do not run on
-  # Linux Bazel CI. Host them here — not on Binding RC python-windows (#2700).
+  # the Linux Rust Tests lane. Host them here — not on Binding RC python-windows (#2700).
   windows-graphforge-storage-locks:
     name: Windows graphforge-storage Locks
     runs-on: blacksmith-4vcpu-windows-2025
@@ -1182,48 +1182,52 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  bazel-bootstrap:
-    # Job display name kept for continuity; this is the authoritative Rust
-    # compile/test path under CI Gate after #4 cutover.
-    name: Bazel Bootstrap
+  rust-tests:
+    # The CI Gate Rust test lane (ADR 0048): the whole Cargo workspace under
+    # nextest, then the custom-harness targets and the doctests under
+    # cargo test. Dev/test profiles keep debug assertions and overflow checks
+    # on; do not switch this lane to a release profile.
+    name: Rust Tests
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: changes
-    if: needs.changes.outputs.bazel == 'true'
-    # Authoritative drift/ledger/tests/binding smokes only. Diagnostics live in
-    # bazel-diagnostics (not required by CI Gate).
+    if: needs.changes.outputs.rust_tests == 'true'
     timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Prepare native test temporary storage
         run: python3 scripts/test_environment.py --github-env "$GITHUB_ENV"
 
-      # The correctness-config test build reused only 34 of 2273 actions from the
-      # injected remote cache. This volume carries that configuration's outputs
-      # between runs; Bazel's disk cache is content-addressed, so a shared volume
-      # is safe and a stale entry is simply never read.
-      - name: Mount Bazel disk cache
+      # Shared warm target/ volume. Cargo fingerprints every unit, so a stale
+      # artifact is rebuilt rather than trusted; the key moves with the
+      # toolchain so a compiler bump starts from an empty volume.
+      - name: Mount sticky target/ disk
         uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
         with:
-          key: ${{ github.repository }}-bazel-disk-cache-v1
-          path: .bazel-disk-cache
+          key: ${{ github.repository }}-rust-tests-rust-1.96.0-target-v1
+          path: target
 
-      - name: Install Bazelisk
-        run: |
-          version=1.26.0
-          # SHA-256 of bazelisk-linux-amd64 from
-          # https://github.com/bazelbuild/bazelisk/releases/tag/v1.26.0
-          # Computed locally: curl -fsSL … | shasum -a 256
-          checksum=6539c12842ad76966f3d493e8f80d67caa84ec4a000e220d5459833c967c12bc
-          tmp=$(mktemp)
-          curl -fsSL \
-            "https://github.com/bazelbuild/bazelisk/releases/download/v${version}/bazelisk-linux-amd64" \
-            -o "$tmp"
-          printf '%s  %s\n' "$checksum" "$tmp" | shasum -a 256 --check
-          sudo install -m 0755 "$tmp" /usr/local/bin/bazelisk
-          rm -f "$tmp"
-          sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
-          bazelisk version
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
+        with:
+          toolchain: "1.96.0"
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2.87.15
+        with:
+          tool: cargo-nextest@0.9.145
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
 
       - name: Install uv for benchmark fixture validation
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
@@ -1242,50 +1246,32 @@ jobs:
             tests.test_progressive_run \
             tests.test_qualification_operator
 
-      - name: Cargo feature drift check (fail-closed)
-        run: |
-          python3 scripts/ci/cargo-bazel-drift-check.py
-          python3 scripts/ci/test-cargo-bazel-drift-check.py
+      # The custom-harness targets (cucumber BDD, allocation probe) cannot
+      # answer nextest's --list protocol; they run under cargo test below.
+      - name: Rust workspace tests (nextest)
+        id: nextest
+        run: >-
+          python3 scripts/test_environment.py --
+          cargo nextest run --workspace --locked --no-fail-fast
+          -E 'not ((package(graphforge-api) and binary(bdd)) or (package(graphforge-observability) and binary(disabled_allocations)))'
 
-      - name: Migration ledger + release platform inventory (fail-closed)
-        run: |
-          python3 scripts/ci/bazel-migration-ledger-check.py
-          python3 scripts/ci/test-bazel-migration-ledger-check.py
-          python3 scripts/ci/test-cargo-bazel-parity-check.py
+      # --workspace keeps workspace feature unification, so the remaining
+      # targets reuse the nextest build instead of recompiling per package.
+      # They run even when nextest fails so one run reports every failure.
+      - name: Rust custom-harness tests (bdd, disabled_allocations)
+        if: ${{ !cancelled() && (steps.nextest.outcome == 'success' || steps.nextest.outcome == 'failure') }}
+        run: >-
+          python3 scripts/test_environment.py --
+          cargo test --workspace --locked --test bdd --test disabled_allocations
 
-      # Live suite-membership gate: every mapped integration-test label must be
-      # reachable from tests(//:ci_rust_tests). Required path must exercise the
-      # live bazelisk query (unit-test harness may skip it).
-      - name: Live suite-membership inventory (fail-closed)
-        run: |
-          python3 scripts/ci/cargo-bazel-parity-check.py --mode inventory
-
-      - name: Blacksmith remote-cache policy + harness unit tests
-        run: |
-          # Do not set --remote_cache; Blacksmith injects repository cache.
-          # Strict evaluate of checked-in perf-sample.json is one-shot Bazel-migration
-          # evidence (see bazel-migration.md), not a live regression gate;
-          # observation/collect lives in bazel-diagnostics.
-          python3 scripts/ci/bazel-cache-perf.py --mode policy
-          python3 scripts/ci/test-bazel-cache-perf.py
-
-      - name: Prepare Bazel evidence directory
-        run: mkdir -p dist
-
-      - name: Authoritative Bazel Rust tests + first-party libs/CLI/resources
-        shell: bash
-        run: |
-          # Do not set --remote_cache; Blacksmith injects repository cache.
-          python3 scripts/test_environment.py -- bazelisk test --config=ci --config=correctness //:ci_rust_tests 2>&1 | tee dist/bazel-ci-rust-tests.log
-          bazelisk build --config=ci \
-            //:bazel_smoke \
-            //:first_party_libs \
-            //:runtime_libs \
-            //:cli_bins \
-            //:resource_inputs \
-            //:release_bins 2>&1 | tee dist/bazel-representative-build.log
+      - name: Rust doctests
+        if: ${{ !cancelled() && (steps.nextest.outcome == 'success' || steps.nextest.outcome == 'failure') }}
+        run: >-
+          python3 scripts/test_environment.py --
+          cargo test --workspace --locked --doc
 
       - name: Real tiny and ownership-growth lifecycle producer
+        if: ${{ !cancelled() && (steps.nextest.outcome == 'success' || steps.nextest.outcome == 'failure') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1295,8 +1281,8 @@ jobs:
           python3 benchmarks/runners/graph500-generator/tests/reference/verify_vectors.py
           cargo test --locked --manifest-path benchmarks/Cargo.toml \
             -p graphforge-benchmark-graph500-generator
-          bazelisk build --config=ci //crates/graphforge-cli:gf
-          gf_bin=$(bazelisk cquery --config=ci --output=files //crates/graphforge-cli:gf | tail -n 1)
+          cargo build --locked -p graphforge-cli --bin gf
+          gf_bin="$GITHUB_WORKSPACE/target/debug/gf"
           test -x "$gf_bin"
           uv run --project benchmarks --locked python \
             benchmarks/scripts/test-tiny-lifecycle-certification.py \
@@ -1311,197 +1297,6 @@ jobs:
             --certify benchmarks/target/debug/graphforge-benchmark-certify \
             --generator benchmarks/target/debug/graphforge-benchmark-graph500-generator \
             --workspace-root "$RUNNER_TEMP"
-
-      - name: Bazel binding cdylibs + packaging handoff
-        run: |
-          set -euo pipefail
-          # Do not set --remote_cache; Blacksmith injects repository cache.
-          mkdir -p dist
-          bazelisk build --config=ci //:binding_cdylibs //:python_wheel_smoke //:node_package_smoke \
-            2>&1 | tee dist/bazel-binding-build.log
-          python3 scripts/ci/test-assemble-bazel-binding-packages.py
-
-  bazel-diagnostics:
-    # Non-required parity/cache diagnostics are intentionally disabled for
-    # pull requests. Preserve the recipe until it moves to maintenance CI.
-    name: Bazel Diagnostics
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: changes
-    if: github.event_name == 'workflow_dispatch' && needs.changes.outputs.bazel == 'true'
-    timeout-minutes: 120
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Bazelisk
-        run: |
-          version=1.26.0
-          # SHA-256 of bazelisk-linux-amd64 from
-          # https://github.com/bazelbuild/bazelisk/releases/tag/v1.26.0
-          # Computed locally: curl -fsSL … | shasum -a 256
-          checksum=6539c12842ad76966f3d493e8f80d67caa84ec4a000e220d5459833c967c12bc
-          tmp=$(mktemp)
-          curl -fsSL \
-            "https://github.com/bazelbuild/bazelisk/releases/download/v${version}/bazelisk-linux-amd64" \
-            -o "$tmp"
-          printf '%s  %s\n' "$checksum" "$tmp" | shasum -a 256 --check
-          sudo install -m 0755 "$tmp" /usr/local/bin/bazelisk
-          rm -f "$tmp"
-          sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
-          bazelisk version
-
-      - name: Prepare Bazel diagnostic evidence directory
-        run: mkdir -p dist
-
-      - name: Same-SHA Cargo/Bazel dual-build parity (diagnostic, one release cycle)
-        run: |
-          # Cargo is no longer authoritative under CI Gate (#4). Keep same-SHA
-          # parity as a diagnostic for one release cycle; see cutover rollback doc.
-          # Do not set --remote_cache; Blacksmith injects repository cache.
-          python3 scripts/ci/cargo-bazel-parity-check.py \
-            --mode all \
-            --write-evidence "dist/cargo-bazel-parity-evidence.json"
-
-      - name: Cache-unavailable cold correctness + warm observation (#5)
-        run: |
-          set -euo pipefail
-          # Cold correctness clears remote/disk cache via CLI only (not checked in).
-          mkdir -p dist
-          python3 scripts/ci/bazel-cache-perf.py --mode cold-correctness
-          python3 scripts/ci/bazel-cache-perf.py --mode observe-warm \
-            --write dist/bazel-warm-observation.json
-          python3 scripts/ci/bazel-cache-perf.py --mode affected-inputs \
-            --write dist/bazel-affected-inputs.json
-          # Representative build for log parse (fail closed; no fabricated hits).
-          bazelisk build \
-            //:bazel_smoke \
-            //:first_party_libs \
-            //:runtime_libs \
-            //:cli_bins \
-            //:resource_inputs \
-            //:release_bins 2>&1 | tee dist/bazel-representative-build.log
-          python3 scripts/ci/bazel-cache-perf.py --mode parse-log \
-            --log dist/bazel-representative-build.log \
-            > dist/bazel-representative-build.summary.json
-          # Collect ≥10 cold/warm pairs only when remote hits are observed and
-          # checked-in evidence is still incomplete. Skip the long loop when the
-          # org-admin remote cache is still inactive. Checked-in perf-sample.json
-          # is one-shot Bazel-migration evidence, not a live regression gate.
-          status="$(python3 - <<'PY'
-          import json
-          from pathlib import Path
-          payload = json.loads(
-              Path("tools/bazel/migration-evidence/perf-sample.json").read_text()
-          )
-          print(payload.get("status", "unknown"))
-          PY
-          )"
-          hits="$(python3 - <<'PY'
-          import json
-          from pathlib import Path
-          warm = json.loads(Path("dist/bazel-warm-observation.json").read_text())
-          print("yes" if warm.get("remote_cache_hits_observed") else "no")
-          PY
-          )"
-          if [[ "$status" == "complete" ]]; then
-            cp tools/bazel/migration-evidence/perf-sample.json \
-              dist/perf-sample-collected.json
-          elif [[ "$hits" == "yes" ]]; then
-            python3 scripts/ci/bazel-cache-perf.py --mode collect-pairs --pairs 10 \
-              --evidence tools/bazel/migration-evidence/perf-sample.json \
-              --write dist/perf-sample-collected.json
-          else
-            cp tools/bazel/migration-evidence/perf-sample.json \
-              dist/perf-sample-collected.json
-            echo "skipping collect-pairs: no remote cache hits observed yet"
-          fi
-          python3 - <<'PY'
-          import json
-          import importlib.util
-          from pathlib import Path
-
-          dist = Path("dist")
-          warm = json.loads((dist / "bazel-warm-observation.json").read_text())
-          affected = json.loads((dist / "bazel-affected-inputs.json").read_text())
-          evidence = json.loads((dist / "perf-sample-collected.json").read_text())
-          obs = evidence.setdefault("observations", {})
-          obs["cache_unavailable_cold_correct"] = True
-          obs["affected_inputs_isolation"] = bool(affected.get("passed"))
-          if warm.get("remote_cache_hits_observed") or evidence.get("collection", {}).get(
-              "remote_cache_hits_seen"
-          ):
-              obs["remote_cache_hits_on_identical_sha"] = True
-          links = evidence.setdefault("blacksmith_dashboard_links", [])
-          run_url = (evidence.get("collection") or {}).get("run_url")
-          for url in (run_url, "https://app.blacksmith.sh/cache"):
-              if url and url not in links:
-                  links.append(url)
-
-          spec = importlib.util.spec_from_file_location(
-              "bazel_cache_perf", "scripts/ci/bazel-cache-perf.py"
-          )
-          mod = importlib.util.module_from_spec(spec)
-          assert spec.loader is not None
-          spec.loader.exec_module(mod)
-          # One-shot Bazel-migration evidence evaluation for observation rollup only; not a
-          # required CI Gate regression gate.
-          eval_payload = mod.evaluate_evidence(evidence)
-          evidence["gates"] = {
-              "passed": bool(eval_payload.get("passed")),
-              "reason": eval_payload.get("reason"),
-              "warm_speedup": eval_payload.get("warm_speedup"),
-              "compute_reduction": eval_payload.get("compute_reduction"),
-              "cold_regression": eval_payload.get("cold_regression"),
-              "pair_count": eval_payload.get("pair_count"),
-          }
-          if eval_payload.get("passed"):
-              evidence["status"] = "complete"
-              evidence.pop("blocker", None)
-          (dist / "perf-sample-collected.json").write_text(
-              json.dumps(evidence, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          hits = bool(obs.get("remote_cache_hits_on_identical_sha"))
-          summary = {
-              "schema": "graphforge.bazel-cache-perf-ci-observation.v1",
-              "warm_observation": warm,
-              "affected_inputs": affected,
-              "remote_cache_hits_observed": hits,
-              "org_admin_blocker_likely": not hits,
-              "evidence_status": evidence.get("status"),
-              "evaluate": eval_payload,
-              "note": "perf-sample.json is one-shot Bazel-migration evidence; not a live CI Gate gate",
-          }
-          (dist / "bazel-cache-perf-ci-observation.json").write_text(
-              json.dumps(summary, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          print(json.dumps(summary, indent=2, sort_keys=True))
-          PY
-
-      - name: Upload Cargo/Bazel parity evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: cargo-bazel-parity-evidence-${{ github.run_id }}
-          path: dist/cargo-bazel-parity-evidence.json
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Upload Bazel cache/perf observation (#5)
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: bazel-cache-perf-evidence-${{ github.run_id }}
-          path: |
-            dist/bazel-warm-observation.json
-            dist/bazel-affected-inputs.json
-            dist/bazel-cache-perf-ci-observation.json
-            dist/bazel-representative-build.summary.json
-            dist/perf-sample-collected.json
-            tools/bazel/migration-evidence/perf-sample.json
-          if-no-files-found: error
-          retention-days: 1
 
   ci-gate:
     name: CI Gate
@@ -1522,7 +1317,7 @@ jobs:
       - windows-graphforge-storage-locks
       - macos-graphforge-storage-durability
       - native-durability-aggregate
-      - bazel-bootstrap
+      - rust-tests
       - epistemic-contract-gate
       - knowledge-contract-gate
       - non-cypher-surface-gate
@@ -1546,7 +1341,7 @@ jobs:
           "${{ needs.windows-graphforge-storage-locks.result }}"
           "${{ needs.macos-graphforge-storage-durability.result }}"
           "${{ needs.native-durability-aggregate.result }}"
-          "${{ needs.bazel-bootstrap.result }}"
+          "${{ needs.rust-tests.result }}"
           "${{ needs.epistemic-contract-gate.result }}"
           "${{ needs.knowledge-contract-gate.result }}"
           "${{ needs.non-cypher-surface-gate.result }}"
