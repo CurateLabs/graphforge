@@ -213,6 +213,7 @@ pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstr
 	@python3 scripts/ci/python-build-mode-check.py
 	@python3 scripts/ci/test-python-build-mode-check.py
 	@python3 scripts/ci/test-uuid-derivation-policy.py
+	@python3 scripts/development/test-digest-census.py
 	@echo "━━━ Source size policy ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@python3 scripts/source_size_policy.py
 	@python3 scripts/ci/test-source-size-policy.py

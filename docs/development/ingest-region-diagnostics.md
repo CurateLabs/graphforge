@@ -160,6 +160,17 @@ an identified source tree, writing results outside the repository:
 python3 scripts/development/digest-census.py --repo . --output /tmp/gf-digest-census
 ```
 
+The method and reviewed classification inputs are pinned by SHA-256:
+`digest-census.py` is
+`32735721cc88d648c24ce6605b58e64c40d02fc50626c3b4b0bf97b451148bba`;
+`digest-census-overrides.json` is
+`d4ed923cb91c24073cc2903eb9315a6d5ee3c0277475f0d7e37c4525707d9966`.
+Run the parser and stale-review regression fixtures with
+`python3 scripts/development/test-digest-census.py`. Reviewed function bodies
+are pinned individually; changed inputs, added producers in the same function,
+missing review pins, and unknown digest algorithms make a strict run fail.
+Refresh a classification only after reviewing its actual inputs and consumers.
+
 The method records the source revision, source-file SHA-256 digests, the working
 diff digest when present, and digests of the method and semantic override inputs.
 Post the generated producer/delegate inventories and review disposition on the
