@@ -206,6 +206,7 @@ impl std::fmt::Display for CancelledBeforeReplace {
 
 impl std::error::Error for CancelledBeforeReplace {}
 
+#[cfg(test)]
 pub(crate) fn publish_atomic_bytes(
     path: &Path,
     bytes: &[u8],

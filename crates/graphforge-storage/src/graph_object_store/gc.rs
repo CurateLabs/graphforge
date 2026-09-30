@@ -26,6 +26,13 @@ use super::validation;
 pub(crate) fn capture_retained_graph_object_identities(
     root: &Path,
 ) -> Result<BTreeMap<String, u64>, GfError> {
+    capture_retained_graph_object_identities_observed(root, None)
+}
+
+pub(crate) fn capture_retained_graph_object_identities_observed(
+    root: &Path,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<BTreeMap<String, u64>, GfError> {
     const MAX_RETAINED_OBJECTS: usize = 4_000_000;
     if !root.join(GRAPH_OBJECTS_DIR).exists() {
         return Ok(BTreeMap::new());
@@ -33,6 +40,12 @@ pub(crate) fn capture_retained_graph_object_identities(
     let cas = ReadOnlyCasRoot::open(root)?;
     let mut identities = BTreeMap::new();
     add_retained_identity(&mut identities, &cas.lifecycle)?;
+    if let Some(allocation) = allocation {
+        allocation.replace_file_at(
+            &root.join(GRAPH_OBJECTS_DIR).join(super::LIFECYCLE_LOCK),
+            &cas.lifecycle,
+        )?;
+    }
     let prefixes = cas
         .sha256
         .child_names_bounded(256)
@@ -68,6 +81,9 @@ pub(crate) fn capture_retained_graph_object_identities(
                 .open_child_file(&object)
                 .map_err(|error| storage("open retained graph object", root, error))?;
             add_retained_identity(&mut identities, &file)?;
+            if let Some(allocation) = allocation {
+                allocation.replace_file_at(&bucket.path().join(&object), &file)?;
+            }
         }
     }
     Ok(identities)
