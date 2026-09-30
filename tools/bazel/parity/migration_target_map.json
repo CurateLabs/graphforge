@@ -1354,6 +1354,16 @@
     },
     {
       "package": "graphforge-storage",
+      "target": "region_work",
+      "class": "integration-test",
+      "source": "crates/graphforge-storage/tests/region_work.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-storage:region_work",
+      "exception_id": null,
+      "notes": "#1623; worker hash, barrier, and written-byte attribution"
+    },
+    {
+      "package": "graphforge-storage",
       "target": "region_controls",
       "class": "example",
       "source": "crates/graphforge-storage/examples/region_controls.rs",

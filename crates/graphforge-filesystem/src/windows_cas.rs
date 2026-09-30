@@ -60,6 +60,17 @@ impl WindowsCasWriter {
     }
 }
 
+#[cfg(windows)]
+impl crate::ObservedSync for WindowsCasWriter {
+    fn observed_sync_all(&self) -> io::Result<()> {
+        self.sync_all()
+    }
+
+    fn observed_sync_data(&self) -> io::Result<()> {
+        self.file.observed_sync_data()
+    }
+}
+
 /// Read-only Windows capability for a canonically sealed CAS object.
 #[cfg(windows)]
 #[derive(Debug)]
