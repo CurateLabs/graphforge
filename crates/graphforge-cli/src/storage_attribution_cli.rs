@@ -9,17 +9,27 @@ use graphforge_api::GraphForge;
 
 use crate::open_cli_graph;
 
+#[derive(Args)]
+pub(super) struct DiagnosticsArgs {
+    /// Include optional lifecycle I/O and region measurements in JSON receipts.
+    #[arg(long = "diagnostics", global = true)]
+    enabled: bool,
+    /// First-party qualification channel; input contains no graph payload.
+    #[arg(long, global = true, hide = true)]
+    pub(super) allocation_diagnostics: bool,
+}
+
 /// Activate requested observations before opening the facade.
 pub(super) fn capture(
     cli: &super::Cli,
 ) -> Result<Option<graphforge_api::LifecycleIoCapture>, graphforge_api::GfError> {
-    if cli.diagnostics && !cli.json {
+    if cli.diagnostics.enabled && !cli.json {
         return Err(graphforge_api::GfError::Validation(
             "diagnostics require --json".into(),
         ));
     }
-    let requested = cli.diagnostics
-        || cli.allocation_diagnostics
+    let requested = cli.diagnostics.enabled
+        || cli.diagnostics.allocation_diagnostics
         || matches!(
             cli.command.as_ref(),
             Some(super::Command::StorageAttribution(_))

@@ -225,10 +225,6 @@ fn load_skill_bundle(root: &Path) -> Result<OwnedSkillBundle, graphforge_api::Gf
 #[derive(Parser)]
 #[command(name = "graphforge", version, about = "GraphForge CLI")]
 struct Cli {
-    /// First-party qualification channel; input contains no graph payload.
-    #[arg(long, global = true, hide = true)]
-    allocation_diagnostics: bool,
-
     /// Print version info and exit.
     #[arg(long)]
     info: bool,
@@ -241,9 +237,8 @@ struct Cli {
     #[arg(long, global = true)]
     project_dir: Option<PathBuf>,
 
-    /// Include optional lifecycle I/O and region measurements in JSON receipts.
-    #[arg(long, global = true)]
-    diagnostics: bool,
+    #[command(flatten)]
+    diagnostics: storage_attribution_cli::DiagnosticsArgs,
 
     /// Emit the stable machine-readable JSON result when supported.
     #[arg(long, global = true)]
@@ -1199,7 +1194,7 @@ impl From<graphforge_api::MultiOntologyError> for CliRuntimeError {
 #[allow(clippy::too_many_lines)]
 fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
     let _capture = storage_attribution_cli::capture(&cli)?;
-    let allocation = if cli.allocation_diagnostics {
+    let allocation = if cli.diagnostics.allocation_diagnostics {
         if !cli.json {
             return Err(graphforge_api::GfError::Validation(
                 "allocation diagnostics require --json".into(),

@@ -346,7 +346,7 @@ struct PropertyParquetRows {
     batch_reservation_bytes: u64,
     _handle: Option<FragmentHandleGuard>,
     #[cfg(test)]
-    late_failure_row_countdown: Option<AtomicU64>,
+    late_failure_row_countdown: Arc<AtomicU64>,
 }
 
 impl Drop for PropertyParquetRows {
