@@ -56,6 +56,22 @@
       "notes": "Node MERGE scaling wall-clock workloads; topology-read bound stays in merge_scaling_bench integration tests."
     },
     {
+      "path": "crates/graphforge-api/benches/tck_scenarios/main.rs",
+      "boundary": "in_process",
+      "authority": "divan",
+      "disposition": "framework_authority",
+      "owner_issue": null,
+      "notes": "openCypher TCK per-scenario Divan benchmark (#1653): normalized corpus and pooled fixture setup; timing from Divan only, serialized as CodSpeed walltime raw_results under CODSPEED_ENV."
+    },
+    {
+      "path": "crates/graphforge-api/benches/tck_scenarios/runner.rs",
+      "boundary": "in_process",
+      "authority": "divan",
+      "disposition": "framework_authority",
+      "owner_issue": null,
+      "notes": "TCK scenario execution through the registered cucumber steps; the timed region is the whole scenario and each verdict is checked outside it, so a failing scenario aborts before Divan records timing."
+    },
+    {
       "path": "crates/graphforge-exec/tests/persistent_adjacency.rs",
       "boundary": "in_process",
       "authority": "custom",

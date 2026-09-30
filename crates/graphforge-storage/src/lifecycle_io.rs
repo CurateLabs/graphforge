@@ -344,9 +344,10 @@ pub fn reset() {
 /// Serializes to the same `{phases, totals}` document
 /// [`ConstructionPhaseAttribution`](crate::ConstructionPhaseAttribution) emits,
 /// with one extra row: `read_path_scan`. Construction never records into that
-/// row — the publish-side and import-side adjacency builds are scoped to the
-/// encoding row (#1449) — so a nonzero `read_path_scan` always means committed
-/// read-path work.
+/// row: the publish-side, import-side and explicit (`index("adjacency")`)
+/// adjacency builds are scoped to the encoding row (#1449). A nonzero
+/// `read_path_scan` therefore means committed read-path work, including a
+/// query process's lazy adjacency rebuild with its writes and barriers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifecyclePhaseAttribution {
     /// Every lifecycle phase exactly once, including zero observations.
@@ -478,10 +479,21 @@ impl parquet::file::reader::ChunkReader for ReadPathFile {
 }
 
 /// Counting adapter for the reader [`ReadPathFile`] hands to Parquet.
+///
+/// It records one call per `read` on the wrapped reader. Placed beneath a
+/// [`std::io::BufReader`], that is one call per buffer refill — the read
+/// syscalls actually issued — rather than one per record the caller decodes.
 #[derive(Debug)]
 pub struct ReadPathRead<R> {
     inner: R,
     capture: CaptureContext,
+}
+
+impl<R> ReadPathRead<R> {
+    /// Count reads issued against `inner`.
+    pub(crate) const fn new(inner: R) -> Self {
+        Self { inner }
+    }
 }
 
 impl<R: std::io::Read> std::io::Read for ReadPathRead<R> {

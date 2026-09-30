@@ -16,7 +16,7 @@ prerequisite for this epic.
 | `cargo test … certification_target_live…` (retired) | `qualification-operator GATE=progressive-ladder` | native host execution belongs to #952/#900 |
 | `scripts/ci/validate-g500-certification.py` | `graphforge_bench.scale_parity` + progressive schemas | historical lifecycle fixture remains readable |
 | `docs/development/perf-g500-ladder.md` | `benchmarks/README.md` | historical reference retained |
-| `.github/workflows/g500-certification.yml` | `.github/workflows/progressive-ladder.yml` | retired; progressive-ladder handoff wired |
+| `.github/workflows/g500-certification.yml` | `qualification-operator GATE=progressive-ladder` | retired; the registry-owned operator command is the entry point |
 
 ## Accepted semantic differences
 
