@@ -1136,6 +1136,60 @@ fn min_cost_flow_persists_and_shares_scalar_and_edge_solution() {
 }
 
 #[test]
+fn min_cost_flow_solves_partially_used_edges_through_both_views() {
+    // #1660: an edge carrying flow below capacity made tie refinement repeat
+    // a no-op cycle until the iteration limit, in either direction mode.
+    for (upstream, downstream) in [(10.0, 5.0), (5.0, 10.0)] {
+        for directed in [true, false] {
+            let graph = GraphForge::new(None).unwrap();
+            let nodes = ["Source", "A", "Sink"].map(|name| add_person(&graph, name));
+            graph
+                .execute(&format!(
+                    "MATCH (s:Person {{name:'Source'}}), (a:Person {{name:'A'}}), \
+                     (t:Person {{name:'Sink'}}) \
+                     CREATE (s)-[:PIPE {{capacity:{upstream:.1}, cost:1.0}}]->(a), \
+                     (a)-[:PIPE {{capacity:{downstream:.1}, cost:1.0}}]->(t)"
+                ))
+                .unwrap();
+            let source = NodeSelector::Uuid(nodes[0].uuid);
+            let sink = NodeSelector::Uuid(nodes[2].uuid);
+            let context = format!("directed={directed} {upstream}->{downstream}");
+            let scalar = graph
+                .paths(
+                    &source,
+                    Some(&sink),
+                    min_cost_flow_options(PathAlgorithm::MinCostMaxFlow, directed),
+                )
+                .unwrap_or_else(|error| panic!("{context}: {error}"));
+            assert_eq!(
+                (
+                    float_column(&scalar, "flow").value(0),
+                    float_column(&scalar, "cost").value(0)
+                ),
+                (5.0, 10.0),
+                "{context}"
+            );
+            let edges = graph
+                .paths(
+                    &source,
+                    Some(&sink),
+                    min_cost_flow_options(PathAlgorithm::MinCostMaxFlowEdges, directed),
+                )
+                .unwrap_or_else(|error| panic!("{context}: {error}"));
+            let flows = float_column(&edges, "flow");
+            let flow_costs = float_column(&edges, "flow_cost");
+            assert_eq!(
+                (0..edges.num_rows())
+                    .map(|row| (flows.value(row), flow_costs.value(row)))
+                    .collect::<Vec<_>>(),
+                vec![(5.0, 5.0), (5.0, 5.0)],
+                "{context}"
+            );
+        }
+    }
+}
+
+#[test]
 fn min_cost_flow_persisted_undirected_signed_parallel_and_failures() {
     let dir = tempfile::tempdir().unwrap();
     let graph = GraphForge::new(Some(dir.path().to_str().unwrap())).unwrap();
