@@ -2099,9 +2099,12 @@ mod tests {
         let reader = ShardedCsrIndex::open(&path).unwrap();
 
         let _capture = crate::lifecycle_io::CaptureScope::install();
-        let before = crate::lifecycle_io::snapshot();
+        let before = crate::lifecycle_io::snapshot().expect("requested lifecycle measurement");
         assert!(!reader.row(0).unwrap().is_empty());
-        let region = crate::lifecycle_io::snapshot().since(&before).unwrap();
+        let region = crate::lifecycle_io::snapshot()
+            .expect("requested lifecycle measurement")
+            .since(&before)
+            .unwrap();
         region.validate_for_qualification().unwrap();
         // #1449: first-row-touch authentication is real read-path work and
         // used to be invisible to the counters.

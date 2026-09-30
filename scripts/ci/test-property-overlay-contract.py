@@ -278,11 +278,11 @@ def main() -> None:
 
         writer = root / "crates/graphforge-storage/src/writer/property_mutation.rs"
         writer_source = writer.read_text(encoding="utf-8")
-        if "read_authenticated_property_snapshots_for_inventory" not in writer_source:
+        if "read_authenticated_property_snapshot_data_for_inventory" not in writer_source:
             raise AssertionError("staging fixture lost targeted reader")
         writer.write_text(
             writer_source.replace(
-                "read_authenticated_property_snapshots_for_inventory",
+                "read_authenticated_property_snapshot_data_for_inventory",
                 "visit_authenticated_property_snapshots",
             ),
             encoding="utf-8",

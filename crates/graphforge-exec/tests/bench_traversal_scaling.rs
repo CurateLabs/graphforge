@@ -198,9 +198,11 @@ async fn run_measured(
         OntologyMode::Strict,
     ));
 
+    let _io_capture = io_stats::CaptureScope::install();
+
     io_stats::reset();
     let out = collect(exec, ctx.task_ctx()).await.unwrap();
-    let snap = io_stats::snapshot();
+    let snap = io_stats::snapshot().expect("requested I/O statistics");
 
     let dst_idx = frontier_schema().fields().len() + 1;
     let mut reached = Vec::new();

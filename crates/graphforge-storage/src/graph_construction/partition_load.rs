@@ -404,9 +404,13 @@ where
         changed: Condvar::new(),
         stop: AtomicBool::new(false),
     };
+    let lifecycle_context = crate::lifecycle_io::CaptureContext::current();
     std::thread::scope(|scope| {
         for _ in 0..window {
-            scope.spawn(|| worker(&shared, partitions, window, weights, weight_budget, &load));
+            scope.spawn(|| {
+                let _lifecycle_capture = lifecycle_context.attach();
+                worker(&shared, partitions, window, weights, weight_budget, &load);
+            });
         }
         let _stop = StopOnExit(&shared);
         (|| -> Result<(), GfError> {

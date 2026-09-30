@@ -330,6 +330,10 @@ pub fn capture<T>(operation: impl FnOnce() -> T) -> (T, DemandSnapshot) {
     let disable_on_exit = CaptureDisable;
     // `reset` binds this thread to the live epoch (inherited across block_on
     // workers). Concurrent unbound executes stamp epoch 0 and cannot record.
+    // Property-overlay work counters belong to the requested diagnostics;
+    // keep their storage collector alive across physical-plan construction.
+    let _storage_capture = (!graphforge_storage::lifecycle_io::is_active())
+        .then(graphforge_storage::lifecycle_io::CaptureScope::install);
     let result = operation();
     // Snapshot while this session is still the active epoch, then retire it so
     // any still-alive operator streams cannot append to the next capture.

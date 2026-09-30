@@ -494,8 +494,8 @@ fn promote_node_properties(
                 }
             }
             for (name, targets) in targets {
-                let (rows, _) =
-                    crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+                let rows =
+                    crate::property_overlay::read_authenticated_property_snapshot_data_for_inventory(
                         &source,
                         crate::PropertyRouteKind::Node,
                         "_untyped",
@@ -571,20 +571,19 @@ fn promote_edge_properties(dir: &Path) -> Result<HashSet<std::path::PathBuf>, Gf
                     .insert(uuids.value(row).try_into().map_err(pq_err)?);
             }
             for (name, targets) in targets {
-                let (mut rows, _) =
-                    crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+                let mut rows =
+                    crate::property_overlay::read_authenticated_property_snapshot_data_for_inventory(
                         &inventory,
                         kind,
                         "_exploratory",
                         &targets,
                     )?;
-                let (present, _) =
-                    crate::property_overlay::read_authenticated_property_presence_for_inventory(
-                        &inventory,
-                        kind,
-                        "_exploratory",
-                        &targets,
-                    )?;
+                let present = crate::property_overlay::read_property_presence_data_for_inventory(
+                    &inventory,
+                    kind,
+                    "_exploratory",
+                    &targets,
+                )?;
                 for uuid in present {
                     rows.entry(uuid)
                         .or_insert_with(|| crate::PropertySnapshotRow {
@@ -730,13 +729,12 @@ fn stage_retired_edge_property_owners(
                 .collect::<Result<BTreeSet<[u8; 16]>, _>>()?;
             let mut retired = BTreeSet::new();
             for route in &routes {
-                let (present, _) =
-                    crate::property_overlay::read_authenticated_property_presence_for_inventory(
-                        &transferred_inventory,
-                        kind,
-                        route,
-                        &targets,
-                    )?;
+                let present = crate::property_overlay::read_property_presence_data_for_inventory(
+                    &transferred_inventory,
+                    kind,
+                    route,
+                    &targets,
+                )?;
                 retired.extend(present);
             }
             let keep = BooleanArray::from(
@@ -1243,13 +1241,14 @@ migrations: []
 
         // Reopening and probing the generation-carried UUID authority must not
         // decode the topology that reconciliation just rewrote.
+        let _io_capture = crate::io_stats::CaptureScope::install();
         crate::io_stats::reset();
         let mut writer =
             crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Exploratory, 2)
                 .unwrap();
         let work = writer.register_existing_endpoints(&endpoints).unwrap();
         assert_eq!(work.found, 2);
-        let io = crate::io_stats::snapshot();
+        let io = crate::io_stats::snapshot().expect("requested I/O statistics");
         assert_eq!(io.node_full_reads, 0);
         assert_eq!(io.node_filtered_reads, 0);
 

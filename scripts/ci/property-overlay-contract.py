@@ -482,7 +482,7 @@ def validate(root: Path, contract_path: Path) -> None:
         "stage_remove_edge_properties_from_inventory",
     ):
         body_text = block(writer, rf"fn\s+{helper}\s*\(")
-        if "read_authenticated_property_snapshots_for_inventory" not in body_text:
+        if "read_authenticated_property_snapshot_data_for_inventory" not in body_text:
             raise ContractError(f"{helper} no longer uses targeted authenticated reads")
         if "visit_route" in body_text or "visit_authenticated_property_snapshots" in body_text:
             raise ContractError(f"{helper} introduced a full prior-fragment decode")

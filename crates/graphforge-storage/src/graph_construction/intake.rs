@@ -6,7 +6,7 @@ use super::{
     ConstructionChunkReceipt, CountingChunkReader, Deserialize, DetailCodec, Digest,
     EDGE_DETAIL_WIDTH, ENDPOINT_WIDTH, FixedSizeBinaryArray, GfError, GraphConstructionBudgets,
     GraphConstructionEvidence, GraphConstructionSession, GraphConstructionState, HashingWriter,
-    IDENTITY_WIDTH, INTENT, IdentityRecord, IoCounter, NODE_DETAIL_WIDTH, Ordering, OsStr,
+    IDENTITY_WIDTH, INTENT, IdentityRecord, IoCounter, NODE_DETAIL_WIDTH, OsStr,
     ParquetRecordBatchReaderBuilder, ReadWork, RecordBatch, Schema, Serialize, Sha256,
     StableDirectory, StringArray, UInt32Array, Uuid, Write, account_cache_release, artifact_temp,
     authenticate_artifact, combine_cache_cleanup, construction_failpoint, decode_bounded,
@@ -1091,8 +1091,8 @@ fn validate_parquet_shape(
     )?;
     Ok(ReadWork {
         detail_records: 0,
-        bytes: counter.bytes.load(Ordering::Relaxed),
-        operations: counter.operations.load(Ordering::Relaxed),
+        bytes: counter.values().0,
+        operations: counter.values().1,
         cache_release: cache_release.evidence(),
     })
 }
@@ -1139,8 +1139,8 @@ pub(super) fn validate_parquet_metadata(
     )?;
     Ok(ReadWork {
         detail_records: 0,
-        bytes: counter.bytes.load(Ordering::Relaxed),
-        operations: counter.operations.load(Ordering::Relaxed),
+        bytes: counter.values().0,
+        operations: counter.values().1,
         cache_release: cache_release.evidence(),
     })
 }

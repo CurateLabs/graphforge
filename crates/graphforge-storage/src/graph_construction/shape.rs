@@ -2410,10 +2410,12 @@ fn retire_segments(
             .take(segments.len())
             .collect::<Vec<Option<Result<ArtifactReceipt, GfError>>>>(),
     );
+    let lifecycle_context = crate::lifecycle_io::CaptureContext::current();
     std::thread::scope(|scope| {
         for _ in 0..lanes {
             scope.spawn(|| {
                 use std::sync::atomic::Ordering;
+                let _lifecycle_capture = lifecycle_context.attach();
                 loop {
                     let index = super::lane_job(
                         next.fetch_add(1, Ordering::AcqRel),

@@ -321,6 +321,7 @@ fn sharded_append_io_evidence_is_process_isolated() {
         max_buffered_topology_bytes: 16 * 1024,
         max_flush_scratch_bytes: 16 * 1024,
     };
+    let _io_capture = graphforge_storage::io_stats::CaptureScope::install();
     graphforge_storage::io_stats::reset();
     let mut second = GraphWriter::open_at(&direct, OntologyMode::Strict, 2)
         .unwrap()
@@ -333,7 +334,7 @@ fn sharded_append_io_evidence_is_process_isolated() {
         .unwrap();
     second.flush().unwrap();
     let work = second.topology_write_work();
-    let io = graphforge_storage::io_stats::snapshot();
+    let io = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(work.input_rows, 1);
     assert_eq!(work.prior_rows_decoded, 0);
     assert_eq!(work.rows_encoded, 1);

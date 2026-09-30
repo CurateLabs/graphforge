@@ -3,14 +3,12 @@
 //! as a *full* scan (not a cheap filtered read), and the empty-set short-circuit
 //! records nothing.
 //!
-//! The counters are process-global, so every test serializes on `GUARD` and
-//! `reset()`s under the lock before measuring. This is the binary's only set of
-//! tests, so no other suite races these statics.
+//! Each measurement requests an operation-owned capture. Ordinary reads do not
+//! allocate or update optional I/O statistics.
 
 use std::collections::HashSet;
 use std::fs::File;
 use std::path::Path;
-use std::sync::Mutex;
 
 use tempfile::TempDir;
 
@@ -26,9 +24,6 @@ use graphforge_storage::{GraphWriter, read_nodes, read_nodes_filtered};
 use graphforge_value::EntityTypeId;
 
 const TS: i64 = 1_700_000_000_000_000;
-
-/// Serializes access to the process-global counters across parallel tests.
-static GUARD: Mutex<()> = Mutex::new(());
 
 /// A KNOWS chain of `n` edges (and `n + 1` nodes) through the normal writer.
 fn write_chain(dir: &Path, n: usize) -> Vec<u64> {
@@ -55,13 +50,14 @@ fn ids(v: &[u64]) -> HashSet<u64> {
 
 #[test]
 fn read_edges_records_a_full_edge_read() {
-    let _g = GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();
     write_chain(dir.path(), 20);
 
+    let _io_capture = io_stats::CaptureScope::install();
+
     io_stats::reset();
     read_edges(dir.path(), "KNOWS", OntologyMode::Strict).unwrap();
-    let s = io_stats::snapshot();
+    let s = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(s.edge_full_reads, 1);
     assert_eq!(s.edge_full_rows, 20);
     assert_eq!(s.edge_filtered_reads, 0);
@@ -70,13 +66,14 @@ fn read_edges_records_a_full_edge_read() {
 
 #[test]
 fn read_nodes_records_a_full_node_read() {
-    let _g = GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();
     write_chain(dir.path(), 20); // 21 nodes
 
+    let _io_capture = io_stats::CaptureScope::install();
+
     io_stats::reset();
     read_nodes(dir.path()).unwrap();
-    let s = io_stats::snapshot();
+    let s = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(s.node_full_reads, 1);
     assert_eq!(s.node_full_rows, 21);
     assert_eq!(s.edge_full_reads, 0);
@@ -85,11 +82,11 @@ fn read_nodes_records_a_full_node_read() {
 
 #[test]
 fn filtered_pushdown_records_only_materialized_rows() {
-    let _g = GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();
     let all = write_chain(dir.path(), 20);
 
     // A small fraction (3 of 20) takes the predicate-pushdown path.
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     read_edges_filtered(
         dir.path(),
@@ -98,7 +95,7 @@ fn filtered_pushdown_records_only_materialized_rows() {
         &ids(&[all[2], all[7], all[15]]),
     )
     .unwrap();
-    let s = io_stats::snapshot();
+    let s = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(s.edge_filtered_reads, 1);
     assert_eq!(
         s.edge_filtered_rows, 3,
@@ -112,16 +109,16 @@ fn filtered_pushdown_records_only_materialized_rows() {
 
 #[test]
 fn filtered_fallback_counts_as_a_full_scan() {
-    let _g = GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();
     let all = write_chain(dir.path(), 10);
 
     // Requesting >50% of the rows trips the fallback: it reads the whole file,
     // so it is recorded as a full read of the full row count — not a cheap
     // filtered read of the 8 requested rows.
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     read_edges_filtered(dir.path(), "KNOWS", OntologyMode::Strict, &ids(&all[..8])).unwrap();
-    let s = io_stats::snapshot();
+    let s = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(s.edge_full_reads, 1);
     assert_eq!(s.edge_full_rows, 10, "the fallback scanned the whole file");
     assert_eq!(s.edge_filtered_reads, 0);
@@ -129,39 +126,50 @@ fn filtered_fallback_counts_as_a_full_scan() {
 
 #[test]
 fn empty_id_set_records_no_read() {
-    let _g = GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();
     write_chain(dir.path(), 5);
 
+    let _io_capture = io_stats::CaptureScope::install();
+
     io_stats::reset();
     read_edges_filtered(dir.path(), "KNOWS", OntologyMode::Strict, &HashSet::new()).unwrap();
-    assert_eq!(io_stats::snapshot(), io_stats::IoSnapshot::default());
+    assert_eq!(
+        io_stats::snapshot().expect("requested I/O statistics"),
+        io_stats::IoSnapshot::default()
+    );
 }
 
 #[test]
 fn reset_then_snapshot_round_trips() {
-    let _g = GUARD.lock().unwrap();
+    let _capture = io_stats::CaptureScope::install();
     let dir = TempDir::new().unwrap();
     write_chain(dir.path(), 3);
 
     read_edges(dir.path(), "KNOWS", OntologyMode::Strict).unwrap();
-    assert_ne!(io_stats::snapshot(), io_stats::IoSnapshot::default());
+    assert_ne!(
+        io_stats::snapshot().expect("requested I/O statistics"),
+        io_stats::IoSnapshot::default()
+    );
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
-    assert_eq!(io_stats::snapshot(), io_stats::IoSnapshot::default());
+    assert_eq!(
+        io_stats::snapshot().expect("requested I/O statistics"),
+        io_stats::IoSnapshot::default()
+    );
 }
 
 // --- read_nodes_filtered (#838): node-side mirror of the edge filtered read ---
 
 #[test]
 fn filtered_node_pushdown_records_only_materialized_rows() {
-    let _g = GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();
     write_chain(dir.path(), 20); // 21 nodes, node_ids 1..=21 (monotonic)
 
     // A small fraction (3 of 21) takes the predicate-pushdown path.
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     read_nodes_filtered(dir.path(), &ids(&[3, 7, 15])).unwrap();
-    let s = io_stats::snapshot();
+    let s = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(s.node_filtered_reads, 1);
     assert_eq!(
         s.node_filtered_rows, 3,
@@ -187,14 +195,14 @@ fn filtered_node_pushdown_records_only_materialized_rows() {
 
 #[test]
 fn filtered_node_fallback_counts_as_a_full_scan() {
-    let _g = GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();
     write_chain(dir.path(), 10); // 11 nodes
 
     // Requesting >50% of the rows trips the fallback: full read, full row count.
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     read_nodes_filtered(dir.path(), &ids(&[1, 2, 3, 4, 5, 6, 7])).unwrap();
-    let s = io_stats::snapshot();
+    let s = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(s.node_full_reads, 1);
     assert_eq!(
         s.node_full_rows, 11,
@@ -205,13 +213,17 @@ fn filtered_node_fallback_counts_as_a_full_scan() {
 
 #[test]
 fn filtered_node_empty_set_records_no_read() {
-    let _g = GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();
     write_chain(dir.path(), 5);
 
+    let _io_capture = io_stats::CaptureScope::install();
+
     io_stats::reset();
     read_nodes_filtered(dir.path(), &HashSet::new()).unwrap();
-    assert_eq!(io_stats::snapshot(), io_stats::IoSnapshot::default());
+    assert_eq!(
+        io_stats::snapshot().expect("requested I/O statistics"),
+        io_stats::IoSnapshot::default()
+    );
 }
 
 fn rewrite_node_ids(path: &Path, batches: &[RecordBatch], ids: Vec<u64>) {
@@ -232,7 +244,6 @@ fn rewrite_node_ids(path: &Path, batches: &[RecordBatch], ids: Vec<u64>) {
 
 #[test]
 fn dense_selection_uses_shard_local_id_range_and_gaps_fall_back() {
-    let _g = GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();
     let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
     for _ in 0..8 {
@@ -256,6 +267,8 @@ fn dense_selection_uses_shard_local_id_range_and_gaps_fall_back() {
     rewrite_node_ids(&shard, &[shard_batch.clone()], (9..=20).collect());
     std::fs::remove_file(&paths[0]).unwrap();
 
+    let _io_capture = io_stats::CaptureScope::install();
+
     io_stats::reset();
     let selected = read_nodes_filtered(dir.path(), &ids(&[8, 9, 14, 20, 21])).unwrap();
     let returned = selected
@@ -274,7 +287,7 @@ fn dense_selection_uses_shard_local_id_range_and_gaps_fall_back() {
         })
         .collect::<Vec<_>>();
     assert_eq!(returned, [9, 14, 20]);
-    let dense = io_stats::snapshot();
+    let dense = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(dense.node_dense_row_selection_reads, 1);
     assert_eq!(dense.node_exact_rows_selected, 3);
     assert_eq!(dense.node_metadata_fallbacks, 0);
@@ -283,6 +296,7 @@ fn dense_selection_uses_shard_local_id_range_and_gaps_fall_back() {
     let mut gapped = (9..=20).collect::<Vec<_>>();
     gapped[5] = 99;
     rewrite_node_ids(&shard, &[shard_batch], gapped);
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     let selected = read_nodes_filtered(dir.path(), &ids(&[9, 99])).unwrap();
     let mut returned = selected
@@ -302,7 +316,7 @@ fn dense_selection_uses_shard_local_id_range_and_gaps_fall_back() {
         .collect::<Vec<_>>();
     returned.sort_unstable();
     assert_eq!(returned, [9, 99]);
-    let fallback = io_stats::snapshot();
+    let fallback = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(fallback.node_dense_row_selection_reads, 0);
     assert_eq!(fallback.node_row_group_predicate_reads, 1);
     assert_eq!(fallback.node_metadata_fallbacks, 1);
@@ -337,4 +351,39 @@ fn read_edges(
     mode: OntologyMode,
 ) -> Result<Vec<arrow::record_batch::RecordBatch>, datafusion::error::DataFusionError> {
     graphforge_storage::read_edges_from_inventory(&admitted_inventory(root), route, mode)
+}
+
+#[test]
+fn default_real_reads_leave_statistics_unavailable_and_captures_are_isolated() {
+    let dir = TempDir::new().unwrap();
+    write_chain(dir.path(), 3);
+    io_stats::reset();
+    assert_eq!(
+        read_nodes(dir.path())
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum::<usize>(),
+        4
+    );
+    assert!(io_stats::snapshot().is_none());
+    let _outer = io_stats::CaptureScope::install();
+    read_nodes(dir.path()).unwrap();
+    assert_eq!(io_stats::snapshot().unwrap().node_full_rows, 4);
+    {
+        let _inner = io_stats::CaptureScope::install();
+        read_nodes(dir.path()).unwrap();
+        assert_eq!(io_stats::snapshot().unwrap().node_full_rows, 4);
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    read_nodes(dir.path()).unwrap();
+                    assert!(io_stats::snapshot().is_none());
+                })
+                .join()
+                .unwrap();
+        });
+        assert_eq!(io_stats::snapshot().unwrap().node_full_rows, 4);
+    }
+    assert_eq!(io_stats::snapshot().unwrap().node_full_rows, 4);
 }
