@@ -87,7 +87,7 @@ jobs:
 
       - name: Install sccache
         if: inputs.cache == 'sccache'
-        uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2.87.15
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: sccache@0.9.1
 
@@ -107,7 +107,7 @@ jobs:
 
       - name: Install cargo-nextest
         if: inputs.runner == 'nextest'
-        uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2.87.15
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: cargo-nextest@0.9.145
 
