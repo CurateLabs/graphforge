@@ -209,11 +209,11 @@ fn materialize_from_cas(
 ///
 /// Every real caller obtains its inventory from this generation's
 /// `graph_files_inventory` admission. That streams each current-format
-/// payload against its persisted XXH64 checksum and exact length; legacy
-/// formats retain SHA-256 admission. Inode identity alone cannot detect an
+/// payload against its required XXH64 checksum and exact length.
+/// Inode identity alone cannot detect an
 /// in-place byte mutation. The topology and all-role mutation tests in
 /// `workspace_hydration/tests.rs` therefore remain required. SHA-256 still
-/// names the object and explicit full verify rechecks that cryptographic name.
+/// names the object and remains required at installation and trust boundaries.
 /// This keeps the checks that stay meaningful after the hardlink: identity
 /// (defense in depth — cheap, `stat`-only, even though `link_child_into`
 /// already enforced it), declared length (mirrors `verify_file_counted`'s

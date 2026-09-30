@@ -21,7 +21,7 @@ use crate::project_publication::{ProjectParticipant, ProjectParticipantEncoding}
 
 /// Capability ID for graph storage.
 pub const GRAPH_CAPABILITY_ID: &str = "graph";
-/// Capability contract version (shared with the legacy snapshot family).
+/// Capability contract version for published graph participants.
 pub const GRAPH_CAPABILITY_VERSION: u32 = 1;
 /// Record family for the file-backed inventory participant.
 pub const GRAPH_FILES_FAMILY: &str = "files";

@@ -448,7 +448,7 @@ mod tests {
             content_sha256: "0".repeat(64),
             role: crate::GraphFileRole::Properties,
         }];
-        for version in [3, 4] {
+        for version in [7, 8] {
             assert!(
                 authenticate_manifest_routes(version, &entries, |_| {
                     panic!("invalid mapped paths must fail before table IO")

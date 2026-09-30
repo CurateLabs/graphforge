@@ -346,9 +346,9 @@ impl ResolvedProjectGeneration {
     }
 
     /// Uncached body of [`Self::graph_files_inventory`]. Every call performs
-    /// the full manifest decode plus, for the V2/mapped-root participant, a
-    /// presence-and-length check and a full streamed SHA-256 admission per
-    /// declared graph payload object. Call only through the memoized public
+    /// full manifest decode and checks each declared graph payload against
+    /// its required checksum and exact length. Control nodes retain SHA-256
+    /// authentication. Call only through the memoized public
     /// method above.
     fn compute_graph_files_inventory(&self) -> Result<Option<crate::GraphFilesInventory>, GfError> {
         let Some(participant) = self.declared_graph_files_participant()? else {
@@ -372,13 +372,11 @@ impl ResolvedProjectGeneration {
                         )
                     },
                 )?;
-                // Authenticate content once per resolved generation before
-                // exposing any reader. Current formats compare the persisted
-                // XXH64 and length; explicit legacy formats retain SHA-256.
-                // This replaces, rather than removes, the only topology check
-                // exercised by the same-inode corruption regression (#1435).
-                // Content-addressed names remain SHA-256, formed at publication
-                // and cryptographically rechecked by explicit full verify.
+                // Refuse payload corruption before exposing any reader by
+                // comparing required XXH64 and exact length. The same-inode
+                // topology regression (#1435) continues to exercise this check.
+                // SHA-256 names are authenticated at installation and existing
+                // trust boundaries; legacy formats and standalone audits are retired.
                 for entry in &files {
                     let path =
                         crate::graph_object_path(self.container_root(), &entry.content_sha256)?;
