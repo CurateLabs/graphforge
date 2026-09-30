@@ -87,14 +87,6 @@
     "visualization-stress": [
       "python3",
       "examples/visualization/stress/harness/run.py"
-    ],
-    "build-lane-measurement": [
-      "gh",
-      "workflow",
-      "run",
-      "build-lane-measurement.yml",
-      "--ref",
-      "main"
     ]
   },
   "matrix_variants": {
@@ -172,17 +164,6 @@
       "evidence_contract": "rust-coverage-ledger",
       "freshness": "latest_main_change",
       "sha_rule": "exact_main"
-    },
-    {
-      "id": "build-lane-measurement",
-      "path": ".github/workflows/build-lane-measurement.yml",
-      "role": "supporting_automation",
-      "owner": "core",
-      "command": "build-lane-measurement",
-      "args": [],
-      "evidence_contract": "graphforge.build-lane-measurement.v1",
-      "freshness": "current_run",
-      "sha_rule": "event_sha"
     },
     {
       "id": "documentation",

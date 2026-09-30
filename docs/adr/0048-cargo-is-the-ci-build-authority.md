@@ -43,8 +43,10 @@ one after another. The corrected measurement is on #1618.
 
 All times are on `blacksmith-4vcpu-ubuntu-2404`, the Bazel lane's runner
 class. The results tables and run ids are on #1618. The Cargo side comes from
-`.github/workflows/build-lane-measurement.yml`, which is dispatch-only and has
-a `runner` input of `cargo-test` or `nextest`.
+a dispatch-only harness, `.github/workflows/build-lane-measurement.yml`, with a
+`runner` input of `cargo-test` or `nextest`. It was retired after the comparison
+(#1663); its method and input digests are in
+[testing.md](../development/testing.md#build-lane-measurement-method-adr-0048).
 
 Three different quantities appear below, and they are not interchangeable:
 
@@ -153,12 +155,14 @@ Cargo, from the dispatch harness (test step only):
   remedy to measure first is skipping a merge group whose tree was already
   tested, not reinstating a second build description.
 - A Cargo lane measures more than 1.25× the replaced Bazel lane on
-  Rust-changing PRs, using the dispatch harness on the same runner class.
+  Rust-changing PRs, reproducing the recorded method on the same runner class.
 - A publication requirement needs a hermetic, remotely cached release build.
 
 ## Evidence
 
-- Measurement method: `.github/workflows/build-lane-measurement.yml`, with the
-  `runner` and `cache` inputs. Results and run ids are on #1618.
+- Measurement method, harness digests, and cohort digest:
+  [testing.md](../development/testing.md#build-lane-measurement-method-adr-0048).
+  The harness itself was retired in #1663 and remains in Git history. Results
+  and run ids are on #1618.
 - CI history classification: the last 150 `test.yml` runs, split by whether
   the diff touches `*.rs`, `Cargo.toml`, `Cargo.lock`, or `BUILD.bazel`.
