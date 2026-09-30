@@ -27,10 +27,10 @@ use uuid::Uuid;
 mod ingest_gate;
 
 use ingest_gate::{
-    GateLimits, GateVerdict, INGEST_RATCHET_MARGIN_BYTES_READ_PER_EDGE,
-    INGEST_RATCHET_MARGIN_CPU_MICROS_PER_EDGE, INGEST_RATCHET_MARGIN_READ_DEGRADATION_RATIO,
-    IngestObservation, METRIC_DESCRIPTORS, MetricDescriptor, RatchetPolicy,
-    THROUGHPUT_RATCHET_EXCLUSION, evaluate_ingest_gate, limits_report,
+    GateLimits, GateVerdict, HostBoundJudgment, INGEST_RATCHET_MARGIN_BYTES_READ_PER_EDGE,
+    INGEST_RATCHET_MARGIN_CPU_MICROS_PER_EDGE, INGEST_RATCHET_MARGIN_EDGES_PER_SECOND,
+    INGEST_RATCHET_MARGIN_READ_DEGRADATION_RATIO, IngestObservation, METRIC_DESCRIPTORS,
+    MetricDescriptor, RatchetPolicy, evaluate_ingest_gate, limits_report,
 };
 
 fn main() {
@@ -308,23 +308,29 @@ const INGEST_DENSITY_EDGES: u64 = 131_072;
 /// acceptance gate lives in #1478 and stays separate from this interim
 /// regression floor (#1476).
 ///
-/// **Banked: 15,000 edges/sec.** Host class: shared development Linux x86_64
-/// host carrying unrelated builds. Build profile: `cargo bench --release`
-/// (divan, bench profile). Set by #1476, carrying forward the value the
-/// pre-#1476 gate used unchanged; `git blame` this line for the exact banking
-/// commit. Across repeated runs of this same workload that host measured
-/// between 23,285 and 65,155 edges/sec purely on how much of a core the run
-/// got, which is why this constant stays coarse.
+/// **Banked: 9,000 edges/sec** (#1672). Host class: the isolated
+/// `codspeed-macro` ARM64 runner the nightly runs on. Build profile: `cargo
+/// bench --release` (divan, bench profile). Source: the twelve consecutive
+/// scheduled nightlies of 2026-09-19 through 2026-09-30, tabulated on #1672.
+/// The binding rung is the smallest: it measured 9,959 to 11,954 edges/sec,
+/// so the floor sits 10% under the lowest night. The larger rung measured
+/// 15,732 to 18,959 and is therefore held only loosely by this one floor; its
+/// cost is held by the CPU ceiling.
 ///
-/// **One-sided by policy (#1476).** Wall-clock throughput is the only metric
-/// here that a busy host can depress without any code change (±48% observed),
-/// so unlike the other three gates this one does **not** fail when the
-/// measurement improves; an unbanked gain is reported as a note instead. The
-/// exclusion lifts in the pull request that banks this floor's baseline from
-/// the isolated `codspeed-macro` runner the nightly already runs on — until
-/// then this limit is still ratcheted by hand exactly as before: raise it in
-/// the same pull request that wins the gain, or the gain is unprotected.
-const INGEST_FLOOR_EDGES_PER_SECOND: f64 = 15_000.0;
+/// The 15,000 this replaces was banked on the shared x86_64 development host
+/// and never applied to this runner: the gate failed every night from the day
+/// it landed, and because it runs first the walltime series recorded nothing.
+/// The runner spends about a quarter of a core on this workload — it is bound
+/// by its device, not its CPU — so the two hosts' wall clocks are not
+/// comparable and neither constant says anything about the other machine.
+///
+/// **Two-sided on the banked host (#1672).** The run declares the host with
+/// [`INGEST_BANKED_HOST_ENV`]. There, throughput under the floor at any size
+/// is a regression, and the slowest size beating the floor by more than
+/// [`INGEST_RATCHET_MARGIN_EDGES_PER_SECOND`] is an unbanked gain. On any
+/// other host both are reported as notes: a loaded developer machine moved
+/// ±48% with no code change, which is host contention and not a verdict.
+const INGEST_FLOOR_EDGES_PER_SECOND: f64 = 9_000.0;
 
 /// Ceiling on bytes read per published edge, enforced at every swept size.
 ///
@@ -335,15 +341,13 @@ const INGEST_FLOOR_EDGES_PER_SECOND: f64 = 15_000.0;
 /// at 524,288 edges and 2,412 at 8,388,608, so the same overhead is already
 /// visible an order of magnitude smaller.
 ///
-/// **Banked: 2,500 bytes/edge**, lowered from 3,000 by #1476. Host class:
-/// shared development Linux x86_64 host. Build profile: `cargo bench
-/// --release` (divan, bench profile). Derived from this benchmark's own
-/// matched workload — repeated runs reproduced 2,138.937 bytes/edge at
-/// 524,288 edges and 2,412.016 at 8,388,608 **to the byte** — with 3.6%
-/// regression headroom over the observed worst. The 3,000 it replaces was a
-/// ladder-era figure carried over from a different measurement scope; #1476
-/// requires constants to be calibrated from the gate's own workload. `git
-/// blame` this line for the exact banking commit.
+/// **Banked: 1,325 bytes/edge** (#1672), lowered from 2,500. This is the
+/// constant the gate itself printed as an unbanked gain on every nightly from
+/// 2026-09-19: 1,238 bytes/edge at 524,288 edges and 1,261 at 8,388,608,
+/// reproduced to the byte across twelve nights, with 5% headroom over the
+/// worst. The counters are deterministic and independent of host, load and
+/// architecture, so this limit is judged on every host. `git blame` this line
+/// for the exact banking commit.
 ///
 /// **Two-sided (#1476).** Measured above this ceiling is a regression.
 /// Measured more than [`INGEST_RATCHET_MARGIN_BYTES_READ_PER_EDGE`] — 10%,
@@ -357,35 +361,34 @@ const INGEST_FLOOR_EDGES_PER_SECOND: f64 = 15_000.0;
 /// parent, divided by published edges. These are storage-layer attribution
 /// counters, not logical record sizes and not harness or whole-rung traffic;
 /// do not transfer them across rung / ingest / validate scopes (#1476).
-const INGEST_CEILING_BYTES_READ_PER_EDGE: f64 = 2_500.0;
+const INGEST_CEILING_BYTES_READ_PER_EDGE: f64 = 1_325.0;
 
 /// Ceiling on process CPU microseconds per published edge, enforced at every
 /// swept size.
 ///
-/// CPU consumed per edge barely moves with host contention, so unlike wall
-/// clock it means roughly the same thing on a loaded developer machine and on
-/// an isolated runner.
+/// CPU consumed per edge barely moves with host contention, but it is not
+/// architecture-independent: the same commit costs roughly twice as many
+/// microseconds per edge on the ARM64 runner as on the x86_64 development
+/// host. It is therefore host-bound, like the throughput floor.
 ///
-/// **Banked: 14.0 µs/edge**, lowered from 15.0 by #1476. Host class: shared
-/// development Linux x86_64 host. Build profile: `cargo bench --release`
-/// (divan, bench profile). Derived from this benchmark's matched workload:
-/// repeated runs of the same commit measured 9.84–13.82 µs/edge, so the
-/// ceiling sits 1.3% over the observed worst — replacing the 15.14 anchor the
-/// 15.0 was set under, which came from the epic's ladder measurement rather
-/// than this benchmark (#1476). Because the metric still moves ±15% under
-/// load, the ratchet margin below it is deliberately the widest here (25%).
-/// `git blame` this line for the exact banking commit.
+/// **Banked: 25.0 µs/edge** (#1672). Host class: the isolated `codspeed-macro`
+/// ARM64 runner. Build profile: `cargo bench --release` (divan, bench
+/// profile). Source: the twelve scheduled nightlies of 2026-09-19 through
+/// 2026-09-30, tabulated on #1672. The binding rung is the smallest, at 23.46
+/// to 23.98 µs/edge, a 2% spread; the ceiling sits 4% over the worst night.
+/// The larger rung measured 17.80 to 19.53.
 ///
-/// The #1387 acceptance criterion is under 9.0; ratchet this down as the
-/// redesign lands — the ratchet side now enforces that a winning pull request
-/// writes the new constant instead of leaving the gain unbanked.
+/// The 14.0 this replaces was banked on the x86_64 host (9.84–13.82 there).
+/// #1476 recorded in this comment that a first isolated run outside that band
+/// should re-baseline the constant rather than remove the gate, and that is
+/// what this is. The #1387 acceptance criterion of under 9.0 was stated
+/// against the x86_64 host and is not this constant's target.
 ///
-/// It is the one limit here that is not architecture-independent, and the
-/// nightly runs on ARM64. If the first isolated run reports outside the
-/// observed band, the correct response is to re-baseline this constant
-/// against that measurement in a follow-up, not to remove the gate — a first
-/// failure that hands us the runner's real baseline is the gate working.
-const INGEST_CEILING_CPU_MICROS_PER_EDGE: f64 = 14.0;
+/// **Two-sided on the banked host.** Above the ceiling at any size is a
+/// regression; the worst size more than
+/// [`INGEST_RATCHET_MARGIN_CPU_MICROS_PER_EDGE`] under it is an unbanked gain.
+/// On any other host both are reported as notes.
+const INGEST_CEILING_CPU_MICROS_PER_EDGE: f64 = 25.0;
 
 /// Maximum tolerated growth in bytes read per edge from the smallest swept size
 /// to the largest.
@@ -414,6 +417,10 @@ const INGEST_CEILING_CPU_MICROS_PER_EDGE: f64 = 14.0;
 /// that flattens the curve must bank the flatter limit in the same pull
 /// request.
 ///
+/// **Banked: 1.070** (#1672), lowered from 1.20: the constant the gate printed
+/// as an unbanked gain on every nightly from 2026-09-19, where the ratio
+/// reproduced at 1.019 (1,261 over 1,238 bytes/edge), with 5% headroom.
+///
 /// This limit and the read-byte ceiling above are the two that hold the line
 /// today: both are deterministic and independent of host, load and
 /// architecture, which the throughput floor and the CPU ceiling are not.
@@ -423,7 +430,7 @@ const INGEST_CEILING_CPU_MICROS_PER_EDGE: f64 = 14.0;
 /// means between the largest and smallest swept size of this benchmark's
 /// sixteen-fold sweep; not transferable to other rungs, workloads or byte
 /// scopes (#1476).
-const INGEST_MAX_READ_DEGRADATION_RATIO: f64 = 1.20;
+const INGEST_MAX_READ_DEGRADATION_RATIO: f64 = 1.070;
 
 /// Process CPU time (user + system) sampled at a point, where available.
 #[cfg(unix)]
@@ -623,6 +630,19 @@ const INGEST_GATE_ENV: &str = "GF_INGEST_FLOOR_GATE";
 /// Optional path for the machine-readable gate report.
 const INGEST_GATE_JSON_ENV: &str = "GF_INGEST_FLOOR_GATE_JSON";
 
+/// Declares which host the gate is running on. The throughput floor and the
+/// CPU ceiling are judged only when it names [`INGEST_BANKED_HOST`] (#1672).
+const INGEST_BANKED_HOST_ENV: &str = "GF_INGEST_GATE_BANKED_HOST";
+
+/// The host the two host-bound constants were banked on: the runner label of
+/// the nightly walltime job. `scripts/ci/check-m6-benchmarks.py` fails when
+/// that job stops declaring it, so the nightly cannot silently run report-only.
+const INGEST_BANKED_HOST: &str = "codspeed-macro";
+
+/// Why a run elsewhere reports the host-bound limits instead of judging them.
+const INGEST_HOST_BOUND_REPORT_ONLY: &str = "throughput and CPU per edge are banked from the codspeed-macro runner; \
+     set GF_INGEST_GATE_BANKED_HOST=codspeed-macro only on that runner";
+
 /// Measure the size sweep once and fail closed on any breach in **either**
 /// direction.
 ///
@@ -640,11 +660,15 @@ const INGEST_GATE_JSON_ENV: &str = "GF_INGEST_FLOOR_GATE_JSON";
 ///   [`INGEST_CEILING_CPU_MICROS_PER_EDGE`] (regression side),
 /// - bytes read per edge grows from the smallest swept size to the largest by
 ///   more than [`INGEST_MAX_READ_DEGRADATION_RATIO`] (regression side), **or**
-/// - any of the three contention-independent limits is beaten by more than
-///   that metric's ratchet margin — an **unbanked gain** (#1476). The failure
-///   prints the exact constant to write, and the gate stays red until the
-///   pull request that won the gain records it. Wall-clock throughput is
-///   excluded from this side (see [`INGEST_FLOOR_EDGES_PER_SECOND`]).
+/// - any limit is beaten by more than that metric's ratchet margin — an
+///   **unbanked gain** (#1476). The failure prints the exact constant to
+///   write, and the gate stays red until the pull request that won the gain
+///   records it.
+///
+/// The throughput floor and the CPU ceiling are host-bound: both of their
+/// sides fail only where [`INGEST_BANKED_HOST_ENV`] names
+/// [`INGEST_BANKED_HOST`], and are reported as notes on any other machine
+/// (#1672). The two byte-counter limits are judged everywhere.
 ///
 /// A clean pass is only trusted because `tests/ingest_gate_verdict.rs` proves
 /// a deliberate regression and a deliberate improvement each fail the gate in
@@ -667,6 +691,17 @@ fn ingest_floor_gate() {
 
     println!("ingest floor gate (#1387 workstream 6)");
     print_metric_descriptors();
+    let limits = gate_limits();
+    match limits.host_bound {
+        HostBoundJudgment::Judged => {
+            println!(
+                "host-bound limits (throughput, CPU per edge): judged on {INGEST_BANKED_HOST}"
+            );
+        }
+        HostBoundJudgment::ReportOnly { reason } => {
+            println!("host-bound limits (throughput, CPU per edge): report only; {reason}");
+        }
+    }
     println!(
         "{:>10}  {:>9}  {:>8}  {:>10}  {:>11}  {:>12}  {:>11}  {:>6}  {:>10}",
         "edges",
@@ -702,7 +737,6 @@ fn ingest_floor_gate() {
         .cpu_micros_per_edge()
         .zip(last.cpu_micros_per_edge())
         .map(|(small, large)| large / small);
-    let limits = gate_limits();
     let verdict = evaluate_ingest_gate(&rows, &limits);
     println!(
         "{span}x size span: bytes read per edge {:.3}x \
@@ -747,9 +781,7 @@ fn gate_limits() -> GateLimits {
         ceiling_bytes_read_per_edge: INGEST_CEILING_BYTES_READ_PER_EDGE,
         ceiling_cpu_micros_per_edge: INGEST_CEILING_CPU_MICROS_PER_EDGE,
         max_read_degradation_ratio: INGEST_MAX_READ_DEGRADATION_RATIO,
-        ratchet_edges_per_second: RatchetPolicy::Excluded {
-            reason: THROUGHPUT_RATCHET_EXCLUSION,
-        },
+        ratchet_edges_per_second: RatchetPolicy::Margin(INGEST_RATCHET_MARGIN_EDGES_PER_SECOND),
         ratchet_bytes_read_per_edge: RatchetPolicy::Margin(
             INGEST_RATCHET_MARGIN_BYTES_READ_PER_EDGE,
         ),
@@ -759,6 +791,18 @@ fn gate_limits() -> GateLimits {
         ratchet_read_degradation_ratio: RatchetPolicy::Margin(
             INGEST_RATCHET_MARGIN_READ_DEGRADATION_RATIO,
         ),
+        host_bound: host_bound_judgment(std::env::var(INGEST_BANKED_HOST_ENV).ok().as_deref()),
+    }
+}
+
+/// Judge the host-bound limits only where the run declares the banked host.
+fn host_bound_judgment(declared_host: Option<&str>) -> HostBoundJudgment {
+    if declared_host == Some(INGEST_BANKED_HOST) {
+        HostBoundJudgment::Judged
+    } else {
+        HostBoundJudgment::ReportOnly {
+            reason: INGEST_HOST_BOUND_REPORT_ONLY,
+        }
     }
 }
 
@@ -791,8 +835,9 @@ fn mebibytes(bytes: u64) -> f64 {
 
 /// Serialize the gate's measurements, limits and verdict so a nightly run can
 /// keep them as an artifact and the ratchet can be argued from recorded
-/// numbers. Schema /2 adds the ratchet policies, per-metric scopes and the
-/// breach lists (#1476); the /1 shape carried measurements only.
+/// numbers. Schema /2 added the ratchet policies, per-metric scopes and the
+/// breach lists (#1476); /3 adds `limits.host_bound`, which says whether the
+/// throughput and CPU limits were judged or only reported on this run (#1672).
 fn write_gate_report(
     path: &std::path::Path,
     rows: &[IngestObservation],
@@ -802,7 +847,7 @@ fn write_gate_report(
     cpu_ratio: Option<f64>,
 ) {
     let report = serde_json::json!({
-        "schema": "graphforge-ingest-floor-gate/2",
+        "schema": "graphforge-ingest-floor-gate/3",
         "limits": limits_report(limits),
         "metric_scopes": METRIC_DESCRIPTORS
             .iter()

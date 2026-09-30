@@ -129,14 +129,18 @@ jobs:
         with:
           tool: cargo-codspeed@5.0.1
       # Banked floor, ceilings and the size-to-size ratio, judged on both sides
-      # (regression and unbanked gain) before the measured run so a breach
-      # fails the nightly fast. The bench binary's `main` switches to the gate
-      # on this variable; the shared `bench` profile output is reused by the
-      # CodSpeed walltime build below.
+      # (regression and unbanked gain). The bench binary's `main` switches to
+      # the gate on GF_INGEST_FLOOR_GATE; the shared `bench` profile output is
+      # reused by the CodSpeed walltime build below.
+      #
+      # The throughput floor and CPU ceiling are banked from this runner, and
+      # the gate judges them only where the run names it (#1672). Cargo runs a
+      # bench binary from its package directory, so the report path is absolute.
       - name: Enforce the ingest throughput gate
         env:
           GF_INGEST_FLOOR_GATE: "1"
-          GF_INGEST_FLOOR_GATE_JSON: ingest-floor-gate.json
+          GF_INGEST_GATE_BANKED_HOST: codspeed-macro
+          GF_INGEST_FLOOR_GATE_JSON: ${{ github.workspace }}/ingest-floor-gate.json
         run: cargo bench -p graphforge-storage --bench m6_storage_io
       # One-day transfer retention, matching the storage policy for a nightly
       # measurement: this is neither a publication nor a certification artifact.
@@ -150,9 +154,15 @@ jobs:
           path: ingest-floor-gate.json
           if-no-files-found: error
           retention-days: 1
+      # The walltime series is recorded whether or not the gate passed. A gate
+      # breach still fails the job, but it must not also erase the measurement
+      # that explains it: from 2026-09-17 to 2026-09-30 a failing gate left the
+      # series with no data point at all (#1672).
       - name: Build durable filesystem benchmarks only
+        if: ${{ !cancelled() }}
         run: cargo codspeed build -m walltime -p graphforge-storage --bench m6_storage_io
       - uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
+        if: ${{ !cancelled() }}
         with:
           mode: walltime
           run: cargo codspeed run
