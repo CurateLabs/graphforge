@@ -281,20 +281,22 @@ authenticates an existing inventory once per publication sequence; individual
 updates cannot substitute a caller-owned cache and do not rescan all prior
 descriptors. Open resolves the bounded manifest and verifies every selected
 payload before exposing the generation. Ordinary API open and restore dispatch
-on the declared participant version. Legacy expanded inventories use versions
-1/3 for raw/mapped routes, and legacy compact CAS roots use versions 2/4.
-Current expanded inventories use versions 5/7 and compact roots use versions
+on the declared participant version. Retired expanded inventory versions 1/3,
+compact root versions 2/4, and persisted Arrow graph snapshots are refused;
+pre-v1 projects in those formats must be recreated. Current expanded
+inventories use versions 5/7 and compact roots use versions
 6/8, with a required seed-zero XXH64 checksum beside every SHA-256 payload
 name. The descriptor and payload must agree. Immutable generations remain
 unchanged while a writable facade materializes a private workspace.
 
 The graph-files role is inferred from the relative path. It does not select a
 different integrity policy: current-format admission checks XXH64 and exact
-length of **every** selected payload without a payload SHA-256 pass. Legacy
-versions retain their SHA-256 admission. SHA-256 still names CAS objects and
-authenticates control metadata; explicit `graphforge verify` audits CAS names
-and retained objects on demand. See [ADR 0048](../../adr/0048-published-payload-checksums.md)
-for compatibility and trust assumptions. The same-inode, same-length corruption test in
+length of **every** selected payload without a payload SHA-256 pass. SHA-256
+still names CAS objects and authenticates control metadata and existing
+trust boundaries. The standalone `graphforge verify` command and whole-store
+forensic scanner are retired. Portable package verification remains required.
+See [ADR 0048](../../adr/0048-published-payload-checksums.md) for the pre-v1
+format policy and trust assumptions. The same-inode, same-length corruption test in
 `graphforge-api/src/workspace_hydration/tests.rs` covers every role, including
 real adjacency and search index publications:
 
@@ -335,11 +337,10 @@ No case folding or Unicode normalization changes a semantic identifier. Names
 such as `CON`, `AUX`, trailing-dot names, normalization variants, and literal
 `r-` prefixes retain their original meaning in public results and metadata.
 Readers use authenticated layout authority, never filename-prefix guessing.
-Legacy versions 1 and 2 cannot contain the reserved mapping record; mapped
-versions 3 and 4 require it. Older readers reject the new versions rather than
-interpreting an encoded component as a semantic name.
+Current raw versions 5 and 6 cannot contain the reserved mapping record;
+mapped versions 7 and 8 require it. Retired versions 1–4 are refused.
 
-Legacy migration operates only in an owned private workspace. It authenticates
+Raw-to-mapped route conversion operates only in an owned private workspace. It authenticates
 source identity and bytes, stages the encoded files and complete mapping in the
 same durable rewrite, and recovers that rewrite before reading route authority.
 Physical migration preserves graph UUIDs, ranks, values, and semantic generation
@@ -930,13 +931,12 @@ so publication never scans or recopies the entire prior file inventory. The priv
 workspace commit boundary records revision-identified sealed and tombstone
 descriptors before mutations become visible; they are acknowledged only after
 CURRENT advances. Reopen authenticates radix control objects and checksums
-every selected payload. A legacy checksum upgrade authenticates retained
-payload SHA-256 identities and rebuilds manifest metadata once; subsequent
-updates retain bounded path-copy publication. Post-CURRENT GC traces every remaining generation
-root and defers while an optimistic attempt or CAS publication lease is live.
-Legacy expanded and compact inventories remain readable. A writable facade
-migrates their raw routes in its private workspace before publishing the mapped
-layout under the CAS publication lease.
+every selected payload. Current updates retain bounded path-copy publication;
+no legacy checksum upgrade exists. Post-CURRENT GC traces every remaining
+generation root and defers while an optimistic attempt or CAS publication
+lease is live. Retired expanded and compact inventories are refused. A writable
+facade converts current raw routes in its private workspace before publishing
+the mapped layout under the CAS publication lease.
 
 The authoritative write census is executable: topology node and edge shards,
 node and edge properties, graph deltas, catalog records, extension-owned graph

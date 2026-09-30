@@ -179,7 +179,7 @@ fn corrupt_compact_root_never_advances_current() {
         .generation_uuid();
     let compact = crate::GraphFilesRootV2 {
         format: crate::GRAPH_FILES_V2_FORMAT.into(),
-        format_version: crate::GRAPH_FILES_V2_RECORD_VERSION,
+        format_version: crate::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION,
         root_node_sha256: "0".repeat(64),
         logical_file_count: 1,
         logical_byte_length: 1,

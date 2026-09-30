@@ -932,15 +932,12 @@ pub fn verify_graph_object(root: &Path, digest: &str, expected_length: u64) -> R
     verify_file(cas.open_digest(digest)?, digest, expected_length, root)
 }
 
-/// Admit a payload under its versioned corruption checksum. Legacy entries
-/// retain their explicit SHA-256 admission; full verify always uses SHA-256.
+/// Admit a payload under its required corruption checksum and exact length.
 pub(crate) fn admit_graph_object(
     root: &Path,
     entry: &crate::GraphFileEntry,
 ) -> Result<(), GfError> {
-    let Some(expected) = entry.content_xxh64 else {
-        return verify_graph_object(root, &entry.content_sha256, entry.byte_length);
-    };
+    let expected = entry.content_xxh64;
     let cas = ReadOnlyCasRoot::open(root)?;
     let file = cas.open_digest(&entry.content_sha256)?;
     let metadata = file
@@ -1146,9 +1143,8 @@ impl GraphObjectReadLease {
     /// no-follow CAS traversal, exact digest address, exact declared length,
     /// read-only permission — but does not stream the payload through
     /// SHA-256. Storage attribution never consumes object content; it reads
-    /// file identity and space usage from the descriptor. Content
-    /// re-authentication of the retained store is the explicit
-    /// `graphforge verify` command's job (`crate::verify_project_store`).
+    /// file identity and space usage from the descriptor. Payload reads
+    /// refuse corruption through the inventory's authenticated checksum.
     pub(crate) fn open_for_attribution(
         &self,
         digest: &str,
@@ -1702,7 +1698,7 @@ pub(crate) use manifest_tree::append_replayed_graph_files;
     unused_imports,
     reason = "preserve the existing staged CAS root API across feature and test configurations"
 )]
-pub use manifest_tree::migrate_graph_files_v1_to_v2;
+pub use manifest_tree::compact_graph_files;
 pub use manifest_tree::prepare_graph_files_replacement;
 pub(crate) use manifest_tree::replace_replayed_graph_files;
 pub use materialization::materialize_graph_objects;

@@ -147,6 +147,54 @@ fn assert_same_inode_graph_object_corruption_is_refused(
 }
 
 #[test]
+fn persisted_graph_snapshot_is_rejected_before_publication() {
+    use graphforge_storage::{
+        ProjectCapability, ProjectGenerationRequest, stage_project_generation,
+    };
+
+    let project = tempfile::tempdir().unwrap();
+    let parent = graphforge_storage::open_or_initialize_project(project.path()).unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(
+        workspace.path().join("graph-content.bin"),
+        b"legacy payload",
+    )
+    .unwrap();
+    let snapshot = crate::graph_snapshot::capture(workspace.path()).unwrap();
+    let mut participants = graphforge_storage::empty_workspace_participants().unwrap();
+    participants.insert(0, snapshot);
+    let request = ProjectGenerationRequest {
+        transaction_uuid: uuid::Uuid::new_v4(),
+        generation_uuid: uuid::Uuid::new_v4(),
+        capabilities: vec![
+            ProjectCapability {
+                capability_id: "graph".into(),
+                capability_version: 1,
+            },
+            ProjectCapability {
+                capability_id: "workspace".into(),
+                capability_version: 1,
+            },
+        ],
+        participants,
+    };
+    let error = match stage_project_generation(project.path(), &request) {
+        Ok(_) => panic!("legacy persisted graph snapshots must not stage"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains("unsupported"), "{message}");
+    assert!(message.contains("snapshot"), "{message}");
+    assert_eq!(
+        graphforge_storage::resolve_project_generation(project.path())
+            .unwrap()
+            .generation_uuid(),
+        parent.generation_uuid(),
+        "legacy refusal must retain the prior committed generation"
+    );
+}
+
+#[test]
 fn compact_graph_root_reopens_through_ordinary_api_and_rematerializes() {
     let project = tempfile::tempdir().unwrap();
     let graph = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();

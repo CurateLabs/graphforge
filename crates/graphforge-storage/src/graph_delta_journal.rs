@@ -1641,8 +1641,7 @@ fn prepare_graph_delta_inner(
     extended_files.insert(
         run_relative_path.clone(),
         GraphFileEntry {
-            content_xxh64: crate::graph_files::inventory_has_checksums(base_format_version)
-                .then(|| crate::corruption_checksum::checksum(&run_bytes)),
+            content_xxh64: crate::corruption_checksum::checksum(&run_bytes),
             relative_path: run_relative_path,
             byte_length: run_byte_length,
             // Hashed once, in memory, from the exact bytes just written
@@ -2346,12 +2345,12 @@ mod crash_oracle_tests {
     };
 
     #[test]
-    fn legacy_parent_path_spelling_preserves_exact_parquet_digest_evidence() {
+    fn raw_parent_path_spelling_preserves_exact_parquet_digest_evidence() {
         let inventory = |relative_path: &str, digest: &str| GraphFilesInventory {
             format: "graphforge-graph-files".to_owned(),
-            format_version: 1,
+            format_version: crate::GRAPH_FILES_CHECKSUM_RECORD_VERSION,
             files: vec![GraphFileEntry {
-                content_xxh64: None,
+                content_xxh64: 0,
                 relative_path: relative_path.to_owned(),
                 byte_length: 7,
                 content_sha256: digest.to_owned(),
@@ -2744,7 +2743,7 @@ mod crash_oracle_tests {
     /// Closes the coverage gap #1401 was found with: the non-mapped (legacy)
     /// V2 fallback branch of `DeltaReplaySource::open` — reachable for a
     /// content-addressed base sealed without a route table, e.g. via
-    /// `migrate_graph_files_v1_to_v2` — had no direct test in this crate.
+    /// `compact_graph_files` — had no direct test in this crate.
     #[test]
     fn delta_replay_source_open_reuses_legacy_non_mapped_v2_layout() {
         let root = tempfile::tempdir().unwrap();
@@ -2763,12 +2762,9 @@ mod crash_oracle_tests {
             "fixture must be the raw, non-mapped layout"
         );
         let lease = crate::begin_graph_object_publication(root.path()).unwrap();
-        let (v2_root, _) = crate::graph_object_store::migrate_graph_files_v1_to_v2(
-            &lease,
-            source_files.path(),
-            &inventory,
-        )
-        .unwrap();
+        let (v2_root, _) =
+            crate::graph_object_store::compact_graph_files(&lease, source_files.path(), &inventory)
+                .unwrap();
         let files_participant = crate::graph_files::graph_files_root_participant(&v2_root).unwrap();
         let mut participants = empty_workspace_participants().unwrap();
         participants.insert(0, files_participant);

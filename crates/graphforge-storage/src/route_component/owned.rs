@@ -411,7 +411,7 @@ mod tests {
         let mut files = names
             .iter()
             .map(|route| crate::GraphFileEntry {
-                content_xxh64: None,
+                content_xxh64: crate::corruption_checksum::checksum(&payload),
                 relative_path: format!("properties/{route}.parquet"),
                 byte_length: payload.len() as u64,
                 content_sha256: digest.clone(),
@@ -473,11 +473,11 @@ mod tests {
         let source = tempfile::tempdir().unwrap();
         let payload = write_legacy_fixture(source.path(), "Legacy");
         let mut inventory = crate::capture_graph_files(source.path()).unwrap().0;
-        inventory.format_version = crate::GRAPH_FILES_RECORD_VERSION;
-        for entry in &mut inventory.files {
-            entry.content_xxh64 = None;
-        }
-        assert_eq!(inventory.format_version, crate::GRAPH_FILES_RECORD_VERSION);
+        inventory.format_version = crate::GRAPH_FILES_CHECKSUM_RECORD_VERSION;
+        assert_eq!(
+            inventory.format_version,
+            crate::GRAPH_FILES_CHECKSUM_RECORD_VERSION
+        );
         let owner = tempfile::tempdir().unwrap();
         let target = owner.path().join("private");
         crate::materialize_graph_tree(source.path(), &inventory, &target).unwrap();

@@ -22,7 +22,11 @@ file identity alone cannot detect this mutation.
 XXH64 corruption detection. Published graph inventories need a durable,
 versioned checksum before their admission can use this separation. Their
 existing versions carry only SHA-256 names. The maintainer selected a
-versioned checksum format for this boundary.
+versioned checksum format for this boundary. Because the product is pre-v1,
+the maintainer also chose to retire legacy graph formats and the standalone
+full-verification command. This supersedes ADR 0045’s administrative
+`graphforge verify` requirement; its producer and trust-boundary
+authentication decisions remain in force.
 
 ## Decision
 
@@ -38,8 +42,8 @@ The graph/files participant and schema explicitly distinguish these formats:
 
 | Routes         | Expanded inventory | Compact root | Payload metadata                |
 | -------------- | ------------------ | ------------ | ------------------------------- |
-| Legacy raw     | 1                  | 2            | SHA-256 name only               |
-| Legacy mapped  | 3                  | 4            | SHA-256 name only               |
+| Retired raw    | 1                  | 2            | Refused                         |
+| Retired mapped | 3                  | 4            | Refused                         |
 | Current raw    | 5                  | 6            | SHA-256 name and required XXH64 |
 | Current mapped | 7                  | 8            | SHA-256 name and required XXH64 |
 
@@ -53,16 +57,24 @@ admission path.
 Current-format graph-inventory admission checks exact length and XXH64 on
 the retained payload handle. It preserves path, link, identity, filesystem
 and atomic-publication checks. It performs no payload SHA-256 pass.
-Explicit legacy formats remain readable with their existing SHA-256 check.
-Publication upgrades retained legacy entries only after authenticating their
-SHA-256 identity, and rebuilds their manifest metadata once. Subsequent
-current-format updates retain bounded path-copy publication.
+Retired graph/files formats 1–4 and persisted graph/snapshot Arrow records
+are refused with an unsupported-format error. Their compatibility readers,
+SHA-256 read fallback and publication upgrade path are removed. Projects
+using these pre-v1 formats must be recreated. Current expanded inventories
+may still be converted to compact manifests; this changes representation,
+not the accepted format policy. Current updates retain bounded path-copy
+publication.
 
-The explicit `graphforge verify` command retains SHA-256 verification of CAS
-object names and scans retained objects beyond those selected by an ordinary
-read. It is an administrative audit and runs in no normal read or query path.
+Retire the standalone `gf verify` / `graphforge verify` command, its public
+facade, reports and whole-store forensic scanner. No replacement full audit
+or diagnostics sweep is introduced. Ordinary reads retain checksum corruption
+refusal; producer installation, control metadata and portable package trust
+boundaries retain required authentication. Internal snapshots used for live
+construction rollback remain an implementation detail.
+
 This format foundation does not claim that all other read-path digest sites
-or the complete #1617 policy have been converted.
+or the complete #1617 policy have been converted. Zero cryptographic payload
+hashing on ordinary reads permits mandatory checksum work.
 
 ## Consequences
 
@@ -70,15 +82,16 @@ Ordinary payload admission still detects accidental corruption while avoiding
 cryptographic payload hashing. It continues to read payload bytes for the
 checksum; eliminating that I/O requires a separate trusted storage mechanism.
 Each entry gains one fixed-width checksum, and newly written versions require a
-reader that understands them. Existing generation bytes remain unchanged.
+reader that understands them. Retired formats are rejected rather than
+rewritten or migrated in place.
 
 XXH64 has neither cryptographic collision resistance nor adversarial
 authentication. This decision inherits ADR 0013 and ADR 0045's exclusion of
-an active same-identity adversary. An operator who needs proof that bytes
-still match their cryptographic CAS names uses explicit verification. A
+an active same-identity adversary. The product offers no whole-store proof
+that unread retained bytes still match their cryptographic CAS names. A
 change to the threat boundary requires revisiting the admission algorithm.
 
 Counter tests enforce SHA-256 capture and admission costs; corruption tests
-exercise same-inode, same-length mutation; compatibility tests enforce format
+exercise same-inode, same-length mutation; refusal tests enforce format
 pairing and reject checksum downgrade. Test results belong on #1637 and its
 PR, with #1617 remaining the complete policy's close gate.

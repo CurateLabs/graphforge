@@ -498,14 +498,8 @@ impl GraphConstructionSession {
                 .iter()
                 .find(|artifact| artifact.path == crate::route_component::TABLE_FILE)
                 .ok_or_else(|| storage("mapped encoding lacks route authority"))?;
-            let entry = crate::GraphFileEntry {
-                content_xxh64: None,
-                relative_path: artifact.path.clone(),
-                byte_length: artifact.bytes,
-                content_sha256: artifact.sha256.clone(),
-                role: crate::GraphFileRole::Other,
-            };
-            let (bytes, calls) = crate::graph_files::read_route_table_counted(&workspace, &entry)?;
+            let (bytes, calls) =
+                crate::graph_files::read_route_table_bounded(&workspace, artifact.bytes)?;
             if bytes.len() as u64 != artifact.bytes
                 || hex(&Sha256::digest(&bytes)) != artifact.sha256
             {

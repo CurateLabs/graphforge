@@ -228,7 +228,7 @@ pub(super) fn materialize_graph_snapshot(
 ) -> Result<(), GfError> {
     let (files, _) = graph_closure(root, graph.record_version, &graph.bytes, None)?;
     let inventory_version = match graph.record_version {
-        1 | 3 | 5 | 7 => graph.record_version,
+        5 | 7 => graph.record_version,
         version => crate::graph_files::expanded_version_for_root(version)?,
     };
     let inventory =
@@ -284,8 +284,7 @@ pub(super) fn install_graph(
         )
         .map(|v| v.0)
     } else {
-        crate::graph_object_store::migrate_graph_files_v1_to_v2(lease, workspace, inventory)
-            .map(|v| v.0)
+        crate::graph_object_store::compact_graph_files(lease, workspace, inventory).map(|v| v.0)
     }
 }
 

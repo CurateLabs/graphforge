@@ -84,12 +84,11 @@ pub use graph_files::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_CHECKSUM_RECORD_VERSION,
     GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION, GRAPH_FILES_FAMILY, GRAPH_FILES_IO_BUFFER_BYTES,
     GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION, GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION,
-    GRAPH_FILES_MAPPED_RECORD_VERSION, GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION,
-    GRAPH_FILES_RECORD_VERSION, GRAPH_FILES_V2_RECORD_VERSION, GRAPH_TREE_DIR, GraphFileEntry,
-    GraphFileRole, GraphFilesInventory, GraphFilesOpenEvidence, GraphFilesOpenStrategy,
-    GraphWorkspaceCheckpoint, GraphWorkspaceRestoration, capture_graph_files, decode_inventory,
-    encode_inventory, graph_tree_root, inventory_participant, materialize_graph_tree,
-    pinned_open_evidence, stage_graph_tree, verify_graph_tree,
+    GRAPH_TREE_DIR, GraphFileEntry, GraphFileRole, GraphFilesInventory, GraphFilesOpenEvidence,
+    GraphFilesOpenStrategy, GraphWorkspaceCheckpoint, GraphWorkspaceRestoration,
+    capture_graph_files, decode_inventory, encode_inventory, graph_tree_root,
+    inventory_participant, materialize_graph_tree, pinned_open_evidence, stage_graph_tree,
+    verify_graph_tree,
 };
 pub(crate) use graph_files::{GraphFilesParticipant, decode_versioned_graph_files_participant};
 
@@ -196,9 +195,6 @@ pub use project_generation::{
     open_or_initialize_ephemeral_project, open_or_initialize_project, resolve_generation_by_uuid,
     resolve_project_generation, resolve_verified_generation,
 };
-
-pub mod verify;
-pub use verify::{ProjectVerifyReport, VerifyCategoryCounts, verify_project_store};
 
 mod project_failpoint;
 

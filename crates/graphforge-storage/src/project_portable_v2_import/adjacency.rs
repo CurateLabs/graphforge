@@ -43,9 +43,7 @@ pub(super) fn persist_import_adjacency(
     };
     if !matches!(
         participant.participant.record_version,
-        crate::GRAPH_FILES_V2_RECORD_VERSION
-            | crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
-            | crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+        crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
             | crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
     ) {
         return Ok(0);
@@ -359,7 +357,7 @@ mod tests {
         fs::remove_dir_all(tree.join("indexes")).unwrap();
         let placeholder = crate::graph_files_root_participant(&crate::GraphFilesRootV2 {
             format: "graphforge-graph-files-root".into(),
-            format_version: crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION,
+            format_version: crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION,
             root_node_sha256: "0".repeat(64),
             logical_file_count: 0,
             logical_byte_length: 0,
@@ -399,7 +397,7 @@ mod tests {
         fs::remove_dir_all(tree.join("indexes")).unwrap();
         let placeholder = crate::graph_files_root_participant(&crate::GraphFilesRootV2 {
             format: "graphforge-graph-files-root".into(),
-            format_version: crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION,
+            format_version: crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION,
             root_node_sha256: "0".repeat(64),
             logical_file_count: 0,
             logical_byte_length: 0,

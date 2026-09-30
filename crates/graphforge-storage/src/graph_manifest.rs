@@ -9,7 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Canonical v2 compact-root format identifier.
 pub const GRAPH_FILES_V2_FORMAT: &str = "graphforge-graph-files-root";
 /// Supported compact-root format version.
-pub const GRAPH_FILES_V2_VERSION: u32 = 2;
+pub const GRAPH_FILES_V2_VERSION: u32 =
+    crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION;
 /// Canonical radix-node format identifier.
 pub const GRAPH_MANIFEST_NODE_FORMAT: &str = "graphforge-graph-manifest-radix-node";
 /// Supported radix-node format version.
@@ -110,8 +111,8 @@ struct BoundedEntry {
     relative_path: BoundedText<GRAPH_MANIFEST_PATH_MAX_BYTES>,
     byte_length: u64,
     content_sha256: BoundedText<64>,
-    #[serde(default, with = "crate::corruption_checksum::optional_hex")]
-    content_xxh64: Option<u64>,
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    content_xxh64: u64,
     role: GraphFileRole,
 }
 struct BoundedEntries(Vec<GraphFileEntry>);
@@ -443,13 +444,6 @@ where
         }
     }
     let files: Vec<_> = files.into_values().collect();
-    if files.iter().any(|entry| {
-        crate::graph_files::root_has_checksums(root.format_version) != entry.content_xxh64.is_some()
-    }) {
-        return Err(validation(
-            "graph root version does not match its payload checksum metadata",
-        ));
-    }
     let bytes = files.iter().try_fold(0_u64, |n, e| {
         n.checked_add(e.byte_length)
             .ok_or_else(|| validation("graph manifest byte total overflow"))
@@ -549,13 +543,6 @@ where
             }
             let ancestral_route = &route[..usize::from(depth)];
             for entry in entries {
-                if crate::graph_files::root_has_checksums(root.format_version)
-                    != entry.content_xxh64.is_some()
-                {
-                    return Err(validation(
-                        "graph root version does not match its payload checksum metadata",
-                    ));
-                }
                 if !hex_digest(logical_path_digest(&entry.relative_path))
                     .starts_with(ancestral_route)
                 {
@@ -624,9 +611,7 @@ fn validate_root(root: &GraphFilesRootV2) -> Result<(), GfError> {
     if root.format != GRAPH_FILES_V2_FORMAT
         || !matches!(
             root.format_version,
-            GRAPH_FILES_V2_VERSION
-                | crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
-                | crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+            crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
                 | crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
         )
     {
@@ -687,18 +672,16 @@ fn validate_node(node: &GraphManifestNode) -> Result<(), GfError> {
             }
         }
         GraphManifestNodeKind::Bucket { entries } => {
+            if node.format_version != GRAPH_MANIFEST_CHECKSUM_NODE_VERSION {
+                return Err(validation(
+                    "unsupported legacy graph manifest bucket version",
+                ));
+            }
             if entries.is_empty() || entries.len() > GRAPH_MANIFEST_BUCKET_CAPACITY {
                 return Err(validation("graph manifest bucket shape is invalid"));
             }
             let mut previous: Option<&str> = None;
             for entry in entries {
-                if (node.format_version == GRAPH_MANIFEST_CHECKSUM_NODE_VERSION)
-                    != entry.content_xxh64.is_some()
-                {
-                    return Err(validation(
-                        "graph manifest bucket version does not match its checksum entries",
-                    ));
-                }
                 validate_entry(entry)?;
                 if previous.is_some_and(|p| p >= entry.relative_path.as_str()) {
                     return Err(validation(
@@ -714,6 +697,10 @@ fn validate_node(node: &GraphManifestNode) -> Result<(), GfError> {
             }
         }
     }
+    validate_decoded_node_charge(node)
+}
+
+fn validate_decoded_node_charge(node: &GraphManifestNode) -> Result<(), GfError> {
     let decoded_charge = std::mem::size_of::<GraphManifestNode>() as u64
         + node.format.len() as u64
         + node.prefix.len() as u64
@@ -881,7 +868,7 @@ mod tests {
             relative_path: path.into(),
             byte_length: 7,
             content_sha256: "0".repeat(64),
-            content_xxh64: Some(123),
+            content_xxh64: 123,
             role: GraphFileRole::Topology,
         };
         let mut node = GraphManifestNode {
@@ -913,28 +900,29 @@ mod tests {
             resolve_manifest_entry(&root, path, GraphManifestLimits::default(), load).unwrap(),
             Some(entry.clone())
         );
-        root.format_version = GRAPH_FILES_V2_VERSION;
+        root.format_version = 2;
         assert!(resolve_manifest(&root, GraphManifestLimits::default(), load).is_err());
         assert!(resolve_manifest_entry(&root, path, GraphManifestLimits::default(), load).is_err());
         node.format_version = GRAPH_MANIFEST_NODE_VERSION;
         assert!(encode_node(&node).is_err());
-        let GraphManifestNodeKind::Bucket { entries } = &mut node.kind else {
-            unreachable!()
-        };
-        entries[0].content_xxh64 = None;
-        let legacy_bytes = encode_node(&node).unwrap();
+        let mut legacy_bytes = serde_json::to_vec(&node).unwrap();
+        legacy_bytes.push(b'\n');
+        assert!(decode_node(&legacy_bytes).is_err());
+        root.format_version = crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION;
         root.root_node_sha256 = object_digest(&legacy_bytes);
         let load_legacy = |_: &str| Ok(legacy_bytes.clone());
-        assert!(resolve_manifest(&root, GraphManifestLimits::default(), load_legacy).is_ok());
-        root.format_version = crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION;
         assert!(resolve_manifest(&root, GraphManifestLimits::default(), load_legacy).is_err());
         assert!(
             resolve_manifest_entry(&root, path, GraphManifestLimits::default(), load_legacy)
                 .is_err()
         );
         node.format_version = GRAPH_MANIFEST_CHECKSUM_NODE_VERSION;
-        assert!(encode_node(&node).is_err());
-        let mut missing_bytes = serde_json::to_vec(&node).unwrap();
+        let mut missing = serde_json::to_value(&node).unwrap();
+        missing["entries"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("content_xxh64");
+        let mut missing_bytes = serde_json::to_vec(&missing).unwrap();
         missing_bytes.push(b'\n');
         assert!(decode_node(&missing_bytes).is_err());
         node.format_version = 5;
@@ -980,7 +968,7 @@ mod tests {
             ] {
                 for bytes in [0, u64::MAX] {
                     let entry = GraphFileEntry {
-                        content_xxh64: Some(u64::MAX),
+                        content_xxh64: u64::MAX,
                         relative_path: path.into(),
                         byte_length: bytes,
                         content_sha256: "0".repeat(64),
@@ -1044,12 +1032,12 @@ mod tests {
         for path in ["../escape", "/absolute", ".graphforge-cache/index"] {
             let node = GraphManifestNode {
                 format: GRAPH_MANIFEST_NODE_FORMAT.into(),
-                format_version: GRAPH_MANIFEST_NODE_VERSION,
+                format_version: GRAPH_MANIFEST_CHECKSUM_NODE_VERSION,
                 depth: GRAPH_RADIX_DEPTH,
                 prefix: String::new(),
                 kind: GraphManifestNodeKind::Bucket {
                     entries: vec![GraphFileEntry {
-                        content_xxh64: None,
+                        content_xxh64: 0,
                         relative_path: path.into(),
                         byte_length: 0,
                         content_sha256: digest.clone(),
@@ -1175,7 +1163,7 @@ mod tests {
         let path = "topology/nodes/a.parquet";
         let path_sha256 = hex_digest(logical_path_digest(path));
         let entry = GraphFileEntry {
-            content_xxh64: None,
+            content_xxh64: 0,
             relative_path: path.into(),
             byte_length: 1,
             content_sha256: "a".repeat(64),
@@ -1183,7 +1171,7 @@ mod tests {
         };
         let node = GraphManifestNode {
             format: GRAPH_MANIFEST_NODE_FORMAT.into(),
-            format_version: GRAPH_MANIFEST_NODE_VERSION,
+            format_version: GRAPH_MANIFEST_CHECKSUM_NODE_VERSION,
             depth: 0,
             prefix: path_sha256.clone(),
             kind: GraphManifestNodeKind::Bucket {
@@ -1260,12 +1248,12 @@ mod tests {
             let route = hex_digest(logical_path_digest(path));
             let leaf = GraphManifestNode {
                 format: GRAPH_MANIFEST_NODE_FORMAT.into(),
-                format_version: GRAPH_MANIFEST_NODE_VERSION,
+                format_version: GRAPH_MANIFEST_CHECKSUM_NODE_VERSION,
                 depth: 1,
                 prefix: route[1..].into(),
                 kind: GraphManifestNodeKind::Bucket {
                     entries: vec![GraphFileEntry {
-                        content_xxh64: None,
+                        content_xxh64: 0,
                         relative_path: path.clone(),
                         byte_length: 1,
                         content_sha256: "a".repeat(64),
@@ -1324,7 +1312,7 @@ mod tests {
         let mut entries = paths
             .iter()
             .map(|path| GraphFileEntry {
-                content_xxh64: None,
+                content_xxh64: 0,
                 relative_path: path.clone(),
                 byte_length: u64::MAX,
                 content_sha256: "a".repeat(64),
@@ -1334,7 +1322,7 @@ mod tests {
         entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
         GraphManifestNode {
             format: GRAPH_MANIFEST_NODE_FORMAT.into(),
-            format_version: GRAPH_MANIFEST_NODE_VERSION,
+            format_version: GRAPH_MANIFEST_CHECKSUM_NODE_VERSION,
             depth,
             prefix: bucket_prefix(depth, &entries).unwrap(),
             kind: GraphManifestNodeKind::Bucket { entries },

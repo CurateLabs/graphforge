@@ -29,7 +29,7 @@ use crate::graph_object_store::try_begin_graph_object_gc;
 use crate::graph_object_store::verify_graph_object;
 
 #[test]
-fn checksum_admission_hashes_no_payload_bytes_and_full_verification_keeps_sha256() {
+fn checksum_admission_hashes_no_payload_bytes_and_boundary_authentication_keeps_sha256() {
     let root = tempfile::tempdir().unwrap();
     let payload = vec![0x5a; BUFFER_BYTES + 17];
     let (digest, evidence) = install_graph_object_bytes(root.path(), &payload).unwrap();
@@ -37,12 +37,12 @@ fn checksum_admission_hashes_no_payload_bytes_and_full_verification_keeps_sha256
         relative_path: "topology/nodes.parquet".into(),
         byte_length: payload.len() as u64,
         content_sha256: digest,
-        content_xxh64: evidence.content_xxh64,
+        content_xxh64: evidence.content_xxh64.unwrap(),
         role: crate::GraphFileRole::Topology,
     };
     assert_eq!(
         entry.content_xxh64,
-        Some(crate::corruption_checksum::checksum(&payload))
+        crate::corruption_checksum::checksum(&payload)
     );
     crate::payload_digest::take_hashed_bytes();
     admit_graph_object(root.path(), &entry).unwrap();
@@ -52,14 +52,6 @@ fn checksum_admission_hashes_no_payload_bytes_and_full_verification_keeps_sha256
         crate::payload_digest::take_hashed_bytes(),
         entry.byte_length
     );
-    let mut legacy = entry.clone();
-    legacy.content_xxh64 = None;
-    admit_graph_object(root.path(), &legacy).unwrap();
-    assert_eq!(
-        crate::payload_digest::take_hashed_bytes(),
-        entry.byte_length
-    );
-
     let object = graph_object_path(root.path(), &entry.content_sha256).unwrap();
     let identity = graphforge_filesystem::path_identity(&object).unwrap();
     let mut corrupted = payload;
@@ -312,9 +304,9 @@ fn pure_reads_require_only_existing_digest_namespace_and_never_create() {
         let target_owner = tempfile::tempdir().unwrap();
         let inventory = GraphFilesInventory {
             format: "graphforge-graph-files".into(),
-            format_version: 1,
+            format_version: crate::GRAPH_FILES_CHECKSUM_RECORD_VERSION,
             files: vec![crate::GraphFileEntry {
-                content_xxh64: None,
+                content_xxh64: crate::corruption_checksum::checksum(payload),
                 relative_path: "payload.bin".into(),
                 byte_length: payload.len() as u64,
                 content_sha256: digest.clone(),

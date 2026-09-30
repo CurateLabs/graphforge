@@ -57,7 +57,7 @@ fn targeted_presence_retains_removed_owner_without_reviving_values() {
         writer.close().unwrap();
         let bytes = fs::read(&path).unwrap();
         entries.push(crate::GraphFileEntry {
-            content_xxh64: None,
+            content_xxh64: crate::corruption_checksum::checksum(&bytes),
             relative_path: relative,
             byte_length: bytes.len() as u64,
             content_sha256: digest_hex(&Sha256::digest(&bytes)),

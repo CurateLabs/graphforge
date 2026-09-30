@@ -440,11 +440,7 @@ impl ResolvedProjectGeneration {
         if snapshot.capability_version != crate::GRAPH_CAPABILITY_VERSION
             || !matches!(
                 snapshot.record_version,
-                crate::GRAPH_FILES_RECORD_VERSION
-                    | crate::GRAPH_FILES_V2_RECORD_VERSION
-                    | crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
-                    | crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
-                    | crate::graph_files::GRAPH_FILES_CHECKSUM_RECORD_VERSION
+                crate::graph_files::GRAPH_FILES_CHECKSUM_RECORD_VERSION
                     | crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
                     | crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
                     | crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
@@ -1550,6 +1546,13 @@ fn validate_manifest(manifest: &GenerationManifest, expected: Uuid) -> Result<()
     for participant in &manifest.participants {
         validate_machine_id(&participant.capability_id)?;
         validate_machine_id(&participant.record_family_id)?;
+        if participant.capability_id == crate::GRAPH_CAPABILITY_ID
+            && participant.record_family_id == "snapshot"
+        {
+            return Err(GfError::Validation(
+                "unsupported legacy graph snapshot format; recreate the pre-v1 project".into(),
+            ));
+        }
         if participant.capability_version == 0 || participant.record_version == 0 {
             return Err(corrupt("participant contract versions must be positive"));
         }
@@ -2071,8 +2074,7 @@ mod tests {
         let participant = if compact {
             let lease = crate::begin_graph_object_publication(root).unwrap();
             let (compact_root, _) =
-                crate::graph_object_store::migrate_graph_files_v1_to_v2(&lease, &graph, &inventory)
-                    .unwrap();
+                crate::graph_object_store::compact_graph_files(&lease, &graph, &inventory).unwrap();
             crate::graph_files_root_participant(&compact_root).unwrap()
         } else {
             expanded

@@ -268,7 +268,7 @@ fn source_graph(
         })
         .collect();
     let version = match graph.record_version {
-        1 | 3 | 5 | 7 => graph.record_version,
+        5 | 7 => graph.record_version,
         version => crate::graph_files::expanded_version_for_root(version)?,
     };
     let inventory = crate::graph_files::inventory_from_entries_with_version(files, version)?;

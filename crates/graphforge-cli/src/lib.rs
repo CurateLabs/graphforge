@@ -32,7 +32,6 @@ mod research_cli;
 mod research_versions_cli;
 mod source_artifact_cli;
 mod storage_attribution_cli;
-mod verify_cli;
 
 const MAX_SKILL_MANIFEST_BYTES: u64 = 256 * 1024;
 const MAX_SKILL_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -333,9 +332,6 @@ enum Command {
     Recovery,
     /// Emit authenticated, identity-free retained storage attribution.
     StorageAttribution(storage_attribution_cli::StorageAttributionArgs),
-    /// Explicitly re-authenticate the retained store on demand. Read-only;
-    /// never runs as part of ingest.
-    Verify,
 }
 
 #[derive(Args)]
@@ -1351,9 +1347,6 @@ fn run_with_allocation(
             .map(|()| 0)
             .map_err(Into::into);
         }
-        Command::Verify => {
-            return verify_cli::run_verify(&graph, cli.json, output).map_err(Into::into);
-        }
         Command::Transaction { command } => {
             return maintenance_cli::run_transaction(&graph, command, cli.json, output)
                 .map(|()| 0)
@@ -2135,6 +2128,31 @@ mod tests {
             Some(Command::Checkpoint {
                 command: CheckpointCommand::Show(ShowArgs { name })
             }) if name == "before-change"
+        ));
+    }
+
+    #[test]
+    fn standalone_verify_is_retired_and_portable_verify_remains_available() {
+        let error = match Cli::try_parse_from(["gf", "--project", "/tmp/project", "verify"]) {
+            Ok(_) => panic!("retired standalone verify command must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        let cli = Cli::try_parse_from([
+            "gf",
+            "portable",
+            "verify",
+            "--input",
+            "/tmp/package.gfportable",
+            "--mode",
+            "full",
+        ])
+        .expect("portable package verification remains available");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Portable {
+                command: portable_cli::PortableCommand::Verify(_)
+            })
         ));
     }
 

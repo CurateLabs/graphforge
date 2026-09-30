@@ -196,39 +196,31 @@ pub(crate) fn checksum(bytes: &[u8]) -> u64 {
     checksum.finish()
 }
 
-/// Canonical fixed-width wire encoding for optional published checksums.
-/// Legacy formats omit the field; current formats require a value.
-pub(crate) mod optional_hex {
+/// Canonical fixed-width wire encoding for published checksums.
+/// Canonical required checksum field; null and missing fields are refused.
+pub(crate) mod wire_hex {
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub(crate) fn serialize<S: Serializer>(
-        value: &Option<u64>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        match value {
-            Some(value) => serializer.serialize_some(&super::hex(*value)),
-            None => serializer.serialize_none(),
-        }
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "Serde field adapters require a reference to the field"
+    )]
+    pub(crate) fn serialize<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&super::hex(*value))
     }
 
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Option<u64>, D::Error> {
-        let value = Option::<String>::deserialize(deserializer)?;
-        value
-            .map(|value| {
-                if value.len() != 16
-                    || !value
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                {
-                    return Err(serde::de::Error::custom(
-                        "XXH64 must be 16 lowercase hexadecimal digits",
-                    ));
-                }
-                u64::from_str_radix(&value, 16).map_err(serde::de::Error::custom)
-            })
-            .transpose()
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        if value.len() != 16
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(serde::de::Error::custom(
+                "XXH64 must be 16 lowercase hexadecimal digits",
+            ));
+        }
+        u64::from_str_radix(&value, 16).map_err(serde::de::Error::custom)
     }
 }
 
@@ -238,18 +230,15 @@ mod tests {
     fn published_checksum_wire_has_fixed_width_and_refuses_noncanonical_values() {
         #[derive(serde::Serialize, serde::Deserialize)]
         struct Wire {
-            #[serde(with = "super::optional_hex")]
-            checksum: Option<u64>,
+            #[serde(with = "super::wire_hex")]
+            checksum: u64,
         }
         for checksum in [0, 1, u64::MAX] {
-            let bytes = serde_json::to_vec(&Wire {
-                checksum: Some(checksum),
-            })
-            .unwrap();
+            let bytes = serde_json::to_vec(&Wire { checksum }).unwrap();
             assert_eq!(bytes.len(), 31);
             assert_eq!(
                 serde_json::from_slice::<Wire>(&bytes).unwrap().checksum,
-                Some(checksum)
+                checksum
             );
         }
         for value in [
