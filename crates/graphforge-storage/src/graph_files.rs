@@ -769,8 +769,8 @@ impl From<&GraphFileEntry> for KnownGraphFile {
 }
 
 /// Capture a private workspace for publication over `parent`, reusing the
-/// parent's authenticated SHA-256 for every file whose path, exact length and
-/// freshly computed XXH64 all match the parent inventory. Changed and new
+/// parent's authenticated declared SHA-256 for every file whose path, exact
+/// length and freshly computed XXH64 all match the parent inventory. Changed and new
 /// files are hashed once. Only newly written bytes pay for a new identity.
 ///
 /// # Errors
@@ -780,16 +780,27 @@ pub fn capture_graph_files_over_parent(
     source_root: &Path,
     parent: &crate::ResolvedProjectGeneration,
 ) -> Result<(GraphFilesInventory, ProjectParticipant), GfError> {
-    let known = parent
-        .graph_files_inventory()?
-        .map(|inventory| {
-            inventory
-                .files
-                .iter()
-                .map(|entry| (entry.relative_path.clone(), KnownGraphFile::from(entry)))
-                .collect::<std::collections::HashMap<_, _>>()
-        })
-        .unwrap_or_default();
+    // Reuse needs only the parent's authenticated declared identities: every
+    // reuse is gated by a fresh checksum of the new bytes, so the parent's
+    // payload files are never read here.
+    let entries = match parent.declared_graph_files_participant()? {
+        Some(GraphFilesParticipant::V1(inventory)) => inventory.files,
+        Some(GraphFilesParticipant::V2(root)) => {
+            crate::resolve_graph_manifest(&root, crate::GraphManifestLimits::default(), |digest| {
+                crate::graph_object_store::read_graph_control_object_by_digest(
+                    parent.container_root(),
+                    digest,
+                    crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
+                )
+            })?
+            .0
+        }
+        None => Vec::new(),
+    };
+    let known = entries
+        .iter()
+        .map(|entry| (entry.relative_path.clone(), KnownGraphFile::from(entry)))
+        .collect::<std::collections::HashMap<_, _>>();
     capture_graph_files_reusing_digests(source_root, &known, ARTIFACT_IDENTITY)
 }
 
