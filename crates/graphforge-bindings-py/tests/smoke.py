@@ -234,6 +234,28 @@ def check_add_node() -> None:
         raise SystemExit("expected TypeError for unsupported node property")
     assert forge.execute("MATCH (n:Person) RETURN n").num_rows == 1
 
+    # #1675 — the construction arguments are positional-only, so a property may
+    # carry the same name as one of them.
+    member = forge.add_node("Member", label="M1", club_id=1)
+    other = forge.add_node("Member", label="M2", club_id=2)
+    assert member.label == "Member", member.label
+    labelled = forge.execute(
+        "MATCH (n:Member) RETURN n.label AS label, n.club_id AS club_id ORDER BY club_id"
+    )
+    assert labelled.column("label").to_pylist() == ["M1", "M2"], labelled
+    forge.add_edge(member, "FRIEND", other, src="a", dst="b", rel_type="c", weight=2)
+    edge = forge.execute(
+        "MATCH (:Member)-[r:FRIEND]->(:Member) "
+        "RETURN r.src AS src, r.dst AS dst, r.rel_type AS rel_type, r.weight AS weight"
+    )
+    assert edge.to_pylist() == [{"src": "a", "dst": "b", "rel_type": "c", "weight": 2}], edge
+    try:
+        forge.add_node(label="Member")
+    except TypeError:
+        pass
+    else:
+        raise SystemExit("expected TypeError: add_node's label is positional-only")
+
 
 def check_parse_error_span() -> None:
     # #586/#588 — a syntax error surfaces as ParseError with a `span`.

@@ -71,7 +71,10 @@ impl PyEdgeHandle {
 #[pymethods]
 impl GraphForge {
     /// Add one node through the Rust facade and return its UUID handle.
-    #[pyo3(signature = (label, **props))]
+    ///
+    /// `label` is positional-only so every keyword is a property, including a
+    /// property that is itself named `label` (#1675).
+    #[pyo3(signature = (label, /, **props))]
     fn add_node(
         &self,
         py: Python<'_>,
@@ -87,7 +90,10 @@ impl GraphForge {
     }
 
     /// Add a directed edge and return its graph UUID handle.
-    #[pyo3(signature = (src, rel_type, dst, **props))]
+    ///
+    /// The endpoints and relationship type are positional-only so every
+    /// keyword is a property, including `src`, `dst` and `rel_type` (#1675).
+    #[pyo3(signature = (src, rel_type, dst, /, **props))]
     fn add_edge(
         &self,
         py: Python<'_>,
