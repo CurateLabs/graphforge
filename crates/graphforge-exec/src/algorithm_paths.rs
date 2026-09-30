@@ -14,9 +14,10 @@ use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 use graphforge_core::algorithms::{Algorithm, PathAlgorithm};
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use graphforge_core::{GfError, OntologyMode, PathsOptions};
 use graphforge_ir::Direction;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::AdjacencyProvider;
 use crate::algorithm_dispatch::{

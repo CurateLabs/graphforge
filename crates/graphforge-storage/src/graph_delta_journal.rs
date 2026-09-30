@@ -10,11 +10,11 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use arrow::array::{
     Array, FixedSizeBinaryArray, ListArray, StringArray, TimestampMicrosecondArray, UInt32Array,
     UInt64Array,
 };
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_ir::IrLiteral;
 use graphforge_value::{EntityTypeId, PrimaryEntityTypeId};
@@ -34,9 +34,9 @@ use crate::project_publication::{
 use crate::{GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, empty_workspace_participants};
 
 /// Run file format identity implemented by this release.
-pub const GRAPH_DELTA_RUN_FORMAT_VERSION: u32 = 1;
+pub const GRAPH_DELTA_RUN_FORMAT_VERSION: u32 = 2;
 /// Record frame version implemented by this release.
-pub const GRAPH_DELTA_RECORD_VERSION: u16 = 1;
+pub const GRAPH_DELTA_RECORD_VERSION: u16 = 2;
 /// File extension for authoritative delta runs.
 pub const GRAPH_DELTA_RUN_EXTENSION: &str = "gfdr";
 /// Directory holding authoritative runs beneath a generation graph tree.
@@ -753,7 +753,7 @@ pub fn encode_delta_run(
     let record_count = u32::try_from(operations.len())
         .map_err(|_| validation("graph delta record count overflow"))?;
     body.extend_from_slice(&record_count.to_le_bytes());
-    let header_checksum = Sha256::digest(&body);
+    let header_checksum = crate::corruption_checksum::checksum(&body).to_le_bytes();
     body.extend_from_slice(&header_checksum);
 
     for (index, op) in operations.iter().enumerate() {
@@ -782,15 +782,15 @@ pub fn encode_delta_run(
             .map_err(|_| validation("graph delta payload length overflow"))?;
         record.extend_from_slice(&payload_len.to_le_bytes());
         record.extend_from_slice(&payload);
-        let record_checksum = Sha256::digest(&record);
+        let record_checksum = crate::corruption_checksum::checksum(&record).to_le_bytes();
         body.extend_from_slice(&record);
         body.extend_from_slice(&record_checksum);
-        if body.len() > limits.max_run_bytes.saturating_sub(32) {
+        if body.len() > limits.max_run_bytes.saturating_sub(8) {
             return Err(resource_limit("graph delta run bytes"));
         }
     }
 
-    let file_checksum = Sha256::digest(&body);
+    let file_checksum = crate::corruption_checksum::checksum(&body).to_le_bytes();
     body.extend_from_slice(&file_checksum);
     if body.len() > limits.max_run_bytes {
         return Err(resource_limit("graph delta run bytes"));
@@ -812,7 +812,7 @@ pub fn decode_delta_run(
     if bytes.len() > limits.max_run_bytes {
         return Err(resource_limit("graph delta run bytes"));
     }
-    if bytes.len() < 4 + 4 + 8 + 16 + 16 + 4 + 32 + 32 {
+    if bytes.len() < 4 + 4 + 8 + 16 + 16 + 4 + 8 + 8 {
         return Err(corrupt("graph delta run truncated before header"));
     }
     if &bytes[..4] != MAGIC {
@@ -836,27 +836,29 @@ pub fn decode_delta_run(
         return Err(corrupt("graph delta record count invalid"));
     }
     let header_end = 52;
-    let stored_header_checksum = &bytes[header_end..header_end + 32];
-    let actual_header_checksum = Sha256::digest(&bytes[..header_end]);
+    let stored_header_checksum = &bytes[header_end..header_end + 8];
+    let actual_header_checksum =
+        crate::corruption_checksum::checksum(&bytes[..header_end]).to_le_bytes();
     if stored_header_checksum != actual_header_checksum.as_slice() {
         return Err(corrupt("graph delta run header checksum mismatch"));
     }
 
-    let file_checksum_offset = bytes.len().saturating_sub(32);
-    if file_checksum_offset <= header_end + 32 {
+    let file_checksum_offset = bytes.len().saturating_sub(8);
+    if file_checksum_offset <= header_end + 8 {
         return Err(corrupt("graph delta run truncated"));
     }
     let stored_file_checksum = &bytes[file_checksum_offset..];
-    let actual_file_checksum = Sha256::digest(&bytes[..file_checksum_offset]);
+    let actual_file_checksum =
+        crate::corruption_checksum::checksum(&bytes[..file_checksum_offset]).to_le_bytes();
     if stored_file_checksum != actual_file_checksum.as_slice() {
         return Err(corrupt("graph delta run file checksum mismatch"));
     }
 
-    let mut cursor = header_end + 32;
+    let mut cursor = header_end + 8;
     let mut records = Vec::with_capacity(record_count);
     let mut seen_ops = BTreeSet::new();
     for expected_op_sequence in 0..record_count {
-        if cursor + 2 + 16 + 4 + 1 + 2 + 4 + 32 > file_checksum_offset {
+        if cursor + 2 + 16 + 4 + 1 + 2 + 4 + 8 > file_checksum_offset {
             return Err(corrupt("graph delta run truncated mid-record"));
         }
         let record_start = cursor;
@@ -887,17 +889,18 @@ pub fn decode_delta_run(
         if payload_len > limits.max_payload_bytes {
             return Err(resource_limit("graph delta payload bytes"));
         }
-        if cursor + payload_len + 32 > file_checksum_offset {
+        if cursor + payload_len + 8 > file_checksum_offset {
             return Err(corrupt("graph delta record payload truncated"));
         }
         let payload_bytes = &bytes[cursor..cursor + payload_len];
         cursor += payload_len;
-        let stored_record_checksum = &bytes[cursor..cursor + 32];
-        let actual_record_checksum = Sha256::digest(&bytes[record_start..cursor]);
+        let stored_record_checksum = &bytes[cursor..cursor + 8];
+        let actual_record_checksum =
+            crate::corruption_checksum::checksum(&bytes[record_start..cursor]).to_le_bytes();
         if stored_record_checksum != actual_record_checksum.as_slice() {
             return Err(corrupt("graph delta record checksum mismatch"));
         }
-        cursor += 32;
+        cursor += 8;
         let payload = GraphDeltaPayload::decode(payload_bytes)?;
         if payload.expected_kind() != kind {
             return Err(corrupt("graph delta record kind/payload mismatch"));
@@ -987,8 +990,8 @@ pub fn load_verified_delta_runs(
         if bytes.len() as u64 != entry.byte_length {
             return Err(corrupt("graph delta run length mismatch"));
         }
-        let digest = hex_digest(Sha256::digest(&bytes).into());
-        if digest != entry.content_sha256 {
+        let checksum = crate::corruption_checksum::checksum(&bytes);
+        if checksum != entry.content_xxh64 {
             return Err(corrupt("graph delta run digest mismatch"));
         }
         let run = decode_delta_run(&bytes, Some(expected), limits)?;
@@ -1648,7 +1651,9 @@ fn prepare_graph_delta_inner(
             byte_length: run_byte_length,
             // Hashed once, in memory, from the exact bytes just written
             // (ADR 0019 record); no re-read of the file we just created.
-            content_sha256: hex_digest(Sha256::digest(&run_bytes).into()),
+            content_sha256: hex_digest(
+                crate::payload_digest::PayloadSha256::digest(&run_bytes).into(),
+            ),
             role: GraphFileRole::Delta,
         },
     );

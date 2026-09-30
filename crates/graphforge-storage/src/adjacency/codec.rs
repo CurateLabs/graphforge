@@ -242,6 +242,39 @@ pub(super) fn preflight(bytes: &[u8], nodes: u64, edges: u64) -> Result<(), GfEr
 mod tests {
     use super::*;
 
+    #[test]
+    fn checksum_csr_manifest_refuses_legacy_missing_and_malformed_metadata() {
+        use super::super::{CsrIndex, ShardedCsrIndex, write_sharded_csr};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.csr");
+        let csr = CsrIndex {
+            offsets: vec![0, 1],
+            edge_ids: vec![0],
+            neighbor_ids: vec![0],
+        };
+        write_sharded_csr(&path, &csr, 1).unwrap();
+        let manifest_path = path.with_extension("csr.json");
+        let original: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        for mode in 0..3 {
+            let mut changed = original.clone();
+            match mode {
+                0 => changed["version"] = serde_json::json!(2),
+                1 => {
+                    changed["shards"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("xxh64");
+                }
+                _ => changed["shards"][0]["xxh64"] = serde_json::json!("not-a-checksum"),
+            }
+            std::fs::write(&manifest_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            assert!(ShardedCsrIndex::open(&path).is_err(), "mode={mode}");
+        }
+        std::fs::write(&manifest_path, serde_json::to_vec(&original).unwrap()).unwrap();
+        ShardedCsrIndex::open(&path).unwrap();
+    }
+
     fn fixture() -> (tempfile::TempDir, std::path::PathBuf, Vec<u8>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shard.csr");
@@ -365,6 +398,7 @@ mod tests {
         let start = first_buffer_start(&bytes);
         bytes[start..start + 8].copy_from_slice(&i64::MAX.to_le_bytes());
         record.sha256 = sha256_hex(&bytes);
+        record.xxh64 = crate::corruption_checksum::checksum(&bytes);
         std::fs::write(payload, bytes).unwrap();
         assert!(reader.row(0).is_err());
         assert!(reader.row_len(0).is_err());

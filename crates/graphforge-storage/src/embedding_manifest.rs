@@ -3,7 +3,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::Digest;
@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// Generation manifest schema implemented by this release.
-pub const EMBEDDING_GENERATION_MANIFEST_VERSION: u32 = 1;
+pub const EMBEDDING_GENERATION_MANIFEST_VERSION: u32 = 2;
 /// Maximum accepted generation manifest bytes.
 pub const MAX_EMBEDDING_GENERATION_MANIFEST_BYTES: usize = 64 * 1024;
 const SOURCE_FINGERPRINT_DOMAIN: &[u8] = b"graphforge_embedding_source_v1";
@@ -27,7 +27,7 @@ impl EmbeddingPublicationFingerprint {
     /// Digest exact publication-file bytes.
     #[must_use]
     pub fn digest(bytes: &[u8]) -> Self {
-        Self(Sha256::digest(bytes).into())
+        Self(graphforge_core::hash_observation::ArtifactSha256::digest(bytes).into())
     }
 
     /// Parse exactly 64 lowercase hexadecimal digits.
@@ -146,6 +146,12 @@ pub struct EmbeddingGenerationManifestInput {
     pub committed_at_micros: i64,
     /// Digest of exact persisted vector-file bytes.
     pub publication_fingerprint: EmbeddingPublicationFingerprint,
+    /// Exact persisted vector-file length.
+    pub publication_byte_length: u64,
+    /// XXH64 of exact persisted vector-file bytes.
+    pub publication_xxh64: u64,
+    /// XXH64 of canonical UUID/vector rows.
+    pub content_xxh64: u64,
 }
 
 /// Durable metadata for one validated, complete embedding generation.
@@ -160,6 +166,9 @@ pub struct EmbeddingGenerationManifest {
     generated_at_micros: i64,
     committed_at_micros: i64,
     publication_fingerprint: EmbeddingPublicationFingerprint,
+    publication_byte_length: u64,
+    publication_xxh64: u64,
+    content_xxh64: u64,
 }
 
 impl EmbeddingGenerationManifest {
@@ -207,6 +216,9 @@ impl EmbeddingGenerationManifest {
             generated_at_micros: input.generated_at_micros,
             committed_at_micros: input.committed_at_micros,
             publication_fingerprint: input.publication_fingerprint,
+            publication_byte_length: input.publication_byte_length,
+            publication_xxh64: input.publication_xxh64,
+            content_xxh64: input.content_xxh64,
         })
     }
 
@@ -228,6 +240,9 @@ impl EmbeddingGenerationManifest {
             "label_membership_digest": encode_digest(self.source.label_membership_digest),
             "manifest_version": EMBEDDING_GENERATION_MANIFEST_VERSION,
             "publication_fingerprint": self.publication_fingerprint.to_hex(),
+            "publication_byte_length": self.publication_byte_length,
+            "publication_xxh64": format!("{:016x}", self.publication_xxh64),
+            "content_xxh64": format!("{:016x}", self.content_xxh64),
             "source_fingerprint": self.source.fingerprint.to_hex(),
             "vector_count": self.vector_count,
         }))
@@ -290,6 +305,9 @@ impl EmbeddingGenerationManifest {
             compatibility_id,
             source,
             content_digest,
+            publication_byte_length: raw.publication_byte_length,
+            publication_xxh64: raw.publication_xxh64,
+            content_xxh64: raw.content_xxh64,
             vector_count: raw.vector_count,
             dimension: raw.dimension,
             generated_at_micros: raw.generated_at_micros,
@@ -364,6 +382,24 @@ impl EmbeddingGenerationManifest {
         self.committed_at_micros
     }
 
+    /// Exact persisted vector-file length.
+    #[must_use]
+    pub const fn publication_byte_length(&self) -> u64 {
+        self.publication_byte_length
+    }
+
+    /// XXH64 of persisted vector-file bytes.
+    #[must_use]
+    pub const fn publication_xxh64(&self) -> u64 {
+        self.publication_xxh64
+    }
+
+    /// XXH64 of canonical UUID/vector rows.
+    #[must_use]
+    pub const fn content_xxh64(&self) -> u64 {
+        self.content_xxh64
+    }
+
     /// Exact persisted vector-file fingerprint.
     #[must_use]
     pub const fn publication_fingerprint(&self) -> EmbeddingPublicationFingerprint {
@@ -388,6 +424,11 @@ struct RawEmbeddingGenerationManifest {
     generated_at_micros: i64,
     committed_at_micros: i64,
     publication_fingerprint: String,
+    publication_byte_length: u64,
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    publication_xxh64: u64,
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    content_xxh64: u64,
 }
 
 fn parse_digest(field: &'static str, value: &str) -> Result<[u8; 32], SearchArtifactError> {
@@ -465,6 +506,9 @@ mod tests {
             generated_at_micros: 100,
             committed_at_micros: 101,
             publication_fingerprint: EmbeddingPublicationFingerprint::digest(b"parquet"),
+            publication_byte_length: 7,
+            publication_xxh64: crate::corruption_checksum::checksum(b"parquet"),
+            content_xxh64: crate::corruption_checksum::checksum(b"canonical rows"),
         }
     }
 
@@ -515,6 +559,50 @@ mod tests {
         let mut reversed = manifest_input();
         reversed.committed_at_micros = 99;
         assert!(EmbeddingGenerationManifest::new(reversed).is_err());
+    }
+
+    #[test]
+    fn checksum_manifest_refuses_legacy_missing_and_malformed_metadata() {
+        let manifest = EmbeddingGenerationManifest::new(manifest_input()).unwrap();
+        let current = manifest.to_canonical_json().unwrap();
+        for case in [
+            "legacy",
+            "missing-file",
+            "missing-content",
+            "malformed",
+            "missing-length",
+        ] {
+            let mut value: Value = serde_json::from_slice(&current).unwrap();
+            match case {
+                "legacy" => value["manifest_version"] = Value::from(1),
+                "missing-file" => {
+                    value.as_object_mut().unwrap().remove("publication_xxh64");
+                }
+                "missing-content" => {
+                    value.as_object_mut().unwrap().remove("content_xxh64");
+                }
+                "missing-length" => {
+                    value
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("publication_byte_length");
+                }
+                "malformed" => value["publication_xxh64"] = Value::String("ABCDEF".into()),
+                _ => unreachable!(),
+            }
+            assert!(
+                EmbeddingGenerationManifest::from_json(
+                    Path::new("manifest.json"),
+                    &serde_json::to_vec(&value).unwrap()
+                )
+                .is_err(),
+                "{case}"
+            );
+        }
+        assert_eq!(
+            EmbeddingGenerationManifest::from_json(Path::new("manifest.json"), &current).unwrap(),
+            manifest
+        );
     }
 
     #[test]

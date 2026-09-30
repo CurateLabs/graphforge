@@ -83,8 +83,8 @@ use super::validate_block_records;
 #[cfg(test)]
 use super::validate_run_contents;
 use super::validate_run_descriptors;
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::GfError;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_filesystem::ObservedSync as _;
 use sha2::Digest;
 use std::cmp::Reverse;
@@ -496,7 +496,7 @@ pub(crate) fn prepare_uuid_membership_delta(
         metrics,
         manifest,
         auxiliary: crate::AuxiliaryReceipt {
-            kind: "uuid-membership/v5".to_owned(),
+            kind: "uuid-membership/v6".to_owned(),
             schema_version: FORMAT_VERSION,
             path: format!("{INDEX_DIR}/{TOPOLOGY_RECEIPT}"),
             digest: hex_bytes(&digest),
@@ -1131,7 +1131,7 @@ pub(super) fn topology_delta_sha256(
     nodes.sort_unstable_by_key(|(uuid, _)| *uuid.as_bytes());
     let mut edges = edges.to_vec();
     edges.sort_unstable_by_key(|uuid| *uuid.as_bytes());
-    let mut hasher = Sha256::new();
+    let mut hasher = graphforge_core::hash_observation::ArtifactSha256::new();
     hasher.update(b"graphforge/uuid-index-topology-delta/v1");
     for (uuid, surrogate) in nodes {
         hasher.update([0]);
@@ -1974,7 +1974,7 @@ pub(crate) fn prepare_v4_ordinal_delta(
     let prepared = PreparedV4OrdinalDelta {
         expected_generation: generation,
         auxiliary: crate::AuxiliaryReceipt {
-            kind: "uuid-membership/v4".to_owned(),
+            kind: "uuid-membership/ordinal-v5".to_owned(),
             schema_version: crate::ORDINAL_IDENTITY_V4,
             path: format!("{INDEX_DIR}/{V4_ORDINAL_RECEIPT}"),
             digest: hex_sha256(&receipt_bytes),

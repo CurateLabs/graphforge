@@ -42,8 +42,8 @@ use super::topology_delta::read_bounded;
 use super::validate_run_contents;
 use super::validate_run_descriptors;
 use super::validate_surrogate_pairs;
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::GfError;
+use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use sha2::Digest;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -474,7 +474,7 @@ impl AuthenticatedUuidIndexSnapshot {
             .and_then(|paths| paths.get(&record.name))
             .map_or_else(
                 || format!("{INDEX_DIR}/{}", record.name),
-                |(path, _, _)| path.clone(),
+                |(path, _, _, _)| path.clone(),
             );
         Ok(ConstructionIndexReference {
             source_root: self.graph_root_path.to_string_lossy().into_owned(),
@@ -567,7 +567,7 @@ impl AuthenticatedUuidIndexSnapshot {
             .cas_source_paths
             .as_ref()
             .and_then(|paths| paths.get(name))
-            .map_or(reference.target_path, |(path, _, _)| path.as_str());
+            .map_or(reference.target_path, |(path, _, _, _)| path.as_str());
         if reference.source_path != expected_source {
             return Err(storage_err("retained construction source path changed"));
         }
@@ -706,16 +706,18 @@ impl AuthenticatedUuidIndexSnapshot {
             .iter()
             .find(|entry| entry.relative_path == manifest_path)
             .ok_or_else(|| storage_err("compact UUID manifest is absent"))?;
-        let mut manifest_lease = crate::graph_object_store::open_graph_object_by_digest(
+        let mut manifest_lease = crate::graph_object_store::open_graph_object_with_checksum(
             container_root,
-            &manifest_entry.content_sha256,
-            manifest_entry.byte_length,
+            manifest_entry,
         )?;
         let manifest_identity =
             graphforge_filesystem::file_identity(manifest_lease.as_ref()).map_err(storage_err)?;
         let body = read_bounded(&mut manifest_lease, MAX_MANIFEST_BYTES)?;
         let manifest_file = manifest_lease.try_clone_file().map_err(storage_err)?;
         let manifest_sha256 = hex_sha256(&body);
+        if manifest_sha256 != manifest_entry.content_sha256 {
+            return Err(storage_err("compact UUID manifest authentication changed"));
+        }
         let manifest: Manifest = serde_json::from_slice(&body).map_err(storage_err)?;
         if manifest.format_version != FORMAT_VERSION || manifest.current_generation != generation {
             return Err(storage_err(
@@ -737,6 +739,7 @@ impl AuthenticatedUuidIndexSnapshot {
                     .into_owned(),
                 manifest_entry.content_sha256.clone(),
                 manifest_entry.byte_length,
+                manifest_entry.content_xxh64,
             ),
         );
         let mut cas_leases = vec![manifest_lease];
@@ -755,10 +758,9 @@ impl AuthenticatedUuidIndexSnapshot {
                 {
                     return Err(storage_err("compact UUID run authority changed"));
                 }
-                let lease = crate::graph_object_store::open_graph_object_by_digest(
+                let lease = crate::graph_object_store::open_graph_object_with_checksum(
                     container_root,
-                    &entry.content_sha256,
-                    entry.byte_length,
+                    entry,
                 )?;
                 let physical = crate::graph_object_path(container_root, &entry.content_sha256)?;
                 let relative = physical
@@ -768,7 +770,12 @@ impl AuthenticatedUuidIndexSnapshot {
                     .into_owned();
                 paths.insert(
                     record.name.clone(),
-                    (relative, entry.content_sha256.clone(), entry.byte_length),
+                    (
+                        relative,
+                        entry.content_sha256.clone(),
+                        entry.byte_length,
+                        entry.content_xxh64,
+                    ),
                 );
                 let file = lease.try_clone_file().map_err(storage_err)?;
                 cas_leases.push(lease);
@@ -848,55 +855,75 @@ impl AuthenticatedUuidIndexSnapshot {
         )
     }
 
+    fn revalidate_compact_source(&self) -> Result<(), GfError> {
+        let objects = self
+            .cas_source_paths
+            .as_ref()
+            .ok_or_else(|| storage_err("compact UUID source authority is absent"))?;
+        let (_, manifest_digest, manifest_length, manifest_checksum) = objects
+            .get(MANIFEST)
+            .ok_or_else(|| storage_err("compact UUID manifest authority is absent"))?;
+        let manifest_entry = crate::GraphFileEntry {
+            relative_path: MANIFEST.to_owned(),
+            content_sha256: manifest_digest.clone(),
+            byte_length: *manifest_length,
+            content_xxh64: *manifest_checksum,
+            role: crate::GraphFileRole::Index,
+        };
+        let mut manifest_lease = crate::graph_object_store::open_graph_object_with_checksum(
+            &self.graph_root_path,
+            &manifest_entry,
+        )?;
+        if graphforge_filesystem::file_identity(manifest_lease.as_ref()).map_err(storage_err)?
+            != self.manifest_identity
+        {
+            return Err(storage_err("compact UUID manifest identity changed"));
+        }
+        let body = read_bounded(&mut manifest_lease, MAX_MANIFEST_BYTES)?;
+        if hex_sha256(&body) != self.manifest_sha256
+            || serde_json::from_slice::<Manifest>(&body).map_err(storage_err)? != self.manifest
+        {
+            return Err(storage_err("compact UUID manifest authentication changed"));
+        }
+        for run in &self.runs {
+            for (record, identity) in [
+                (&run.descriptor.identities, run.identities_identity),
+                (
+                    &run.descriptor.node_surrogates,
+                    run.node_surrogates_identity,
+                ),
+            ] {
+                let (_, digest, length, checksum) = objects
+                    .get(&record.name)
+                    .ok_or_else(|| storage_err("compact UUID run authority is absent"))?;
+                let entry = crate::GraphFileEntry {
+                    relative_path: record.name.clone(),
+                    content_sha256: digest.clone(),
+                    byte_length: *length,
+                    content_xxh64: *checksum,
+                    role: crate::GraphFileRole::Index,
+                };
+                let file = crate::graph_object_store::open_graph_object_with_checksum(
+                    &self.graph_root_path,
+                    &entry,
+                )?;
+                if graphforge_filesystem::file_identity(file.as_ref()).map_err(storage_err)?
+                    != identity
+                {
+                    return Err(storage_err("compact UUID run identity changed"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn revalidate(&self) -> Result<(), GfError> {
         self.graph_root.revalidate_named().map_err(storage_err)?;
         if self.graph_root.identity() != self.graph_root_identity {
             return Err(storage_err("UUID graph root identity changed"));
         }
-        if let Some(objects) = &self.cas_source_paths {
-            let (_, manifest_digest, manifest_length) = objects
-                .get(MANIFEST)
-                .ok_or_else(|| storage_err("compact UUID manifest authority is absent"))?;
-            let mut manifest_lease = crate::graph_object_store::open_graph_object_by_digest(
-                &self.graph_root_path,
-                manifest_digest,
-                *manifest_length,
-            )?;
-            if graphforge_filesystem::file_identity(manifest_lease.as_ref()).map_err(storage_err)?
-                != self.manifest_identity
-            {
-                return Err(storage_err("compact UUID manifest identity changed"));
-            }
-            let body = read_bounded(&mut manifest_lease, MAX_MANIFEST_BYTES)?;
-            if hex_sha256(&body) != self.manifest_sha256
-                || serde_json::from_slice::<Manifest>(&body).map_err(storage_err)? != self.manifest
-            {
-                return Err(storage_err("compact UUID manifest authentication changed"));
-            }
-            for run in &self.runs {
-                for (record, identity) in [
-                    (&run.descriptor.identities, run.identities_identity),
-                    (
-                        &run.descriptor.node_surrogates,
-                        run.node_surrogates_identity,
-                    ),
-                ] {
-                    let (_, digest, length) = objects
-                        .get(&record.name)
-                        .ok_or_else(|| storage_err("compact UUID run authority is absent"))?;
-                    let file = crate::graph_object_store::open_graph_object_by_digest(
-                        &self.graph_root_path,
-                        digest,
-                        *length,
-                    )?;
-                    if graphforge_filesystem::file_identity(file.as_ref()).map_err(storage_err)?
-                        != identity
-                    {
-                        return Err(storage_err("compact UUID run identity changed"));
-                    }
-                }
-            }
-            return Ok(());
+        if self.cas_source_paths.is_some() {
+            return self.revalidate_compact_source();
         }
         self.root.revalidate_named().map_err(storage_err)?;
         if self.root.identity() != self.root_identity {

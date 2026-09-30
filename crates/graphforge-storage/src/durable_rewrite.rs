@@ -11,8 +11,8 @@ use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::path::{Component, Path};
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::GfError;
+use graphforge_core::hash_observation::{ControlSha256 as Sha256, HashDomain, ObservedSha256};
 use graphforge_filesystem::{FileIdentity, StableDirectory};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -168,7 +168,10 @@ pub(crate) fn reconcile_auxiliary(
         Err(error) => return Err(storage(error)),
     };
     let exact = if let Some(file) = file {
-        let (bytes, digest) = hash_reader(file.try_clone().map_err(storage)?)?;
+        let (bytes, digest) = hash_reader_in_domain(
+            file.try_clone().map_err(storage)?,
+            HashDomain::ControlAuthentication,
+        )?;
         directory.revalidate_named().map_err(storage)?;
         bytes == receipt.bytes && digest == receipt.digest
     } else {
@@ -272,9 +275,20 @@ fn decoded_journal_path(value: &str) -> Result<String, GfError> {
     normalize_journal_path(value, cfg!(windows))
 }
 
-fn hash_reader(mut file: File) -> Result<(u64, String), GfError> {
+fn hash_reader(file: File) -> Result<(u64, String), GfError> {
+    hash_reader_in_domain(file, HashDomain::ArtifactPayload)
+}
+
+fn rewrite_file_domain(relative: &str) -> HashDomain {
+    match relative {
+        "semantic-routes.json" | "topology/generation.json" => HashDomain::ControlAuthentication,
+        _ => HashDomain::ArtifactPayload,
+    }
+}
+
+fn hash_reader_in_domain(mut file: File, domain: HashDomain) -> Result<(u64, String), GfError> {
     file.rewind().map_err(storage)?;
-    let mut hash = Sha256::new();
+    let mut hash = ObservedSha256::for_domain(domain);
     let mut bytes = 0_u64;
     let mut buffer = vec![0_u8; 1024 * 1024].into_boxed_slice();
     loop {
@@ -291,8 +305,15 @@ fn hash_reader(mut file: File) -> Result<(u64, String), GfError> {
 }
 
 fn authenticated_file(file: &File) -> Result<AuthenticatedFile, GfError> {
+    authenticated_file_in_domain(file, HashDomain::ArtifactPayload)
+}
+
+fn authenticated_file_in_domain(
+    file: &File,
+    domain: HashDomain,
+) -> Result<AuthenticatedFile, GfError> {
     let identity = graphforge_filesystem::file_identity(file).map_err(storage)?;
-    let (bytes, sha256) = hash_reader(file.try_clone().map_err(storage)?)?;
+    let (bytes, sha256) = hash_reader_in_domain(file.try_clone().map_err(storage)?, domain)?;
     Ok(AuthenticatedFile {
         volume: identity.volume_serial,
         file: hex(&identity.file_id),
@@ -455,8 +476,12 @@ fn install(root_path: &Path, root: &StableDirectory, entry: &Entry) -> Result<()
     match parent.open_child_file(&temporary) {
         Ok(temp) => {
             authenticate_staged_file(&temp, entry)?;
-            let prior =
-                authenticate_prior_destination(&parent, &target, entry.prior_destination.as_ref())?;
+            let prior = authenticate_prior_destination(
+                &parent,
+                &target,
+                entry.prior_destination.as_ref(),
+                rewrite_file_domain(&entry.destination),
+            )?;
             let expected = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
             drop(temp);
             let authority = if entry.destination == crate::route_component::TABLE_FILE {
@@ -495,7 +520,11 @@ fn authenticate_staged_file(file: &File, entry: &Entry) -> Result<(), GfError> {
     {
         return Err(storage("rewrite temporary identity changed"));
     }
-    if hash_reader(file.try_clone().map_err(storage)?)? != (entry.bytes, entry.sha256.clone()) {
+    if hash_reader_in_domain(
+        file.try_clone().map_err(storage)?,
+        rewrite_file_domain(&entry.destination),
+    )? != (entry.bytes, entry.sha256.clone())
+    {
         return Err(storage("rewrite recovery input is missing or corrupt"));
     }
     Ok(())
@@ -505,6 +534,7 @@ fn authenticate_prior_destination(
     parent: &StableDirectory,
     target: &std::ffi::OsStr,
     prior: Option<&AuthenticatedFile>,
+    domain: HashDomain,
 ) -> Result<Option<FileIdentity>, GfError> {
     match (parent.open_child_file(target), prior) {
         (Err(error), None) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -512,7 +542,7 @@ fn authenticate_prior_destination(
             let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
             if (identity.volume_serial, hex(&identity.file_id))
                 != (prior.volume, prior.file.clone())
-                || hash_reader(file)? != (prior.bytes, prior.sha256.clone())
+                || hash_reader_in_domain(file, domain)? != (prior.bytes, prior.sha256.clone())
             {
                 return Err(storage("rewrite destination changed after intent"));
             }
@@ -535,7 +565,8 @@ fn authenticate_installed_destination(
     let identity = graphforge_filesystem::file_identity(&destination).map_err(storage)?;
     if (identity.volume_serial, hex(&identity.file_id))
         != (entry.temporary_volume, entry.temporary_file.clone())
-        || hash_reader(destination)? != (entry.bytes, entry.sha256.clone())
+        || hash_reader_in_domain(destination, rewrite_file_domain(&entry.destination))?
+            != (entry.bytes, entry.sha256.clone())
     {
         return Err(storage(
             "installed rewrite destination failed authentication",
@@ -1192,9 +1223,15 @@ fn commit_locked(
             return Err(storage("rewrite temporary identity changed before intent"));
         }
         parent.sync().map_err(storage)?;
-        let (bytes, sha256) = hash_reader(temp.as_file().try_clone().map_err(storage)?)?;
+        let (bytes, sha256) = hash_reader_in_domain(
+            temp.as_file().try_clone().map_err(storage)?,
+            rewrite_file_domain(&relative),
+        )?;
         let prior_destination = match parent.open_child_file(&target) {
-            Ok(file) => Some(authenticated_file(&file)?),
+            Ok(file) => Some(authenticated_file_in_domain(
+                &file,
+                rewrite_file_domain(&relative),
+            )?),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(storage(error)),
         };
@@ -1312,12 +1349,12 @@ fn valid_uuid_receipt(receipt: &AuxiliaryReceipt) -> bool {
             receipt.path.as_str()
         ),
         (
-            "uuid-membership/v5",
-            5,
+            "uuid-membership/v6",
+            6,
             "topology/uuid-membership/topology-receipt.json"
         ) | (
-            "uuid-membership/v4",
-            4,
+            "uuid-membership/ordinal-v5",
+            5,
             "topology/uuid-membership/ordinal-v4-receipt.json"
         )
     )
@@ -1331,8 +1368,8 @@ fn is_v4_ordinal_receipt(receipt: &AuxiliaryReceipt) -> bool {
             receipt.path.as_str()
         ),
         (
-            "uuid-membership/v4",
-            4,
+            "uuid-membership/ordinal-v5",
+            5,
             "topology/uuid-membership/ordinal-v4-receipt.json"
         )
     )
@@ -1476,8 +1513,8 @@ mod tests {
     fn auxiliary_receipt_must_name_and_digest_an_exact_staged_entry() {
         let mut valid = intent();
         valid.auxiliary = Some(AuxiliaryReceipt {
-            kind: "uuid-membership/v5".to_owned(),
-            schema_version: 5,
+            kind: "uuid-membership/v6".to_owned(),
+            schema_version: 6,
             path: valid.entries[0].destination.clone(),
             digest: valid.entries[0].sha256.clone(),
             bytes: valid.entries[0].bytes,
@@ -1490,8 +1527,8 @@ mod tests {
         cross_paired.digest = valid.entries[0].sha256.clone();
         cross_paired.path = "topology/uuid-membership/ordinal-v4-receipt.json".to_owned();
         assert!(!valid_uuid_receipt(&cross_paired));
-        cross_paired.kind = "uuid-membership/v4".to_owned();
-        cross_paired.schema_version = 4;
+        cross_paired.kind = "uuid-membership/ordinal-v5".to_owned();
+        cross_paired.schema_version = 5;
         assert!(valid_uuid_receipt(&cross_paired));
     }
 
@@ -1509,8 +1546,8 @@ mod tests {
 
         let mut legacy = intent();
         legacy.auxiliary = Some(AuxiliaryReceipt {
-            kind: "uuid-membership/v5".to_owned(),
-            schema_version: 5,
+            kind: "uuid-membership/v6".to_owned(),
+            schema_version: 6,
             path: legacy.entries[0].destination.clone(),
             digest: legacy.entries[0].sha256.clone(),
             bytes: legacy.entries[0].bytes,
@@ -1713,14 +1750,14 @@ mod tests {
         let index = root.path().join("topology/uuid-membership");
         std::fs::create_dir_all(&index).unwrap();
         assert!(!index.join("ordinal-v4.lock").exists());
-        let receipt = br#"{"schema_version":4}"#;
+        let receipt = br#"{"schema_version":5}"#;
         let receipt_digest = hex(&Sha256::digest(receipt));
         let participant: RewriteParticipantPreparer<'_> = Box::new(move |context, batch| {
             batch.stage_bytes(
                 &context
                     .project_root
                     .join("topology/uuid-membership/ordinal-v4-manifest.json"),
-                br#"{"schema_version":4}"#,
+                br#"{"schema_version":5}"#,
             )?;
             batch.stage_bytes(
                 &context
@@ -1729,8 +1766,8 @@ mod tests {
                 receipt,
             )?;
             Ok(Some(AuxiliaryReceipt {
-                kind: "uuid-membership/v4".to_owned(),
-                schema_version: 4,
+                kind: "uuid-membership/ordinal-v5".to_owned(),
+                schema_version: 5,
                 path: "topology/uuid-membership/ordinal-v4-receipt.json".to_owned(),
                 digest: receipt_digest,
                 bytes: receipt.len() as u64,

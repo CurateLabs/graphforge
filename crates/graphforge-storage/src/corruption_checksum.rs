@@ -92,6 +92,8 @@ impl Checksum {
 
     /// Append `bytes` to the checksummed payload.
     pub(crate) fn update(&mut self, bytes: &[u8]) {
+        #[cfg(any(test, feature = "test-support"))]
+        graphforge_core::hash_observation::operation::record_checksum(bytes.len() as u64);
         self.length = self.length.wrapping_add(bytes.len() as u64);
         let mut rest = bytes;
         if self.buffered != 0 {

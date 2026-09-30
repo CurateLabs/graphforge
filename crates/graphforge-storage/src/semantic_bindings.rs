@@ -409,10 +409,25 @@ impl SemanticStorageBindings {
         graph_root: &Path,
         inventory: Option<&crate::GraphFilesInventory>,
     ) -> Result<(), GfError> {
-        let captured = crate::capture_graph_files(graph_root)?.0;
+        let projected = inventory
+            .map(crate::GraphReadInventory::from_published)
+            .transpose()?;
+        self.validate_physical_routes_with_read_inventory(graph_root, projected.as_ref())
+    }
+
+    /// Validate published or private replay read authority without deriving CAS identities.
+    ///
+    /// # Errors
+    /// Refuses changed payloads, unlisted routes, and invalid schema or topology authority.
+    pub fn validate_physical_routes_with_read_inventory(
+        &self,
+        graph_root: &Path,
+        inventory: Option<&crate::GraphReadInventory>,
+    ) -> Result<(), GfError> {
+        let captured = crate::capture_graph_read_inventory(graph_root)?;
         let inventory = match inventory {
             Some(inventory) => {
-                if inventory != &captured {
+                if !inventory.agrees_with(&captured) {
                     return Err(corrupt(
                         "semantic route inventory disagrees with the graph tree",
                     ));
@@ -421,7 +436,7 @@ impl SemanticStorageBindings {
             }
             None => &captured,
         };
-        let routes = semantic_fragment_inventory(graph_root, inventory)?;
+        let routes = semantic_read_fragment_inventory(graph_root, inventory)?;
         let expected = self
             .bindings
             .iter()
@@ -569,15 +584,17 @@ impl SemanticStorageBindings {
 
 type SemanticFragments = BTreeMap<(String, String), Vec<PathBuf>>;
 
-fn semantic_fragment_inventory(
+fn semantic_read_fragment_inventory(
     root: &Path,
-    inventory: &crate::GraphFilesInventory,
+    inventory: &crate::GraphReadInventory,
 ) -> Result<SemanticFragments, GfError> {
-    let authority =
-        crate::graph_projection::TransformRoutes::from_inventory(root, inventory.clone())?;
+    let table = inventory.authenticate_routes(root)?;
     let mut routes = BTreeMap::<(String, String), Vec<PathBuf>>::new();
     for entry in &inventory.files {
-        let logical = authority.semantic_path(&entry.relative_path)?;
+        let logical = match &table {
+            Some(table) => table.semantic_relative_path(&entry.relative_path)?,
+            None => entry.relative_path.clone(),
+        };
         if let Some(route) = semantic_route_from_wire(&logical) {
             let domain = if logical.starts_with("topology/edges/") {
                 "topology/edges"
@@ -586,7 +603,7 @@ fn semantic_fragment_inventory(
             } else {
                 "properties"
             };
-            let physical = crate::graph_files::resolve_v1_inventory_entry(root, entry)?;
+            let physical = crate::graph_read_inventory::resolve_entry_retained(root, entry)?.path;
             routes
                 .entry((domain.to_owned(), route.to_owned()))
                 .or_default()
@@ -613,10 +630,10 @@ fn semantic_route_fragments(
     binding: &SemanticStorageBinding,
     root: &Path,
 ) -> Result<Vec<PathBuf>, GfError> {
-    let (inventory, _) = crate::capture_graph_files(root)?;
+    let inventory = crate::capture_graph_read_inventory(root)?;
     Ok(binding_fragments(
         binding,
-        &semantic_fragment_inventory(root, &inventory)?,
+        &semantic_read_fragment_inventory(root, &inventory)?,
     ))
 }
 
@@ -1578,7 +1595,8 @@ mod tests {
         second.flush().unwrap();
 
         let inventory = crate::capture_graph_files(dir.path()).unwrap().0;
-        let fragments = semantic_fragment_inventory(dir.path(), &inventory)
+        let read_inventory = crate::GraphReadInventory::from_published(&inventory).unwrap();
+        let fragments = semantic_read_fragment_inventory(dir.path(), &read_inventory)
             .unwrap()
             .remove(&("properties".to_owned(), entity.route.clone()))
             .unwrap();

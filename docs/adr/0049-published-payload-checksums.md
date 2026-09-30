@@ -72,9 +72,26 @@ refusal; producer installation, control metadata and portable package trust
 boundaries retain required authentication. Internal snapshots used for live
 construction rollback remain an implementation detail.
 
-This format foundation does not claim that all other read-path digest sites
-or the complete #1617 policy have been converted. Zero cryptographic payload
-hashing on ordinary reads permits mandatory checksum work.
+The same mandatory-checksum policy applies to the other persisted payload
+readers: CSR shard manifests use version 3, UUID membership manifests version 6,
+the logical ordinal-v4 facet descriptor uses wire version 5, GFDR run envelopes
+and records use version 2, and embedding generation manifests use version 2.
+These versions bind exact payload lengths and required file/block checksums;
+older descriptors are refused without a SHA read fallback. Publication names,
+control authentication, and canonical identity commitments remain SHA-256.
+
+The project generation manifest uses wire version 2 with mandatory participant
+checksums. Arrow/Parquet participant reads use checksum/length admission, while
+JSON control participant authentication remains cryptographic. The project
+`FORMAT` and `CURRENT` schemas are unchanged and retain version 1.
+
+Private replay and materialization inventories carry read-only lengths and
+checksums. They are not serializable publication descriptors and cannot create
+CAS names. A bounded semantic-route control table retains its actual SHA-256
+authentication; no placeholder payload digest substitutes for one. Zero
+cryptographic payload hashing on ordinary reads permits mandatory checksum work.
+Once-per-payload publication/export and optional observability remain separate
+acceptance outcomes of the complete #1617 policy.
 
 ## Consequences
 

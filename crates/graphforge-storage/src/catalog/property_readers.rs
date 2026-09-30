@@ -2,7 +2,7 @@
 
 use super::AdmittedSourceFile;
 use super::admit_decoded_parquet;
-use super::hash_admitted_source;
+use super::checksum_admitted_source;
 use super::io_err;
 use super::parquet_err;
 use super::preflight_parquet_handle;
@@ -278,9 +278,8 @@ where
 {
     let inventory = crate::property_overlay::authenticated_property_inventory(dir)
         .map_err(|error| DataFusionError::Execution(error.to_string()))?;
-    let admitted = inventory
-        .admitted_source_files(crate::property_overlay::PropertyRouteKind::Node)
-        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let admitted =
+        inventory.admitted_source_files(crate::property_overlay::PropertyRouteKind::Node);
     let total = admitted.iter().try_fold(0_u64, |sum, file| {
         sum.checked_add(file.byte_length).ok_or_else(|| {
             DataFusionError::ResourcesExhausted("property source bytes overflow".into())
@@ -388,7 +387,7 @@ where
             )));
         }
         preflight_parquet_handle(&mut file, metadata.len())?;
-        evidence.push(hash_admitted_source(
+        evidence.push(checksum_admitted_source(
             property_relative_name(stem, path)?,
             &mut file,
             metadata.len(),

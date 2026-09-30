@@ -55,6 +55,7 @@ use std::sync::Arc;
 use arrow::array::{Array, FixedSizeBinaryArray};
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use graphforge_core::{ApiErrorCode, GfError, ProjectErrorCode};
 use graphforge_knowledge::{
     ASSERTION_STATUS_SCHEMA, ASSERTION_SUPERSESSION_SCHEMA, Assertion, AssertionGraphRef,
@@ -67,7 +68,6 @@ use graphforge_knowledge::{
 use graphforge_provenance::{
     EventKind, LineageRecord, LineageRole, ProvenanceEvent, ProvenanceLedger, SubjectKind,
 };
-use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::{
     ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
     ProjectStageOutcome, ResolvedProjectGeneration,

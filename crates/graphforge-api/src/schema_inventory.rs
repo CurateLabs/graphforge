@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
-use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use serde_json::{Value, json};
 use sha2::Digest;
 

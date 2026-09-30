@@ -6,11 +6,11 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, FixedSizeBinaryBuilder, StringArray, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_exec::{ExecutionResult, ExecutionStats};
 #[cfg(feature = "knowledge")]
 use graphforge_knowledge::EPISTEMIC_CAPABILITY_VERSION;
-use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::{
     ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
     ProjectStageOutcome,

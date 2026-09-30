@@ -26,7 +26,6 @@
 use self::filtered_parquet::FilteredReadKind;
 use self::filtered_parquet::read_parquet_filtered_u64;
 use self::filtered_parquet::read_required_edge_filtered;
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use crate::schemas::EXPLORATORY_EDGE_SCHEMA;
 use crate::schemas::TOPOLOGY_NODES_SCHEMA;
 use crate::schemas::TYPED_EDGE_SCHEMA;
@@ -50,7 +49,6 @@ use graphforge_value::RelationTypeId;
 use graphforge_value::RuntimeEntityId;
 use graphforge_value::RuntimeRelationId;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use sha2::Digest;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
@@ -881,7 +879,7 @@ where
             )));
         }
         preflight_parquet_handle(&mut file, metadata.len())?;
-        evidence.push(hash_admitted_source(
+        evidence.push(checksum_admitted_source(
             node_relative_name(&path)?,
             &mut file,
             metadata.len(),
@@ -914,8 +912,8 @@ pub struct AdmittedSourceFile {
     pub name: String,
     /// Exact handle length admitted before hashing and decode.
     pub byte_length: u64,
-    /// SHA-256 of the complete bytes read from that handle.
-    pub sha256: [u8; 32],
+    /// XXH64 of the complete bytes read from that handle.
+    pub content_xxh64: u64,
 }
 
 fn property_relative_name(stem: &str, path: &Path) -> Result<String, DataFusionError> {
@@ -956,13 +954,13 @@ fn node_relative_name(path: &Path) -> Result<String, DataFusionError> {
     )
 }
 
-fn hash_admitted_source(
+fn checksum_admitted_source(
     name: String,
     file: &mut File,
     length: u64,
 ) -> Result<AdmittedSourceFile, DataFusionError> {
     file.seek(SeekFrom::Start(0)).map_err(|e| io_err(&e))?;
-    let mut digest = Sha256::new();
+    let mut digest = crate::corruption_checksum::Checksum::new();
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     let mut read = 0_u64;
     loop {
@@ -975,21 +973,21 @@ fn hash_admitted_source(
         })?;
         if read > length {
             return Err(DataFusionError::Execution(
-                "graph source changed while hashing admitted handle".into(),
+                "graph source changed while checksumming admitted handle".into(),
             ));
         }
         digest.update(&buffer[..count]);
     }
     if read != length {
         return Err(DataFusionError::Execution(
-            "graph source changed while hashing admitted handle".into(),
+            "graph source changed while checksumming admitted handle".into(),
         ));
     }
     file.seek(SeekFrom::Start(0)).map_err(|e| io_err(&e))?;
     Ok(AdmittedSourceFile {
         name,
         byte_length: length,
-        sha256: digest.finalize().into(),
+        content_xxh64: digest.finish(),
     })
 }
 

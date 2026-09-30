@@ -4,8 +4,8 @@ use std::fmt::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use graphforge_core::{ApiErrorCode, GfError};
-use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use sha2::Digest;
 use uuid::Uuid;
 

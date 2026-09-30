@@ -33,10 +33,10 @@ use super::topology_delta::hex_sha256;
 use super::topology_delta::read_bounded;
 use super::v4_authority_failure;
 use super::validate_run_descriptors;
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use crate::construction_record_layout::BASE_IDENTITY_WIDTH as CONSTRUCTION_IDENTITY_WIDTH;
 use crate::construction_record_layout::IDENTITY_SURROGATE_OFFSET;
 use graphforge_core::GfError;
+use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use graphforge_filesystem::ObservedSync as _;
 use serde::Deserialize;
 use serde::Serialize;
@@ -147,7 +147,7 @@ fn construction_intent_digest(
     source_bytes: u64,
     source_sha256: &str,
 ) -> String {
-    let mut digest = Sha256::new();
+    let mut digest = graphforge_core::hash_observation::ControlSha256::new();
     digest.update(b"graphforge.uuid-membership.construction-intent.v2\0");
     digest.update(format_version.to_be_bytes());
     digest.update(generation.to_be_bytes());
@@ -1715,7 +1715,11 @@ pub(super) fn install_construction_bytes(
         ConstructionIndexOutput {
             name: name.to_owned(),
             bytes: bytes.len() as u64,
-            sha256: hex_sha256(bytes),
+            sha256: if matches!(name, MANIFEST | V4_ORDINAL_RECEIPT | V4_ORDINAL_MANIFEST) {
+                hex_sha256(bytes)
+            } else {
+                hex_bytes(&Sha256::digest(bytes))
+            },
         },
         publication,
     ))

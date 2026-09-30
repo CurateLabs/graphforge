@@ -404,9 +404,15 @@ where
         changed: Condvar::new(),
         stop: AtomicBool::new(false),
     };
+    #[cfg(any(test, feature = "test-support"))]
+    let digest_context = graphforge_core::hash_observation::operation::Context::capture();
     std::thread::scope(|scope| {
         for _ in 0..window {
-            scope.spawn(|| worker(&shared, partitions, window, weights, weight_budget, &load));
+            scope.spawn(|| {
+                #[cfg(any(test, feature = "test-support"))]
+                let _digest_guard = digest_context.attach();
+                worker(&shared, partitions, window, weights, weight_budget, &load);
+            });
         }
         let _stop = StopOnExit(&shared);
         (|| -> Result<(), GfError> {

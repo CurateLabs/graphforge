@@ -121,6 +121,35 @@ pub fn search_graph_vectors<C>(
     query: &[f32],
     limit: usize,
     limits: VectorLifecycleLimits,
+    checkpoint: C,
+) -> Result<Vec<VectorSearchHit>, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    search_graph_vectors_with_projection(
+        project_dir,
+        request,
+        query,
+        limit,
+        limits,
+        None,
+        checkpoint,
+    )
+}
+
+/// Search with an optional admitted label projection shared with facade result shaping.
+/// A changed generation always fails; callers may capture a fresh projection and retry.
+///
+/// # Errors
+/// Returns the same selector, resource, corruption and mutation errors as ordinary search.
+#[allow(clippy::too_many_arguments)]
+pub fn search_graph_vectors_with_projection<C>(
+    project_dir: &Path,
+    request: VectorIndexRequest<'_>,
+    query: &[f32],
+    limit: usize,
+    limits: VectorLifecycleLimits,
+    admitted: Option<&LabelMemberProjection>,
     mut checkpoint: C,
 ) -> Result<Vec<VectorSearchHit>, SearchArtifactError>
 where
@@ -131,8 +160,19 @@ where
     validate_result_limit(limit, limits.vector)?;
 
     for attempt in 1_u8..=2 {
-        let projection =
-            project_label_members_snapshot(project_dir, request.label_id, limits, &mut checkpoint)?;
+        let captured;
+        let projection = if let Some(projection) = admitted {
+            projection.validate_binding(project_dir, request.label_id)?;
+            projection
+        } else {
+            captured = project_label_members_snapshot(
+                project_dir,
+                request.label_id,
+                limits,
+                &mut checkpoint,
+            )?;
+            &captured
+        };
         let expected_generation = projection.snapshot.generation;
 
         let hits = match current_search_artifact(project_dir, &key)? {
@@ -180,13 +220,41 @@ where
         .map(|projection| projection.members)
 }
 
-pub(crate) struct LabelMemberProjection {
+/// Admitted label membership and the generation that supplied it.
+pub struct LabelMemberProjection {
+    project_dir: std::path::PathBuf,
+    label_id: graphforge_value::EntityTypeSelection,
     pub(crate) members: BTreeSet<[u8; 16]>,
     pub(crate) snapshot: SearchSourceSnapshot,
 }
 
+impl LabelMemberProjection {
+    /// UUID membership from the exact admitted topology handles.
+    #[must_use]
+    pub fn members(&self) -> &BTreeSet<[u8; 16]> {
+        &self.members
+    }
+    pub(crate) fn validate_binding(
+        &self,
+        project: &Path,
+        label: graphforge_value::EntityTypeSelection,
+    ) -> Result<(), SearchArtifactError> {
+        if self.project_dir != project
+            || self.label_id != label
+            || SearchSourceSnapshot::generation(project)? != self.snapshot.generation
+        {
+            return Err(SearchArtifactError::ConcurrentMutation);
+        }
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
-pub(crate) fn project_label_members_snapshot<C>(
+/// Read the canonical topology membership once for a label at one generation.
+///
+/// # Errors
+/// Refuses invalid topology, concurrent mutation, cancellation, and resource limits.
+pub fn project_label_members_snapshot<C>(
     project_dir: &Path,
     label_id: graphforge_value::EntityTypeSelection,
     limits: VectorLifecycleLimits,
@@ -195,6 +263,7 @@ pub(crate) fn project_label_members_snapshot<C>(
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
+    graphforge_core::hash_observation::record_topology_projection();
     checkpoint()?;
     let source_generation = SearchSourceSnapshot::generation(project_dir)?;
     let mut source_evidence = Vec::new();
@@ -317,6 +386,8 @@ where
         &source_evidence,
     )?;
     Ok(LabelMemberProjection {
+        project_dir: project_dir.to_path_buf(),
+        label_id,
         members: eligible,
         snapshot,
     })

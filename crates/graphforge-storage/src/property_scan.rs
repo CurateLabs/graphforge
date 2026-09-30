@@ -42,6 +42,8 @@ pub(crate) struct PropertyOverlayExec {
     metrics: ExecutionPlanMetricsSet,
     work_counts: [Count; 3],
     decoder_peak: Gauge,
+    #[cfg(any(test, feature = "test-support"))]
+    digest_context: graphforge_core::hash_observation::operation::Context,
 }
 
 impl fmt::Debug for PropertyOverlayExec {
@@ -126,6 +128,8 @@ impl PropertyOverlayExec {
             metrics,
             work_counts,
             decoder_peak,
+            #[cfg(any(test, feature = "test-support"))]
+            digest_context: graphforge_core::hash_observation::operation::Context::capture(),
         })
     }
 }
@@ -212,7 +216,11 @@ impl ExecutionPlan for PropertyOverlayExec {
         let batch_size = self.batch_size;
         let work_counts = self.work_counts.clone();
         let decoder_peak = self.decoder_peak.clone();
+        #[cfg(any(test, feature = "test-support"))]
+        let digest_context = self.digest_context.clone();
         tokio::task::spawn_blocking(move || {
+            #[cfg(any(test, feature = "test-support"))]
+            let _digest_guard = digest_context.attach();
             let selected_properties = projection
                 .as_ref()
                 .map(|names| names.iter().cloned().collect());

@@ -1316,9 +1316,13 @@ fn seal_on_lanes<'r>(
     let reversed = super::lane_jobs_reversed();
     let sealed = std::sync::Mutex::new(Vec::with_capacity(jobs.len()));
     let lane_batches = std::sync::Mutex::new(Vec::new());
+    #[cfg(any(test, feature = "test-support"))]
+    let digest_context = graphforge_core::hash_observation::operation::Context::capture();
     std::thread::scope(|scope| {
         for _ in 0..lanes.get() {
             scope.spawn(|| {
+                #[cfg(any(test, feature = "test-support"))]
+                let _digest_guard = digest_context.attach();
                 let mut lane_batch = SealDirectoryBatch::new(root);
                 loop {
                     let index = super::lane_job(

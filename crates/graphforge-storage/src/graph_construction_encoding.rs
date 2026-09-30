@@ -923,7 +923,7 @@ fn construction_parent_routes(
                 &root,
                 crate::GraphManifestLimits::default(),
                 |digest| {
-                    crate::graph_object_store::read_graph_object_counted(
+                    crate::graph_object_store::read_graph_control_object_counted(
                         parent.container_root(),
                         digest,
                         crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,

@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, BooleanBuilder, RecordBatch, StringBuilder, UInt32Builder};
-use graphforge_core::hash_observation::ObservedSha256 as Sha256;
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use sha2::Digest;
 
 use crate::error::OntologyError;

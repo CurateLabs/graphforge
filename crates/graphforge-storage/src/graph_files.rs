@@ -5,14 +5,17 @@
 //! lengths, digests, roles). Open paths validate inventory against that tree and
 //! never assemble the complete graph into one in-memory Arrow/binary payload.
 
+mod read_materialization;
+use read_materialization::copy_read_inventory_file;
+
 use graphforge_filesystem::ObservedSync as _;
 use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::canonical::{CANONICAL_CONTRACT_VERSION, CanonicalDomain, fingerprint};
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -39,7 +42,7 @@ pub const GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION: u32 = 8;
 pub const GRAPH_TREE_DIR: &str = "graph";
 
 const GRAPH_FILES_FORMAT: &str = "graphforge-graph-files";
-const MAX_GRAPH_FILES: usize = 100_000;
+pub(crate) const MAX_GRAPH_FILES: usize = 100_000;
 /// Maximum bytes consumed by one instrumented graph-file copy/hash operation.
 pub const GRAPH_FILES_IO_BUFFER_BYTES: usize = 64 * 1024;
 const HASH_BUFFER_BYTES: usize = GRAPH_FILES_IO_BUFFER_BYTES;
@@ -184,15 +187,6 @@ pub fn capture_graph_files(
     let bytes = encode_inventory(&inventory)?;
     let participant = inventory_participant(bytes, inventory.file_count)?;
     Ok((inventory, participant))
-}
-
-pub(crate) fn capture_graph_files_with_read_calls(
-    source_root: &Path,
-) -> Result<(GraphFilesInventory, ProjectParticipant, u64), GfError> {
-    let (inventory, read_calls) = build_inventory(source_root)?;
-    let bytes = encode_inventory(&inventory)?;
-    let participant = inventory_participant(bytes, inventory.file_count)?;
-    Ok((inventory, participant, read_calls))
 }
 
 /// Encode inventory bytes as the registered `graph`/`files` participant.
@@ -656,13 +650,13 @@ pub fn materialize_graph_tree(
         ..GraphFilesOpenEvidence::default()
     };
     for (entry, relative) in inventory.files.iter().zip(&routes.destinations) {
-        let source = resolve_v1_inventory_entry(graph_root, entry)?;
+        let source = resolve_v1_inventory_entry_retained(graph_root, entry)?;
         let destination = target.join(wire_relative_path(relative)?);
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)
                 .map_err(|error| storage("create private graph directory", parent, error))?;
         }
-        let copied = copy_regular_file(&source, &destination)?;
+        let copied = copy_read_inventory_file(source, &destination, entry)?;
         evidence.application_read_bytes = evidence
             .application_read_bytes
             .checked_add(copied.read_bytes)
@@ -902,7 +896,10 @@ fn capture_payload_identity(
     }
 }
 
-fn owned_inventory_path_text(relative: &Path, admit_raw_routes: bool) -> Result<String, GfError> {
+pub(crate) fn owned_inventory_path_text(
+    relative: &Path,
+    admit_raw_routes: bool,
+) -> Result<String, GfError> {
     if admit_raw_routes {
         let parts = relative
             .components()
@@ -956,7 +953,7 @@ pub(crate) fn inventory_from_entries_with_version(
     Ok(inventory)
 }
 
-fn validate_inventory_contract(inventory: &GraphFilesInventory) -> Result<(), GfError> {
+pub(crate) fn validate_inventory_contract(inventory: &GraphFilesInventory) -> Result<(), GfError> {
     if inventory.format != GRAPH_FILES_FORMAT {
         return Err(validation("unsupported graph files inventory format"));
     }
@@ -1045,12 +1042,15 @@ fn validate_inventory_contract(inventory: &GraphFilesInventory) -> Result<(), Gf
 ///
 /// NFC before and after Unicode uppercase expansion makes the comparison
 /// deterministic across hosts without rewriting the authenticated wire path.
-fn portable_case_collision_key(path: &Path) -> Result<String, GfError> {
+pub(crate) fn portable_case_collision_key(path: &Path) -> Result<String, GfError> {
     let text = path_text(path)?;
     Ok(text.nfc().flat_map(char::to_uppercase).nfc().collect())
 }
 
-fn collect_source_files(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<(), GfError> {
+pub(crate) fn collect_source_files(
+    directory: &Path,
+    paths: &mut Vec<PathBuf>,
+) -> Result<(), GfError> {
     collect_source_files_from(directory, directory, paths)
 }
 
@@ -1512,7 +1512,7 @@ pub(crate) fn legacy_inventory_logical_text(text: &str) -> Result<String, GfErro
 
 /// Legacy route spellings are admitted only at known semantic positions. The
 /// translated destination still passes the unchanged portable wire validator.
-fn legacy_route_destination(text: &str) -> Result<PathBuf, GfError> {
+pub(crate) fn legacy_route_destination(text: &str) -> Result<PathBuf, GfError> {
     let mut table = crate::route_component::RouteTable::default();
     let encoded =
         crate::route_component::encode_relative_route(text, &mut table, 64 * 1024 * 1024, 100_000)?;
@@ -1585,6 +1585,13 @@ pub(crate) fn resolve_v1_inventory_entry_retained(
     graph_root: &Path,
     entry: &GraphFileEntry,
 ) -> Result<RetainedV1InventoryEntry, GfError> {
+    resolve_read_inventory_entry_retained(graph_root, &entry.into())
+}
+
+pub(crate) fn resolve_read_inventory_entry_retained(
+    graph_root: &Path,
+    entry: &crate::GraphReadFileEntry,
+) -> Result<RetainedV1InventoryEntry, GfError> {
     let mut authenticated = Vec::new();
     for relative in inventory_relative_path_candidates(&entry.relative_path)? {
         let path = graph_root.join(&relative);
@@ -1628,7 +1635,10 @@ pub(crate) fn resolve_v1_inventory_entry_retained(
     }
 }
 
-fn open_retained_relative_file(graph_root: &Path, relative: &Path) -> std::io::Result<File> {
+pub(crate) fn open_retained_relative_file(
+    graph_root: &Path,
+    relative: &Path,
+) -> std::io::Result<File> {
     let mut directory = graphforge_filesystem::StableDirectory::open(graph_root)?;
     let mut components = relative.components().peekable();
     while let Some(component) = components.next() {

@@ -197,6 +197,7 @@ fn shared_v4_builder_rejects_sparse_manifest_above_reader_bound() {
         generation: 1,
         bytes: 16,
         sha256: "00".repeat(32),
+        xxh64: 0,
     };
     let ranges = (0..V4_MAX_RANGES)
         .map(|ordinal| crate::V4OrdinalRange {
@@ -207,6 +208,7 @@ fn shared_v4_builder_rejects_sparse_manifest_above_reader_bound() {
                 offset: 0,
                 count: 1,
                 sha256: "11".repeat(32),
+                xxh64: 0,
             }],
         })
         .collect::<Vec<_>>();
@@ -219,6 +221,7 @@ fn shared_v4_builder_rejects_sparse_manifest_above_reader_bound() {
             generation: 1,
             bytes: 24,
             sha256: "22".repeat(32),
+            xxh64: 0,
         }],
         ordinal_ranges: ranges,
         tombstones: Vec::new(),

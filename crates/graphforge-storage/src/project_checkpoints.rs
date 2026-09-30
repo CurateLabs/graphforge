@@ -20,13 +20,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use arrow::array::{
     ArrayRef, FixedSizeBinaryBuilder, StringArray, TimestampMicrosecondArray, UInt32Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::canonical::{CANONICAL_CONTRACT_VERSION, CanonicalDomain, fingerprint};
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use parquet::arrow::ArrowWriter;
 use serde::{Deserialize, Serialize};

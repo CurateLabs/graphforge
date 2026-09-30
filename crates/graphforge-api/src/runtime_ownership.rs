@@ -135,8 +135,10 @@ impl GraphForge {
         let handle = self.runtime.handle().clone();
         if tokio::runtime::Handle::try_current().is_ok() {
             let capture_session = graphforge_exec::demand::bound_capture_session();
+            let digest_context = graphforge_core::hash_observation::OperationContext::capture();
             std::thread::scope(|s| {
                 s.spawn(|| {
+                    let _digest_guard = digest_context.attach();
                     graphforge_exec::demand::set_bound_capture_session(capture_session);
                     handle.block_on(fut)
                 })
@@ -219,8 +221,10 @@ impl RuntimeGuard {
         let handle = self.runtime.handle().clone();
         if tokio::runtime::Handle::try_current().is_ok() {
             let capture_session = graphforge_exec::demand::bound_capture_session();
+            let digest_context = graphforge_core::hash_observation::OperationContext::capture();
             std::thread::scope(|s| {
                 s.spawn(|| {
+                    let _digest_guard = digest_context.attach();
                     graphforge_exec::demand::set_bound_capture_session(capture_session);
                     handle.block_on(fut)
                 })

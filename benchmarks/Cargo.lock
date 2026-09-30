@@ -2048,6 +2048,7 @@ name = "graphforge-search"
 version = "0.5.2"
 dependencies = [
  "arrow",
+ "graphforge-core",
  "graphforge-storage",
  "graphforge-value",
  "serde",

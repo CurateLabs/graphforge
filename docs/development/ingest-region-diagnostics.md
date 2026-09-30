@@ -151,6 +151,56 @@ These are calibration observations, not ingest performance thresholds. In the
 last row process CPU includes both threads; the scheduler row observes only the
 capturing thread.
 
+## Digest inventory and isolated read-path accounting
+
+The digest census method is `scripts/development/digest-census.py`. Run it on
+an identified source tree, writing results outside the repository:
+
+```bash
+python3 scripts/development/digest-census.py --repo . --output /tmp/gf-digest-census
+```
+
+The method records the source revision, source-file SHA-256 digests, the working
+diff digest when present, and digests of the method and semantic override inputs.
+Post the generated producer/delegate inventories and review disposition on the
+owning issue. Refresh after the final source edit. Results and per-run tables do
+not belong in this page or elsewhere under `docs/`.
+
+Production producer sites exclude test-only items and descendants. A constructor
+or static digest invocation is a producer site; calls into a digest-owning helper
+form a separate delegate population. Do not add wrapper levels to infer runtime
+passes. The semantic input and consumer, rather than an alias name, determine
+classification: durable artifact/trust-boundary work, contract identity, or
+optional evidence. Required control authentication is recorded separately within
+the trust-boundary category. Mixed helpers list their input-specific callers.
+The method refuses unresolved or stale classifications by default and records
+its lexical limitations. Resolve remaining candidates against current source;
+a text match alone is neither a runtime hash pass nor proof of exhaustiveness.
+
+`graphforge_core::hash_observation::operation::Capture` is test-only scoped
+accounting. It counts actual SHA update input bytes by artifact payload,
+contract identity, control authentication, optional evidence, and unclassified
+producer; actual XXH64 input is counted separately. Worker jobs capture and
+attach the current operation context. Nested operations and unrelated parallel
+tests retain separate collectors; there is no process-wide reset. Production
+context wrappers are zero-sized when test support is disabled.
+
+The actual facade regressions are in
+`crates/graphforge-api/tests/facade_checksum_admission.rs`. Run them with the
+admitted test environment:
+
+```bash
+python3 scripts/test_environment.py -- cargo test -p graphforge-api --test facade_checksum_admission
+```
+
+Default read/query assertions require both artifact-payload and unclassified
+SHA bytes to be zero. Nonzero checksum bytes prove that payload admission still
+runs. Bounded control authentication and existing logical identity commitments
+remain distinct work. Same-inode, same-length mutation tests target the owning
+admission boundary. A full import/query/export accounting test additionally
+bounds payload SHA input by actual published/exported bytes; standalone region
+hash totals mix domains and cannot prove that bound.
+
 ## Written and hashed bytes and barriers
 
 Stock `gf --json import-session validate --session-uuid UUID` stages and seals

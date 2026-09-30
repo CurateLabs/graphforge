@@ -8,13 +8,13 @@ use super::{AtomicU64, Mutex, Ordering};
 
 use super::{
     AdmittedEdgeFile, Arc, AuthenticatedPropertyFragment, AuthenticatedPropertyInventory, BTreeMap,
-    BTreeSet, Deserialize, Digest, File, FragmentHandleGuard, GfError, HashMap,
-    OpenPropertyFragment, PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_LIVE_SCHEMA_FORMAT,
+    BTreeSet, Deserialize, File, FragmentHandleGuard, GfError, HashMap, OpenPropertyFragment,
+    PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_LIVE_SCHEMA_FORMAT,
     PROPERTY_LIVE_SCHEMA_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT_KEY,
     PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD, ParquetRecordBatchReaderBuilder, Path, PathBuf,
     PropertyFragment, PropertyFragmentId, PropertyFragmentLayout, PropertyInventoryOpenMetrics,
-    PropertyRouteKind, PropertySnapshotRow, Read, Seek, Serialize, Sha256, Write, corrupt, fs,
-    io_error, json_error, parquet_error, retained_read_at, validate_fragment_schema,
+    PropertyRouteKind, PropertySnapshotRow, Read, Seek, Serialize, Write, corrupt, fs, io_error,
+    json_error, parquet_error, retained_read_at, validate_fragment_schema,
 };
 
 impl AuthenticatedPropertyInventory {
@@ -54,23 +54,22 @@ impl AuthenticatedPropertyInventory {
     pub(crate) fn admitted_source_files(
         &self,
         kind: PropertyRouteKind,
-    ) -> Result<Vec<crate::catalog::AdmittedSourceFile>, GfError> {
+    ) -> Vec<crate::catalog::AdmittedSourceFile> {
         let mut files = Vec::new();
         for ((candidate, _), fragments) in &self.routes {
             if *candidate != kind {
                 continue;
             }
             for fragment in fragments {
-                let digest = decode_sha256(&fragment.entry.content_sha256)?;
                 files.push(crate::catalog::AdmittedSourceFile {
                     name: fragment.entry.relative_path.clone(),
                     byte_length: fragment.entry.byte_length,
-                    sha256: digest,
+                    content_xxh64: fragment.entry.content_xxh64,
                 });
             }
         }
         files.sort_unstable_by(|left, right| left.name.cmp(&right.name));
-        Ok(files)
+        files
     }
 
     #[cfg(test)]
@@ -335,6 +334,62 @@ impl AuthenticatedPropertyInventory {
         Ok(admitted)
     }
 
+    /// Admit checksum-only private replay files under their owning immutable generation.
+    /// This read authority cannot be serialized as a CAS publication inventory.
+    pub fn from_private_workspace_inventory(
+        generation: &crate::ResolvedProjectGeneration,
+        root: &Path,
+        inventory: crate::GraphReadInventory,
+    ) -> Result<Self, GfError> {
+        let mut admitted = Self::from_read_inventory_at_root(root, inventory, None)?;
+        admitted.seed_semantic_property_schemas(generation)?;
+        admitted.generation_lease = Some(generation.clone());
+        Ok(admitted)
+    }
+
+    fn from_read_inventory_at_root(
+        root: &Path,
+        inventory: crate::GraphReadInventory,
+        requested_route: Option<(PropertyRouteKind, &str)>,
+    ) -> Result<Self, GfError> {
+        let table = inventory.authenticate_routes(root)?;
+        let retained_root = graphforge_filesystem::StableDirectory::open(root).map_err(io_error)?;
+        let mut entries = Vec::new();
+        let mut edge_routes = BTreeMap::<String, Vec<AdmittedEdgeFile>>::new();
+        for entry in inventory.files {
+            crate::graph_files::wire_relative_path(&entry.relative_path)?;
+            let semantic = match table.as_ref() {
+                Some(table) => table.semantic_relative_path(&entry.relative_path)?,
+                None => entry.relative_path.clone(),
+            };
+            if !inventory_entry_reaches_route(entry.role, &semantic, requested_route)? {
+                continue;
+            }
+            let relative = PathBuf::from(&entry.relative_path);
+            let retained = open_retained_under(&retained_root, &relative)?;
+            authenticate_inventory_file(&retained, &entry)?;
+            if requested_route.is_none() && entry.relative_path.starts_with("topology/edges/") {
+                if entry.role != crate::GraphFileRole::Topology {
+                    return Err(corrupt("edge topology entry has the wrong role"));
+                }
+                let route = crate::route_component::route_position(&semantic)?
+                    .ok_or_else(|| corrupt("edge topology entry lacks relation route"))?;
+                edge_routes
+                    .entry(route.to_owned())
+                    .or_default()
+                    .push(AdmittedEdgeFile {
+                        path: root.join(&relative),
+                        relative_path: entry.relative_path.clone(),
+                    });
+            }
+            entries.push((entry, relative));
+        }
+        let mut admitted =
+            Self::admit_read_entries(root, entries, requested_route, table.as_ref())?;
+        admitted.edge_routes = edge_routes;
+        Ok(admitted)
+    }
+
     pub(crate) fn from_inventory_at_root(
         root: &Path,
         inventory: crate::GraphFilesInventory,
@@ -450,7 +505,7 @@ impl AuthenticatedPropertyInventory {
                     inventory.format_version,
                     &inventory.files,
                     |entry| {
-                        crate::read_graph_object_by_digest(
+                        crate::graph_object_store::read_graph_control_object_by_digest(
                             root,
                             &entry.content_sha256,
                             64 * 1024 * 1024,
@@ -518,6 +573,29 @@ impl AuthenticatedPropertyInventory {
     pub(super) fn admit_entries(
         root_path: &Path,
         entries: Vec<(crate::GraphFileEntry, PathBuf)>,
+        requested_route: Option<(PropertyRouteKind, &str)>,
+        route_table: Option<&crate::route_component::RouteTable>,
+    ) -> Result<Self, GfError> {
+        let entries = entries
+            .into_iter()
+            .map(|(entry, path)| {
+                (
+                    crate::GraphReadFileEntry {
+                        relative_path: entry.relative_path,
+                        byte_length: entry.byte_length,
+                        content_xxh64: entry.content_xxh64,
+                        role: entry.role,
+                    },
+                    path,
+                )
+            })
+            .collect();
+        Self::admit_read_entries(root_path, entries, requested_route, route_table)
+    }
+
+    fn admit_read_entries(
+        root_path: &Path,
+        entries: Vec<(crate::GraphReadFileEntry, PathBuf)>,
         requested_route: Option<(PropertyRouteKind, &str)>,
         route_table: Option<&crate::route_component::RouteTable>,
     ) -> Result<Self, GfError> {
@@ -699,31 +777,6 @@ struct RouteSchemaBuilder {
     uuid: arrow::datatypes::FieldRef,
     fields: BTreeMap<String, arrow::datatypes::FieldRef>,
     metadata: HashMap<String, String>,
-}
-
-fn decode_sha256(value: &str) -> Result<[u8; 32], GfError> {
-    if value.len() != 64 {
-        return Err(corrupt(
-            "property inventory digest is not canonical SHA-256",
-        ));
-    }
-    let mut decoded = [0_u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-        let high = hex_value(pair[0])?;
-        let low = hex_value(pair[1])?;
-        decoded[index] = (high << 4) | low;
-    }
-    Ok(decoded)
-}
-
-fn hex_value(value: u8) -> Result<u8, GfError> {
-    match value {
-        b'0'..=b'9' => Ok(value - b'0'),
-        b'a'..=b'f' => Ok(value - b'a' + 10),
-        _ => Err(corrupt(
-            "property inventory digest is not lowercase hexadecimal",
-        )),
-    }
 }
 
 fn apply_authenticated_live_schema(
@@ -1085,7 +1138,7 @@ fn open_retained_under(
 
 fn authenticate_inventory_file(
     file: &File,
-    entry: &crate::GraphFileEntry,
+    entry: &crate::GraphReadFileEntry,
 ) -> Result<(u64, u64, u64), GfError> {
     let metadata = file.metadata().map_err(io_error)?;
     if !metadata.is_file() || metadata.len() != entry.byte_length {
@@ -1093,7 +1146,7 @@ fn authenticate_inventory_file(
             "property handle length or kind conflicts with inventory",
         ));
     }
-    let mut digest = Sha256::new();
+    let mut digest = crate::corruption_checksum::Checksum::new();
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     let mut bytes = 0_u64;
     let mut read_calls = 0_u64;
@@ -1110,7 +1163,7 @@ fn authenticate_inventory_file(
             .ok_or_else(|| corrupt("authentication read call overflow"))?;
         digest.update(&buffer[..read]);
     }
-    if digest_hex(&digest.finalize()) != entry.content_sha256 {
+    if bytes != entry.byte_length || digest.finish() != entry.content_xxh64 {
         return Err(corrupt("property handle digest conflicts with inventory"));
     }
     // #1449: these reads were computed and counted here but never reached the
@@ -1132,7 +1185,7 @@ fn authenticate_inventory_file(
 fn authenticated_snapshot_file(
     source: &File,
     expected_identity: graphforge_filesystem::FileIdentity,
-    entry: &crate::GraphFileEntry,
+    entry: &crate::GraphReadFileEntry,
     scratch: &Path,
     #[cfg(test)] mutation_barrier: Option<Arc<TestMutationBarrier>>,
 ) -> Result<(File, u64, u64, u64), GfError> {
@@ -1174,7 +1227,7 @@ fn authenticated_snapshot_file(
             "property snapshot scratch is not on the authenticated project volume",
         ));
     }
-    let mut digest = Sha256::new();
+    let mut digest = crate::corruption_checksum::Checksum::new();
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     let mut bytes = 0_u64;
     let mut read_calls = 0_u64;
@@ -1204,7 +1257,7 @@ fn authenticated_snapshot_file(
             barrier.restored.wait();
         }
     }
-    if bytes != entry.byte_length || digest_hex(&digest.finalize()) != entry.content_sha256 {
+    if bytes != entry.byte_length || digest.finish() != entry.content_xxh64 {
         return Err(corrupt("property handle digest conflicts with inventory"));
     }
     if graphforge_filesystem::file_identity(source).map_err(io_error)? != expected_identity
@@ -1218,6 +1271,7 @@ fn authenticated_snapshot_file(
     Ok((snapshot, bytes, bytes.div_ceil(64 * 1024), read_calls))
 }
 
+#[cfg(test)]
 pub(super) fn digest_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -1438,13 +1492,13 @@ pub(crate) fn authenticated_property_inventory_for_route(
             route,
         );
     }
-    let (inventory, _, authority_read_calls) =
-        crate::graph_files::capture_graph_files_with_read_calls(project)?;
-    let authority_bytes = inventory.total_byte_length;
+    let inventory = crate::capture_graph_read_inventory(project)?;
+    let authority_read_calls = inventory.authority_read_calls();
+    let authority_bytes = inventory.files.iter().map(|entry| entry.byte_length).sum();
     let authority_block_equivalents = inventory.files.iter().fold(0_u64, |blocks, entry| {
         blocks.saturating_add(entry.byte_length.div_ceil(64 * 1024))
     });
-    let mut admitted = AuthenticatedPropertyInventory::from_inventory_at_root(
+    let mut admitted = AuthenticatedPropertyInventory::from_read_inventory_at_root(
         project,
         inventory,
         Some((kind, route)),
@@ -1466,14 +1520,14 @@ pub(crate) fn authenticated_property_inventory(
         let generation = crate::resolve_project_generation(project)?;
         return AuthenticatedPropertyInventory::from_resolved_generation(&generation);
     }
-    let (inventory, _, authority_read_calls) =
-        crate::graph_files::capture_graph_files_with_read_calls(project)?;
-    let authority_bytes = inventory.total_byte_length;
+    let inventory = crate::capture_graph_read_inventory(project)?;
+    let authority_read_calls = inventory.authority_read_calls();
+    let authority_bytes = inventory.files.iter().map(|entry| entry.byte_length).sum();
     let authority_block_equivalents = inventory.files.iter().fold(0_u64, |blocks, entry| {
         blocks.saturating_add(entry.byte_length.div_ceil(64 * 1024))
     });
     let mut admitted =
-        AuthenticatedPropertyInventory::from_inventory_at_root(project, inventory, None)?;
+        AuthenticatedPropertyInventory::from_read_inventory_at_root(project, inventory, None)?;
     admitted.authority_bytes = authority_bytes;
     admitted.authority_block_equivalents = authority_block_equivalents;
     admitted.authority_read_calls = authority_read_calls;

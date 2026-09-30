@@ -361,7 +361,7 @@ fn compact_parent_inventory(
     let mut io = crate::GraphObjectIoTotals::default();
     let (entries, _) =
         crate::resolve_graph_manifest(&root, crate::GraphManifestLimits::default(), |digest| {
-            crate::graph_object_store::read_graph_object_counted(
+            crate::graph_object_store::read_graph_control_object_counted(
                 parent.container_root(),
                 digest,
                 crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
@@ -369,7 +369,7 @@ fn compact_parent_inventory(
             )
         })?;
     crate::route_component::authenticate_manifest_routes(root.format_version, &entries, |entry| {
-        crate::graph_object_store::read_graph_object_counted(
+        crate::graph_object_store::read_graph_control_object_counted(
             parent.container_root(),
             &entry.content_sha256,
             64 * 1024 * 1024,

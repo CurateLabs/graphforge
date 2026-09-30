@@ -22,8 +22,8 @@ use super::topology_delta::hex_sha256;
 use super::v4_authority_failure;
 use super::v4_publication_failure;
 use super::v4_publication_io_failure;
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::GfError;
+use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use sha2::Digest;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -604,7 +604,7 @@ pub(super) fn admit_v4_construction_manifest(
 }
 
 fn add_v4_mapping_commitment(commitment: &mut [u8; 32], domain: u8, uuid: [u8; 16], node_id: u64) {
-    let mut digest = Sha256::new();
+    let mut digest = graphforge_core::hash_observation::ContractSha256::new();
     digest.update(b"graphforge-v4-mapping-v1\0");
     digest.update([domain]);
     digest.update(uuid);
@@ -622,6 +622,7 @@ pub(super) struct StreamingV4Artifact {
     pub(super) writer: BufWriter<graphforge_filesystem::DurableFileCacheWriter>,
     publication: V4PublicationGuard,
     digest: Sha256,
+    checksum: crate::corruption_checksum::Checksum,
     pub(super) bytes: u64,
 }
 
@@ -658,6 +659,7 @@ impl StreamingV4Artifact {
             writer: BufWriter::with_capacity(V4_ORDINAL_BLOCK_BYTES, writer),
             publication,
             digest: Sha256::new(),
+            checksum: crate::corruption_checksum::Checksum::new(),
             bytes: 0,
         })
     }
@@ -676,6 +678,7 @@ impl StreamingV4Artifact {
         written?;
         observed?;
         self.digest.update(bytes);
+        self.checksum.update(bytes);
         self.bytes = self
             .bytes
             .checked_add(u64::try_from(bytes.len()).map_err(storage_err)?)
@@ -769,6 +772,7 @@ pub(super) fn finish_streamed_v4_artifact(
             generation,
             bytes: writer.bytes,
             sha256,
+            xxh64: writer.checksum.clone().finish(),
         };
         committed_metrics.artifact_bytes = committed_metrics
             .artifact_bytes
@@ -889,7 +893,8 @@ impl V4OrdinalRangeWriter {
         self.blocks.push(crate::V4OrdinalBlock {
             offset,
             count: u64::try_from(self.block.len() / 16).map_err(storage_err)?,
-            sha256: hex_sha256(&self.block),
+            sha256: artifact_sha256(&self.block),
+            xxh64: crate::corruption_checksum::checksum(&self.block),
         });
         self.block.clear();
         Ok(())
@@ -1452,7 +1457,8 @@ fn finish_v4_tombstone_block(
         count: u64::try_from(bytes.len() / 8).map_err(storage_err)?,
         first,
         last,
-        sha256: hex_sha256(bytes),
+        sha256: artifact_sha256(bytes),
+        xxh64: crate::corruption_checksum::checksum(bytes),
     });
     writer.push(bytes)?;
     *offset = offset
@@ -1476,3 +1482,7 @@ pub(super) fn v4_manifest_artifact_names(
 
 #[cfg(test)]
 mod tests;
+
+fn artifact_sha256(bytes: &[u8]) -> String {
+    hex_bytes(&Sha256::digest(bytes))
+}

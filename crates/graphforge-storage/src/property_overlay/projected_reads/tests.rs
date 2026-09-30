@@ -1158,7 +1158,7 @@ fn hostile_authenticated_property_matrix_fails_closed_before_projection_or_limit
             .unwrap_err();
     assert_corrupt(&error, "Parquet is corrupt");
     let mut conflicting_digest = entry;
-    conflicting_digest.content_sha256 = "00".repeat(32);
+    conflicting_digest.content_xxh64 ^= 1;
     let error = AuthenticatedPropertyInventory::from_entries_at_root(
         hostile.path(),
         vec![conflicting_digest],

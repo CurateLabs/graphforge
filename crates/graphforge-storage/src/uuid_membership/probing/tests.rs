@@ -351,7 +351,7 @@ fn compact_retained_reference_authentication_is_batched_and_linear() {
     assert!(
         error
             .to_string()
-            .contains("digest does not match its address"),
+            .contains("XXH64 checksum does not match its inventory"),
         "{error}"
     );
 }
@@ -402,4 +402,35 @@ fn lookup_lazily_rejects_authenticated_pair_inconsistency() {
             .to_string()
             .contains("pair is inconsistent")
     );
+}
+
+#[test]
+fn checksum_uuid_manifest_refuses_legacy_missing_and_malformed_metadata() {
+    let (dir, _, _) = fixture();
+    rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+    let path = dir.path().join(INDEX_DIR).join(MANIFEST);
+    let original: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for mode in 0..3 {
+        let mut changed = original.clone();
+        match mode {
+            0 => changed["format_version"] = serde_json::json!(5),
+            1 => {
+                changed["runs"][0]["identities"]["blocks"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("xxh64");
+            }
+            _ => {
+                changed["runs"][0]["identities"]["blocks"][0]["xxh64"] =
+                    serde_json::json!("not-a-checksum")
+            }
+        }
+        fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(
+            UuidMembershipIndex::open(dir.path()).is_err(),
+            "mode={mode}"
+        );
+    }
+    fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+    UuidMembershipIndex::open(dir.path()).unwrap();
 }

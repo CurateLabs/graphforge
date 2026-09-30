@@ -26,13 +26,12 @@ use super::begin_graph_object_publication;
 #[cfg(windows)]
 use super::fs;
 use super::hex_digest;
-use super::read_graph_object_counted;
+use super::read_graph_control_object_counted;
 use super::storage;
 #[cfg(windows)]
 use super::validate_directory_identity;
 use super::validate_logical_path;
 use super::validation;
-use super::verify_file_counted;
 
 /// Materialize a verified logical inventory into a private graph tree. Ordinary
 /// immutable payloads reuse CAS inodes; the v4 ordinal authority facet is
@@ -47,7 +46,12 @@ pub fn materialize_graph_objects(
     let mut route_io = GraphObjectIoTotals::default();
     let routes =
         crate::route_component::materialize::MaterializationRoutes::prepare(inventory, |entry| {
-            read_graph_object_counted(root, &entry.content_sha256, 64 * 1024 * 1024, &mut route_io)
+            read_graph_control_object_counted(
+                root,
+                &entry.content_sha256,
+                64 * 1024 * 1024,
+                &mut route_io,
+            )
         })?;
     let _target_guard = open_empty_materialization_target(target)?;
     let target_directory = StableDirectory::open(target)
@@ -427,12 +431,7 @@ fn copy_single_link_materialized_object(
                 "private materialization file is multiply linked",
             ));
         }
-        let verified = verify_file_counted(
-            installed,
-            &entry.content_sha256,
-            entry.byte_length,
-            &cas.diagnostic_root,
-        )?;
+        let verified = checksum_materialized_file(installed, entry, &cas.diagnostic_root)?;
         add_materialization_verification(&mut io, verified)?;
         io.copied = true;
         Ok(io)
@@ -466,13 +465,18 @@ fn copy_and_authenticate_materialized_object(
     entry: &crate::GraphFileEntry,
     diagnostic_root: &Path,
 ) -> Result<MaterializeIoEvidence, GfError> {
-    let mut digest = Sha256::new();
+    let bound = entry
+        .byte_length
+        .checked_add(1)
+        .ok_or_else(|| validation("materialization length overflow"))?;
+    let mut bounded = input.take(bound);
+    let mut digest = crate::corruption_checksum::Checksum::new();
     let mut length = 0_u64;
     let mut read_calls = 0_u64;
     let mut write_calls = 0_u64;
     let mut buffer = vec![0_u8; BUFFER_BYTES].into_boxed_slice();
     loop {
-        let read = input
+        let read = bounded
             .read(&mut buffer)
             .map_err(|error| storage("read materialization source", diagnostic_root, error))?;
         if read == 0 {
@@ -492,7 +496,7 @@ fn copy_and_authenticate_materialized_object(
             .checked_add(read as u64)
             .ok_or_else(|| validation("private materialization length overflows"))?;
     }
-    if length != entry.byte_length || hex_digest(digest.finalize().into()) != entry.content_sha256 {
+    if length != entry.byte_length || digest.finish() != entry.content_xxh64 {
         return Err(validation(
             "private materialization bytes do not match inventory",
         ));
@@ -507,6 +511,84 @@ fn copy_and_authenticate_materialized_object(
         file_fsync_calls: 0,
         directory_fsync_calls: 0,
     })
+}
+
+fn checksum_materialized_file(
+    file: File,
+    entry: &crate::GraphFileEntry,
+    diagnostic_root: &Path,
+) -> Result<ReadIoEvidence, GfError> {
+    if file
+        .metadata()
+        .map_err(|error| storage("inspect private materialization", diagnostic_root, error))?
+        .len()
+        != entry.byte_length
+    {
+        return Err(validation(
+            "private materialization length does not match inventory",
+        ));
+    }
+    let identity = graphforge_filesystem::file_identity(&file)
+        .map_err(|error| storage("identify private materialization", diagnostic_root, error))?;
+    let read_bound = entry
+        .byte_length
+        .checked_add(1)
+        .ok_or_else(|| validation("private checksum length overflow"))?;
+    let mut reader =
+        graphforge_filesystem::FileCacheReleasingReader::new(file).map_err(|error| {
+            storage(
+                "bound private materialization verification",
+                diagnostic_root,
+                error,
+            )
+        })?;
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut io = ReadIoEvidence::default();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let checked = (|| {
+        let mut bounded = (&mut reader).take(read_bound);
+        loop {
+            let read = bounded.read(&mut buffer).map_err(|error| {
+                storage("verify private materialization", diagnostic_root, error)
+            })?;
+            if read == 0 {
+                break;
+            }
+            io.bytes = io
+                .bytes
+                .checked_add(read as u64)
+                .ok_or_else(|| validation("private verification bytes overflow"))?;
+            io.calls += 1;
+            checksum.update(&buffer[..read]);
+        }
+        if io.bytes != entry.byte_length
+            || checksum.finish() != entry.content_xxh64
+            || reader
+                .file()
+                .metadata()
+                .map_err(|error| {
+                    storage("reinspect private materialization", diagnostic_root, error)
+                })?
+                .len()
+                != entry.byte_length
+            || graphforge_filesystem::file_identity(reader.file()).map_err(|error| {
+                storage("reidentify private materialization", diagnostic_root, error)
+            })? != identity
+        {
+            return Err(validation(
+                "private materialization checksum does not match inventory",
+            ));
+        }
+        Ok(io)
+    })();
+    let released = reader
+        .finish()
+        .map_err(|error| storage("release private verification cache", diagnostic_root, error));
+    match (checked, released) {
+        (Ok(io), Ok(_)) => Ok(io),
+        (Err(primary), Ok(_)) | (Ok(_), Err(primary)) => Err(primary),
+        (Err(primary), Err(cleanup)) => Err(validation(format!("{primary}; {cleanup}"))),
+    }
 }
 
 #[cfg(unix)]
