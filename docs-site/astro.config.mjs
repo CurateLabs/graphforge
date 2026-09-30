@@ -409,6 +409,10 @@ export default defineConfig({
                   label: '0047 — Over-budget construction partitions succeed; one CPU budget per instance',
                   slug: 'adr/0047-over-budget-partitions-and-instance-cpu-budget',
                 },
+                {
+                  label: '0048 — Cargo with nextest is the CI build authority; Bazel is removed',
+                  slug: 'adr/0048-cargo-is-the-ci-build-authority',
+                },
                 // END generated ADR records
               ],
             },
