@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -11,6 +12,19 @@ import tempfile
 method = pathlib.Path(__file__).with_name("digest-census.py")
 with tempfile.TemporaryDirectory(prefix="gf-census-method-fixture-") as tmp:
     container = pathlib.Path(tmp)
+    # Git subprocesses belong to this fixture, including the census's Git reads.
+    # Inherited repository selectors or user configuration must not redirect them.
+    git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    templates = container / "empty-templates"
+    hooks = container / "empty-hooks"
+    templates.mkdir()
+    hooks.mkdir()
+    git_env.update(
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_NOSYSTEM="1",
+        GIT_TEMPLATE_DIR=str(templates),
+    )
+    fixture_git = ["git", "-c", f"core.hooksPath={hooks}", "-c", "commit.gpgsign=false"]
     root = container / "repo"
     p = root / "crates/demo/src/lib.rs"
     p.parent.mkdir(parents=True)
@@ -81,11 +95,11 @@ fn wrapper() { shard_set_identity(); }
             }
         )
     )
-    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run([*fixture_git, "init", "-q"], cwd=root, env=git_env, check=True)
+    subprocess.run([*fixture_git, "add", "."], cwd=root, env=git_env, check=True)
     subprocess.run(
         [
-            "git",
+            *fixture_git,
             "-c",
             "user.name=Census fixture",
             "-c",
@@ -95,6 +109,7 @@ fn wrapper() { shard_set_identity(); }
             "fixture",
         ],
         cwd=root,
+        env=git_env,
         check=True,
     )
     out = container / "output"
@@ -110,6 +125,7 @@ fn wrapper() { shard_set_identity(); }
             str(overrides),
         ],
         text=True,
+        env=git_env,
         capture_output=True,
         check=False,
     )
@@ -143,6 +159,7 @@ fn wrapper() { shard_set_identity(); }
             str(overrides),
         ],
         text=True,
+        env=git_env,
         capture_output=True,
         check=False,
     )
@@ -161,6 +178,7 @@ fn wrapper() { shard_set_identity(); }
             str(overrides),
         ],
         text=True,
+        env=git_env,
         capture_output=True,
         check=False,
     )
@@ -187,6 +205,7 @@ fn wrapper() { shard_set_identity(); }
             str(overrides),
         ],
         text=True,
+        env=git_env,
         capture_output=True,
         check=False,
     )
@@ -202,6 +221,7 @@ fn wrapper() { shard_set_identity(); }
     run = subprocess.run(
         ["python3", method, "--repo", str(root), "--output", str(out), "--overrides", str(missing)],
         text=True,
+        env=git_env,
         capture_output=True,
         check=False,
     )
@@ -222,6 +242,7 @@ fn wrapper() { shard_set_identity(); }
             str(overrides),
         ],
         text=True,
+        env=git_env,
         capture_output=True,
         check=False,
     )

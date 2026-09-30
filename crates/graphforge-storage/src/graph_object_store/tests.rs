@@ -1,4 +1,5 @@
 use super::*;
+
 use crate::graph_object_store::ACTIVE_DIR;
 use crate::graph_object_store::BTreeSet;
 use crate::graph_object_store::GRAPH_OBJECTS_DIR;
@@ -568,4 +569,42 @@ fn publication_lease_probe_fails_closed_on_noncanonical_residue() {
     fs::write(&hostile, b"preserve").unwrap();
     assert!(graph_object_publication_is_live(root.path()).is_err());
     assert_eq!(fs::read(&hostile).unwrap(), b"preserve");
+}
+
+#[test]
+fn object_payload_read_is_bounded_even_when_input_has_no_end() {
+    struct UnendingReader(u64);
+    impl std::io::Read for UnendingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            buffer.fill(0);
+            self.0 += buffer.len() as u64;
+            Ok(buffer.len())
+        }
+    }
+    let root = Path::new(".");
+    let mut source = UnendingReader(0);
+    let error = read_exact_object_payload(&mut source, 4, root).unwrap_err();
+    assert!(
+        error.to_string().contains("length does not match"),
+        "{error}"
+    );
+    assert_eq!(source.0, 5);
+
+    let mut source = UnendingReader(0);
+    let error = read_exact_object_payload(&mut source, u64::MAX, root).unwrap_err();
+    assert!(error.to_string().contains("length overflow"), "{error}");
+    assert_eq!(source.0, 0);
+}
+
+#[test]
+fn object_payload_read_requires_exact_length_and_consumes_no_excess() {
+    let root = Path::new(".");
+    assert_eq!(
+        read_exact_object_payload(&b"data"[..], 4, root).unwrap(),
+        b"data"
+    );
+    assert!(read_exact_object_payload(&b"bad"[..], 4, root).is_err());
+    let mut source = std::io::Cursor::new(b"oversized");
+    assert!(read_exact_object_payload(&mut source, 4, root).is_err());
+    assert_eq!(source.position(), 5);
 }

@@ -1342,7 +1342,7 @@
       "role": "durable_artifact",
       "input_contract": "Complete artifact bytes authenticate the SHA-addressed object trust-boundary API.",
       "function_bodies_sha256": [
-        "2c923992c235903c2ee71c4bf65f26f1b7a84637b029edb382175a5023095ef4"
+        "af6a32fbdaec5b1c704dc58b7e267ce2cbee94fe6be2ba8cbb117271dd41eaa8"
       ]
     },
     {

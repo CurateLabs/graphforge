@@ -180,10 +180,17 @@ fn current_facade_refuses_same_inode_same_length_payload_mutation() {
     let capture = PayloadDigestCapture::start();
     let error = GraphForge::new(Some(path)).unwrap_err();
     assert!(error.to_string().contains("GF_PROJECT_CORRUPT"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("generation graph file has no authenticated legacy path resolution"),
+        "{error}"
+    );
     let work = capture.snapshot();
     eprintln!("corruption refusal digest work: {work:?}");
     assert_eq!(work.artifact_payload_sha256_bytes, 0);
     assert_eq!(work.unclassified_sha256_bytes, 0);
+    assert!(work.checksum_bytes > 0, "{work:?}");
 }
 
 #[test]

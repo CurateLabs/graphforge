@@ -939,13 +939,29 @@ pub fn read_graph_object(
 ) -> Result<Vec<u8>, GfError> {
     let cas = ReadOnlyCasRoot::open(root)?;
     let mut file = cas.open_digest(digest)?;
+    let bytes = read_exact_object_payload(&mut file, expected_length, root)?;
+    if hex_digest(crate::payload_digest::PayloadSha256::digest(&bytes).into()) != digest {
+        return Err(validation(
+            "graph object digest or length does not match its address",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn read_exact_object_payload(
+    reader: impl Read,
+    expected_length: u64,
+    root: &Path,
+) -> Result<Vec<u8>, GfError> {
+    let limit = expected_length
+        .checked_add(1)
+        .ok_or_else(|| validation("graph object length overflow"))?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    reader
+        .take(limit)
+        .read_to_end(&mut bytes)
         .map_err(|error| storage("read stable graph object", root, error))?;
-    validate_digest(digest)?;
-    if bytes.len() as u64 != expected_length
-        || hex_digest(crate::payload_digest::PayloadSha256::digest(&bytes).into()) != digest
-    {
+    if bytes.len() as u64 != expected_length {
         return Err(validation(
             "graph object digest or length does not match its address",
         ));
