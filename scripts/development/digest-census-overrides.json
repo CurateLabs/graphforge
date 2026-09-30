@@ -881,7 +881,7 @@
       "role": "contract_identity",
       "input_contract": "Domain plus node/edge counts and recorded shard bounds/digests define stable shard-set identity; does not hash shard payload here.",
       "function_bodies_sha256": [
-        "f2d0cffe1d2da68b5eb5696307b97dd5903c65d9eb38f8f8838af1c7f3e0d4ee"
+        "0c377240afaf2f185f7f47139a73a8589bf9bfab5c6c1a6ab0b2377049da6114"
       ]
     },
     {
@@ -891,6 +891,15 @@
       "input_contract": "Shared helper hashes complete CSR shard bytes for artifact identity or the previously computed shard-set identity digest for stable namespace; classify caller edges separately.",
       "function_bodies_sha256": [
         "b94410260b7e047a09f5527cdd14e74be0f1e62f8ca3e67023328b1e5be5fb6a"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/adjacency/codec.rs",
+      "function": "shard_set_identity",
+      "role": "contract_identity",
+      "input_contract": "Domain plus node/edge counts and recorded shard bounds/digests define immutable shard-set identity. The preserved second SHA pass consumes only the first32-byte digest; neither pass reads shard payload.",
+      "function_bodies_sha256": [
+        "f27d96c1956d554acfbffbf09740c947e400ca5ad2ca4c2af85e1288d1cb7f55"
       ]
     },
     {
@@ -932,8 +941,8 @@
     {
       "path": "crates/graphforge-storage/src/embedding_batch.rs",
       "function": "validate_embedding_batch",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Canonical UUID/vector coordinate content defines persisted embedding batch content identity.",
+      "role": "contract_identity",
+      "input_contract": "Canonical UUID/Float32 row content defines the frozen embedding-v1 generation identity and content-idempotent publication contract (embedding-v1.md; EmbeddingGenerationManifest::new and publish_embedding_generation). This full canonical-row SHA work remains counted as contract identity; persisted Parquet publication integrity is a separate artifact producer.",
       "function_bodies_sha256": [
         "78a056b4bcbd2a70f4d699f27bbd15a3de6e49aff959fe96b81f95a458ecbd38"
       ]
@@ -2129,7 +2138,7 @@
       "role": "contract_identity",
       "input_contract": "Domain plus semantic route text derives stable physical route name.",
       "function_bodies_sha256": [
-        "fe05423f92fabbeae01d024bd70067e40775affd195555ca12994a3f4fb8600c"
+        "183f82df3f1639260a839b84855dde6369d86108e0d1f1bc120e125a5d44246c"
       ]
     },
     {
@@ -2174,7 +2183,7 @@
       "role": "contract_identity",
       "input_contract": "Route kind/qualified symbol metadata or constant semantic-bindings schema descriptor define physical route/schema identity.",
       "function_bodies_sha256": [
-        "5c34f85550204f725ea2b81160a74446095885be28e313a4bc692faaed7f5c40"
+        "3d252056e7aa2b36a2913175a562f32717e9ba2022540f8f1b6fe32497b247f3"
       ]
     },
     {
@@ -2183,7 +2192,7 @@
       "role": "contract_identity",
       "input_contract": "Route kind/qualified symbol metadata or constant semantic-bindings schema descriptor define physical route/schema identity.",
       "function_bodies_sha256": [
-        "c4750beb0ba4e5598a2bbc3319639c0ece4a3bfdf1b51cca94cab6ebb3398428"
+        "f84eadf0a251bdec0fd1b2e405454747a2378539940cf02b2859c6c9ba8c7d86"
       ]
     },
     {
@@ -2192,7 +2201,7 @@
       "role": "contract_identity",
       "input_contract": "Route kind/qualified symbol metadata or constant semantic-bindings schema descriptor define physical route/schema identity.",
       "function_bodies_sha256": [
-        "1d673727ae3db3bc92164f8cd57de36724228efcfb4edcf024fa34110bd1d418"
+        "73e721e2b348074567c0918c046e3761f37ac25d6682d3f2e72a242b56571aeb"
       ]
     },
     {
@@ -2381,7 +2390,7 @@
       "role": "contract_identity",
       "input_contract": "Domain plus logical node UUID/surrogate and edge UUID/source/target tuples define topology delta identity.",
       "function_bodies_sha256": [
-        "eee405aa453cf445b83a2f8c14f479cc6c2045410af74c6ba58a748d6968b766"
+        "cfd016176037fe317c191d160da42b947c569ef5b62515a511a825f1621d45a3"
       ]
     },
     {
@@ -2399,7 +2408,7 @@
       "role": "contract_identity",
       "input_contract": "Workspace schema literal or canonical authored ontology JSON defines required schema/ontology identity.",
       "function_bodies_sha256": [
-        "1508812825244ddea7c197522b21d8a2730a0a9ec5b776b711284251f8867753"
+        "09f523fbb4492e74253e4e6dbf74b0ef4fa6050028b2b1dc1aedd9489cb9c483"
       ]
     },
     {

@@ -364,7 +364,10 @@ for path, (original, code, functions, excluded) in parsed.items():
         )
         if name in ("new", "default"):
             continue
-        if not re.search(r"(hash|digest|sha256|fingerprint|checksum)", name, re.I):
+        if (
+            not re.search(r"(hash|digest|sha256|fingerprint|checksum)", name, re.I)
+            and name != "shard_set_identity"
+        ):
             continue
         delegates.append(
             {
@@ -668,6 +671,10 @@ for c in d["delegate_candidates"]:
         )
     else:
         targets = {
+            "shard_set_identity": (
+                "crates/graphforge-storage/src/adjacency/codec.rs",
+                "shard_set_identity",
+            ),
             "shape_authority_sha256": (
                 "crates/graphforge-storage/src/graph_construction.rs",
                 "shape_authority_sha256",
@@ -789,7 +796,9 @@ for path, (_original, code, functions, excluded) in parsed.items():
 by_name = collections.defaultdict(list)
 for key in function_sources:
     by_name[key[1]].append(key)
-helper_pattern = re.compile(r"\b(\w*(?:hash|digest|fingerprint|checksum)\w*)\s*\(", re.I)
+helper_pattern = re.compile(
+    r"\b(\w*(?:hash|digest|fingerprint|checksum)\w*|shard_set_identity)\s*\(", re.I
+)
 # Propagate known producer contracts through named helpers; preserve mixed roles.
 for _ in range(len(function_sources) + 1):
     changed = False

@@ -27,6 +27,8 @@ fn runtime() { #[cfg(test)] { Sha256::new(); } }
 #[cfg(any(test, feature = "production"))]
 fn alternative() { Crypto::new(); }
 fn callback() { let state = true.then(Crypto::new); }
+fn shard_set_identity() { Crypto::digest(b"descriptors"); }
+fn wrapper() { shard_set_identity(); }
 #[cfg(test)] mod tests { fn helper() { Sha256::new(); } }
 """)
     source = p.read_text()
@@ -46,6 +48,13 @@ fn callback() { let state = true.then(Crypto::new); }
         json.dumps(
             {
                 "function_overrides": [
+                    {
+                        "path": "crates/demo/src/lib.rs",
+                        "function": "shard_set_identity",
+                        "function_bodies_sha256": body_sha("shard_set_identity"),
+                        "role": "contract_identity",
+                        "input_contract": "Fixture immutable descriptor identity.",
+                    },
                     {
                         "path": "crates/demo/src/lib.rs",
                         "function": "fingerprint",
@@ -110,9 +119,17 @@ fn callback() { let state = true.then(Crypto::new); }
         run.stderr,
         json.loads((out / "review-gaps.json").read_text())["gaps"],
     )
-    assert summary["application_producer_sites"] == 3, summary
+    assert summary["application_producer_sites"] == 4, summary
     assert summary["excluded_test_constructors"] == 3, summary
-    assert summary["producer_classes"] == {"b": 3}, summary
+    assert summary["producer_classes"] == {"b": 4}, summary
+    delegates = json.loads((out / "delegates.json").read_text())["edges"]
+    assert any(
+        edge["delegate"] == "shard_set_identity"
+        and edge["caller"] == "wrapper"
+        and edge["class"] == "b"
+        and not edge["count_as_application_producer"]
+        for edge in delegates
+    ), delegates
     # Raw evidence must never enter the source repository.
     refused = subprocess.run(
         [

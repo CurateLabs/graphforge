@@ -162,9 +162,9 @@ python3 scripts/development/digest-census.py --repo . --output /tmp/gf-digest-ce
 
 The method and reviewed classification inputs are pinned by SHA-256:
 `digest-census.py` is
-`32735721cc88d648c24ce6605b58e64c40d02fc50626c3b4b0bf97b451148bba`;
+`066813e6666c1a77782402cee7ae957b450ccd47a7e14874c4e47b996aabb0eb`;
 `digest-census-overrides.json` is
-`d4ed923cb91c24073cc2903eb9315a6d5ee3c0277475f0d7e37c4525707d9966`.
+`64d460016093dc4b7cbfbfbd4c8aafe76d032bf3f302ae20053314085227e58a`.
 Run the parser and stale-review regression fixtures with
 `python3 scripts/development/test-digest-census.py`. Reviewed function bodies
 are pinned individually; changed inputs, added producers in the same function,
@@ -197,8 +197,12 @@ tests retain separate collectors; there is no process-wide reset. Production
 context wrappers are zero-sized when test support is disabled.
 
 The actual facade regressions are in
-`crates/graphforge-api/tests/facade_checksum_admission.rs`. Run them with the
-admitted test environment:
+`crates/graphforge-api/tests/facade_checksum_admission.rs`, identified by SHA-256
+`2d9744c546c16d6e78a97ad5d1c8916822f84e70375b96281c62b6ae8a760ce0`.
+They include a nonempty published semantic binding participant, qualified
+property writes, fresh durable reopen and an actual qualified query. Required
+ontology, schema and route identities are measured separately from graph payload.
+Run them with the admitted test environment:
 
 ```bash
 python3 scripts/test_environment.py -- cargo test -p graphforge-api --test facade_checksum_admission
