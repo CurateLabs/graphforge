@@ -1,7 +1,9 @@
 //! Actual Rust facade reads must consume authenticated checksums, never payload SHA-256.
 use std::collections::HashMap;
 
-use graphforge_api::{FindOptions, GraphForge, NodeSelector, PropValue, SearchIndexOptions};
+#[cfg(feature = "search")]
+use graphforge_api::{FindOptions, NodeSelector, SearchIndexOptions};
+use graphforge_api::{GraphForge, PropValue};
 use graphforge_storage::payload_digest::PayloadDigestCapture;
 
 #[test]
@@ -99,6 +101,7 @@ fn durable_reopen_properties_uuid_and_delta_query_hash_no_payload_bytes() {
     );
 }
 
+#[cfg(feature = "search")]
 #[test]
 fn published_vector_find_and_property_shaping_hash_no_payload_bytes() {
     let graph = GraphForge::new(None).unwrap();
@@ -193,6 +196,7 @@ fn current_facade_refuses_same_inode_same_length_payload_mutation() {
     assert!(work.checksum_bytes > 0, "{work:?}");
 }
 
+#[cfg(feature = "search")]
 #[test]
 fn caller_embedding_reopen_and_find_hash_no_payload_bytes() {
     use graphforge_api::{
@@ -247,6 +251,7 @@ fn caller_embedding_reopen_and_find_hash_no_payload_bytes() {
     assert_eq!(work.topology_projections, 1, "{work:?}");
 }
 
+#[cfg(feature = "knowledge")]
 #[test]
 fn durable_knowledge_and_provenance_reads_use_participant_checksums() {
     use graphforge_api::{
@@ -306,7 +311,7 @@ fn durable_knowledge_and_provenance_reads_use_participant_checksums() {
     assert!(work.checksum_bytes > 0, "{work:?}");
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "knowledge"))]
 #[test]
 fn knowledge_refuses_same_inode_same_length_participant_corruption() {
     use graphforge_api::{
@@ -363,6 +368,7 @@ fn knowledge_refuses_same_inode_same_length_participant_corruption() {
     assert_eq!(work.unclassified_sha256_bytes, 0, "{work:?}");
 }
 
+#[cfg(feature = "knowledge")]
 fn enable_knowledge(graph: &GraphForge) {
     use graphforge_api::{CapabilityId, EnableCapabilityRequest, OperationId, WriteContext};
     for capability_id in [CapabilityId::Provenance, CapabilityId::Knowledge] {
@@ -476,6 +482,7 @@ fn compact_cas_facade_reopen_and_query_hash_no_payload_bytes() {
     assert!(work.checksum_bytes > 0, "{work:?}");
 }
 
+#[cfg(feature = "knowledge")]
 #[test]
 fn semantic_project_reopen_and_qualified_query_hash_no_payload_or_unclassified_bytes() {
     use graphforge_api::{

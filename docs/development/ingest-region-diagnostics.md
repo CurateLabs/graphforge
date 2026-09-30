@@ -222,7 +222,7 @@ context wrappers are zero-sized when test support is disabled.
 
 The actual facade regressions are in
 `crates/graphforge-api/tests/facade_checksum_admission.rs`, identified by SHA-256
-`2d9744c546c16d6e78a97ad5d1c8916822f84e70375b96281c62b6ae8a760ce0`.
+`0a9ac8fa6785ad0702e3de0be34f6d461ad122e6e32331ee4617377a9f4ddc56`.
 They include a nonempty published semantic binding participant, qualified
 property writes, fresh durable reopen and an actual qualified query. Required
 ontology, schema and route identities are measured separately from graph payload.
