@@ -55,8 +55,10 @@ function checkConstructionError() {
   );
 
   // The stable legacy-format error must leave the old project untouched.
-  const project = mkdtempSync(join(process.cwd(), "graphforge-legacy-smoke-"));
+  const fixture = mkdtempSync(join(process.cwd(), "graphforge-legacy-smoke-"));
+  const project = join(fixture, "project");
   try {
+    mkdirSync(project);
     const topology = join(project, "topology");
     mkdirSync(topology);
     const nodes = join(topology, "nodes.parquet");
@@ -68,7 +70,7 @@ function checkConstructionError() {
     assert.equal(readFileSync(nodes, "utf8"), "legacy");
     assert.equal(existsSync(join(project, "FORMAT")), false);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    rmSync(fixture, { recursive: true, force: true });
   }
 }
 
