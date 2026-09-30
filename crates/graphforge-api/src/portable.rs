@@ -74,6 +74,9 @@ pub struct PortableV2ImportResult {
     /// Whether the cleanup namespace synchronization completed.
     #[doc(hidden)]
     pub materialized_cleanup_parent_sync_confirmed: bool,
+    /// Import-local peak observed at ordered staging/destination writer boundaries.
+    #[doc(hidden)]
+    pub observed_transient_peak_allocated_bytes: u64,
 }
 
 /// Publish a verified local portable-v2 package to an OCI registry.
@@ -643,6 +646,7 @@ impl GraphForge {
             materialized_cleanup_parent_sync_confirmed: receipt
                 .materialized_cleanup
                 .parent_sync_confirmed,
+            observed_transient_peak_allocated_bytes: receipt.transient_peak_allocated_bytes,
         })
     }
 }
@@ -1611,7 +1615,8 @@ impl std::fmt::Debug for PortableV2OciPullFacadeRequest {
 }
 
 impl PortableV2ImportResult {
-    /// Qualify durable cleanup and report the exact deduplicated lifecycle allocation peak.
+    /// Qualify durable cleanup and report the ordered peak of claimed staging
+    /// plus the lifecycle-admitted destination, excluding pre-admission activity.
     pub fn transient_peak_allocated_bytes(&self) -> Result<u64, GfError> {
         if !self.materialized_cleanup_parent_sync_confirmed
             || self.materialized_cleanup_removed_identity_allocated_bytes
@@ -1631,8 +1636,12 @@ impl PortableV2ImportResult {
             "portable-import-published",
             &self.published_identity_allocated_bytes,
         )?;
-        lifecycle.remove_owner("portable-import-materialized")?;
-        Ok(lifecycle.peak_allocated_bytes())
+        if self.observed_transient_peak_allocated_bytes < lifecycle.current_allocated_bytes() {
+            return Err(GfError::Validation(
+                "storage.portable_import_allocation_peak: ordered peak is below the live allocation union".into(),
+            ));
+        }
+        Ok(self.observed_transient_peak_allocated_bytes)
     }
 }
 
@@ -1950,6 +1959,7 @@ mod repack_boundary_tests {
                 ("stage".into(), 6),
             ]),
             materialized_cleanup_parent_sync_confirmed: true,
+            observed_transient_peak_allocated_bytes: 20,
         };
         assert_eq!(result.transient_peak_allocated_bytes().unwrap(), 20);
         result.materialized_cleanup_parent_sync_confirmed = false;
@@ -1968,6 +1978,73 @@ mod repack_boundary_tests {
             result.transient_peak_allocated_bytes().unwrap_err().code(),
             "GF_VALIDATION"
         );
+    }
+
+    #[test]
+    fn import_allocation_qualification_rejects_live_alias_disagreement_and_underreported_peak() {
+        use std::collections::BTreeMap;
+        let mut result = PortableV2ImportResult {
+            package_digest: "package".into(),
+            transport_digest: None,
+            generation_uuid: Uuid::nil(),
+            idempotent_replay: false,
+            materialized_identity_allocated_bytes: BTreeMap::from([("live".into(), 4)]),
+            published_identity_allocated_bytes: BTreeMap::from([("live".into(), 10)]),
+            materialized_cleanup_removed_identity_allocated_bytes: BTreeMap::from([(
+                "live".into(),
+                4,
+            )]),
+            materialized_cleanup_parent_sync_confirmed: true,
+            observed_transient_peak_allocated_bytes: 14,
+        };
+        let error = result.transient_peak_allocated_bytes().unwrap_err();
+        assert_eq!(error.code(), "GF_VALIDATION");
+        assert!(
+            error
+                .to_string()
+                .contains("active identity allocation changed")
+        );
+        result.published_identity_allocated_bytes = BTreeMap::from([("published".into(), 10)]);
+        result.observed_transient_peak_allocated_bytes = 13;
+        let error = result.transient_peak_allocated_bytes().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("storage.portable_import_allocation_peak")
+        );
+    }
+
+    #[test]
+    fn import_allocation_qualification_distinguishes_retired_identity_lifetimes() {
+        use std::collections::BTreeMap;
+        let mut ordered = graphforge_storage::StorageAllocationLifecycle::default();
+        ordered
+            .replace_owner("stage-root", &BTreeMap::from([("reused".into(), 4)]))
+            .unwrap();
+        ordered
+            .replace_owner("stage-payload", &BTreeMap::from([("live".into(), 6)]))
+            .unwrap();
+        ordered.remove_owner("stage-root").unwrap();
+        ordered
+            .replace_owner("published", &BTreeMap::from([("reused".into(), 10)]))
+            .unwrap();
+        assert_eq!(ordered.peak_allocated_bytes(), 16);
+
+        let result = PortableV2ImportResult {
+            package_digest: "package".into(),
+            transport_digest: None,
+            generation_uuid: Uuid::nil(),
+            idempotent_replay: false,
+            materialized_identity_allocated_bytes: BTreeMap::from([("live".into(), 6)]),
+            published_identity_allocated_bytes: BTreeMap::from([("reused".into(), 10)]),
+            materialized_cleanup_removed_identity_allocated_bytes: BTreeMap::from([(
+                "live".into(),
+                6,
+            )]),
+            materialized_cleanup_parent_sync_confirmed: true,
+            observed_transient_peak_allocated_bytes: ordered.peak_allocated_bytes(),
+        };
+        assert_eq!(result.transient_peak_allocated_bytes().unwrap(), 16);
     }
 }
 

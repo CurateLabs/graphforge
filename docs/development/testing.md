@@ -60,6 +60,9 @@ cargo test --workspace -- --nocapture
 cargo test --doc --workspace
 ```
 
+The CI Gate Rust lane runs the workspace under nextest; its exact commands are
+in [agent-environment.md](agent-environment.md#rust-test-gate).
+
 ### v0.5.0 non-Cypher release conformance
 
 Part of the **v0.5.0 testing strategy**: the openCypher TCK proves `execute()` language
@@ -123,6 +126,60 @@ Differential tests run both parsers on the same input and assert AST parity:
 ```bash
 cargo test -p graphforge-cypher -- differential
 ```
+
+### Differential traversal oracle
+
+Ordinary builds of `graphforge-rel` and `graphforge-exec` do not expose a
+reference-mode switch. The independent relational fixed-hop oracle requires the
+non-default `differential-testing` feature, and the `differential_traversal`
+target declares it as a required feature, so a default workspace run does not
+build it. Run its three-way corpus explicitly:
+
+```bash
+cargo test -p graphforge-exec --features differential-testing --test differential_traversal
+```
+
+It verifies indexed and scan-built provider execution against the relational
+oracle, including physical-plan differences and result equality.
+
+### Python test and extension build modes
+
+Python Rust tests are executables and must link to libpython. Distribution
+extensions resolve Python symbols when loaded by the interpreter and must not
+link libpython on Unix. The same ABI3 (Python 3.10+) contract applies in both modes.
+
+| Build | Link mode |
+|---|---|
+| Ordinary `cargo test` / `cargo llvm-cov` | Default features retain ABI3 and link libpython |
+| `maturin build` / `maturin develop` | The binding's `pyproject.toml` explicitly selects its `extension-module` feature |
+
+Do not enable `pyo3/extension-module` in an unconditional Cargo dependency or
+default feature. Cargo unifies dependency features across the workspace, so
+that would break the binding's Rust tests and the ordinary workspace coverage
+command. Do not export `PYO3_BUILD_EXTENSION_MODULE` globally: PyO3 treats its
+presence as enabled, even if its value is `0`. A manual Cargo distribution
+build must opt in with `--features graphforge-bindings-py/extension-module`.
+
+For native Rust tests, select a supported interpreter with its shared development
+library available. On Linux, a managed interpreter's library directory also
+needs to be visible to the runtime loader:
+
+```bash
+uv python install 3.12
+python_test_exe="$(uv python find 3.12)"
+python_test_libdir="$("$python_test_exe" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+PYO3_PYTHON="$python_test_exe" \
+  LD_LIBRARY_PATH="$python_test_libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+  CARGO_TARGET_DIR=target/python-tests \
+  cargo test -p graphforge-bindings-py --lib
+```
+
+`scripts/ci/python-build-mode-check.py` inspects the actual default and packaging
+Cargo feature graphs. It runs in the fast local gate and the required Rust
+Quality job before Clippy. Test builds, a real native import, and inspection of
+the distribution artifact's dynamic dependencies remain required evidence when
+changing linkage; a successful cdylib build alone does not prove the Rust-test
+executable links.
 
 ---
 
@@ -220,14 +277,14 @@ pytest tests/ -n auto
 ## Resumable full validation
 
 `make pre-push` is the full local gate. It begins with a prerequisite and disk
-preflight (including `bazelisk` on `PATH`), then records content-addressed
+preflight, then records content-addressed
 evidence for policy checks, Rust tests and coverage, the instrumented native
 Python and Node builds consumed by acceptance, wrapper coverage, Rust engine
 Rust API/TCK BDD and one native smoke suite per binding, and coverage thresholds.
 `make pre-push-fast` (also invoked from the
-policy-static stage) runs bazelisk presence + `cargo-bazel-drift-check.py`
-before format/lint/security. Optional authoritative local Bazel suite:
-`make bazel-test` → `bazelisk test //:ci_rust_tests` (see [bazel.md](bazel.md)).
+policy-static stage) runs the Python lock, build-mode, and inventory policies
+before format/lint/security. The CI Gate Rust lane's nextest commands are in
+[agent-environment.md](agent-environment.md#rust-test-gate).
 It never skips a gate: a compatible passed stage is reused only when its exact
 inputs, command contract, toolchain, dependency evidence, and required native
 artifact identity still match.
@@ -240,10 +297,15 @@ outcome. These paths are ignored by Git and the evidence contains no command
 output or secrets. The instrumented Rust coverage run executes the full Rust
 corpus once and builds each native artifact once; later acceptance stages reuse
 those exact artifact identities.
-Compatible Cargo dependency compilation is shared beneath the common Git
-metadata directory (`graphforge-validation-cache/cargo`, one target directory
-per manifest, toolchain, and heavy-profile identity), while evidence and native
-binding artifacts stay scoped to their individual worktree. Each heavy stage
+Cargo targets live beneath the common Git metadata directory
+(`graphforge-validation-cache/cargo`, one target directory per canonical
+worktree, manifest, toolchain, and heavy-profile identity). Ordinary source
+edits reuse that worktree's target; distinct worktrees never share first-party
+artifacts because Cargo timestamp fingerprints can accept stale metadata from
+another root. The root identity is hashed internally, and absolute paths are
+not recorded in evidence. A versioned heavy-stage cache contract invalidates
+receipts produced under the earlier cross-worktree policy. Evidence and native
+binding artifacts also stay scoped to their individual worktree. Each heavy stage
 records its use and, while holding the shared heavy-build lock, evicts the
 least-recently-used target directories so at most six remain
 (`GF_PRE_PUSH_CACHE_KEEP_ENTRIES` overrides the six). The directories the

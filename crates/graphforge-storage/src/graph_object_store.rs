@@ -467,6 +467,25 @@ impl GraphObjectPublicationLease {
         self.cas.allocation = allocation;
     }
 
+    /// Import-owned controls must be observed as well as object installation.
+    pub(crate) fn set_import_allocation_operation(
+        &mut self,
+        allocation: Option<crate::StorageAllocationOperation>,
+    ) -> Result<(), GfError> {
+        if let Some(allocation) = &allocation {
+            allocation.replace_file_at(
+                &self
+                    .cas
+                    .diagnostic_root
+                    .join(GRAPH_OBJECTS_DIR)
+                    .join(LIFECYCLE_LOCK),
+                &self.cas.lifecycle,
+            )?;
+        }
+        self.set_allocation_operation(allocation);
+        Ok(())
+    }
+
     /// Revalidate the stable CAS root immediately before publishing `CURRENT`.
     pub fn revalidate_for_publish(&self) -> Result<(), GfError> {
         validate_publication_identity(self)
@@ -1667,13 +1686,15 @@ mod installation;
 mod manifest_tree;
 mod materialization;
 
-pub(crate) use gc::capture_retained_graph_object_identities;
 #[allow(
     unused_imports,
     reason = "preserve the existing staged CAS root API across feature and test configurations"
 )]
 pub use gc::gc_graph_objects;
 pub(crate) use gc::gc_graph_objects_with_evidence_guarded;
+pub(crate) use gc::{
+    capture_retained_graph_object_identities, capture_retained_graph_object_identities_observed,
+};
 #[allow(
     unused_imports,
     reason = "preserve the existing staged CAS root API across feature and test configurations"
@@ -1685,7 +1706,7 @@ use installation::install_graph_object_bytes_with_lease;
     reason = "preserve the existing staged CAS root API across feature and test configurations"
 )]
 pub use installation::install_graph_object_file;
-use installation::install_graph_object_file_with_lease;
+pub(crate) use installation::install_graph_object_file_with_lease;
 pub use manifest_tree::GraphManifestState;
 #[allow(
     unused_imports,

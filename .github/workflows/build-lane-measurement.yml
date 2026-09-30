@@ -2,7 +2,7 @@ name: Build Lane Measurement
 run-name: "Build lane ${{ inputs.runner }}/${{ inputs.cache }} ${{ inputs.ref }} [${{ inputs.sticky_key }}]"
 
 # Issue #1618 measurement harness: times the Cargo compile+test lane on the
-# same runner class as the Bazel CI lane (blacksmith-4vcpu-ubuntu-2404).
+# same runner class as the CI Gate Rust lane (blacksmith-4vcpu-ubuntu-2404).
 # `cargo-test` runs `cargo test --workspace --locked`, which executes test
 # binaries one after another; `nextest` runs test binaries concurrently
 # (`cargo nextest run`), then the two custom-harness targets and the

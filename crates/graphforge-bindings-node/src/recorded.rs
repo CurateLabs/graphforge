@@ -52,7 +52,7 @@ pub struct RecordedAlgorithmOutput {
     pub result: Buffer,
 }
 
-/// Execute a Bazel-migration0 descriptor against a resolved projection and attach epistemic context.
+/// Execute a knowledge descriptor against a resolved projection and attach epistemic context.
 #[napi(object, object_to_js = false)]
 pub struct ResolvedRecordedAlgorithmInput<'env> {
     /// Required operation/idempotency UUID.

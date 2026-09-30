@@ -1,7 +1,0 @@
-"""Bazel helpers for first-party GraphForge Rust targets."""
-
-exports_files([
-    "gf_rust.bzl",
-    "gf_version.bzl",
-    "crate_universe.MODULE.bazel.fragment",
-])

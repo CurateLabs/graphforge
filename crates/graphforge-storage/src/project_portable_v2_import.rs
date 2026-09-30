@@ -27,6 +27,8 @@ use crate::project_portable_v2::{
     PortableV2Report, RUNTIME_MAP_PATH, decode_runtime_map, materialize_verified_portable_v2,
 };
 mod adjacency;
+mod allocation;
+use allocation::{capture_import_tree, record_import_file_identity};
 mod outcome;
 use outcome::{storage, storage_or_cancel};
 
@@ -54,6 +56,9 @@ pub struct PortableV2ImportReceipt {
     pub published_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
     /// Identity-safe, durably synchronized removal of private import materialization.
     pub materialized_cleanup: PortableV2ImportCleanupReceipt,
+    /// Ordered peak of claimed staging and lifecycle-admitted destination resources.
+    /// Validation scratch projects and pre-admission target activity are excluded.
+    pub transient_peak_allocated_bytes: u64,
 }
 
 /// Exact cleanup receipt for private portable-import materialization.
@@ -119,7 +124,7 @@ pub fn consume_selective_portable_v2<T>(
         ));
     }
     let (ontology, staged_composition) = if report.ontology_composition.is_some() {
-        let (candidate, receipt) = build_staged_composition(&stage, &report, limits)?;
+        let (candidate, receipt) = build_staged_composition(&stage, &report, limits, None)?;
         let bytes = read_bounded_payload(
             &candidate.source,
             limits.max_manifest_bytes,
@@ -294,7 +299,11 @@ fn import_complete_portable_v2_native(
     validator: Option<&mut NativeResearchValidator<'_>>,
 ) -> Result<PortableV2ImportReceipt, PortableV2Error> {
     let source = source.as_ref();
-    let target = target.as_ref();
+    let project_paths = crate::StorageAllocationOperation::project_paths(target.as_ref())
+        .map_err(|error| storage(&error))?;
+    let target = project_paths[0].as_path();
+    let owned_allocation = crate::StorageAllocationOperation::default().with_mirror(allocation);
+    let allocation = Some(&owned_allocation);
     progress(PortableV2ImportProgress {
         phase: PortableV2ImportPhase::Verifying,
         entries: 0,
@@ -370,22 +379,15 @@ fn import_complete_portable_v2_native(
                 materialization_read_operations,
             )
     });
-    let result = result.and_then(|mut receipt| {
-        finalize_import_materialization_cleanup(
+    let result = result.and_then(|receipt| {
+        allocation::finish_receipt(
             &stage,
             &owner,
             materialized_stage_identity,
-            &mut receipt,
+            receipt,
             entry_count.saturating_add(added_stage_entries),
-            allocation,
+            &owned_allocation,
         )
-        .map_err(|error| {
-            error.with_committed_import(outcome::committed(
-                &receipt.publication,
-                &receipt.package_digest,
-            ))
-        })?;
-        Ok(receipt)
     });
     if result.is_ok() {
         progress(PortableV2ImportProgress {
@@ -406,9 +408,8 @@ fn finalize_import_materialization_cleanup(
     entry_count: usize,
     allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), PortableV2Error> {
-    // Finalization can atomically replace authenticated staging files. Preserve
-    // the pre-finalization identities as removed ownership while separately
-    // capturing the final live set that deterministic cleanup must remove.
+    // Only this live inventory can overlap the published inventory. An inode
+    // removed during finalization may already identify a different file.
     let mut finalized_live_identities = std::collections::BTreeMap::new();
     capture_finalized_import_identities(
         stage,
@@ -416,16 +417,16 @@ fn finalize_import_materialization_cleanup(
         &mut finalized_live_identities,
         entry_count,
     )?;
-    let historically_removed_identities = receipt
-        .materialized_identity_allocated_bytes
-        .iter()
-        .filter(|(identity, _)| !finalized_live_identities.contains_key(*identity))
-        .map(|(identity, allocated)| (identity.clone(), *allocated))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    receipt
-        .materialized_identity_allocated_bytes
-        .extend(finalized_live_identities);
-    let mut cleanup = cleanup_import_materialization(
+    let owner_file = fs::File::open(owner).map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "cannot authenticate finalized import owner",
+        )
+    })?;
+    record_import_file_identity(&owner_file, &mut finalized_live_identities)?;
+    drop(owner_file);
+    receipt.materialized_identity_allocated_bytes = finalized_live_identities;
+    let cleanup = cleanup_import_materialization(
         stage,
         owner,
         materialized_stage_identity,
@@ -435,9 +436,6 @@ fn finalize_import_materialization_cleanup(
     .map_err(|error| {
         error.with_allocation_identities(receipt.materialized_identity_allocated_bytes.clone())
     })?;
-    cleanup
-        .removed_identity_allocated_bytes
-        .extend(historically_removed_identities);
     receipt.materialized_cleanup = cleanup;
     Ok(())
 }
@@ -476,7 +474,13 @@ fn materialize_owned_import(
             ".{target_name}.portable-v2-{}",
             transaction_uuid.hyphenated()
         ));
-    let (owner, owned_retry) = claim_stage(&stage, target_name, transaction_uuid, generation_uuid)?;
+    let (owner, owned_retry) = claim_stage(
+        &stage,
+        target_name,
+        transaction_uuid,
+        generation_uuid,
+        allocation,
+    )?;
     let mut identities = std::collections::BTreeMap::new();
     let owner_file = fs::File::open(&owner).map_err(|_| {
         PortableV2Error::new(PortableV2ErrorCode::Io, "cannot open import ownership")
@@ -493,9 +497,6 @@ fn materialize_owned_import(
         limits,
         cancelled,
         |path, file| {
-            if let Some(file) = file {
-                record_import_file_identity(file, &mut identities)?;
-            }
             if let Some(allocation) = allocation {
                 match file {
                     Some(file) => allocation.replace_file_at(path, file),
@@ -520,8 +521,8 @@ fn materialize_owned_import(
     };
     let report = materialized.report;
     // Atomic replacement can change identities after the write observer. The
-    // completed boundary is the cleanup authority; the later finalization
-    // capture extends this into the operation-wide identity union.
+    // completed boundary is the cleanup authority. The ordered operation
+    // retains the numeric peak separately from this live inventory.
     identities.clear();
     record_import_file_identity(&owner_file, &mut identities)?;
     let stage_directory = graphforge_filesystem::StableDirectory::open(&stage).map_err(|_| {
@@ -808,6 +809,7 @@ fn claim_stage(
     target_name: &str,
     transaction_uuid: Uuid,
     generation_uuid: Uuid,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(PathBuf, bool), PortableV2Error> {
     let owner = stage.with_file_name(format!(
         ".{target_name}.portable-v2-{}.owner",
@@ -828,12 +830,21 @@ fn claim_stage(
                 "import staging identity already exists",
             ));
         }
-        fs::remove_dir_all(stage).map_err(|_| {
-            PortableV2Error::new(
-                PortableV2ErrorCode::Io,
-                "owned import staging is unavailable",
-            )
-        })?;
+        if let Some(allocation) = allocation {
+            allocation
+                .observe_paths(&[stage.to_path_buf(), owner.clone()])
+                .map_err(|error| storage(&error))?;
+            allocation
+                .remove_owned_tree(stage)
+                .map_err(|error| storage(&error))?;
+        } else {
+            fs::remove_dir_all(stage).map_err(|_| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::Io,
+                    "owned import staging is unavailable",
+                )
+            })?;
+        }
         owned_retry = true;
     }
     if owner.exists() {
@@ -1014,7 +1025,7 @@ fn import_materialized(
         });
     }
     let staged_composition = if report.ontology_composition.is_some() {
-        let (candidate, receipt) = build_staged_composition(stage, report, limits)?;
+        let (candidate, receipt) = build_staged_composition(stage, report, limits, allocation)?;
         if let Some(expected) = semantic_composition_fingerprint.as_deref() {
             let staged_bytes = read_bounded_payload(
                 &candidate.source,
@@ -1030,7 +1041,11 @@ fn import_materialized(
                     "semantic bindings and portable composition fingerprints disagree",
                 ));
             }
-            participants.push(persist_composition_authority(stage, &staged.composition)?);
+            participants.push(persist_composition_authority(
+                stage,
+                &staged.composition,
+                allocation,
+            )?);
         }
         participants.push(candidate);
         Some(receipt)
@@ -1062,8 +1077,13 @@ fn import_materialized(
     if let Some(graph_tree) = &package_graph_tree {
         validate_import_graph_identities(graph_tree, cancelled)?;
         validate_import_property_values(graph_tree, report.entry_count, cancelled)?;
-        *added_stage_entries =
-            adjacency::persist_import_adjacency(stage, graph_tree, &participants, cancelled)?;
+        *added_stage_entries = adjacency::persist_import_adjacency(
+            stage,
+            graph_tree,
+            &participants,
+            cancelled,
+            allocation,
+        )?;
     }
     let stage_entry_count = usize::try_from(report.entry_count)
         .map_err(|_| {
@@ -1107,6 +1127,11 @@ fn import_materialized(
     } else {
         prepare_import_target(admission.root()).map_err(|error| storage(&error))?
     };
+    // Only admitted retained authorities join this operation; other attempts'
+    // private preparation remains outside its resource ownership.
+    if let Some(allocation) = allocation {
+        allocation::observe_destination(allocation, admission.root(), existing.as_ref())?;
+    }
     let parent = match existing {
         Some(parent) => parent,
         None => crate::project_generation::open_or_initialize_project_admitted_with_allocation(
@@ -1123,9 +1148,12 @@ fn import_materialized(
         allocation,
     )?;
     let _research_lease = if let Some((_, objects)) = &research {
-        let lease = crate::begin_graph_object_publication(admission.root())
+        let mut lease = crate::begin_graph_object_publication(admission.root())
             .map_err(|error| storage(&error))?;
-        crate::project_portable_v2::research::install(stage, admission.root(), objects)?;
+        lease
+            .set_import_allocation_operation(allocation.cloned())
+            .map_err(|error| storage(&error))?;
+        crate::project_portable_v2::research::install_with_lease(stage, &lease, objects)?;
         Some(lease)
     } else {
         None
@@ -1205,6 +1233,7 @@ fn import_materialized(
         .map_err(|error| storage(&error).with_committed_import(committed))?
         .physical_identity_allocated_bytes,
         materialized_cleanup: PortableV2ImportCleanupReceipt::default(),
+        transient_peak_allocated_bytes: 0,
     })
 }
 
@@ -1398,7 +1427,9 @@ fn prepare_compact_import_graph_with_allocation(
     }
     let mut lease =
         crate::begin_graph_object_publication(target).map_err(|error| storage(&error))?;
-    lease.set_allocation_operation(allocation.cloned());
+    lease
+        .set_import_allocation_operation(allocation.cloned())
+        .map_err(|error| storage(&error))?;
     let directory = graphforge_filesystem::StableDirectory::open(graph_tree).map_err(|_| {
         PortableV2Error::new(
             PortableV2ErrorCode::Io,
@@ -1434,12 +1465,13 @@ fn prepare_compact_import_graph_with_allocation(
     let published =
         crate::graph_files::graph_files_root_participant(&root).map_err(|error| storage(&error))?;
     let bytes = &published.bytes;
-    crate::project_publication::publish_atomic_bytes(
+    crate::project_publication::publish_atomic_bytes_with_allocation(
         &participant.source,
         bytes,
         || Ok(()),
         || Ok(()),
         || Ok(()),
+        allocation,
     )
     .map_err(|_| {
         PortableV2Error::new(
@@ -1500,63 +1532,6 @@ fn collect_portable_graph_paths(
     Ok(())
 }
 
-fn record_import_file_identity(
-    file: &fs::File,
-    identities: &mut std::collections::BTreeMap<String, u64>,
-) -> Result<(), PortableV2Error> {
-    let identity = graphforge_filesystem::file_identity(file).map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "cannot identify owned import artifact",
-        )
-    })?;
-    let usage = graphforge_filesystem::file_space_usage(file).map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "cannot measure owned import artifact",
-        )
-    })?;
-    let mut file_id = String::with_capacity(32);
-    for byte in identity.file_id {
-        use std::fmt::Write as _;
-        write!(&mut file_id, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    let key = format!("{:016x}:{file_id}", identity.volume_serial);
-    identities
-        .entry(key)
-        .and_modify(|allocated| *allocated = (*allocated).max(usage.allocated_bytes))
-        .or_insert(usage.allocated_bytes);
-    Ok(())
-}
-
-fn capture_import_tree(
-    directory: &graphforge_filesystem::StableDirectory,
-    identities: &mut std::collections::BTreeMap<String, u64>,
-    remaining: &mut usize,
-) -> Result<(), PortableV2Error> {
-    let names = directory.child_names_bounded(*remaining).map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "completed import staging exceeds identity bound",
-        )
-    })?;
-    *remaining = remaining.saturating_sub(names.len());
-    for name in names {
-        if let Ok(child) = directory.open_child_directory(&name) {
-            capture_import_tree(&child, identities, remaining)?;
-        } else {
-            let file = directory.open_child_file(&name).map_err(|_| {
-                PortableV2Error::new(
-                    PortableV2ErrorCode::Io,
-                    "cannot authenticate completed import entry",
-                )
-            })?;
-            record_import_file_identity(&file, identities)?;
-        }
-    }
-    Ok(())
-}
-
 fn parse_mode(value: &str) -> Result<ActivationMode, PortableV2Error> {
     match value {
         "exploratory" => Ok(ActivationMode::Exploratory),
@@ -1573,6 +1548,7 @@ fn build_staged_composition(
     stage: &Path,
     report: &PortableV2Report,
     limits: PortableV2Limits,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(ProjectFileParticipant, PortableV2StagedCompositionReceipt), PortableV2Error> {
     let control = report.ontology_composition.as_ref().ok_or_else(|| {
         PortableV2Error::new(
@@ -1644,7 +1620,7 @@ fn build_staged_composition(
         portable_composition_digest: control.composition_digest.clone(),
         composition,
     };
-    let (participant, source, bytes) = persist_staged_composition(stage, &staged)?;
+    let (participant, source, bytes) = persist_staged_composition(stage, &staged, allocation)?;
     let receipt = PortableV2StagedCompositionReceipt {
         package_digest: report.package_digest.clone(),
         portable_composition_digest: control.composition_digest.clone(),
@@ -1791,6 +1767,7 @@ fn resolve_staged_bridge_ids(
 fn persist_staged_composition(
     stage: &Path,
     staged: &crate::WorkspacePortableOntologyStaging,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(ProjectParticipant, PathBuf, Vec<u8>), PortableV2Error> {
     let participant = staged
         .to_project_participant()
@@ -1816,12 +1793,18 @@ fn persist_staged_composition(
     output.observed_sync_all().map_err(|_| {
         PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync composition candidate")
     })?;
+    if let Some(allocation) = allocation {
+        allocation
+            .replace_file_at(&source, &output)
+            .map_err(|error| storage(&error))?;
+    }
     Ok((participant, source, bytes))
 }
 
 fn persist_composition_authority(
     stage: &Path,
     composition: &crate::WorkspaceOntologyComposition,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<ProjectFileParticipant, PortableV2Error> {
     let participant = composition
         .to_project_participant()
@@ -1847,6 +1830,11 @@ fn persist_composition_authority(
     output.observed_sync_all().map_err(|_| {
         PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync composition authority")
     })?;
+    if let Some(allocation) = allocation {
+        allocation
+            .replace_file_at(&source, &output)
+            .map_err(|error| storage(&error))?;
+    }
     Ok(ProjectFileParticipant {
         participant: ProjectParticipant {
             bytes: Vec::new(),
@@ -2626,7 +2614,9 @@ mod tests {
         let target = parent.path().join("imported");
         let transaction = Uuid::new_v4();
         let generation = Uuid::new_v4();
-        let first = import_complete_portable_v2(
+        let paths = crate::StorageAllocationOperation::project_paths(&target).unwrap();
+        let allocation = crate::StorageAllocationOperation::from_paths(&paths).unwrap();
+        let first = import_complete_portable_v2_with_allocation(
             &package,
             &target,
             transaction,
@@ -2634,8 +2624,19 @@ mod tests {
             &supported(),
             PortableV2Limits::default(),
             None,
+            |_| {},
+            Some(&allocation),
         )
         .unwrap();
+        let expected = crate::StorageAllocationOperation::from_paths(&paths).unwrap();
+        let observed = serde_json::to_value(allocation.snapshot().unwrap()).unwrap();
+        let expected = serde_json::to_value(expected.snapshot().unwrap()).unwrap();
+        assert_eq!(observed["active"], expected["active"]);
+        assert_eq!(observed["owners"], expected["owners"]);
+        assert_eq!(
+            first.transient_peak_allocated_bytes,
+            allocation.totals().unwrap().1
+        );
         assert!(first.staged_composition.is_some());
         assert!(first.materialized_cleanup.parent_sync_confirmed);
         assert_eq!(

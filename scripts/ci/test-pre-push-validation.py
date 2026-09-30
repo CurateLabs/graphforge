@@ -270,6 +270,102 @@ class PrePushValidationTests(unittest.TestCase):
             (crate / "Cargo.toml").write_text("[package]\nname='demo2'\n", encoding="utf-8")
             self.assertNotEqual(before, coordinator.cargo_cache_digest(stage))
 
+    def test_cargo_targets_isolate_worktrees_but_reuse_canonical_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            first = base / "first"
+            first.mkdir()
+
+            def git(root: Path, *arguments: str) -> None:
+                GATE.subprocess.run(("git", *arguments), cwd=root, check=True, capture_output=True)
+
+            git(first, "init", "--quiet")
+            (first / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+            (first / "Cargo.lock").write_text("first\n", encoding="utf-8")
+            (first / "lib.rs").write_text("pub fn first() {}\n", encoding="utf-8")
+            git(first, "add", ".")
+            git(
+                first,
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            )
+            second = base / "second"
+            git(first, "worktree", "add", "--detach", str(second), "HEAD")
+            alias = base / "alias"
+            alias.symlink_to(first, target_is_directory=True)
+            stage = GATE.Stage(
+                "rust-quality", commands=(("cargo",),), inputs=("lib.rs",), heavy=True
+            )
+
+            def coordinator(root: Path) -> object:
+                result = GATE.Coordinator(root, (stage,), runner=lambda *_args: None)
+                result.command_versions = lambda _stage: {"tool": "test"}
+                return result
+
+            original, other, aliased = map(coordinator, (first, second, alias))
+            self.assertEqual(original.shared_cache_root, other.shared_cache_root)
+            target = original.cargo_cache_path(stage)
+            self.assertNotEqual(target, other.cargo_cache_path(stage))
+            self.assertEqual(target, aliased.cargo_cache_path(stage))
+            original.run()
+            aliased.run()
+            self.assertEqual(aliased.results[stage.name].status, "hit")
+            (first / "lib.rs").write_text("pub fn changed() {}\n", encoding="utf-8")
+            edited = coordinator(first)
+            self.assertEqual(target, edited.cargo_cache_path(stage))
+            edited.run()
+            self.assertEqual(edited.results[stage.name].status, "miss")
+
+    def test_legacy_heavy_evidence_reruns_dependents_only(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.make_root(root)
+            calls: list[tuple[str, ...]] = []
+            stages = (
+                GATE.Stage("independent", commands=(("independent",),)),
+                GATE.Stage("rust", commands=(("rust",),), heavy=True),
+                GATE.Stage("binding", commands=(("binding",),), dependencies=("rust",)),
+            )
+
+            def coordinator() -> object:
+                result = GATE.Coordinator(
+                    root, stages, runner=lambda command, _env: calls.append(command)
+                )
+                result.command_versions = lambda _stage: {"tool": "test"}
+                return result
+
+            current_digest = GATE.digest
+
+            def legacy_digest(value: object) -> str:
+                # Reproduce the pre-repair execution contract, including valid proofs.
+                if isinstance(value, dict) and "execution_contract" in value:
+                    value = dict(value)
+                    contract = dict(value["execution_contract"])
+                    contract.pop("cargo_cache_scope", None)
+                    value["execution_contract"] = contract
+                return current_digest(value)
+
+            with patch.object(GATE, "digest", side_effect=legacy_digest):
+                coordinator().run()
+                calls.clear()
+                legacy = coordinator()
+                legacy.run()
+                self.assertEqual(calls, [])
+                self.assertTrue(all(result.status == "hit" for result in legacy.results.values()))
+            repaired = coordinator()
+            repaired.run()
+            self.assertEqual(calls, [("rust",), ("binding",)])
+            self.assertEqual(repaired.results["independent"].status, "hit")
+            calls.clear()
+            coordinator().run()
+            self.assertEqual(calls, [])
+
     def test_missing_native_artifact_rejects_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

@@ -34,6 +34,7 @@ pub(super) fn persist_import_adjacency(
     graph_tree: &Path,
     participants: &[ProjectFileParticipant],
     cancelled: Option<&AtomicBool>,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<usize, PortableV2Error> {
     let Some(participant) = participants.iter().find(|participant| {
         participant.participant.capability_id == crate::GRAPH_CAPABILITY_ID
@@ -70,12 +71,14 @@ pub(super) fn persist_import_adjacency(
     let phase_scope = crate::lifecycle_io::PhaseScope::enter(
         crate::StorageIoPhase::EncodeWritePostwriteAuthentication,
     );
-    let outcome = crate::adjacency::build_adjacency_index_for_edge_files(
+    let outcome = crate::adjacency::build_adjacency_index_for_edge_files_observed(
         graph_tree,
         &edge_files,
         generation,
         built_at_micros,
         &options,
+        None,
+        allocation,
         || {
             if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
                 Err(GfError::Storage("import cancelled".into()))
@@ -370,17 +373,33 @@ mod tests {
             byte_length: placeholder.bytes.len() as u64,
             content_sha256: Sha256::digest(&placeholder.bytes).into(),
         }];
-        let added = persist_import_adjacency(stage.path(), &tree, &participants, None).unwrap();
+        let allocation =
+            crate::StorageAllocationOperation::from_paths(&[stage.path().to_path_buf()]).unwrap();
+        let added =
+            persist_import_adjacency(stage.path(), &tree, &participants, None, Some(&allocation))
+                .unwrap();
+        let expected =
+            crate::StorageAllocationOperation::from_paths(&[stage.path().to_path_buf()]).unwrap();
+        let actual = serde_json::to_value(allocation.snapshot().unwrap()).unwrap();
+        let expected = serde_json::to_value(expected.snapshot().unwrap()).unwrap();
+        assert_eq!(
+            actual["active"], expected["active"],
+            "scratch identities must retire before returning"
+        );
+        assert_eq!(
+            actual["owners"], expected["owners"],
+            "renamed shard owners must follow their live routes"
+        );
         assert_eq!(added, index_entries(&inventory).len());
         assert!(!stage.path().join(IMPORT_ADJACENCY_SPILL_ROOT).exists());
         assert_index_current(&tree);
         assert_eq!(
-            persist_import_adjacency(stage.path(), &tree, &participants, None).unwrap(),
+            persist_import_adjacency(stage.path(), &tree, &participants, None, None).unwrap(),
             0
         );
         let first = crate::capture_graph_files(&tree).unwrap().0;
         fs::remove_dir_all(tree.join("indexes")).unwrap();
-        persist_import_adjacency(stage.path(), &tree, &participants, None).unwrap();
+        persist_import_adjacency(stage.path(), &tree, &participants, None, None).unwrap();
         assert_eq!(crate::capture_graph_files(&tree).unwrap().0, first);
     }
     fn indexless_package() -> (tempfile::TempDir, PathBuf) {

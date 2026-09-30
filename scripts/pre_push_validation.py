@@ -25,8 +25,9 @@ import time
 
 SCHEMA = "graphforge-pre-push-validation/v1"
 MIN_FREE_GIB = 80
-# Each distinct manifest/toolchain state needs one target directory per heavy profile
-# (debug, coverage); keep room for three concurrent states before evicting.
+# Each worktree/manifest/toolchain state needs one target per heavy profile
+# (debug, coverage); keep a bounded pool across worktrees before evicting.
+CARGO_CACHE_SCOPE = "canonical-worktree/v1"
 CACHE_KEEP_ENTRIES = 6
 CACHE_LAST_USED = ".graphforge-last-used"
 IGNORED_PARTS = {".git", ".graphforge", ".venv", "build", "target", "node_modules"}
@@ -223,6 +224,7 @@ class Coordinator:
                     "python_extension": stage.python_extension,
                     "heavy": stage.heavy,
                     "profile_isolation": stage.profile_isolation,
+                    **({"cargo_cache_scope": CARGO_CACHE_SCOPE} if stage.heavy else {}),
                 },
                 "dependencies": dependencies,
                 "environment": environment,
@@ -323,15 +325,14 @@ class Coordinator:
     def run_preflight(self, environment: Mapping[str, str]) -> None:
         missing = [
             name
-            for name in ("cargo", "rustc", "rustup", "uv", "node", "pnpm", "bazelisk")
+            for name in ("cargo", "rustc", "rustup", "uv", "node", "pnpm")
             if not shutil.which(name)
         ]
         if missing:
             raise ValidationError(
                 "missing prerequisite(s): "
                 + ", ".join(missing)
-                + ". Install the pinned toolchain described in docs/development/contributing.md "
-                "(Bazelisk: docs/development/bazel.md)."
+                + ". Install the pinned toolchain described in docs/development/contributing.md."
             )
         # Never wait here: another worktree's heavy build holds the lock and prunes itself.
         with self.heavy_lock(blocking=False) as held:
@@ -423,8 +424,8 @@ class Coordinator:
             profile_root = self.evidence_root / "profiles" / stage.name
             profile_root.mkdir(parents=True, exist_ok=True)
             environment["LLVM_PROFILE_FILE"] = str(profile_root / "%p-%m.profraw")
-        # Cargo fingerprints first-party units inside one target directory. Key only on
-        # toolchain/profile/manifest inputs that make a target directory incompatible.
+        # Cargo timestamp fingerprints cannot safely share first-party units across
+        # source roots. Reuse targets only within one canonical worktree.
         if stage.heavy:
             environment["CARGO_TARGET_DIR"] = str(self.cargo_cache_path(stage))
         return environment
@@ -441,6 +442,8 @@ class Coordinator:
             {
                 "schema": SCHEMA,
                 "profile": profile,
+                "cargo_cache_scope": CARGO_CACHE_SCOPE,
+                "worktree_identity": digest(str(self.root)),
                 "sources": self.source_state(
                     (
                         "Cargo.toml",

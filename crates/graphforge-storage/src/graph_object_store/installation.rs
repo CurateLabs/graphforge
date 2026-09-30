@@ -110,7 +110,7 @@ pub fn install_graph_object_file(
 }
 
 #[allow(clippy::too_many_lines)] // The streamed copy keeps source authentication and destination durability atomic.
-pub(super) fn install_graph_object_file_with_lease(
+pub(crate) fn install_graph_object_file_with_lease(
     lease: &GraphObjectPublicationLease,
     source: &Path,
     expected_digest: &str,

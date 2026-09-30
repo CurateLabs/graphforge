@@ -1,3 +1,0 @@
-"""First-party crate packages live in crates/*/BUILD.bazel (#10/#9/#8)."""
-
-package(default_visibility = ["//visibility:public"])

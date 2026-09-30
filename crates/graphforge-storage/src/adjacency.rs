@@ -38,6 +38,7 @@
 use graphforge_filesystem::ObservedSync as _;
 mod builder;
 mod codec;
+mod installation;
 pub use builder::{
     ADJACENCY_SPILL_DIR_NAME, AdjacencyBuildMetrics, AdjacencyBuildOptions,
     DEFAULT_ADJACENCY_CHUNK_ROWS, DEFAULT_ADJACENCY_MERGE_FAN_IN, build_adjacency_index,
@@ -46,8 +47,9 @@ pub use builder::{
     build_adjacency_index_with_checkpoint,
 };
 pub(crate) use builder::{
-    build_adjacency_index_for_edge_files, build_adjacency_index_for_edge_files_on_lanes,
+    build_adjacency_index_for_edge_files_observed, build_adjacency_index_for_edge_files_on_lanes,
 };
+use installation::{persist_temp_observed, write_csr_shard_bytes_observed};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -63,7 +65,6 @@ use arrow::ipc::reader::FileReader;
 use arrow::ipc::writer::FileWriter;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-use tempfile::NamedTempFile;
 
 use graphforge_core::GfError;
 
@@ -466,6 +467,7 @@ pub fn write_sharded_csr(path: &Path, csr: &CsrIndex, max_edges: usize) -> Resul
 
 /// Row-emitting bounded sink used directly by the external-run merge.
 struct ShardedCsrWriter {
+    allocation: Option<crate::StorageAllocationOperation>,
     path: PathBuf,
     root: PathBuf,
     shard_dir: String,
@@ -493,6 +495,7 @@ impl ShardedCsrWriter {
         let root = parent.join(&shard_dir);
         std::fs::create_dir(&root).map_err(storage_err)?;
         Ok(Self {
+            allocation: None,
             path: path.to_path_buf(),
             owned_root: Some(root.clone()),
             root,
@@ -550,6 +553,7 @@ impl ShardedCsrWriter {
             first,
             &self.shard,
             self.records.len(),
+            self.allocation.as_ref(),
         )?);
         self.shard = CsrIndex {
             offsets: vec![0],
@@ -587,13 +591,22 @@ impl ShardedCsrWriter {
             .expect("validated parent")
             .join(&stable_dir);
         if stable_root.exists() && shard_set_matches(&stable_root, &self.records) {
-            std::fs::remove_dir_all(&self.root).map_err(storage_err)?;
+            self.remove_scratch_tree(&self.root)?;
             self.owned_root = None;
         } else {
             if stable_root.exists() {
-                std::fs::remove_dir_all(&stable_root).map_err(storage_err)?;
+                self.remove_scratch_tree(&stable_root)?;
             }
             std::fs::rename(&self.root, &stable_root).map_err(storage_err)?;
+            if let Some(allocation) = &self.allocation {
+                for record in &self.records {
+                    let source = self.root.join(&record.file);
+                    let destination = stable_root.join(&record.file);
+                    let file = std::fs::File::open(&destination).map_err(storage_err)?;
+                    allocation.remove_file_at(&source)?;
+                    allocation.replace_file_at(&destination, &file)?;
+                }
+            }
             self.owned_root = Some(stable_root.clone());
         }
         self.root = stable_root;
@@ -614,14 +627,28 @@ impl ShardedCsrWriter {
             .tempfile_in(parent)
             .map_err(storage_err)?;
         temp.write_all(&bytes).map_err(storage_err)?;
+        if let Some(allocation) = &self.allocation {
+            allocation.replace_file_at(temp.path(), temp.as_file())?;
+        }
         temp.as_file().observed_sync_all().map_err(storage_err)?;
-        persist_temp(temp, &self.path.with_extension("csr.json"))?;
+        persist_temp_observed(
+            temp,
+            &self.path.with_extension("csr.json"),
+            self.allocation.as_ref(),
+        )?;
         self.finished = true;
         Ok((
             manifest.shards.len() as u64,
             self.peak_shard_edges,
             self.peak_shard_nodes,
         ))
+    }
+
+    fn remove_scratch_tree(&self, root: &Path) -> Result<(), GfError> {
+        match &self.allocation {
+            Some(allocation) => allocation.remove_owned_tree(root),
+            None => std::fs::remove_dir_all(root).map_err(storage_err),
+        }
     }
 }
 
@@ -630,7 +657,7 @@ impl Drop for ShardedCsrWriter {
         if !self.finished
             && let Some(root) = self.owned_root.as_ref()
         {
-            let _ = std::fs::remove_dir_all(root);
+            let _ = self.remove_scratch_tree(root);
         }
     }
 }
@@ -650,6 +677,7 @@ fn write_csr_shard(
     first_node: u64,
     shard: &CsrIndex,
     ordinal: usize,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<CsrShardRecord, GfError> {
     let file = format!("{ordinal:020}.csr");
     let path = root.join(&file);
@@ -664,7 +692,7 @@ fn write_csr_shard(
     codec::preflight(&bytes, shard.node_count(), shard.edge_count())?;
     let encoded_bytes = bytes.len() as u64;
     crate::lifecycle_io::record_write(crate::StorageIoPhase::ReadPathScan, encoded_bytes, 1);
-    write_csr_shard_bytes(&path, &bytes)?;
+    write_csr_shard_bytes_observed(&path, &bytes, allocation)?;
     Ok(CsrShardRecord {
         first_node,
         node_count: shard.node_count(),
@@ -1032,28 +1060,9 @@ fn encode_csr_shard_bytes(csr: &CsrIndex) -> Result<Vec<u8>, GfError> {
     Ok(writer.into_inner().map_err(storage_err)?.into_inner())
 }
 
-/// Write produced shard bytes once, atomically replacing any prior content.
+#[cfg(test)]
 fn write_csr_shard_bytes(path: &Path, bytes: &[u8]) -> Result<(), GfError> {
-    use std::io::Write as _;
-
-    let parent = path.parent().ok_or_else(|| {
-        GfError::Storage(format!(
-            "CSR path {} has no parent directory",
-            path.display()
-        ))
-    })?;
-    std::fs::create_dir_all(parent).map_err(storage_err)?;
-    let file_name = path
-        .file_name()
-        .map_or_else(|| "csr".to_owned(), |n| n.to_string_lossy().into_owned());
-    let tmp = tempfile::Builder::new()
-        .prefix(&format!("{file_name}."))
-        .suffix(".tmp")
-        .tempfile_in(parent)
-        .map_err(storage_err)?;
-    tmp.as_file().write_all(bytes).map_err(storage_err)?;
-    persist_temp(tmp, path)?;
-    Ok(())
+    write_csr_shard_bytes_observed(path, bytes, None)
 }
 
 /// Materialize a current sharded CSR for explicit validation/inspection.
@@ -1200,6 +1209,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// Returns [`GfError::Storage`] on I/O or Parquet-encode failure; on failure
 /// any existing manifest is untouched.
 pub fn write_manifest(project_dir: &Path, rows: &[AdjacencyManifestRow]) -> Result<(), GfError> {
+    write_manifest_observed(project_dir, rows, None)
+}
+
+fn write_manifest_observed(
+    project_dir: &Path,
+    rows: &[AdjacencyManifestRow],
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<(), GfError> {
     let relation_types: StringArray = rows
         .iter()
         .map(|r| Some(r.relation_type.as_str()))
@@ -1228,7 +1245,7 @@ pub fn write_manifest(project_dir: &Path, rows: &[AdjacencyManifestRow]) -> Resu
         Arc::clone(&ADJACENCY_MANIFEST_SCHEMA),
         &batch,
     )?;
-    staged.commit_at(project_dir)?;
+    staged.commit_at_observed(project_dir, allocation)?;
     crate::lifecycle_io::record_write(
         crate::StorageIoPhase::ReadPathScan,
         std::fs::metadata(manifest_path(project_dir))
@@ -1932,13 +1949,6 @@ fn named_column<'a>(
     batch
         .column_by_name(name)
         .ok_or_else(|| GfError::Storage(format!("adjacency build: missing column {name}")))
-}
-
-/// Atomically rename `tmp` into place at `path`.
-fn persist_temp(tmp: NamedTempFile, path: &Path) -> Result<(), GfError> {
-    tmp.persist(path)
-        .map(|_| ())
-        .map_err(|e| storage_err(e.error))
 }
 
 fn uint64_column<'a>(

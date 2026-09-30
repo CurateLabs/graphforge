@@ -22,6 +22,7 @@ use crate::{StorageAllocationLifecycle, StorageAllocationTransition};
 #[derive(Clone, Debug, Default)]
 pub struct StorageAllocationOperation {
     state: Arc<Mutex<StorageAllocationLifecycle>>,
+    mirrors: Vec<Arc<Mutex<StorageAllocationLifecycle>>>,
 }
 
 impl StorageAllocationOperation {
@@ -42,6 +43,13 @@ impl StorageAllocationOperation {
     /// Rejects links, special files, unresolved paths, and oversized inventories.
     pub fn from_paths(paths: &[std::path::PathBuf]) -> Result<Self, GfError> {
         let operation = Self::default();
+        operation.observe_paths(paths)?;
+        Ok(operation)
+    }
+
+    /// Extend a baseline only while the caller owns these quiescent paths.
+    pub(crate) fn observe_paths(&self, paths: &[std::path::PathBuf]) -> Result<(), GfError> {
+        let operation = self;
         let mut directories = Vec::new();
         let mut remaining = 1_000_000_usize;
         for path in paths {
@@ -93,7 +101,7 @@ impl StorageAllocationOperation {
                 }
             }
         }
-        Ok(operation)
+        Ok(())
     }
 
     /// Read a bounded private continuation before any project mutation.
@@ -132,6 +140,7 @@ impl StorageAllocationOperation {
         state.validate_continuation()?;
         Ok(Self {
             state: Arc::new(Mutex::new(state)),
+            mirrors: Vec::new(),
         })
     }
 
@@ -154,7 +163,47 @@ impl StorageAllocationOperation {
         }
         Ok(Self {
             state: Arc::new(Mutex::new(state)),
+            mirrors: Vec::new(),
         })
+    }
+
+    /// Observe this operation in a caller's continuation without including that
+    /// continuation's earlier owners or peak in the operation-local result.
+    pub(crate) fn with_mirror(mut self, mirror: Option<&Self>) -> Self {
+        if let Some(mirror) = mirror {
+            for state in std::iter::once(&mirror.state).chain(&mirror.mirrors) {
+                if !Arc::ptr_eq(&self.state, state)
+                    && !self.mirrors.iter().any(|old| Arc::ptr_eq(old, state))
+                {
+                    self.mirrors.push(state.clone());
+                }
+            }
+        }
+        self
+    }
+
+    /// Validate every participating continuation before changing any of them.
+    fn change(
+        &self,
+        mut update: impl FnMut(&mut StorageAllocationLifecycle) -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        let mut states: Vec<_> = std::iter::once(&self.state).chain(&self.mirrors).collect();
+        states.sort_unstable_by_key(|state| Arc::as_ptr(state) as usize);
+        let mut guards = states
+            .iter()
+            .map(|state| state.lock().map_err(poisoned))
+            .collect::<Result<Vec<_>, _>>()?;
+        if guards.len() == 1 {
+            return update(&mut guards[0]);
+        }
+        let mut next: Vec<_> = guards.iter().map(|state| (**state).clone()).collect();
+        for state in &mut next {
+            update(state)?;
+        }
+        for (state, next) in guards.iter_mut().zip(next) {
+            **state = next;
+        }
+        Ok(())
     }
 
     /// Record an actual writer transition, retaining aliases held by other owners.
@@ -166,10 +215,7 @@ impl StorageAllocationOperation {
         owner: &str,
         transition: &StorageAllocationTransition,
     ) -> Result<(), GfError> {
-        self.state
-            .lock()
-            .map_err(poisoned)?
-            .apply_owner_transition(owner, transition)
+        self.change(|state| state.apply_owner_transition(owner, transition))
     }
 
     /// Resolve the project using the ordinary admission path authority.
@@ -221,6 +267,40 @@ impl StorageAllocationOperation {
         self.remove_owner(&Self::file_owner(path)?)
     }
 
+    /// Retire an exclusively owned scratch tree at its actual unlink boundary.
+    /// Inventory only its bounded names; never inspect payload bytes.
+    pub(crate) fn remove_owned_tree(&self, root: &Path) -> Result<(), GfError> {
+        let mut directories = vec![
+            graphforge_filesystem::StableDirectory::open(root)
+                .map_err(|error| GfError::Storage(error.to_string()))?,
+        ];
+        let mut files = Vec::new();
+        let mut remaining = 1_000_000_usize;
+        while let Some(directory) = directories.pop() {
+            let names = directory
+                .child_names_bounded(remaining)
+                .map_err(|error| GfError::Storage(error.to_string()))?;
+            remaining = remaining
+                .checked_sub(names.len())
+                .ok_or_else(|| GfError::Storage("allocation cleanup exceeds entry bound".into()))?;
+            for name in names {
+                if let Ok(child) = directory.open_child_directory(&name) {
+                    directories.push(child);
+                } else {
+                    directory
+                        .open_child_file(&name)
+                        .map_err(|error| GfError::Storage(error.to_string()))?;
+                    files.push(directory.path().join(name));
+                }
+            }
+        }
+        std::fs::remove_dir_all(root).map_err(|error| GfError::Storage(error.to_string()))?;
+        for path in files {
+            self.remove_file_at(&path)?;
+        }
+        Ok(())
+    }
+
     /// Record the allocated bytes of an open file before its installation.
     ///
     /// # Errors
@@ -248,11 +328,8 @@ impl StorageAllocationOperation {
             identity.volume_serial,
             &identity.file_id,
         );
-        self.state.lock().map_err(poisoned)?.replace_owner_in(
-            component,
-            owner,
-            &BTreeMap::from([(identity, usage.allocated_bytes)]),
-        )
+        let identities = BTreeMap::from([(identity, usage.allocated_bytes)]);
+        self.change(|state| state.replace_owner_in(component, owner, &identities))
     }
 
     /// Remove a writer's reference after successful unlink/replacement.
@@ -260,7 +337,7 @@ impl StorageAllocationOperation {
     /// # Errors
     /// Returns accounting errors without discarding other owners' aliases.
     pub fn remove_owner(&self, owner: &str) -> Result<(), GfError> {
-        self.state.lock().map_err(poisoned)?.remove_owner(owner)
+        self.change(|state| state.remove_owner(owner))
     }
 
     /// Return the composition of the high-water mark, which sums to the peak
@@ -395,6 +472,65 @@ mod tests {
                 .allocated_bytes,
             operation.totals().unwrap().0
         );
+    }
+
+    #[test]
+    fn mirror_only_live_conflict_preserves_every_continuation() {
+        let outer = StorageAllocationOperation::from_owners(&BTreeMap::from([(
+            "outer-live".into(),
+            BTreeMap::from([("shared".into(), 4)]),
+        )]))
+        .unwrap();
+        let local = StorageAllocationOperation::default().with_mirror(Some(&outer));
+        let before_local = serde_json::to_vec(&local.snapshot().unwrap()).unwrap();
+        let before_outer = serde_json::to_vec(&outer.snapshot().unwrap()).unwrap();
+        let error = local
+            .transition(
+                "new-owner",
+                &StorageAllocationTransition {
+                    installed: BTreeMap::from([("shared".into(), 10)]),
+                    removed: Default::default(),
+                },
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("active identity allocation changed")
+        );
+        assert_eq!(
+            serde_json::to_vec(&local.snapshot().unwrap()).unwrap(),
+            before_local
+        );
+        assert_eq!(
+            serde_json::to_vec(&outer.snapshot().unwrap()).unwrap(),
+            before_outer
+        );
+    }
+
+    #[test]
+    fn mirrored_operation_keeps_local_peak_and_retires_reused_identity() {
+        let outer = StorageAllocationOperation::from_owners(&BTreeMap::from([(
+            "prior".into(),
+            BTreeMap::from([("prior-identity".into(), 100)]),
+        )]))
+        .unwrap();
+        let local = StorageAllocationOperation::default().with_mirror(Some(&outer));
+        let install = |bytes| StorageAllocationTransition {
+            installed: BTreeMap::from([("reused".into(), bytes)]),
+            removed: Default::default(),
+        };
+        local.transition("stage", &install(4)).unwrap();
+        let before = local.totals().unwrap();
+        assert!(local.transition("alias", &install(10)).is_err());
+        assert_eq!(local.totals().unwrap(), before);
+        local.remove_owner("stage").unwrap();
+        local.transition("published", &install(10)).unwrap();
+        assert_eq!(local.totals().unwrap(), (10, 10));
+        assert_eq!(outer.totals().unwrap(), (110, 110));
+        local.remove_owner("published").unwrap();
+        assert_eq!(local.totals().unwrap(), (0, 10));
+        assert_eq!(outer.totals().unwrap(), (100, 110));
     }
 
     #[test]

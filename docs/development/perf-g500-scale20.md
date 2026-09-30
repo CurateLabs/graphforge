@@ -31,7 +31,7 @@ exec-kernel speedups onto this facade evidence.
 
 ## Commands
 
-SCALE-6 CI smoke (also runs under Bazel `//crates/graphforge-api:scale_g500_scale20`):
+SCALE-6 CI smoke:
 
 ```bash
 cargo test -p graphforge-api --test scale_g500_scale20

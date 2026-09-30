@@ -45,13 +45,11 @@ Use targeted checks while iterating; run the gates for the changed surface befor
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace -- -D warnings
-cargo test --workspace
-make pre-push-fast   # needs bazelisk on PATH; runs the Cargo/Bazel drift check
+make pre-push-fast   # Python/policy/inventory checks; not Rust fmt or clippy
 make pre-push
-make bazel-test      # optional, heavy: authoritative //:ci_rust_tests locally
 ```
 
-Bazel (`//:ci_rust_tests`) is the CI compile/test authority; see `docs/development/bazel.md`. After changing Rust, rebuild the native bindings before running Python or Node tests (commands in `docs/development/agent-environment.md`).
+Cargo with nextest is the CI compile/test authority (ADR 0048). The CI Gate Rust lane is the `rust-tests` job in `.github/workflows/test.yml`; `docs/development/agent-environment.md` gives its exact local commands. Adding a Rust test file needs no edit beyond Cargo. After changing Rust, rebuild the native bindings before running Python or Node tests (commands in the same doc).
 
 Run formatting after the final edit. Review intentional snapshot changes before accepting them. Keep native builds isolated with `CARGO_TARGET_DIR`; run at most two heavy builds concurrently and monitor disk.
 

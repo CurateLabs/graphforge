@@ -7,7 +7,6 @@ target
 **/.mypy_cache
 **/.pytest_cache
 **/.ruff_cache
-bazel-*
 build
 dist
 node_modules

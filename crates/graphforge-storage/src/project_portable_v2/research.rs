@@ -85,9 +85,18 @@ pub(crate) fn install(
     target: &Path,
     objects: &BTreeMap<String, u64>,
 ) -> Result<(), PortableV2Error> {
+    let lease = crate::begin_graph_object_publication(target).map_err(|_| invalid())?;
+    install_with_lease(stage, &lease, objects)
+}
+
+pub(crate) fn install_with_lease(
+    stage: &Path,
+    lease: &crate::GraphObjectPublicationLease,
+    objects: &BTreeMap<String, u64>,
+) -> Result<(), PortableV2Error> {
     for (digest, length) in objects {
-        crate::graph_object_store::install_graph_object_file(
-            target,
+        crate::graph_object_store::install_graph_object_file_with_lease(
+            lease,
             &stage.join(format!("{PREFIX}{digest}")),
             digest,
             *length,
