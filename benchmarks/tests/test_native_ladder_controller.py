@@ -16,7 +16,17 @@ from graphforge_bench.progressive_host_run import (
 )
 
 from tests.host_run_fixture import ROOT, executables, write_host_bundle
-from tests.test_progressive_host_run import COMMIT, WORK_PARENT, sha256
+
+# Share the scratch root's module fixtures: they create WORK_PARENT and fail if a
+# test leaves anything at its top level. Without them this module depended on
+# test_progressive_host_run running first (#1679).
+from tests.test_progressive_host_run import (  # noqa: F401
+    COMMIT,
+    WORK_PARENT,
+    setUpModule,
+    sha256,
+    tearDownModule,
+)
 
 
 class NativeLadderControllerTests(unittest.TestCase):
