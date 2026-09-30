@@ -911,9 +911,9 @@ mod tests {
             .unwrap();
 
         let _capture = lifecycle_io::CaptureScope::install();
-        let before = lifecycle_io::snapshot();
+        let before = lifecycle_io::snapshot().unwrap();
         graph.index("adjacency").unwrap();
-        let region = lifecycle_io::snapshot().since(&before).unwrap();
+        let region = lifecycle_io::snapshot().unwrap().since(&before).unwrap();
 
         // #1449: `read_path_scan` is a query's own work. The explicit build
         // publishes the index like construction does, so it shares that row.

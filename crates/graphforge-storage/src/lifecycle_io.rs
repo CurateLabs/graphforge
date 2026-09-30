@@ -491,8 +491,11 @@ pub struct ReadPathRead<R> {
 
 impl<R> ReadPathRead<R> {
     /// Count reads issued against `inner`.
-    pub(crate) const fn new(inner: R) -> Self {
-        Self { inner }
+    pub(crate) fn new(inner: R) -> Self {
+        Self {
+            inner,
+            capture: CaptureContext::current(),
+        }
     }
 }
 
@@ -553,6 +556,12 @@ mod tests {
         record_fsync(StorageIoPhase::FsyncSynchronization, 1);
         reset();
         crate::io_stats::reset();
+        // Spill readers also retain a disabled context when opened without
+        // collection, even though their reads pass through the adapter.
+        let mut reader = ReadPathRead::new(std::io::Cursor::new([1_u8; 8]));
+        let mut bytes = [0_u8; 8];
+        std::io::Read::read_exact(&mut reader, &mut bytes).unwrap();
+        assert_eq!(bytes, [1_u8; 8]);
         assert!(snapshot().is_none());
         assert!(crate::io_stats::snapshot().is_none());
         assert!(!is_active());

@@ -625,9 +625,12 @@ fn a_rebuild_attributes_every_file_it_publishes_and_every_barrier() {
     let observation = graphforge_filesystem::observation::Observation::start();
     let (observed_before, _) = graphforge_filesystem::observation::fsync_totals();
     let _capture = crate::lifecycle_io::CaptureScope::install();
-    let before = crate::lifecycle_io::snapshot();
+    let before = crate::lifecycle_io::snapshot().unwrap();
     build_adjacency_index(dir.path(), BUILD_TS).unwrap();
-    let region = crate::lifecycle_io::snapshot().since(&before).unwrap();
+    let region = crate::lifecycle_io::snapshot()
+        .unwrap()
+        .since(&before)
+        .unwrap();
     let (observed_after, _) = graphforge_filesystem::observation::fsync_totals();
     drop(observation);
     region.validate_for_qualification().unwrap();
@@ -685,14 +688,17 @@ fn spill_merge_read_calls_count_buffer_refills_not_records() {
     let buffer = (MERGE_READER_BUFFER_BYTES / runs.len()) as u64;
 
     let _capture = crate::lifecycle_io::CaptureScope::install();
-    let before = crate::lifecycle_io::snapshot();
+    let before = crate::lifecycle_io::snapshot().unwrap();
     let mut merged = 0_u64;
     merge_keyed_runs(&runs, &mut || Ok(()), &mut |_| {
         merged += 1;
         Ok(())
     })
     .unwrap();
-    let region = crate::lifecycle_io::snapshot().since(&before).unwrap();
+    let region = crate::lifecycle_io::snapshot()
+        .unwrap()
+        .since(&before)
+        .unwrap();
     let scan = &region.phases[&crate::StorageIoPhase::ReadPathScan];
 
     assert_eq!(merged, records);
@@ -714,7 +720,7 @@ fn a_real_rebuilds_spill_reads_cost_one_call_per_run_it_wrote() {
     let measure = |options: &AdjacencyBuildOptions| {
         let stage = TempDir::new().unwrap();
         let _capture = crate::lifecycle_io::CaptureScope::install();
-        let before = crate::lifecycle_io::snapshot();
+        let before = crate::lifecycle_io::snapshot().unwrap();
         let (_, metrics) = build_adjacency_index_into_with_metrics(
             dir.path(),
             stage.path(),
@@ -723,7 +729,10 @@ fn a_real_rebuilds_spill_reads_cost_one_call_per_run_it_wrote() {
             || Ok(()),
         )
         .unwrap();
-        let region = crate::lifecycle_io::snapshot().since(&before).unwrap();
+        let region = crate::lifecycle_io::snapshot()
+            .unwrap()
+            .since(&before)
+            .unwrap();
         (
             region.phases[&crate::StorageIoPhase::ReadPathScan].clone(),
             metrics,
