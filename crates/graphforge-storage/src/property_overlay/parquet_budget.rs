@@ -212,7 +212,7 @@ impl TargetReadAdmission {
 }
 
 pub(super) fn charge_target_batch(
-    metrics: &mut PropertyOverlayMetrics,
+    metrics: Option<&mut PropertyOverlayMetrics>,
     batch: &RecordBatch,
     admission: TargetReadAdmission,
     retained_bytes: u64,
@@ -226,10 +226,12 @@ pub(super) fn charge_target_batch(
         arrow_bytes.saturating_add(decoded_reservation),
         retained_bytes,
     )?;
-    metrics.emitted_batches = metrics.emitted_batches.saturating_add(1);
-    metrics.decoder_peak_rows = metrics.decoder_peak_rows.max(batch.num_rows() as u64);
-    metrics.decoder_peak_bytes = metrics.decoder_peak_bytes.max(arrow_bytes);
-    metrics.peak_buffered_bytes = metrics.peak_buffered_bytes.max(bytes);
+    if let Some(metrics) = metrics {
+        metrics.emitted_batches = metrics.emitted_batches.saturating_add(1);
+        metrics.decoder_peak_rows = metrics.decoder_peak_rows.max(batch.num_rows() as u64);
+        metrics.decoder_peak_bytes = metrics.decoder_peak_bytes.max(arrow_bytes);
+        metrics.peak_buffered_bytes = metrics.peak_buffered_bytes.max(bytes);
+    }
     Ok(())
 }
 
@@ -658,6 +660,37 @@ mod tests;
 mod diagnostic_tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn unobserved_targeted_batches_still_enforce_decoder_admission() {
+        let batch = RecordBatch::try_from_iter([(
+            "id",
+            Arc::new(arrow::array::UInt64Array::from(vec![1_u64; 4])) as arrow::array::ArrayRef,
+        )])
+        .unwrap();
+        let admission = TargetReadAdmission {
+            limits: PropertyOverlayLimits {
+                max_buffered_bytes: 64,
+                max_row_bytes: 64,
+                ..PropertyOverlayLimits::default()
+            },
+            page_reservation_bytes: 0,
+            replay: false,
+        };
+        for collect in [false, true] {
+            let mut metrics = collect.then(PropertyOverlayMetrics::default);
+            let error = charge_target_batch(metrics.as_mut(), &batch, admission, 0).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("decode exceeds live-byte budget"),
+                "{error}"
+            );
+            if let Some(metrics) = metrics {
+                assert_eq!(metrics, PropertyOverlayMetrics::default());
+            }
+        }
+    }
 
     #[test]
     fn unobserved_property_reads_keep_data_and_allocate_no_read_counter() {

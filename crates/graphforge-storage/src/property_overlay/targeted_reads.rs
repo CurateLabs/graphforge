@@ -320,42 +320,44 @@ pub(super) fn read_property_targets(
     let mut unresolved = targets.clone();
     let mut found = BTreeMap::new();
     let mut retained_bytes = 0;
-    let mut metrics = PropertyOverlayMetrics::default();
+    let mut metrics = collect.then(PropertyOverlayMetrics::default);
     let Some(fragments) = inventory.routes.get(&(kind, route.to_owned())) else {
         return Ok(TargetPropertyRows {
             rows: found,
             unresolved,
-            metrics,
+            metrics: metrics.unwrap_or_default(),
         });
     };
     let targeted_scratch = inventory.create_snapshot_scratch()?;
     for fragment in fragments.iter().rev() {
         let counts = ReadCounts::new(collect);
         let opened = inventory.open_fragment(fragment, targeted_scratch.path())?;
-        metrics.authentication_bytes = metrics
-            .authentication_bytes
-            .saturating_add(opened.authentication_bytes);
-        metrics.authentication_block_equivalents = metrics
-            .authentication_block_equivalents
-            .saturating_add(opened.authentication_block_equivalents);
-        metrics.authentication_read_calls = metrics
-            .authentication_read_calls
-            .saturating_add(opened.authentication_read_calls);
-        metrics.property_authentication_bytes = metrics
-            .property_authentication_bytes
-            .saturating_add(opened.authentication_bytes);
-        metrics.authenticated_snapshot_bytes = metrics
-            .authenticated_snapshot_bytes
-            .saturating_add(opened.authentication_bytes);
-        metrics.authenticated_snapshot_peak_bytes = metrics
-            .authenticated_snapshot_peak_bytes
-            .max(fragment.entry.byte_length);
-        metrics.property_authentication_block_equivalents = metrics
-            .property_authentication_block_equivalents
-            .saturating_add(opened.authentication_block_equivalents);
-        metrics.property_authentication_read_calls = metrics
-            .property_authentication_read_calls
-            .saturating_add(opened.authentication_read_calls);
+        if let Some(metrics) = &mut metrics {
+            metrics.authentication_bytes = metrics
+                .authentication_bytes
+                .saturating_add(opened.authentication_bytes);
+            metrics.authentication_block_equivalents = metrics
+                .authentication_block_equivalents
+                .saturating_add(opened.authentication_block_equivalents);
+            metrics.authentication_read_calls = metrics
+                .authentication_read_calls
+                .saturating_add(opened.authentication_read_calls);
+            metrics.property_authentication_bytes = metrics
+                .property_authentication_bytes
+                .saturating_add(opened.authentication_bytes);
+            metrics.authenticated_snapshot_bytes = metrics
+                .authenticated_snapshot_bytes
+                .saturating_add(opened.authentication_bytes);
+            metrics.authenticated_snapshot_peak_bytes = metrics
+                .authenticated_snapshot_peak_bytes
+                .max(fragment.entry.byte_length);
+            metrics.property_authentication_block_equivalents = metrics
+                .property_authentication_block_equivalents
+                .saturating_add(opened.authentication_block_equivalents);
+            metrics.property_authentication_read_calls = metrics
+                .property_authentication_read_calls
+                .saturating_add(opened.authentication_read_calls);
+        }
         if let Some(bytes) = replay_budget {
             admit_target_footer(&opened.file, fragment.entry.byte_length, bytes)?;
         }
@@ -399,29 +401,32 @@ pub(super) fn read_property_targets(
             replay: replay_budget.is_some(),
         };
         admission.check(0, retained_bytes)?;
-        metrics.decoder_page_reservation_bytes = metrics
-            .decoder_page_reservation_bytes
-            .max(page_reservation_bytes);
-        metrics.row_groups_considered = metrics
-            .row_groups_considered
-            .saturating_add(u64::try_from(builder.metadata().num_row_groups()).unwrap_or(u64::MAX));
+        if let Some(metrics) = &mut metrics {
+            metrics.decoder_page_reservation_bytes = metrics
+                .decoder_page_reservation_bytes
+                .max(page_reservation_bytes);
+            metrics.row_groups_considered = metrics.row_groups_considered.saturating_add(
+                u64::try_from(builder.metadata().num_row_groups()).unwrap_or(u64::MAX),
+            );
+        }
         let row_groups = select_target_row_groups(
             fragment,
             &opened,
             kind,
             &unresolved,
             &counts,
-            &mut metrics,
+            metrics.as_mut(),
             admission,
             targeted_batch_rows,
             retained_bytes,
         )?;
-        let validation_bytes = counts.values().0;
-        let validation_read_calls = counts.values().1;
+        let validation = metrics.as_ref().map(|_| counts.values());
         if !row_groups.is_empty() {
-            metrics.row_groups_selected = metrics
-                .row_groups_selected
-                .saturating_add(u64::try_from(row_groups.len()).unwrap_or(u64::MAX));
+            if let Some(metrics) = &mut metrics {
+                metrics.row_groups_selected = metrics
+                    .row_groups_selected
+                    .saturating_add(u64::try_from(row_groups.len()).unwrap_or(u64::MAX));
+            }
             decode_target_row_groups(
                 TargetDecodeOptions {
                     fragment,
@@ -435,43 +440,50 @@ pub(super) fn read_property_targets(
                 &mut unresolved,
                 &mut found,
                 &mut retained_bytes,
-                &mut metrics,
+                metrics.as_mut(),
             )?;
         }
-        let total_bytes = counts.values().0;
-        let total_read_calls = counts.values().1;
-        metrics.fragments_considered = metrics.fragments_considered.saturating_add(1);
-        metrics.physical_bytes = metrics.physical_bytes.saturating_add(total_bytes);
-        metrics.validation_bytes = metrics.validation_bytes.saturating_add(validation_bytes);
-        metrics.selected_value_bytes = metrics
-            .selected_value_bytes
-            .saturating_add(total_bytes.saturating_sub(validation_bytes));
-        metrics.read_calls = metrics.read_calls.saturating_add(total_read_calls);
-        metrics.validation_read_calls = metrics
-            .validation_read_calls
-            .saturating_add(validation_read_calls);
-        metrics.selected_value_read_calls = metrics
-            .selected_value_read_calls
-            .saturating_add(total_read_calls.saturating_sub(validation_read_calls));
-        metrics.physical_blocks = metrics
-            .physical_blocks
-            .saturating_add(total_read_calls.saturating_add(opened.authentication_read_calls));
-        metrics.range_seeks = metrics.range_seeks.saturating_add(counts.values().2);
+        if let Some(metrics) = &mut metrics {
+            let (total_bytes, total_read_calls, range_seeks) = counts.values();
+            let (validation_bytes, validation_read_calls, _) =
+                validation.expect("requested target read statistics");
+            metrics.fragments_considered = metrics.fragments_considered.saturating_add(1);
+            metrics.physical_bytes = metrics.physical_bytes.saturating_add(total_bytes);
+            metrics.validation_bytes = metrics.validation_bytes.saturating_add(validation_bytes);
+            metrics.selected_value_bytes = metrics
+                .selected_value_bytes
+                .saturating_add(total_bytes.saturating_sub(validation_bytes));
+            metrics.read_calls = metrics.read_calls.saturating_add(total_read_calls);
+            metrics.validation_read_calls = metrics
+                .validation_read_calls
+                .saturating_add(validation_read_calls);
+            metrics.selected_value_read_calls = metrics
+                .selected_value_read_calls
+                .saturating_add(total_read_calls.saturating_sub(validation_read_calls));
+            metrics.physical_blocks = metrics
+                .physical_blocks
+                .saturating_add(total_read_calls.saturating_add(opened.authentication_read_calls));
+            metrics.range_seeks = metrics.range_seeks.saturating_add(range_seeks);
+        }
     }
-    metrics.physical_bytes = metrics
-        .physical_bytes
-        .saturating_add(metrics.authentication_bytes);
+    if let Some(metrics) = &mut metrics {
+        metrics.physical_bytes = metrics
+            .physical_bytes
+            .saturating_add(metrics.authentication_bytes);
+    }
     #[cfg(test)]
     assert_eq!(
         retained_bytes,
         found.values().map(snapshot_charge).sum::<u64>()
     );
-    metrics.logical_rows = u64::try_from(found.len()).unwrap_or(u64::MAX);
-    metrics.peak_buffered_rows = metrics.decoder_peak_rows;
+    if let Some(metrics) = &mut metrics {
+        metrics.logical_rows = u64::try_from(found.len()).unwrap_or(u64::MAX);
+        metrics.peak_buffered_rows = metrics.decoder_peak_rows;
+    }
     Ok(TargetPropertyRows {
         rows: found,
         unresolved,
-        metrics,
+        metrics: metrics.unwrap_or_default(),
     })
 }
 
@@ -485,7 +497,7 @@ fn select_target_row_groups(
     kind: PropertyRouteKind,
     unresolved: &std::collections::BTreeSet<[u8; 16]>,
     counts: &ReadCounts,
-    metrics: &mut PropertyOverlayMetrics,
+    mut metrics: Option<&mut PropertyOverlayMetrics>,
     admission: TargetReadAdmission,
     targeted_batch_rows: usize,
     retained_bytes: u64,
@@ -502,7 +514,7 @@ fn select_target_row_groups(
         let mut selected = false;
         for batch in validation {
             let batch = batch.map_err(authenticated_arrow_error)?;
-            charge_target_batch(metrics, &batch, admission, retained_bytes)?;
+            charge_target_batch(metrics.as_deref_mut(), &batch, admission, retained_bytes)?;
             let uuids = batch
                 .column_by_name(kind.uuid_field())
                 .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
@@ -545,9 +557,11 @@ fn select_target_row_groups(
                     return Err(corrupt("property tombstone carries values"));
                 }
             }
-            metrics.physical_rows = metrics
-                .physical_rows
-                .saturating_add(u64::try_from(batch.num_rows()).unwrap_or(u64::MAX));
+            if let Some(metrics) = &mut metrics {
+                metrics.physical_rows = metrics
+                    .physical_rows
+                    .saturating_add(u64::try_from(batch.num_rows()).unwrap_or(u64::MAX));
+            }
         }
         if selected {
             selected_groups.push(index);
@@ -571,7 +585,7 @@ fn decode_target_row_groups(
     unresolved: &mut std::collections::BTreeSet<[u8; 16]>,
     found: &mut BTreeMap<[u8; 16], PropertySnapshotRow>,
     retained_bytes: &mut u64,
-    metrics: &mut PropertyOverlayMetrics,
+    mut metrics: Option<&mut PropertyOverlayMetrics>,
 ) -> Result<(), GfError> {
     let reader =
         open_counted_retained_property_builder(options.fragment, options.opened, counts.clone())?
@@ -581,7 +595,12 @@ fn decode_target_row_groups(
             .map_err(parquet_error)?;
     for batch in reader {
         let batch = batch.map_err(authenticated_arrow_error)?;
-        charge_target_batch(metrics, &batch, options.admission, *retained_bytes)?;
+        charge_target_batch(
+            metrics.as_deref_mut(),
+            &batch,
+            options.admission,
+            *retained_bytes,
+        )?;
         let decoded = decode_snapshot_batch(&batch, options.kind.uuid_field())?;
         if decoded
             .iter()
@@ -591,27 +610,27 @@ fn decode_target_row_groups(
                 .admission
                 .error("property snapshot row exceeds byte limit"));
         }
+        let decoded_bytes = decoded.iter().map(snapshot_charge).sum::<u64>();
         options.admission.check(
             batch.get_array_memory_size() as u64,
-            decoded
-                .iter()
-                .map(snapshot_charge)
-                .sum::<u64>()
-                .checked_add(*retained_bytes)
-                .ok_or_else(|| {
-                    options
-                        .admission
-                        .error("property target memory charge overflow")
-                })?,
+            decoded_bytes.checked_add(*retained_bytes).ok_or_else(|| {
+                options
+                    .admission
+                    .error("property target memory charge overflow")
+            })?,
         )?;
-        metrics.decoder_peak_bytes = metrics
-            .decoder_peak_bytes
-            .max(decoded.iter().map(snapshot_charge).sum::<u64>());
+        if let Some(metrics) = &mut metrics {
+            metrics.decoder_peak_bytes = metrics.decoder_peak_bytes.max(decoded_bytes);
+        }
         for row in decoded {
-            metrics.physical_rows = metrics.physical_rows.saturating_add(1);
+            if let Some(metrics) = &mut metrics {
+                metrics.physical_rows = metrics.physical_rows.saturating_add(1);
+            }
             if unresolved.remove(&row.uuid) {
                 if row.tombstone {
-                    metrics.tombstones = metrics.tombstones.saturating_add(1);
+                    if let Some(metrics) = &mut metrics {
+                        metrics.tombstones = metrics.tombstones.saturating_add(1);
+                    }
                 } else {
                     // Unresolved UUIDs are removed once, so each retained live
                     // snapshot contributes exactly once across all fragments.
