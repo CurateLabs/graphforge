@@ -192,35 +192,211 @@ def build_settings(receipt):
     return settings
 
 
-def ambient_resources():
-    cgroup = next(
-        (
-            line.split("::", 1)[1]
-            for line in Path("/proc/self/cgroup").read_text().splitlines()
-            if line.startswith("0::")
-        ),
-        "",
+CGROUP_FIELDS = (
+    "cpu.max",
+    "cpu.max.burst",
+    "cpu.weight",
+    "cpuset.cpus.effective",
+    "cpuset.mems.effective",
+    "memory.max",
+    "memory.high",
+    "memory.low",
+    "memory.min",
+    "memory.swap.max",
+    "memory.swap.high",
+    "memory.oom.group",
+    "io.max",
+    "io.weight",
+    "cgroup.controllers",
+    "cgroup.subtree_control",
+)
+
+
+def cpu_set(value):
+    result = set()
+    for component in value.split(","):
+        if not component:
+            continue
+        bounds = component.split("-")
+        assert len(bounds) in (1, 2)
+        first, last = int(bounds[0]), int(bounds[-1])
+        assert 0 <= first <= last <= 1048576, "invalid CPU-set range"
+        result.update(range(first, last + 1))
+    return result
+
+
+def cgroup_directory_state(path):
+    try:
+        return path.is_dir(), None
+    except OSError as error:
+        return False, type(error).__name__
+
+
+def read_cgroup_field(path, field):
+    try:
+        return (path / field).read_text().strip(), None
+    except FileNotFoundError:
+        return None, "not_exposed"
+    except OSError as error:
+        return None, type(error).__name__
+
+
+def parse_cgroup_constraints(fields):
+    try:
+        quota = None
+        if fields["cpu.max"] is not None:
+            amount, period = fields["cpu.max"].split()
+            assert int(period) > 0
+            if amount != "max":
+                assert int(amount) > 0
+                quota = int(amount) / int(period)
+        cpus = (
+            cpu_set(fields["cpuset.cpus.effective"])
+            if fields["cpuset.cpus.effective"] is not None
+            else None
+        )
+        limits = {}
+        for field in ("memory.max", "memory.high", "memory.swap.max"):
+            value = fields[field]
+            limits[field] = int(value) if value not in (None, "max") else None
+            assert limits[field] is None or limits[field] >= 0
+        return {"quota": quota, "cpus": cpus, **limits}, None
+    except (AssertionError, ValueError) as error:
+        return None, str(error)
+
+
+def inherited_cgroup_policy(mount, leaf, ancestor_visibility_complete=True):
+    """Record every visible ancestor; derived limits are observed upper bounds."""
+    mount, leaf = Path(mount).resolve(), Path(leaf).resolve()
+    assert leaf.is_relative_to(mount), "cgroup membership escapes mount"
+    levels = []
+    unavailable = []
+    errors = []
+    paths = [leaf, *leaf.parents]
+    for path in paths:
+        if not path.is_relative_to(mount):
+            break
+        name = str(path.relative_to(mount))
+        fields = {}
+        accessible, access_error = cgroup_directory_state(path)
+        if not accessible:
+            errors.append({"ancestor": name, "reason": access_error or "ancestor_unavailable"})
+        for field in CGROUP_FIELDS:
+            value, reason = read_cgroup_field(path, field)
+            fields[field] = value
+            if reason is not None:
+                entry = {"ancestor": name, "field": field, "reason": reason}
+                unavailable.append(entry)
+                if reason != "not_exposed":
+                    errors.append(entry)
+        levels.append({"ancestor": name, "accessible": accessible, "fields": fields})
+    quotas, cpus, memories, highs, swaps = [], [], [], [], []
+    for level in levels:
+        constraints, error = parse_cgroup_constraints(level["fields"])
+        if error is not None:
+            errors.append(
+                {"ancestor": level["ancestor"], "reason": "invalid_control", "error": error}
+            )
+            continue
+        if constraints["quota"] is not None:
+            quotas.append(constraints["quota"])
+        if constraints["cpus"] is not None:
+            cpus.append(constraints["cpus"])
+        if constraints["memory.max"] is not None:
+            memories.append(constraints["memory.max"])
+        if constraints["memory.high"] is not None:
+            highs.append(constraints["memory.high"])
+        if constraints["memory.swap.max"] is not None:
+            swaps.append(constraints["memory.swap.max"])
+    allowed = sorted(set.intersection(*cpus)) if cpus else None
+    quota = min(quotas) if quotas else None
+    cpu_bounds = ([quota] if quota is not None else []) + (
+        [len(allowed)] if allowed is not None else []
     )
-    root = Path("/sys/fs/cgroup") / cgroup.lstrip("/")
-    names = (
-        "cpu.max",
-        "cpu.weight",
-        "cpuset.cpus.effective",
-        "memory.max",
-        "memory.swap.max",
-        "io.max",
-    )
-    limits = {
-        name: (root / name).read_text().strip() if (root / name).is_file() else None
-        for name in names
+    return {
+        "mount_point": str(mount),
+        "resolved_leaf": str(leaf),
+        "ancestor_visibility_complete": ancestor_visibility_complete,
+        "ancestors": levels,
+        "unavailable_fields": unavailable,
+        "observation_errors": errors,
+        "effective_observed_constraints": {
+            "cpu_quota_cores_upper_bound": quota,
+            "cpuset_cpus_upper_bound": allowed,
+            "cpu_cores_upper_bound": min(cpu_bounds) if cpu_bounds else None,
+            "memory_bytes_upper_bound": min(memories) if memories else None,
+            "swap_bytes_upper_bound": min(swaps) if swaps else None,
+            "memory_high_throttle_bytes": min(highs) if highs else None,
+            "derivation": (
+                "minimum observed ancestor quota/memory and intersection of observed CPU sets"
+            ),
+            "complete": ancestor_visibility_complete and not unavailable and not errors,
+            "missing_limit_meaning": (
+                "no finite observed constraint; never an assertion of unlimited resources"
+            ),
+        },
     }
+
+
+def decode_mount_path(value):
+    return (
+        value.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+    )
+
+
+def cgroup_resources(membership, mountinfo):
+    """Resolve cgroup2 membership against mountinfo rather than guessing limits."""
+    paths = [line.split("::", 1)[1] for line in membership.splitlines() if line.startswith("0::")]
+    mounts = []
+    for line in mountinfo.splitlines():
+        before, separator, after = line.partition(" - ")
+        if separator and after.split()[0] == "cgroup2":
+            columns = before.split()
+            mounts.append(
+                (Path(decode_mount_path(columns[3])), Path(decode_mount_path(columns[4])))
+            )
+    if len(paths) != 1:
+        return {
+            "membership": paths,
+            "observation_errors": ["cgroup2 membership unavailable/ambiguous"],
+        }
+    membership_path = Path(paths[0])
+    candidates = [(root, mount) for root, mount in mounts if membership_path.is_relative_to(root)]
+    if len(candidates) != 1:
+        return {
+            "membership": paths[0],
+            "observation_errors": ["cgroup2 mount unavailable/ambiguous"],
+        }
+    root, mount = candidates[0]
+    leaf = mount / membership_path.relative_to(root)
+    policy = inherited_cgroup_policy(mount, leaf, ancestor_visibility_complete=str(root) == "/")
+    policy.update(membership=paths[0], mount_root=str(root))
+    if root != Path("/"):
+        policy["observation_errors"].append("ancestors above cgroup mount root are not visible")
+    return policy
+
+
+def validate_resource_policy(resources):
+    assert not resources["cgroup_policy"]["observation_errors"], (
+        "unqualified cgroup resource policy",
+        resources["cgroup_policy"]["observation_errors"],
+    )
+
+
+def ambient_resources():
+    policy = cgroup_resources(
+        Path("/proc/self/cgroup").read_text(), Path("/proc/self/mountinfo").read_text()
+    )
     return {
         "environment": {key: os.environ.get(key) for key in RESOURCE_ENV},
         "temporary_directory_policy": "TMPDIR overridden with lane_root/tmp",
         "caller_affinity": sorted(os.sched_getaffinity(0)),
         "scheduler": os.sched_getscheduler(0),
         "nice": os.getpriority(os.PRIO_PROCESS, 0),
-        "cgroup_limits": limits,
+        "cgroup_policy": policy,
         "rlimits": {
             name: list(resource.getrlimit(getattr(resource, name)))
             for name in (
@@ -320,11 +496,18 @@ def validate_qualification(root, identity):
         "runexec.txt",
         "runexec.stderr",
         "workload.log",
+        "resource-policy-after.json",
         *(f"run/{name}" for name in RECEIPTS),
     }
     assert set(qualification["artifact_sha256"]) == required, "incomplete qualified artifact set"
     for name, expected in qualification["artifact_sha256"].items():
         assert digest(root / name) == expected, ("qualified artifact changed", name)
+    validate_resource_policy(identity["ambient_resources"])
+    after_resources = read_json(root / "resource-policy-after.json")
+    validate_resource_policy(after_resources)
+    assert after_resources == identity["ambient_resources"], (
+        "resource policy changed during measurement"
+    )
     cpu = read_json(root / "quiet-cpu.json")
     assert type(cpu["ticks_per_second"]) is int and cpu["ticks_per_second"] > 0
     assert cpu == quiet_metrics(read_json(root / "quiet-before.json"), cpu["ticks_per_second"])

@@ -328,7 +328,17 @@ names every five seconds, and refuses observed compiler overlap. Sampling does
 not prove absence of a process that starts and finishes between samples.
 Qualification binds the five command receipts, quiet/during observations,
 build/input identities and workload log by SHA-256. The comparator requires
-both completed, qualified lanes and matching ambient resource settings. It
+both completed, qualified lanes and matching ambient resource settings.
+Resource provenance resolves the current cgroup2 membership against mountinfo
+and records every visible leaf-to-root ancestor: CPU quotas/weights/bursts,
+CPU/NUMA sets, memory limits/protection/throttling/swap, I/O limits/weights and
+controller exposure. Each unavailable field retains its reason. Derived CPU
+quota/set and memory bounds use the minimum/intersection of observed ancestor
+constraints; a missing finite limit remains unavailable, never invented
+unlimited. Completeness is explicit. Unreadable, malformed, unmapped or hidden
+ancestor policy is refused before cache reset. The saved
+`resource-policy-after.json` must equal the initial policy, and both snapshots
+are bound into qualification and revalidated by the comparator. It
 reparses BenchExec's workload `returnvalue`, signal and termination fields:
 the `runexec` process's successful exit alone cannot qualify a failed ingest.
 Optimized Python (`-O` or `PYTHONOPTIMIZE`) is refused at shared-module import
@@ -376,10 +386,10 @@ Method SHA-256 pins:
 | Method | SHA-256 |
 | --- | --- |
 | `driver.sh` | `a011e6b682c49a59d08ef919cca6997971f3cbb0d52ff27fa0c2dd0e4aa8a498` |
-| `measure-lane.py` | `ec96354470b6d3b96d06717f4d3fae8c7cf4cb44ce33a8edd35d3ad7c0e2693d` |
-| `measurement_contract.py` | `4fe3c7df6004efe47df055f4580209dde0cf6e9868ed9cde77886fd13c1bdef1` |
+| `measure-lane.py` | `a6eceaaccbeccf1b70d453bd40c26c2206e6ce2114d5e2f6d76e24b50acf8af7` |
+| `measurement_contract.py` | `87d1861b62bb8313037338027c3e78c50b2fea00dc11913b6c60b002240be87f` |
 | `compare-pair.py` | `e948cd34b6b3a4b16778f1afc3644f22806c1fd5e6676c47f8cdf70c276079a3` |
-| `test-measurement-method.py` | `9e281f483f8f1d7f37facc85225acfb96ce52a7f150eb4ad859d20a2cdd38a45` |
+| `test-measurement-method.py` | `25d643c77ae7fa70310c711b5ae2b36b564f6164f50d4b6e0128cdba7f45b13d` |
 | `verify-reopen.py` | `6cb6da70c9a0d7ee2d0f1d2debb3c39838daaa44c35a3d04b3e5b4caf937e3a5` |
 | `test-reopen-method.py` | `ce22331249b55d5bb56f907f727c8ff98892b2c4aa0ee44cdfcaf1833dfb7d1e` |
 

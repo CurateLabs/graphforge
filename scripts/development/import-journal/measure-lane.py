@@ -22,6 +22,7 @@ from measurement_contract import (
     require_external_output,
     runexec_result,
     successful_workload,
+    validate_resource_policy,
     write_json,
 )
 
@@ -149,6 +150,7 @@ def run():
         "build_provenance_sha256": digest(BASE / "build-provenance.json"),
         "ambient_resources": ambient_resources(),
     }
+    validate_resource_policy(identity["ambient_resources"])
     qualification.update(
         {key: identity[key] for key in ("source_sha", "binary_sha256", "method_sha256")}
     )
@@ -230,6 +232,12 @@ def run():
         ).strip()
     )
     subprocess.run(["git", "diff", "--quiet", "HEAD"], cwd=args.worktree, check=True)
+    after_resources = ambient_resources()
+    write_json(BASE / "resource-policy-after.json", after_resources)
+    validate_resource_policy(after_resources)
+    assert after_resources == identity["ambient_resources"], (
+        "resource policy changed during measurement"
+    )
     assert digest(args.binary) == binary_sha, "binary changed during measurement"
     assert method_sha == {name: digest(SCRIPT_ROOT / name) for name in method_sha}, (
         "method changed during measurement"
@@ -245,6 +253,7 @@ def run():
         "runexec.txt",
         "runexec.stderr",
         "workload.log",
+        "resource-policy-after.json",
         *(f"run/{name}" for name in RECEIPTS),
     )
     qualification["artifact_sha256"] = {name: digest(BASE / name) for name in artifacts}

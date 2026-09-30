@@ -14,11 +14,14 @@ from unittest.mock import patch
 from measurement_contract import (
     BUILD_ENV,
     RECEIPTS,
+    cgroup_resources,
     digest,
+    inherited_cgroup_policy,
     read_json,
     require_external_output,
     runexec_result,
     successful_workload,
+    validate_resource_policy,
     write_json,
 )
 
@@ -391,6 +394,148 @@ with tempfile.TemporaryDirectory(prefix="gf1624-method-fixtures-") as tmp:
     with patch.dict(os.environ, {"RAYON_NUM_THREADS": "123"}):
         lane(7, "candidate")
     refused(7)
+    # Inherited resource policy is part of matched provenance, including a
+    # parent cap when the leaf exposes no quota/memory files.
+    cgroot = container / "cgroup-mount"
+    parent = cgroot / "user"
+    leaf = parent / "app"
+    leaf.mkdir(parents=True)
+    for directory, values in (
+        (
+            cgroot,
+            {
+                "cpu.max": "max 100000",
+                "cpuset.cpus.effective": "0-7",
+                "memory.max": "max",
+                "io.max": "8:0 rbps=4096 wbps=max",
+            },
+        ),
+        (
+            parent,
+            {
+                "cpu.max": "200000 100000",
+                "cpuset.cpus.effective": "0-3",
+                "memory.max": "1073741824",
+                "memory.swap.max": "536870912",
+                "io.max": "8:0 rbps=2048 wbps=max",
+            },
+        ),
+    ):
+        for name, value in values.items():
+            (directory / name).write_text(value)
+    inherited = inherited_cgroup_policy(cgroot, leaf)
+    assert [row["ancestor"] for row in inherited["ancestors"]] == ["user/app", "user", "."]
+    constraints = inherited["effective_observed_constraints"]
+    assert constraints["cpu_quota_cores_upper_bound"] == 2
+    assert constraints["cpuset_cpus_upper_bound"] == [0, 1, 2, 3]
+    assert constraints["cpu_cores_upper_bound"] == 2
+    assert constraints["memory_bytes_upper_bound"] == 1073741824
+    assert constraints["swap_bytes_upper_bound"] == 536870912
+    assert constraints["complete"] is False
+    assert {"ancestor": "user/app", "field": "cpu.max", "reason": "not_exposed"} in inherited[
+        "unavailable_fields"
+    ]
+    assert inherited["ancestors"][1]["fields"]["io.max"] == "8:0 rbps=2048 wbps=max"
+    validate_resource_policy({"cgroup_policy": inherited})
+    (leaf / "cpu.max").write_text("100000 100000")
+    (leaf / "cpuset.cpus.effective").write_text("2-3")
+    (leaf / "memory.max").write_text("536870912")
+    narrower = inherited_cgroup_policy(cgroot, leaf)
+    constraints = narrower["effective_observed_constraints"]
+    assert constraints["cpu_quota_cores_upper_bound"] == 1
+    assert constraints["cpuset_cpus_upper_bound"] == [2, 3]
+    assert constraints["memory_bytes_upper_bound"] == 536870912
+    with patch("measurement_contract.cgroup_resources", return_value=inherited):
+        lane(40, "baseline")
+    with patch("measurement_contract.cgroup_resources", return_value=narrower):
+        lane(40, "candidate")
+    refused(40)
+    (parent / "cpu.max").write_text("50000 100000")
+    (parent / "memory.max").write_text("268435456")
+    (parent / "memory.high").write_text("134217728")
+    parent_limited = inherited_cgroup_policy(cgroot, leaf)
+    constraints = parent_limited["effective_observed_constraints"]
+    assert constraints["cpu_quota_cores_upper_bound"] == 0.5
+    assert constraints["memory_bytes_upper_bound"] == 268435456
+    assert constraints["memory_high_throttle_bytes"] == 134217728
+    with patch("measurement_contract.cgroup_resources", return_value=narrower):
+        lane(41, "baseline")
+    with patch("measurement_contract.cgroup_resources", return_value=parent_limited):
+        lane(41, "candidate")
+    refused(41)
+    with patch("measurement_contract.cgroup_resources", return_value=inherited):
+        lane(43, "baseline")
+    with patch("measurement_contract.cgroup_resources", side_effect=[inherited, narrower]):
+        changed_policy = lane(43, "candidate", case="resources_changed")
+    changed_status = read_json(changed_policy / "qualification.json")
+    assert changed_status["completed"] is True and changed_status["qualified"] is False
+    assert (
+        read_json(changed_policy / "resource-policy-after.json")["cgroup_policy"][
+            "effective_observed_constraints"
+        ]["cpu_quota_cores_upper_bound"]
+        == 1
+    )
+    refused(43)
+    mountinfo = f"37 28 0:31 / {cgroot} rw - cgroup2 cgroup2 rw\n"
+    resolved = cgroup_resources("0::/user/app\n", mountinfo)
+    assert resolved["ancestors"] == parent_limited["ancestors"]
+    assert resolved["ancestor_visibility_complete"] is True
+    hidden = cgroup_resources("0::/tenant/user/app\n", mountinfo.replace(" / ", " /tenant "))
+    assert hidden["ancestor_visibility_complete"] is False and hidden["observation_errors"]
+    unavailable = cgroup_resources("0::/user/app\n", "")
+    assert unavailable["observation_errors"]
+    original_read = Path.read_text
+
+    def unreadable(path, *arguments, **keywords):
+        if path == parent / "memory.max":
+            raise PermissionError("fixture")
+        return original_read(path, *arguments, **keywords)
+
+    with patch.object(Path, "read_text", unreadable):
+        unreadable_policy = inherited_cgroup_policy(cgroot, leaf)
+    assert unreadable_policy["observation_errors"]
+    lane(42, "baseline")
+    with patch("measurement_contract.cgroup_resources", return_value=unreadable_policy):
+        rejected = lane(42, "candidate", case="resources")
+    rejected_status = read_json(rejected / "qualification.json")
+    assert rejected_status["qualified"] is False and rejected_status["cold_cache_reset"] is False
+    refused(42)
+    assert any(
+        row["reason"] == "PermissionError" for row in unreadable_policy["unavailable_fields"]
+    )
+    (leaf / "cpu.max").write_text("invalid quota")
+    invalid = inherited_cgroup_policy(cgroot, leaf)
+    assert invalid["observation_errors"]
+
+    def refused_policy(policy):
+        try:
+            validate_resource_policy({"cgroup_policy": policy})
+        except AssertionError:
+            return
+        raise AssertionError("unobservable resource policy admitted")
+
+    for policy in (hidden, unavailable, unreadable_policy, invalid):
+        refused_policy(policy)
+    empty = container / "empty-cgroup"
+    empty.mkdir()
+    unknown = inherited_cgroup_policy(empty, empty)
+    assert unknown["effective_observed_constraints"]["cpu_quota_cores_upper_bound"] is None
+    assert unknown["effective_observed_constraints"]["memory_bytes_upper_bound"] is None
+    assert (
+        unknown["unavailable_fields"]
+        and unknown["effective_observed_constraints"]["complete"] is False
+    )
+    after_path = candidate / "resource-policy-after.json"
+    original_after = after_path.read_text()
+    changed_after = json.loads(original_after)
+    changed_after["cgroup_policy"]["ancestors"][0]["fields"]["memory.max"] = "1234"
+    write_json(after_path, changed_after)
+    status = json.loads(original_q)
+    status["artifact_sha256"]["resource-policy-after.json"] = digest(after_path)
+    write_json(qpath, status)
+    refused(1)
+    after_path.write_text(original_after)
+    qpath.write_text(original_q)
     # Even rebinding the receipt hash cannot admit nested or null measurements.
     for case in (
         "nested",
@@ -427,7 +572,8 @@ with tempfile.TemporaryDirectory(prefix="gf1624-method-fixtures-") as tmp:
         "PASS: saved positive completion; runexec/workload/termination/compiler/busy refusal; "
         "incomplete/missing qualification refusal; "
         "artifact tampering, build/resource mismatch, nested/null/missing regions; "
-        "source barriers included, unobserved baseline wall unavailable; disjoint sums"
+        "source barriers included, unobserved baseline wall unavailable; disjoint sums; "
+        "inherited cgroup caps and unknown-policy refusal"
     )
 
 # Real, tiny BenchExec regression: its successful process exit cannot qualify an
