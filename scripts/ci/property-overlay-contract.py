@@ -349,13 +349,18 @@ def check_scale_target_runs_in_ci(root: Path) -> None:
     jobs = workflow_jobs((root / TEST_WORKFLOW).read_text(encoding="utf-8"))
     if RUST_TESTS_JOB not in jobs:
         raise ContractError(f"CI Rust lane {RUST_TESTS_JOB!r} is missing")
+    # Targeted runs (for example a feature-gated target, #1662) only add
+    # coverage; the property is that the one workspace-wide run selects the
+    # scale target.
     runs = [
         normalize_run(scalar)
         for scalar in job_run_scalars(jobs[RUST_TESTS_JOB])
-        if "cargo nextest run" in scalar
+        if re.search(r"cargo nextest run(?:\s.*)?\s--workspace(?:\s|$)", normalize_run(scalar))
     ]
     if len(runs) != 1:
-        raise ContractError(f"{RUST_TESTS_JOB} must run exactly one cargo nextest invocation")
+        raise ContractError(
+            f"{RUST_TESTS_JOB} must run exactly one workspace-wide cargo nextest invocation"
+        )
     command = runs[0].split("cargo nextest run", 1)[1]
     if not re.search(r"(?:^|\s)--workspace(?:\s|$)", command):
         raise ContractError(f"{RUST_TESTS_JOB} nextest run is not workspace-wide")

@@ -1270,6 +1270,16 @@ jobs:
           python3 scripts/test_environment.py --
           cargo test --workspace --locked --doc
 
+      # Test targets whose required features sit outside their package's
+      # default set are skipped by the workspace run; each runs here with its
+      # features. Policy: scripts/ci/test-ci-storage-policy.py (#1662).
+      - name: Rust feature-gated tests (differential traversal oracle)
+        if: ${{ !cancelled() && (steps.nextest.outcome == 'success' || steps.nextest.outcome == 'failure') }}
+        run: >-
+          python3 scripts/test_environment.py --
+          cargo nextest run --locked --no-fail-fast
+          -p graphforge-exec --features differential-testing --test differential_traversal
+
       - name: Real tiny and ownership-growth lifecycle producer
         if: ${{ !cancelled() && (steps.nextest.outcome == 'success' || steps.nextest.outcome == 'failure') }}
         shell: bash
