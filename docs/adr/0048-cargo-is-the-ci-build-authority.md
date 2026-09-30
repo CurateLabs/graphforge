@@ -70,9 +70,15 @@ Cargo, from the dispatch harness (test step only):
 - **nextest, warm `target/` volume** (9 runs on the final harness): p50 996 s
   (843–1235 s). One of the nine, `fc09f6a1`, had one failing test (#1643);
   it still executed the whole suite and its 926 s is included. Paired with the
-  Bazel test step on four Rust-changing PR SHAs, all of which passed, nextest
-  took a median of 964 s against 1045 s and was faster in 3 of 4 pairs.
-  Run-to-run variation is about ±150 s, so the difference is within noise.
+  Bazel test step on three Rust-changing PR SHAs whose two lanes passed,
+  nextest took a median of 1028 s against 1075 s and was faster in 2 of 3
+  pairs. A fourth pair, `f6d88ab9`, is excluded from this successful-lane
+  comparison: its Bazel authoritative test step failed after 1014 s, while
+  nextest passed in 899 s. Failed or cancelled historical runs are retained
+  in the issue census rather than treated as completed green timings.
+  These different-SHA samples do not establish a repeatability or noise bound,
+  and the small sample does not establish a general performance difference.
+  This is a small-sample lane comparison, not evidence of a CI Gate speedup.
 - **nextest, empty `target/`** (2 runs): 1412 s and 954 s.
 - **`cargo test`, warm**: 1388–1754 s on the same PR SHAs, 1.4–1.8× both of
   the above.
