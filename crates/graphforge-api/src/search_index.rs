@@ -249,6 +249,13 @@ impl GraphForge {
         let _phase = graphforge_storage::lifecycle_io::PhaseScope::enter(
             graphforge_storage::StorageIoPhase::EncodeWritePostwriteAuthentication,
         );
+        self.rebuild_adjacency_in_phase(cancellation)
+    }
+
+    fn rebuild_adjacency_in_phase(
+        &self,
+        cancellation: Option<CancellationToken>,
+    ) -> Result<AdjacencyInspection, GfError> {
         let visibility = self.graph_visibility.lock()?;
         let adjacency_visibility = self
             .adjacency_visibility
