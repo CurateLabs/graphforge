@@ -14,13 +14,16 @@
 //! walltime `raw_results`, written only when `CODSPEED_ENV` is set; see
 //! `docs/development/benchmarking.md`. Test mode runs every scenario once and
 //! emits no timing. `TCK_ONLY=<substr>` restricts the corpus as it does for the
-//! Cucumber run.
+//! Cucumber run. `GF_TCK_PERF_FAULT_*` (`tests/bdd/fault.rs`) injects a
+//! test-only delay for the #1654 known positive.
 
 #[cfg(feature = "search")]
 #[path = "../../tests/bdd/api_steps.rs"]
 mod api_steps;
 #[path = "../../tests/bdd/corpus.rs"]
 mod corpus;
+#[path = "../../tests/bdd/fault.rs"]
+mod fault;
 #[path = "../../tests/bdd/fixture.rs"]
 mod fixture;
 mod runner;
@@ -43,6 +46,8 @@ fn main() {
         fixture::TCK_CONCURRENCY
     );
     runner::install_corpus(cases);
+    // Announce (or reject) a test-only fault injection before any timing.
+    fault::active();
 
     let fixture_guard = fixture::activate();
     divan::main();
