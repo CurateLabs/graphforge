@@ -31,6 +31,8 @@
       "read_authenticated_property_presence_for_inventory",
       "read_authenticated_property_snapshots_for_inventory",
       "read_authenticated_property_targets_for_inventory", "PropertyTargetSnapshots",
+      "read_authenticated_property_target_data_for_inventory", "PropertyTargetData",
+      "read_authenticated_property_snapshot_data_for_inventory", "resolve_existing_edge_property_owner_data",
       "visit_authenticated_property_snapshots"
     ],
     "property_overlay_module": [
@@ -39,6 +41,7 @@
       "AuthenticatedPropertyInventory", "AuthenticatedPropertyInventory::edge_files",
       "AuthenticatedPropertyInventory::from_materialized_generation",
       "AuthenticatedPropertyInventory::from_materialized_inventory",
+      "AuthenticatedPropertyInventory::from_private_workspace_inventory",
       "AuthenticatedPropertyInventory::property_fragments",
       "AuthenticatedPropertyInventory::from_resolved_generation",
       "AuthenticatedPropertyInventory::from_resolved_generation_for_route",
@@ -52,7 +55,9 @@
       "enumerate_property_fragments", "read_authenticated_property_snapshots_for",
       "read_authenticated_property_presence_for_inventory",
       "read_authenticated_property_snapshots_for_inventory",
-      "read_authenticated_property_targets_for_inventory", "PropertyTargetSnapshots", "PropertyTargetSnapshots::edge_batch",
+      "read_authenticated_property_targets_for_inventory", "PropertyTargetSnapshots",
+      "read_authenticated_property_target_data_for_inventory", "PropertyTargetData",
+      "read_authenticated_property_snapshot_data_for_inventory", "resolve_existing_edge_property_owner_data", "PropertyTargetSnapshots::edge_batch", "PropertyTargetData::edge_batch",
       "visit_authenticated_property_snapshots"
     ],
     "authenticated_staging": [
@@ -71,7 +76,7 @@
   "metrics": {
     "physical_rows":{"unit":"row-decode visits", "aggregation":"sum across every decoded physical snapshot row, including rows later shadowed or tombstoned", "source_markers":["Physical snapshot rows decoded"]},
     "physical_bytes":{"unit":"bytes", "aggregation":"sum of admission and bounded authenticated-snapshot bytes plus decoder bytes", "source_markers":["authentication", "decoder bytes"]},
-    "authentication_bytes":{"unit":"bytes", "aggregation":"sum of full-file bytes read for SHA-256 admission and bounded immutable snapshot authentication", "source_markers":["SHA-256 authentication", "authenticated immutable snapshot"]},
+    "authentication_bytes":{"unit":"bytes", "aggregation":"sum of full-file bytes read for checksum admission, control authentication and bounded immutable snapshot authentication", "source_markers":["checksum admission", "authenticated immutable snapshot"]},
     "authority_authentication_bytes":{"unit":"bytes", "aggregation":"raw graph-files authority bytes included in authentication_bytes", "source_markers":["Raw graph-files authority bytes", "authentication bytes"]},
     "property_authentication_bytes":{"unit":"bytes", "aggregation":"property-fragment bytes read during admission and bounded immutable snapshot authentication", "source_markers":["Retained property-fragment bytes", "authentication bytes"]},
     "authenticated_snapshot_bytes":{"unit":"bytes", "aggregation":"sum of bytes written to immutable authenticated decode snapshots", "source_markers":["authenticated decode snapshots"]},

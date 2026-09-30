@@ -24,7 +24,7 @@ use std::time::Instant;
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_filesystem::is_link_or_reparse;
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use sha2::Digest as _;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use sysinfo::Disks;

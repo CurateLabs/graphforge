@@ -189,7 +189,9 @@ inventory in `benchmarks/README.md`.
 
 Host filesystem admission requires an ext4, xfs, or btrfs volume. `/tmp` on
 OVHC-AGENCY is tmpfs, so host-run tests take their scratch root from
-`GF_LADDER_TEST_ROOT` (default `/home/ubuntu/graphforge-ladder-test`). The
+`GF_LADDER_TEST_ROOT`, defaulting to `graphforge-ladder-test` under the
+temporary root (`TMPDIR`; point it at native storage, as
+`scripts/test_environment.py` does in CI). The
 evidence root `/home/ubuntu/graphforge-ladder` is retained data that tests
 and cleanup tooling must not touch.
 

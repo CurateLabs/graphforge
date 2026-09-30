@@ -199,6 +199,16 @@ def command_argv(value: dict[str, Any], gate_id: str) -> list[str]:
     return rendered
 
 
+def executable_argv(rendered: list[str]) -> list[str]:
+    """Execute registry Python commands under the interpreter that invoked the registry.
+
+    Registry commands name `python3` so the rendered operator command is portable.
+    Executing that literal drops the caller's virtualenv, and with it any wheel the
+    lane installed there (#1671).
+    """
+    return [sys.executable, *rendered[1:]] if rendered[:1] == ["python3"] else rendered
+
+
 def command_environment(argv: list[str]) -> dict[str, str] | None:
     """Make benchmark modules importable for registry-owned operator commands."""
     if argv[1:3] != ["-m", "graphforge_bench.qualification_operator"]:
@@ -264,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         reject_owned_options(passthrough, record["args"])
         return subprocess.run(
-            [*rendered, *passthrough],
+            [*executable_argv(rendered), *passthrough],
             cwd=ROOT,
             check=False,
             env=command_environment(rendered),

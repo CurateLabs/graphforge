@@ -16,11 +16,12 @@ use arrow::array::{
     Array, FixedSizeBinaryArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
     Int64Array, ListArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use graphforge_core::{GfError, OntologyMode};
 use graphforge_ir::{Direction, IrLiteral};
 #[cfg(test)]
 use graphforge_value::EntityTypeId;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::adjacency::AdjacencyProvider;
 use crate::algorithm_partition::{PartitionValue, ResolvedPartitionMap};

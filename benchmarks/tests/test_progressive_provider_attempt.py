@@ -25,6 +25,7 @@ from graphforge_bench.progressive_provider_attempt import (
     parse_spend_authorization,
 )
 from jsonschema import Draft202012Validator
+
 from tests.test_progressive_provider_plan import result as local_result
 from tests.test_progressive_provider_plan import rung as rung_evidence
 from tests.test_progressive_run import benchexec as benchexec_evidence

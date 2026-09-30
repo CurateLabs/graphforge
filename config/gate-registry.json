@@ -204,36 +204,6 @@
       "sha_rule": "exact_commit"
     },
     {
-      "id": "fly-tiny-qualification",
-      "path": ".github/workflows/fly-tiny-qualification.yml",
-      "class": "operator_qualification",
-      "owner": "benchmark-operator",
-      "command": "operator",
-      "args": [
-        "--gate",
-        "fly-tiny"
-      ],
-      "evidence_contract": "graphforge-fly-filesystem-qualification/1",
-      "freshness": "24h",
-      "sha_rule": "exact_main",
-      "control_plane": "pulumi_esc"
-    },
-    {
-      "id": "fly-tiny-recovery",
-      "path": ".github/workflows/fly-tiny-recovery.yml",
-      "class": "operator_qualification",
-      "owner": "benchmark-operator",
-      "command": "operator",
-      "args": [
-        "--gate",
-        "fly-tiny-recovery"
-      ],
-      "evidence_contract": "graphforge-fly-adapter-result/2",
-      "freshness": "ownership_receipt_24h",
-      "sha_rule": "receipt_commit",
-      "control_plane": "pulumi_esc"
-    },
-    {
       "id": "fuzz",
       "path": ".github/workflows/fuzz.yml",
       "class": "scheduled_health_stress",
@@ -245,21 +215,6 @@
       "sha_rule": "exact_main"
     },
     {
-      "id": "progressive-ladder",
-      "path": ".github/workflows/progressive-ladder.yml",
-      "class": "operator_qualification",
-      "owner": "benchmark-operator",
-      "command": "operator",
-      "args": [
-        "--gate",
-        "progressive-ladder"
-      ],
-      "evidence_contract": "graphforge-progressive-provider-plan/1 + rung evidence",
-      "freshness": "adjacent_rung",
-      "sha_rule": "exact_main",
-      "control_plane": "pulumi_esc"
-    },
-    {
       "id": "knowledge-contract",
       "path": ".github/workflows/knowledge-contract-gate.yml",
       "class": "release_certification",
@@ -269,18 +224,6 @@
       "evidence_contract": "graphforge-knowledge-contract/1",
       "freshness": "30d",
       "sha_rule": "exact_commit"
-    },
-    {
-      "id": "native-local-admission",
-      "path": ".github/workflows/native-local-admission.yml",
-      "class": "operator_qualification",
-      "owner": "benchmark-operator",
-      "command": "native-admission",
-      "args": [],
-      "evidence_contract": "graphforge-local-admission/1",
-      "freshness": "runner_image",
-      "sha_rule": "exact_commit",
-      "control_plane": "local_delegated"
     },
     {
       "id": "non-cypher-surface",
@@ -382,5 +325,59 @@
       "sha_rule": "exact_commit"
     }
   ],
-  "operator_gates": []
+  "operator_gates": [
+    {
+      "id": "fly-tiny-qualification",
+      "class": "operator_qualification",
+      "owner": "benchmark-operator",
+      "command": "operator",
+      "args": [
+        "--gate",
+        "fly-tiny"
+      ],
+      "evidence_contract": "graphforge-fly-filesystem-qualification/1",
+      "freshness": "24h",
+      "sha_rule": "exact_main",
+      "control_plane": "pulumi_esc"
+    },
+    {
+      "id": "fly-tiny-recovery",
+      "class": "operator_qualification",
+      "owner": "benchmark-operator",
+      "command": "operator",
+      "args": [
+        "--gate",
+        "fly-tiny-recovery"
+      ],
+      "evidence_contract": "graphforge-fly-adapter-result/2",
+      "freshness": "ownership_receipt_24h",
+      "sha_rule": "receipt_commit",
+      "control_plane": "pulumi_esc"
+    },
+    {
+      "id": "progressive-ladder",
+      "class": "operator_qualification",
+      "owner": "benchmark-operator",
+      "command": "operator",
+      "args": [
+        "--gate",
+        "progressive-ladder"
+      ],
+      "evidence_contract": "graphforge-progressive-provider-plan/1 + rung evidence",
+      "freshness": "adjacent_rung",
+      "sha_rule": "exact_main",
+      "control_plane": "pulumi_esc"
+    },
+    {
+      "id": "native-local-admission",
+      "class": "operator_qualification",
+      "owner": "benchmark-operator",
+      "command": "native-admission",
+      "args": [],
+      "evidence_contract": "graphforge-local-admission/1",
+      "freshness": "runner_image",
+      "sha_rule": "exact_commit",
+      "control_plane": "local_delegated"
+    }
+  ]
 }

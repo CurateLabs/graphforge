@@ -11,14 +11,14 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path};
 use std::time::SystemTime;
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_filesystem::{FileIdentity, StableDirectory, file_identity, file_link_count};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use uuid::Uuid;
 
-/// Immutable v4 manifest version.
-pub const ORDINAL_IDENTITY_V4: u32 = 4;
+/// Checksum-bearing wire version of the ordinal mapping authority.
+pub const ORDINAL_IDENTITY_V4: u32 = 5;
 /// Canonical location below a graph project.
 pub const ORDINAL_IDENTITY_MANIFEST: &str = "topology/uuid-membership/ordinal-v4-manifest.json";
 const INDEX_DIR: &str = "topology/uuid-membership";
@@ -103,6 +103,9 @@ pub struct V4OrdinalArtifact {
     pub bytes: u64,
     /// Lowercase SHA-256 digest.
     pub sha256: String,
+    /// Required corruption checksum of the exact artifact bytes.
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    pub xxh64: u64,
 }
 
 /// A packed contiguous reverse-identity range.
@@ -129,6 +132,9 @@ pub struct V4OrdinalBlock {
     pub count: u64,
     /// Lowercase SHA-256 of the exact block bytes.
     pub sha256: String,
+    /// Required corruption checksum of this exact block.
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    pub xxh64: u64,
 }
 
 /// A newest-generation sparse deletion override.
@@ -157,6 +163,9 @@ pub struct V4OrdinalTombstoneBlock {
     pub last: u64,
     /// Lowercase SHA-256 of the exact block bytes.
     pub sha256: String,
+    /// Required corruption checksum of this exact block.
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    pub xxh64: u64,
 }
 
 /// Generation-pinned v4 authority descriptor.
@@ -1201,8 +1210,23 @@ fn validate_manifest(
                 "ordinal artifact length is not packed",
             ));
         }
+        if range
+            .blocks
+            .iter()
+            .any(|block| !canonical_sha256(&block.sha256))
+        {
+            return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "ordinal block identity is noncanonical",
+            ));
+        }
         prior_end = end;
     }
+    validate_tombstone_descriptors(manifest)
+}
+
+fn validate_tombstone_descriptors(
+    manifest: &V4OrdinalIdentityManifest,
+) -> Result<(), V4OrdinalIdentityError> {
     let mut prior_generation = 0;
     for run in &manifest.tombstones {
         require_kind(
@@ -1217,6 +1241,15 @@ fn validate_manifest(
         {
             return Err(V4OrdinalIdentityError::InvalidDescriptor(
                 "tombstone runs are noncanonical",
+            ));
+        }
+        if run
+            .blocks
+            .iter()
+            .any(|block| !canonical_sha256(&block.sha256))
+        {
+            return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "tombstone block identity is noncanonical",
             ));
         }
         prior_generation = run.generation;
@@ -1253,6 +1286,13 @@ fn require_kind(
     Ok(())
 }
 
+fn canonical_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct MappingCommitment {
     count: u64,
@@ -1261,7 +1301,7 @@ struct MappingCommitment {
 
 impl MappingCommitment {
     fn add(&mut self, uuid: &[u8; UUID_WIDTH_USIZE], node_id: u64) {
-        let mut digest = Sha256::new();
+        let mut digest = graphforge_core::hash_observation::ContractSha256::new();
         digest.update(b"graphforge-v4-ordinal-mapping\0");
         digest.update(uuid);
         digest.update(node_id.to_be_bytes());
@@ -1286,7 +1326,7 @@ fn admit_ordinal_artifact(
         usize::try_from(ORDINAL_BLOCK_BYTES.min(artifact.descriptor.bytes.max(UUID_WIDTH)))
             .map_err(|_| V4OrdinalIdentityError::Authentication)?;
     let mut buffer = vec![0_u8; block_bytes];
-    let mut whole = Sha256::new();
+    let mut whole = crate::corruption_checksum::Checksum::new();
     let mut declared = range.blocks.iter();
     let mut offset = 0_u64;
     let mut ordinal = 0_u64;
@@ -1299,12 +1339,11 @@ fn admit_ordinal_artifact(
         if !read.is_multiple_of(UUID_WIDTH_USIZE) {
             return Err(V4OrdinalIdentityError::Authentication);
         }
-        let actual = V4OrdinalBlock {
-            offset,
-            count: read as u64 / UUID_WIDTH,
-            sha256: hex(&Sha256::digest(&buffer[..read])),
-        };
-        if declared.next() != Some(&actual) {
+        if !declared.next().is_some_and(|block| {
+            block.offset == offset
+                && block.count == read as u64 / UUID_WIDTH
+                && block.xxh64 == crate::corruption_checksum::checksum(&buffer[..read])
+        }) {
             return Err(V4OrdinalIdentityError::InvalidDescriptor(
                 "ordinal block fences are noncanonical",
             ));
@@ -1334,7 +1373,7 @@ fn admit_ordinal_artifact(
             "ordinal block fences are noncanonical",
         ));
     }
-    finish_admission(&mut artifact, whole, metrics)?;
+    finish_admission(&mut artifact, &whole, metrics)?;
     Ok(artifact)
 }
 
@@ -1352,7 +1391,7 @@ fn admit_forward_artifact(
         .min(artifact_bytes)
         .max(FORWARD_RECORD_WIDTH_USIZE);
     let mut buffer = vec![0_u8; stream_bytes];
-    let mut whole = Sha256::new();
+    let mut whole = crate::corruption_checksum::Checksum::new();
     let mut remaining = descriptor.bytes;
     let mut prior_uuid = None;
     while remaining != 0 {
@@ -1385,7 +1424,7 @@ fn admit_forward_artifact(
         }
         remaining -= read as u64;
     }
-    finish_admission(&mut artifact, whole, metrics)?;
+    finish_admission(&mut artifact, &whole, metrics)?;
     Ok(artifact)
 }
 
@@ -1497,7 +1536,7 @@ fn admit_tombstone_artifact(
     let block_bytes =
         usize::try_from(block_bytes).map_err(|_| V4OrdinalIdentityError::Authentication)?;
     let mut buffer = vec![0_u8; block_bytes];
-    let mut whole = Sha256::new();
+    let mut whole = crate::corruption_checksum::Checksum::new();
     let mut prior = None;
     let mut offset = 0_u64;
     let mut declared = run.blocks.iter();
@@ -1523,19 +1562,18 @@ fn admit_tombstone_artifact(
             last = id;
             prior = Some(id);
         }
-        if let Some(first) = first {
-            let actual = V4OrdinalTombstoneBlock {
-                offset,
-                count: read as u64 / TOMBSTONE_WIDTH,
-                first,
-                last,
-                sha256: hex(&Sha256::digest(&buffer[..read])),
-            };
-            if declared.next() != Some(&actual) {
-                return Err(V4OrdinalIdentityError::InvalidDescriptor(
-                    "tombstone block fences are noncanonical",
-                ));
-            }
+        if let Some(first) = first
+            && !declared.next().is_some_and(|block| {
+                block.offset == offset
+                    && block.count == read as u64 / TOMBSTONE_WIDTH
+                    && block.first == first
+                    && block.last == last
+                    && block.xxh64 == crate::corruption_checksum::checksum(&buffer[..read])
+            })
+        {
+            return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "tombstone block fences are noncanonical",
+            ));
         }
         offset = offset.saturating_add(read as u64);
     }
@@ -1544,7 +1582,7 @@ fn admit_tombstone_artifact(
             "tombstone block fences are noncanonical",
         ));
     }
-    finish_admission(&mut artifact, whole, metrics)?;
+    finish_admission(&mut artifact, &whole, metrics)?;
     Ok(artifact)
 }
 fn read_tombstone_block(
@@ -1580,7 +1618,7 @@ fn read_tombstone_block(
         .seek(SeekFrom::Start(block.offset))
         .map_err(io_error)?;
     run.artifact.file.read_exact(&mut bytes).map_err(io_error)?;
-    if hex(&Sha256::digest(&bytes)) != block.sha256 {
+    if crate::corruption_checksum::checksum(&bytes) != block.xxh64 {
         return Err(V4OrdinalIdentityError::Authentication);
     }
     metrics.sequential_read_calls = metrics.sequential_read_calls.saturating_add(1);
@@ -1687,10 +1725,12 @@ fn read_fill_or_eof<R: Read>(
 
 fn finish_admission(
     artifact: &mut OpenArtifact,
-    digest: Sha256,
+    digest: &crate::corruption_checksum::Checksum,
     metrics: &mut V4OrdinalAdmissionMetrics,
 ) -> Result<(), V4OrdinalIdentityError> {
-    if hex(&digest.finalize()) != artifact.descriptor.sha256 {
+    if digest.finish() != artifact.descriptor.xxh64
+        || artifact.file.metadata().map_err(io_error)?.len() != artifact.descriptor.bytes
+    {
         return Err(V4OrdinalIdentityError::Authentication);
     }
     artifact.file.seek(SeekFrom::Start(0)).map_err(io_error)?;
@@ -1779,9 +1819,8 @@ fn read_range_coalesced(
                 .map_err(|_| V4OrdinalIdentityError::Authentication)?;
             let slice_len = usize::try_from(block.count * UUID_WIDTH)
                 .map_err(|_| V4OrdinalIdentityError::Authentication)?;
-            if hex(&Sha256::digest(
-                &buffer[slice_start..slice_start + slice_len],
-            )) != block.sha256
+            if crate::corruption_checksum::checksum(&buffer[slice_start..slice_start + slice_len])
+                != block.xxh64
             {
                 return Err(V4OrdinalIdentityError::Authentication);
             }
@@ -2031,6 +2070,7 @@ mod tests {
             generation,
             bytes: bytes.len() as u64,
             sha256: hex(&Sha256::digest(bytes)),
+            xxh64: crate::corruption_checksum::checksum(bytes),
         }
     }
 
@@ -2048,8 +2088,58 @@ mod tests {
                         .flat_map(|id| id.to_be_bytes())
                         .collect::<Vec<_>>(),
                 )),
+                xxh64: crate::corruption_checksum::checksum(
+                    &chunk
+                        .iter()
+                        .flat_map(|id| id.to_be_bytes())
+                        .collect::<Vec<_>>(),
+                ),
             })
             .collect()
+    }
+
+    #[test]
+    fn checksum_ordinal_manifest_refuses_legacy_missing_and_malformed_metadata() {
+        let fixture = Fixture::new(&[2], &[]);
+        let original = serde_json::to_value(&fixture.manifest).unwrap();
+        for mode in 0..4 {
+            let mut changed = original.clone();
+            match mode {
+                0 => changed["format_version"] = serde_json::json!(4),
+                1 => {
+                    changed["ordinal_ranges"][0]["artifact"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("xxh64");
+                }
+                2 => {
+                    changed["ordinal_ranges"][0]["blocks"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("xxh64");
+                }
+                _ => {
+                    changed["ordinal_ranges"][0]["blocks"][0]["xxh64"] =
+                        serde_json::json!("not-a-checksum")
+                }
+            }
+            assert!(
+                parse_manifest(
+                    &serde_json::to_vec(&changed).unwrap(),
+                    fixture.manifest.topology_generation
+                )
+                .is_err(),
+                "mode={mode}"
+            );
+        }
+        assert!(
+            parse_manifest(
+                &serde_json::to_vec(&original).unwrap(),
+                fixture.manifest.topology_generation
+            )
+            .unwrap()
+            .is_some()
+        );
     }
 
     fn ordinal_blocks(bytes: &[u8]) -> Vec<V4OrdinalBlock> {
@@ -2060,6 +2150,7 @@ mod tests {
                 offset: index as u64 * ORDINAL_BLOCK_BYTES,
                 count: block.len() as u64 / UUID_WIDTH,
                 sha256: hex(&Sha256::digest(block)),
+                xxh64: crate::corruption_checksum::checksum(block),
             })
             .collect()
     }

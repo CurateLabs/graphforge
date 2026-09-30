@@ -32,8 +32,16 @@ struct Job {
     batch: RecordBatch,
     cache_window: NonZeroU64,
 }
+struct EncodingJob {
+    index: usize,
+    batch: RecordBatch,
+    #[cfg(any(test, feature = "test-support"))]
+    digest_context: graphforge_core::hash_observation::operation::Context,
+    lifecycle_context: crate::lifecycle_io::CaptureContext,
+}
+
 struct Pool {
-    sender: Option<mpsc::Sender<(usize, RecordBatch)>>,
+    sender: Option<mpsc::Sender<EncodingJob>>,
     receiver: mpsc::Receiver<(usize, Compressed)>,
     workers: Vec<std::thread::JoinHandle<()>>,
     stop: Arc<AtomicBool>,
@@ -41,7 +49,7 @@ struct Pool {
 }
 impl Pool {
     fn new(lease: ConstructionCpuLease) -> Self {
-        let (sender, jobs) = mpsc::channel::<(usize, RecordBatch)>();
+        let (sender, jobs) = mpsc::channel::<EncodingJob>();
         let jobs = Arc::new(Mutex::new(jobs));
         let (results, receiver) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
@@ -56,14 +64,17 @@ impl Pool {
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .recv();
-                        let Ok((index, batch)) = job else {
+                        let Ok(job) = job else {
                             break;
                         };
+                        #[cfg(any(test, feature = "test-support"))]
+                        let _digest_guard = job.digest_context.attach();
+                        let _lifecycle_capture = job.lifecycle_context.attach();
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            compress(&batch, &stop)
+                            compress(&job.batch, &stop)
                         }))
                         .unwrap_or_else(|_| Err(storage("encoding lane panicked")));
-                        if results.send((index, result)).is_err() {
+                        if results.send((job.index, result)).is_err() {
                             break;
                         }
                     }
@@ -82,7 +93,13 @@ impl Pool {
         self.sender
             .as_ref()
             .expect("live pool")
-            .send((index, batch))
+            .send(EncodingJob {
+                index,
+                batch,
+                #[cfg(any(test, feature = "test-support"))]
+                digest_context: graphforge_core::hash_observation::operation::Context::capture(),
+                lifecycle_context: crate::lifecycle_io::CaptureContext::current(),
+            })
             .map_err(storage)
     }
 }

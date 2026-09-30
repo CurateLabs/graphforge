@@ -11,12 +11,11 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
+use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use sha2::Digest;
 use uuid::Uuid;
 
-use crate::graph_manifest::verify_object_bytes;
 use crate::{
     GRAPH_FILES_V2_FORMAT, GRAPH_MANIFEST_NODE_FORMAT, GRAPH_MANIFEST_NODE_VERSION,
     GRAPH_RADIX_DEPTH, GraphFilesInventory, GraphFilesOpenEvidence, GraphFilesOpenStrategy,
@@ -940,10 +939,33 @@ pub fn read_graph_object(
 ) -> Result<Vec<u8>, GfError> {
     let cas = ReadOnlyCasRoot::open(root)?;
     let mut file = cas.open_digest(digest)?;
+    let bytes = read_exact_object_payload(&mut file, expected_length, root)?;
+    if hex_digest(crate::payload_digest::PayloadSha256::digest(&bytes).into()) != digest {
+        return Err(validation(
+            "graph object digest or length does not match its address",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn read_exact_object_payload(
+    reader: impl Read,
+    expected_length: u64,
+    root: &Path,
+) -> Result<Vec<u8>, GfError> {
+    let limit = expected_length
+        .checked_add(1)
+        .ok_or_else(|| validation("graph object length overflow"))?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    reader
+        .take(limit)
+        .read_to_end(&mut bytes)
         .map_err(|error| storage("read stable graph object", root, error))?;
-    verify_object_bytes(digest, expected_length, &bytes)?;
+    if bytes.len() as u64 != expected_length {
+        return Err(validation(
+            "graph object digest or length does not match its address",
+        ));
+    }
     Ok(bytes)
 }
 
@@ -1023,6 +1045,23 @@ pub fn read_graph_object_by_digest(
 ) -> Result<Vec<u8>, GfError> {
     let cas = ReadOnlyCasRoot::open(root)?;
     read_graph_object_by_digest_from_read_only_cas(&cas, digest, max_length)
+}
+
+/// Authenticate only graph manifest nodes or semantic route control tables.
+pub(crate) fn read_graph_control_object_by_digest(
+    root: &Path,
+    digest: &str,
+    max_length: u64,
+) -> Result<Vec<u8>, GfError> {
+    let cas = ReadOnlyCasRoot::open(root)?;
+    read_graph_object_by_digest_file_counted_in_domain(
+        cas.open_digest(digest)?,
+        digest,
+        max_length,
+        &cas.diagnostic_root,
+        graphforge_core::hash_observation::HashDomain::ControlAuthentication,
+    )
+    .map(|(bytes, _)| bytes)
 }
 
 /// Open and stream-authenticate one immutable CAS object without allocating its payload.
@@ -1262,6 +1301,64 @@ pub fn open_graph_object_by_digest(
     begin_graph_object_read(root)?.open(digest, expected_length)
 }
 
+/// Retain the exact CAS descriptor admitted by authenticated inventory metadata.
+/// CAS addressing remains SHA-256; default payload admission uses XXH64 and length.
+pub(crate) fn open_graph_object_with_checksum(
+    root: &Path,
+    entry: &crate::GraphFileEntry,
+) -> Result<AuthenticatedGraphObject, GfError> {
+    let lease = begin_graph_object_read(root)?;
+    let mut file = lease.open_for_attribution(&entry.content_sha256, entry.byte_length)?;
+    let identity = graphforge_filesystem::file_identity(&file)
+        .map_err(|error| storage("identify checksum object", root, error))?;
+    let read_bound = entry
+        .byte_length
+        .checked_add(1)
+        .ok_or_else(|| validation("checksum length overflow"))?;
+    let mut bounded = (&mut file).take(read_bound);
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut block = vec![0_u8; 64 * 1024];
+    let mut bytes = 0_u64;
+    let mut calls = 0_u64;
+    loop {
+        let read = bounded
+            .read(&mut block)
+            .map_err(|error| storage("read checksum object", root, error))?;
+        if read == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| validation("checksum object byte overflow"))?;
+        calls += 1;
+        checksum.update(&block[..read]);
+    }
+    if bytes != entry.byte_length
+        || checksum.finish() != entry.content_xxh64
+        || file
+            .metadata()
+            .map_err(|error| storage("reinspect checksum object", root, error))?
+            .len()
+            != entry.byte_length
+        || graphforge_filesystem::file_identity(&file)
+            .map_err(|error| storage("reidentify checksum object", root, error))?
+            != identity
+    {
+        return Err(validation(
+            "graph payload XXH64 checksum does not match its inventory",
+        ));
+    }
+    file.rewind()
+        .map_err(|error| storage("rewind checksum object", root, error))?;
+    crate::lifecycle_io::record_read(crate::StorageIoPhase::HydrationVerification, bytes, calls);
+    crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
+    Ok(AuthenticatedGraphObject {
+        file,
+        authenticated_length: entry.byte_length,
+        _cas: lease.cas,
+    })
+}
+
 fn open_graph_object_with_read_lease(
     lease: &GraphObjectReadLease,
     digest: &str,
@@ -1327,18 +1424,19 @@ fn open_graph_object_with_read_lease(
     })
 }
 
-pub(crate) fn read_graph_object_counted(
+pub(crate) fn read_graph_control_object_counted(
     root: &Path,
     digest: &str,
     maximum: u64,
     totals: &mut GraphObjectIoTotals,
 ) -> Result<Vec<u8>, GfError> {
     let cas = ReadOnlyCasRoot::open(root)?;
-    let (bytes, io) = read_graph_object_by_digest_file_counted(
+    let (bytes, io) = read_graph_object_by_digest_file_counted_in_domain(
         cas.open_digest(digest)?,
         digest,
         maximum,
         &cas.diagnostic_root,
+        graphforge_core::hash_observation::HashDomain::ControlAuthentication,
     )?;
     totals.read_bytes = totals
         .read_bytes
@@ -1388,10 +1486,26 @@ fn read_graph_object_by_digest_file(
 }
 
 fn read_graph_object_by_digest_file_counted(
+    file: File,
+    digest: &str,
+    max_length: u64,
+    diagnostic_root: &Path,
+) -> Result<(Vec<u8>, ReadIoEvidence), GfError> {
+    read_graph_object_by_digest_file_counted_in_domain(
+        file,
+        digest,
+        max_length,
+        diagnostic_root,
+        graphforge_core::hash_observation::HashDomain::ArtifactPayload,
+    )
+}
+
+fn read_graph_object_by_digest_file_counted_in_domain(
     mut file: File,
     digest: &str,
     max_length: u64,
     diagnostic_root: &Path,
+    domain: graphforge_core::hash_observation::HashDomain,
 ) -> Result<(Vec<u8>, ReadIoEvidence), GfError> {
     let metadata = file
         .metadata()
@@ -1422,7 +1536,9 @@ fn read_graph_object_by_digest_file_counted(
             .ok_or_else(|| validation("manifest read call count overflows"))?;
         bytes.extend_from_slice(&buffer[..read]);
     }
-    if hex_digest(Sha256::digest(&bytes).into()) != digest {
+    let mut hasher = graphforge_core::hash_observation::ObservedSha256::for_domain(domain);
+    hasher.update(&bytes);
+    if hex_digest(hasher.finalize().into()) != digest {
         return Err(validation("graph object digest does not match its address"));
     }
     crate::lifecycle_io::record_read(

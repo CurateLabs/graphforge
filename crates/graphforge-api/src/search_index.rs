@@ -242,6 +242,20 @@ impl GraphForge {
         &self,
         cancellation: Option<CancellationToken>,
     ) -> Result<AdjacencyInspection, GfError> {
+        // #1449: an explicit build constructs and publishes the index, exactly
+        // as construction publish and clean import do, so its build, staged
+        // validation and publication share their encoding row. Unscoped, it
+        // landed in `read_path_scan`, which is reserved for a query's own work.
+        let _phase = graphforge_storage::lifecycle_io::PhaseScope::enter(
+            graphforge_storage::StorageIoPhase::EncodeWritePostwriteAuthentication,
+        );
+        self.rebuild_adjacency_in_phase(cancellation)
+    }
+
+    fn rebuild_adjacency_in_phase(
+        &self,
+        cancellation: Option<CancellationToken>,
+    ) -> Result<AdjacencyInspection, GfError> {
         let visibility = self.graph_visibility.lock()?;
         let adjacency_visibility = self
             .adjacency_visibility
@@ -885,6 +899,33 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn an_explicit_adjacency_build_is_encoding_work_not_a_read_path_scan() {
+        use graphforge_storage::{PhaseIoTotals, StorageIoPhase, lifecycle_io};
+
+        let graph = GraphForge::new(None).unwrap();
+        graph
+            .execute("CREATE (:Person)-[:KNOWS]->(:Person)-[:KNOWS]->(:Person)")
+            .unwrap();
+
+        let _capture = lifecycle_io::CaptureScope::install();
+        let before = lifecycle_io::snapshot().unwrap();
+        graph.index("adjacency").unwrap();
+        let region = lifecycle_io::snapshot().unwrap().since(&before).unwrap();
+
+        // #1449: `read_path_scan` is a query's own work. The explicit build
+        // publishes the index like construction does, so it shares that row.
+        assert_eq!(
+            region.phases[&StorageIoPhase::ReadPathScan],
+            PhaseIoTotals::default(),
+            "explicit build leaked into read_path_scan: {region:#?}"
+        );
+        let encode = &region.phases[&StorageIoPhase::EncodeWritePostwriteAuthentication];
+        assert!(encode.read_bytes > 0, "{region:#?}");
+        assert!(encode.write_bytes > 0, "{region:#?}");
+        assert!(encode.fsync_calls > 0, "{region:#?}");
     }
 
     #[test]

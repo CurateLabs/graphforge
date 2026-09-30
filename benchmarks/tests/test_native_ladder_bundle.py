@@ -18,6 +18,7 @@ from graphforge_bench.progressive_host_run import _result, inventory_work_root
 from graphforge_bench.progressive_provider_attempt import CANONICAL_RUNGS
 from graphforge_bench.progressive_qualification import load_profiles, project
 from graphforge_bench.progressive_run import assemble_rung_evidence
+
 from tests.test_progressive_host_run import host_capacity, host_result
 from tests.test_progressive_run import authoritative_receipts, benchexec, graphforge
 

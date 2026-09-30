@@ -159,6 +159,21 @@ jobs:
       - name: Test Fly qualification safety contract
         run: python3 scripts/ci/test-fly-filesystem-safety-contract.py
 
+      # These suites' subjects are live, but nothing ran them until #1671.
+      # `test-gate-registry.py` now fails when a scripts/ci suite is unreached.
+      - name: Test publish-track and binding parity policy suites
+        run: |
+          python3 scripts/ci/test-publish-track.py
+          python3 scripts/ci/test-binding-parity-policy.py
+
+      - name: Test release workflow, Fly qualification, and G500 validator suites
+        run: |
+          uv sync --locked --no-install-project --extra dev
+          uv run --no-sync pytest -q -p no:cacheprovider \
+            scripts/ci/test-release-workflows.py \
+            scripts/ci/test-fly-filesystem-qualification.py \
+            scripts/ci/test-validate-g500-certification.py
+
       - name: Test progressive qualification image contract
         run: python3 scripts/ci/test-progressive-qualification-image.py
 
@@ -660,6 +675,9 @@ jobs:
           assert importlib.util.find_spec("igraph") is None
           PY
           timeout 60s /tmp/gf-native/bin/python crates/graphforge-bindings-py/tests/smoke.py
+          # The documented visualization example's GraphForge path, offline (#1675).
+          timeout 60s /tmp/gf-native/bin/python \
+            crates/graphforge-bindings-py/tests/visualization_example_projection.py
 
       - name: Install test dependencies and wheel
         shell: bash
@@ -1234,18 +1252,6 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Test offline progressive provider boundary
-        working-directory: benchmarks
-        run: |
-          PYTHONPATH=harness uv run --locked python -m unittest \
-            tests.test_progressive_esc \
-            tests.test_progressive_fly_transport \
-            tests.test_progressive_provider_attempt \
-            tests.test_progressive_provider_plan \
-            tests.test_progressive_provider_run \
-            tests.test_progressive_run \
-            tests.test_qualification_operator
-
       # The custom-harness targets (cucumber BDD, allocation probe) cannot
       # answer nextest's --list protocol; they run under cargo test below.
       - name: Rust workspace tests (nextest)
@@ -1308,6 +1314,50 @@ jobs:
             --generator benchmarks/target/debug/graphforge-benchmark-graph500-generator \
             --workspace-root "$RUNNER_TEMP"
 
+  benchmark-harness:
+    # Every benchmarks/tests module, found by unittest discovery so a new one
+    # cannot escape CI (#1679). The GDC suites build their Rust runners against
+    # graphforge-api, so the lane follows the Rust test gate; it runs beside
+    # Rust Tests rather than lengthening it.
+    # Policy: scripts/ci/test-ci-storage-policy.py.
+    name: Benchmark Harness Tests
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: changes
+    if: needs.changes.outputs.rust_tests == 'true'
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare native test temporary storage
+        run: python3 scripts/test_environment.py --github-env "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
+        with:
+          toolchain: "1.96.0"
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+
+      - name: Benchmark harness tests (unittest discovery)
+        working-directory: benchmarks
+        run: >-
+          PYTHONPATH=harness uv run --locked python -m unittest discover
+          -v -s tests -t . -p 'test_*.py'
+
   ci-gate:
     name: CI Gate
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -1328,6 +1378,7 @@ jobs:
       - macos-graphforge-storage-durability
       - native-durability-aggregate
       - rust-tests
+      - benchmark-harness
       - epistemic-contract-gate
       - knowledge-contract-gate
       - non-cypher-surface-gate
@@ -1352,6 +1403,7 @@ jobs:
           "${{ needs.macos-graphforge-storage-durability.result }}"
           "${{ needs.native-durability-aggregate.result }}"
           "${{ needs.rust-tests.result }}"
+          "${{ needs.benchmark-harness.result }}"
           "${{ needs.epistemic-contract-gate.result }}"
           "${{ needs.knowledge-contract-gate.result }}"
           "${{ needs.non-cypher-surface-gate.result }}"

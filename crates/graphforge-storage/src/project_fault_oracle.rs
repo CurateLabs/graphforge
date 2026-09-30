@@ -380,6 +380,8 @@ struct ParticipantRecord {
     row_count: u64,
     schema_fingerprint: String,
     content_sha256: String,
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    content_xxh64: u64,
 }
 
 fn canonical_json_line<T: Serialize>(value: &T) -> Vec<u8> {
@@ -674,7 +676,7 @@ fn hex_digest(bytes: [u8; 32]) -> String {
 fn parent_manifest_bytes(ids: PublicationIds) -> Vec<u8> {
     canonical_json_line(&ManifestRecord {
         format: "graphforge-generation".into(),
-        format_version: 1,
+        format_version: crate::project_generation::GENERATION_MANIFEST_VERSION,
         generation_uuid: ids.parent_generation.hyphenated().to_string(),
         parent_generation_uuid: None,
         transaction_uuid: uuid_from_seed(0, 9).hyphenated().to_string(),
@@ -691,7 +693,7 @@ fn child_manifest_bytes(ids: PublicationIds, participant_bytes: &[u8]) -> Vec<u8
     let schema = hex_digest(Sha256::digest(b"graph/nodes").into());
     canonical_json_line(&ManifestRecord {
         format: "graphforge-generation".into(),
-        format_version: 1,
+        format_version: crate::project_generation::GENERATION_MANIFEST_VERSION,
         generation_uuid: ids.new_generation.hyphenated().to_string(),
         parent_generation_uuid: Some(ids.parent_generation.hyphenated().to_string()),
         transaction_uuid: ids.transaction.hyphenated().to_string(),
@@ -710,6 +712,7 @@ fn child_manifest_bytes(ids: PublicationIds, participant_bytes: &[u8]) -> Vec<u8
             row_count: 1,
             schema_fingerprint: schema,
             content_sha256: digest,
+            content_xxh64: crate::corruption_checksum::checksum(participant_bytes),
         }],
     })
 }

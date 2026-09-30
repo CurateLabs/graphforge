@@ -1210,6 +1210,7 @@ mod tests {
             byte_length: 1,
             row_count: 1,
             schema_fingerprint: encode_hex(&Sha256::digest("workspace/repository_snapshot@1")),
+            content_xxh64: 0,
             content_sha256: content_sha256.into(),
         }
     }
@@ -1239,6 +1240,7 @@ mod tests {
                 ..valid.clone()
             },
             graphforge_storage::StagedParticipant {
+                content_xxh64: 0,
                 content_sha256: "wrong".into(),
                 ..valid
             },

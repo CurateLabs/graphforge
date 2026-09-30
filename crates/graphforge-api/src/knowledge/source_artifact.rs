@@ -8,7 +8,6 @@ use graphforge_knowledge::{
     ArtifactPreferenceLedger, DerivationRole, DerivationSubjectKind, RETENTION_DEPENDENCY_SCHEMA,
     SOURCE_SCHEMA, Source, SourceKind, SourceLedger,
 };
-use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use sha2::Digest;
 
 use super::ledger::{
@@ -705,7 +704,8 @@ type ResolvedArtifactPayload = (
 fn resolve_payload(payload: &ArtifactPayloadRequest) -> Result<ResolvedArtifactPayload, GfError> {
     match payload {
         ArtifactPayloadRequest::LocalBytes(bytes) => {
-            let digest = Sha256::digest(bytes.as_slice()).into();
+            let digest =
+                graphforge_core::hash_observation::ArtifactSha256::digest(bytes.as_slice()).into();
             let length = u64::try_from(bytes.len())
                 .map_err(|_| GfError::Validation("artifact bytes exceed u64".into()))?;
             Ok((

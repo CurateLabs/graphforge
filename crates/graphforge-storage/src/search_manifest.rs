@@ -7,8 +7,8 @@
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::GfError;
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use sha2::Digest as _;
 
 use crate::catalog::AdmittedSourceFile;
@@ -344,17 +344,17 @@ impl SearchSourceSnapshot {
             }
         }
         let mut digest = Sha256::new();
-        digest.update(b"graphforge-admitted-source-v1\0");
+        digest.update(b"graphforge-admitted-checksum-source-v1\0");
         for file in ordered {
             let name = normalize_source_name(&file.name)?;
             digest.update((name.len() as u64).to_le_bytes());
             digest.update(name.as_bytes());
             digest.update(file.byte_length.to_le_bytes());
-            digest.update(file.sha256);
+            digest.update(file.content_xxh64.to_le_bytes());
         }
         Ok(Self {
             generation,
-            fingerprint: format!("gf-sha256-files-v1:{}", hex(&digest.finalize())),
+            fingerprint: format!("gf-sha256-checksums-v1:{}", hex(&digest.finalize())),
         })
     }
 
@@ -889,6 +889,7 @@ fn canonical_fingerprint(value: &str) -> bool {
     value
         .strip_prefix("gf-fnv1a256:")
         .or_else(|| value.strip_prefix("gf-sha256-files-v1:"))
+        .or_else(|| value.strip_prefix("gf-sha256-checksums-v1:"))
         .is_some_and(|digest| {
             digest.len() == 64
                 && digest

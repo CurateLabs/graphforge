@@ -4,8 +4,8 @@ use super::{
     CompositionBindingContext, CompositionBindingLimits, GfError, GraphForge, OntologyDoc,
     OntologyHandle, OntologyMode, ResolvedProjectGeneration, RuntimeCatalog,
 };
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use graphforge_ontology::OntologyCompiler;
-use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use sha2::Digest;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -269,7 +269,7 @@ pub(super) fn property_and_graph_inventory_for_hydrated_generation(
 ) -> Result<
     (
         Arc<graphforge_storage::AuthenticatedPropertyInventory>,
-        graphforge_storage::GraphFilesInventory,
+        graphforge_storage::GraphReadInventory,
     ),
     GfError,
 > {
@@ -289,12 +289,12 @@ pub(super) fn property_and_graph_inventory_for_hydrated_generation(
             graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
                 generation,
             )?,
-            inventory,
+            graphforge_storage::GraphReadInventory::from_published(&inventory)?,
         ),
         _ => {
-            let (materialized, _) = graphforge_storage::capture_graph_files(hydrated_root)?;
+            let materialized = graphforge_storage::capture_graph_read_inventory(hydrated_root)?;
             let admitted =
-                graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
+                graphforge_storage::AuthenticatedPropertyInventory::from_private_workspace_inventory(
                     generation,
                     hydrated_root,
                     materialized.clone(),

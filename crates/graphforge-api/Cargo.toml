@@ -54,6 +54,7 @@ uuid = { workspace = true }
 # Assessment-only IPC codec experiments; production writers remain unchanged.
 arrow = { workspace = true, features = ["ipc_compression"] }
 cucumber = { workspace = true }
+divan = { workspace = true }
 tokio = { workspace = true }
 graphforge-cypher = { path = "../graphforge-cypher" }
 graphforge-storage = { path = "../graphforge-storage", features = ["test-failpoints", "test-support"] }
@@ -211,6 +212,12 @@ required-features = ["research", "search"]
 # A custom-harness target (cucumber drives its own main).
 [[test]]
 name = "bdd"
+harness = false
+
+# In-process Divan benchmark over the same TCK scenarios, step functions and
+# pooled fixture as the `bdd` run (#1653). Divan's own harness drives `main`.
+[[bench]]
+name = "tck_scenarios"
 harness = false
 
 [lints]

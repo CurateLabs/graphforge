@@ -1,17 +1,24 @@
-//! Unit and integration coverage for Rust BDD timing reports.
+//! Unit and integration coverage for the diagnostic Rust BDD timing reports
+//! and the test-only TCK fault injection (#1654).
+//!
+//! Threshold behaviour moved to the provenance-gated `make tck-perf` consumer;
+//! its parity cases live in `benchmarks/tests/test_tck_perf.py`.
 
+#[path = "bdd/fault.rs"]
+mod fault;
 #[path = "bdd/fixture.rs"]
 mod fixture;
 #[path = "bdd/timing.rs"]
 mod timing;
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
+use fault::{Fault, Scope};
 use timing::{
-    SCHEMA_VERSION, ScenarioOutcome, ScenarioTimer, ScenarioTiming, Suite, TimingBaseline,
-    TimingPolicy, annotation_messages, baseline_candidate, build_report, distribution,
-    escape_github_command, load_baseline, load_policy, non_passing_scenario_keys, render_markdown,
-    write_artifacts,
+    LegacyFile, REPORT_KIND, REPORT_SCHEMA_VERSION, ScenarioOutcome, ScenarioTimer, ScenarioTiming,
+    Suite, build_report, distribution, legacy_notice, load_legacy, non_passing_scenario_keys,
+    render_markdown, write_artifacts,
 };
 
 #[test]
@@ -100,21 +107,6 @@ fn record(
     }
 }
 
-fn policy() -> TimingPolicy {
-    TimingPolicy {
-        schema_version: SCHEMA_VERSION,
-        baseline_required: true,
-        fixture_profile: "pooled-isolated-serial-v1".to_owned(),
-        tck_concurrency: fixture::TCK_CONCURRENCY,
-        per_scenario_multiplier: 2.0,
-        per_scenario_min_delta_ms: 250.0,
-        aggregate_multiplier: 1.25,
-        aggregate_min_delta_ms: 15_000.0,
-        absolute_slow_ms: Some(2_000.0),
-        max_warning_annotations: 25,
-    }
-}
-
 #[test]
 fn timer_handles_interleaved_scenarios_with_monotonic_instants() {
     let started = Instant::now();
@@ -183,105 +175,53 @@ fn correctness_failure_keys_include_skips_and_are_suite_scoped_and_stably_ordere
     );
 }
 
+fn workspace_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root")
+}
+
 #[test]
-fn only_tck_baseline_regressions_create_findings() {
+fn report_is_diagnostic_only_and_carries_no_threshold_fields() {
     let records = vec![
         record(
-            Suite::Api,
-            "api:1:slow",
-            "api",
-            ScenarioOutcome::Passed,
-            5_000,
-        ),
-        record(
             Suite::Tck,
-            "tck:1:slow",
-            "tck",
+            "feature:1:name",
+            "feature",
             ScenarioOutcome::Passed,
-            2_001,
+            10,
         ),
-        record(
-            Suite::Tck,
-            "tck:2:new",
-            "tck",
-            ScenarioOutcome::Passed,
-            9_000,
-        ),
+        record(Suite::Api, "api:1:name", "api", ScenarioOutcome::Passed, 5),
     ];
-    let policy = policy();
-    let mut baseline = baseline_candidate(&records, false, &policy);
-    baseline.scenarios.remove("tck:2:new");
-    baseline.scenarios.insert("tck:1:slow".to_owned(), 500_000);
-    baseline
-        .scenarios
-        .insert("tck:9:removed".to_owned(), 10_000);
-    baseline.scenario_count = baseline.scenarios.len();
-    baseline.total_elapsed_us = 500_000;
-    baseline.features.insert("tck".to_owned(), 500_000);
-    let report = build_report(&records, &policy, Some(&baseline), false).unwrap();
-
-    assert_eq!(report.findings.len(), 1);
-    assert_eq!(report.findings[0].key.as_deref(), Some("tck:1:slow"));
-    assert_eq!(report.unbaselined_tck_scenarios, ["tck:2:new"]);
-    assert_eq!(report.missing_baseline_tck_scenarios, ["tck:9:removed"]);
+    let report = build_report(&records, false, fixture::TCK_CONCURRENCY, None);
+    assert_eq!(report.schema_version, REPORT_SCHEMA_VERSION);
+    assert_eq!(report.report_kind, REPORT_KIND);
+    let json: serde_json::Value = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["report_kind"], "diagnostic");
+    for removed in [
+        "findings",
+        "baseline_status",
+        "unbaselined_tck_scenarios",
+        "missing_baseline_tck_scenarios",
+    ] {
+        assert!(
+            json.get(removed).is_none(),
+            "{removed} must not be reported"
+        );
+    }
+    let tck = &report.suites[1];
+    assert_eq!(tck.suite, Suite::Tck);
+    assert_eq!(tck.distribution.count, 1);
+    assert_eq!(tck.slowest[0].key, "feature:1:name");
+    let markdown = render_markdown(&report);
+    assert!(markdown.contains("Slowest TCK scenarios"));
+    assert!(markdown.contains("drive no performance threshold"));
+    assert!(!markdown.contains("Performance warnings"));
 }
 
 #[test]
-fn aggregate_degradation_reports_largest_feature_contributors() {
-    let records = vec![
-        record(Suite::Tck, "a:1:x", "a", ScenarioOutcome::Passed, 20_000),
-        record(Suite::Tck, "b:1:y", "b", ScenarioOutcome::Passed, 10_000),
-    ];
-    let baseline = TimingBaseline {
-        schema_version: SCHEMA_VERSION,
-        partial: false,
-        fixture_profile: "pooled-isolated-serial-v1".to_owned(),
-        tck_concurrency: fixture::TCK_CONCURRENCY,
-        runner: "ubuntu".to_owned(),
-        rust_toolchain: "1.96.0".to_owned(),
-        source_commit: "abc".to_owned(),
-        scenario_count: 2,
-        total_elapsed_us: 10_000_000,
-        features: [("a".to_owned(), 6_000_000), ("b".to_owned(), 4_000_000)]
-            .into_iter()
-            .collect(),
-        scenarios: [
-            ("a:1:x".to_owned(), 6_000_000),
-            ("b:1:y".to_owned(), 4_000_000),
-        ]
-        .into_iter()
-        .collect(),
-        suggested_absolute_slow_ms: 1_000.0,
-    };
-    let mut aggregate_policy = policy();
-    aggregate_policy.absolute_slow_ms = None;
-    aggregate_policy.per_scenario_multiplier = 100.0;
-    aggregate_policy.aggregate_min_delta_ms = 1.0;
-    let report = build_report(&records, &aggregate_policy, Some(&baseline), false).unwrap();
-
-    assert_eq!(report.findings.len(), 1);
-    assert!(report.findings[0].key.is_none());
-    assert_eq!(report.findings[0].contributors[0].feature, "a");
-}
-
-#[test]
-fn partial_runs_never_compare_with_the_full_baseline() {
-    let records = vec![record(
-        Suite::Tck,
-        "tck:1:slow",
-        "tck",
-        ScenarioOutcome::Passed,
-        99_000,
-    )];
-    let policy = policy();
-    let baseline = baseline_candidate(&records, false, &policy);
-    let report = build_report(&records, &policy, Some(&baseline), true).unwrap();
-    assert!(report.findings.is_empty());
-    assert_eq!(report.baseline_status, "partial_not_compared");
-}
-
-#[test]
-fn report_is_privacy_safe_and_github_commands_are_escaped() {
+fn report_is_privacy_safe() {
     let records = vec![record(
         Suite::Tck,
         "feature:1:name",
@@ -289,39 +229,17 @@ fn report_is_privacy_safe_and_github_commands_are_escaped() {
         ScenarioOutcome::Passed,
         10,
     )];
-    let report = build_report(
-        &records,
-        &TimingPolicy {
-            baseline_required: false,
-            ..policy()
-        },
-        None,
-        false,
-    )
-    .unwrap();
+    let notice = legacy_notice(&[("tests/tck/performance_baseline.json", LegacyFile::Schema2)]);
+    let report = build_report(&records, false, fixture::TCK_CONCURRENCY, notice);
     let json = serde_json::to_string(&report).unwrap();
     assert!(!json.contains("query"));
     assert!(!json.contains("/tmp"));
-    assert!(render_markdown(&report).contains("Slowest TCK scenarios"));
-    assert_eq!(escape_github_command("a:b,c%\n"), "a%3Ab%2Cc%25%0A");
+    assert!(!json.contains("/home"));
 }
 
 #[test]
-fn policy_baseline_and_artifacts_round_trip() {
+fn artifacts_are_the_report_and_summary_only() {
     let dir = tempfile::TempDir::new().unwrap();
-    let policy_path = dir.path().join("policy.json");
-    std::fs::write(
-        &policy_path,
-        serde_json::to_string_pretty(&TimingPolicy {
-            baseline_required: false,
-            ..policy()
-        })
-        .unwrap(),
-    )
-    .unwrap();
-    let loaded_policy = load_policy(&policy_path).unwrap();
-    assert!(!loaded_policy.baseline_required);
-
     let records = vec![record(
         Suite::Tck,
         "feature:1:name",
@@ -329,94 +247,124 @@ fn policy_baseline_and_artifacts_round_trip() {
         ScenarioOutcome::Passed,
         10,
     )];
-    let candidate = baseline_candidate(&records, false, &loaded_policy);
-    let report = build_report(&records, &loaded_policy, None, false).unwrap();
+    let report = build_report(&records, false, fixture::TCK_CONCURRENCY, None);
     let output = dir.path().join("artifacts");
-    write_artifacts(&output, &report, &candidate).unwrap();
-    assert!(output.join("report.json").is_file());
-    assert!(output.join("summary.md").is_file());
-
-    let baseline_path = output.join("tck-baseline-candidate.json");
-    let loaded_baseline = load_baseline(&baseline_path, true).unwrap().unwrap();
-    assert_eq!(loaded_baseline.scenario_count, 1);
+    write_artifacts(&output, &report).unwrap();
+    let mut names: Vec<String> = std::fs::read_dir(&output)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["report.json", "summary.md"]);
 }
 
 #[test]
-fn threshold_boundaries_are_strict_and_annotations_are_capped() {
-    let mut records = Vec::new();
-    let mut scenarios = std::collections::BTreeMap::new();
-    let mut features = std::collections::BTreeMap::new();
-    for index in 0..5 {
-        let key = format!("feature:{index}:scenario");
-        records.push(record(
-            Suite::Tck,
-            &key,
-            "feature",
-            ScenarioOutcome::Passed,
-            501,
-        ));
-        scenarios.insert(key, 250_000);
-    }
-    features.insert("feature".to_owned(), 1_250_000);
-    let baseline = TimingBaseline {
-        schema_version: SCHEMA_VERSION,
-        partial: false,
-        fixture_profile: "pooled-isolated-serial-v1".to_owned(),
-        tck_concurrency: fixture::TCK_CONCURRENCY,
-        runner: "ubuntu".to_owned(),
-        rust_toolchain: "1.96.0".to_owned(),
-        source_commit: "abc".to_owned(),
-        scenario_count: 5,
-        total_elapsed_us: 1_250_000,
-        features,
-        scenarios,
-        suggested_absolute_slow_ms: 1_000.0,
-    };
-    let mut boundary_policy = policy();
-    boundary_policy.absolute_slow_ms = None;
-    boundary_policy.aggregate_multiplier = 100.0;
-    let report = build_report(&records, &boundary_policy, Some(&baseline), false).unwrap();
-    assert_eq!(report.findings.len(), 5);
-    let messages = annotation_messages(&report, 3);
-    assert_eq!(messages.len(), 3);
-    assert!(messages[2].contains("5 TCK performance warning(s)"));
-
-    for record in &mut records {
-        record.elapsed_us = 500_000;
-    }
-    let at_boundary = build_report(&records, &boundary_policy, Some(&baseline), false).unwrap();
-    assert!(at_boundary.findings.is_empty());
+fn committed_schema_2_policy_and_baseline_load_as_one_legacy_diagnostic_notice() {
+    let root = workspace_root();
+    let files: Vec<(&str, LegacyFile)> = [
+        "tests/tck/performance_policy.json",
+        "tests/tck/performance_baseline.json",
+    ]
+    .into_iter()
+    .map(|name| (name, load_legacy(&root.join(name))))
+    .collect();
+    assert_eq!(files[0].1, LegacyFile::Schema2);
+    assert_eq!(files[1].1, LegacyFile::Schema2);
+    let notice = legacy_notice(&files).expect("legacy files present");
+    assert!(
+        notice.starts_with("legacy diagnostic baseline: "),
+        "{notice}"
+    );
+    assert!(notice.contains("tests/tck/performance_policy.json (schema 2)"));
+    assert!(notice.contains("tests/tck/performance_baseline.json (schema 2)"));
+    assert!(notice.contains("not a performance threshold authority"));
+    assert_eq!(notice.matches("legacy diagnostic baseline").count(), 1);
 }
 
 #[test]
-fn required_or_malformed_monitor_configuration_is_blocking() {
-    let records = vec![record(
-        Suite::Tck,
-        "feature:1:name",
-        "feature",
-        ScenarioOutcome::Passed,
-        10,
-    )];
-    assert!(
-        build_report(&records, &policy(), None, false)
-            .unwrap_err()
-            .contains("required TCK performance baseline")
+fn absent_malformed_or_unknown_legacy_files_never_panic() {
+    let dir = tempfile::TempDir::new().unwrap();
+    assert_eq!(
+        load_legacy(&dir.path().join("missing.json")),
+        LegacyFile::Absent
+    );
+    assert_eq!(legacy_notice(&[("missing.json", LegacyFile::Absent)]), None);
+
+    let malformed = dir.path().join("malformed.json");
+    std::fs::write(&malformed, "{ not json").unwrap();
+    assert!(matches!(
+        load_legacy(&malformed),
+        LegacyFile::Unrecognised(_)
+    ));
+
+    let future = dir.path().join("future.json");
+    std::fs::write(&future, r#"{"schema_version": 7}"#).unwrap();
+    assert_eq!(
+        load_legacy(&future),
+        LegacyFile::Unrecognised("schema 7".to_owned())
+    );
+    let notice = legacy_notice(&[("future.json", load_legacy(&future))]).unwrap();
+    assert!(notice.contains("future.json (schema 7)"), "{notice}");
+}
+
+#[test]
+fn fault_injection_parses_a_named_scenario_or_every_scenario() {
+    assert_eq!(Fault::parse(None, None), Ok(None));
+    let named = Fault::parse(Some("250"), Some("Delete5:34:[1] Delete node from a list"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        named.scope,
+        Scope::Scenario("Delete5:34:[1] Delete node from a list".to_owned())
+    );
+    assert_eq!(
+        named.delay_for("Delete5:34:[1] Delete node from a list"),
+        Some(Duration::from_millis(250))
+    );
+    assert_eq!(named.delay_for("Delete5:35:[2] other"), None);
+    assert_eq!(
+        named.announcement(),
+        "TCK PERF FAULT INJECTION: delay_ms=250 scenario=Delete5:34:[1] Delete node from a list"
     );
 
-    let mut invalid = policy();
-    invalid.max_warning_annotations = 0;
-    assert!(
-        build_report(&records, &invalid, None, true)
-            .unwrap_err()
-            .contains("invalid TCK timing policy")
+    let all = Fault::parse(Some("5"), Some("*")).unwrap().unwrap();
+    assert_eq!(all.scope, Scope::All);
+    assert_eq!(
+        all.delay_for("anything:1:x"),
+        Some(Duration::from_millis(5))
     );
+    assert_eq!(
+        all.announcement(),
+        "TCK PERF FAULT INJECTION: delay_ms=5 scenario=*"
+    );
+}
 
-    let configured = policy();
-    let mut wrong_profile = baseline_candidate(&records, false, &configured);
-    wrong_profile.tck_concurrency = 64;
-    assert!(
-        build_report(&records, &configured, Some(&wrong_profile), false)
-            .unwrap_err()
-            .contains("does not match policy")
-    );
+#[test]
+fn fault_injection_rejects_partial_or_invalid_configuration() {
+    for (delay, scenario) in [
+        (Some("5"), None),
+        (None, Some("*")),
+        (Some("0"), Some("*")),
+        (Some("-1"), Some("*")),
+        (Some("fast"), Some("*")),
+        (Some("5"), Some("  ")),
+    ] {
+        assert!(
+            Fault::parse(delay, scenario).is_err(),
+            "{delay:?} / {scenario:?} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn fault_injection_is_inactive_without_configuration() {
+    // cargo test and CI never set GF_TCK_PERF_FAULT_*; the child-process tests
+    // in tck_scenario_bench.rs cover an active injection end to end.
+    if std::env::var_os(fault::DELAY_ENV).is_none()
+        && std::env::var_os(fault::SCENARIO_ENV).is_none()
+    {
+        assert!(fault::active().is_none());
+        // With no injection configured this is a no-op.
+        fault::inject("any:1:scenario");
+    }
 }

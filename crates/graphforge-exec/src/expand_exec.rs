@@ -757,7 +757,7 @@ fn read_target_edge_properties(
     property_names: &[String],
     owners: &mut std::collections::BTreeSet<[u8; 16]>,
 ) -> Result<Vec<arrow::record_batch::RecordBatch>, GfError> {
-    let selected = graphforge_storage::read_authenticated_property_targets_for_inventory(
+    let selected = graphforge_storage::read_authenticated_property_target_data_for_inventory(
         inventory,
         graphforge_storage::PropertyRouteKind::Edge,
         stem,
@@ -1065,10 +1065,9 @@ impl V4OrdinalIdentitySession {
 ///
 /// Probes the session's [`AdjacencyProvider`] per frontier row instead of
 /// hash-joining the full edge table; emits exactly the rows (and column
-/// layout) the join chain would have produced. For `Undirected` the lowerer
-/// wraps the node in `DISTINCT` (mirroring the join path's union+distinct),
-/// so this node emits the provider's merged view raw — including a
-/// self-loop's two entries, which the `DISTINCT` collapses.
+/// layout) the join chain would have produced. For `Undirected` this node
+/// reads the provider's merged view and skips an edge already emitted for the
+/// same source row, so a self-loop's two entries yield one row.
 pub struct ExpandExec {
     pub(super) input: Arc<dyn ExecutionPlan>,
     rel_type_name: String,

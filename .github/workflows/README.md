@@ -163,24 +163,23 @@ open/recovery/commit/GC/compaction use CodSpeed's isolated bare-metal
 compaction peak-RSS artifacts while CodSpeed memory mode is unavailable for
 this project.
 
-### `progressive-ladder.yml` — Progressive Fly qualification ladder
+### Operator gates — no workflow
 
-This manual compatibility wrapper validates and renders the registry-owned
-operator command. It never provisions or spends. Provider, SKU, runner
-registration, cost approval, and teardown remain explicit operator decisions;
-the actual run must use the Python + Pulumi ESC control plane described in
-`benchmarks/README.md` and the progressive qualification operator.
+`progressive-ladder`, `fly-tiny-qualification`, `fly-tiny-recovery`, and
+`native-local-admission` are registered under `operator_gates` in
+`config/gate-registry.json` and have no Actions workflow. Actions holds no
+provider credential, spend authority, or deletion authority, and hosted runners
+are disqualified as BenchExec admission hosts by design, so a wrapper could only
+print the command. Render a gate's command with:
 
-### `fly-tiny-qualification.yml` — Disposable Fly environment smoke
+```bash
+python3 scripts/ci/gate-registry.py command <gate>
+```
 
-This manual compatibility wrapper validates and renders the registry-owned
-operator command without credentials or provider execution. Live qualification
-is available only through the Python + Pulumi ESC control plane below.
-
-For new operator runs, use the registry-owned entry point instead of Actions
-dispatch. All controller flags are passed after `ARGS=`; the Python operator
-requires the exact SHA, an explicit live mode, and disposable confirmation
-before it opens the named ESC environment:
+The Fly gates run only through the Python + Pulumi ESC control plane. All
+controller flags are passed after `ARGS=`; the Python operator requires the
+exact SHA, an explicit live mode, and disposable confirmation before it opens
+the named ESC environment:
 
 ```bash
 make -C benchmarks qualification-operator \
@@ -189,12 +188,17 @@ make -C benchmarks qualification-operator \
   ARGS='--expected-sha <sha> --execute --confirm-disposable <remaining-controller-args>'
 ```
 
-### `fly-tiny-recovery.yml` — Manual Fly orphan recovery
+Receipt-bound orphan cleanup uses `GATE=fly-tiny-recovery` through the same
+operator. Native admission runs on the designated benchmark host with
+`make -C benchmarks local-admission`.
 
-This manual compatibility wrapper only validates and renders the registry-owned
-recovery command. Receipt-bound orphan cleanup must be launched through the
-Python + Pulumi ESC operator; Actions has no provider credential or deletion
-authority.
+### Scheduled and manual lane health
+
+A scheduled lane that has been red for seven days is fixed or removed; a lane
+nobody reads is cost without signal. A manual lane is dispatched once when it
+is added, so it is known to work before anyone depends on it. `fuzz.yml` was
+red for 51 days and `concurrency-stress-gate.yml` had never passed when #1671
+took the first census.
 
 ### CodeRabbit
 

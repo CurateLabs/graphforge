@@ -9,8 +9,9 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_filesystem::{ObservedSync as _, StableDirectory};
-use graphforge_storage::concurrency_attribution::{ObservedSha256 as Sha256, RegionScope};
+use graphforge_storage::concurrency_attribution::RegionScope;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use uuid::Uuid;

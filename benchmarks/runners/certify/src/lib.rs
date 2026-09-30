@@ -583,7 +583,7 @@ impl PhaseExecutor for PublicProcessExecutor {
                 let execution = match if produce_lifecycle_storage {
                     self.execute_cli_observed(&profile.executable, args)
                 } else {
-                    execute_process(&profile.executable, args)
+                    execute_cli_measured(&profile.executable, args)
                 } {
                     Ok(execution) => execution,
                     Err(_) => {
@@ -647,6 +647,8 @@ impl PhaseExecutor for PublicProcessExecutor {
             && matches!(&command.action, PhaseAction::GraphForgeCli { .. })
         {
             self.execute_cli_observed(executable, args)?
+        } else if matches!(&command.action, PhaseAction::GraphForgeCli { .. }) {
+            execute_cli_measured(executable, args)?
         } else {
             execute_process(executable, args)?
         };
@@ -676,6 +678,17 @@ impl PhaseExecutor for PublicProcessExecutor {
     }
 }
 
+/// Certification consumes measured receipts; request the optional collector
+/// explicitly without changing generator or arbitrary subprocess arguments.
+fn execute_cli_measured(executable: &str, args: &[String]) -> Result<Execution, String> {
+    if args == ["--info"] || args.iter().any(|arg| arg == "--diagnostics") {
+        return execute_process(executable, args);
+    }
+    let mut measured = args.to_vec();
+    measured.push("--diagnostics".to_owned());
+    execute_process(executable, &measured)
+}
+
 fn execute_process(executable: &str, args: &[String]) -> Result<Execution, String> {
     execute_process_with_allocation(executable, args, None)
 }
@@ -690,7 +703,7 @@ fn execute_process_with_allocation(
     let mut command = Command::new(executable);
     command.args(args);
     if diagnostic {
-        command.arg("--allocation-diagnostics");
+        command.arg("--allocation-diagnostics").arg("--diagnostics");
     }
     let mut child = command
         .stdin(if diagnostic {
@@ -2337,6 +2350,14 @@ mod tests {
                 "object_count": 1, "block_count": 0, "fsync_calls": 0
             }
         })
+    }
+
+    #[test]
+    fn cli_measurement_adapter_explicitly_requests_diagnostics() {
+        let args = ["-c", "test \"$1\" = --diagnostics", "gf"]
+            .map(str::to_owned);
+        assert_eq!(execute_cli_measured("/bin/sh", &args).unwrap().exit_code, Some(0));
+        assert_ne!(execute_process("/bin/sh", &args).unwrap().exit_code, Some(0));
     }
 
     #[test]

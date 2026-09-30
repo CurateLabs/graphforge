@@ -2,7 +2,7 @@
 
 use super::AdmittedSourceFile;
 use super::admit_decoded_parquet;
-use super::hash_admitted_source;
+use super::checksum_admitted_source;
 use super::io_err;
 use super::parquet_err;
 use super::preflight_parquet_handle;
@@ -96,12 +96,12 @@ pub(crate) fn visit_property_overlay_batched_projected<F>(
     batch_size: usize,
     selected_properties: Option<&std::collections::BTreeSet<String>>,
     mut visit: F,
-) -> Result<crate::PropertyOverlayMetrics, DataFusionError>
+) -> Result<Option<crate::PropertyOverlayMetrics>, DataFusionError>
 where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
 {
     if !dir.exists() {
-        return Ok(crate::PropertyOverlayMetrics::default());
+        return Ok(crate::lifecycle_io::is_active().then(crate::PropertyOverlayMetrics::default));
     }
     let kind = if is_edge {
         crate::property_overlay::PropertyRouteKind::Edge
@@ -124,7 +124,7 @@ where
     let mut rows = Vec::with_capacity(batch_size.max(1));
     let mut stopped = false;
     let metrics = inventory
-        .visit_route_projected(
+        .visit_route_projected_optional(
             kind,
             stem,
             scratch.path(),
@@ -278,9 +278,8 @@ where
 {
     let inventory = crate::property_overlay::authenticated_property_inventory(dir)
         .map_err(|error| DataFusionError::Execution(error.to_string()))?;
-    let admitted = inventory
-        .admitted_source_files(crate::property_overlay::PropertyRouteKind::Node)
-        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let admitted =
+        inventory.admitted_source_files(crate::property_overlay::PropertyRouteKind::Node);
     let total = admitted.iter().try_fold(0_u64, |sum, file| {
         sum.checked_add(file.byte_length).ok_or_else(|| {
             DataFusionError::ResourcesExhausted("property source bytes overflow".into())
@@ -303,11 +302,12 @@ where
     for route in routes {
         let mut rows = Vec::with_capacity(batch_size.max(1));
         inventory
-            .visit_route(
+            .visit_route_projected_optional(
                 crate::property_overlay::PropertyRouteKind::Node,
                 &route,
                 scratch.path(),
                 crate::property_overlay::PropertyOverlayLimits::default(),
+                None,
                 |mut row| {
                     if stopped {
                         return Ok(());
@@ -388,7 +388,7 @@ where
             )));
         }
         preflight_parquet_handle(&mut file, metadata.len())?;
-        evidence.push(hash_admitted_source(
+        evidence.push(checksum_admitted_source(
             property_relative_name(stem, path)?,
             &mut file,
             metadata.len(),

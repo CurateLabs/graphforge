@@ -2158,6 +2158,7 @@ version = "0.5.2"
 dependencies = [
  "arrow",
  "bytes",
+ "codspeed-divan-compat",
  "cucumber",
  "datafusion",
  "fs4 1.1.0",

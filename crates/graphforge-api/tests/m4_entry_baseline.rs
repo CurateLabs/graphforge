@@ -1231,6 +1231,7 @@ fn run_node2vec(gf: &GraphForge) -> WorkloadEvidence {
 
 fn assert_fixed_hop_demand(gf: &GraphForge) {
     let _guard = IO_GUARD.lock().expect("io guard");
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     demand::reset();
     let plan = gf.explain(FIXED_HOP_LIMIT).expect("explain fixed-hop");
@@ -1244,7 +1245,7 @@ fn assert_fixed_hop_demand(gf: &GraphForge) {
         demand::disable();
         snap
     };
-    let io = io_stats::snapshot();
+    let io = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(result.stats.rows_produced, 3);
     // Small fixture may not cancel upstream reads; still require demand/plan surface.
     assert!(

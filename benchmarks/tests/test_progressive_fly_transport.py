@@ -15,6 +15,7 @@ from graphforge_bench.progressive_fly_transport import (
     FlyTransportError,
 )
 from graphforge_bench.progressive_provider_attempt import AttemptError, AttemptInvocation, execute
+
 from tests.test_progressive_provider_attempt import APP, IMAGE, ROOT, authorization, planner
 
 NOW = datetime(2026, 6, 1, tzinfo=timezone.utc)
@@ -598,10 +599,8 @@ class ProgressiveFlyTransportTests(unittest.TestCase):
         records = registry_doc["workflows"] + registry_doc.get("operator_gates", [])
         progressive = next(gate for gate in records if gate["id"] == "progressive-ladder")
         self.assertEqual(progressive["control_plane"], "pulumi_esc")
-        self.assertEqual(
-            progressive["path"],
-            ".github/workflows/progressive-ladder.yml",
-        )
+        # The operator command is the only entry point; no Actions wrapper (#1671).
+        self.assertNotIn("path", progressive)
 
 
 if __name__ == "__main__":

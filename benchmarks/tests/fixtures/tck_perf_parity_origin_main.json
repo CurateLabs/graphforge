@@ -1,0 +1,509 @@
+{
+  "_source": "Expected outputs are verbatim serde_json output of the pre-#1654 Rust crates/graphforge-api/tests/bdd/timing.rs::build_report and annotation_messages at origin/main bf28be798, from a temporary, uncommitted probe test fed these _cases (case A's probe input also carried an API-suite record, which build_report ignores). Case letters: A-E and H port bdd_timing.rs parity tests; F uses the #1467 observations; G pins the absolute boundary.",
+  "_cases": {
+    "A": {
+      "records": [
+        [
+          "tck:1:slow",
+          "tck",
+          "passed",
+          2001000
+        ],
+        [
+          "tck:2:new",
+          "tck",
+          "passed",
+          9000000
+        ]
+      ],
+      "baseline": {
+        "tck:1:slow": 500000,
+        "tck:9:removed": 10000
+      },
+      "features": {
+        "tck": 500000
+      },
+      "baseline_total": 500000,
+      "policy": {
+        "absolute_slow_ms": 2000.0
+      },
+      "partial": false,
+      "annotation_cap": 25
+    },
+    "B": {
+      "records": [
+        [
+          "a:1:x",
+          "a",
+          "passed",
+          20000000
+        ],
+        [
+          "b:1:y",
+          "b",
+          "passed",
+          10000000
+        ]
+      ],
+      "baseline": {
+        "a:1:x": 6000000,
+        "b:1:y": 4000000
+      },
+      "features": {
+        "a": 6000000,
+        "b": 4000000
+      },
+      "baseline_total": 10000000,
+      "policy": {
+        "absolute_slow_ms": null,
+        "per_scenario_multiplier": 100.0,
+        "aggregate_min_delta_ms": 1.0
+      },
+      "partial": false,
+      "annotation_cap": 25
+    },
+    "C": {
+      "records": [
+        [
+          "tck:1:slow",
+          "tck",
+          "passed",
+          99000000
+        ]
+      ],
+      "baseline": {
+        "tck:1:slow": 99000000
+      },
+      "features": {
+        "tck": 99000000
+      },
+      "baseline_total": 99000000,
+      "policy": {
+        "absolute_slow_ms": 2000.0
+      },
+      "partial": true,
+      "annotation_cap": 25
+    },
+    "D": {
+      "records": [
+        [
+          "feature:0:scenario",
+          "feature",
+          "passed",
+          501000
+        ],
+        [
+          "feature:1:scenario",
+          "feature",
+          "passed",
+          501000
+        ],
+        [
+          "feature:2:scenario",
+          "feature",
+          "passed",
+          501000
+        ],
+        [
+          "feature:3:scenario",
+          "feature",
+          "passed",
+          501000
+        ],
+        [
+          "feature:4:scenario",
+          "feature",
+          "passed",
+          501000
+        ]
+      ],
+      "baseline": {
+        "feature:0:scenario": 250000,
+        "feature:1:scenario": 250000,
+        "feature:2:scenario": 250000,
+        "feature:3:scenario": 250000,
+        "feature:4:scenario": 250000
+      },
+      "features": {
+        "feature": 1250000
+      },
+      "baseline_total": 1250000,
+      "policy": {
+        "absolute_slow_ms": null,
+        "aggregate_multiplier": 100.0
+      },
+      "partial": false,
+      "annotation_cap": 3
+    },
+    "E": {
+      "records": [
+        [
+          "feature:0:scenario",
+          "feature",
+          "passed",
+          500000
+        ],
+        [
+          "feature:1:scenario",
+          "feature",
+          "passed",
+          500000
+        ],
+        [
+          "feature:2:scenario",
+          "feature",
+          "passed",
+          500000
+        ],
+        [
+          "feature:3:scenario",
+          "feature",
+          "passed",
+          500000
+        ],
+        [
+          "feature:4:scenario",
+          "feature",
+          "passed",
+          500000
+        ]
+      ],
+      "baseline": {
+        "feature:0:scenario": 250000,
+        "feature:1:scenario": 250000,
+        "feature:2:scenario": 250000,
+        "feature:3:scenario": 250000,
+        "feature:4:scenario": 250000
+      },
+      "features": {
+        "feature": 1250000
+      },
+      "baseline_total": 1250000,
+      "policy": {
+        "absolute_slow_ms": null,
+        "aggregate_multiplier": 100.0
+      },
+      "partial": false,
+      "annotation_cap": 3
+    },
+    "F": {
+      "records": [
+        [
+          "Delete5 - Delete clause interoperation with other clauses:34:[1] Delete node from a list",
+          "Delete5",
+          "passed",
+          1242413
+        ],
+        [
+          "Create3 - Interoperation with other clauses:49:[2] WITH-CREATE",
+          "Create3",
+          "passed",
+          361800
+        ],
+        [
+          "Filler:1:rest",
+          "Filler",
+          "passed",
+          139644489
+        ]
+      ],
+      "baseline": {
+        "Delete5 - Delete clause interoperation with other clauses:34:[1] Delete node from a list": 41886,
+        "Create3 - Interoperation with other clauses:49:[2] WITH-CREATE": 17587,
+        "Filler:1:rest": 66445459
+      },
+      "features": {
+        "Delete5": 41886,
+        "Create3": 17587,
+        "Filler": 66445459
+      },
+      "baseline_total": 66504932,
+      "policy": {
+        "absolute_slow_ms": 1300.0
+      },
+      "partial": false,
+      "annotation_cap": 25
+    },
+    "G": {
+      "records": [
+        [
+          "g:1:over",
+          "g",
+          "passed",
+          1300001
+        ],
+        [
+          "g:2:at",
+          "g",
+          "passed",
+          1300000
+        ]
+      ],
+      "baseline": {
+        "g:1:over": 900000,
+        "g:2:at": 900000
+      },
+      "features": {
+        "g": 1800000
+      },
+      "baseline_total": 1800000,
+      "policy": {
+        "absolute_slow_ms": 1300.0
+      },
+      "partial": false,
+      "annotation_cap": 25
+    },
+    "H": {
+      "records": [
+        [
+          "h:1:failed",
+          "h",
+          "failed",
+          9000000
+        ],
+        [
+          "h:2:skipped",
+          "h",
+          "skipped",
+          9000000
+        ]
+      ],
+      "baseline": {
+        "h:1:failed": 1000,
+        "h:2:skipped": 1000
+      },
+      "features": {
+        "h": 2000
+      },
+      "baseline_total": 2000,
+      "policy": {
+        "absolute_slow_ms": 1300.0,
+        "aggregate_multiplier": 1000000.0
+      },
+      "partial": false,
+      "annotation_cap": 25
+    }
+  },
+  "A": {
+    "annotations": [
+      "tck:1:slow: 2001.000 ms (baseline 500.000 ms, warning threshold 1000.000 ms)"
+    ],
+    "baseline_status": "compared",
+    "findings": [
+      {
+        "baseline_ms": 500.0,
+        "contributors": [],
+        "current_ms": 2001.0,
+        "delta_ms": 1501.0,
+        "key": "tck:1:slow",
+        "kind": "scenario_regression",
+        "message": "tck:1:slow: 2001.000 ms (baseline 500.000 ms, warning threshold 1000.000 ms)",
+        "threshold_ms": 1000.0
+      }
+    ],
+    "missing": [
+      "tck:9:removed"
+    ],
+    "unbaselined": [
+      "tck:2:new"
+    ]
+  },
+  "B": {
+    "annotations": [
+      "openCypher TCK total: 30000.000 ms (baseline 10000.000 ms, warning threshold 12500.000 ms)"
+    ],
+    "baseline_status": "compared",
+    "findings": [
+      {
+        "baseline_ms": 10000.0,
+        "contributors": [
+          {
+            "delta_ms": 14000.0,
+            "feature": "a"
+          },
+          {
+            "delta_ms": 6000.0,
+            "feature": "b"
+          }
+        ],
+        "current_ms": 30000.0,
+        "delta_ms": 20000.0,
+        "key": null,
+        "kind": "aggregate_regression",
+        "message": "openCypher TCK total: 30000.000 ms (baseline 10000.000 ms, warning threshold 12500.000 ms)",
+        "threshold_ms": 12500.0
+      }
+    ],
+    "missing": [],
+    "unbaselined": []
+  },
+  "C": {
+    "annotations": [],
+    "baseline_status": "partial_not_compared",
+    "findings": [],
+    "missing": [],
+    "unbaselined": []
+  },
+  "D": {
+    "annotations": [
+      "feature:0:scenario: 501.000 ms (baseline 250.000 ms, warning threshold 500.000 ms)",
+      "feature:1:scenario: 501.000 ms (baseline 250.000 ms, warning threshold 500.000 ms)",
+      "5 TCK performance warning(s); 2 detailed annotation(s) emitted — see report.json"
+    ],
+    "baseline_status": "compared",
+    "findings": [
+      {
+        "baseline_ms": 250.0,
+        "contributors": [],
+        "current_ms": 501.0,
+        "delta_ms": 251.0,
+        "key": "feature:0:scenario",
+        "kind": "scenario_regression",
+        "message": "feature:0:scenario: 501.000 ms (baseline 250.000 ms, warning threshold 500.000 ms)",
+        "threshold_ms": 500.0
+      },
+      {
+        "baseline_ms": 250.0,
+        "contributors": [],
+        "current_ms": 501.0,
+        "delta_ms": 251.0,
+        "key": "feature:1:scenario",
+        "kind": "scenario_regression",
+        "message": "feature:1:scenario: 501.000 ms (baseline 250.000 ms, warning threshold 500.000 ms)",
+        "threshold_ms": 500.0
+      },
+      {
+        "baseline_ms": 250.0,
+        "contributors": [],
+        "current_ms": 501.0,
+        "delta_ms": 251.0,
+        "key": "feature:2:scenario",
+        "kind": "scenario_regression",
+        "message": "feature:2:scenario: 501.000 ms (baseline 250.000 ms, warning threshold 500.000 ms)",
+        "threshold_ms": 500.0
+      },
+      {
+        "baseline_ms": 250.0,
+        "contributors": [],
+        "current_ms": 501.0,
+        "delta_ms": 251.0,
+        "key": "feature:3:scenario",
+        "kind": "scenario_regression",
+        "message": "feature:3:scenario: 501.000 ms (baseline 250.000 ms, warning threshold 500.000 ms)",
+        "threshold_ms": 500.0
+      },
+      {
+        "baseline_ms": 250.0,
+        "contributors": [],
+        "current_ms": 501.0,
+        "delta_ms": 251.0,
+        "key": "feature:4:scenario",
+        "kind": "scenario_regression",
+        "message": "feature:4:scenario: 501.000 ms (baseline 250.000 ms, warning threshold 500.000 ms)",
+        "threshold_ms": 500.0
+      }
+    ],
+    "missing": [],
+    "unbaselined": []
+  },
+  "E": {
+    "annotations": [],
+    "baseline_status": "compared",
+    "findings": [],
+    "missing": [],
+    "unbaselined": []
+  },
+  "F": {
+    "annotations": [
+      "openCypher TCK total: 141248.702 ms (baseline 66504.932 ms, warning threshold 83131.165 ms)",
+      "Filler:1:rest: 139644.489 ms (baseline 66445.459 ms, warning threshold 1300.000 ms)",
+      "Delete5 - Delete clause interoperation with other clauses:34:[1] Delete node from a list: 1242.413 ms (baseline 41.886 ms, warning threshold 291.886 ms)",
+      "Create3 - Interoperation with other clauses:49:[2] WITH-CREATE: 361.800 ms (baseline 17.587 ms, warning threshold 267.587 ms)"
+    ],
+    "baseline_status": "compared",
+    "findings": [
+      {
+        "baseline_ms": 66504.932,
+        "contributors": [
+          {
+            "delta_ms": 73199.03,
+            "feature": "Filler"
+          },
+          {
+            "delta_ms": 1200.527,
+            "feature": "Delete5"
+          },
+          {
+            "delta_ms": 344.213,
+            "feature": "Create3"
+          }
+        ],
+        "current_ms": 141248.702,
+        "delta_ms": 74743.76999999999,
+        "key": null,
+        "kind": "aggregate_regression",
+        "message": "openCypher TCK total: 141248.702 ms (baseline 66504.932 ms, warning threshold 83131.165 ms)",
+        "threshold_ms": 83131.165
+      },
+      {
+        "baseline_ms": 66445.459,
+        "contributors": [],
+        "current_ms": 139644.489,
+        "delta_ms": 73199.03,
+        "key": "Filler:1:rest",
+        "kind": "scenario_regression",
+        "message": "Filler:1:rest: 139644.489 ms (baseline 66445.459 ms, warning threshold 1300.000 ms)",
+        "threshold_ms": 1300.0
+      },
+      {
+        "baseline_ms": 41.886,
+        "contributors": [],
+        "current_ms": 1242.413,
+        "delta_ms": 1200.527,
+        "key": "Delete5 - Delete clause interoperation with other clauses:34:[1] Delete node from a list",
+        "kind": "scenario_regression",
+        "message": "Delete5 - Delete clause interoperation with other clauses:34:[1] Delete node from a list: 1242.413 ms (baseline 41.886 ms, warning threshold 291.886 ms)",
+        "threshold_ms": 291.886
+      },
+      {
+        "baseline_ms": 17.587,
+        "contributors": [],
+        "current_ms": 361.8,
+        "delta_ms": 344.213,
+        "key": "Create3 - Interoperation with other clauses:49:[2] WITH-CREATE",
+        "kind": "scenario_regression",
+        "message": "Create3 - Interoperation with other clauses:49:[2] WITH-CREATE: 361.800 ms (baseline 17.587 ms, warning threshold 267.587 ms)",
+        "threshold_ms": 267.587
+      }
+    ],
+    "missing": [],
+    "unbaselined": []
+  },
+  "G": {
+    "annotations": [
+      "g:1:over: 1300.001 ms (baseline 900.000 ms, warning threshold 1300.000 ms)"
+    ],
+    "baseline_status": "compared",
+    "findings": [
+      {
+        "baseline_ms": 900.0,
+        "contributors": [],
+        "current_ms": 1300.001,
+        "delta_ms": 400.001,
+        "key": "g:1:over",
+        "kind": "scenario_regression",
+        "message": "g:1:over: 1300.001 ms (baseline 900.000 ms, warning threshold 1300.000 ms)",
+        "threshold_ms": 1300.0
+      }
+    ],
+    "missing": [],
+    "unbaselined": []
+  },
+  "H": {
+    "annotations": [],
+    "baseline_status": "compared",
+    "findings": [],
+    "missing": [],
+    "unbaselined": []
+  }
+}

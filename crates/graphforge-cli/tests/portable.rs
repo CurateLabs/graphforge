@@ -378,7 +378,7 @@ fn portable_facade_and_same_binary_preserve_complete_receipts() {
             ("expanded", PortableV2Output::Expanded),
         ] {
             let package = root.path().join("package");
-            let mut args = vec!["--json", "portable", "export"];
+            let mut args = vec!["--json", "--diagnostics", "portable", "export"];
             args.extend(selector.iter().copied());
             args.extend([
                 "--format",
@@ -543,6 +543,7 @@ fn import_operation_timings_survive_separate_cli_processes() {
         &project,
         &[
             "--json",
+            "--diagnostics",
             "import-session",
             "begin",
             "--operation-uuid",
@@ -555,6 +556,7 @@ fn import_operation_timings_survive_separate_cli_processes() {
         &project,
         &[
             "--json",
+            "--diagnostics",
             "import-session",
             "register-parquet",
             "--session-uuid",
@@ -576,6 +578,7 @@ fn import_operation_timings_survive_separate_cli_processes() {
         &project,
         &[
             "--json",
+            "--diagnostics",
             "import-session",
             "validate",
             "--session-uuid",
@@ -651,6 +654,7 @@ fn import_operation_timings_survive_separate_cli_processes() {
         &project,
         &[
             "--json",
+            "--diagnostics",
             "import-session",
             "commit",
             "--session-uuid",
@@ -707,6 +711,7 @@ fn import_operation_timings_survive_separate_cli_processes() {
         &project,
         &[
             "--json",
+            "--diagnostics",
             "import-session",
             "status",
             "--session-uuid",
@@ -719,4 +724,28 @@ fn import_operation_timings_survive_separate_cli_processes() {
     );
     let graph = graphforge_api::GraphForge::new(project.to_str()).unwrap();
     assert_eq!(graph.node_count("Person").unwrap(), 2);
+}
+
+#[test]
+fn ordinary_json_import_does_not_request_region_diagnostics() {
+    let root = TempDir::new().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let operation = uuid::Uuid::now_v7().to_string();
+    let begun = json(&gf(
+        &project,
+        &[
+            "--json",
+            "import-session",
+            "begin",
+            "--operation-uuid",
+            &operation,
+        ],
+    ));
+    assert!(begun.get("region_diagnostics").is_none());
+    assert!(
+        begun
+            .get("application_io")
+            .is_none_or(serde_json::Value::is_null)
+    );
 }

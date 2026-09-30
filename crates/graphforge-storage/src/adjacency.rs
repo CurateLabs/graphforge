@@ -54,7 +54,6 @@ use installation::{persist_temp_observed, write_csr_shard_bytes_observed};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use arrow::array::{
     Array, LargeListArray, RecordBatch, StringArray, StructArray, TimestampMicrosecondArray,
     UInt64Array,
@@ -63,6 +62,7 @@ use arrow::buffer::{OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field};
 use arrow::ipc::reader::FileReader;
 use arrow::ipc::writer::FileWriter;
+use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
@@ -79,7 +79,7 @@ pub const ALL_RELATIONS_STEM: &str = "_all";
 /// File name of the adjacency index manifest within `indexes/adjacency/`.
 pub const MANIFEST_FILE: &str = "index_manifest.parquet";
 
-const SHARDED_CSR_VERSION: u32 = 2;
+const SHARDED_CSR_VERSION: u32 = 3;
 /// Default maximum adjacency entries materialized in one persisted CSR shard.
 pub const DEFAULT_CSR_SHARD_EDGES: usize = 1_048_576;
 /// Default maximum local CSR rows (offset entries minus one) per shard.
@@ -93,6 +93,8 @@ struct CsrShardRecord {
     edge_count: u64,
     file: String,
     sha256: String,
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    xxh64: u64,
     encoded_bytes: u64,
     decoded_bytes: u64,
 }
@@ -207,13 +209,7 @@ impl ShardedCsrIndex {
             bytes.len() as u64,
             1,
         );
-        let manifest: CsrShardManifest = serde_json::from_slice(&bytes).map_err(storage_err)?;
-        if manifest.format != "graphforge.csr-shards" || manifest.version != SHARDED_CSR_VERSION {
-            return Err(GfError::Storage(format!(
-                "unsupported sharded CSR manifest {}",
-                manifest_path.display()
-            )));
-        }
+        let manifest = codec::decode_manifest(&bytes, &manifest_path)?;
         let mut prior_first = None;
         let mut edges = 0_u64;
         if !is_normal_path_component(&manifest.shard_dir) {
@@ -241,6 +237,11 @@ impl ShardedCsrIndex {
                 .ok_or_else(|| GfError::Storage("CSR manifest edge count overflow".into()))?;
             if shard.decoded_bytes != codec::decoded_bytes(shard.node_count, shard.edge_count)?
                 || shard.encoded_bytes > codec::encoded_limit(shard.node_count, shard.edge_count)?
+                || shard.sha256.len() != 64
+                || !shard
+                    .sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             {
                 return Err(GfError::Storage(
                     "CSR shard admission metadata disagrees".into(),
@@ -568,17 +569,7 @@ impl ShardedCsrWriter {
         use std::io::Write as _;
 
         self.flush()?;
-        let mut identity = Sha256::new();
-        identity.update(b"graphforge/csr-shards/v2\0");
-        identity.update(node_count.to_le_bytes());
-        identity.update(self.edge_count.to_le_bytes());
-        for record in &self.records {
-            identity.update(record.first_node.to_le_bytes());
-            identity.update(record.node_count.to_le_bytes());
-            identity.update(record.edge_count.to_le_bytes());
-            identity.update(record.sha256.as_bytes());
-        }
-        let digest = sha256_hex(&identity.finalize());
+        let digest = codec::shard_set_identity(node_count, self.edge_count, &self.records);
         let stem = self
             .path
             .file_name()
@@ -627,10 +618,18 @@ impl ShardedCsrWriter {
             .tempfile_in(parent)
             .map_err(storage_err)?;
         temp.write_all(&bytes).map_err(storage_err)?;
+        // #1449: the per-CSR manifest and its barrier belong to the same phase
+        // as the shards it names; unscoped, a rebuild reported `fsync_calls: 0`.
+        crate::lifecycle_io::record_write(
+            crate::StorageIoPhase::ReadPathScan,
+            bytes.len() as u64,
+            1,
+        );
         if let Some(allocation) = &self.allocation {
             allocation.replace_file_at(temp.path(), temp.as_file())?;
         }
         temp.as_file().observed_sync_all().map_err(storage_err)?;
+        crate::lifecycle_io::record_fsync(crate::StorageIoPhase::ReadPathScan, 1);
         persist_temp_observed(
             temp,
             &self.path.with_extension("csr.json"),
@@ -699,6 +698,7 @@ fn write_csr_shard(
         edge_count: shard.edge_count(),
         file,
         sha256: sha256_hex(&bytes),
+        xxh64: crate::corruption_checksum::checksum(&bytes),
         encoded_bytes,
         decoded_bytes: codec::decoded_bytes(shard.node_count(), shard.edge_count())?,
     })
@@ -1099,7 +1099,7 @@ fn read_authenticated_shard(path: &Path, record: &CsrShardRecord) -> Result<CsrI
         codec::encoded_limit(record.node_count, record.edge_count)?,
     )?;
     crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, record.encoded_bytes, 1);
-    if sha256_hex(&bytes) != record.sha256 {
+    if crate::corruption_checksum::checksum(&bytes) != record.xxh64 {
         return Err(GfError::Storage(format!(
             "CSR shard checksum mismatch: {}",
             record.file
@@ -1245,7 +1245,7 @@ fn write_manifest_observed(
         Arc::clone(&ADJACENCY_MANIFEST_SCHEMA),
         &batch,
     )?;
-    staged.commit_at_observed(project_dir, allocation)?;
+    let barriers = staged.commit_retained_at_observed(project_dir, allocation)?;
     crate::lifecycle_io::record_write(
         crate::StorageIoPhase::ReadPathScan,
         std::fs::metadata(manifest_path(project_dir))
@@ -1253,6 +1253,7 @@ fn write_manifest_observed(
             .len(),
         1,
     );
+    crate::lifecycle_io::record_fsync(crate::StorageIoPhase::ReadPathScan, barriers);
     Ok(())
 }
 
@@ -1332,8 +1333,7 @@ pub const DEFAULT_ADJACENCY_BATCH_SIZE: usize = 8_192;
 fn capture_adjacency_inventory(
     root: &Path,
 ) -> Result<crate::AuthenticatedPropertyInventory, GfError> {
-    let (inventory, _) = crate::capture_graph_files(root)?;
-    crate::AuthenticatedPropertyInventory::from_inventory_at_root(root, inventory, None)
+    crate::AuthenticatedPropertyInventory::capture(root)
 }
 
 /// The `(relation, path)` edge tables an adjacency build streams, resolved
@@ -1878,7 +1878,7 @@ fn entries_from_out_csr(csr: &CsrIndex) -> Option<Vec<BuildEntry>> {
 
 fn entries_fingerprint(entries: &mut [BuildEntry]) -> String {
     entries.sort_unstable();
-    let mut digest = Sha256::new();
+    let mut digest = graphforge_core::hash_observation::ContractSha256::new();
     digest.update(b"graphforge/adjacency-topology/v1\0");
     for &(src, edge, dst) in entries.iter() {
         digest.update(src.to_le_bytes());
@@ -2090,9 +2090,12 @@ mod tests {
         let reader = ShardedCsrIndex::open(&path).unwrap();
 
         let _capture = crate::lifecycle_io::CaptureScope::install();
-        let before = crate::lifecycle_io::snapshot();
+        let before = crate::lifecycle_io::snapshot().expect("requested lifecycle measurement");
         assert!(!reader.row(0).unwrap().is_empty());
-        let region = crate::lifecycle_io::snapshot().since(&before).unwrap();
+        let region = crate::lifecycle_io::snapshot()
+            .expect("requested lifecycle measurement")
+            .since(&before)
+            .unwrap();
         region.validate_for_qualification().unwrap();
         // #1449: first-row-touch authentication is real read-path work and
         // used to be invisible to the counters.
@@ -2414,6 +2417,7 @@ mod tests {
         let mut bytes = std::fs::read(&victim_path).unwrap();
         bytes[0] ^= 0xFF;
         victim.sha256 = sha256_hex(&bytes);
+        victim.xxh64 = crate::corruption_checksum::checksum(&bytes);
         std::fs::write(&victim_path, bytes).unwrap();
 
         assert!(reader.row(5).is_err());

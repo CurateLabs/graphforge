@@ -489,10 +489,20 @@ fn resolve_property_write_batch(
         captured = AuthenticatedPropertyInventory::capture(env.dir)?;
         &captured
     };
+    let observe = graphforge_storage::lifecycle_io::is_active();
     if col.is_edge {
-        let work =
-            graphforge_storage::resolve_existing_edge_property_owners(inventory, &mut committed)?;
-        crate::demand::record_edge_owner_work(&work, committed.len());
+        if observe {
+            let work = graphforge_storage::resolve_existing_edge_property_owners(
+                inventory,
+                &mut committed,
+            )?;
+            crate::demand::record_edge_owner_work(&work, committed.len());
+        } else {
+            graphforge_storage::resolve_existing_edge_property_owner_data(
+                inventory,
+                &mut committed,
+            )?;
+        }
     }
     let mut routes: BTreeMap<String, BTreeSet<[u8; 16]>> = BTreeMap::new();
     for (uuid, stem) in committed {
@@ -508,10 +518,18 @@ fn resolve_property_write_batch(
         PropertyRouteKind::Node
     };
     for (route, targets) in routes {
-        let (rows, work) = graphforge_storage::read_authenticated_property_snapshots_for_inventory(
-            inventory, kind, &route, &targets,
-        )?;
-        crate::demand::record_replacement_key_work(&work, targets.len());
+        let rows = if observe {
+            let (rows, work) =
+                graphforge_storage::read_authenticated_property_snapshots_for_inventory(
+                    inventory, kind, &route, &targets,
+                )?;
+            crate::demand::record_replacement_key_work(&work, targets.len());
+            rows
+        } else {
+            graphforge_storage::read_authenticated_property_snapshot_data_for_inventory(
+                inventory, kind, &route, &targets,
+            )?
+        };
         for (uuid, row) in rows {
             keys.insert(uuid, row.values.into_keys().collect());
         }

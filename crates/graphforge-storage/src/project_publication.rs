@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_core::{ApiErrorCode, GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -168,6 +168,8 @@ pub struct StagedParticipant {
     pub schema_fingerprint: String,
     /// SHA-256 over exact persisted bytes.
     pub content_sha256: String,
+    /// XXH64 over exact persisted bytes for default read admission.
+    pub content_xxh64: u64,
 }
 
 /// Durable publication result.
@@ -1471,7 +1473,7 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
 
     let manifest = GenerationManifestRecord {
         format: "graphforge-generation".into(),
-        format_version: 1,
+        format_version: crate::project_generation::GENERATION_MANIFEST_VERSION,
         generation_uuid: staged.generation_uuid.hyphenated().to_string(),
         parent_generation_uuid: Some(staged.parent.generation_uuid().hyphenated().to_string()),
         transaction_uuid: staged.transaction_uuid.hyphenated().to_string(),

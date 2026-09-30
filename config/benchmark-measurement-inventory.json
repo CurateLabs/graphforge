@@ -56,6 +56,22 @@
       "notes": "Node MERGE scaling wall-clock workloads; topology-read bound stays in merge_scaling_bench integration tests."
     },
     {
+      "path": "crates/graphforge-api/benches/tck_scenarios/main.rs",
+      "boundary": "in_process",
+      "authority": "divan",
+      "disposition": "framework_authority",
+      "owner_issue": null,
+      "notes": "openCypher TCK per-scenario Divan benchmark (#1653): normalized corpus and pooled fixture setup; timing from Divan only, serialized as CodSpeed walltime raw_results under CODSPEED_ENV."
+    },
+    {
+      "path": "crates/graphforge-api/benches/tck_scenarios/runner.rs",
+      "boundary": "in_process",
+      "authority": "divan",
+      "disposition": "framework_authority",
+      "owner_issue": null,
+      "notes": "TCK scenario execution through the registered cucumber steps; the timed region is the whole scenario and each verdict is checked outside it, so a failing scenario aborts before Divan records timing. A test-only GF_TCK_PERF_FAULT_* delay (tests/bdd/fault.rs) is the #1654 known positive and is recorded in the run provenance."
+    },
+    {
       "path": "crates/graphforge-exec/tests/persistent_adjacency.rs",
       "boundary": "in_process",
       "authority": "custom",
@@ -89,6 +105,14 @@
       "disposition": "framework_consumer",
       "owner_issue": 959,
       "notes": "Lifecycle evidence assembly; distinguishes BenchExec cgroup memory from process RSS."
+    },
+    {
+      "path": "benchmarks/harness/graphforge_bench/tck_perf.py",
+      "boundary": "process_tree",
+      "authority": "benchexec",
+      "disposition": "framework_consumer",
+      "owner_issue": 1654,
+      "notes": "make tck-perf: the single TCK threshold consumer. Whole-TCK aggregate from BenchExec (local admission, adapt_run_result, normalize_run); per-scenario medians from the tck_scenarios Divan raw_results. Compares only under matched provenance."
     },
     {
       "path": "benchmarks/runners/gdc-graphalytics",
@@ -138,24 +162,16 @@
       "boundary": "in_process",
       "authority": "diagnostic_only",
       "disposition": "diagnostic_only",
-      "owner_issue": 1467,
-      "notes": "BDD scenario timings are informational; TCK baseline comparisons migrate under #1467."
-    },
-    {
-      "path": "scripts/tck_perf_report.py",
-      "boundary": "process_tree",
-      "authority": "diagnostic_only",
-      "disposition": "diagnostic_only",
-      "owner_issue": 1467,
-      "notes": "JUnit wall-clock reporter for slow TCK tests; not a performance gate authority."
+      "owner_issue": 1654,
+      "notes": "Cucumber BDD/TCK scenario timings are diagnostic only (report schema 3, report_kind diagnostic). benchmark-measurement-policy.py rejects threshold consumers in this tree; thresholds belong to the make tck-perf consumer (#1654)."
     },
     {
       "path": "tests/tck/performance_baseline.json",
       "boundary": "in_process",
       "authority": "diagnostic_only",
       "disposition": "diagnostic_only",
-      "owner_issue": 1467,
-      "notes": "TCK timing baseline artifact; refreshed only from complete passing BDD runs."
+      "owner_issue": 1654,
+      "notes": "Legacy schema-2 Cucumber baseline. Loaded only to emit one legacy-diagnostic notice; the make tck-perf consumer rejects it as diagnostic-substituted input."
     }
   ]
 }

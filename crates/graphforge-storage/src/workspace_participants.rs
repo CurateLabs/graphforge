@@ -655,7 +655,9 @@ fn validate_ontology(record: &WorkspaceOntology) -> Result<(), GfError> {
             }
             let canonical = serde_json::to_vec(document)
                 .map_err(|_| corrupt("ontology document cannot be encoded"))?;
-            let digest = encode_hex(&Sha256::digest(canonical));
+            let digest = encode_hex(&graphforge_core::hash_observation::ContractSha256::digest(
+                canonical,
+            ));
             if record.canonical_ontology_sha256.as_deref() != Some(digest.as_str()) {
                 return Err(corrupt("canonical ontology digest does not match"));
             }

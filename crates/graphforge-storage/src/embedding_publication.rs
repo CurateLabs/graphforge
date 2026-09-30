@@ -6,17 +6,17 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use serde::Deserialize;
 use sha2::Digest;
 
 use crate::{
-    EmbeddingCompatibilityDescriptor, EmbeddingCompatibilityId, EmbeddingContentDigest,
-    EmbeddingGenerationId, EmbeddingGenerationManifest, EmbeddingGenerationManifestInput,
-    EmbeddingPublicationFingerprint, EmbeddingSourceState, EmbeddingSpaceCatalogLimits,
-    SearchArtifactError, SearchCoordinationLimits, StoredVector, VECTOR_DATA_FILE,
-    ValidatedEmbeddingBatch, VectorStoreLimits, read_vector_snapshot,
-    remove_embedding_space_catalog_identity, write_vector_snapshot,
+    EmbeddingCompatibilityDescriptor, EmbeddingCompatibilityId, EmbeddingGenerationId,
+    EmbeddingGenerationManifest, EmbeddingGenerationManifestInput, EmbeddingPublicationFingerprint,
+    EmbeddingSourceState, EmbeddingSpaceCatalogLimits, SearchArtifactError,
+    SearchCoordinationLimits, StoredVector, VECTOR_DATA_FILE, ValidatedEmbeddingBatch,
+    VectorStoreLimits, read_vector_snapshot, remove_embedding_space_catalog_identity,
+    write_vector_snapshot,
 };
 
 const SPACE_FILE: &str = "space.json";
@@ -139,6 +139,9 @@ where
         generated_at_micros: request.generated_at_micros,
         committed_at_micros: request.committed_at_micros,
         publication_fingerprint: EmbeddingPublicationFingerprint::from_hex(&"0".repeat(64))?,
+        publication_byte_length: 0,
+        publication_xxh64: 0,
+        content_xxh64: 0,
     })?;
     let generation_id = provisional.generation_id();
     let generations = root.join(GENERATIONS_DIR);
@@ -302,6 +305,16 @@ where
         generated_at_micros: request.generated_at_micros,
         committed_at_micros: request.committed_at_micros,
         publication_fingerprint,
+        publication_byte_length: std::fs::metadata(&vector_path)
+            .map_err(|source| io("inspect embedding file", &vector_path, source))?
+            .len(),
+        publication_xxh64: checksum_file(
+            &vector_path,
+            vector_limits.parquet_bytes,
+            &mut *checkpoint,
+        )?
+        .1,
+        content_xxh64: content_checksum(&rows, &mut *checkpoint)?,
     })?;
     debug_assert_eq!(manifest.generation_id(), generation_id);
     checkpoint()?;
@@ -400,12 +413,14 @@ where
         ));
     }
     let vector_path = path.join(VECTOR_DATA_FILE);
-    let fingerprint = hash_file(&vector_path, vector_limits.parquet_bytes, checkpoint)
-        .map_err(|error| primary_from(&path, error))?;
-    if fingerprint != manifest.publication_fingerprint() {
+    let (byte_length, checksum) =
+        checksum_file(&vector_path, vector_limits.parquet_bytes, checkpoint)
+            .map_err(|error| primary_from(&path, error))?;
+    if byte_length != manifest.publication_byte_length() || checksum != manifest.publication_xxh64()
+    {
         return Err(corrupt_primary(
             &vector_path,
-            "vector file fingerprint does not match generation manifest",
+            "vector file checksum or length does not match generation manifest",
         ));
     }
     let dimension = usize::try_from(manifest.dimension())
@@ -418,10 +433,10 @@ where
             "vector row count does not match generation manifest",
         ));
     }
-    if content_digest(&rows, checkpoint)? != manifest.content_digest() {
+    if content_checksum(&rows, checkpoint)? != manifest.content_xxh64() {
         return Err(corrupt_primary(
             &vector_path,
-            "canonical UUID/vector content digest does not match generation manifest",
+            "canonical UUID/vector content checksum does not match generation manifest",
         ));
     }
     Ok(EmbeddingGenerationPublication {
@@ -612,22 +627,22 @@ fn active_checksum(
     hex_lower(hasher.finalize())
 }
 
-fn content_digest<C>(
+fn content_checksum<C>(
     rows: &[StoredVector],
     checkpoint: &mut C,
-) -> Result<EmbeddingContentDigest, SearchArtifactError>
+) -> Result<u64, SearchArtifactError>
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
-    let mut hasher = Sha256::new();
+    let mut hasher = crate::corruption_checksum::Checksum::new();
     for row in rows {
         checkpoint()?;
-        hasher.update(row.node_uuid);
+        hasher.update(&row.node_uuid);
         for value in &row.vector {
-            hasher.update(value.to_le_bytes());
+            hasher.update(&value.to_le_bytes());
         }
     }
-    EmbeddingContentDigest::from_hex(&hex_lower(hasher.finalize()))
+    Ok(hasher.finish())
 }
 
 fn hash_file<C>(
@@ -648,7 +663,7 @@ where
         });
     }
     let mut file = File::open(path).map_err(|source| io("open embedding file", path, source))?;
-    let mut hasher = Sha256::new();
+    let mut hasher = graphforge_core::hash_observation::ArtifactSha256::new();
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
     loop {
         checkpoint()?;
@@ -661,6 +676,47 @@ where
         hasher.update(&buffer[..read]);
     }
     EmbeddingPublicationFingerprint::from_hex(&hex_lower(hasher.finalize()))
+}
+
+fn checksum_file<C>(
+    path: &Path,
+    max_bytes: u64,
+    checkpoint: &mut C,
+) -> Result<(u64, u64), SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    ensure_regular_file(path)?;
+    let metadata =
+        std::fs::metadata(path).map_err(|source| io("inspect embedding file", path, source))?;
+    if metadata.len() > max_bytes {
+        return Err(SearchArtifactError::ResourceExhausted {
+            resource: "vector_parquet_bytes",
+            limit: max_bytes,
+        });
+    }
+    let mut file = File::open(path).map_err(|source| io("open embedding file", path, source))?;
+    let mut hasher = crate::corruption_checksum::Checksum::new();
+    let mut byte_length = 0_u64;
+    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
+    loop {
+        checkpoint()?;
+        let read = file
+            .read(&mut buffer)
+            .map_err(|source| io("read embedding file", path, source))?;
+        if read == 0 {
+            break;
+        }
+        byte_length += read as u64;
+        hasher.update(&buffer[..read]);
+    }
+    if byte_length != metadata.len() {
+        return Err(corrupt_primary(
+            path,
+            "embedding file changed while checksumming",
+        ));
+    }
+    Ok((byte_length, hasher.finish()))
 }
 
 struct EmbeddingWriterLock {
@@ -1151,6 +1207,9 @@ mod tests {
                 generated_at_micros: 10,
                 committed_at_micros: 20,
                 publication_fingerprint: original.publication_fingerprint(),
+                publication_byte_length: original.publication_byte_length(),
+                publication_xxh64: original.publication_xxh64(),
+                content_xxh64: original.content_xxh64(),
             })
             .unwrap();
             std::fs::write(
@@ -1214,6 +1273,15 @@ mod tests {
                 generated_at_micros: 10,
                 committed_at_micros: 20,
                 publication_fingerprint: fingerprint,
+                publication_byte_length: std::fs::metadata(&vector_path).unwrap().len(),
+                publication_xxh64: checksum_file(
+                    &vector_path,
+                    VectorStoreLimits::default().parquet_bytes,
+                    &mut || Ok(()),
+                )
+                .unwrap()
+                .1,
+                content_xxh64: published.publication().manifest.content_xxh64(),
             })
             .unwrap();
             std::fs::write(

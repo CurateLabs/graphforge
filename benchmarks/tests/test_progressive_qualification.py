@@ -18,6 +18,7 @@ from graphforge_bench.progressive_qualification import (
     select_next,
 )
 from jsonschema import Draft202012Validator
+
 from tests.lifecycle_storage_fixture import retained_owners
 
 ROOT = Path(__file__).resolve().parents[1]

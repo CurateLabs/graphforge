@@ -37,6 +37,7 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 import re
+import tempfile
 
 import tomllib
 from workflow_policy import (
@@ -104,7 +105,6 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "native-durability-aggregate-${{ github.sha }}": 1,
         "m6-memory-${{ github.sha }}-blacksmith-4vcpu-ubuntu-2404": 1,
         "ingest-floor-gate-${{ needs.nightly.outputs.sha }}": 1,
-        "native-local-admission-${{ matrix.authority }}-${{ github.sha }}": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(
@@ -135,9 +135,9 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
 EXPECTED_DEPENDENCY_KEYS = Counter(
     {
         # test.yml: policy + rust-lint + python/node binding + Windows/macOS
-        # durability + Rust Tests (7);
+        # durability + Rust Tests + Benchmark Harness Tests (8);
         # Binding RC: 3; coverage-baseline post-merge ledger: 1.
-        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 11,
+        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 12,
         "${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}": 1,
     }
 )
@@ -514,31 +514,6 @@ def validate_node_loader_negative_fixtures() -> None:
         raise AssertionError(f"Node loader policy accepted drift: {changed}")
 
 
-def validate_operator_handoffs_have_no_artifacts() -> None:
-    for workflow, gate in (
-        ("progressive-ladder.yml", "progressive-ladder"),
-        ("fly-tiny-qualification.yml", "fly-tiny-qualification"),
-        ("fly-tiny-recovery.yml", "fly-tiny-recovery"),
-    ):
-        text = (WORKFLOWS / workflow).read_text()
-        uploaded, downloaded = artifact_contracts(text)
-        assert not uploaded and not downloaded, f"operator handoff transfers artifacts: {workflow}"
-        command = f"python3 scripts/ci/gate-registry.py command {gate}"
-        matches = [
-            scalar
-            for body in workflow_jobs(text).values()
-            for scalar in job_required_run_scalars(body, command)
-        ]
-        assert matches, f"operator handoff does not execute its registry command: {workflow}"
-        inactive = text.replace(command, f'echo "{command}"', 1)
-        inactive_matches = [
-            scalar
-            for body in workflow_jobs(inactive).values()
-            for scalar in job_required_run_scalars(body, command)
-        ]
-        assert not inactive_matches, f"inactive operator handoff passed policy: {workflow}"
-
-
 def cache_contracts(text: str) -> tuple[list[str], list[str]]:
     saved: list[str] = []
     restored: list[str] = []
@@ -557,6 +532,52 @@ def cache_contracts(text: str) -> tuple[list[str], list[str]]:
             assert field(step, "fail-on-cache-miss") == "true", f"restore is not fail-closed: {key}"
             restored.append(key)
     return saved, restored
+
+
+def cache_transfer_path_mismatches(text: str) -> list[str]:
+    """Keys whose save and restore steps name different path strings.
+
+    `actions/cache` derives the entry version from the literal path input, so
+    `fragments/` saved and `fragments` restored is always a miss (#1671).
+    """
+    saved: dict[str, str | None] = {}
+    restored: dict[str, str | None] = {}
+    for step in cache_steps(text):
+        uses = field(step, "uses")
+        key = field(step, "key")
+        if uses is None or key is None:
+            continue
+        target = saved if uses.startswith("actions/cache/save@") else restored
+        target[key] = field(step, "path")
+    return sorted(key for key in saved.keys() & restored.keys() if saved[key] != restored[key])
+
+
+def validate_cache_transfer_path_negative_fixture() -> None:
+    matching = """
+jobs:
+  a:
+    steps:
+      - uses: actions/cache/save@0000000000000000000000000000000000000000 # v6.1.0
+        with:
+          path: fragments/
+          key: transfer-rust
+  b:
+    steps:
+      - uses: actions/cache/restore@0000000000000000000000000000000000000000 # v6.1.0
+        with:
+          path: fragments/
+          key: transfer-rust
+          fail-on-cache-miss: true
+"""
+    assert cache_transfer_path_mismatches(matching) == []
+    drifted = matching.replace(
+        "path: fragments/\n          key: transfer-rust\n          fail",
+        "path: fragments\n          key: transfer-rust\n          fail",
+    )
+    assert drifted != matching
+    assert cache_transfer_path_mismatches(drifted) == ["transfer-rust"], (
+        "cache transfer policy accepted a save/restore path mismatch"
+    )
 
 
 def dependency_contracts(text: str) -> list[str]:
@@ -874,6 +895,137 @@ def validate_feature_gated_tests(text: str) -> None:
     assert job_runs_exact(lane, step), f"{RUST_TESTS_JOB} must run: {step}"
 
 
+BENCHMARK_HARNESS_JOB = "benchmark-harness"
+BENCHMARK_HARNESS_COMMAND = (
+    "PYTHONPATH=harness uv run --locked python -m unittest discover -v -s tests -t . -p 'test_*.py'"
+)
+
+
+def job_steps(job_body: str) -> list[list[str]]:
+    """Split a job's ``steps:`` list into one line list per step."""
+    steps: list[list[str]] = []
+    inside = False
+    for line in job_body.splitlines():
+        if line == "    steps:":
+            inside = True
+            continue
+        if not inside:
+            continue
+        if line.strip() and not line.startswith("      "):
+            break
+        if line.startswith("      - "):
+            steps.append([line])
+        elif steps:
+            steps[-1].append(line)
+    return steps
+
+
+def benchmark_modules_outside_discovery(tests: Path) -> list[str]:
+    """``test_*.py`` modules under ``tests`` that package discovery cannot import.
+
+    unittest discovery with ``-t .`` needs ``tests`` to be a package and recurses
+    only through directories that are packages too; any other module would
+    silently never run (#1679).
+    """
+    unreachable: list[str] = []
+    for module in sorted(tests.rglob("test_*.py")):
+        directory = module.parent
+        while True:
+            if not (directory / "__init__.py").is_file():
+                unreachable.append(module.relative_to(tests).as_posix())
+                break
+            if directory == tests:
+                break
+            directory = directory.parent
+    return unreachable
+
+
+def assert_benchmark_harness_lane(text: str) -> None:
+    """One CI Gate lane runs every benchmark harness module by discovery (#1679)."""
+    jobs = workflow_jobs(text)
+    lanes = [
+        job_id
+        for job_id, body in jobs.items()
+        if any(
+            field(step, "working-directory") == "benchmarks"
+            and "python -m unittest" in (field(step, "run") or "")
+            for step in job_steps(body)
+        )
+    ]
+    assert lanes == [BENCHMARK_HARNESS_JOB], (
+        f"exactly {BENCHMARK_HARNESS_JOB!r} must run the benchmark harness tests, got {lanes}"
+    )
+    lane = jobs[BENCHMARK_HARNESS_JOB]
+    # The GDC suites build their Rust runners against graphforge-api.
+    assert job_scalar(lane, "if") == "needs.changes.outputs.rust_tests == 'true'", (
+        f"{BENCHMARK_HARNESS_JOB} must follow the Rust test gate"
+    )
+    harness = [
+        step
+        for step in job_steps(lane)
+        if normalize_run(field(step, "run") or "") == normalize_run(BENCHMARK_HARNESS_COMMAND)
+        and field(step, "working-directory") == "benchmarks"
+    ]
+    assert len(harness) == 1 and job_runs_exact(lane, BENCHMARK_HARNESS_COMMAND), (
+        f"{BENCHMARK_HARNESS_JOB} must run from benchmarks/, exactly: "
+        f"{BENCHMARK_HARNESS_COMMAND} (discovery, not a module list)"
+    )
+    gate = next(body for body in jobs.values() if job_scalar(body, "name") == "CI Gate")
+    assert BENCHMARK_HARNESS_JOB in job_needs(gate), (
+        f"CI Gate must depend on {BENCHMARK_HARNESS_JOB}"
+    )
+
+
+def validate_benchmark_harness_negative_fixtures(text: str) -> None:
+    """A module list, a missing gate edge, a Python-only gate or a lost cwd is refused."""
+    lane = workflow_jobs(text)[BENCHMARK_HARNESS_JOB]
+    discovery = "discover\n          -v -s tests -t . -p 'test_*.py'"
+    gated = "    if: needs.changes.outputs.rust_tests == 'true'\n    timeout-minutes: 45"
+    hostile = {
+        "module list": text.replace(discovery, "tests.test_smoke tests.test_tck_perf"),
+        "no CI Gate edge": text.replace("      - benchmark-harness\n", ""),
+        "Python-only gate": text.replace(gated, gated.replace("rust_tests", "python")),
+        "no benchmarks cwd": text.replace(
+            lane, lane.replace("        working-directory: benchmarks\n", "")
+        ),
+    }
+    for name, candidate in hostile.items():
+        assert candidate != text, f"benchmark harness negative fixture did not apply: {name}"
+        try:
+            assert_benchmark_harness_lane(candidate)
+        except AssertionError:
+            continue
+        raise AssertionError(f"benchmark harness lane with {name} must stay refused")
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        (root / "__init__.py").write_text("")
+        (root / "test_reached.py").write_text("")
+        (root / "nested").mkdir()
+        (root / "nested" / "test_orphan.py").write_text("")
+        assert benchmark_modules_outside_discovery(root) == ["nested/test_orphan.py"]
+        (root / "nested" / "__init__.py").write_text("")
+        assert benchmark_modules_outside_discovery(root) == []
+        (root / "__init__.py").unlink()
+        assert benchmark_modules_outside_discovery(root) == [
+            "nested/test_orphan.py",
+            "test_reached.py",
+        ]
+
+
+def validate_benchmark_harness(text: str) -> None:
+    """Every benchmarks/tests module runs in the CI Gate; a new one cannot escape."""
+    assert_benchmark_harness_lane(text)
+    validate_benchmark_harness_negative_fixtures(text)
+    tests = ROOT / "benchmarks" / "tests"
+    assert sorted(tests.glob("test_*.py")), "benchmark harness discovery found no modules"
+    unreachable = benchmark_modules_outside_discovery(tests)
+    assert not unreachable, (
+        f"benchmark harness modules outside package discovery: {unreachable}; "
+        "add the missing __init__.py"
+    )
+
+
 def validate_rust_profiles_keep_runtime_checks() -> None:
     """Cargo dev/test profiles keep debug assertions and overflow checks on by default."""
     manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
@@ -894,12 +1046,13 @@ def main() -> None:
     test_suite = texts[WORKFLOWS / "test.yml"]
     validate_test_suite_trigger(test_suite)
     validate_required_run_negative_fixtures()
+    validate_cache_transfer_path_negative_fixture()
     validate_node_loader_negative_fixtures()
     validate_test_suite_sticky_negative_fixtures()
-    validate_operator_handoffs_have_no_artifacts()
     validate_rust_tests_lane(test_suite)
     validate_rust_profiles_keep_runtime_checks()
     validate_feature_gated_tests(test_suite)
+    validate_benchmark_harness(test_suite)
     jobs = workflow_jobs(test_suite)
     for job_id, runner in (
         ("windows-graphforge-storage-locks", "blacksmith-4vcpu-windows-2025"),
@@ -940,6 +1093,8 @@ def main() -> None:
         artifact_uploads.extend(file_uploads)
         artifact_downloads.extend(file_downloads)
         file_saves, file_restores = cache_contracts(text)
+        mismatched = cache_transfer_path_mismatches(text)
+        assert not mismatched, f"cache save/restore paths differ for {mismatched}"
         saved.extend(file_saves)
         restored.extend(file_restores)
         dependency_keys.extend(dependency_contracts(text))
