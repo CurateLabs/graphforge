@@ -772,8 +772,9 @@ def validate_release_candidate_loader_policy(release_candidate_job: str) -> None
     download = workflow_step(release_candidate_job, "name: Download exact-run tested Node loaders")
     assert_active_lines(
         download,
-        "name: binding-rc-node-loaders-${{ github.run_id }}",
+        "pattern: binding-rc-node-loaders-${{ github.run_id }}",
         "path: ${{ runner.temp }}/node-loaders",
+        "merge-multiple: true",
     )
     assemble = workflow_step(release_candidate_job, "name: Assemble and pack every npm package")
     assert_active_lines(
