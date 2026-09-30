@@ -109,9 +109,9 @@ fn densified_8m_128m_public_reopen_emits_evidence() {
         "reopened in {reopen_s:.1}s strategy={:?} validated={} copied={}",
         open_evidence.strategy, open_evidence.bytes_validated, open_evidence.bytes_copied
     );
-    assert_ne!(
+    assert_eq!(
         open_evidence.strategy,
-        GraphFilesOpenStrategy::LegacySnapshotHydrate
+        GraphFilesOpenStrategy::PrivateMaterialize
     );
     assert_eq!(open_evidence.bytes_validated, inventory_bytes);
 

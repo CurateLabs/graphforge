@@ -1319,8 +1319,8 @@ fn add_compact_entry(
     accumulator.add_logical(category, entry.byte_length)?;
     // Attribution reads identity and space usage from the descriptor; it never
     // consumes payload bytes, so it does not re-hash the object. The graph open
-    // that precedes every attribution call authenticates the inventory, and
-    // `graphforge verify` is the explicit whole-store content check.
+    // that precedes every attribution call authenticates the inventory.
+    // Payload readers validate its checksum before consuming content.
     let object = lease.open_for_attribution(&entry.content_sha256, entry.byte_length)?;
     accumulator.add_physical(category, &object, entry.byte_length)
 }

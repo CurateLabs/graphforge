@@ -101,12 +101,15 @@ fn authenticated_reader_reports_actual_io_and_decodes_snapshot() {
 
     let bytes = fs::read(&path).unwrap();
     let entry = crate::GraphFileEntry {
+        content_xxh64: crate::corruption_checksum::checksum(&bytes),
         relative_path: format!("properties/Person/{}", id.file_name()),
         byte_length: u64::try_from(bytes.len()).unwrap(),
         content_sha256: digest_hex(&Sha256::digest(&bytes)),
         role: crate::GraphFileRole::Properties,
     };
+    // This absent, unselected entry exercises metadata filtering only.
     let missing_unrelated = crate::GraphFileEntry {
+        content_xxh64: 0,
         relative_path: format!("properties/Unrelated/{}", id.file_name()),
         byte_length: u64::MAX,
         content_sha256: "00".repeat(32),
@@ -216,6 +219,7 @@ fn authenticated_reader_reports_actual_io_and_decodes_snapshot() {
     let unrelated_bytes = b"authenticated but deliberately not parquet";
     fs::write(&unrelated_path, unrelated_bytes).unwrap();
     let unrelated_entry = crate::GraphFileEntry {
+        content_xxh64: crate::corruption_checksum::checksum(unrelated_bytes),
         relative_path: format!("properties/Unrelated/{}", id.file_name()),
         byte_length: u64::try_from(unrelated_bytes.len()).unwrap(),
         content_sha256: digest_hex(&Sha256::digest(unrelated_bytes)),
@@ -315,6 +319,7 @@ fn authenticated_reader_reports_actual_io_and_decodes_snapshot() {
     conflicting_writer.close().unwrap();
     let conflicting_bytes = fs::read(&conflicting_path).unwrap();
     let conflicting_entry = crate::GraphFileEntry {
+        content_xxh64: crate::corruption_checksum::checksum(&conflicting_bytes),
         relative_path: format!("properties/Person/{}", conflicting_id.file_name()),
         byte_length: u64::try_from(conflicting_bytes.len()).unwrap(),
         content_sha256: digest_hex(&Sha256::digest(&conflicting_bytes)),
@@ -363,6 +368,7 @@ fn authenticated_reader_reports_actual_io_and_decodes_snapshot() {
     tombstone_writer.close().unwrap();
     let tombstone_bytes = fs::read(&tombstone_path).unwrap();
     let tombstone_entry = crate::GraphFileEntry {
+        content_xxh64: crate::corruption_checksum::checksum(&tombstone_bytes),
         relative_path: format!("properties/Person/{}", tombstone_id.file_name()),
         byte_length: u64::try_from(tombstone_bytes.len()).unwrap(),
         content_sha256: digest_hex(&Sha256::digest(&tombstone_bytes)),
@@ -522,6 +528,7 @@ fn many_fragment_inventory_bounds_all_live_handles_without_rlimit_assumptions() 
         writer.close().unwrap();
         let bytes = fs::read(&path).unwrap();
         entries.push(crate::GraphFileEntry {
+            content_xxh64: crate::corruption_checksum::checksum(&bytes),
             relative_path: format!("properties/Person/{}", id.file_name()),
             byte_length: u64::try_from(bytes.len()).unwrap(),
             content_sha256: digest_hex(&Sha256::digest(&bytes)),
@@ -658,6 +665,7 @@ async fn late_authenticated_decoder_failure_emits_nothing_direct_or_through_limi
         AuthenticatedPropertyInventory::from_entries_at_root(
             dir.path(),
             vec![crate::GraphFileEntry {
+                content_xxh64: crate::corruption_checksum::checksum(&bytes),
                 relative_path: format!("properties/Person/{}", id.file_name()),
                 byte_length: u64::try_from(bytes.len()).unwrap(),
                 content_sha256: digest_hex(&Sha256::digest(&bytes)),
@@ -858,6 +866,7 @@ fn projected_overlay_decodes_only_selected_values_and_mandatory_keys() {
     let inventory = AuthenticatedPropertyInventory::from_entries_at_root(
         root.path(),
         vec![crate::GraphFileEntry {
+            content_xxh64: crate::corruption_checksum::checksum(&bytes),
             relative_path: format!("edge_properties/KNOWS/{}", id.file_name()),
             byte_length: u64::try_from(bytes.len()).unwrap(),
             content_sha256: digest_hex(&Sha256::digest(&bytes)),
@@ -1138,6 +1147,7 @@ fn hostile_authenticated_property_matrix_fails_closed_before_projection_or_limit
     let bytes = b"authenticated but not Parquet";
     fs::write(&path, bytes).unwrap();
     let entry = crate::GraphFileEntry {
+        content_xxh64: crate::corruption_checksum::checksum(bytes),
         relative_path: relative,
         byte_length: u64::try_from(bytes.len()).unwrap(),
         content_sha256: digest_hex(&Sha256::digest(bytes)),

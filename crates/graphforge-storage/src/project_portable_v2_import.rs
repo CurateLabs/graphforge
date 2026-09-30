@@ -1389,8 +1389,8 @@ fn prepare_compact_import_graph_with_allocation(
     };
     if !matches!(
         participant.participant.record_version,
-        crate::GRAPH_FILES_V2_RECORD_VERSION
-            | crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+        crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+            | crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
     ) {
         return Ok(None);
     }
@@ -1407,9 +1407,7 @@ fn prepare_compact_import_graph_with_allocation(
     let mut remaining = entry_count.saturating_mul(2).saturating_add(1024);
     collect_portable_graph_paths(&directory, Path::new(""), &mut paths, &mut remaining)?;
     paths.sort();
-    let (root, _) = if participant.participant.record_version
-        == crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
-    {
+    let (root, _) = if crate::graph_files::root_is_mapped(participant.participant.record_version) {
         let routes = crate::route_component::owned::read_owned_layout_table(&directory)
             .map_err(|error| storage(&error))?
             .ok_or_else(|| {
@@ -1431,10 +1429,12 @@ fn prepare_compact_import_graph_with_allocation(
         )
     }
     .map_err(|error| storage(&error))?;
-    let bytes = crate::graph_manifest::encode_root(&root).map_err(|error| storage(&error))?;
+    let published =
+        crate::graph_files::graph_files_root_participant(&root).map_err(|error| storage(&error))?;
+    let bytes = &published.bytes;
     crate::project_publication::publish_atomic_bytes(
         &participant.source,
-        &bytes,
+        bytes,
         || Ok(()),
         || Ok(()),
         || Ok(()),
@@ -1456,7 +1456,8 @@ fn prepare_compact_import_graph_with_allocation(
         )
     })?;
     participant.byte_length = bytes.len() as u64;
-    participant.content_sha256 = Sha256::digest(&bytes).into();
+    participant.content_sha256 = Sha256::digest(bytes).into();
+    participant.participant = published;
     file.sync_all().map_err(|_| {
         PortableV2Error::new(
             PortableV2ErrorCode::Io,
@@ -2505,7 +2506,7 @@ mod tests {
         fs::write(package.path().join("properties/Person.parquet"), b"people").unwrap();
         let placeholder = crate::graph_files_root_participant(&crate::GraphFilesRootV2 {
             format: "graphforge-graph-files-root".into(),
-            format_version: crate::GRAPH_FILES_V2_RECORD_VERSION,
+            format_version: crate::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION,
             root_node_sha256: "0".repeat(64),
             logical_file_count: 0,
             logical_byte_length: 0,

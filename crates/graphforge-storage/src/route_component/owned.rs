@@ -50,7 +50,7 @@ fn prepare_owned_workspace(
     remove_owned_migration_temps(directory)?;
     remove_owned_table_temps(root)?;
     let inventory = crate::graph_files::capture_owned_route_migration_inventory(root)?;
-    if inventory.format_version == crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION {
+    if crate::graph_files::inventory_is_mapped(inventory.format_version) {
         return Ok((
             crate::RewriteBatch::new(),
             (
@@ -411,6 +411,7 @@ mod tests {
         let mut files = names
             .iter()
             .map(|route| crate::GraphFileEntry {
+                content_xxh64: crate::corruption_checksum::checksum(&payload),
                 relative_path: format!("properties/{route}.parquet"),
                 byte_length: payload.len() as u64,
                 content_sha256: digest.clone(),
@@ -427,7 +428,7 @@ mod tests {
         let mapped = crate::capture_graph_files(&target).unwrap().0;
         assert_eq!(
             mapped.format_version,
-            crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
+            crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
         );
         let table = crate::graph_files::authenticate_route_table(&target, &mapped).unwrap();
         for route in names {
@@ -471,8 +472,12 @@ mod tests {
     fn legacy_expanded_materialization_installs_mapped_owned_authority() {
         let source = tempfile::tempdir().unwrap();
         let payload = write_legacy_fixture(source.path(), "Legacy");
-        let inventory = crate::capture_graph_files(source.path()).unwrap().0;
-        assert_eq!(inventory.format_version, crate::GRAPH_FILES_RECORD_VERSION);
+        let mut inventory = crate::capture_graph_files(source.path()).unwrap().0;
+        inventory.format_version = crate::GRAPH_FILES_CHECKSUM_RECORD_VERSION;
+        assert_eq!(
+            inventory.format_version,
+            crate::GRAPH_FILES_CHECKSUM_RECORD_VERSION
+        );
         let owner = tempfile::tempdir().unwrap();
         let target = owner.path().join("private");
         crate::materialize_graph_tree(source.path(), &inventory, &target).unwrap();
@@ -547,11 +552,11 @@ mod tests {
         let (inventory, participant) = crate::capture_graph_files(root.path()).unwrap();
         assert_eq!(
             inventory.format_version,
-            crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
+            crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
         );
         assert_eq!(
             participant.record_version,
-            crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
+            crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
         );
         let table = crate::graph_files::authenticate_route_table(root.path(), &inventory).unwrap();
         assert_eq!(
@@ -659,7 +664,7 @@ mod tests {
             let (inventory, _) = crate::capture_graph_files(root.path()).unwrap();
             assert_eq!(
                 inventory.format_version,
-                crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
+                crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
             );
         }
     }

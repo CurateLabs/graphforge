@@ -13,7 +13,8 @@ fn publish_compact_graph_workspace(project: &Path, workspace: &Path) {
     let lease = graphforge_storage::begin_graph_object_publication(project).unwrap();
     let mut state = graphforge_storage::GraphManifestState::empty();
     let (inventory, _) = graphforge_storage::capture_graph_files(workspace).unwrap();
-    let mapped = inventory.format_version == graphforge_storage::GRAPH_FILES_MAPPED_RECORD_VERSION;
+    let mapped =
+        inventory.format_version == graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION;
     let paths = inventory
         .files
         .into_iter()
@@ -23,7 +24,7 @@ fn publish_compact_graph_workspace(project: &Path, workspace: &Path) {
         graphforge_storage::append_graph_files_v2(&lease, workspace, &mut state, &paths, &[])
             .unwrap();
     if mapped {
-        root.format_version = graphforge_storage::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION;
+        root.format_version = graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION;
     }
     let participant = ProjectParticipant {
         capability_id: graphforge_storage::GRAPH_CAPABILITY_ID.into(),
@@ -34,7 +35,7 @@ fn publish_compact_graph_workspace(project: &Path, workspace: &Path) {
         schema_fingerprint: fingerprint(
             CanonicalDomain::Schema,
             CANONICAL_CONTRACT_VERSION,
-            if mapped { b"graphforge-graph-files-root/4|root_node_sha256|logical_file_count|logical_byte_length|semantic-routes/1" } else { b"graphforge-graph-files-root/2|root_node_sha256|logical_file_count|logical_byte_length" },
+            if mapped { b"graphforge-graph-files-root/8|root_node_sha256|logical_file_count|logical_byte_length|xxh64/1|semantic-routes/1" } else { b"graphforge-graph-files-root/6|root_node_sha256|logical_file_count|logical_byte_length|xxh64/1" },
         )
         .unwrap(),
         row_count: root.logical_file_count,
@@ -143,6 +144,54 @@ fn assert_same_inode_graph_object_corruption_is_refused(
     file.sync_all().unwrap();
     drop(file);
     std::fs::set_permissions(&object, original_metadata.permissions()).unwrap();
+}
+
+#[test]
+fn persisted_graph_snapshot_is_rejected_before_publication() {
+    use graphforge_storage::{
+        ProjectCapability, ProjectGenerationRequest, stage_project_generation,
+    };
+
+    let project = tempfile::tempdir().unwrap();
+    let parent = graphforge_storage::open_or_initialize_project(project.path()).unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(
+        workspace.path().join("graph-content.bin"),
+        b"legacy payload",
+    )
+    .unwrap();
+    let snapshot = crate::graph_snapshot::capture(workspace.path()).unwrap();
+    let mut participants = graphforge_storage::empty_workspace_participants().unwrap();
+    participants.insert(0, snapshot);
+    let request = ProjectGenerationRequest {
+        transaction_uuid: uuid::Uuid::new_v4(),
+        generation_uuid: uuid::Uuid::new_v4(),
+        capabilities: vec![
+            ProjectCapability {
+                capability_id: "graph".into(),
+                capability_version: 1,
+            },
+            ProjectCapability {
+                capability_id: "workspace".into(),
+                capability_version: 1,
+            },
+        ],
+        participants,
+    };
+    let error = match stage_project_generation(project.path(), &request) {
+        Ok(_) => panic!("legacy persisted graph snapshots must not stage"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains("unsupported"), "{message}");
+    assert!(message.contains("snapshot"), "{message}");
+    assert_eq!(
+        graphforge_storage::resolve_project_generation(project.path())
+            .unwrap()
+            .generation_uuid(),
+        parent.generation_uuid(),
+        "legacy refusal must retain the prior committed generation"
+    );
 }
 
 #[test]
