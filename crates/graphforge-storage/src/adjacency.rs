@@ -627,10 +627,18 @@ impl ShardedCsrWriter {
             .tempfile_in(parent)
             .map_err(storage_err)?;
         temp.write_all(&bytes).map_err(storage_err)?;
+        // #1449: the per-CSR manifest and its barrier belong to the same phase
+        // as the shards it names; unscoped, a rebuild reported `fsync_calls: 0`.
+        crate::lifecycle_io::record_write(
+            crate::StorageIoPhase::ReadPathScan,
+            bytes.len() as u64,
+            1,
+        );
         if let Some(allocation) = &self.allocation {
             allocation.replace_file_at(temp.path(), temp.as_file())?;
         }
         temp.as_file().observed_sync_all().map_err(storage_err)?;
+        crate::lifecycle_io::record_fsync(crate::StorageIoPhase::ReadPathScan, 1);
         persist_temp_observed(
             temp,
             &self.path.with_extension("csr.json"),
@@ -1245,7 +1253,7 @@ fn write_manifest_observed(
         Arc::clone(&ADJACENCY_MANIFEST_SCHEMA),
         &batch,
     )?;
-    staged.commit_at_observed(project_dir, allocation)?;
+    let barriers = staged.commit_retained_at_observed(project_dir, allocation)?;
     crate::lifecycle_io::record_write(
         crate::StorageIoPhase::ReadPathScan,
         std::fs::metadata(manifest_path(project_dir))
@@ -1253,6 +1261,7 @@ fn write_manifest_observed(
             .len(),
         1,
     );
+    crate::lifecycle_io::record_fsync(crate::StorageIoPhase::ReadPathScan, barriers);
     Ok(())
 }
 
