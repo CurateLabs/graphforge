@@ -1,13 +1,13 @@
 //! Targeted reads for authenticated property overlays.
 
 use super::{
-    Arc, Array, AuthenticatedPropertyFragment, AuthenticatedPropertyInventory, BTreeMap, BTreeSet,
-    BooleanArray, FixedSizeBinaryArray, GfError, OpenPropertyFragment, Ordering,
-    PROPERTY_TOMBSTONE_FIELD, PropertyOverlayLimits, PropertyOverlayMetrics, PropertyRouteKind,
-    PropertySnapshotRow, ReadCounts, RecordBatch, TargetReadAdmission, Uuid, admit_target_footer,
-    admitted_batch_rows, authenticated_arrow_error, charge_target_batch, corrupt,
-    decode_snapshot_batch, open_counted_retained_property_builder, parquet_error,
-    parquet_resource_admission, replay_decoder_limit, snapshot_charge, validate_fragment_schema,
+    Array, AuthenticatedPropertyFragment, AuthenticatedPropertyInventory, BTreeMap, BTreeSet,
+    BooleanArray, FixedSizeBinaryArray, GfError, OpenPropertyFragment, PROPERTY_TOMBSTONE_FIELD,
+    PropertyOverlayLimits, PropertyOverlayMetrics, PropertyRouteKind, PropertySnapshotRow,
+    ReadCounts, RecordBatch, TargetReadAdmission, Uuid, admit_target_footer, admitted_batch_rows,
+    authenticated_arrow_error, charge_target_batch, corrupt, decode_snapshot_batch,
+    open_counted_retained_property_builder, parquet_error, parquet_resource_admission,
+    replay_decoder_limit, snapshot_charge, validate_fragment_schema,
     validate_parquet_resource_admission,
 };
 
@@ -145,11 +145,47 @@ pub fn read_authenticated_property_targets_for_inventory(
     route: &str,
     targets: &BTreeSet<[u8; 16]>,
 ) -> Result<PropertyTargetSnapshots, GfError> {
-    let result = read_property_targets(inventory, kind, route, targets, None)?;
+    let result = read_property_targets(inventory, kind, route, targets, None, true)?;
     Ok(PropertyTargetSnapshots {
         present: targets.difference(&result.unresolved).copied().collect(),
         rows: result.rows,
         metrics: result.metrics,
+    })
+}
+
+/// Logical rows and physical ownership without optional returned-work observations.
+pub struct PropertyTargetData {
+    /// Latest live snapshots for requested UUIDs only.
+    pub rows: BTreeMap<[u8; 16], PropertySnapshotRow>,
+    /// Requested UUIDs with a physical owner, including newest tombstones.
+    pub present: BTreeSet<[u8; 16]>,
+}
+impl PropertyTargetData {
+    /// Materialize selected live edge rows in their declared Arrow representation.
+    pub fn edge_batch(&self, schema: &arrow::datatypes::Schema) -> Result<RecordBatch, GfError> {
+        crate::writer::edge_property_snapshots_batch(schema, &self.rows)
+    }
+}
+
+/// Execute a data-only query read with the same corruption/resource refusal.
+#[doc(hidden)]
+pub fn read_authenticated_property_target_data_for_inventory(
+    inventory: &AuthenticatedPropertyInventory,
+    kind: PropertyRouteKind,
+    route: &str,
+    targets: &BTreeSet<[u8; 16]>,
+) -> Result<PropertyTargetData, GfError> {
+    let result = read_property_targets(
+        inventory,
+        kind,
+        route,
+        targets,
+        None,
+        crate::lifecycle_io::is_active(),
+    )?;
+    Ok(PropertyTargetData {
+        present: targets.difference(&result.unresolved).copied().collect(),
+        rows: result.rows,
     })
 }
 
@@ -162,7 +198,7 @@ pub fn read_authenticated_property_presence_for_inventory(
     route: &str,
     targets: &BTreeSet<[u8; 16]>,
 ) -> Result<(BTreeSet<[u8; 16]>, PropertyOverlayMetrics), GfError> {
-    let result = read_property_targets(inventory, kind, route, targets, None)?;
+    let result = read_property_targets(inventory, kind, route, targets, None, true)?;
     let present = targets.difference(&result.unresolved).copied().collect();
     Ok((present, result.metrics))
 }
@@ -180,7 +216,14 @@ pub(crate) fn read_replay_property_targets(
     ),
     GfError,
 > {
-    let result = read_property_targets(inventory, kind, route, targets, Some(max_memory_bytes))?;
+    let result = read_property_targets(
+        inventory,
+        kind,
+        route,
+        targets,
+        Some(max_memory_bytes),
+        true,
+    )?;
     Ok((result.rows, result.metrics))
 }
 
@@ -200,6 +243,7 @@ pub(super) fn read_property_targets(
     route: &str,
     targets: &BTreeSet<[u8; 16]>,
     replay_budget: Option<usize>,
+    collect: bool,
 ) -> Result<TargetPropertyRows, GfError> {
     let mut limits = PropertyOverlayLimits::default();
     if let Some(bytes) = replay_budget {
@@ -224,7 +268,7 @@ pub(super) fn read_property_targets(
     };
     let targeted_scratch = inventory.create_snapshot_scratch()?;
     for fragment in fragments.iter().rev() {
-        let counts = Arc::new(ReadCounts::default());
+        let counts = ReadCounts::new(collect);
         let opened = inventory.open_fragment(fragment, targeted_scratch.path())?;
         metrics.authentication_bytes = metrics
             .authentication_bytes
@@ -253,8 +297,7 @@ pub(super) fn read_property_targets(
         if let Some(bytes) = replay_budget {
             admit_target_footer(&opened.file, fragment.entry.byte_length, bytes)?;
         }
-        let builder =
-            open_counted_retained_property_builder(fragment, &opened, Arc::clone(&counts))?;
+        let builder = open_counted_retained_property_builder(fragment, &opened, counts.clone())?;
         validate_fragment_schema(
             builder.schema().as_ref(),
             fragment.id,
@@ -311,8 +354,8 @@ pub(super) fn read_property_targets(
             targeted_batch_rows,
             retained_bytes,
         )?;
-        let validation_bytes = counts.bytes.load(Ordering::Relaxed);
-        let validation_read_calls = counts.blocks.load(Ordering::Relaxed);
+        let validation_bytes = counts.values().0;
+        let validation_read_calls = counts.values().1;
         if !row_groups.is_empty() {
             metrics.row_groups_selected = metrics
                 .row_groups_selected
@@ -333,8 +376,8 @@ pub(super) fn read_property_targets(
                 &mut metrics,
             )?;
         }
-        let total_bytes = counts.bytes.load(Ordering::Relaxed);
-        let total_read_calls = counts.blocks.load(Ordering::Relaxed);
+        let total_bytes = counts.values().0;
+        let total_read_calls = counts.values().1;
         metrics.fragments_considered = metrics.fragments_considered.saturating_add(1);
         metrics.physical_bytes = metrics.physical_bytes.saturating_add(total_bytes);
         metrics.validation_bytes = metrics.validation_bytes.saturating_add(validation_bytes);
@@ -351,9 +394,7 @@ pub(super) fn read_property_targets(
         metrics.physical_blocks = metrics
             .physical_blocks
             .saturating_add(total_read_calls.saturating_add(opened.authentication_read_calls));
-        metrics.range_seeks = metrics
-            .range_seeks
-            .saturating_add(counts.range_seeks.load(Ordering::Relaxed));
+        metrics.range_seeks = metrics.range_seeks.saturating_add(counts.values().2);
     }
     metrics.physical_bytes = metrics
         .physical_bytes
@@ -381,22 +422,21 @@ fn select_target_row_groups(
     opened: &OpenPropertyFragment,
     kind: PropertyRouteKind,
     unresolved: &std::collections::BTreeSet<[u8; 16]>,
-    counts: &Arc<ReadCounts>,
+    counts: &ReadCounts,
     metrics: &mut PropertyOverlayMetrics,
     admission: TargetReadAdmission,
     targeted_batch_rows: usize,
     retained_bytes: u64,
 ) -> Result<Vec<usize>, GfError> {
-    let builder = open_counted_retained_property_builder(fragment, opened, Arc::clone(counts))?;
+    let builder = open_counted_retained_property_builder(fragment, opened, counts.clone())?;
     let mut selected_groups = Vec::new();
     let mut prior_uuid = None;
     for index in 0..builder.metadata().num_row_groups() {
-        let validation =
-            open_counted_retained_property_builder(fragment, opened, Arc::clone(counts))?
-                .with_row_groups(vec![index])
-                .with_batch_size(targeted_batch_rows)
-                .build()
-                .map_err(parquet_error)?;
+        let validation = open_counted_retained_property_builder(fragment, opened, counts.clone())?
+            .with_row_groups(vec![index])
+            .with_batch_size(targeted_batch_rows)
+            .build()
+            .map_err(parquet_error)?;
         let mut selected = false;
         for batch in validation {
             let batch = batch.map_err(authenticated_arrow_error)?;
@@ -465,21 +505,18 @@ struct TargetDecodeOptions<'a> {
 
 fn decode_target_row_groups(
     options: TargetDecodeOptions<'_>,
-    counts: &Arc<ReadCounts>,
+    counts: &ReadCounts,
     unresolved: &mut std::collections::BTreeSet<[u8; 16]>,
     found: &mut BTreeMap<[u8; 16], PropertySnapshotRow>,
     retained_bytes: &mut u64,
     metrics: &mut PropertyOverlayMetrics,
 ) -> Result<(), GfError> {
-    let reader = open_counted_retained_property_builder(
-        options.fragment,
-        options.opened,
-        Arc::clone(counts),
-    )?
-    .with_row_groups(options.row_groups)
-    .with_batch_size(options.batch_rows)
-    .build()
-    .map_err(parquet_error)?;
+    let reader =
+        open_counted_retained_property_builder(options.fragment, options.opened, counts.clone())?
+            .with_row_groups(options.row_groups)
+            .with_batch_size(options.batch_rows)
+            .build()
+            .map_err(parquet_error)?;
     for batch in reader {
         let batch = batch.map_err(authenticated_arrow_error)?;
         charge_target_batch(metrics, &batch, options.admission, *retained_bytes)?;

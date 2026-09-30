@@ -46,13 +46,65 @@ impl AuthenticatedPropertyInventory {
     where
         F: FnMut(PropertySnapshotRow) -> Result<(), GfError>,
     {
+        self.visit_route_projected_collect(
+            kind,
+            route,
+            scratch,
+            limits,
+            selected_properties,
+            true,
+            emit,
+        )
+    }
+
+    /// Query execution requests observations only when its collector is active.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(crate) fn visit_route_projected_optional<F>(
+        &self,
+        kind: PropertyRouteKind,
+        route: &str,
+        scratch: &Path,
+        limits: PropertyOverlayLimits,
+        selected_properties: Option<&BTreeSet<String>>,
+        emit: F,
+    ) -> Result<Option<PropertyOverlayMetrics>, GfError>
+    where
+        F: FnMut(PropertySnapshotRow) -> Result<(), GfError>,
+    {
+        let collect = crate::lifecycle_io::is_active();
+        self.visit_route_projected_collect(
+            kind,
+            route,
+            scratch,
+            limits,
+            selected_properties,
+            collect,
+            emit,
+        )
+        .map(|metrics| collect.then_some(metrics))
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn visit_route_projected_collect<F>(
+        &self,
+        kind: PropertyRouteKind,
+        route: &str,
+        scratch: &Path,
+        limits: PropertyOverlayLimits,
+        selected_properties: Option<&BTreeSet<String>>,
+        collect: bool,
+        emit: F,
+    ) -> Result<PropertyOverlayMetrics, GfError>
+    where
+        F: FnMut(PropertySnapshotRow) -> Result<(), GfError>,
+    {
         let Some(fragments) = self.routes.get(&(kind, route.to_owned())) else {
             return Ok(PropertyOverlayMetrics::default());
         };
-        let counts = Arc::new(ReadCounts::default());
-        let authentication_bytes = Arc::new(AtomicU64::new(0));
-        let authentication_block_equivalents = Arc::new(AtomicU64::new(0));
-        let authentication_read_calls = Arc::new(AtomicU64::new(0));
+        let counts = ReadCounts::new(collect);
+        let authentication_bytes = collect.then(|| AtomicU64::new(0));
+        let authentication_block_equivalents = collect.then(|| AtomicU64::new(0));
+        let authentication_read_calls = collect.then(|| AtomicU64::new(0));
         let budget = Arc::new(LiveByteBudget::new(limits.max_buffered_bytes));
         let decoded = Arc::new(Mutex::new(DecodedRetention::default()));
         let reader_context = ProjectedReaderContext {
@@ -128,12 +180,12 @@ struct ProjectedReaderContext<'a> {
     kind: PropertyRouteKind,
     route: &'a str,
     selected_properties: Option<&'a BTreeSet<String>>,
-    counts: &'a Arc<ReadCounts>,
+    counts: &'a ReadCounts,
     budget: &'a Arc<LiveByteBudget>,
     decoded: &'a Arc<Mutex<DecodedRetention>>,
-    authentication_bytes: &'a Arc<AtomicU64>,
-    authentication_block_equivalents: &'a Arc<AtomicU64>,
-    authentication_read_calls: &'a Arc<AtomicU64>,
+    authentication_bytes: &'a Option<AtomicU64>,
+    authentication_block_equivalents: &'a Option<AtomicU64>,
+    authentication_read_calls: &'a Option<AtomicU64>,
 }
 
 fn open_projected_fragment(
@@ -149,19 +201,19 @@ fn open_projected_fragment(
     GfError,
 > {
     let opened = context.inventory.open_fragment(fragment, context.scratch)?;
-    context
-        .authentication_bytes
-        .fetch_add(opened.authentication_bytes, Ordering::Relaxed);
-    context
-        .authentication_block_equivalents
-        .fetch_add(opened.authentication_block_equivalents, Ordering::Relaxed);
-    context
-        .authentication_read_calls
-        .fetch_add(opened.authentication_read_calls, Ordering::Relaxed);
+    if let Some(counter) = context.authentication_bytes {
+        counter.fetch_add(opened.authentication_bytes, Ordering::Relaxed);
+    }
+    if let Some(counter) = context.authentication_block_equivalents {
+        counter.fetch_add(opened.authentication_block_equivalents, Ordering::Relaxed);
+    }
+    if let Some(counter) = context.authentication_read_calls {
+        counter.fetch_add(opened.authentication_read_calls, Ordering::Relaxed);
+    }
     let source = CountingChunkReader {
         length: fragment.entry.byte_length,
         file: Arc::clone(&opened.file),
-        counts: Arc::clone(context.counts),
+        counts: context.counts.clone(),
     };
     let builder = ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_error)?;
     validate_fragment_schema(
@@ -210,9 +262,9 @@ fn open_projected_fragment(
 
 struct ProjectedMetricSources<'a> {
     counts: &'a ReadCounts,
-    authentication_bytes: &'a AtomicU64,
-    authentication_block_equivalents: &'a AtomicU64,
-    authentication_read_calls: &'a AtomicU64,
+    authentication_bytes: &'a Option<AtomicU64>,
+    authentication_block_equivalents: &'a Option<AtomicU64>,
+    authentication_read_calls: &'a Option<AtomicU64>,
     decoded: &'a Mutex<DecodedRetention>,
     budget: &'a LiveByteBudget,
     authenticated_snapshot_peak_bytes: u64,
@@ -242,26 +294,33 @@ fn finalize_projected_metrics(
     metrics: &mut PropertyOverlayMetrics,
     sources: &ProjectedMetricSources<'_>,
 ) {
-    metrics.authentication_bytes = sources.authentication_bytes.load(Ordering::Relaxed);
+    metrics.authentication_bytes = sources
+        .authentication_bytes
+        .as_ref()
+        .map_or(0, |count| count.load(Ordering::Relaxed));
     metrics.authentication_block_equivalents = sources
         .authentication_block_equivalents
-        .load(Ordering::Relaxed);
-    metrics.authentication_read_calls = sources.authentication_read_calls.load(Ordering::Relaxed);
+        .as_ref()
+        .map_or(0, |count| count.load(Ordering::Relaxed));
+    metrics.authentication_read_calls = sources
+        .authentication_read_calls
+        .as_ref()
+        .map_or(0, |count| count.load(Ordering::Relaxed));
     metrics.property_authentication_bytes = metrics.authentication_bytes;
     metrics.authenticated_snapshot_bytes = metrics.authentication_bytes;
     metrics.authenticated_snapshot_peak_bytes = sources.authenticated_snapshot_peak_bytes;
     metrics.property_authentication_block_equivalents = metrics.authentication_block_equivalents;
     metrics.property_authentication_read_calls = metrics.authentication_read_calls;
-    metrics.validation_bytes = sources.counts.bytes.load(Ordering::Relaxed);
+    metrics.validation_bytes = sources.counts.values().0;
     metrics.physical_bytes = metrics
         .authentication_bytes
         .saturating_add(metrics.validation_bytes);
-    metrics.read_calls = sources.counts.blocks.load(Ordering::Relaxed);
+    metrics.read_calls = sources.counts.values().1;
     metrics.validation_read_calls = metrics.read_calls;
     metrics.physical_blocks = metrics
         .authentication_read_calls
         .saturating_add(metrics.read_calls);
-    metrics.range_seeks = sources.counts.range_seeks.load(Ordering::Relaxed);
+    metrics.range_seeks = sources.counts.values().2;
     let decoded = sources.decoded.lock().expect("property retention lock");
     metrics.decoder_peak_rows = decoded.peak_rows;
     metrics.decoder_peak_bytes = decoded.peak_bytes;
@@ -287,7 +346,7 @@ struct PropertyParquetRows {
     batch_reservation_bytes: u64,
     _handle: Option<FragmentHandleGuard>,
     #[cfg(test)]
-    late_failure_row_countdown: Arc<AtomicU64>,
+    late_failure_row_countdown: Option<AtomicU64>,
 }
 
 impl Drop for PropertyParquetRows {
@@ -518,7 +577,7 @@ pub fn read_authenticated_property_snapshots_for_inventory(
     ),
     GfError,
 > {
-    let result = read_property_targets(inventory, kind, route, targets, None)?;
+    let result = read_property_targets(inventory, kind, route, targets, None, true)?;
     Ok((result.rows, result.metrics))
 }
 

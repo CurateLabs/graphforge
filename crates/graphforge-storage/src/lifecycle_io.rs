@@ -81,7 +81,7 @@ pub fn observer_work() -> (u64, u64, u64) {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-fn observe_work(kind: usize) {
+pub(crate) fn observe_work(kind: usize) {
     OBSERVER_WORK.with(|work| {
         let (mut allocations, mut recordings, mut maps) = work.get();
         match kind {

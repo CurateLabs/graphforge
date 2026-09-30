@@ -24,8 +24,9 @@ mod targeted_reads;
 use targeted_reads::read_property_targets;
 pub(crate) use targeted_reads::read_replay_property_targets;
 pub use targeted_reads::{
-    EdgeOwnerProbeWork, PropertyTargetSnapshots,
+    EdgeOwnerProbeWork, PropertyTargetData, PropertyTargetSnapshots,
     read_authenticated_property_presence_for_inventory,
+    read_authenticated_property_target_data_for_inventory,
     read_authenticated_property_targets_for_inventory, resolve_existing_edge_property_owners,
 };
 mod parquet_budget;

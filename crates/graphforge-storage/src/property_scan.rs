@@ -263,7 +263,7 @@ impl ExecutionPlan for PropertyOverlayExec {
                 },
             );
             let result = result.and_then(|work| {
-                let Some((work_counts, decoder_peak)) = work_counts else {
+                let (Some((work_counts, decoder_peak)), Some(work)) = (work_counts, work) else {
                     return Ok(());
                 };
                 // Completed reader work only; these logical counters are not native RSS.

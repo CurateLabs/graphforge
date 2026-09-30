@@ -757,7 +757,7 @@ fn read_target_edge_properties(
     property_names: &[String],
     owners: &mut std::collections::BTreeSet<[u8; 16]>,
 ) -> Result<Vec<arrow::record_batch::RecordBatch>, GfError> {
-    let selected = graphforge_storage::read_authenticated_property_targets_for_inventory(
+    let selected = graphforge_storage::read_authenticated_property_target_data_for_inventory(
         inventory,
         graphforge_storage::PropertyRouteKind::Edge,
         stem,

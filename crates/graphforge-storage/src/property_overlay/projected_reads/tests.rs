@@ -919,6 +919,30 @@ fn projected_overlay_decodes_only_selected_values_and_mandatory_keys() {
         .unwrap();
     let keep = schema.index_of("keep").unwrap();
     let uuid = schema.index_of("edge_uuid").unwrap();
+    let targets = BTreeSet::from([[1_u8; 16], [2_u8; 16]]);
+    let before = crate::lifecycle_io::observer_work();
+    let data_only = read_authenticated_property_target_data_for_inventory(
+        &inventory,
+        PropertyRouteKind::Edge,
+        "KNOWS",
+        &targets,
+    )
+    .unwrap();
+    assert_eq!(data_only.rows.len(), 2);
+    assert_eq!(data_only.present, targets);
+    assert_eq!(crate::lifecycle_io::observer_work(), before);
+    let exact_work = read_authenticated_property_targets_for_inventory(
+        &inventory,
+        PropertyRouteKind::Edge,
+        "KNOWS",
+        &targets,
+    )
+    .unwrap();
+    assert_eq!(exact_work.rows, data_only.rows);
+    assert_eq!(exact_work.present, data_only.present);
+    assert!(exact_work.metrics.validation_bytes > 0);
+    assert!(exact_work.metrics.read_calls > 0);
+
     let runtime = tokio::runtime::Runtime::new().unwrap();
     // Real DataFusion execution returns the same rows with no optional metric set.
     let ordinary: Arc<dyn datafusion::physical_plan::ExecutionPlan> = Arc::new(

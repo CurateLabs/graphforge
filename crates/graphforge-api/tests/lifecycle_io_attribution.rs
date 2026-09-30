@@ -62,7 +62,18 @@ fn explicit_demand_capture_collects_property_work_and_preserves_query_rows() {
     let ordinary = forge.execute(ORDERED_ONE_HOP).unwrap();
     assert!(lifecycle_io_snapshot().is_none());
     let (requested, work) = graphforge_exec::demand::capture(|| forge.execute(ORDERED_ONE_HOP));
-    assert_eq!(requested.unwrap().batches, ordinary.batches);
+    let requested = requested.unwrap();
+    assert_eq!(requested.batches.len(), ordinary.batches.len());
+    for (requested, ordinary) in requested.batches.iter().zip(&ordinary.batches) {
+        assert_eq!(requested.num_rows(), ordinary.num_rows());
+        assert_eq!(requested.columns(), ordinary.columns());
+        assert_eq!(requested.schema().fields(), ordinary.schema().fields());
+        let mut requested_metadata = requested.schema().metadata().clone();
+        let mut ordinary_metadata = ordinary.schema().metadata().clone();
+        assert!(requested_metadata.remove("graphforge.query_id").is_some());
+        assert!(ordinary_metadata.remove("graphforge.query_id").is_some());
+        assert_eq!(requested_metadata, ordinary_metadata);
+    }
     assert!(!work.property_overlays.is_empty());
     assert!(
         work.property_overlays
@@ -94,6 +105,38 @@ fn requested_query_capture_survives_an_ambient_tokio_runtime() {
         assert!(query.totals.read_bytes > 0);
         assert!(query.totals.read_calls > 0);
     });
+    assert!(lifecycle_io_snapshot().is_none());
+}
+
+#[test]
+fn default_filtered_and_targeted_property_queries_allocate_no_optional_counters() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("state");
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    forge
+        .execute("CREATE (:Leaf {value: 1})-[:LINK {weight: 7}]->(:Leaf {value: 2})")
+        .unwrap();
+    drop(forge);
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let before = graphforge_storage::lifecycle_io::observer_work();
+    let query = "MATCH (a)-[r:LINK]->(b) WHERE b.value = 2 RETURN r";
+    let ordinary = forge.execute(query).unwrap();
+    assert_eq!(
+        ordinary.batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+        1
+    );
+    assert_eq!(graphforge_storage::lifecycle_io::observer_work(), before);
+    assert!(lifecycle_io_snapshot().is_none());
+    {
+        let _capture = LifecycleIoCapture::install();
+        let measured = forge.execute(query).unwrap();
+        assert_eq!(
+            measured.batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+            1
+        );
+        assert_eq!(measured.batches[0].columns(), ordinary.batches[0].columns());
+        assert!(lifecycle_io_snapshot().unwrap().totals.read_bytes > 0);
+    }
     assert!(lifecycle_io_snapshot().is_none());
 }
 
