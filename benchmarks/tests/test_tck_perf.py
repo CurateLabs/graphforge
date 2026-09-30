@@ -314,7 +314,9 @@ def _mismatch_test(key: str):
         self.assertFalse(any("TCK PERF WARNING" in line for line in result.lines))
         self.assertEqual(result.exit_code, 0)
         strict = tck_perf.check(
-            self.slow_run("strict", provenance=current), self.baseline(base), require_compatible=True
+            self.slow_run("strict", provenance=current),
+            self.baseline(base),
+            require_compatible=True,
         )
         self.assertEqual(strict.exit_code, 3)
         self.assertEqual(strict.report["findings"], [])
@@ -334,7 +336,9 @@ class ProvenanceGate(_TempCase):
         current = fixture_provenance(build__profile="test", host__runner_label="ci")
         result = tck_perf.check(self.slow_run(provenance=current), self.baseline())
         self.assertEqual(result.report["mismatched_fields"], ["host.runner_label", "build.profile"])
-        self.assertIn('build.profile (baseline "release", current "test")', result.report["skip_reason"])
+        self.assertIn(
+            'build.profile (baseline "release", current "test")', result.report["skip_reason"]
+        )
 
     def test_fault_injection_is_recorded_but_not_a_compatibility_key(self):
         fault = {"scenario": DELETE5, "delay_ms": 1200}
@@ -348,7 +352,9 @@ class ProvenanceGate(_TempCase):
         result = tck_perf.check(self.slow_run(), None)
         self.assertEqual((result.report["baseline_status"], result.exit_code), ("unbaselined", 0))
         self.assertEqual(result.report["findings"], [])
-        self.assertEqual(tck_perf.check(self.slow_run("b"), None, require_compatible=True).exit_code, 3)
+        self.assertEqual(
+            tck_perf.check(self.slow_run("b"), None, require_compatible=True).exit_code, 3
+        )
 
 
 for _key in PROVENANCE_KEYS:
@@ -418,7 +424,9 @@ class Rejections(_TempCase):
     def test_test_mode_divan_declared(self):
         run = write_run(self.dir / "r", CLEAN, wall_seconds=1.0)
         edit_run(run, lambda doc: doc["divan"].update(mode="test"))
-        self.assert_rejected("test mode is not performance evidence", lambda: tck_perf.load_run(run))
+        self.assert_rejected(
+            "test mode is not performance evidence", lambda: tck_perf.load_run(run)
+        )
 
     def test_scenario_set_mismatch_between_divan_and_the_whole_run(self):
         run = write_run(self.dir / "r", CLEAN, wall_seconds=1.0)
@@ -457,7 +465,9 @@ class Rejections(_TempCase):
 
     def test_cucumber_report_offered_as_baseline(self):
         path = self.dir / "report.json"
-        path.write_text(json.dumps({"schema_version": 3, "report_kind": "diagnostic", "suites": []}))
+        path.write_text(
+            json.dumps({"schema_version": 3, "report_kind": "diagnostic", "suites": []})
+        )
         self.assert_rejected(
             "diagnostic-substituted input", lambda: tck_perf.load_baseline(path, "explicit")
         )
@@ -465,12 +475,16 @@ class Rejections(_TempCase):
     def test_schema_invalid_baseline(self):
         path = self.dir / "baseline.json"
         path.write_text(json.dumps({"schema": tck_perf.BASELINE_SCHEMA, "provenance": {}}))
-        self.assert_rejected("provenance must use schema", lambda: tck_perf.load_baseline(path, "x"))
+        self.assert_rejected(
+            "provenance must use schema", lambda: tck_perf.load_baseline(path, "x")
+        )
 
     def test_explicit_baseline_must_exist(self):
         self.assert_rejected(
             "explicit baseline is missing",
-            lambda: tck_perf.resolve_baseline(self.dir / "nope.json", self.dir / "a", self.dir / "b"),
+            lambda: tck_perf.resolve_baseline(
+                self.dir / "nope.json", self.dir / "a", self.dir / "b"
+            ),
         )
 
     def test_fault_injection_naming_an_unknown_scenario(self):
@@ -486,11 +500,15 @@ class HostLocalBaselines(_TempCase):
         self.assertEqual(baseline.timings.scenarios[DELETE5], 41_886)
         run = tck_perf.load_run(write_run(self.dir / "again", CLEAN, wall_seconds=CLEAN_WALL))
         result = tck_perf.check(run, baseline)
-        self.assertEqual((result.report["baseline_status"], result.report["findings"]), ("compared", []))
+        self.assertEqual(
+            (result.report["baseline_status"], result.report["findings"]), ("compared", [])
+        )
 
     def test_capture_refuses_a_fault_injected_run(self):
         provenance = fixture_provenance(fault_injection={"scenario": "*", "delay_ms": 5})
-        run = tck_perf.load_run(write_run(self.dir / "r", CLEAN, wall_seconds=1.0, provenance=provenance))
+        run = tck_perf.load_run(
+            write_run(self.dir / "r", CLEAN, wall_seconds=1.0, provenance=provenance)
+        )
         with self.assertRaisesRegex(TckPerfError, "fault-injected"):
             tck_perf.capture_baseline(run, self.dir / "store/baseline.json", ROOT)
         self.assertFalse((self.dir / "store/baseline.json").exists())
@@ -519,7 +537,9 @@ class HostLocalBaselines(_TempCase):
         host.write_text("{}")
         self.assertEqual(tck_perf.resolve_baseline(None, host, committed), (host, "host_local"))
         explicit.write_text("{}")
-        self.assertEqual(tck_perf.resolve_baseline(explicit, host, committed), (explicit, "explicit"))
+        self.assertEqual(
+            tck_perf.resolve_baseline(explicit, host, committed), (explicit, "explicit")
+        )
 
     def test_host_local_store_is_outside_the_tree(self):
         self.assertEqual(
@@ -611,7 +631,9 @@ class CommandLine(_TempCase):
         )
         code, err = self.main("--baseline", baseline, str(run))
         self.assertEqual(code, 0, err)
-        self.assertIn("TCK PERF SKIPPED: baseline incompatible: provenance mismatch: build.profile", err)
+        self.assertIn(
+            "TCK PERF SKIPPED: baseline incompatible: provenance mismatch: build.profile", err
+        )
         report = json.loads((run / "report.json").read_text())
         self.assertEqual(report["baseline_status"], "incompatible")
         code, _ = self.main("--baseline", baseline, "--require-compatible", str(run))
@@ -655,7 +677,9 @@ class DriverHelpers(unittest.TestCase):
 
     def test_host_and_build_facts(self):
         self.assertEqual(
-            tck_perf.host_facts("model name\t: AMD Ryzen 7 3800X 8-Core Processor\n", "MemTotal: 2 kB\n"),
+            tck_perf.host_facts(
+                "model name\t: AMD Ryzen 7 3800X 8-Core Processor\n", "MemTotal: 2 kB\n"
+            ),
             {"cpu_model": "AMD Ryzen 7 3800X 8-Core Processor", "memory_bytes": 2048},
         )
         self.assertEqual(

@@ -40,6 +40,8 @@ from typing import Any
 
 from graphforge_bench.benchexec_authority import (
     SCHEMA as BENCHEXEC_SCHEMA,
+)
+from graphforge_bench.benchexec_authority import (
     EvidenceError,
     Limits,
     Outcome,
@@ -130,6 +132,9 @@ class Policy:
             or self.max_warning_annotations == 0
         ):
             raise TckPerfError("invalid TCK timing policy values")
+
+
+DEFAULT_POLICY = Policy()
 
 
 @dataclass(frozen=True)
@@ -231,7 +236,10 @@ def compare(
         )
         if current_total_us > aggregate_threshold:
             contributors = [
-                {"feature": feature, "delta_ms": _ms(current_us - baseline.features.get(feature, 0))}
+                {
+                    "feature": feature,
+                    "delta_ms": _ms(current_us - baseline.features.get(feature, 0)),
+                }
                 for feature, current_us in feature_totals(list(current.values())).items()
                 if current_us >= baseline.features.get(feature, 0)
             ]
@@ -243,8 +251,8 @@ def compare(
                 {
                     "kind": "aggregate_regression",
                     "message": (
-                        f"openCypher TCK total: {current_ms:.3f} ms (baseline {baseline_ms:.3f} ms, "
-                        f"warning threshold {threshold_ms:.3f} ms)"
+                        f"openCypher TCK total: {current_ms:.3f} ms "
+                        f"(baseline {baseline_ms:.3f} ms, warning threshold {threshold_ms:.3f} ms)"
                     ),
                     "key": None,
                     "baseline_ms": baseline_ms,
@@ -359,7 +367,8 @@ def _compact(value: Any) -> str:
 
 def skip_reason(mismatches: Sequence[tuple[str, Any, Any]]) -> str:
     return "provenance mismatch: " + "; ".join(
-        f"{key} (baseline {_compact(base)}, current {_compact(cur)})" for key, base, cur in mismatches
+        f"{key} (baseline {_compact(base)}, current {_compact(cur)})"
+        for key, base, cur in mismatches
     )
 
 
@@ -504,7 +513,9 @@ def load_run(directory: Path) -> Run:
         or wall <= 0
     ):
         raise TckPerfError("BenchExec wall_seconds is missing or invalid")
-    total, passing, regressed = (whole.get(name) for name in ("tck_total", "tck_passing", "tck_regressed"))
+    total, passing, regressed = (
+        whole.get(name) for name in ("tck_total", "tck_passing", "tck_regressed")
+    )
     if not all(type(value) is int for value in (total, passing, regressed)) or total <= 0:
         raise TckPerfError("whole-TCK correctness counts are malformed")
     if regressed != 0 or passing != total:
@@ -565,7 +576,9 @@ def load_baseline(path: Path, source: str) -> Baseline:
             raise TckPerfError(f"baseline {label} are malformed")
     if document.get("scenario_count") != len(scenarios):
         raise TckPerfError("baseline scenario_count does not match its scenarios")
-    return Baseline(path, source, provenance, BaselineTimings(total, dict(scenarios), dict(features)))
+    return Baseline(
+        path, source, provenance, BaselineTimings(total, dict(scenarios), dict(features))
+    )
 
 
 def host_local_baseline_path(environ: Mapping[str, str] | None = None) -> Path:
@@ -573,7 +586,9 @@ def host_local_baseline_path(environ: Mapping[str, str] | None = None) -> Path:
     environ = os.environ if environ is None else environ
     if home := environ.get("GF_TCK_PERF_HOME"):
         return Path(home) / BASELINE_FILE
-    data = environ.get("XDG_DATA_HOME") or str(Path(environ.get("HOME", "~")).expanduser() / ".local/share")
+    data = environ.get("XDG_DATA_HOME") or str(
+        Path(environ.get("HOME", "~")).expanduser() / ".local/share"
+    )
     return Path(data) / "graphforge/tck-perf" / BASELINE_FILE
 
 
@@ -644,7 +659,7 @@ def check(
     run: Run,
     baseline: Baseline | None,
     *,
-    policy: Policy = Policy(),
+    policy: Policy = DEFAULT_POLICY,
     require_compatible: bool = False,
     github_actions: bool = False,
 ) -> CheckResult:
@@ -743,7 +758,11 @@ def corpus_digest(features: Path) -> str:
 
 def host_facts(cpuinfo: str, meminfo: str) -> dict[str, Any]:
     model = next(
-        (line.split(":", 1)[1].strip() for line in cpuinfo.splitlines() if line.startswith("model name")),
+        (
+            line.split(":", 1)[1].strip()
+            for line in cpuinfo.splitlines()
+            if line.startswith("model name")
+        ),
         None,
     )
     total = next(
@@ -824,7 +843,12 @@ def _base_env(tmp: Path) -> dict[str, str]:
 
 
 def _run_divan(
-    executable: Path, repo: Path, output: Path, tmp: Path, samples: int, fault: Mapping[str, Any] | None
+    executable: Path,
+    repo: Path,
+    output: Path,
+    tmp: Path,
+    samples: int,
+    fault: Mapping[str, Any] | None,
 ) -> None:
     codspeed_root = output / "codspeed"
     env = _base_env(tmp) | _fault_env(fault)
@@ -856,7 +880,7 @@ def _run_whole_tck(
     fault: Mapping[str, Any] | None,
     limits: Limits,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    from benchexec.runexecutor import RunExecutor  # noqa: PLC0415 - Linux-only, after admission
+    from benchexec.runexecutor import RunExecutor
 
     timings = output / "bdd-timings"
     env = _base_env(tmp) | _fault_env(fault)
@@ -903,14 +927,23 @@ def _run_whole_tck(
         "status": "passed" if correctness else "failed",
         "source": "cucumber-diagnostic-scenario-sums",
         "phases": [
-            {"phase": f"{name}_scenarios", "duration_ms": round(suites[name]["distribution"]["sum_ms"])}
+            {
+                "phase": f"{name}_scenarios",
+                "duration_ms": round(suites[name]["distribution"]["sum_ms"]),
+            }
             for name in ("api", "tck")
         ],
     }
     benchexec = normalize_run(
-        benchexec=adapt_run_result(raw, correctness=correctness), graphforge=telemetry, limits=limits
+        benchexec=adapt_run_result(raw, correctness=correctness),
+        graphforge=telemetry,
+        limits=limits,
     )
-    tck_keys = [scenario["key"] for scenario in suites["tck"]["scenarios"] if scenario["outcome"] == "passed"]
+    tck_keys = [
+        scenario["key"]
+        for scenario in suites["tck"]["scenarios"]
+        if scenario["outcome"] == "passed"
+    ]
     whole = {
         "verdict": verdict,
         "tck_keys": tck_keys,
@@ -923,13 +956,16 @@ def _run_whole_tck(
 
 
 def _write_json(path: Path, value: Any) -> None:
-    path.write_text(json.dumps(value, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(value, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8"
+    )
 
 
 def measure(args: argparse.Namespace) -> Path:
     """Build, admit, measure and write one run directory."""
-    import benchexec  # noqa: PLC0415 - Linux-only
-    from graphforge_bench.local_admission import qualify_local_host  # noqa: PLC0415
+    import benchexec
+
+    from graphforge_bench.local_admission import qualify_local_host
 
     repo = args.repo_root.resolve()
     fault = (
@@ -953,7 +989,9 @@ def measure(args: argparse.Namespace) -> Path:
     try:
         require_local_admission(admission)
     except EvidenceError as error:
-        raise TckPerfError(f"native BenchExec admission refused: {admission.get('cause')}") from error
+        raise TckPerfError(
+            f"native BenchExec admission refused: {admission.get('cause')}"
+        ) from error
 
     rustc_vv = subprocess.check_output(["rustc", "-vV"], cwd=repo, text=True).strip()
     features = sorted(args.features)
@@ -961,7 +999,12 @@ def measure(args: argparse.Namespace) -> Path:
     bench = _cargo_build(repo, ["bench", "--bench", "tck_scenarios"], "tck_scenarios", features)
 
     cores = tuple(sorted(os.sched_getaffinity(0)))
-    limits = Limits(args.wall_limit_seconds, args.wall_limit_seconds * len(cores), args.memory_limit_bytes, cores)
+    limits = Limits(
+        args.wall_limit_seconds,
+        args.wall_limit_seconds * len(cores),
+        args.memory_limit_bytes,
+        cores,
+    )
     benchexec_doc, whole = _run_whole_tck(bdd, repo, output, tmp, fault, limits)
     _write_json(output / "benchexec.json", benchexec_doc)
     if benchexec_doc["outcome"] != Outcome.PASSED:
@@ -1061,7 +1104,9 @@ def _parser() -> argparse.ArgumentParser:
     for name in ("run", "check"):
         command = commands.add_parser(name)
         command.add_argument("--repo-root", type=Path, default=Path.cwd())
-        command.add_argument("--baseline", type=Path, help="explicit baseline (first in resolution order)")
+        command.add_argument(
+            "--baseline", type=Path, help="explicit baseline (first in resolution order)"
+        )
         command.add_argument(
             "--require-compatible",
             action="store_true",
