@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 import json
 import math
 from pathlib import Path
@@ -134,6 +135,35 @@ class BenchExecAuthorityTests(unittest.TestCase):
             )
             | {"termination_reason": None, "signal": None},
         )
+
+    def test_adapts_runexecutor_decimal_pressure_totals(self):
+        # RunExecutor (BenchExec 3.35) reports PSI totals as decimal.Decimal.
+        class Exit:
+            value = 0
+            signal = None
+
+        adapted = adapt_run_result(
+            {
+                "walltime": 1.0,
+                "cputime": 1.5,
+                "memory": 99,
+                "blkio-read": 10,
+                "blkio-write": 20,
+                "pressure-cpu-some": Decimal("0.000007"),
+                "pressure-io-some": Decimal("0"),
+                "pressure-memory-some": Decimal("0.3"),
+                "exitcode": Exit(),
+            },
+            correctness=True,
+        )
+        self.assertEqual(adapted["pressure_cpu_seconds"], 0.000007)
+        self.assertIs(type(adapted["pressure_io_seconds"]), float)
+        normalized = normalize_run(
+            benchexec=adapted,
+            graphforge={"status": "passed", "phases": [{"phase": "run", "duration_ms": 1000}]},
+            limits=LIMITS,
+        )
+        self.assertEqual(normalized["authority"]["pressure_memory_seconds"], 0.3)
 
     def test_tool_info_invokes_only_versioned_public_runner_shape(self):
         class Task:

@@ -49,6 +49,11 @@ from graphforge_bench.benchexec_authority import (
     normalize_run,
     require_local_admission,
 )
+from graphforge_bench.hybrid_cgroup_v2 import (
+    benchexec_cgroup_version,
+    is_hybrid_cgroup_layout,
+    measure_hybrid_pressure,
+)
 
 RUN_SCHEMA = "graphforge-tck-perf-run/1"
 BASELINE_SCHEMA = "graphforge-tck-perf-baseline/1"
@@ -900,16 +905,22 @@ def _run_whole_tck(
         container_tmpfs=False,
     )
     log_path = output / "whole-tck.log"
-    raw = executor.execute_run(
-        args=[str(executable)],
-        output_filename=str(log_path),
-        walltimelimit=int(limits.wall_seconds),
-        hardtimelimit=int(limits.cpu_seconds),
-        memlimit=limits.memory_bytes,
-        cores=list(limits.cores),
-        environments={"keepEnv": {}, "newEnv": env},
-        workingDir=str(repo),
-    )
+    with measure_hybrid_pressure() as hybrid_pressure:
+        raw = executor.execute_run(
+            args=[str(executable)],
+            output_filename=str(log_path),
+            walltimelimit=int(limits.wall_seconds),
+            hardtimelimit=int(limits.cpu_seconds),
+            memlimit=limits.memory_bytes,
+            cores=list(limits.cores),
+            environments={"keepEnv": {}, "newEnv": env},
+            workingDir=str(repo),
+        )
+    # On a hybrid cgroup layout BenchExec measures through v1 and omits PSI;
+    # fill it from the unified hierarchy exactly as native admission does.
+    if is_hybrid_cgroup_layout() and benchexec_cgroup_version() == 1:
+        for key, value in hybrid_pressure().items():
+            raw.setdefault(key, value)
     log = log_path.read_text(encoding="utf-8", errors="replace")
     verdict = parse_tck_verdict(log)
     check_fault_announcement(log, fault, "the whole-TCK run")

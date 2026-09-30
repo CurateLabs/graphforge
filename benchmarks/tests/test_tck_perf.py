@@ -11,6 +11,7 @@ origin/main bf28be798 (see that file's `_source`).
 from __future__ import annotations
 
 import copy
+from decimal import Decimal
 import io
 import json
 from pathlib import Path
@@ -120,9 +121,10 @@ def write_run(
         "memory": 1024,
         "blkio-read": 0,
         "blkio-write": 0,
-        "pressure-cpu-some": 0.0,
-        "pressure-io-some": 0.0,
-        "pressure-memory-some": 0.0,
+        # RunExecutor reports PSI totals as Decimal (BenchExec 3.35).
+        "pressure-cpu-some": Decimal("0.000007"),
+        "pressure-io-some": Decimal("0"),
+        "pressure-memory-some": Decimal("0"),
         "exitcode": _ExitCode(0),
     }
     benchexec = normalize_run(
