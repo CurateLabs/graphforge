@@ -44,7 +44,7 @@ PROSE_SUFFIXES = frozenset({".md", ".mdx", ".txt"})
 IMAGE_SUFFIXES = frozenset({".png", ".svg", ".jpg", ".jpeg", ".gif", ".webp"})
 SITE_SUFFIXES = frozenset({".css"})
 
-# Structured data that code, CI, or Bazel reads from under docs/. Anything added
+# Structured data that code or CI reads from under docs/. Anything added
 # here must have a reader; evidence never does.
 STRUCTURED_DATA_DIRECTORIES = (
     "docs/contracts",
@@ -59,7 +59,6 @@ STRUCTURED_DATA_FILES = frozenset(
         "docs/reference/knowledge-schema-inventory.sha256",
     }
 )
-BUILD_FILES = frozenset({"BUILD.bazel", "BUILD"})
 
 # Files whose bytes are searched for references to development docs.
 REFERENCE_SUFFIXES = frozenset(
@@ -77,8 +76,6 @@ REFERENCE_SUFFIXES = frozenset(
         ".sh",
         ".json",
         ".txt",
-        ".bazel",
-        ".bzl",
     }
 )
 REFERENCE_NAMES = frozenset({"Makefile", "AGENTS.md", "CONTRIBUTING.md", "README.md"})
@@ -129,8 +126,6 @@ def is_allowed_shape(path: str) -> bool:
     pure = PurePosixPath(path)
     suffix = pure.suffix.lower()
     if suffix in PROSE_SUFFIXES or suffix in IMAGE_SUFFIXES or suffix in SITE_SUFFIXES:
-        return True
-    if pure.name in BUILD_FILES:
         return True
     if path in STRUCTURED_DATA_FILES:
         return True

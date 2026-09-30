@@ -392,8 +392,7 @@ fn deterministic_export_and_reopen() {
     let round_json: BridgeDocument = serde_json::from_str(&json).unwrap();
     assert_eq!(bridge_document_digest(&round_json).unwrap(), digest_a);
 
-    // YAML round-trip via lifecycle import (avoid direct serde_yaml crate name;
-    // Bazel crate_universe exposes it as serde_yaml_ng).
+    // YAML round-trip via lifecycle import rather than a direct YAML crate.
     let mut staging = BridgeInventory::new(ActivationMode::Exploratory, Default::default());
     for table in [
         table(

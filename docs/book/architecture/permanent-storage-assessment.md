@@ -310,8 +310,8 @@ Validation includes 734 API unit tests, 45 publication tests, the unequal-route
 property generation regression, production workspace Clippy and fast pre-push.
 The storage-wide run passed 1,074 tests with two existing ignored tests; its one
 failure is an unchanged test hard-coding `/tmp`, which is tmpfs on this host and
-fails filesystem admission before its hostile-file assertions. Required Bazel
-PR CI remains the merge authority. Composite topology creation on an already
+fails filesystem admission before its hostile-file assertions. Required PR CI
+remains the merge authority. Composite topology creation on an already
 constructed CAS parent still exposes the UUID authority defect tracked in
 #1221; no authentication check was relaxed to admit that operation.
 
@@ -541,11 +541,11 @@ and 16 journal integration tests; and 20 replay-focused unit tests. The API
 fixtures inspect published knowledge, epistemic, provenance, vector, projection
 and restoration output, including the restoration `created_by` marker. Existing
 recovery, cancellation, active-snapshot, authentication and exact retry tests
-remain active. Targeted native Bazel certification/journal/compaction tests,
+remain active. Targeted native certification/journal/compaction tests,
 workspace Clippy, formatting, fast pre-push and gate-registry checks passed.
 The full local storage aggregate passed 1,081 tests with two existing ignores;
 one unchanged test hardcodes `/tmp`, where this host's tmpfs fails filesystem
-admission. Required native Bazel CI remains the merge gate.
+admission. Required native CI remains the merge gate.
 
 ## CAS UUID mutation ownership (#1228)
 

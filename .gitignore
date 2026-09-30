@@ -53,7 +53,6 @@ coverage/
 .nyc_output/
 *.lcov
 *.profraw
-.bazel-disk-cache/
 mutants.out*/
 
 # Translations
@@ -79,10 +78,6 @@ docs/_build/
 # PyBuilder
 .pybuilder/
 target/
-
-# Bazel
-/bazel-*
-.bazelbsp/
 
 # Jupyter Notebook
 .ipynb_checkpoints

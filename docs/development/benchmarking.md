@@ -180,7 +180,7 @@ the exact runner image, architecture, head/base SHA, fixture version, and
 artifact URL. Until CodSpeed memory mode is available on
 the project runner, replay and compaction peak-resident counters are emitted as
 an explicit scheduled hardware artifact. CodSpeed remains diagnostic only:
-Bazel tests, deterministic fault models, and native platform lanes are the
+the CI Gate Rust tests, deterministic fault models, and native platform lanes are the
 correctness authority. Material regressions must be repaired or documented with
 their measured tradeoff; samples and thresholds must not be weakened.
 
@@ -201,13 +201,10 @@ tradeoff. `scripts/ci/check-m6-benchmarks.py` freezes the v1 names and count.
    `[[bench]]` section with `harness = false`.
 2. Keep each benchmark deterministic and bounded — no network, no wall-clock
    dependence, and inputs built outside the measured closure.
-3. Benchmarks are not Bazel targets: `//:ci_rust_tests` stays the authoritative
-   compile/test surface, and `cargo codspeed` is a diagnostics-only Cargo path.
-4. Adding a dev-dependency changes the Cargo feature graph, so refresh the Bazel
-   drift fingerprint with
-   `python3 scripts/ci/cargo-bazel-drift-check.py --write` and repin
-   `cargo-bazel-lock.json`
-   (`CARGO_BAZEL_REPIN=1 bazelisk build --repo_env=CARGO_BAZEL_REPIN=1 //:first_party_libs`).
+3. Benchmarks are not tests: the CI Gate Rust lane
+   ([agent-environment.md](agent-environment.md#rust-test-gate)) stays the
+   authoritative compile/test surface, and `cargo codspeed` is a
+   diagnostics-only Cargo path.
 
 ## Related manual benchmarks
 

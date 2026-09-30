@@ -721,7 +721,7 @@ def assert_test_suite_sticky(job_id: str, body: str) -> None:
 
 
 def validate_test_suite_sticky_negative_fixtures() -> None:
-    """The rule still refuses every volume #4 retired and the retired Bazel cache."""
+    """The rule still refuses every volume #4 retired and any other lane's volume."""
 
     def fixture(job_id: str, key: str, path: str = "target") -> str:
         return f"""jobs:
@@ -740,7 +740,6 @@ def validate_test_suite_sticky_negative_fixtures() -> None:
     hostile = (
         ("probe", RUST_TESTS_TARGET_KEY, "target"),
         (RUST_TESTS_JOB, "${{ github.repository }}-pr-rust-target-v1", "target"),
-        (RUST_TESTS_JOB, "${{ github.repository }}-bazel-disk-cache-v1", ".bazel-disk-cache"),
         (
             RUST_TESTS_JOB,
             "${{ github.repository }}-binding-rc-linux-rust-1.96.0-release-target-v1",
@@ -757,13 +756,9 @@ def validate_test_suite_sticky_negative_fixtures() -> None:
 
 
 def validate_rust_tests_lane(text: str) -> None:
-    """ADR 0048: Cargo with nextest is the CI Gate Rust lane; no Bazel job runs."""
+    """ADR 0048: Cargo with nextest is the CI Gate Rust lane."""
     jobs = workflow_jobs(text)
     for job_id, body in jobs.items():
-        assert "bazel" not in job_id, f"Test Suite must not run a Bazel job: {job_id!r}"
-        assert "bazelisk" not in "\n".join(job_run_scalars(body)), (
-            f"Test Suite job {job_id!r} must not run bazelisk (ADR 0048)"
-        )
         assert_test_suite_sticky(job_id, body)
 
     lanes = [job_id for job_id, body in jobs.items() if job_run_contains(body, NEXTEST_COMMAND)]
@@ -813,7 +808,7 @@ def validate_rust_tests_lane(text: str) -> None:
 
 
 def validate_rust_profiles_keep_runtime_checks() -> None:
-    """Bazel's --config=correctness forced these on; Cargo dev/test have them by default."""
+    """Cargo dev/test profiles keep debug assertions and overflow checks on by default."""
     manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
     profiles = manifest.get("profile", {})
     for name in ("dev", "test"):

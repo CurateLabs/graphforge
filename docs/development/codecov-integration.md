@@ -5,9 +5,9 @@
 ## Current policy
 
 GraphForge does **not** upload coverage to Codecov (or any external coverage
-service) from CI. Post–Bazel cutover, the authoritative Rust compile/test path
-under CI Gate is `bazelisk test //:ci_rust_tests`, which does not produce
-Codecov-compatible reports.
+service) from CI. The authoritative Rust compile/test path under CI Gate is the
+`rust-tests` nextest lane (ADR 0048), which does not produce Codecov-compatible
+reports.
 
 Coverage floors remain enforced locally by `make pre-push` via
 `scripts/pre_push_validation.py` (Rust llvm-cov plus Python/Node wrapper
@@ -22,6 +22,6 @@ history as compromised.
 
 ## Future work
 
-A scheduled or nightly Bazel/`llvm-cov` coverage job (with optional external
+A scheduled or nightly `llvm-cov` coverage job (with optional external
 publication) may be added later as a separate issue. Until then, treat
 `make pre-push` as the coverage gate.

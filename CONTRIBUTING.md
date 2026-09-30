@@ -34,16 +34,15 @@ Agent-oriented workflow and architecture rules are in [AGENTS.md](AGENTS.md).
 ### Validation (summary)
 
 Before pushing, run the Rust gates appropriate to the changed surface, then the
-Python/workspace mirror. Install [Bazelisk](https://github.com/bazelbuild/bazelisk)
-(`bazelisk` on `PATH`); see [docs/development/bazel.md](docs/development/bazel.md).
+Python/workspace mirror. Cargo with nextest is the CI build authority (ADR 0048);
+[docs/development/agent-environment.md](docs/development/agent-environment.md#rust-test-gate)
+gives the exact commands the CI Gate Rust lane runs.
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace -- -D warnings
-cargo test --workspace
-make pre-push-fast   # bazelisk + Cargo/Bazel drift, then format/lint/…
+make pre-push-fast   # Python/policy/inventory checks, then ruff format/lint/…
 make pre-push
-make bazel-test      # optional local //:ci_rust_tests
 ```
 
 ## Getting help

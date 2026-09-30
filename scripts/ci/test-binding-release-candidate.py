@@ -1071,8 +1071,6 @@ def main() -> None:
         not in release_candidate_job
     ), "assemble must not recompile natives; pack the loaders the Linux lane tested"
     validate_release_candidate_loader_policy(release_candidate_job)
-    # Binding RC builds every native with maturin or napi (ADR 0048, #1645).
-    assert not re.search(r"(?i)bazel", rc_workflow_text)
     # Tarball guards must mean "exactly one existing file" (#1374). Without
     # nullglob a non-matching pattern survives as a one-element array.
     assert "shopt -s nullglob" in release_candidate_job

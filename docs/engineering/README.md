@@ -41,9 +41,6 @@ They are requirements for implementation, not claims of shipped functionality.
 | --- | --- |
 | [`../book/architecture/`](../book/architecture/overview.md) | Deep architecture notes, pipeline, storage, embedding contracts |
 | [`../development/`](../development/contributing.md) | Contributor workflow, testing detail, release process |
-| [`../development/bazel.md`](../development/bazel.md) | Bazel migration / #1 Bazel developer guide (install, extend, cache, CI/release) |
-| [`../development/bazel-migration.md`](../development/bazel-migration.md) | Bazel migration / #1 record: orchestration, ledger, baseline, parity, cache gates, cutover, and close-readiness evidence map |
-| [`../development/bazel-bootstrap.md`](../development/bazel-bootstrap.md) | Bazel migration / #11 Bazelisk/Bzlmod bootstrap and Cargo drift check |
 | [`../contracts/`](https://github.com/CurateLabs/graphforge/tree/main/docs/contracts) | Frozen public API / fingerprint JSON contracts |
 | [`../reference/`](../reference/api.md) | Compatibility, TCK, scale limits, column naming |
 | Root `AGENTS.md` | Agent workflow and validation gates |

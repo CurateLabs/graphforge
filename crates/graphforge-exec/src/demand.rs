@@ -316,7 +316,7 @@ fn may_instrument_demand() -> bool {
 /// Deferred partition `execute` or stream drops after a later [`reset`] must
 /// not mutate the next session: record paths ignore mismatched epochs so
 /// one-hop expand evidence cannot leak into a following optimized two-hop
-/// snapshot (Bazel CI failure mode).
+/// snapshot (an observed CI failure mode).
 ///
 /// Epoch checks and snapshot mutations share one mutex so a deferred worker
 /// that observed the prior session cannot win a TOCTOU race against `reset`

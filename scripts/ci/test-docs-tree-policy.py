@@ -53,7 +53,6 @@ class SyntheticTreeTests(unittest.TestCase):
         self.add("docs/reference/discovery/v1/conformance.json", "{}")
         self.add("docs/reference/knowledge-schema-inventory.sha256")
         self.add("docs/releases/records/v0.6.0-artifacts.json", "{}")
-        self.add("docs/reference/BUILD.bazel")
         result = policy.census(self.root, self.files)
         self.assertEqual(result.evidence_shaped, [])
         self.assertEqual(result.oversize, [])

@@ -139,25 +139,6 @@ assert_classification "$all" ".github/workflows/test.yml" workflow
 assert_classification "$all" scripts/ci/require-gates.sh aggregate-gate
 assert_classification "$all" scripts/ci/concurrency-short-gate.py concurrency-short-gate
 assert_classification "$all" tests/contracts/concurrency-short-matrix.json concurrency-short-matrix
-# Bazel build descriptions feed no CI Gate lane after ADR 0048 (#1644).
-assert_classification "$none" MODULE.bazel bazel-module
-assert_classification "$none" tools/bazel/smoke/src/lib.rs bazel-smoke
-assert_classification "$none" cargo-bazel-lock.json bazel-crate-universe-lock
-assert_classification "$none" crates/graphforge-core/BUILD.bazel bazel-crate-build
-assert_classification "$none" docs/reference/BUILD.bazel bazel-docs-reference-build
-assert_classification "$none" docs/contracts/examples/BUILD.bazel bazel-docs-contracts-build
-assert_classification "$none" tools/bazel/bindings/BUILD.bazel bazel-bindings-handoff
-assert_classification "$none" tests/features/BUILD.bazel bazel-features-build
-assert_classification "$none" tests/tck/BUILD.bazel bazel-tck-build
-assert_classification "$none" examples/agent_grounding/BUILD.bazel bazel-notebook-build
-assert_classification "$none" platforms/BUILD.bazel bazel-release-platforms
-assert_classification "$none" tests/release_workflows/BUILD.bazel bazel-release-workflow-inputs
-assert_classification "$none" \
-  tools/bazel/migration-evidence/perf-sample.json bazel-cache-perf-evidence
-# Bazel scripts are ordinary Python and Bazel docs are ordinary docs.
-assert_classification "$python_only" scripts/ci/cargo-bazel-drift-check.py bazel-drift-check
-assert_classification "$python_only" scripts/ci/bazel-cache-perf.py bazel-cache-perf-harness
-assert_classification "$none" docs/development/bazel-migration.md bazel-migration-doc
 # Docs-only changes skip the Rust test lane (#1644 acceptance criterion).
 assert_classification "$none" "docs/a file with spaces.md" docs-only
 assert_classification "$none" docs/book/architecture/ast-and-planning.md book-docs-only
@@ -241,10 +222,6 @@ empty=$(
 # The Cargo Rust test lane must consume the rust_tests output (#1644).
 grep -Fq 'rust_tests: ${{ steps.filter.outputs.rust_tests }}' "$workflow"
 grep -Fq "needs.changes.outputs.rust_tests == 'true'" "$workflow"
-if grep -Fq 'outputs.bazel' "$workflow"; then
-  echo "test.yml must not consume the retired bazel classifier output" >&2
-  exit 1
-fi
 
 # Reusable contract lanes must consume the feature-specific classifier outputs.
 for feature in epistemic_contract knowledge_contract non_cypher_surface; do

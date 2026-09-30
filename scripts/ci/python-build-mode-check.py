@@ -42,22 +42,6 @@ def validate_metadata(metadata: dict[str, Any], *, extension: bool) -> None:
         raise ValueError(f"missing resolved PyO3 crates: {sorted(PYO3_CRATES - found)}")
 
 
-def validate_bazel(lock: dict[str, Any]) -> None:
-    """Require explicit extension mode in every generated PyO3 build script."""
-    found = set()
-    for crate in lock["crates"].values():
-        name = crate["name"]
-        if name not in PYO3_CRATES:
-            continue
-        found.add(name)
-        environment = crate.get("build_script_attrs", {}).get("build_script_env", {})
-        # PyO3 treats presence as enabled, even when a caller writes "0".
-        if EXTENSION_ENV not in environment.get("common", {}):
-            raise ValueError(f"{name}: Bazel distribution build lacks explicit extension mode")
-    if found != PYO3_CRATES:
-        raise ValueError("Bazel lock is missing PyO3 build scripts")
-
-
 def cargo_metadata(root: Path, features: list[str] | None = None) -> dict[str, Any]:
     command = ["cargo", "metadata", "--format-version=1", "--locked"]
     if features is not None:
@@ -80,12 +64,9 @@ def main() -> None:
         )
         features = packaging["tool"]["maturin"].get("features", [])
         validate_metadata(cargo_metadata(root, features), extension=True)
-        validate_bazel(json.loads((root / "cargo-bazel-lock.json").read_text(encoding="utf-8")))
     except (ValueError, KeyError, subprocess.CalledProcessError) as error:
         raise SystemExit(f"Python build-mode check failed: {error}") from error
-    print(
-        "Python build-mode configuration valid: Cargo tests, maturin extensions, Bazel extensions"
-    )
+    print("Python build-mode configuration valid: Cargo tests, maturin extensions")
 
 
 if __name__ == "__main__":

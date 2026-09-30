@@ -1,9 +1,5 @@
 # Dependabot configuration for automated dependency updates
 # https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
-#
-# Cargo bumps that change the lockfile also need a Bazel crate-universe repin
-# (CARGO_BAZEL_REPIN=1 / MODULE.bazel.lock + feature fingerprint). Reviewers
-# should reject Cargo-only Dependabot PRs that skip the Bazel refresh.
 
 version: 2
 updates:
@@ -83,7 +79,6 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
-      # Reminder: Cargo bumps need Bazel crate-universe repin before merge.
     # Arrow / Parquet / DataFusion majors must move together. Isolated majors
     # (closed #686 parquet, #695 arrow) leave dual arrow-schema vs DataFusion.
     # Ignore the whole stack's majors until a coordinated upgrade; do not use a

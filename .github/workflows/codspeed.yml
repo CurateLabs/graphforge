@@ -3,8 +3,8 @@ name: CodSpeed
 # Nightly performance measurement for the Rust surface. Benchmarks are
 # divan targets built through `cargo codspeed` and measured with CodSpeed's
 # CPU simulation instrument for pure kernels and CodSpeed Macro Runners for
-# durable I/O walltime. Cargo builds here are diagnostics-only: Bazel remains
-# the authoritative compile/test surface (see .github/workflows/README.md).
+# durable I/O walltime. These builds are diagnostics-only: the CI Gate Rust
+# Tests lane remains the authoritative compile/test surface (ADR 0048).
 #
 # CodSpeed compares each run against the previous one, which catches a step
 # regression and nothing else. The ingest floor gate in `m6-walltime` is the

@@ -144,11 +144,11 @@ Rust/Python/Node/CLI journey and captured consumer outputs. See [acceptance evid
   [`OBSERVABILITY.md`](OBSERVABILITY.md).
 - **Correctness bar:** TCK + non-Cypher surface inventories; wrapper/logical-plan tests
   alone are insufficient (`AGENTS.md`).
-- **Build system:** Bazel (Bazelisk) owns CI Rust compilation and the mapped test
-  graph; Cargo manifests remain ecosystem inputs. See
-  [`../development/bazel.md`](../development/bazel.md). Publish credentials stay
-  outside cacheable Bazel actions. Swift/Kotlin UniFFI bindings are not a Bazel-migration
-  build-migration deliverable.
+- **Build system:** Cargo with nextest owns CI Rust compilation and tests
+  ([ADR 0048](../adr/0048-cargo-is-the-ci-build-authority.md)); maturin and napi
+  build the binding packages. See
+  [`../development/agent-environment.md`](../development/agent-environment.md#rust-test-gate).
+  Publish credentials stay in release workflows.
 
 ## Decisions
 
