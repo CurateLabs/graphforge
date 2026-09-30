@@ -185,7 +185,7 @@ pub struct OperationGuard {
 }
 
 /// Account an actual admitted topology projection only when test support is compiled in.
-#[inline(always)]
+#[inline]
 pub fn record_topology_projection() {
     #[cfg(any(test, feature = "test-support"))]
     operation::record_topology_projection();
