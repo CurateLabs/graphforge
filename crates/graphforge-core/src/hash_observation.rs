@@ -193,8 +193,8 @@ pub fn record_topology_projection() {
 
 /// Account an actual composite request fingerprint producer in test support only.
 #[inline]
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn record_composite_request_fingerprint() {
+pub fn record_composite_request_fingerprint() {
+    #[cfg(any(test, feature = "test-support"))]
     operation::record_composite_request_fingerprint();
 }
 
@@ -234,7 +234,7 @@ pub mod operation {
         pub checksum_bytes: u64,
         /// Actual admitted label topology projections started by this operation.
         pub topology_projections: u64,
-        /// Successful canonical CompositeRequest producer invocations, not authorizations.
+        /// Successful whole composite request fingerprints, excluding participant subfingerprints.
         pub composite_request_fingerprints: u64,
     }
     /// Captured operation context, transferable to synchronous worker threads.
@@ -370,6 +370,7 @@ mod tests {
                 hash.update([0_u8; 29]);
                 hash.finalize();
                 fingerprint(CanonicalDomain::CompositeRequest, 1, b"second worker").unwrap();
+                super::record_composite_request_fingerprint();
             })
             .join()
             .unwrap();
@@ -381,12 +382,15 @@ mod tests {
             hash.update([0_u8; 17]);
             hash.finalize();
             fingerprint(CanonicalDomain::CompositeRequest, 1, b"first worker").unwrap();
+            super::record_composite_request_fingerprint();
             {
                 let nested = Capture::start();
                 let mut hash = ObservedSha256::for_domain(HashDomain::ControlAuthentication);
                 hash.update([0_u8; 11]);
                 hash.finalize();
                 fingerprint(CanonicalDomain::CompositeRequest, 1, b"nested").unwrap();
+                assert_eq!(nested.snapshot().composite_request_fingerprints, 0);
+                super::record_composite_request_fingerprint();
                 fingerprint(
                     CanonicalDomain::CompositeGraphMutationContent,
                     1,

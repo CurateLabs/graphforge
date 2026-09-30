@@ -1912,6 +1912,87 @@ mod tests {
     }
 
     #[test]
+    fn external_graph_ref_and_confidence_input_publish_have_one_whole_request_fingerprint() {
+        let directory = TempDir::new().unwrap();
+        let graph = GraphForge::new(directory.path().to_str()).unwrap();
+        enable(&graph, CapabilityId::Provenance, 1);
+        enable(&graph, CapabilityId::Knowledge, 2);
+        enable(&graph, CapabilityId::Epistemic, 3);
+        let mut initial = publish_request();
+        let original_ref = initial.knowledge.assertion_graph_refs[0].clone();
+        for identity in [50, 51] {
+            initial.knowledge.confidence_assessments.push(
+                graphforge_knowledge::ConfidenceAssessment::new(
+                    uuid7(identity),
+                    uuid7(30),
+                    graphforge_knowledge::ConfidencePolicy::ConservativeMin,
+                    None,
+                    initial.knowledge.provenance_events[0].provenance_uuid,
+                    10,
+                )
+                .unwrap(),
+            );
+        }
+        graph.publish_composite_transaction(initial).unwrap();
+        let request = CompositeTransactionRequest {
+            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: WriteContext {
+                operation_uuid: OperationId(uuid7(11)),
+                actor_uuid: None,
+            },
+            graph_mutations: Vec::new(),
+            knowledge: CompositeKnowledgeParticipants {
+                assertion_graph_refs: vec![
+                    AssertionGraphRef::new(
+                        uuid7(30),
+                        uuid7(20),
+                        GraphObjectKind::Node,
+                        AssertionGraphRole::Subject,
+                        1,
+                    )
+                    .unwrap(),
+                ],
+                confidence_inputs: vec![
+                    graphforge_knowledge::ConfidenceInput::new(uuid7(50), uuid7(51), None, 0)
+                        .unwrap(),
+                ],
+                ..CompositeKnowledgeParticipants::default()
+            },
+        };
+        let expected_refs = vec![
+            original_ref,
+            request.knowledge.assertion_graph_refs[0].clone(),
+        ];
+        let expected_inputs = request.knowledge.confidence_inputs.clone();
+        let capture = graphforge_core::hash_observation::operation::Capture::start();
+        let receipt = graph
+            .publish_composite_transaction(request.clone())
+            .unwrap();
+        assert_eq!(capture.snapshot().composite_request_fingerprints, 1);
+        assert!(capture.snapshot().contract_identity_sha256_bytes > 0);
+        drop(capture);
+        drop(graph);
+        let reopened = GraphForge::new(directory.path().to_str()).unwrap();
+        let capture = graphforge_core::hash_observation::operation::Capture::start();
+        assert_eq!(
+            reopened.publish_composite_transaction(request).unwrap(),
+            receipt
+        );
+        assert_eq!(capture.snapshot().composite_request_fingerprints, 1);
+        let parent = graphforge_storage::resolve_project_generation(directory.path()).unwrap();
+        assert_eq!(
+            crate::knowledge::read_ledger(&parent).unwrap().graph_refs,
+            expected_refs
+        );
+        assert_eq!(
+            crate::knowledge::read_confidence_ledger(&parent)
+                .unwrap()
+                .inputs,
+            expected_inputs
+        );
+    }
+
+    #[test]
     fn publish_composite_is_one_generation_with_canonical_receipt() {
         let directory = TempDir::new().unwrap();
         let graph = GraphForge::new(directory.path().to_str()).unwrap();

@@ -242,12 +242,14 @@ impl CompositeTransactionRequest {
             canonical_graph_mutation_content_fingerprint(&self.graph_mutations)?;
         writer.raw(&graph_fingerprint).map_err(canonical_error)?;
         encode_knowledge(&mut writer, &self.knowledge)?;
-        fingerprint(
+        let fingerprint = fingerprint(
             CanonicalDomain::CompositeRequest,
             CANONICAL_CONTRACT_VERSION,
             &writer.finish(),
         )
-        .map_err(canonical_error)
+        .map_err(canonical_error)?;
+        graphforge_core::hash_observation::record_composite_request_fingerprint();
+        Ok(fingerprint)
     }
 
     /// Resolve one pre-staging retry decision using a prior result found by request identity.
@@ -1740,6 +1742,47 @@ pub(crate) mod tests {
             different_identity.retry_decision::<Vec<u8>>(None).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn external_participant_subfingerprints_retain_sha_work_without_counting_whole_requests() {
+        let mut request = request(130, 131);
+        let graph_ref = AssertionGraphRef::new(
+            uuid7(200),
+            uuid7(30),
+            GraphObjectKind::Node,
+            AssertionGraphRole::Subject,
+            1,
+        )
+        .unwrap();
+        let confidence_input = ConfidenceInput::new(uuid7(201), uuid7(40), None, 1).unwrap();
+        request
+            .knowledge
+            .assertion_graph_refs
+            .push(graph_ref.clone());
+        request
+            .knowledge
+            .confidence_inputs
+            .push(confidence_input.clone());
+
+        let sub_capture = graphforge_core::hash_observation::operation::Capture::start();
+        external_graph_ref_fingerprint(&graph_ref).unwrap();
+        let graph_bytes = sub_capture.snapshot().contract_identity_sha256_bytes;
+        assert!(graph_bytes > 0);
+        external_confidence_input_fingerprint(&confidence_input).unwrap();
+        let sub_bytes = sub_capture.snapshot().contract_identity_sha256_bytes;
+        assert!(sub_bytes > graph_bytes);
+        assert_eq!(sub_capture.snapshot().composite_request_fingerprints, 0);
+        drop(sub_capture);
+
+        let expected = request.canonical_fingerprint().unwrap();
+        let capture = graphforge_core::hash_observation::operation::Capture::start();
+        let prepared = PreparedCompositeOperation::new(&request).unwrap();
+        assert_eq!(prepared.fingerprint(), expected);
+        assert_eq!(capture.snapshot().composite_request_fingerprints, 1);
+        assert!(capture.snapshot().contract_identity_sha256_bytes > sub_bytes);
+        assert_eq!(prepared.receipt().unwrap(), prepared.receipt().unwrap());
+        assert_eq!(capture.snapshot().composite_request_fingerprints, 1);
     }
 
     #[test]

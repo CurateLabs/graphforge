@@ -754,7 +754,7 @@
       "role": "contract_identity",
       "input_contract": "Canonical logical values and domain-separated contract metadata define semantic identity.",
       "function_bodies_sha256": [
-        "afd1b439b36f3e424f75830c50a3b5d1b54ac9777bc18dcdfaf597fba1cb8af9"
+        "97bf96b037cc5e0e5e72dda3d407e1c4d8909bf76563c6c4f93f77521f13ae3f"
       ]
     },
     {
