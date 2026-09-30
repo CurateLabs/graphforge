@@ -43,6 +43,17 @@ SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
+# Trees whose timers are shared diagnostics only (#1654). Their Cucumber
+# scenario timings must never drive a performance threshold: thresholds belong
+# to the provenance-gated BenchExec/Divan consumer (`make tck-perf`).
+DIAGNOSTIC_ONLY_TREES = ("crates/graphforge-api/tests/bdd/",)
+
+THRESHOLD_CONSUMER_PATTERN = re.compile(
+    r"\b(?:per_scenario_multiplier|per_scenario_min_delta_ms|aggregate_multiplier"
+    r"|aggregate_min_delta_ms|absolute_slow_ms|PerformanceFinding|ScenarioRegression"
+    r"|AggregateRegression|baseline_status)\b|warning threshold|TCK PERF WARNING"
+)
+
 DISPOSITIONS = {
     "framework_authority",
     "framework_consumer",
@@ -155,6 +166,23 @@ def detect_signals(text: str) -> dict[str, list[int]]:
     return hits
 
 
+def threshold_consumer_errors(root: Path, tracked: set[str]) -> list[str]:
+    """Reject threshold consumers in the diagnostic-only Cucumber tree."""
+    errors: list[str] = []
+    for path in sorted(tracked):
+        if not path.endswith(".rs") or not path.startswith(DIAGNOSTIC_ONLY_TREES):
+            continue
+        for line_no, line in enumerate((root / path).read_text().splitlines(), 1):
+            match = THRESHOLD_CONSUMER_PATTERN.search(line)
+            if match:
+                errors.append(
+                    f"{path}:{line_no}: threshold consumer ({match.group(0)}) in a "
+                    "diagnostic-only timing tree; performance thresholds belong to the "
+                    "provenance-gated BenchExec/Divan consumer (make tck-perf, #1654)"
+                )
+    return errors
+
+
 def inventory_by_path(payload: dict) -> dict[str, dict]:
     return {site["path"]: site for site in payload["sites"]}
 
@@ -210,6 +238,7 @@ def validate(root: Path) -> tuple[dict, list[str]]:
                     "update the inventory when migrating or add the reviewed exception"
                 )
 
+    errors.extend(threshold_consumer_errors(root, tracked))
     return payload, errors
 
 

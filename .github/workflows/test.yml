@@ -1259,7 +1259,8 @@ jobs:
             tests.test_progressive_provider_plan \
             tests.test_progressive_provider_run \
             tests.test_progressive_run \
-            tests.test_qualification_operator
+            tests.test_qualification_operator \
+            tests.test_tck_perf
 
       # The custom-harness targets (cucumber BDD, allocation probe) cannot
       # answer nextest's --list protocol; they run under cargo test below.

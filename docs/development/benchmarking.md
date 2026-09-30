@@ -80,8 +80,15 @@ TCK_ONLY=Delete5 cargo bench -p graphforge-api --bench tck_scenarios # feature-f
 
 `make bench-tck-scenarios` runs the whole corpus with the default sample count.
 
-The target has no thresholds, baseline or comparison; those belong to the
-provenance-gated consumer of #1654. It is not part of the PR CI Gate:
+The target has no thresholds, baseline or comparison of its own. Its raw
+results are the per-scenario input to `make tck-perf` (#1654), the single TCK
+threshold consumer: it also measures the whole-TCK Cucumber process under
+BenchExec for the aggregate, and compares only when every provenance key
+(host, build profile and toolchain, workload, sample counts) matches a
+host-local baseline. See `docs/reference/tck-compliance.md`. Divan orders
+scenarios by name, not Cucumber file order, and `cargo bench` builds with an
+optimizing profile while `cargo test` does not; both are provenance keys. The
+bench is not part of the PR CI Gate:
 `cargo test` and nextest do not run bench targets by default.
 `tests/tck_scenario_bench.rs` covers it there, running the benchmark in
 subprocesses: a passing scenario yields a keyed raw result, a failing step
