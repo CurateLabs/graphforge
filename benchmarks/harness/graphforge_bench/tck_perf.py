@@ -965,7 +965,10 @@ def measure(args: argparse.Namespace) -> Path:
     """Build, admit, measure and write one run directory."""
     import benchexec
 
-    from graphforge_bench.local_admission import qualify_local_host
+    # The existing native admission path: it runs the admission probe under
+    # the system Python with a filtered environment (an inherited TMPDIR on
+    # the durable work volume breaks the probe's container).
+    from graphforge_bench.progressive_run import ControllerError, _native_authority
 
     repo = args.repo_root.resolve()
     fault = (
@@ -984,14 +987,12 @@ def measure(args: argparse.Namespace) -> Path:
     if temp_fs not in DURABLE_FILESYSTEMS:
         raise TckPerfError(f"temp root {tmp} is {temp_fs}; use ext4/xfs/btrfs storage")
 
-    admission = qualify_local_host()
-    _write_json(output / "admission.json", admission)
     try:
+        admission = _native_authority()
+        _write_json(output / "admission.json", admission)
         require_local_admission(admission)
-    except EvidenceError as error:
-        raise TckPerfError(
-            f"native BenchExec admission refused: {admission.get('cause')}"
-        ) from error
+    except (ControllerError, EvidenceError) as error:
+        raise TckPerfError(str(error)) from error
 
     rustc_vv = subprocess.check_output(["rustc", "-vV"], cwd=repo, text=True).strip()
     features = sorted(args.features)
