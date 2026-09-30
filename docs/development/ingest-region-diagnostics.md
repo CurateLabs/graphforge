@@ -13,6 +13,11 @@ and cancellation checks retain their normal clocks. Custom property-scan
 execution metrics are collected only when requested; an explicit execution-demand
 capture enables them while resource reservations and decoder limits remain active
 for every query.
+Storage APIs that explicitly return exact `PropertyOverlayMetrics` continue to
+collect the work promised by that return value. Ordinary facade scans and
+targeted reads use internal data-only paths; they do not allocate or update
+those optional read and authentication counters. Decoder admission, retained
+buffer ownership, and header bounds are still enforced on both paths.
 
 No test feature or custom engine build is needed. Rust callers request lifecycle
 and storage read measurements with `graphforge_api::LifecycleIoCapture::install()`.
