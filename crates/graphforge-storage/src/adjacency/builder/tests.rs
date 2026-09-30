@@ -593,6 +593,161 @@ fn spill_runs_are_counted_in_both_directions_of_their_lifetime() {
     );
 }
 
+/// Every regular file under `root`, recursively, as `(path, bytes)`.
+fn files_under(root: &Path) -> Vec<(PathBuf, u64)> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                files.push((entry.path(), entry.metadata().unwrap().len()));
+            }
+        }
+    }
+    files
+}
+
+#[test]
+fn a_rebuild_attributes_every_file_it_publishes_and_every_barrier() {
+    let dir = TempDir::new().unwrap();
+    write_diamond(dir.path());
+
+    let observation = graphforge_filesystem::observation::Observation::start();
+    let (observed_before, _) = graphforge_filesystem::observation::fsync_totals();
+    let _capture = crate::lifecycle_io::CaptureScope::install();
+    let before = crate::lifecycle_io::snapshot();
+    build_adjacency_index(dir.path(), BUILD_TS).unwrap();
+    let region = crate::lifecycle_io::snapshot().since(&before).unwrap();
+    let (observed_after, _) = graphforge_filesystem::observation::fsync_totals();
+    drop(observation);
+    region.validate_for_qualification().unwrap();
+    let scan = &region.phases[&crate::StorageIoPhase::ReadPathScan];
+
+    // No spill at this size, so everything the build wrote is still on disk:
+    // CSR shards, one `*.csr.json` per relation and direction, and the index
+    // manifest. #1449: the `*.csr.json` writes were missing from the row.
+    let published = files_under(&crate::adjacency::adjacency_dir(dir.path()));
+    let csr_manifests = published
+        .iter()
+        .filter(|(path, _)| path.to_string_lossy().ends_with(".csr.json"))
+        .count() as u64;
+    assert!(csr_manifests >= 2, "{published:#?}");
+    assert_eq!(
+        scan.write_bytes,
+        published.iter().map(|(_, bytes)| bytes).sum::<u64>(),
+        "attributed writes differ from the bytes published: {published:#?} {region:#?}"
+    );
+    assert_eq!(scan.write_calls, published.len() as u64, "{region:#?}");
+
+    // One `sync_all` per `*.csr.json`, and one directory barrier for the
+    // index manifest's retained install. #1449: the rebuild reported zero.
+    assert_eq!(scan.fsync_calls, csr_manifests + 1, "{region:#?}");
+    // Independently, the filesystem's own barrier counter. It is process-wide,
+    // so under nextest's process-per-test it is exactly this build; under a
+    // threaded harness a concurrent test can only add to it.
+    let observed = observed_after - observed_before;
+    if std::env::var_os("NEXTEST").is_some() {
+        assert_eq!(scan.fsync_calls, observed, "{region:#?}");
+    } else {
+        assert!(scan.fsync_calls <= observed, "{observed} < {region:#?}");
+    }
+}
+
+#[test]
+fn spill_merge_read_calls_count_buffer_refills_not_records() {
+    let dir = TempDir::new().unwrap();
+    let mut spill = SpillSession::create(&dir.path().join("runs")).unwrap();
+    let mut runs = Vec::new();
+    let mut records = 0_u64;
+    for run in 0..3_u64 {
+        // Each run is larger than its share of the merge budget, so every
+        // cursor refills its buffer several times.
+        let entries: Vec<_> = (0..45_000_u64).map(|row| (row, run, run)).collect();
+        records += entries.len() as u64;
+        let path = spill.next_run_path("EDGE", Direction::Out);
+        write_keyed_run(&path, &entries, &mut spill).unwrap();
+        runs.push(path);
+    }
+    let sizes: Vec<u64> = runs
+        .iter()
+        .map(|path| std::fs::metadata(path).unwrap().len())
+        .collect();
+    let buffer = (MERGE_READER_BUFFER_BYTES / runs.len()) as u64;
+
+    let _capture = crate::lifecycle_io::CaptureScope::install();
+    let before = crate::lifecycle_io::snapshot();
+    let mut merged = 0_u64;
+    merge_keyed_runs(&runs, &mut || Ok(()), &mut |_| {
+        merged += 1;
+        Ok(())
+    })
+    .unwrap();
+    let region = crate::lifecycle_io::snapshot().since(&before).unwrap();
+    let scan = &region.phases[&crate::StorageIoPhase::ReadPathScan];
+
+    assert_eq!(merged, records);
+    assert_eq!(scan.read_bytes, sizes.iter().sum::<u64>(), "{region:#?}");
+    // A regular file fills each request, so every run costs exactly one read
+    // per buffer-sized window. #1449: this was one call per 24-byte record.
+    assert_eq!(
+        scan.read_calls,
+        sizes.iter().map(|size| size.div_ceil(buffer)).sum::<u64>(),
+        "{region:#?}"
+    );
+    assert!(scan.read_calls * 1_000 < records, "{region:#?}");
+}
+
+#[test]
+fn a_real_rebuilds_spill_reads_cost_one_call_per_run_it_wrote() {
+    let dir = TempDir::new().unwrap();
+    write_diamond(dir.path());
+    let measure = |options: &AdjacencyBuildOptions| {
+        let stage = TempDir::new().unwrap();
+        let _capture = crate::lifecycle_io::CaptureScope::install();
+        let before = crate::lifecycle_io::snapshot();
+        let (_, metrics) = build_adjacency_index_into_with_metrics(
+            dir.path(),
+            stage.path(),
+            BUILD_TS,
+            options,
+            || Ok(()),
+        )
+        .unwrap();
+        let region = crate::lifecycle_io::snapshot().since(&before).unwrap();
+        (
+            region.phases[&crate::StorageIoPhase::ReadPathScan].clone(),
+            metrics,
+        )
+    };
+    let (unspilled, plain) = measure(&AdjacencyBuildOptions::default());
+    let (spilled, metrics) = measure(&AdjacencyBuildOptions {
+        chunk_rows: 2, // force sorted spill runs for the six diamond edges
+        ..AdjacencyBuildOptions::default()
+    });
+    assert_eq!(plain.spill_runs, 0);
+    assert!(metrics.spill_runs > 0, "{metrics:?}");
+
+    // Same edge-table reads and the same published bytes either way, so the
+    // difference is the spill alone. Every run is merged once without
+    // compaction at this fan-in and fits one buffer window: it is read back
+    // in full, in exactly one call, and written in one.
+    let spill_writes = spilled.write_bytes - unspilled.write_bytes;
+    assert_eq!(spilled.read_bytes - unspilled.read_bytes, spill_writes);
+    assert_eq!(
+        spilled.write_calls - unspilled.write_calls,
+        metrics.spill_runs
+    );
+    assert_eq!(
+        spilled.read_calls - unspilled.read_calls,
+        metrics.spill_runs,
+        "unspilled {unspilled:#?} spilled {spilled:#?}"
+    );
+}
+
 #[test]
 fn a_publish_style_scope_moves_the_build_out_of_the_read_path_row() {
     let dir = TempDir::new().unwrap();
