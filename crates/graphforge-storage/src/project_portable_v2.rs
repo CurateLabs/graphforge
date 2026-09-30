@@ -18,10 +18,11 @@ pub(crate) use semantic_validation::{
     decode_runtime_map, validate_materialized_ontology_composition,
 };
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File};

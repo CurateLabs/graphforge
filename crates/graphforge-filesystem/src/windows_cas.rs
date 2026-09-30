@@ -1,5 +1,6 @@
 //! Exclusive construction and sealed-read capabilities for Windows CAS files.
 
+use crate::ObservedSync as _;
 use std::fs::File;
 use std::io;
 
@@ -49,13 +50,24 @@ impl WindowsCasWriter {
 
     /// Flush the exact retained writer.
     pub fn sync_all(&self) -> io::Result<()> {
-        self.file.sync_all()
+        self.file.observed_sync_all()
     }
 
     /// Return the immutable identity captured at exclusive creation.
     #[must_use]
     pub fn identity(&self) -> FileIdentity {
         self.identity
+    }
+}
+
+#[cfg(windows)]
+impl crate::ObservedSync for WindowsCasWriter {
+    fn observed_sync_all(&self) -> io::Result<()> {
+        self.sync_all()
+    }
+
+    fn observed_sync_data(&self) -> io::Result<()> {
+        self.file.observed_sync_data()
     }
 }
 

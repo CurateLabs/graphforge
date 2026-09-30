@@ -11,9 +11,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path};
 use std::time::SystemTime;
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_filesystem::{FileIdentity, StableDirectory, file_identity, file_link_count};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 /// Immutable v4 manifest version.

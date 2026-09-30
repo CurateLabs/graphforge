@@ -3,6 +3,7 @@ use graphforge_core::portable::{
     PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2Report,
     PortableV2Representation,
 };
+use graphforge_filesystem::ObservedSync as _;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -101,7 +102,7 @@ impl PortablePackageStage {
                 PortableV2Error::new(PortableV2ErrorCode::Io, "failed to write staging file")
             })?;
         }
-        file.sync_all().map_err(|_| {
+        file.observed_sync_all().map_err(|_| {
             PortableV2Error::new(PortableV2ErrorCode::Io, "failed to sync staging file")
         })?;
         Ok(stage)

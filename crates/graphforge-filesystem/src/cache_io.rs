@@ -526,7 +526,7 @@ fn synchronize_file(file: &File) -> io::Result<()> {
         }
         Ok(())
     })?;
-    file.sync_all()
+    crate::ObservedSync::observed_sync_all(file)
 }
 
 #[cfg(test)]

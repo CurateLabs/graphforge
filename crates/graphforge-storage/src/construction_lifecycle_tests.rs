@@ -1,3 +1,4 @@
+use graphforge_filesystem::ObservedSync as _;
 // Real multi-level construction measurements, sharing the writer test fixtures.
 mod lifecycle_budget {
     use super::*;
@@ -2375,7 +2376,7 @@ mod group_boundary {
             std::io::Read::read_exact(&mut file, &mut byte).unwrap();
             file.seek(SeekFrom::Start(length - 1)).unwrap();
             file.write_all(&[byte[0] ^ 0x5a]).unwrap();
-            file.sync_all().unwrap();
+            file.observed_sync_all().unwrap();
         }
         /// Change the first digit of `key`'s numeric value, in place.
         fn bump_number(path: &Path, key: &str) {
@@ -2396,7 +2397,7 @@ mod group_boundary {
             // Same inode, same length: an in-place rewrite.
             assert_eq!(from.len(), to.len());
             file.write_all(body.replacen(from, to, 1).as_bytes()).unwrap();
-            file.sync_all().unwrap();
+            file.observed_sync_all().unwrap();
         }
         type Mutation<'a> = (&'a str, &'a str, &'a dyn Fn(&Path));
         let cases: [Mutation; 4] = [

@@ -18,7 +18,8 @@ pub use model::*;
 mod tests;
 
 use crate::GfError;
-use sha2::{Digest, Sha256};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+use sha2::Digest;
 use uuid::Uuid;
 
 fn identity(operation: Uuid, role: &str) -> Uuid {

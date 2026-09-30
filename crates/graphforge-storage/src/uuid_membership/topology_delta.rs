@@ -83,9 +83,10 @@ use super::validate_block_records;
 #[cfg(test)]
 use super::validate_run_contents;
 use super::validate_run_descriptors;
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::GfError;
+use graphforge_filesystem::ObservedSync as _;
 use sha2::Digest;
-use sha2::Sha256;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
@@ -1216,7 +1217,7 @@ pub(super) fn append_uuid_membership_delta_with_tombstones(
                 .map_err(storage_err)?;
             let empty = scratch.path().join("empty.run");
             File::create(&empty)
-                .and_then(|file| file.sync_all())
+                .and_then(|file| file.observed_sync_all())
                 .map_err(storage_err)?;
             let identities = publish_data(
                 &empty,
@@ -1538,7 +1539,7 @@ fn publish_manifest(root: &Path, staging: &Path, manifest: &Manifest) -> Result<
     let result = (|| -> Result<(), GfError> {
         serde_json::to_writer(&mut temp, manifest).map_err(storage_err)?;
         temp.flush().map_err(storage_err)?;
-        temp.sync_all().map_err(storage_err)?;
+        temp.observed_sync_all().map_err(storage_err)?;
         directory
             .replace_child(&temp_name, identity, std::ffi::OsStr::new(MANIFEST))
             .map_err(storage_err)?;
@@ -1691,7 +1692,7 @@ fn merge_identity_v3(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
         out.write_all(&block).map_err(storage_err)?;
     }
     out.flush().map_err(storage_err)?;
-    out.sync_all().map_err(storage_err)
+    out.observed_sync_all().map_err(storage_err)
 }
 
 /// Stage one incremental v4 node-ordinal delta beside the canonical topology
@@ -2198,7 +2199,7 @@ fn external_sort_v4_nodes(
     if runs.is_empty() {
         let path = scratch.join("v4-delta-empty.run");
         File::create(&path)
-            .and_then(|file| file.sync_all())
+            .and_then(|file| file.observed_sync_all())
             .map_err(storage_err)?;
         runs.push(path);
     }

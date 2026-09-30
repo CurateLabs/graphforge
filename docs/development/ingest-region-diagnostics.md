@@ -62,7 +62,7 @@ after this boundary, matching existing phase-wall semantics.
 and their wall/CPU residuals. The residual includes work outside the import
 command handler, such as startup and facade opening. CPU residuals are signed
 because separate proc samples can differ by a tick. Within a command,
-`resume_import`, `register_parquet`, `validate`, `open_construction`, `seal`, and
+`resume_import`, `register_parquet`, `stage+seal`, `open_construction`, `seal`, and
 `commit/publish` retain their own explicit residuals. Existing operation timings
 remain the five disjoint construction-call observations; their boundaries are
 narrower than command scopes.
@@ -90,7 +90,7 @@ failure leaves `CURRENT` unchanged (fail-closed) instead of committing a
 generation that cannot be hydrated. Candidate verification before that callback
 (the durable manifest and lease authentication) remains in `generation_commit`'s
 residual. Adjacency CSR encoding runs
-inside `validate/seal/canonical_encoding/adjacency_encoding`, not inside
+inside `stage+seal/seal/canonical_encoding/adjacency_encoding`, not inside
 publish; reconcile publication against that region rather than assuming CSR
 cost lands in `commit`. Measured attribution on the integrated tree is recorded in
 [`evidence/publication-attribution-1481.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/publication-attribution-1481.md).
@@ -106,7 +106,7 @@ For two controlled worker-count runs, the comparison entrypoint is:
 
 ```bash
 PYTHONPATH=benchmarks/harness python3 -m graphforge_bench.region_diagnostics \
-  baseline.json candidate.json --scope import_command/validate/seal/shaping --unit edges
+  baseline.json candidate.json --scope import_command/stage+seal/seal/shaping --unit edges
 ```
 
 Each file wraps the unmodified receipt as `receipt` plus `provenance` containing
@@ -150,3 +150,94 @@ and scheduler statistics enabled for the experiment (then restored):
 These are calibration observations, not ingest performance thresholds. In the
 last row process CPU includes both threads; the scheduler row observes only the
 capturing thread.
+
+## Written and hashed bytes and barriers
+
+Stock `gf --json import-session validate --session-uuid UUID` stages and seals
+sources. Its outcome and measured region are `stage+seal`; `validate` remains
+the CLI command. `status` uses the same outcome after sealing. The persisted
+`ImportPhase::Validated` state and its existing binding labels remain readable;
+they describe the durable lifecycle state rather than the measured phase.
+
+New receipts use `graphforge-region-diagnostics/2`. The certification reader
+and schema also accept `/1` because the retained encoding-lane receipt fixture
+and historical ladder receipts are consumers of that contract. Old receipts
+keep their original names and have no invented byte or barrier observations.
+
+Every region's `inclusive` and `residual` measurements include:
+
+- `written_bytes`: Linux `/proc/self/io` `wchar` differences, bytes accepted by
+  write syscalls on all process threads. This includes control and payload
+  writes and any other writes in the process, including pipes. It is neither
+  disk writeback nor the logical length of newly published objects. It is
+  unavailable (`null`) when the kernel counter cannot be read.
+- `hashed_bytes`: input bytes supplied to instrumented SHA-256 sites in storage,
+  API, core canonical identities, and ontology compilation/composition.
+  Repeated input counts repeatedly; finalization padding does not count as
+  payload. The ordinary digest implementation and digest bytes are unchanged.
+- `hash_elapsed_ns`: the sum of SHA update/finalize elapsed intervals across
+  process threads, excluding counter updates. Concurrent intervals overlap;
+  this is accumulated hashing effort, not a disjoint critical-path region or
+  process CPU time. Instrumentation has overhead, so it is not a speedup proof.
+- `fsync_calls` and `fsync_elapsed_ns`: attempted file/data/directory barriers
+  and their accumulated elapsed intervals, including failed calls. They cover
+  observed storage/API file barriers, stable-directory barriers and cache-writer
+  barriers. They are not inferred from the number of named `fsync` scopes.
+
+Counters activate only during explicit region capture and never reset another
+capture's totals. Region boundary differences include workers even though
+worker region trees are not captured. Like process CPU, these totals require
+one purpose per process: simultaneous unrelated tasks contaminate attribution.
+The `io_scope` field states their shared process scope. Sum disjoint residuals,
+not inclusive parents and children; unknown or inconsistent differences stay
+`null`. Useful-work counters remain a separate population.
+
+`source_read` covers iterator decode/canonicalization calls; `normalization`
+covers bounded normalization windows. Appends are split into `append_nodes`
+and `append_edges`; `manifest_persistence` covers each full manifest rewrite
+including its barrier and install. Seal, encoding, hydration and commit retain
+their existing boundaries. Reader setup and uninstrumented work stay in the
+reported residual; do not call the entire residual hashing or source reading.
+
+The baseline S22 input identities are `nodes.parquet`
+(`bcbcbea526e61ceb63f6006ee5f56de6bb4f74cffdd68dc6eff6d230d3897f06`)
+and `edges.parquet`
+(`1c0ff75485f75e904cbd59b6f5d42da1d8b1af6ddac59ee6c495a4948a428d13`).
+They represent 4,194,304 input nodes and 67,108,864 input edges.
+
+For a fresh successful S22 construction, independently reconcile the leaf
+`import_command/stage+seal/seal/shaping/shape_routing/artifact_authentication`
+against the retained `receipt-NNNNNNNNNNNNNNNNNNNN.json` chunk receipts under
+`.graphforge-construction/`. Require contiguous accepted sequences starting at
+zero and reconcile receipt rows by kind with the input node/edge counts. That
+leaf authenticates each chunk's Parquet artifact once: its `hashed_bytes` must
+equal the sum of `parquet.bytes`, with zero-byte tolerance, and its call count
+must equal the number of accepted chunk receipts. Normal publication retains
+these small receipts, so collect them after measurement. Original source file
+sizes and aggregate application reads are different populations; the latter
+also includes metadata reads outside this leaf.
+
+To reproduce S22, use those digest-pinned inputs and the baseline host. Build an ordinary release CLI with an isolated
+`CARGO_TARGET_DIR`, record the source revision and binary/input SHA-256 digests,
+then finish all builds before measuring. Set `TMPDIR` and the new project to
+native storage on the process-root volume. Check for compiler/benchmark
+processes and low load, establish a quiet window, and sample process names/load
+throughout the five-command begin/register-nodes/register-edges/validate/commit
+workflow under `runexec --no-container --cores 0-15` on the baseline host.
+A contended run cannot establish the priority decision.
+
+Keep each command's JSON receipt and the runexec output outside `docs/`; attach
+them to #1623 or its PR. The snapshot lives at `receipt.region_diagnostics`.
+Report wall/CPU, CPU divided by wall, written/hashed bytes and barrier counts
+per region, along with the parent-minus-immediate-children residual. Budget
+shares use the S22 edge count divided by 1,000,000 edges/s. Compare accumulated
+hash/barrier effort with the disjoint construction regions and disclose its
+scope when recording #735's conditional priority decision. Reopen and recount
+the published project before claiming a successful ingest.
+
+The deterministic worker-thread counter and residual regression runs with:
+
+```bash
+cargo test -p graphforge-storage --test region_work
+cargo test -p graphforge-cli --test portable import_operation_timings_survive_separate_cli_processes
+```

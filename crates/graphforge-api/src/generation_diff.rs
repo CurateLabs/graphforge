@@ -14,7 +14,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use graphforge_core::{ApiErrorCode, GfError};
-use sha2::{Digest, Sha256};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::{CancellationToken, GraphForge};

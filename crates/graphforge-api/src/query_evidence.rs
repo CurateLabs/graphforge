@@ -2,9 +2,10 @@
 
 use arrow::array::{Array, Int64Array, UInt64Array};
 use arrow::ipc::{reader::StreamReader, writer::StreamWriter};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::fs::File;
 use std::io::{BufReader, Write};
 

@@ -1,5 +1,6 @@
 //! Deterministic, non-mutating ontology inspection, suggestion, validation, and export.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::path::Path;
 use std::{fmt::Write as _, io::Write as _};
 
@@ -10,8 +11,9 @@ use graphforge_ontology::{
     ConstraintKind, EntityTypeDef, OntologyDoc, OntologyValidationError, OntologyValidator,
     PropertyDef, PropertyValueType,
 };
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::GraphForge;
 
@@ -355,7 +357,7 @@ fn atomic_replace(destination: &Path, bytes: &[u8]) -> Result<(), GfError> {
     })?;
     temporary
         .write_all(bytes)
-        .and_then(|()| temporary.as_file().sync_all())
+        .and_then(|()| temporary.as_file().observed_sync_all())
         .map_err(|error| GfError::Storage(format!("write ontology export: {error}")))?;
     temporary.persist(destination).map_err(|error| {
         GfError::Storage(format!(

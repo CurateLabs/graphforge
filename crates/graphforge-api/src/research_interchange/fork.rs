@@ -240,7 +240,8 @@ fn replay(
 }
 
 fn intent(request: &ForkResearchRequest) -> Result<[u8; 32], PortableV2Error> {
-    use sha2::{Digest, Sha256};
+    use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+    use sha2::Digest;
     struct HashWriter {
         digest: Sha256,
         remaining: usize,

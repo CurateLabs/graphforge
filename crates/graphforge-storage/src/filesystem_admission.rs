@@ -13,6 +13,7 @@
 //! retained directory identity plus post-operation reconciliation ensure a
 //! concurrent namespace change cannot produce a successful admission.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::fs::File;
 #[cfg(any(test, windows))]
 use std::fs::OpenOptions;
@@ -23,7 +24,8 @@ use std::time::Instant;
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_filesystem::is_link_or_reparse;
 
-use sha2::{Digest as _, Sha256};
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
+use sha2::Digest as _;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use sysinfo::Disks;
 
@@ -553,7 +555,7 @@ impl LifecycleLock {
         let path = parent.path().join(&name);
         let file = open_lifecycle_lock_file(parent, &name)
             .map_err(|_| unsupported("LOCK", "lifecycle_lock_open_failed"))?;
-        file.sync_all()
+        file.observed_sync_all()
             .map_err(|_| unsupported("LOCK", "lifecycle_lock_flush_failed"))?;
         complete_namespace_barrier(parent.path())
             .map_err(|_| unsupported("LOCK", "parent_namespace_barrier_failed"))?;
@@ -1240,7 +1242,7 @@ fn run_probe(
     lock.write_all(PROBE_BYTES_A)
         .map_err(|_| unsupported("WRITE", "lock_file_write_failed"))?;
     hit(fault, ProbeFault::Write, "WRITE")?;
-    lock.sync_all()
+    lock.observed_sync_all()
         .map_err(|_| unsupported("FILE_FLUSH", "lock_file_flush_failed"))?;
     hit(fault, ProbeFault::FileFlush, "FILE_FLUSH")?;
     verify_stable_identity(&lock, &lock_path, parent.path())?;
@@ -1315,7 +1317,7 @@ fn replace_probe_file(
     let mut initial = create_new_file(probe, "initial")?;
     initial
         .write_all(PROBE_BYTES_A)
-        .and_then(|()| initial.sync_all())
+        .and_then(|()| initial.observed_sync_all())
         .map_err(|_| unsupported("REPLACE", "initial_file_flush_failed"))?;
     drop(initial);
     graphforge_filesystem::install_new_file(
@@ -1332,7 +1334,7 @@ fn replace_probe_file(
     let mut replacement = create_new_file(probe, "replacement")?;
     replacement
         .write_all(PROBE_BYTES_B)
-        .and_then(|()| replacement.sync_all())
+        .and_then(|()| replacement.observed_sync_all())
         .map_err(|_| unsupported("REPLACE", "replacement_file_flush_failed"))?;
     drop(replacement);
     hit(fault, ProbeFault::Replace, "REPLACE")?;
@@ -1528,7 +1530,7 @@ fn cleanup_probe(
 fn complete_namespace_barrier_handle(parent: &LifecycleDirectory) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        parent.handle().sync_all()
+        parent.handle().observed_sync_all()
     }
     #[cfg(not(unix))]
     {
@@ -1538,7 +1540,7 @@ fn complete_namespace_barrier_handle(parent: &LifecycleDirectory) -> std::io::Re
 
 #[cfg(unix)]
 fn complete_namespace_barrier(path: &Path) -> std::io::Result<()> {
-    File::open(path)?.sync_all()
+    File::open(path)?.observed_sync_all()
 }
 
 #[cfg(windows)]
@@ -2059,7 +2061,7 @@ mod tests {
         crate::file_lock::lock_exclusive(&file).unwrap();
         let mut signal = File::create(ready).unwrap();
         signal.write_all(b"locked").unwrap();
-        signal.sync_all().unwrap();
+        signal.observed_sync_all().unwrap();
         std::process::abort();
     }
 

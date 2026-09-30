@@ -678,7 +678,10 @@ fn run_import_session_inner(
             let (phase, progress) = graph.import_session_status(session_uuid)?;
             write_progress(
                 session_uuid,
-                &format!("{phase:?}").to_ascii_lowercase(),
+                &match phase {
+                    graphforge_api::ImportPhase::Validated => "stage+seal".to_owned(),
+                    _ => format!("{phase:?}").to_ascii_lowercase(),
+                },
                 &progress,
                 None,
                 json,
@@ -711,7 +714,7 @@ fn run_import_session_inner(
             let progress = session.validate(graph)?;
             write_progress(
                 session.session_uuid(),
-                "validated",
+                "stage+seal",
                 &progress,
                 Some(session.operation_timings()),
                 json,

@@ -100,7 +100,7 @@ if [[ "$*" == *'import-session validate'* ]]; then
     failed) exit 9 ;;
     invalid) echo '{"outcome":"rejected"}' ;;
     missing) exit 0 ;;
-    *) echo '{"outcome":"validated"}' ;;
+    *) echo '{"outcome":"stage+seal"}' ;;
   esac
 fi
 """,
@@ -163,7 +163,7 @@ esac
         """if [[ "$MODE" == invalid ]]; then
   echo '{"outcome":"rejected"}'
 else
-  echo '{"outcome":"validated"}'
+  echo '{"outcome":"stage+seal"}'
 fi
 """,
     )

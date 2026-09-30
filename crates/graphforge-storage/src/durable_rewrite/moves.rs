@@ -188,7 +188,7 @@ pub(crate) fn stage_retained(
     let mut input = source.try_clone().map_err(storage)?;
     input.rewind().map_err(storage)?;
     std::io::copy(&mut input, &mut temporary).map_err(storage)?;
-    temporary.as_file().sync_all().map_err(storage)?;
+    temporary.as_file().observed_sync_all().map_err(storage)?;
     authenticate(&source, &original)?;
     let (bytes, digest) = hash_reader(temporary.as_file().try_clone().map_err(storage)?)?;
     if bytes != original.bytes || digest != original.sha256 {

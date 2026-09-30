@@ -5,14 +5,16 @@
 //! participant inventory, and participant bytes. Locks, journals, attempts,
 //! trash, caches, leases, manifests, and `CURRENT` are never enumerated.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::Path;
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use atomicwrites::{AtomicFile, DisallowOverwrite};
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -221,7 +223,7 @@ pub fn export_portable_project(
     AtomicFile::new(destination, DisallowOverwrite)
         .write(|file| {
             file.write_all(&bytes)?;
-            file.sync_all()
+            file.observed_sync_all()
         })
         .map_err(|error| GfError::Storage(format!("failed to write portable export: {error}")))?;
     Ok(receipt)

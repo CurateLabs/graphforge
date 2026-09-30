@@ -8,13 +8,14 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
 use graphforge_exec::{ExecutionResult, ExecutionStats};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::{
     ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectStageOutcome,
     ResearchProjectDiscoveryLimits, ResearchProjectDiscoveryQuery, ResearchProjectSummary,
     WORKSPACE_CAPABILITY_ID, WORKSPACE_RESEARCH_METADATA_FAMILY, WorkspaceResearchMetadata,
     discover_research_projects, read_workspace_research_metadata, summarize_research_project,
 };
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::{GraphForge, WriteContext};

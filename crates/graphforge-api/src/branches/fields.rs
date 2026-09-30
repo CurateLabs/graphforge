@@ -5,7 +5,8 @@ use arrow::{
     datatypes::{Field, Schema},
     record_batch::RecordBatch,
 };
-use sha2::{Digest, Sha256};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+use sha2::Digest;
 use std::{collections::BTreeMap, sync::Arc};
 use uuid::Uuid;
 pub(crate) type Key = (String, Uuid, String);

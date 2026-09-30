@@ -10,11 +10,12 @@
 use self::probing::ProbeFileKind;
 use self::probing::authenticated_probe_block;
 use self::topology_delta::hex_sha256;
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::GfError;
+use graphforge_filesystem::ObservedSync as _;
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
-use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -102,7 +103,7 @@ fn create_uuid_file(path: &Path) -> Result<File, GfError> {
 
 fn sync_uuid_file(file: &File) -> Result<(), GfError> {
     let _wait = crate::concurrency_attribution::RegionScope::named("fsync");
-    file.sync_all().map_err(storage_err)?;
+    file.observed_sync_all().map_err(storage_err)?;
     crate::io_stats::record_uuid_file_sync();
     Ok(())
 }

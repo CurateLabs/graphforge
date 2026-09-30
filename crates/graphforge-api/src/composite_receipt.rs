@@ -13,7 +13,8 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
 use graphforge_core::canonical::uuid_v8;
-use sha2::{Digest, Sha256};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::composite_transaction::{

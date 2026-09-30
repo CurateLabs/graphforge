@@ -107,7 +107,8 @@ impl Attempt {
         domain: &[u8],
         request: &impl serde::Serialize,
     ) -> Result<Self, GfError> {
-        use sha2::{Digest, Sha256};
+        use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+        use sha2::Digest;
         let registry = graphforge_storage::research_versions::read_research_registry(parent)?;
         let bytes = serde_json::to_vec(request)
             .map_err(|_| GfError::Validation("invalid research request".into()))?;

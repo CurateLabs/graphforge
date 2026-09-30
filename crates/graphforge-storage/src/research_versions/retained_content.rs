@@ -3,6 +3,7 @@ use super::{
     BTreeSet, Digest, GfError, Path, ProjectErrorCode, ResearchRegistry, ResearchVersionRecord,
     Sha256, Uuid, error, hex, inspect_research_version, invalid, read_research_registry,
 };
+use graphforge_filesystem::ObservedSync as _;
 
 const MAX_PARTICIPANT_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -257,7 +258,7 @@ pub(super) fn materialize_graph_snapshot(
             .open(path)
             .map_err(|error| io(&error))?;
         std::io::copy(&mut reader, &mut output).map_err(|error| io(&error))?;
-        output.sync_all().map_err(|error| io(&error))?;
+        output.observed_sync_all().map_err(|error| io(&error))?;
     }
     routes.install_table(target, &mut crate::GraphFilesOpenEvidence::default())?;
     Ok(())

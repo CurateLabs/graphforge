@@ -28,7 +28,7 @@ import sys
 for name in sys.argv[1:]:
     with open(name) as stream:
         receipt = json.load(stream)
-    if receipt.get("outcome") != "validated":
-        raise SystemExit(f"{name}: expected validated outcome")
+    if receipt.get("outcome") != "stage+seal":
+        raise SystemExit(f"{name}: expected stage+seal outcome")
 PYCODE
 }

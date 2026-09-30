@@ -1,7 +1,8 @@
 //! Graph mutation publication, reconciliation, and in-memory reset.
 
 use super::{CompositionBindingContext, GfError, GraphForge, RuntimeCatalog};
-use sha2::{Digest, Sha256};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+use sha2::Digest;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 

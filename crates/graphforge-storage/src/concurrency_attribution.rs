@@ -60,6 +60,7 @@
 //! shared-process totals and must never be summed across overlapping phases.
 
 mod capture;
+pub use graphforge_core::hash_observation::ObservedSha256;
 mod scheduler;
 pub use capture::{RegionCapture, RegionMeasurement, RegionRow, RegionSnapshot};
 

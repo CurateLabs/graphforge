@@ -15,8 +15,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::project_fault_oracle::{
     AuthorityClass, PublicationPhase, default_durable_ids, expected_authority, history_budget,

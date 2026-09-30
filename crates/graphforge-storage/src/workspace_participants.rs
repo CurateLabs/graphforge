@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::{GfError, OntologyMode, ProjectErrorCode};
 use graphforge_ontology::{
     ActivationMode, ActivationRecord, AuthoredModule, BridgeDocument, BridgeInventory,
@@ -11,7 +12,7 @@ use graphforge_ontology::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::{ProjectParticipant, ProjectParticipantEncoding};

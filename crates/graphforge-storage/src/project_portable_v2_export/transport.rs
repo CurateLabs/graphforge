@@ -5,7 +5,9 @@ use super::{
     PortableV2ExportProgress, err, fs, hex, identity, limit, observed_write_result,
     open_source_no_follow, storage, sync_dir,
 };
-use sha2::{Digest, Sha256};
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
+use graphforge_filesystem::ObservedSync as _;
+use sha2::Digest;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -208,7 +210,7 @@ pub(super) fn bundle(
     observed_write_result(out.write_all(&end).map_err(storage), &out, allocation)?;
     allocation.observe(&out)?;
     h.update(end);
-    out.sync_all().map_err(storage)?;
+    out.observed_sync_all().map_err(storage)?;
     allocation.observe(&out)?;
     Ok(h.finalize().into())
 }
@@ -237,7 +239,7 @@ fn copy(
             allocation,
         )?;
         allocation.observe(&output)?;
-        output.sync_all().map_err(storage)?;
+        output.observed_sync_all().map_err(storage)?;
         allocation.observe(&output)?;
         tick(bytes.len() as u64);
         return Ok(());
@@ -266,7 +268,7 @@ fn copy(
         bytes_read += count as u64;
         tick(count as u64);
     }
-    output.sync_all().map_err(storage)?;
+    output.observed_sync_all().map_err(storage)?;
     allocation.observe(&output)?;
     if bytes_read != planned.length || <[u8; 32]>::from(digest.finalize()) != planned.digest {
         return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
@@ -490,7 +492,7 @@ fn write_bytes(
     allocation.register(&p, &f)?;
     observed_write_result(f.write_all(b).map_err(storage), &f, allocation)?;
     allocation.observe(&f)?;
-    f.sync_all().map_err(storage)?;
+    f.observed_sync_all().map_err(storage)?;
     allocation.observe(&f)
 }
 fn sync_tree(root: &Path) -> Result<(), ExportError> {

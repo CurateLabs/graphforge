@@ -1,5 +1,6 @@
 //! Exact-path durable filesystem qualification for provisioned Fly Machines.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -517,9 +518,9 @@ fn write_evidence(path: &Path, encoded: &[u8]) -> std::io::Result<()> {
         .create_new(true)
         .open(&temporary)?;
     file.write_all(encoded)?;
-    file.sync_all()?;
+    file.observed_sync_all()?;
     fs::rename(temporary, path)?;
-    File::open(path.parent().unwrap_or_else(|| Path::new(".")))?.sync_all()
+    File::open(path.parent().unwrap_or_else(|| Path::new(".")))?.observed_sync_all()
 }
 
 #[cfg(test)]

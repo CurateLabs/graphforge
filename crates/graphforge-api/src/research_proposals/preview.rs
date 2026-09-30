@@ -1,11 +1,12 @@
 //! Pin destination authority once and commit the exact native review preview.
 use super::{PreviewResearchProposalRequest, invalid};
 use crate::{CancellationToken, ExecutionResult, GfError, GraphForge, branches::fields};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::research_versions::{
     ResearchProposalDestination, ResearchProposalRecord, ResearchRegistry, read_research_registry,
 };
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 

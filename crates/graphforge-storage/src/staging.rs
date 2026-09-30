@@ -26,6 +26,7 @@
 //! plain [`commit`](RewriteBatch::commit) remains for tests and explicitly
 //! ephemeral callers; persistent graph mutations use the topology-aware path.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::path::{Path, PathBuf};
 
 use arrow::array::RecordBatch;
@@ -270,7 +271,9 @@ impl RewriteBatch {
             crate::io_stats::record_uuid_file_open();
         }
         std::io::Write::write_all(&mut temp, bytes).map_err(|error| io_err(&error))?;
-        temp.as_file().sync_all().map_err(|error| io_err(&error))?;
+        temp.as_file()
+            .observed_sync_all()
+            .map_err(|error| io_err(&error))?;
         if uuid_participant {
             crate::io_stats::record_uuid_file_sync();
         }
@@ -304,7 +307,9 @@ impl RewriteBatch {
             std::io::Write::write_all(&mut temp, &block[..count])
                 .map_err(|error| io_err(&error))?;
         }
-        temp.as_file().sync_all().map_err(|error| io_err(&error))?;
+        temp.as_file()
+            .observed_sync_all()
+            .map_err(|error| io_err(&error))?;
         if uuid_participant {
             crate::io_stats::record_uuid_file_sync();
         }

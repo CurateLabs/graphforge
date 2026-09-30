@@ -5,9 +5,10 @@
 
 use std::collections::BTreeMap;
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 pub(crate) mod materialize;
 pub(crate) mod owned;

@@ -4,6 +4,7 @@
 //! enumerate `generations/`, inspect transaction journals, or decode any
 //! participant table.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
@@ -14,9 +15,10 @@ use std::sync::{Arc, OnceLock};
 #[cfg(windows)]
 use std::sync::{Condvar, Mutex};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::project_failpoint;
@@ -1369,7 +1371,7 @@ fn write_new_synced(
         .open(path)
         .map_err(|error| GfError::Storage(format!("failed to create {name}: {error}")))?;
     file.write_all(bytes)
-        .and_then(|()| file.sync_all())
+        .and_then(|()| file.observed_sync_all())
         .map_err(|error| GfError::Storage(format!("failed to write {name}: {error}")))?;
     if let Some(allocation) = allocation {
         allocation.replace_file_at(path, &file)?;

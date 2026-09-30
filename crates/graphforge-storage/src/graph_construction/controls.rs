@@ -7,6 +7,7 @@ use super::{
     StableDirectory, Uuid, Write, checked_evidence_sum, construction_failpoint, file_identity,
     file_link_count, is_control_temp, sha256, storage,
 };
+use graphforge_filesystem::ObservedSync as _;
 
 /// Current-format phase totals must be exact; omitted old-version fields are refused.
 pub(super) fn validate_parent_phase_bytes(checkpoint: &Checkpoint) -> Result<(), GfError> {
@@ -236,7 +237,7 @@ pub(super) fn install_control<T: Serialize>(
         .map_err(storage)?;
     let identity = file_identity(&file).map_err(storage)?;
     write_control_body(&mut file, &body, target, "install")?;
-    file.sync_all().map_err(storage)?;
+    file.observed_sync_all().map_err(storage)?;
     root.sync().map_err(storage)?;
     construction_failpoint(&format!("control.install.after_temp_fsync.{target}"));
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(target))
@@ -349,7 +350,7 @@ pub(super) fn install_control_batched<T: Serialize>(
         .map_err(storage)?;
     let identity = file_identity(&file).map_err(storage)?;
     write_control_body(&mut file, &body, target, "install")?;
-    file.sync_all().map_err(storage)?;
+    file.observed_sync_all().map_err(storage)?;
     construction_failpoint(&format!("control.install.after_temp_fsync.{target}"));
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(target))
         .map_err(storage)?;
@@ -370,7 +371,7 @@ pub(super) fn replace_control<T: Serialize>(
         .map_err(storage)?;
     let identity = file_identity(&file).map_err(storage)?;
     write_control_body(&mut file, &body, target, "replace")?;
-    file.sync_all().map_err(storage)?;
+    file.observed_sync_all().map_err(storage)?;
     root.sync().map_err(storage)?;
     construction_failpoint(&format!("control.replace.after_temp_fsync.{target}"));
     root.replace_child(OsStr::new(&temporary), identity, OsStr::new(target))
@@ -521,7 +522,7 @@ fn write_control_body(
     {
         let middle = body.len() / 2;
         file.write_all(&body[..middle]).map_err(storage)?;
-        file.sync_all().map_err(storage)?;
+        file.observed_sync_all().map_err(storage)?;
         construction_failpoint(&format!("control.{operation}.after_partial.{target}"));
         file.write_all(&body[middle..]).map_err(storage)?;
     }

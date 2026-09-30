@@ -1,6 +1,7 @@
 //! Version-qualified citations are metadata, never active membership or retention roots.
 use super::{ReferenceResearchBranchRequest, publication, unavailable};
 use crate::{CancellationToken, ExecutionResult, GfError, GraphForge};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::{
     ProjectParticipant, ProjectParticipantEncoding,
     research_versions::{
@@ -9,7 +10,7 @@ use graphforge_storage::{
     },
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::sync::Arc;
 use uuid::Uuid;
 const FAMILY: &str = "branch_references";

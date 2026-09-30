@@ -1,5 +1,6 @@
 //! installation ownership for immutable graph objects.
 use super::{Seek, fs};
+use graphforge_filesystem::ObservedSync as _;
 
 use super::BUFFER_BYTES;
 use super::CasRoot;
@@ -71,7 +72,7 @@ pub(super) fn install_graph_object_bytes_with_lease(
                 error,
             )
         })?;
-        file.sync_all().map_err(|error| {
+        file.observed_sync_all().map_err(|error| {
             storage(
                 "fsync temporary graph object",
                 &lease.cas.diagnostic_root,
@@ -253,7 +254,7 @@ pub(crate) fn install_graph_object_file_with_lease(
                 }
                 #[cfg(windows)]
                 {
-                    output.sync_all().map_err(|error| {
+                    output.observed_sync_all().map_err(|error| {
                         storage(
                             "fsync temporary graph object",
                             &lease.cas.diagnostic_root,
@@ -667,7 +668,7 @@ fn transition_temporary_to_sealed_reader(
     expected_length: u64,
     diagnostic: &Path,
 ) -> Result<(SealedTemporaryObject, ReadIoEvidence), GfError> {
-    temporary.file.sync_all().map_err(|error| {
+    temporary.file.observed_sync_all().map_err(|error| {
         storage(
             "sync temporary graph object before sealing",
             diagnostic,

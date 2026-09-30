@@ -11,8 +11,9 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::{ApiErrorCode, GfError};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;

@@ -1,13 +1,14 @@
 //! SHA-256 used to name or fully verify payload bytes. Test accounting excludes
-//! control-object hashing and adds no counters to production operations.
+//! control-object hashing. Explicit region captures observe payload hashing too.
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use sha2::Digest;
 
-pub(crate) struct PayloadSha256(sha2::Sha256);
+pub(crate) struct PayloadSha256(Sha256);
 
 impl PayloadSha256 {
     pub(crate) fn new() -> Self {
-        Self(sha2::Sha256::new())
+        Self(Sha256::new())
     }
 
     pub(crate) fn update(&mut self, bytes: impl AsRef<[u8]>) {

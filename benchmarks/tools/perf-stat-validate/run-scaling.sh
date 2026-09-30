@@ -41,10 +41,10 @@ for n in $NS; do
   done
   failed=0
   for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
-  [[ "$failed" = 0 ]] || { echo "validation child failed" >&2; exit 1; }
+  [[ "$failed" = 0 ]] || { echo "stage+seal child failed" >&2; exit 1; }
   t1=$(date +%s.%N)
   validate_receipts "${receipts[@]}"
   wall=$(python3 -c "print(round($t1-$t0,2))")
-  echo "N=$n wall=$wall validated=$n/$n" | tee -a "$LOG"
+  echo "N=$n wall=$wall stage+seal=$n/$n" | tee -a "$LOG"
 done
 echo "done: $LOG"

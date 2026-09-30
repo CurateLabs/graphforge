@@ -1,13 +1,15 @@
 //! Durable, content-free embedding refresh policy and terminal outcomes.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::{
     EmbeddingCompatibilityId, EmbeddingSourceFingerprint, SearchArtifactError,
@@ -1080,7 +1082,7 @@ fn persist_synced_file(path: &Path, bytes: &[u8]) -> Result<(), SearchArtifactEr
     temp.write_all(bytes)
         .map_err(|source| io("write embedding refresh temp", path, source))?;
     temp.as_file()
-        .sync_all()
+        .observed_sync_all()
         .map_err(|source| io("sync embedding refresh temp", path, source))?;
     temp.persist(path)
         .map_err(|error| io("publish embedding refresh config", path, error.error))?;
@@ -1090,7 +1092,7 @@ fn persist_synced_file(path: &Path, bytes: &[u8]) -> Result<(), SearchArtifactEr
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), SearchArtifactError> {
     File::open(path)
-        .and_then(|directory| directory.sync_all())
+        .and_then(|directory| directory.observed_sync_all())
         .map_err(|source| io("sync embedding refresh directory", path, source))
 }
 

@@ -1,5 +1,6 @@
 //! Versioned translation at the boundary into an empty private workspace.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::io::Write;
 use std::path::Path;
 
@@ -91,7 +92,7 @@ impl MaterializationRoutes {
                     .ok_or_else(|| invalid("materialized route write calls overflow"))?;
                 remaining = &remaining[written..];
             }
-            file.sync_all()
+            file.observed_sync_all()
                 .map_err(|_| invalid("materialized route table sync failed"))?;
             evidence.file_fsync_calls = evidence
                 .file_fsync_calls

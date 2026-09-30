@@ -33,13 +33,14 @@ use super::topology_delta::hex_sha256;
 use super::topology_delta::read_bounded;
 use super::v4_authority_failure;
 use super::validate_run_descriptors;
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use crate::construction_record_layout::BASE_IDENTITY_WIDTH as CONSTRUCTION_IDENTITY_WIDTH;
 use crate::construction_record_layout::IDENTITY_SURROGATE_OFFSET;
 use graphforge_core::GfError;
+use graphforge_filesystem::ObservedSync as _;
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
-use sha2::Sha256;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
@@ -1111,7 +1112,7 @@ fn write_construction_intent(
     observed?;
     work.write_bytes = work.write_bytes.saturating_add(body.len() as u64);
     work.write_operations = work.write_operations.saturating_add(1);
-    file.sync_all().map_err(storage_err)?;
+    file.observed_sync_all().map_err(storage_err)?;
     index
         .observe_file(std::ffi::OsStr::new(&temporary), &file)
         .map_err(storage_err)?;
@@ -1592,7 +1593,7 @@ fn install_empty_construction_run(
         .create_replaceable_child_file(std::ffi::OsStr::new(&temporary))
         .map_err(storage_err)?;
     let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
-    file.sync_all().map_err(storage_err)?;
+    file.observed_sync_all().map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
     drop(file);
     describe_and_install_construction_run(
@@ -1676,7 +1677,7 @@ pub(super) fn install_construction_bytes(
     work.peak_temporary_bytes = work
         .peak_temporary_bytes
         .max(u64::try_from(bytes.len()).map_err(storage_err)?);
-    file.sync_all().map_err(storage_err)?;
+    file.observed_sync_all().map_err(storage_err)?;
     publication.observe(&file).map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
     let failpoint = match name {

@@ -6,6 +6,7 @@
 //! replacing a small `current.json` pointer. The prior pointer remains readable
 //! until that final replace.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -588,7 +589,7 @@ fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), SearchArtifactErro
         .map_err(|source| io("create publication file", path, source))?;
     file.write_all(bytes)
         .map_err(|source| io("write publication file", path, source))?;
-    file.sync_all()
+    file.observed_sync_all()
         .map_err(|source| io("sync publication file", path, source))
 }
 
@@ -604,7 +605,7 @@ fn persist_synced_pointer(path: &Path, bytes: &[u8]) -> Result<(), SearchArtifac
     temp.write_all(bytes)
         .map_err(|source| io("write current pointer temp", path, source))?;
     temp.as_file()
-        .sync_all()
+        .observed_sync_all()
         .map_err(|source| io("sync current pointer temp", path, source))?;
     temp.persist(path)
         .map_err(|error| io("publish current pointer", path, error.error))?;
@@ -654,14 +655,14 @@ fn sync_file(path: &Path) -> Result<(), SearchArtifactError> {
         .read(true)
         .write(true)
         .open(path)
-        .and_then(|file| file.sync_all())
+        .and_then(|file| file.observed_sync_all())
         .map_err(|source| io("sync build file", path, source))
 }
 
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), SearchArtifactError> {
     File::open(path)
-        .and_then(|file| file.sync_all())
+        .and_then(|file| file.observed_sync_all())
         .map_err(|source| io("sync directory", path, source))
 }
 

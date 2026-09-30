@@ -35,6 +35,7 @@
 //! Indexes. [`ShardedCsrIndex`] resolves only the shard(s) containing a requested
 //! row. Only the current versioned shard representation is supported.
 
+use graphforge_filesystem::ObservedSync as _;
 mod builder;
 mod codec;
 mod installation;
@@ -53,6 +54,7 @@ use installation::{persist_temp_observed, write_csr_shard_bytes_observed};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use arrow::array::{
     Array, LargeListArray, RecordBatch, StringArray, StructArray, TimestampMicrosecondArray,
     UInt64Array,
@@ -62,7 +64,7 @@ use arrow::datatypes::{DataType, Field};
 use arrow::ipc::reader::FileReader;
 use arrow::ipc::writer::FileWriter;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use graphforge_core::GfError;
 
@@ -628,7 +630,7 @@ impl ShardedCsrWriter {
         if let Some(allocation) = &self.allocation {
             allocation.replace_file_at(temp.path(), temp.as_file())?;
         }
-        temp.as_file().sync_all().map_err(storage_err)?;
+        temp.as_file().observed_sync_all().map_err(storage_err)?;
         persist_temp_observed(
             temp,
             &self.path.with_extension("csr.json"),

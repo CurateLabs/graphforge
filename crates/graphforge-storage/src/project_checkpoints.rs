@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use arrow::array::{
     ArrayRef, FixedSizeBinaryBuilder, StringArray, TimestampMicrosecondArray, UInt32Array,
 };
@@ -29,7 +30,7 @@ use graphforge_core::canonical::{CANONICAL_CONTRACT_VERSION, CanonicalDomain, fi
 use graphforge_core::{GfError, ProjectErrorCode};
 use parquet::arrow::ArrowWriter;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 

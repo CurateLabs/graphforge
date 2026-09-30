@@ -2,7 +2,8 @@
 use super::fields::{Fields, insert};
 use crate::{CancellationToken, GfError, GraphForge};
 use arrow::array::StringArray;
-use sha2::{Digest, Sha256};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+use sha2::Digest;
 use uuid::Uuid;
 pub(super) fn read(
     graph: &GraphForge,

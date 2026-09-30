@@ -4,6 +4,7 @@ use super::{
     PortableV2ExportPlan, PortableV2PackageClass, err, hex, identity, limit, open_source_no_follow,
     storage, validate_limits,
 };
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use crate::project_portable_v2::{
     PortableV2ActivationOverride, PortableV2ActivationProfile, PortableV2BridgeSet,
     PortableV2ExactIdentity, PortableV2OntologyComposition, PortableV2OntologyModule,
@@ -14,7 +15,7 @@ use crate::{
     ResolvedProjectGeneration, preview_portable_v2_selection, project_portable_v2::canonical_json,
 };
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::io::Read;
 use unicode_normalization::UnicodeNormalization;
 

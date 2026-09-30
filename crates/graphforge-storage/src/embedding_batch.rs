@@ -2,7 +2,8 @@
 
 use std::collections::BTreeSet;
 
-use sha2::{Digest, Sha256};
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
+use sha2::Digest;
 
 use crate::{
     EmbeddingContentDigest, EmbeddingNormalization, SearchArtifactError, VectorStoreLimits,

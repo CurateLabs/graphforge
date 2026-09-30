@@ -1107,6 +1107,7 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                             | "registered"
                             | "checkpointed"
                             | "validated"
+                            | "stage+seal"
                             | "committed"
                             | "aborted"
                     )
@@ -1123,7 +1124,7 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
             if object.get("operation_timings").is_some_and(|timings| {
                 !matches!(
                     object.get("outcome").and_then(serde_json::Value::as_str),
-                    Some("validated" | "committed")
+                    Some("validated" | "stage+seal" | "committed")
                 ) || !sanitized_import_operation_timings(timings)
             }) {
                 return None;
@@ -2419,6 +2420,11 @@ mod tests {
         let receipt = serde_json::json!({"contract":"graphforge-import-session/1", "outcome":"committed", "operation_timings":timings});
         let parsed = parse_receipts(&serde_json::to_vec(&receipt).unwrap(), true).unwrap();
         assert_eq!(parsed[0]["operation_timings"], timings);
+        for outcome in ["validated", "stage+seal"] {
+            let mut candidate = receipt.clone();
+            candidate["outcome"] = serde_json::json!(outcome);
+            assert!(parse_receipts(&serde_json::to_vec(&candidate).unwrap(), true).is_ok());
+        }
         for (phase, key, value) in [
             ("append", "elapsed_ns", serde_json::json!(1)),
             ("append", "errors", serde_json::json!(1)),

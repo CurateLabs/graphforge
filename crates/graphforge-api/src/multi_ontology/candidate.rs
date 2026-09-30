@@ -233,7 +233,8 @@ pub(super) fn migration_generation_uuid(
     request: &ModuleMigrationRequest,
     preview: &ModuleMigrationPreview,
 ) -> Uuid {
-    use sha2::{Digest, Sha256};
+    use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+    use sha2::Digest;
     let mut hasher = Sha256::new();
     hasher.update(b"graphforge-retained-data-migration-generation/1");
     hasher.update(request.authority.context.operation_uuid.0.as_bytes());

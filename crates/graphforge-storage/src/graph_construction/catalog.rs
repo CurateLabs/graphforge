@@ -9,12 +9,13 @@ use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use arrow::array::{Array, StringArray};
 use graphforge_core::GfError;
 use graphforge_filesystem::{file_identity, file_link_count};
 use graphforge_ir::RuntimeCatalog;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::construction_directory::ConstructionDirectory as StableDirectory;
 

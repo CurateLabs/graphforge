@@ -33,15 +33,16 @@ use super::storage_err;
 use super::topology_delta::hex_sha256;
 use super::uuid_membership_index_is_fresh;
 use super::validate_run_descriptors;
+#[cfg(test)]
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use arrow::array::Array;
 use arrow::array::FixedSizeBinaryArray;
 use arrow::array::UInt64Array;
 use graphforge_core::GfError;
+use graphforge_filesystem::ObservedSync as _;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 #[cfg(test)]
 use sha2::Digest;
-#[cfg(test)]
-use sha2::Sha256;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 #[cfg(test)]
@@ -654,7 +655,7 @@ fn scan_to_runs(
         let path = scratch.join(format!("{prefix}-empty.run"));
         File::create(&path)
             .map_err(storage_err)?
-            .sync_all()
+            .observed_sync_all()
             .map_err(storage_err)?;
         runs.push(path);
     }
@@ -702,7 +703,7 @@ pub(super) fn build_identity_run(nodes: &Path, edges: &Path, output: &Path) -> R
         out.write_all(&block).map_err(storage_err)?;
     }
     out.flush().map_err(storage_err)?;
-    out.sync_all().map_err(storage_err)
+    out.observed_sync_all().map_err(storage_err)
 }
 
 pub(super) fn build_surrogate_run(
@@ -727,7 +728,7 @@ pub(super) fn build_surrogate_run(
     if runs.is_empty() {
         let path = scratch.join("surrogates-empty.run");
         File::create(&path)
-            .and_then(|file| file.sync_all())
+            .and_then(|file| file.observed_sync_all())
             .map_err(storage_err)?;
         runs.push(path);
     }
@@ -766,7 +767,7 @@ fn flush_surrogate_run(
     }
     let mut file = File::create(&path).map_err(storage_err)?;
     file.write_all(&bytes).map_err(storage_err)?;
-    file.sync_all().map_err(storage_err)?;
+    file.observed_sync_all().map_err(storage_err)?;
     buffer.clear();
     runs.push(path);
     metrics.temporary_runs += 1;
@@ -812,7 +813,7 @@ pub(super) fn merge_surrogate_runs(inputs: &[PathBuf], output: &Path) -> Result<
         out.write_all(&block).map_err(storage_err)?;
     }
     out.flush().map_err(storage_err)?;
-    out.sync_all().map_err(storage_err)
+    out.observed_sync_all().map_err(storage_err)
 }
 
 pub(super) fn read_surrogate_record(
@@ -864,7 +865,7 @@ fn flush_run(
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    out.sync_all().map_err(storage_err)?;
+    out.observed_sync_all().map_err(storage_err)?;
     buffer.clear();
     runs.push(path);
     metrics.temporary_runs += 1;
@@ -927,7 +928,7 @@ fn merge_runs(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    out.sync_all().map_err(storage_err)?;
+    out.observed_sync_all().map_err(storage_err)?;
     Ok(())
 }
 
@@ -988,7 +989,7 @@ fn scan_entity_surrogate_runs(
         let path = scratch.join(format!("{prefix}-surrogates-empty.run"));
         File::create(&path)
             .map_err(storage_err)?
-            .sync_all()
+            .observed_sync_all()
             .map_err(storage_err)?;
         runs.push(path);
     }
@@ -1079,7 +1080,7 @@ fn scan_pinned_entity_surrogate_runs(
         let path = scratch.join(format!("{prefix}-surrogates-empty.run"));
         File::create(&path)
             .map_err(storage_err)?
-            .sync_all()
+            .observed_sync_all()
             .map_err(storage_err)?;
         runs.push(path);
     }
@@ -1126,7 +1127,7 @@ fn scan_node_surrogate_validation_runs(
         let path = scratch.join("node-surrogate-validation-empty.run");
         File::create(&path)
             .map_err(storage_err)?
-            .sync_all()
+            .observed_sync_all()
             .map_err(storage_err)?;
         runs.push(path);
     }
@@ -1154,7 +1155,7 @@ fn flush_node_surrogate_validation_run(
     if !bytes.is_empty() {
         file.write_all(&bytes).map_err(storage_err)?;
     }
-    file.sync_all().map_err(storage_err)?;
+    file.observed_sync_all().map_err(storage_err)?;
     buffer.clear();
     runs.push(path);
     metrics.temporary_runs += 1;
@@ -1220,7 +1221,7 @@ fn merge_node_surrogate_validation_group(inputs: &[PathBuf], output: &Path) -> R
     if !bytes.is_empty() {
         out.write_all(&bytes).map_err(storage_err)?;
     }
-    out.sync_all().map_err(storage_err)
+    out.observed_sync_all().map_err(storage_err)
 }
 
 fn read_validation_surrogate(reader: &mut impl Read) -> Result<Option<u64>, GfError> {
@@ -1248,7 +1249,7 @@ pub(super) fn flush_entity_surrogate_run(
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    out.sync_all().map_err(storage_err)?;
+    out.observed_sync_all().map_err(storage_err)?;
     buffer.clear();
     runs.push(path);
     metrics.temporary_runs += 1;
@@ -1313,7 +1314,7 @@ fn merge_node_surrogate_group(inputs: &[PathBuf], output: &Path) -> Result<(), G
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    out.sync_all().map_err(storage_err)?;
+    out.observed_sync_all().map_err(storage_err)?;
     Ok(())
 }
 
@@ -1387,7 +1388,7 @@ pub(super) fn publish_data(
         let mut install = || -> Result<(), GfError> {
             let mut input = File::open(source).map_err(storage_err)?;
             std::io::copy(&mut input, &mut temp).map_err(storage_err)?;
-            temp.sync_all().map_err(storage_err)?;
+            temp.observed_sync_all().map_err(storage_err)?;
             match directory.link_child_into(&temp_name, &temp, temp_identity, &directory, target) {
                 Ok(_) => Ok(()),
                 Err(_) => {
