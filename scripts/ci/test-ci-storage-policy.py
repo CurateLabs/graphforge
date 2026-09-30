@@ -105,7 +105,6 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "m6-memory-${{ github.sha }}-blacksmith-4vcpu-ubuntu-2404": 1,
         "ingest-floor-gate-${{ needs.nightly.outputs.sha }}": 1,
         "native-local-admission-${{ matrix.authority }}-${{ github.sha }}": 1,
-        "lane-evidence-${{ inputs.cache }}-${{ github.run_id }}": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(
@@ -137,9 +136,8 @@ EXPECTED_DEPENDENCY_KEYS = Counter(
     {
         # test.yml: policy + rust-lint + python/node binding + Windows/macOS
         # durability + Rust Tests (7);
-        # Binding RC: 3; coverage-baseline post-merge ledger: 1;
-        # build-lane-measurement harness: 1.
-        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 12,
+        # Binding RC: 3; coverage-baseline post-merge ledger: 1.
+        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 11,
         "${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}": 1,
     }
 )
@@ -165,10 +163,6 @@ EXPECTED_STICKY_KEYS = Counter(
         (
             "${{ github.repository }}-coverage-rust-1.96.0-${{ hashFiles('Cargo.lock') }}-target-v1"
         ): 1,
-        # build-lane-measurement harness: target/ and sccache volumes are
-        # caller-keyed per lane so independent chains never share a volume.
-        "${{ github.repository }}-${{ inputs.sticky_key }}": 1,
-        "${{ github.repository }}-${{ inputs.sticky_key }}-sccache": 1,
     }
 )
 EXPECTED_STICKY_DELETES = Counter(
@@ -324,7 +318,6 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             ("candidate/release-artifacts/evidence/\ncandidate/release-artifacts/node-addons/"),
             "reconciliation/summary.json",
             "examples/visualization/stress/results/",
-            ("dist/lane-evidence.json\ndist/sccache-stats.txt\ndist/cargo-lane-test.log"),
             "${{ runner.temp }}/durability-certification-evidence",
             "native/native-durability-aggregate.json",
             "replay-memory.txt\ncompaction-memory.txt",

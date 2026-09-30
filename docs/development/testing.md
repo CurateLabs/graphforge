@@ -440,6 +440,68 @@ jobs:
       - run: make pre-push
 ```
 
+### Build-lane measurement method (ADR 0048)
+
+[ADR 0048](../adr/0048-cargo-is-the-ci-build-authority.md) rests on a
+comparison of the Bazel CI lane with a Cargo lane on the same runner class. The
+dispatch-only harness that produced the Cargo samples,
+`.github/workflows/build-lane-measurement.yml`, was retired when the comparison
+finished (#1663). This section records how to reproduce it and the digests that
+identify its inputs. The results (per-run tables, run ids, logs and artifact
+hashes) are on
+[#1618](https://github.com/CurateLabs/graphforge/issues/1618#issuecomment-5902091518)
+and are not kept in the repository.
+
+**Method.**
+
+- **Runner and toolchain:** `blacksmith-4vcpu-ubuntu-2404`, Rust 1.96.0,
+  cargo-nextest 0.9.145, `CARGO_INCREMENTAL=0`, and the dev/test profile with
+  debug information off. Debug assertions and overflow checks stay on.
+- **Concurrent variant:** the three Rust gate commands in
+  [agent-environment.md](agent-environment.md#rust-test-gate), timed as one
+  interval that includes compilation. `cargo fetch` is timed separately.
+- **Serial variant:** `cargo test --workspace --locked`.
+- **Keep the aggregate exit status.** Run every constituent step even when an
+  earlier one fails.
+- **Record the cache state before each sample,** from the actual contents of
+  `target/`. A cache key or label does not prove the cache is populated.
+  Compilation caching and test-result caching are different inputs.
+- **Compare only compatible boundaries.** Compare successful runs over the
+  same timing boundary. The test interval and the full job wall time are
+  different quantities. Label cancelled runs and failed collectors explicitly,
+  even if a test step passed.
+- **Check cohort ancestry.** Verify each main-history SHA with
+  `git merge-base --is-ancestor <measured-sha> <frozen-main-sha>`. An event
+  label does not establish ancestry.
+
+**Harness identity.** A harness commit identifies the workflow, not the
+measured tree. Check out the measured SHA separately. To reproduce, run
+`git show <harness-commit>:.github/workflows/build-lane-measurement.yml` and
+check its SHA-256:
+
+| Harness commit | Workflow SHA-256 |
+| --- | --- |
+| `d05a1fcee10ca2a07cb75423a35954ba66d2cdc0` | `3d660ea31df1e5461cba0c22397cb22d878b8895044dab4fe3170af65d88ed82` |
+| `6363d0c5b682347d7a53feab44975264c43bf2fe` | `816352ea82fc76914dcc228052253237781875c396c09c6094e2b762fd8b2ed8` |
+| `3ba0ccf40c03140d8dbf0d3c96e03f9b1c7afaea` | `816352ea82fc76914dcc228052253237781875c396c09c6094e2b762fd8b2ed8` |
+| `5bbf944e7204c54504f67236ba936e544945c345` | `a08ac97aeae44d5eb682db9576901fcdac934338090bfeb133193bf95ecc7978` |
+| `59e9165970d08aeb20e94b6fd63dfa5bd3e9497b` | `d5d1d3ee5079d5018be1c74e3d47bccb2e6d9f7046d9bb347ef871fe08aa4763` |
+| `1cf4548608a6d441808146b4268660f55f89d4d1` | `ee91e8d7bbfb14a9946bf2be494882ea49e3dbcb160b8e20525ea6244315a1ac` |
+| `4ce5649c51bc9684eb9a83cc945a191d7a3d56ca` | `ee91e8d7bbfb14a9946bf2be494882ea49e3dbcb160b8e20525ea6244315a1ac` |
+| `29a7b34ebe441a85ffb9274164d58aaeeb68dc8a` | `38d95bbe61096b904e5c16221d8f3e6a28235929109dacd1a564b18e843783d0` |
+
+Samples from `5bbf944e` failed before running tests: nextest could not list a
+custom-harness target. Samples from `59e91659` recompiled the custom-harness
+targets under per-package features. #1618 qualifies both groups.
+
+**Cohort identity.** The twenty measured SHAs (ten main-history, ten pull
+request) and their `Cargo.lock` inputs have canonical digest
+`1661bfc7d281b6abcbc5edff33041f97502996d0492f80c888beb1cd174ab1d1`. It is the
+SHA-256 of UTF-8 JSON for the ordered records
+`{"cargo_lock_sha256", "lane", "measured_sha"}`, with sorted keys and compact
+separators (`,` and `:`). It identifies inputs only and contains no timing or
+pass/fail results.
+
 ---
 
 ## Known Issues
