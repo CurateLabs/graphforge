@@ -2132,31 +2132,6 @@ mod tests {
     }
 
     #[test]
-    fn standalone_verify_is_retired_and_portable_verify_remains_available() {
-        let error = match Cli::try_parse_from(["gf", "--project", "/tmp/project", "verify"]) {
-            Ok(_) => panic!("retired standalone verify command must be rejected"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
-        let cli = Cli::try_parse_from([
-            "gf",
-            "portable",
-            "verify",
-            "--input",
-            "/tmp/package.gfportable",
-            "--mode",
-            "full",
-        ])
-        .expect("portable package verification remains available");
-        assert!(matches!(
-            cli.command,
-            Some(Command::Portable {
-                command: portable_cli::PortableCommand::Verify(_)
-            })
-        ));
-    }
-
-    #[test]
     fn repository_commands_use_project_dir_and_explicit_remove_confirmation() {
         assert!(Cli::try_parse_from(["gf", "--project-dir", "/tmp/repo", "init"]).is_ok());
         assert!(
@@ -3014,3 +2989,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod command_retirement_tests;
