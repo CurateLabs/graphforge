@@ -39,11 +39,12 @@ from tests.host_run_fixture import write_host_bundle
 from tests.test_progressive_run import passed_rung as local_passed_rung
 
 ROOT = Path(__file__).resolve().parents[1]
-# Native filesystem admission requires ext4, xfs, or btrfs. /tmp on this host
-# is tmpfs, so host-run tests take a scratch root from GF_LADDER_TEST_ROOT.
-# The default directory is documented next to that ext4 requirement in
+# Native filesystem admission requires ext4, xfs, or btrfs. The scratch root is
+# GF_LADDER_TEST_ROOT, else a directory under the temporary root, which
+# scripts/test_environment.py checks is native storage and CI exports as TMPDIR.
+# Never a host-specific path: CI runners have no /home/ubuntu (#1679). See
 # docs/development/perf-g500-ladder.md.
-_DEFAULT_SCRATCH_ROOT = Path("/home/ubuntu") / "graphforge-ladder-test"
+_DEFAULT_SCRATCH_ROOT = Path(tempfile.gettempdir()) / "graphforge-ladder-test"
 WORK_PARENT = Path(os.environ.get("GF_LADDER_TEST_ROOT") or _DEFAULT_SCRATCH_ROOT)
 COMMIT = "f013587f0123456789abcdef0123456789abcdef"
 _SCRATCH_TOP_LEVEL: list[set[str]] = []
