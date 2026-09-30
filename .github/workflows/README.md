@@ -34,10 +34,10 @@ Wall-clock targets and the dual-track table live in
 `publish.yaml` consumes a retained Binding RC candidate (no rebuild-on-write)
 after a GitHub Release / release identity exists for that SHA.
 
-Linux jobs run on the pinned `blacksmith-4vcpu-ubuntu-2404` image. After the
-Bazel CI Gate cutover (#4), Test Suite no longer mounts job-isolated Cargo
-`target/` sticky disks; authoritative Rust compile/test is Bazel under
-`Bazel Bootstrap` (`//:ci_rust_tests`). Registry and pnpm dependencies still use
+Linux jobs run on the pinned `blacksmith-4vcpu-ubuntu-2404` image. The CI Gate
+Rust test lane is Cargo with nextest (`Rust Tests`, ADR 0048). It is the only
+Test Suite job that mounts a `target/` sticky disk: one shared volume keyed by
+the toolchain. The job-isolated PR Cargo volumes that #4 retired stay retired. Registry and pnpm dependencies still use
 the colocated cache through upstream `actions/cache@v6` and `actions/setup-node`.
 Binding RC and the release-certification host-native release load matrix retain sticky `target/`
 volumes so maturin, Cargo, and napi share one build volume for packaging lanes
@@ -70,7 +70,9 @@ ${{ github.repository }}-binding-rc-linux-rust-<toolchain>-${{ hashFiles('Cargo.
 ${{ github.repository }}-release_candidate-rust-<toolchain>-${{ hashFiles('Cargo.lock') }}-release-target-v1
 ```
 
-PR Test Suite sticky keys are retired after #4. macOS/Windows RC cells use
+The Test Suite Rust Tests lane key is
+`${{ github.repository }}-rust-tests-rust-<toolchain>-target-v1`; no other Test
+Suite job mounts a sticky disk. macOS/Windows RC cells use
 larger Blacksmith runners + colocated registry cache; use sticky disks there
 only when the platform supports them.
 
@@ -82,15 +84,18 @@ only when the platform supports them.
   ADR 0014 domain-dependency directions, and license compliance.
 - Documentation and packaging-metadata-only changes do not compile Rust or
   native bindings.
-- Rust changes run Cargo formatting/Clippy (`Rust Quality`) and authoritative
-  Bazel tests (`Bazel Bootstrap` → `//:ci_rust_tests`, including API BDD). The
+- Rust changes run Cargo formatting/Clippy (`Rust Quality`) and the Cargo
+  test lane (`Rust Tests`: `cargo nextest run --workspace --locked`, then the
+  `bdd` and `disabled_allocations` custom-harness targets and the doctests under
+  `cargo test --workspace --locked`). Rust test data (TCK features, goldens,
+  snapshots, fixtures, reference docs) also runs `Rust Tests`. The
   same Rust classification also runs native filesystem publication/admission
   tests on `blacksmith-4vcpu-windows-2025` and
   `blacksmith-12vcpu-macos-15`; Windows retains the existing project-root lock
   tests. Both native lanes also exercise mapped semantic routes, legacy CAS
   translation, reserved-route adjacency/deletion, lazy stream isolation, and full
   and projected portable export/import/reopen through the Rust facade. Linux
-  Bazel CI cannot execute those host-specific contracts.
+  Rust Tests cannot execute those host-specific contracts.
 - Python, Gherkin, public binding, Pulumi static-validation, and Terraform
   static-validation gates run only when their owned surfaces change. Shared
   GraphForge configuration and infrastructure contract fixtures run both IaC
@@ -113,18 +118,19 @@ only when the platform supports them.
 ### `test.yml` — Test Suite
 
 Runs the change classifier, repository policy, and only the applicable Rust,
-Python, Gherkin, native binding, Pulumi, Terraform, or Bazel jobs. Pull-request
-native binding acceptance is Linux-only and uses Cargo's `dev` profile for
-maturin/napi assembly. Authoritative Rust compile/test is Bazel
-(`//:ci_rust_tests`) under `Bazel Bootstrap`.
-The non-required Cargo/Bazel parity and cache-observation diagnostics do not
-run on pull requests; they remain available for future maintenance CI.
+Python, Gherkin, native binding, Pulumi, Terraform, or Rust test jobs.
+Pull-request native binding acceptance is Linux-only and uses Cargo's `dev`
+profile for maturin/napi assembly; the `Python Binding` and `Node Binding` jobs
+build, install, and smoke-test the same-SHA wheel and addon. The Rust test lane
+is `Rust Tests` (Cargo with nextest, dev/test profile, so debug assertions and
+overflow checks stay on). It also runs the offline progressive provider tests
+and the tiny and ownership-growth lifecycle producer against a Cargo-built `gf`.
 When Rust surfaces change, `Windows graphforge-storage Locks` runs the native
 project-root lock, exact filesystem primitive, NTFS admission, and real
 publication-kill/fault-oracle cross-checks on `blacksmith-4vcpu-windows-2025`.
 `macOS graphforge-storage Durability` runs the corresponding native APFS
 primitive, admission, and publication-kill cross-checks. Linux executes the same
-storage unit suite through authoritative `//:ci_rust_tests`. These platform jobs
+storage unit suite through `Rust Tests`. These platform jobs
 record actual subprocess/handle observations; the simulator does not stand in
 for native evidence.
 
@@ -148,7 +154,7 @@ dispatch. Pull requests and pushes do not trigger CodSpeed. The latest
 successful scheduled workflow SHA skips all nightly benchmark runners when
 `main` has not changed; missing or unsuccessful prior evidence fails closed to
 running the suite. Its Cargo
-build stays a diagnostic path next to authoritative Bazel compilation.
+build is a diagnostic path, not part of CI Gate.
 Comparable-run and measurement-floor triage is documented in
 [`docs/development/benchmarking.md`](../../docs/development/benchmarking.md).
 M6 pure kernels use simulation on the ordinary pinned CI runner; durable
