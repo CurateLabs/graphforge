@@ -209,13 +209,7 @@ impl ShardedCsrIndex {
             bytes.len() as u64,
             1,
         );
-        let manifest: CsrShardManifest = serde_json::from_slice(&bytes).map_err(storage_err)?;
-        if manifest.format != "graphforge.csr-shards" || manifest.version != SHARDED_CSR_VERSION {
-            return Err(GfError::Storage(format!(
-                "unsupported sharded CSR manifest {}",
-                manifest_path.display()
-            )));
-        }
+        let manifest = codec::decode_manifest(&bytes, &manifest_path)?;
         let mut prior_first = None;
         let mut edges = 0_u64;
         if !is_normal_path_component(&manifest.shard_dir) {
@@ -575,17 +569,7 @@ impl ShardedCsrWriter {
         use std::io::Write as _;
 
         self.flush()?;
-        let mut identity = Sha256::new();
-        identity.update(b"graphforge/csr-shards/v2\0");
-        identity.update(node_count.to_le_bytes());
-        identity.update(self.edge_count.to_le_bytes());
-        for record in &self.records {
-            identity.update(record.first_node.to_le_bytes());
-            identity.update(record.node_count.to_le_bytes());
-            identity.update(record.edge_count.to_le_bytes());
-            identity.update(record.sha256.as_bytes());
-        }
-        let digest = sha256_hex(&identity.finalize());
+        let digest = codec::shard_set_identity(node_count, self.edge_count, &self.records);
         let stem = self
             .path
             .file_name()

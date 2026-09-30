@@ -238,7 +238,7 @@ impl SemanticStorageBindings {
         symbol: &QualifiedSymbol,
         owner: Option<&QualifiedSymbol>,
     ) -> String {
-        let mut digest = Sha256::new();
+        let mut digest = graphforge_core::hash_observation::ContractSha256::new();
         digest.update(b"graphforge-semantic-route/1\0");
         let route_symbol = owner.unwrap_or(symbol);
         // Properties are columns in their owner's physical table.  The owner
@@ -506,7 +506,10 @@ impl SemanticStorageBindings {
             record_family_id: GRAPH_SEMANTIC_BINDINGS_FAMILY.into(),
             record_version: GRAPH_SEMANTIC_BINDINGS_VERSION,
             encoding: ProjectParticipantEncoding::Json,
-            schema_fingerprint: Sha256::digest(b"graphforge-semantic-storage-bindings/1").into(),
+            schema_fingerprint: graphforge_core::hash_observation::ContractSha256::digest(
+                b"graphforge-semantic-storage-bindings/1",
+            )
+            .into(),
             row_count: self.bindings.len() as u64,
             bytes,
         })
@@ -778,7 +781,10 @@ pub fn semantic_storage_bindings(
         .participant_snapshot(GRAPH_CAPABILITY_ID, GRAPH_SEMANTIC_BINDINGS_FAMILY)?
         .map(|snapshot| {
             let expected_schema: [u8; 32] =
-                Sha256::digest(b"graphforge-semantic-storage-bindings/1").into();
+                graphforge_core::hash_observation::ContractSha256::digest(
+                    b"graphforge-semantic-storage-bindings/1",
+                )
+                .into();
             if snapshot.capability_version != crate::GRAPH_CAPABILITY_VERSION
                 || snapshot.record_version != GRAPH_SEMANTIC_BINDINGS_VERSION
                 || snapshot.encoding != "json"

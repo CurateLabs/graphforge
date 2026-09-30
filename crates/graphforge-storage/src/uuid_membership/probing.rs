@@ -7,7 +7,6 @@ use super::BlockRecord;
 use super::ConstructionIndexReference;
 use super::ConstructionReferenceAuthentication;
 use super::ConstructionReferenceAuthenticationWork;
-use super::FORMAT_VERSION;
 use super::FileRecord;
 use super::IDENTITY_RECORD_BYTES;
 #[cfg(test)]
@@ -28,6 +27,7 @@ use super::UuidProbeMetrics;
 use super::authenticate_file_blocks;
 use super::batch_identity_states;
 use super::block_matches;
+use super::decode_manifest;
 use super::hex_bytes;
 #[cfg(test)]
 use super::identity_codec;
@@ -136,7 +136,7 @@ impl UuidConstructionSnapshot {
         if graphforge_filesystem::file_identity(&manifest).map_err(storage_err)?
             != self.manifest_identity
             || hex_sha256(&body) != self.manifest_sha256
-            || serde_json::from_slice::<Manifest>(&body).map_err(storage_err)? != self.manifest
+            || decode_manifest(&body)? != self.manifest
         {
             return Err(storage_err("construction UUID manifest changed"));
         }
@@ -387,8 +387,8 @@ pub(crate) fn pin_uuid_construction_snapshot(
         graphforge_filesystem::file_identity(&manifest_file).map_err(storage_err)?;
     let body = read_bounded(&mut manifest_file, MAX_MANIFEST_BYTES)?;
     let manifest_sha256 = hex_sha256(&body);
-    let manifest: Manifest = serde_json::from_slice(&body).map_err(storage_err)?;
-    if manifest.format_version != FORMAT_VERSION || manifest.current_generation != generation {
+    let manifest = decode_manifest(&body)?;
+    if manifest.current_generation != generation {
         return Err(storage_err(
             "construction UUID snapshot generation is stale",
         ));
@@ -634,8 +634,8 @@ impl AuthenticatedUuidIndexSnapshot {
             graphforge_filesystem::file_identity(&manifest_file).map_err(storage_err)?;
         let body = read_bounded(&mut manifest_file, MAX_MANIFEST_BYTES)?;
         let manifest_sha256 = hex_sha256(&body);
-        let manifest: Manifest = serde_json::from_slice(&body).map_err(storage_err)?;
-        if manifest.format_version != FORMAT_VERSION || manifest.current_generation != generation {
+        let manifest = decode_manifest(&body)?;
+        if manifest.current_generation != generation {
             return Err(storage_err("authenticated snapshot generation is stale"));
         }
         validate_run_descriptors(&manifest)?;
@@ -718,8 +718,8 @@ impl AuthenticatedUuidIndexSnapshot {
         if manifest_sha256 != manifest_entry.content_sha256 {
             return Err(storage_err("compact UUID manifest authentication changed"));
         }
-        let manifest: Manifest = serde_json::from_slice(&body).map_err(storage_err)?;
-        if manifest.format_version != FORMAT_VERSION || manifest.current_generation != generation {
+        let manifest = decode_manifest(&body)?;
+        if manifest.current_generation != generation {
             return Err(storage_err(
                 "authenticated compact snapshot generation is stale",
             ));
@@ -880,9 +880,7 @@ impl AuthenticatedUuidIndexSnapshot {
             return Err(storage_err("compact UUID manifest identity changed"));
         }
         let body = read_bounded(&mut manifest_lease, MAX_MANIFEST_BYTES)?;
-        if hex_sha256(&body) != self.manifest_sha256
-            || serde_json::from_slice::<Manifest>(&body).map_err(storage_err)? != self.manifest
-        {
+        if hex_sha256(&body) != self.manifest_sha256 || decode_manifest(&body)? != self.manifest {
             return Err(storage_err("compact UUID manifest authentication changed"));
         }
         for run in &self.runs {
@@ -948,9 +946,7 @@ impl AuthenticatedUuidIndexSnapshot {
             return Err(storage_err("UUID manifest identity changed"));
         }
         let body = read_bounded(&mut named_manifest, MAX_MANIFEST_BYTES)?;
-        if hex_sha256(&body) != self.manifest_sha256
-            || serde_json::from_slice::<Manifest>(&body).map_err(storage_err)? != self.manifest
-        {
+        if hex_sha256(&body) != self.manifest_sha256 || decode_manifest(&body)? != self.manifest {
             return Err(storage_err("UUID manifest authentication changed"));
         }
         for run in &self.runs {
@@ -991,9 +987,7 @@ impl AuthenticatedUuidIndexSnapshot {
             return Err(storage_err("suspended UUID manifest identity changed"));
         }
         let body = read_bounded(&mut file, MAX_MANIFEST_BYTES)?;
-        if hex_sha256(&body) != self.manifest_sha256
-            || serde_json::from_slice::<Manifest>(&body).map_err(storage_err)? != self.manifest
-        {
+        if hex_sha256(&body) != self.manifest_sha256 || decode_manifest(&body)? != self.manifest {
             return Err(storage_err(
                 "suspended UUID manifest authentication changed",
             ));
@@ -1168,13 +1162,7 @@ impl UuidMembershipIndex {
     pub(crate) fn open_at_generation(project_dir: &Path, generation: u64) -> Result<Self, GfError> {
         let root = project_dir.join(INDEX_DIR);
         let body = fs::read(root.join(MANIFEST)).map_err(storage_err)?;
-        let manifest: Manifest = serde_json::from_slice(&body).map_err(storage_err)?;
-        if manifest.format_version != FORMAT_VERSION {
-            return Err(storage_err(format!(
-                "unsupported format version {}",
-                manifest.format_version
-            )));
-        }
+        let manifest = decode_manifest(&body)?;
         if manifest.current_generation != generation {
             return Err(storage_err(format!(
                 "stale index generation {} (graph generation {generation})",

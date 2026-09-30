@@ -827,13 +827,35 @@ pub fn uuid_membership_index_is_fresh(project_dir: &Path) -> Result<bool, GfErro
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(storage_err(error)),
     };
-    let manifest: Manifest = serde_json::from_slice(&body).map_err(storage_err)?;
-    Ok(manifest.format_version == FORMAT_VERSION
-        && manifest.current_generation == crate::read_topology_generation(project_dir)?)
+    let manifest = decode_manifest(&body)?;
+    Ok(manifest.current_generation == crate::read_topology_generation(project_dir)?)
 }
 
 const TOPOLOGY_RECEIPT: &str = "topology-receipt.json";
 const MAX_MANIFEST_BYTES: u64 = 1 << 20;
+
+fn validate_manifest_version(version: u32) -> Result<(), GfError> {
+    if version != FORMAT_VERSION {
+        return Err(storage_err(format!(
+            "unsupported UUID membership format version {version}; recreate the index"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse retired or future schemas before decoding current checksum fields.
+fn decode_manifest(bytes: &[u8]) -> Result<Manifest, GfError> {
+    #[derive(Deserialize)]
+    struct Header {
+        format_version: u32,
+    }
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(storage_err("UUID membership manifest exceeds size limit"));
+    }
+    let header: Header = serde_json::from_slice(bytes).map_err(storage_err)?;
+    validate_manifest_version(header.format_version)?;
+    serde_json::from_slice(bytes).map_err(storage_err)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TopologyIndexReceipt {
@@ -1188,6 +1210,7 @@ impl PreparedUuidIndexDelta {
 }
 
 fn validate_run_descriptors(manifest: &Manifest) -> Result<(), GfError> {
+    validate_manifest_version(manifest.format_version)?;
     for record in manifest.runs.iter().flat_map(|run| {
         [
             (&run.identities, IDENTITY_RECORD_BYTES),

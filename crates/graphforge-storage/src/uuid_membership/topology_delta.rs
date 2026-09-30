@@ -1131,7 +1131,7 @@ pub(super) fn topology_delta_sha256(
     nodes.sort_unstable_by_key(|(uuid, _)| *uuid.as_bytes());
     let mut edges = edges.to_vec();
     edges.sort_unstable_by_key(|uuid| *uuid.as_bytes());
-    let mut hasher = graphforge_core::hash_observation::ArtifactSha256::new();
+    let mut hasher = graphforge_core::hash_observation::ContractSha256::new();
     hasher.update(b"graphforge/uuid-index-topology-delta/v1");
     for (uuid, surrogate) in nodes {
         hasher.update([0]);

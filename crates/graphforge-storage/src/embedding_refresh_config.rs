@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use graphforge_core::hash_observation::ContractSha256 as Sha256;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
@@ -1155,6 +1155,27 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     use super::*;
+
+    #[test]
+    fn config_checksum_accounts_authentication_of_control_json() {
+        use graphforge_core::hash_observation::operation::{Capture, Snapshot};
+        let material = br#"{"version":1,"proactive":true}"#;
+        let mut preimage = CHECKSUM_DOMAIN.to_vec();
+        preimage.extend_from_slice(material);
+        let expected = sha2::Sha256::digest(&preimage)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let capture = Capture::start();
+        assert_eq!(checksum(material), expected);
+        assert_eq!(
+            capture.snapshot(),
+            Snapshot {
+                control_authentication_sha256_bytes: preimage.len() as u64,
+                ..Snapshot::default()
+            }
+        );
+    }
 
     fn id(value: u8) -> EmbeddingCompatibilityId {
         EmbeddingCompatibilityId::from_hex(&format!("{value:02x}").repeat(32)).unwrap()

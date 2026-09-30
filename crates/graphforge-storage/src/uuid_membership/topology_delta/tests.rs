@@ -488,3 +488,67 @@ fn retained_planner_stages_only_new_and_binary_carry_outputs() {
     assert_eq!(subsequent.validation_scan_bytes, 0);
     assert_eq!(subsequent.validation_scan_blocks, 0);
 }
+
+#[test]
+fn topology_delta_digest_accounts_canonical_logical_contract_bytes() {
+    use graphforge_core::hash_observation::operation::{Capture, Snapshot};
+    use sha2::{Digest, Sha256};
+    let nodes = [(Uuid::from_u128(2), 20_u64), (Uuid::from_u128(1), 10)];
+    let edges = [Uuid::from_u128(4), Uuid::from_u128(3)];
+    let deleted_nodes = [(Uuid::from_u128(6), 60_u64), (Uuid::from_u128(5), 50)];
+    let deleted_edges = [Uuid::from_u128(8), Uuid::from_u128(7)];
+    let mut preimage = b"graphforge/uuid-index-topology-delta/v1".to_vec();
+    for (tag, tuples) in [
+        (0, [nodes[1], nodes[0]]),
+        (2, [deleted_nodes[1], deleted_nodes[0]]),
+    ] {
+        if tag == 2 {
+            for uuid in [edges[1], edges[0]] {
+                preimage.push(1);
+                preimage.extend_from_slice(uuid.as_bytes());
+            }
+        }
+        for (uuid, surrogate) in tuples {
+            preimage.push(tag);
+            preimage.extend_from_slice(uuid.as_bytes());
+            preimage.extend_from_slice(&surrogate.to_be_bytes());
+        }
+    }
+    for uuid in [deleted_edges[1], deleted_edges[0]] {
+        preimage.push(3);
+        preimage.extend_from_slice(uuid.as_bytes());
+    }
+    let expected = Sha256::digest(&preimage)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let capture = Capture::start();
+    let actual = super::topology_delta_sha256(&nodes, &edges, &deleted_nodes, &deleted_edges);
+    assert_eq!(actual, expected);
+    assert_eq!(
+        capture.snapshot(),
+        Snapshot {
+            contract_identity_sha256_bytes: preimage.len() as u64,
+            ..Snapshot::default()
+        }
+    );
+    drop(capture);
+    assert_eq!(
+        super::topology_delta_sha256(
+            &[nodes[1], nodes[0]],
+            &[edges[1], edges[0]],
+            &[deleted_nodes[1], deleted_nodes[0]],
+            &[deleted_edges[1], deleted_edges[0]]
+        ),
+        actual
+    );
+    assert_ne!(
+        super::topology_delta_sha256(
+            &[(nodes[0].0, 21), nodes[1]],
+            &edges,
+            &deleted_nodes,
+            &deleted_edges
+        ),
+        actual
+    );
+}

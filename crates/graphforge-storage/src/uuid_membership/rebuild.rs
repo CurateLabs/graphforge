@@ -20,6 +20,7 @@ use super::V4_ORDINAL_RECEIPT;
 use super::V4OrdinalBuildMetrics;
 use super::V4OrdinalRebuildDisposition;
 use super::V4OrdinalRebuildEvidence;
+use super::decode_manifest;
 #[cfg(test)]
 use super::describe_blocks;
 use super::describe_staged_data;
@@ -603,9 +604,9 @@ pub(super) fn manifest_generation(project_dir: &Path) -> Result<Option<u64>, GfE
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(storage_err(error)),
     };
-    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(storage_err)?;
+    let manifest = decode_manifest(&bytes)?;
     validate_run_descriptors(&manifest)?;
-    Ok((manifest.format_version == FORMAT_VERSION).then_some(manifest.current_generation))
+    Ok(Some(manifest.current_generation))
 }
 
 fn scan_to_runs(

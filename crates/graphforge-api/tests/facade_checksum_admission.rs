@@ -468,3 +468,106 @@ fn compact_cas_facade_reopen_and_query_hash_no_payload_bytes() {
     assert_eq!(work.unclassified_sha256_bytes, 0, "{work:?}");
     assert!(work.checksum_bytes > 0, "{work:?}");
 }
+
+#[test]
+fn semantic_project_reopen_and_qualified_query_hash_no_payload_or_unclassified_bytes() {
+    use graphforge_api::{
+        AdoptOntologyRequest, COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeGraphMutation,
+        CompositeKnowledgeParticipants, CompositeTransactionRequest, CompositionChangeRequest,
+        CompositionDataDisposition, OntologyMode, OperationId, WriteContext,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("project");
+    let ontology = root.path().join("routes.yaml");
+    std::fs::write(&ontology, "ontology_id: https://example.test/mixed\nversion: \"1\"\nentity_types:\n  - name: NewNode\n    abstract: false\nproperties:\n  - owner: NewNode\n    name: score\n    type: int64\n    nullable: true\n").unwrap();
+    let context = || WriteContext {
+        operation_uuid: OperationId(uuid::Uuid::now_v7()),
+        actor_uuid: None,
+    };
+    let mut graph = GraphForge::new(path.to_str()).unwrap();
+    graph
+        .adopt_ontology(AdoptOntologyRequest {
+            context: context(),
+            path: ontology,
+            mode: OntologyMode::Advisory,
+        })
+        .unwrap();
+    drop(graph);
+    let mut graph = GraphForge::new(path.to_str()).unwrap();
+    let candidate = graph.workspace_ontology_composition().unwrap().unwrap();
+    let request = CompositionChangeRequest {
+        context: context(),
+        expected_project_generation_uuid: graphforge_storage::resolve_project_generation(&path)
+            .unwrap()
+            .generation_uuid(),
+        expected_composition_fingerprint: Some(candidate.composition_fingerprint.clone()),
+        candidate,
+        data_disposition: CompositionDataDisposition::RequireConforming,
+    };
+    let preview = graph
+        .preview_ontology_composition_change(&request, None)
+        .unwrap();
+    assert!(preview.diagnostics.is_empty(), "{:?}", preview.diagnostics);
+    graph
+        .publish_ontology_composition_change(&request, &preview, None)
+        .unwrap();
+    let node = uuid::Uuid::now_v7();
+    graph
+        .publish_composite_transaction(CompositeTransactionRequest {
+            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: context(),
+            graph_mutations: vec![CompositeGraphMutation::CreateNode {
+                node_uuid: node,
+                label: "mixed:NewNode".into(),
+                properties: [("score".into(), PropValue::Int(42))].into(),
+            }],
+            knowledge: CompositeKnowledgeParticipants::default(),
+        })
+        .unwrap();
+    drop(graph);
+    let selected = graphforge_storage::resolve_project_generation(&path).unwrap();
+    assert!(
+        selected
+            .participant_snapshot("graph", graphforge_storage::GRAPH_SEMANTIC_BINDINGS_FAMILY)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        !graphforge_storage::semantic_storage_bindings(&selected)
+            .unwrap()
+            .unwrap()
+            .bindings
+            .is_empty()
+    );
+    drop(selected);
+
+    let capture = PayloadDigestCapture::start();
+    let reopened = GraphForge::new(path.to_str()).unwrap();
+    let result = reopened
+        .execute("MATCH (n:`mixed:NewNode`) RETURN n.score")
+        .unwrap();
+    assert_eq!(
+        result
+            .batches
+            .iter()
+            .map(arrow::record_batch::RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
+    let scores = result.batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap();
+    assert_eq!(scores.value(0), 42);
+    let work = capture.snapshot();
+    eprintln!("semantic facade digest work: {work:?}");
+    assert_eq!(work.artifact_payload_sha256_bytes, 0, "{work:?}");
+    assert_eq!(work.unclassified_sha256_bytes, 0, "{work:?}");
+    assert!(
+        work.contract_identity_sha256_bytes
+            >= b"graphforge-semantic-storage-bindings/1".len() as u64,
+        "{work:?}"
+    );
+    assert!(work.checksum_bytes > 0, "{work:?}");
+}
