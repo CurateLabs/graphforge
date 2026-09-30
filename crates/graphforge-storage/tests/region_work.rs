@@ -77,4 +77,30 @@ fn work_observation_counts_worker_hashes_writes_and_barriers_and_reconciles() {
         idle.regions["import_command"].inclusive.fsync_calls,
         Some(0)
     );
+
+    // Payload identity capture uses its own wrapper. Its byte observation must
+    // include the file itself, as well as the much smaller control identities.
+    let source = tempfile::tempdir().unwrap();
+    std::fs::create_dir(source.path().join("topology")).unwrap();
+    let payload = vec![b'A'; 1024 * 1024];
+    std::fs::write(source.path().join("topology/nodes.parquet"), &payload).unwrap();
+    let capture = RegionCapture::start("payload_inventory");
+    let (inventory, _) = graphforge_storage::capture_graph_files(source.path()).unwrap();
+    let snapshot = capture.finish();
+    assert!(snapshot.complete);
+    assert_eq!(inventory.total_byte_length, payload.len() as u64);
+    assert_eq!(
+        inventory.files[0].content_sha256,
+        Sha256::digest(&payload)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    assert!(
+        snapshot.regions["payload_inventory"]
+            .inclusive
+            .hashed_bytes
+            .unwrap()
+            >= inventory.total_byte_length
+    );
 }

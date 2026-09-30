@@ -205,6 +205,18 @@ and `edges.parquet`
 (`1c0ff75485f75e904cbd59b6f5d42da1d8b1af6ddac59ee6c495a4948a428d13`).
 They represent 4,194,304 input nodes and 67,108,864 input edges.
 
+For a fresh successful S22 construction, independently reconcile the leaf
+`import_command/stage+seal/seal/shaping/shape_routing/artifact_authentication`
+against the retained `receipt-NNNNNNNNNNNNNNNNNNNN.json` chunk receipts under
+`.graphforge-construction/`. Require contiguous accepted sequences starting at
+zero and reconcile receipt rows by kind with the input node/edge counts. That
+leaf authenticates each chunk's Parquet artifact once: its `hashed_bytes` must
+equal the sum of `parquet.bytes`, with zero-byte tolerance, and its call count
+must equal the number of accepted chunk receipts. Normal publication retains
+these small receipts, so collect them after measurement. Original source file
+sizes and aggregate application reads are different populations; the latter
+also includes metadata reads outside this leaf.
+
 To reproduce S22, use those digest-pinned inputs and the baseline host. Build an ordinary release CLI with an isolated
 `CARGO_TARGET_DIR`, record the source revision and binary/input SHA-256 digests,
 then finish all builds before measuring. Set `TMPDIR` and the new project to
