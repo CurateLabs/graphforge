@@ -124,8 +124,12 @@ python -m pytest examples/visualization/tests/test_python_examples.py -q
 node --test examples/visualization/tests/test_node_examples.mjs
 ```
 
-These checks are part of the example suite. They are **not** required CI,
-scheduled CI, or release gates.
+These checks are part of the example suite and need the visualization
+libraries, so they are **not** required CI, scheduled CI, or release gates. The
+part they share with GraphForge is: the Python binding job runs the example's
+graph construction and projection against the built wheel on every binding
+change (`crates/graphforge-bindings-py/tests/visualization_example_projection.py`),
+offline and without a visualization library.
 
 ## Limitations (honest comparison)
 

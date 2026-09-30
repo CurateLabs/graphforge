@@ -675,6 +675,9 @@ jobs:
           assert importlib.util.find_spec("igraph") is None
           PY
           timeout 60s /tmp/gf-native/bin/python crates/graphforge-bindings-py/tests/smoke.py
+          # The documented visualization example's GraphForge path, offline (#1675).
+          timeout 60s /tmp/gf-native/bin/python \
+            crates/graphforge-bindings-py/tests/visualization_example_projection.py
 
       - name: Install test dependencies and wheel
         shell: bash
