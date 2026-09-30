@@ -194,8 +194,10 @@ not inclusive parents and children; unknown or inconsistent differences stay
 
 `source_read` covers iterator decode/canonicalization calls; `normalization`
 covers bounded normalization windows. Appends are split into `append_nodes`
-and `append_edges`; `manifest_persistence` covers each full manifest rewrite
-including its barrier and install. Seal, encoding, hydration and commit retain
+and `append_edges`; `manifest_persistence` covers complete manifest checkpoints
+including their barriers and installs. Import progress journal work uses the
+disjoint `journal_append`, `journal_sync`, and `journal_namespace_publication`
+leaves. Seal, encoding, hydration and commit retain
 their existing boundaries. Reader setup and uninstrumented work stay in the
 reported residual; do not call the entire residual hashing or source reading.
 
@@ -241,3 +243,135 @@ The deterministic worker-thread counter and residual regression runs with:
 cargo test -p graphforge-storage --test region_work
 cargo test -p graphforge-cli --test portable import_operation_timings_survive_separate_cli_processes
 ```
+
+## Matched import journal measurements
+
+The [lane runner](../../scripts/development/import-journal/measure-lane.py),
+[five-command driver](../../scripts/development/import-journal/driver.sh),
+[comparator](../../scripts/development/import-journal/compare-pair.py), and
+[qualification contract](../../scripts/development/import-journal/measurement_contract.py)
+reproduce a journal-only comparison. Use the immediate integrated `main` as
+baseline; the candidate may differ in only the three import-session Rust files.
+Historical runs do not supply a matched baseline. Both lanes use the input
+digests and populations above, the same release profile/features, explicit
+`--json --diagnostics`, cores 0–15, and independent fresh projects on supported
+native storage. All artifacts and build targets stay outside both checkouts.
+
+Build each lane after fixing `task_worktree`, `task_target`, `task_artifacts`,
+and the absolute `task_methods` path to `scripts/development/import-journal`.
+Run the following from the same build environment for both lanes. This records
+the actual build command, profile, feature settings, toolchain, source and
+binary identities, and the whitelisted build environment before measurement:
+
+```bash
+mkdir -p "$task_artifacts"
+PYTHONPATH="$task_methods" CARGO_TARGET_DIR="$task_target" \
+  CARGO_BUILD_JOBS=4 CARGO_PROFILE_RELEASE_DEBUG=0 \
+  python3 - "$task_worktree" "$task_target" "$task_artifacts" <<'PY'
+import os
+from pathlib import Path
+import subprocess
+import sys
+from measurement_contract import BUILD_ENV, digest, require_external_output, write_json
+
+tree, target, artifacts = (Path(value).resolve() for value in sys.argv[1:])
+require_external_output(artifacts, tree, Path(os.environ["PYTHONPATH"]))
+require_external_output(target, tree, Path(os.environ["PYTHONPATH"]))
+def command(arguments):
+    return subprocess.check_output(arguments, cwd=tree, text=True).strip()
+source = command(["git", "rev-parse", "HEAD"])
+subprocess.run(["git", "diff", "--quiet", "HEAD"], cwd=tree, check=True)
+arguments = ["build", "--locked", "--release", "-p", "graphforge-cli", "--bin", "gf"]
+metadata = {
+    "source_sha": source, "profile": "release", "features": [], "default_features": True,
+    "target": next(line[6:] for line in command(["rustc", "-vV"]).splitlines()
+                   if line.startswith("host: ")),
+    "rustc_version": command(["rustc", "-vV"]), "cargo_version": command(["cargo", "-V"]),
+    "cargo_args": arguments, "build_environment": {key: os.environ.get(key) for key in BUILD_ENV},
+}
+with (artifacts / "build.log").open("w") as log:
+    subprocess.run(["cargo", *arguments], cwd=tree, check=True,
+                   stdout=log, stderr=subprocess.STDOUT)
+assert source == command(["git", "rev-parse", "HEAD"])
+subprocess.run(["git", "diff", "--quiet", "HEAD"], cwd=tree, check=True)
+metadata["binary_sha256"] = digest(target / "release/gf")
+write_json(artifacts / "build-provenance.json", metadata)
+(artifacts / "build-source.sha").write_text(source + "\n")
+PY
+```
+
+Finish all builds and tests before launching lanes. Set `task_evidence` to an
+external output directory, `task_nodes` and `task_edges` to the absolute S22
+input paths, and create `inputs.sha256` there with the two pinned digests and
+those exact absolute paths in `sha256sum` format. For each lane, set
+`task_lane` to `baseline` or `candidate`, its worktree/target/build artifacts,
+and the same positive `task_pair` number, then run sequentially:
+
+```bash
+python3 "$task_methods/measure-lane.py" --lane "$task_lane" --pair "$task_pair" \
+  --worktree "$task_worktree" --binary "$task_target/release/gf" \
+  --expected-source-sha "$(cat "$task_artifacts/build-source.sha")" \
+  --build-source-file "$task_artifacts/build-source.sha" \
+  --build-provenance-file "$task_artifacts/build-provenance.json" \
+  --evidence-root "$task_evidence" --inputs-sha-file "$task_evidence/inputs.sha256" \
+  --nodes "$task_nodes" --edges "$task_edges"
+# Compare only after both baseline and candidate lanes finish:
+python3 "$task_methods/compare-pair.py" --pair "$task_pair" \
+  --repository "$task_worktree" --evidence-root "$task_evidence"
+```
+
+The runner resets cold caches and requires passwordless operator permission
+for `drop_caches`; schedule it on an exclusively available host. It persists
+a 60-second quiet window (mean ≤0.2 and peak ≤0.5 busy cores), samples process
+names every five seconds, and refuses observed compiler overlap. Sampling does
+not prove absence of a process that starts and finishes between samples.
+Qualification binds the five command receipts, quiet/during observations,
+build/input identities and workload log by SHA-256. The comparator requires
+both completed, qualified lanes and matching ambient resource settings. It
+reparses BenchExec's workload `returnvalue`, signal and termination fields:
+the `runexec` process's successful exit alone cannot qualify a failed ingest.
+Missing/unavailable measurements and nested persistence rows are refused.
+Manifest checkpoint, journal append, sync and namespace costs are reported
+separately and summed only as disjoint leaves.
+
+After each measurement, use a new CLI process to open that lane's project and
+execute node and directed-edge count queries into external Parquet sinks.
+With `task_lane_root="$task_evidence/pair-$task_pair/$task_lane"`, run:
+
+```bash
+"$task_target/release/gf" --json --project "$task_lane_root/project" query \
+  --cypher 'MATCH (n) RETURN count(n) AS nodes' --output "$task_lane_root/nodes.parquet" \
+  --cypher 'MATCH ()-[e]->() RETURN count(e) AS edges' --output "$task_lane_root/edges.parquet" \
+  --cypher 'MATCH (n) RETURN n LIMIT 1' --output "$task_lane_root/sample.parquet" \
+  > "$task_lane_root/reopen-query.jsonl" 2> "$task_lane_root/reopen-query.stderr"
+python3 - "$task_lane_root" > "$task_lane_root/reopen-counts.txt" <<'PY'
+from pathlib import Path
+import sys
+import pyarrow.parquet as pq
+root = Path(sys.argv[1])
+assert pq.read_table(root / "nodes.parquet").column("nodes").to_pylist() == [4194304]
+assert pq.read_table(root / "edges.parquet").column("edges").to_pylist() == [67108864]
+assert pq.read_table(root / "sample.parquet").num_rows == 1
+print("PASS: fresh-process reopen, node/edge counts and non-count query")
+PY
+```
+
+Keep these reopening/query proofs outside the measured workflow. A qualified
+timing comparison alone does not establish published graph correctness.
+Attach comparison, qualification, receipts, host samples and reopen proofs to
+the producing issue or PR.
+
+Method SHA-256 pins:
+
+| Method | SHA-256 |
+| --- | --- |
+| `driver.sh` | `a011e6b682c49a59d08ef919cca6997971f3cbb0d52ff27fa0c2dd0e4aa8a498` |
+| `measure-lane.py` | `ec96354470b6d3b96d06717f4d3fae8c7cf4cb44ce33a8edd35d3ad7c0e2693d` |
+| `measurement_contract.py` | `25a6468dbda2ec56f558ee6d51dd48c47f66c9c5bb5940a6fe09e31943de5de7` |
+| `compare-pair.py` | `2c034851bac427b0b87d3bd56bc1fdd239d58571efe152cac1bde53622e7dd8b` |
+| `test-measurement-method.py` | `7f9e9647217098714bcb9c8a74ba2a0c5f331a56684ba73dc47b4019091abe75` |
+
+The [method regression](../../scripts/development/import-journal/test-measurement-method.py)
+runs with `python3 scripts/development/import-journal/test-measurement-method.py`.
+It uses synthetic lanes plus tiny shell exit probes; it never resets caches,
+builds GraphForge or imports the S22 inputs.
