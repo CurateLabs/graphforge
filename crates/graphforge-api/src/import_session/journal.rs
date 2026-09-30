@@ -42,6 +42,19 @@ pub(super) struct Journal {
 }
 
 impl Journal {
+    pub(super) fn ensure_writable(&self) -> Result<(), GfError> {
+        if self.failed_write {
+            return Err(storage(
+                "resume import journal after a failed write or sync",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn poison(&mut self) {
+        self.failed_write = true;
+    }
+
     pub(super) fn open(
         root: &Path,
         manifest: &SessionManifest,
@@ -118,11 +131,7 @@ impl Journal {
         allocation: Option<&graphforge_storage::StorageAllocationOperation>,
     ) -> Result<(), GfError> {
         let region = RegionScope::named("journal_append");
-        if self.failed_write {
-            return Err(storage(
-                "resume import journal after a failed write or sync",
-            ));
-        }
+        self.ensure_writable()?;
         let sequence = manifest
             .journal_sequence
             .checked_add(1)
@@ -173,11 +182,7 @@ impl Journal {
         allocation: Option<&graphforge_storage::StorageAllocationOperation>,
     ) -> Result<(), GfError> {
         let _region = RegionScope::named("journal_sync");
-        if self.failed_write {
-            return Err(storage(
-                "resume import journal after a failed write or sync",
-            ));
-        }
+        self.ensure_writable()?;
         // Any failed barrier leaves durability uncertain. Only replay on a
         // fresh handle can admit the actual complete/torn tail before retry.
         self.failed_write = true;
@@ -292,6 +297,7 @@ pub(super) fn write_checkpoint(
     root: &Path,
     manifest: &SessionManifest,
     allocation: Option<&graphforge_storage::StorageAllocationOperation>,
+    publication_started: &mut bool,
 ) -> Result<(), GfError> {
     let _region = RegionScope::named("manifest_persistence");
     let directory = StableDirectory::open(root).map_err(storage)?;
@@ -308,13 +314,15 @@ pub(super) fn write_checkpoint(
     if let Some(allocation) = allocation {
         allocation.replace_file_at(&temporary_path, &file)?;
     }
+    let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
+    // Replacement can report an error after the rename. From this point the
+    // checkpoint may already reference its sources, even without a barrier.
+    *publication_started = true;
     directory
-        .replace_child(
-            OsStr::new(&temporary),
-            graphforge_filesystem::file_identity(&file).map_err(storage)?,
-            OsStr::new(MANIFEST),
-        )
+        .replace_child(OsStr::new(&temporary), identity, OsStr::new(MANIFEST))
         .map_err(storage)?;
+    #[cfg(test)]
+    failure("checkpoint_after_replace")?;
     // The replacement is a complete checkpoint even if the parent barrier
     // fails: deleting it would also destroy the prior checkpoint. The guard
     // therefore owns only the preparation name. Cleanup removes that name if
@@ -325,6 +333,37 @@ pub(super) fn write_checkpoint(
         allocation.remove_file_at(&root.join(MANIFEST))?;
         allocation.replace_file_at(&root.join(MANIFEST), &file)?;
         allocation.remove_file_at(&temporary_path)?;
+    }
+    Ok(())
+}
+
+/// Remove only an unreferenced source through its retained namespace authority.
+pub(super) fn cleanup_source(
+    destination: &Path,
+    allocation: Option<&graphforge_storage::StorageAllocationOperation>,
+) -> Result<(), GfError> {
+    let _region = RegionScope::named("source_cleanup");
+    let parent = destination
+        .parent()
+        .ok_or_else(|| storage("import source has no parent"))?;
+    let directory = StableDirectory::open(parent).map_err(storage)?;
+    let name = destination
+        .file_name()
+        .ok_or_else(|| storage("import source has no name"))?;
+    let file = match directory.open_child_file(name) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(storage(error)),
+    };
+    let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
+    #[cfg(test)]
+    failure("source_cleanup_before_unlink")?;
+    directory
+        .unlink_child_if_identity(name, identity)
+        .map_err(storage)?;
+    directory.sync().map_err(storage)?;
+    if let Some(allocation) = allocation {
+        allocation.remove_file_at(destination)?;
     }
     Ok(())
 }
@@ -361,6 +400,8 @@ pub(super) fn publish_source(
             destination_name,
         )
         .map_err(storage)?;
+    #[cfg(test)]
+    failure("source_after_replace")?;
     directory.sync().map_err(storage)?;
     if let Some(allocation) = allocation {
         allocation.remove_file_at(destination)?;

@@ -261,7 +261,15 @@ fn byte_cadence_flushes_journal_without_replacing_manifest() {
 fn failed_cadence_sync_blocks_writes_until_fresh_format_aware_reopen() {
     let (directory, graph, mut session) = staged_fixture();
     let id = session.session_uuid();
+    let construction = session.open_construction(&graph).unwrap();
+    let construction_id = construction.session_uuid();
+    assert_eq!(construction.progress().accepted_chunks, 0);
+    drop(construction);
     let checkpoint = std::fs::read(session.root.join(MANIFEST)).unwrap();
+    // A failed cadence barrier can leave a complete in-flight frame. Without
+    // session-level admission, validate would resume construction and append
+    // this chunk before its next journal write notices the failed barrier.
+    session.manifest.sources[0].inflight_batch = Some(0);
     inject("sync");
     loop {
         let pending_before = session.journal.pending_bytes;
@@ -307,7 +315,49 @@ fn failed_cadence_sync_blocks_writes_until_fresh_format_aware_reopen() {
         std::fs::read(session.root.join(MANIFEST)).unwrap(),
         checkpoint
     );
-    drop(session);
+    let before_state = serde_json::to_vec(&session.manifest).unwrap();
+    let before_files = project_files(&directory.path().join("project"));
+    assert_recovery_required(session.validate(&graph).unwrap_err());
+    let cancelled = crate::CancellationToken::new();
+    cancelled.cancel();
+    assert_recovery_required(
+        session
+            .validate_with_cancellation(&graph, Some(&cancelled))
+            .unwrap_err(),
+    );
+    assert_recovery_required(session.append_arrow(BulkInputKind::Node, &[]).unwrap_err());
+    assert_recovery_required(
+        session
+            .append_arrow(BulkInputKind::Node, &[nodes(&[Uuid::now_v7()])])
+            .unwrap_err(),
+    );
+    assert_recovery_required(
+        session
+            .register_parquet(BulkInputKind::Node, &session.root.join(MANIFEST))
+            .unwrap_err(),
+    );
+    assert_recovery_required(session.checkpoint().unwrap_err());
+    assert_recovery_required(session.commit(&graph, None).unwrap_err());
+    assert_eq!(serde_json::to_vec(&session.manifest).unwrap(), before_state);
+    assert_eq!(
+        project_files(&directory.path().join("project")),
+        before_files
+    );
+    let construction = graph
+        .resume_graph_construction(construction_id, session.construction_budgets())
+        .unwrap();
+    assert_eq!(construction.progress().accepted_chunks, 0);
+    drop(construction);
+    let session_root = session.root.clone();
+    assert_recovery_required(session.abort(&graph).unwrap_err());
+    assert_eq!(
+        project_files(&directory.path().join("project")),
+        before_files
+    );
+    assert_eq!(
+        std::fs::read(session_root.join(MANIFEST)).unwrap(),
+        checkpoint
+    );
     drop(graph);
     let graph = crate::GraphForge::new(directory.path().join("project").to_str()).unwrap();
     let mut resumed = graph.resume_import_session(id).unwrap();
@@ -391,7 +441,7 @@ fn legacy_or_missing_journal_state_is_refused() {
     std::fs::remove_file(root.join(NAME)).unwrap();
     assert!(graph.resume_import_session(id).is_err());
     manifest.format_version = 1;
-    write_checkpoint(&root, &manifest, None).unwrap();
+    write_checkpoint(&root, &manifest, None, &mut false).unwrap();
     assert!(
         graph
             .resume_import_session(id)
@@ -447,4 +497,191 @@ fn corrupt_sequence_cannot_disguise_a_checkpointed_record_as_unflushed() {
     bytes[offset + 16..offset + 24].copy_from_slice(&u64::MAX.to_le_bytes());
     std::fs::write(root.join(NAME), bytes).unwrap();
     assert!(graph.resume_import_session(id).is_err());
+}
+
+fn assert_recovery_required(error: GfError) {
+    assert!(
+        error.to_string().contains("failed write or sync"),
+        "{error}"
+    );
+}
+
+fn project_files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    fn visit(
+        root: &Path,
+        directory: &Path,
+        files: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    ) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                visit(root, &entry.path(), files);
+            } else {
+                files.insert(
+                    entry.path().strip_prefix(root).unwrap().to_path_buf(),
+                    std::fs::read(entry.path()).unwrap(),
+                );
+            }
+        }
+    }
+    let mut files = std::collections::BTreeMap::new();
+    visit(root, root, &mut files);
+    files
+}
+
+#[test]
+fn source_registration_checkpoint_failure_preserves_only_possible_authority() {
+    for point in ["checkpoint_before_sync", "checkpoint_after_replace"] {
+        let (directory, _, graph) = fixture();
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        let id = session.session_uuid();
+        let root = session.root.clone();
+        let before = std::fs::read(root.join(MANIFEST)).unwrap();
+        inject(point);
+        let error = session
+            .append_arrow(BulkInputKind::Node, &[nodes(&[Uuid::now_v7()])])
+            .unwrap_err();
+        assert!(error.to_string().contains(point));
+        assert_recovery_required(session.checkpoint().unwrap_err());
+        let source = root.join("sources/00000000000000000000.arrow");
+        let published = point == "checkpoint_after_replace";
+        assert_eq!(source.exists(), published);
+        let checkpoint: SessionManifest =
+            serde_json::from_slice(&std::fs::read(root.join(MANIFEST)).unwrap()).unwrap();
+        assert_eq!(checkpoint.sources.len(), usize::from(published));
+        if !published {
+            assert_eq!(std::fs::read(root.join(MANIFEST)).unwrap(), before);
+        }
+        assert!(!std::fs::read_dir(&root).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+        drop(session);
+        drop(graph);
+        let graph = crate::GraphForge::new(directory.path().join("project").to_str()).unwrap();
+        let mut resumed = graph.resume_import_session(id).unwrap();
+        assert_eq!(resumed.status().1.files_accepted, u64::from(published));
+        if !published {
+            // Repeat a fresh definite-prepublication refusal. Cleanup keeps
+            // both source and preparation namespaces bounded on every attempt.
+            inject(point);
+            assert!(
+                resumed
+                    .append_arrow(BulkInputKind::Node, &[nodes(&[Uuid::now_v7()])])
+                    .is_err()
+            );
+            assert!(
+                std::fs::read_dir(root.join("sources"))
+                    .unwrap()
+                    .next()
+                    .is_none()
+            );
+            drop(resumed);
+            resumed = graph.resume_import_session(id).unwrap();
+            resumed
+                .append_arrow(BulkInputKind::Node, &[nodes(&[Uuid::now_v7()])])
+                .unwrap();
+        }
+        let progress = resumed.validate(&graph).unwrap();
+        assert_eq!(progress.rows_accepted, 1);
+        resumed.commit(&graph, None).unwrap();
+        assert_eq!(graph.node_count("Person").unwrap(), 1);
+    }
+}
+
+#[test]
+fn source_publication_failure_requires_fresh_reopen_before_cleanup() {
+    let (directory, graph, mut session) = staged_fixture();
+    let id = session.session_uuid();
+    let root = session.root.clone();
+    inject("source_after_replace");
+    assert!(
+        session
+            .append_arrow(BulkInputKind::Node, &[nodes(&[Uuid::now_v7()])])
+            .unwrap_err()
+            .to_string()
+            .contains("source_after_replace")
+    );
+    let files = project_files(&directory.path().join("project"));
+    assert_recovery_required(session.abort(&graph).unwrap_err());
+    assert_eq!(project_files(&directory.path().join("project")), files);
+    drop(graph);
+    let graph = crate::GraphForge::new(directory.path().join("project").to_str()).unwrap();
+    let resumed = graph.resume_import_session(id).unwrap();
+    assert_eq!(resumed.status().1.files_accepted, 1);
+    assert_eq!(std::fs::read_dir(root.join("sources")).unwrap().count(), 2);
+    resumed.abort(&graph).unwrap();
+    assert!(!root.join("sources").exists());
+}
+
+#[test]
+fn failed_prepublication_source_cleanup_retains_primary_error_and_requires_recovery() {
+    let (directory, _, graph) = fixture();
+    let mut session = graph
+        .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+        .unwrap();
+    let id = session.session_uuid();
+    let root = session.root.clone();
+    inject("checkpoint_before_sync");
+    inject("source_cleanup_before_unlink");
+    let error = session
+        .append_arrow(BulkInputKind::Node, &[nodes(&[Uuid::now_v7()])])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("checkpoint_before_sync"));
+    assert!(error.contains("source cleanup failed"));
+    assert!(error.contains("source_cleanup_before_unlink"));
+    assert_recovery_required(session.checkpoint().unwrap_err());
+    drop(session);
+    drop(graph);
+    let graph = crate::GraphForge::new(directory.path().join("project").to_str()).unwrap();
+    let resumed = graph.resume_import_session(id).unwrap();
+    assert_eq!(resumed.status().1.files_accepted, 0);
+    assert_eq!(std::fs::read_dir(root.join("sources")).unwrap().count(), 1);
+    resumed.abort(&graph).unwrap();
+    assert!(!root.join("sources").exists());
+}
+
+#[test]
+fn registration_sync_failure_cleans_unreferenced_sources_on_every_fresh_attempt() {
+    let (directory, _, graph) = fixture();
+    let mut session = graph
+        .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+        .unwrap();
+    let id = session.session_uuid();
+    let root = session.root.clone();
+    let checkpoint = std::fs::read(root.join(MANIFEST)).unwrap();
+    for _ in 0..3 {
+        inject("sync");
+        let error = session
+            .append_arrow(BulkInputKind::Node, &[nodes(&[Uuid::now_v7()])])
+            .unwrap_err();
+        assert!(error.to_string().contains("injected import journal sync"));
+        assert_recovery_required(session.checkpoint().unwrap_err());
+        assert!(
+            std::fs::read_dir(root.join("sources"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert_eq!(std::fs::read(root.join(MANIFEST)).unwrap(), checkpoint);
+        drop(session);
+        session = graph.resume_import_session(id).unwrap();
+        assert_eq!(session.status().1.files_accepted, 0);
+    }
+    drop(session);
+    drop(graph);
+    let graph = crate::GraphForge::new(directory.path().join("project").to_str()).unwrap();
+    let mut resumed = graph.resume_import_session(id).unwrap();
+    resumed
+        .append_arrow(BulkInputKind::Node, &[nodes(&[Uuid::now_v7()])])
+        .unwrap();
+    assert_eq!(resumed.validate(&graph).unwrap().rows_accepted, 1);
+    resumed.commit(&graph, None).unwrap();
+    assert_eq!(graph.node_count("Person").unwrap(), 1);
 }

@@ -592,20 +592,72 @@ impl GraphImportSession {
     pub fn operation_timings(&self) -> ImportOperationTimings {
         self.operation_timings
     }
-    fn publish_source(&self, temporary: &Path, destination: &Path) -> Result<(), GfError> {
-        journal::publish_source(temporary, destination, self.allocation_operation.as_ref())
+    fn publish_source(&mut self, temporary: &Path, destination: &Path) -> Result<(), GfError> {
+        self.journal.ensure_writable()?;
+        let result =
+            journal::publish_source(temporary, destination, self.allocation_operation.as_ref());
+        if result.is_err() {
+            self.journal.poison();
+        }
+        result
     }
 
     fn persist_manifest(&mut self) -> Result<(), GfError> {
-        self.journal.sync(self.allocation_operation.as_ref())?;
-        write_manifest_with_allocation(
+        self.persist_manifest_with_source_cleanup(None)
+    }
+
+    fn persist_manifest_with_source_cleanup(
+        &mut self,
+        unpublished_source: Option<&Path>,
+    ) -> Result<(), GfError> {
+        self.journal.ensure_writable()?;
+        if let Err(error) = self.journal.sync(self.allocation_operation.as_ref()) {
+            return Err(self.poison_checkpoint_failure(error, false, unpublished_source));
+        }
+        let mut publication_started = false;
+        let result = journal::write_checkpoint(
             &self.root,
             &self.manifest,
             self.allocation_operation.as_ref(),
-        )
+            &mut publication_started,
+        );
+        if let Err(error) = result {
+            return Err(self.poison_checkpoint_failure(
+                error,
+                publication_started,
+                unpublished_source,
+            ));
+        }
+        Ok(())
+    }
+
+    fn poison_checkpoint_failure(
+        &mut self,
+        error: GfError,
+        publication_started: bool,
+        unpublished_source: Option<&Path>,
+    ) -> GfError {
+        // Only the failing registration operation can supply its new source.
+        // A failed journal barrier has poisoned the writer, but this source is
+        // still absent from the prior checkpoint: cleaning it is completion of
+        // the failed operation, never admission of a new session mutation.
+        // Once replacement was attempted, the source may be authoritative.
+        let cleanup = if !publication_started {
+            unpublished_source
+                .map(|source| journal::cleanup_source(source, self.allocation_operation.as_ref()))
+                .transpose()
+        } else {
+            Ok(None)
+        };
+        self.journal.poison();
+        match cleanup {
+            Ok(_) => error,
+            Err(cleanup) => storage(format!("{error}; source cleanup failed: {cleanup}")),
+        }
     }
 
     fn persist_progress(&mut self, source_index: usize) -> Result<(), GfError> {
+        self.journal.ensure_writable()?;
         self.journal.append(
             &mut self.manifest,
             source_index,
@@ -621,12 +673,8 @@ impl GraphImportSession {
     }
 
     fn cleanup_source(&self, destination: &Path) -> Result<(), GfError> {
-        if fs::remove_file(destination).is_ok()
-            && let Some(allocation) = &self.allocation_operation
-        {
-            allocation.remove_file_at(destination)?;
-        }
-        Ok(())
+        self.journal.ensure_writable()?;
+        journal::cleanup_source(destination, self.allocation_operation.as_ref())
     }
 
     /// Durable identifier used for resume.
@@ -647,6 +695,7 @@ impl GraphImportSession {
         kind: BulkInputKind,
         batches: &[RecordBatch],
     ) -> Result<(), GfError> {
+        self.journal.ensure_writable()?;
         let _region = RegionScope::named("register_arrow");
         self.ensure_open()?;
         if batches.is_empty() {
@@ -694,7 +743,9 @@ impl GraphImportSession {
             rows,
         );
         if result.is_err() {
-            self.cleanup_source(&destination)?;
+            if self.journal.ensure_writable().is_ok() {
+                self.cleanup_source(&destination)?;
+            }
         } else {
             RegionScope::record_work("rows", rows);
         }
@@ -703,6 +754,7 @@ impl GraphImportSession {
 
     /// Register a local Parquet source by copying it into durable session ownership.
     pub fn register_parquet(&mut self, kind: BulkInputKind, source: &Path) -> Result<(), GfError> {
+        self.journal.ensure_writable()?;
         let _region = RegionScope::named("register_parquet");
         self.ensure_open()?;
         reject_unsafe_path(source)?;
@@ -756,7 +808,9 @@ impl GraphImportSession {
             0,
         );
         if result.is_err() {
-            self.cleanup_source(&destination)?;
+            if self.journal.ensure_writable().is_ok() {
+                self.cleanup_source(&destination)?;
+            }
         } else {
             RegionScope::record_work("bytes", bytes);
         }
@@ -765,6 +819,14 @@ impl GraphImportSession {
 
     /// Persist counters and source ordering without publishing graph state.
     pub fn checkpoint(&mut self) -> Result<ImportProgress, GfError> {
+        self.checkpoint_with_source_cleanup(None)
+    }
+
+    fn checkpoint_with_source_cleanup(
+        &mut self,
+        unpublished_source: Option<&Path>,
+    ) -> Result<ImportProgress, GfError> {
+        self.journal.ensure_writable()?;
         let _region = RegionScope::named("checkpoint");
         self.manifest.progress.elapsed_millis =
             self.manifest.progress.elapsed_millis.saturating_add(
@@ -772,7 +834,7 @@ impl GraphImportSession {
             );
         self.observed = Instant::now();
         self.manifest.updated_unix_millis = unix_millis()?;
-        self.persist_manifest()?;
+        self.persist_manifest_with_source_cleanup(unpublished_source)?;
         Ok(self.manifest.progress.clone())
     }
 
@@ -787,6 +849,7 @@ impl GraphImportSession {
         graph: &GraphForge,
         cancellation: Option<&CancellationToken>,
     ) -> Result<ImportProgress, GfError> {
+        self.journal.ensure_writable()?;
         let _region = RegionScope::named("stage+seal");
         self.operation_timings = ImportOperationTimings::default();
         self.ensure_open()?;
@@ -840,6 +903,7 @@ impl GraphImportSession {
         batch: &RecordBatch,
         cancellation: Option<&CancellationToken>,
     ) -> Result<(), GfError> {
+        self.journal.ensure_writable()?;
         let input_kind = self.manifest.sources[source_index].kind.input_kind();
         let mut batch_index = index;
         if cancellation.is_some_and(CancellationToken::is_cancelled) {
@@ -927,6 +991,7 @@ impl GraphImportSession {
         construction: &mut crate::GraphConstructionSession<'_>,
         cancellation: Option<&CancellationToken>,
     ) -> Result<ImportProgress, GfError> {
+        self.journal.ensure_writable()?;
         let _region = RegionScope::named("seal");
         self.persist_manifest()?;
         #[cfg(test)]
@@ -942,6 +1007,7 @@ impl GraphImportSession {
 
     /// Abort without changing CURRENT; removes staged sources or quarantines on cleanup failure.
     pub fn abort(mut self, graph: &GraphForge) -> Result<ImportProgress, GfError> {
+        self.journal.ensure_writable()?;
         if self.manifest.phase == ImportPhase::Committed {
             return Err(validation("committed import cannot be aborted"));
         }
@@ -977,6 +1043,7 @@ impl GraphImportSession {
         graph: &GraphForge,
         cancellation: Option<&CancellationToken>,
     ) -> Result<Uuid, GfError> {
+        self.journal.ensure_writable()?;
         let _region = RegionScope::named("commit");
         self.operation_timings = ImportOperationTimings::default();
         if self.manifest.phase != ImportPhase::Validated
@@ -1038,6 +1105,7 @@ impl GraphImportSession {
         &mut self,
         graph: &'a GraphForge,
     ) -> Result<crate::GraphConstructionSession<'a>, GfError> {
+        self.journal.ensure_writable()?;
         let _region = RegionScope::named("open_construction");
         let budgets = self.construction_budgets();
         let started = CallStart::now();
@@ -1062,6 +1130,7 @@ impl GraphImportSession {
         &mut self,
         progress: &crate::GraphConstructionProgress,
     ) -> Result<(), GfError> {
+        self.journal.ensure_writable()?;
         let application_io = graphforge_storage::ConstructionPhaseAttribution::from_construction(
             &progress.evidence,
         )?;
@@ -1126,6 +1195,8 @@ impl GraphImportSession {
         bytes: u64,
         rows: u64,
     ) -> Result<(), GfError> {
+        self.journal.ensure_writable()?;
+        let destination = self.root.join("sources").join(&name);
         let total = self.manifest.progress.bytes_accepted.saturating_add(bytes);
         if total > self.manifest.limits.max_source_bytes {
             return Err(limit("import max_source_bytes exceeded"));
@@ -1144,7 +1215,8 @@ impl GraphImportSession {
         self.manifest.progress.bytes_accepted = total;
         self.manifest.progress.files_accepted += 1;
         self.manifest.progress.files_pending += 1;
-        self.checkpoint().map(|_| ())
+        self.checkpoint_with_source_cleanup(Some(&destination))
+            .map(|_| ())
     }
 }
 
@@ -1460,7 +1532,7 @@ fn write_manifest_with_allocation(
     manifest: &SessionManifest,
     allocation: Option<&graphforge_storage::StorageAllocationOperation>,
 ) -> Result<(), GfError> {
-    journal::write_checkpoint(root, manifest, allocation)
+    journal::write_checkpoint(root, manifest, allocation, &mut false)
 }
 
 fn read_manifest(root: &Path) -> Result<SessionManifest, GfError> {
