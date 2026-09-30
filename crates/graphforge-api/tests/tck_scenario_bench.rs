@@ -235,7 +235,7 @@ fn scenario_keys_match_the_cucumber_runner() {
 /// the injection is announced for the driver to record.
 #[test]
 fn fault_injection_delays_the_named_scenario_inside_the_timed_region() {
-    const DELAY_MS: u64 = 250;
+    const DELAY_MS: u32 = 250;
     let delay = DELAY_MS.to_string();
     let run = run_child_with(
         "bench",
@@ -257,7 +257,7 @@ fn fault_injection_delays_the_named_scenario_inside_the_timed_region() {
         .as_f64()
         .expect("min_ns");
     assert!(
-        min_ns >= (DELAY_MS * 1_000_000) as f64,
+        min_ns >= f64::from(DELAY_MS) * 1_000_000.0,
         "every sample must include the injected delay, min_ns={min_ns}"
     );
 }
