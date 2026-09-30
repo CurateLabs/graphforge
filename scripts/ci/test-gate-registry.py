@@ -55,7 +55,9 @@ class GateRegistryTests(unittest.TestCase):
 
     def test_costly_qualification_cannot_bypass_esc_operator(self) -> None:
         mutated = copy.deepcopy(self.registry)
-        fly = next(item for item in mutated["workflows"] if item["id"] == "fly-tiny-qualification")
+        fly = next(
+            item for item in mutated["operator_gates"] if item["id"] == "fly-tiny-qualification"
+        )
         fly["command"] = "native-admission"
         self.rejected("bypasses the Python operator", mutated)
 
@@ -180,6 +182,53 @@ class GateRegistryTests(unittest.TestCase):
                 2,
             )
         run.assert_not_called()
+
+    def test_run_executes_python_commands_under_the_invoking_interpreter(self) -> None:
+        """A literal `python3` drops the lane's virtualenv and its installed wheel (#1671)."""
+        self.assertEqual(GATE.command_argv(self.registry, "concurrency-stress")[0], "python3")
+        completed = subprocess.CompletedProcess((), 0)
+        with patch.object(GATE.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(GATE.main(["run", "concurrency-stress", "--", "--seed", "1"]), 0)
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[0], sys.executable)
+        self.assertEqual(argv[1:3], ["scripts/ci/gate-registry.py", "matrix"])
+        self.assertEqual(argv[-2:], ["--seed", "1"])
+
+    def test_operator_gates_have_no_actions_wrapper(self) -> None:
+        """Operator gates run through the registry command, not an Actions handoff (#1671)."""
+        operators = self.registry["operator_gates"]
+        self.assertEqual(
+            {item["id"] for item in operators},
+            {
+                "fly-tiny-qualification",
+                "fly-tiny-recovery",
+                "native-local-admission",
+                "progressive-ladder",
+            },
+        )
+        for item in operators:
+            self.assertNotIn("path", item)
+            self.assertTrue(GATE.command_argv(self.registry, item["id"]))
+
+    def test_every_ci_script_test_is_invoked(self) -> None:
+        """A test no workflow or Makefile runs protects nothing (#1671)."""
+        invokers = [
+            *sorted((ROOT / ".github" / "workflows").glob("*.y*ml")),
+            ROOT / "Makefile",
+            ROOT / "benchmarks" / "Makefile",
+        ]
+        invoked = "\n".join(path.read_text(encoding="utf-8") for path in invokers)
+        directory = ROOT / "scripts" / "ci"
+        suites = sorted(path.name for path in directory.glob("test-*"))
+        self.assertGreater(len(suites), 50)
+        reached = {name for name in suites if f"scripts/ci/{name}" in invoked}
+        # A reached suite may run sibling suites as subprocesses or fixtures.
+        frontier = set(reached)
+        while frontier:
+            text = "\n".join((directory / name).read_text(encoding="utf-8") for name in frontier)
+            frontier = {name for name in suites if name not in reached and name in text}
+            reached |= frontier
+        self.assertEqual(sorted(set(suites) - reached), [], "CI script tests that nothing runs")
 
     def test_documented_fly_gate_id_renders(self) -> None:
         rendered = GATE.command_argv(self.registry, "fly-tiny-qualification")

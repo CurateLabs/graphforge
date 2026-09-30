@@ -10,7 +10,7 @@ parity-gate: install
 
 smoke-python: install
 	PYTHONPATH=harness uv run --locked python -m graphforge_bench.smoke
-	PYTHONPATH=harness uv run --locked python -m unittest discover -s tests -p 'test_*.py'
+	PYTHONPATH=harness uv run --locked python -m unittest discover -s tests -t . -p 'test_*.py'
 
 smoke-rust: install
 	cargo fmt --all -- --check

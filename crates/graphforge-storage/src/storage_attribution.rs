@@ -74,10 +74,13 @@ pub enum StorageIoPhase {
     /// Besides the ordinary Parquet reads of committed topology and property
     /// data, this row owns the whole lazy adjacency rebuild a query process
     /// can perform: the projected edge-table reads, the spill-run and CSR
-    /// shard reads and writes, the shard manifest reads, the serving-time
-    /// shard authentication on first row touch, and the rebuild's manifest
-    /// write. Construction publish and clean import build the same index as
-    /// ordinary construction work and scope themselves to
+    /// shard reads and writes, the per-CSR `*.csr.json` manifest reads and
+    /// writes, the serving-time shard authentication on first row touch, the
+    /// rebuild's `index_manifest.parquet` write, and every durability barrier
+    /// those writes complete. Spill-run read calls count reads issued to the
+    /// file beneath the merge buffer, not records decoded. Construction
+    /// publish, clean import and an explicit `index("adjacency")` build the
+    /// same index as construction work and scope themselves to
     /// [`StorageIoPhase::EncodeWritePostwriteAuthentication`], so this row
     /// stays zero for them. What this row does not claim: OS page-cache
     /// effects, and read-ahead or buffering the kernel performs beyond the

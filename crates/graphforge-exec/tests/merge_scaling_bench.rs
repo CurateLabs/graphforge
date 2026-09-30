@@ -70,13 +70,21 @@ async fn node_merge_topology_read_count_is_bounded_not_per_row() {
     let dir = TempDir::new().unwrap();
     seed_filler_nodes(dir.path(), 500);
 
+    let _io_capture = io_stats::CaptureScope::install();
+
     io_stats::reset();
     execute_merge_range(dir.path(), &rt, 0, 0).await;
-    let reads_for_one_row = io_stats::snapshot().node_full_reads;
+    let reads_for_one_row = io_stats::snapshot()
+        .expect("requested I/O statistics")
+        .node_full_reads;
+
+    let _io_capture = io_stats::CaptureScope::install();
 
     io_stats::reset();
     execute_merge_range(dir.path(), &rt, 1_000, 1_049).await;
-    let reads_for_fifty_rows = io_stats::snapshot().node_full_reads;
+    let reads_for_fifty_rows = io_stats::snapshot()
+        .expect("requested I/O statistics")
+        .node_full_reads;
 
     println!(
         "node_full_reads: {reads_for_one_row} for a 1-row MERGE, {reads_for_fifty_rows} for a 50-row MERGE"

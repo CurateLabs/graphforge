@@ -18,6 +18,7 @@ from graphforge_bench.progressive_provider_run import (
     validate_admitted_plan,
 )
 from graphforge_bench.progressive_run import ControllerError, Executables
+
 from tests.test_progressive_run import (
     benchexec as benchexec_fixture,
 )

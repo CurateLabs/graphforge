@@ -46,6 +46,54 @@ statistics in the scanned in-process benchmark surfaces (`crates/*/benches/`,
 when adding a reviewed legacy exception or completing a migration; stale entries
 fail closed.
 
+### CodSpeed walltime raw results are Divan evidence
+
+Maintainer decision on #1467 (2026-09-30): when a Divan target runs with
+`CODSPEED_ENV` set, the per-benchmark walltime `raw_results` JSON that the
+CodSpeed Divan integration writes
+(`$CODSPEED_CARGO_WORKSPACE_ROOT/target/codspeed/walltime/raw_results/divan/*.json`)
+is accepted as Divan evidence. Divan does the measuring; CodSpeed only
+serializes the samples Divan collected. This does not make CodSpeed a merge
+authority, and it does not admit any hand-written timer. Divan test mode
+(`--test`, or `cargo test` on a bench target) runs each benchmark once and
+writes no raw results, so it is never performance evidence.
+
+### openCypher TCK scenario benchmark
+
+`crates/graphforge-api/benches/tck_scenarios/` (#1653) is the in-process
+per-scenario measurement boundary for the TCK. It parses the same ephemeral
+normalized corpus as the Cucumber correctness run, and executes every step
+through the step functions registered on `GraphForgeWorld` with the same pooled
+fixture and clear-on-lease semantics. One timed iteration is a whole scenario,
+including `Given an empty graph`, so fixture reset cost stays visible. Each
+iteration's verdict is checked outside the timed region; a failing scenario
+aborts the run before Divan records its timing. Benchmarks are named
+`scenario[<feature>:<line>:<name>]`, the key `tests/tck/passing_baseline.txt`
+uses. The default is 10 samples of one scenario execution each.
+
+```bash
+cargo bench -p graphforge-api --bench tck_scenarios -- --test      # run every scenario once, no timing
+CODSPEED_ENV=local CODSPEED_CARGO_WORKSPACE_ROOT="$PWD" \
+  cargo bench -p graphforge-api --bench tck_scenarios               # whole corpus, raw results
+TCK_ONLY=Delete5 cargo bench -p graphforge-api --bench tck_scenarios # feature-file subset
+```
+
+`make bench-tck-scenarios` runs the whole corpus with the default sample count.
+
+The target has no thresholds, baseline or comparison of its own. Its raw
+results are the per-scenario input to `make tck-perf` (#1654), the single TCK
+threshold consumer: it also measures the whole-TCK Cucumber process under
+BenchExec for the aggregate, and compares only when every provenance key
+(host, build profile and toolchain, workload, sample counts) matches a
+host-local baseline. See `docs/reference/tck-compliance.md`. Divan orders
+scenarios by name, not Cucumber file order, and `cargo bench` builds with an
+optimizing profile while `cargo test` does not; both are provenance keys. The
+bench is not part of the PR CI Gate:
+`cargo test` and nextest do not run bench targets by default.
+`tests/tck_scenario_bench.rs` covers it there, running the benchmark in
+subprocesses: a passing scenario yields a keyed raw result, a failing step
+aborts without one, and test mode writes none.
+
 Validation:
 
 ```bash

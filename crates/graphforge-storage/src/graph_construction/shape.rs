@@ -2412,12 +2412,14 @@ fn retire_segments(
     );
     #[cfg(any(test, feature = "test-support"))]
     let digest_context = graphforge_core::hash_observation::operation::Context::capture();
+    let lifecycle_context = crate::lifecycle_io::CaptureContext::current();
     std::thread::scope(|scope| {
         for _ in 0..lanes {
             scope.spawn(|| {
                 use std::sync::atomic::Ordering;
                 #[cfg(any(test, feature = "test-support"))]
                 let _digest_guard = digest_context.attach();
+                let _lifecycle_capture = lifecycle_context.attach();
                 loop {
                     let index = super::lane_job(
                         next.fetch_add(1, Ordering::AcqRel),

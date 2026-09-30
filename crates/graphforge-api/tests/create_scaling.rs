@@ -31,11 +31,12 @@ fn scalar_count(forge: &GraphForge, query: &str) -> i64 {
 
 fn measure(clauses: usize) -> IoSnapshot {
     let forge = GraphForge::new(None).expect("in-memory forge");
+    let _io_capture = graphforge_storage::io_stats::CaptureScope::install();
     graphforge_storage::io_stats::reset();
     let result = forge
         .execute(&dependent_create_query(clauses))
         .expect("dependent CREATE executes");
-    let io = graphforge_storage::io_stats::snapshot();
+    let io = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
     let effects = result.side_effects.expect("write side effects");
     assert_eq!(effects.nodes_created, u64::try_from(clauses + 1).unwrap());
     assert_eq!(

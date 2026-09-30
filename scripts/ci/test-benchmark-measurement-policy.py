@@ -165,6 +165,36 @@ class BenchmarkMeasurementPolicyTests(unittest.TestCase):
         self._git("add", relative)
         self.assert_passes()
 
+    def test_threshold_consumer_in_the_cucumber_tree_is_rejected(self) -> None:
+        relative = "crates/graphforge-api/tests/bdd/timing.rs"
+        self._write(
+            relative,
+            "pub struct TimingPolicy {\n    pub per_scenario_multiplier: f64,\n}\n",
+        )
+        self._git("add", relative)
+        self.assert_rejected(
+            f"{relative}:2: threshold consumer (per_scenario_multiplier) in a "
+            "diagnostic-only timing tree"
+        )
+
+    def test_threshold_warning_emitter_in_the_cucumber_tree_is_rejected(self) -> None:
+        relative = "crates/graphforge-api/tests/bdd/main.rs"
+        self._write(relative, 'fn warn() { eprintln!("TCK PERF WARNING: {}", 1); }\n')
+        self._git("add", relative)
+        self.assert_rejected("threshold consumer (TCK PERF WARNING)")
+
+    def test_diagnostic_timer_in_the_cucumber_tree_passes(self) -> None:
+        relative = "crates/graphforge-api/tests/bdd/timing.rs"
+        self._write(relative, CUSTOM_TIMER_FIXTURE)
+        self._git("add", relative)
+        self.assert_passes()
+
+    def test_threshold_names_outside_the_cucumber_tree_are_not_this_guard(self) -> None:
+        relative = "crates/graphforge-api/tests/other.rs"
+        self._write(relative, "const absolute_slow_ms: f64 = 1.0;\n")
+        self._git("add", relative)
+        self.assert_passes()
+
 
 if __name__ == "__main__":
     unittest.main()

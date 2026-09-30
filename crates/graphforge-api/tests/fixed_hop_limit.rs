@@ -65,10 +65,11 @@ const ORDERED_TWO_HOP: &str =
     "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000";
 
 fn measured_identity_query(forge: &GraphForge, query: &str) -> (Vec<Vec<u8>>, DemandSnapshot) {
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     let (result, snapshot) = demand::capture(|| forge.execute(query));
     let result = result.unwrap();
-    let io = io_stats::snapshot();
+    let io = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:#?}");
     assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:#?}");
     let optimized_ordered = query == ORDERED_ONE_HOP || query == ORDERED_TWO_HOP;
@@ -951,6 +952,7 @@ fn run_measured(
     forge: &GraphForge,
     query: &str,
 ) -> (Duration, io_stats::IoSnapshot, DemandSnapshot) {
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     demand::reset();
     let started = Instant::now();
@@ -958,7 +960,11 @@ fn run_measured(
     let elapsed = started.elapsed();
     demand::disable();
     assert_eq!(result.stats.rows_produced, LIMIT as u64, "{query}");
-    (elapsed, io_stats::snapshot(), demand::snapshot())
+    (
+        elapsed,
+        io_stats::snapshot().expect("requested I/O statistics"),
+        demand::snapshot(),
+    )
 }
 
 #[derive(Debug)]
@@ -1110,12 +1116,13 @@ fn scale_fixture_uses_bounded_bulk_publications() {
     let forge = open_forge(dir.path());
     let plan = forge.explain(ORDERED_ONE_HOP).unwrap();
     assert!(plan.contains("OrderedOneHopExec"), "{plan}");
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     let (result, demand) = demand::capture(|| forge.execute(ORDERED_ONE_HOP));
     let result = result.unwrap();
     assert_eq!(result.stats.rows_produced, LIMIT as u64);
     assert!(demand.hops.values().all(|hop| hop.identity_read_calls > 0));
-    assert_projected_identity_io(&io_stats::snapshot());
+    assert_projected_identity_io(&io_stats::snapshot().expect("requested I/O statistics"));
 }
 
 fn run_scattered_destination_scale(
@@ -1130,6 +1137,7 @@ fn run_scattered_destination_scale(
     let dir = TempDir::new().unwrap();
     let edges = generate_scattered_destinations(dir.path(), nodes, 4, 1_500);
     let forge = open_forge(dir.path());
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     demand::reset();
     let result = forge.execute(ONE_HOP).unwrap();
@@ -1139,7 +1147,7 @@ fn run_scattered_destination_scale(
     values.sort_unstable();
     (
         values,
-        io_stats::snapshot(),
+        io_stats::snapshot().expect("requested I/O statistics"),
         demand::snapshot(),
         edges,
         u64::try_from(nodes.div_ceil(WRITE_WINDOW)).unwrap(),
@@ -1200,11 +1208,13 @@ fn run_ordered_projection_scale(nodes: usize) -> (Vec<Vec<u8>>, DemandSnapshot) 
         "{plan}"
     );
 
+    let _io_capture = io_stats::CaptureScope::install();
+
     io_stats::reset();
     demand::reset();
     let first = forge.execute(ORDERED_ONE_HOP).unwrap();
     demand::disable();
-    let io = io_stats::snapshot();
+    let io = io_stats::snapshot().expect("requested I/O statistics");
     let snapshot = demand::snapshot();
     let first_values = fixed_binary_values(&first, "id");
     assert_eq!(first_values.len(), LIMIT);
@@ -1250,13 +1260,14 @@ fn run_ordered_projection_scale(nodes: usize) -> (Vec<Vec<u8>>, DemandSnapshot) 
             .unwrap()
             .contains("EdgeCountExec")
     );
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     let (recount, recount_demand) = demand::capture(|| forge.execute(recount_query));
     assert_eq!(
         int64_values(&recount.unwrap(), "total"),
         vec![(nodes * FAN_OUT) as i64]
     );
-    let recount_io = io_stats::snapshot();
+    let recount_io = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(
         recount_io.edge_full_reads
             + recount_io.edge_filtered_reads
@@ -1509,6 +1520,7 @@ fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
         "{canonical_plan}"
     );
     assert!(!canonical_plan.contains("ExpandExec"), "{canonical_plan}");
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     let (canonical, canonical_demand) = demand::capture(|| forge.execute(ORDERED_TWO_HOP));
     let canonical = canonical.unwrap();
@@ -1518,7 +1530,7 @@ fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
         .take(LIMIT)
         .collect::<Vec<_>>();
     assert_eq!(fixed_binary_values(&canonical, "id"), expected);
-    assert_projected_identity_io(&io_stats::snapshot());
+    assert_projected_identity_io(&io_stats::snapshot().expect("requested I/O statistics"));
     assert_eq!(canonical_demand.hops.len(), 1, "{canonical_demand:#?}");
     assert!(canonical_demand.sorts.is_empty(), "{canonical_demand:#?}");
     let hop = canonical_demand.hops.values().next().unwrap();
@@ -1553,6 +1565,7 @@ fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
         ),
     ];
     for (query, multiplicity, identity_only, expects_v4_lookup) in cases {
+        let _io_capture = io_stats::CaptureScope::install();
         io_stats::reset();
         demand::reset();
         let result = forge.execute(query).unwrap();
@@ -1563,7 +1576,7 @@ fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
             .take(LIMIT)
             .collect::<Vec<_>>();
         assert_eq!(fixed_binary_values(&result, "id"), expected, "{query}");
-        let io = io_stats::snapshot();
+        let io = io_stats::snapshot().expect("requested I/O statistics");
         if identity_only {
             assert_eq!(
                 io.edge_full_reads + io.edge_filtered_reads,
@@ -1633,6 +1646,7 @@ fn optimized_v4_preserves_parallel_self_loop_and_demanded_property_semantics() {
         destination_plan.contains("projection=1"),
         "{destination_plan}"
     );
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     let destinations = forge.execute(destination_query).unwrap();
     let expected = [nodes[0], nodes[1], nodes[1], nodes[2]]
@@ -1640,7 +1654,7 @@ fn optimized_v4_preserves_parallel_self_loop_and_demanded_property_semantics() {
         .map(|uuid| uuid.as_bytes().to_vec())
         .collect::<Vec<_>>();
     assert_eq!(fixed_binary_values(&destinations, "id"), expected);
-    let io = io_stats::snapshot();
+    let io = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:#?}");
     assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:#?}");
 
@@ -1712,12 +1726,14 @@ fn limits_sweep_bounded_multi_hop_work_and_repartition() {
         );
         assert!(!plan.contains("RoundRobinBatch"), "{plan}");
 
+        let _io_capture = io_stats::CaptureScope::install();
+
         io_stats::reset();
         demand::reset();
         let result = forge.execute(&query).unwrap();
         demand::disable();
         assert_eq!(result.stats.rows_produced, limit);
-        let io = io_stats::snapshot();
+        let io = io_stats::snapshot().expect("requested I/O statistics");
         assert_indexed_limit_io(&io);
         assert_bounded_demand(&demand::snapshot(), 2, limit);
     }
@@ -1811,6 +1827,8 @@ fn fixed_hop_limit_preserves_skip_parameters_filters_and_blockers() {
     generate_graph(dir.path(), 64, 4, false);
     let forge = open_forge(dir.path());
 
+    let _io_capture = io_stats::CaptureScope::install();
+
     io_stats::reset();
     assert_eq!(
         forge
@@ -1820,7 +1838,7 @@ fn fixed_hop_limit_preserves_skip_parameters_filters_and_blockers() {
             .rows_produced,
         0
     );
-    let zero = io_stats::snapshot();
+    let zero = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(
         zero.edge_full_reads + zero.edge_filtered_reads,
         0,
@@ -1923,6 +1941,7 @@ fn physical_plan_only(explain: &str) -> &str {
 }
 
 fn livejournal_sample(forge: &GraphForge, query: &str, limit: usize) -> LiveJournalSample {
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     demand::reset();
     let started = Instant::now();
@@ -1934,7 +1953,7 @@ fn livejournal_sample(forge: &GraphForge, query: &str, limit: usize) -> LiveJour
     assert_eq!(result.stats.rows_produced, limit as u64);
     LiveJournalSample {
         elapsed,
-        io: io_stats::snapshot(),
+        io: io_stats::snapshot().expect("requested I/O statistics"),
         demand: demand::snapshot(),
     }
 }

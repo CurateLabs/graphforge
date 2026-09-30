@@ -415,12 +415,21 @@ struct CallStart {
 }
 
 impl CallStart {
-    fn now() -> Self {
-        Self {
-            wall: Instant::now(),
-            cpu: graphforge_storage::concurrency_attribution::process_cpu_time(),
-        }
+    fn now() -> Option<Self> {
+        graphforge_storage::lifecycle_io::is_active().then(|| {
+            #[cfg(test)]
+            CALL_TIMING_SAMPLES.with(|samples| samples.set(samples.get() + 1));
+            Self {
+                wall: Instant::now(),
+                cpu: graphforge_storage::concurrency_attribution::process_cpu_time(),
+            }
+        })
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CALL_TIMING_SAMPLES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Disjoint call timings from the latest import validation or commit invocation.
@@ -447,7 +456,7 @@ pub struct GraphImportSession {
     root: PathBuf,
     manifest: SessionManifest,
     observed: Instant,
-    operation_timings: ImportOperationTimings,
+    operation_timings: Option<ImportOperationTimings>,
 }
 
 impl GraphForge {
@@ -491,7 +500,7 @@ impl GraphForge {
             root,
             manifest,
             observed: Instant::now(),
-            operation_timings: ImportOperationTimings::default(),
+            operation_timings: None,
         })
     }
 
@@ -514,7 +523,7 @@ impl GraphForge {
             root,
             manifest,
             observed: Instant::now(),
-            operation_timings: ImportOperationTimings::default(),
+            operation_timings: None,
         })
     }
 
@@ -563,7 +572,7 @@ impl GraphForge {
                 root,
                 manifest,
                 observed: Instant::now(),
-                operation_timings: ImportOperationTimings::default(),
+                operation_timings: None,
             }
             .abort(self)?;
             cleaned = cleaned.saturating_add(1);
@@ -574,9 +583,10 @@ impl GraphForge {
 
 impl GraphImportSession {
     /// Timings from the latest validation or commit on this handle, including
-    /// calls that returned errors. Reading these observations performs no I/O.
+    /// calls that returned errors. `None` means no optional capture was requested.
+    /// Reading these observations performs no I/O.
     #[must_use]
-    pub fn operation_timings(&self) -> ImportOperationTimings {
+    pub fn operation_timings(&self) -> Option<ImportOperationTimings> {
         self.operation_timings
     }
     fn publish_source(&self, temporary: &Path, destination: &Path) -> Result<(), GfError> {
@@ -784,7 +794,8 @@ impl GraphImportSession {
         cancellation: Option<&CancellationToken>,
     ) -> Result<ImportProgress, GfError> {
         let _region = RegionScope::named("stage+seal");
-        self.operation_timings = ImportOperationTimings::default();
+        self.operation_timings =
+            graphforge_storage::lifecycle_io::is_active().then(ImportOperationTimings::default);
         self.ensure_open()?;
         self.ensure_base(graph)?;
         let mut construction = self.open_construction(graph)?;
@@ -836,9 +847,7 @@ impl GraphImportSession {
                                 construction.append_edges(&chunk_id, &batch)
                             }
                         };
-                        self.operation_timings
-                            .append
-                            .record(started, staged.is_err());
+                        self.record_append_timing(started, staged.is_err());
                         if staged.is_ok() {
                             RegionScope::record_work("rows", batch.num_rows() as u64);
                         }
@@ -885,6 +894,12 @@ impl GraphImportSession {
         self.seal_construction(&mut construction, cancellation)
     }
 
+    fn record_append_timing(&mut self, started: Option<CallStart>, failed: bool) {
+        if let (Some(timings), Some(started)) = (&mut self.operation_timings, started) {
+            timings.append.record(started, failed);
+        }
+    }
+
     fn seal_construction(
         &mut self,
         construction: &mut crate::GraphConstructionSession<'_>,
@@ -893,7 +908,9 @@ impl GraphImportSession {
         let _region = RegionScope::named("seal");
         let started = CallStart::now();
         let sealed = construction.validate_and_seal(cancellation);
-        self.operation_timings.seal.record(started, sealed.is_err());
+        if let (Some(timings), Some(started)) = (&mut self.operation_timings, started) {
+            timings.seal.record(started, sealed.is_err());
+        }
         sealed?;
         self.update_construction_progress(&construction.progress())?;
         self.manifest.phase = ImportPhase::Validated;
@@ -938,7 +955,8 @@ impl GraphImportSession {
         cancellation: Option<&CancellationToken>,
     ) -> Result<Uuid, GfError> {
         let _region = RegionScope::named("commit");
-        self.operation_timings = ImportOperationTimings::default();
+        self.operation_timings =
+            graphforge_storage::lifecycle_io::is_active().then(ImportOperationTimings::default);
         if self.manifest.phase != ImportPhase::Validated
             || self.manifest.progress.files_pending != 0
         {
@@ -952,9 +970,9 @@ impl GraphImportSession {
             Some(token) => construction.seal_and_publish_with_cancellation(token),
             None => construction.seal_and_publish(),
         };
-        self.operation_timings
-            .publish
-            .record(started, publication.is_err());
+        if let (Some(timings), Some(started)) = (&mut self.operation_timings, started) {
+            timings.publish.record(started, publication.is_err());
+        }
         drop(region);
         let publication = publication?;
         self.update_construction_progress(&construction.progress())?;
@@ -1003,15 +1021,15 @@ impl GraphImportSession {
         let started = CallStart::now();
         if let Some(session_uuid) = self.manifest.construction_session_uuid {
             let resumed = graph.resume_graph_construction(session_uuid, budgets);
-            self.operation_timings
-                .resume
-                .record(started, resumed.is_err());
+            if let (Some(timings), Some(started)) = (&mut self.operation_timings, started) {
+                timings.resume.record(started, resumed.is_err());
+            }
             return resumed;
         }
         let session = graph.begin_graph_construction(budgets);
-        self.operation_timings
-            .begin
-            .record(started, session.is_err());
+        if let (Some(timings), Some(started)) = (&mut self.operation_timings, started) {
+            timings.begin.record(started, session.is_err());
+        }
         let session = session?;
         self.manifest.construction_session_uuid = Some(session.session_uuid());
         self.persist_manifest()?;
@@ -1584,7 +1602,37 @@ mod tests {
     }
 
     #[test]
+    fn default_import_has_no_optional_timing_samples_and_preserves_progress() {
+        let (_directory, _project, graph) = fixture();
+        let before = CALL_TIMING_SAMPLES.with(std::cell::Cell::get);
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        let ids = [Uuid::now_v7()];
+        session
+            .append_arrow(BulkInputKind::Node, &[nodes(&ids)])
+            .unwrap();
+        let prior = *graph.current_generation_uuid.lock().unwrap();
+        let progress = session.validate(&graph).unwrap();
+        assert_eq!(progress.rows_accepted, 1);
+        assert!(session.operation_timings().is_none());
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert_eq!(
+            session.commit(&graph, Some(&cancelled)).unwrap_err().code(),
+            "GF_CANCELLED"
+        );
+        assert_eq!(*graph.current_generation_uuid.lock().unwrap(), prior);
+        assert!(session.operation_timings().is_none());
+        session.commit(&graph, None).unwrap();
+        assert_eq!(graph.node_count("Person").unwrap(), 1);
+        assert!(session.operation_timings().is_none());
+        assert_eq!(CALL_TIMING_SAMPLES.with(std::cell::Cell::get), before);
+    }
+
+    #[test]
     fn operation_timings_carry_process_cpu_for_every_measured_call() {
+        let _capture = graphforge_storage::lifecycle_io::CaptureScope::install();
         // Real import operations carry process CPU in ordinary receipts;
         // CPU/wall is effective cores, never an inferred serial fraction.
         let (_directory, _project, graph) = fixture();
@@ -1608,7 +1656,9 @@ mod tests {
             )
             .unwrap();
         session.validate(&graph).unwrap();
-        let timing = session.operation_timings();
+        let timing = session
+            .operation_timings()
+            .expect("requested import timings");
 
         for (name, call) in [
             ("begin", timing.begin),
@@ -1635,6 +1685,7 @@ mod tests {
 
     #[test]
     fn operation_timings_are_scoped_non_durable_and_preserve_cancelled_commit() {
+        let _capture = graphforge_storage::lifecycle_io::CaptureScope::install();
         let (_directory, _project, graph) = fixture();
         let mut session = graph
             .begin_import_session(
@@ -1657,7 +1708,9 @@ mod tests {
             .unwrap();
         let prior = *graph.current_generation_uuid.lock().unwrap();
         session.validate(&graph).unwrap();
-        let timing = session.operation_timings();
+        let timing = session
+            .operation_timings()
+            .expect("requested import timings");
         assert_eq!(
             (
                 timing.begin.calls,
@@ -1672,7 +1725,9 @@ mod tests {
             assert_eq!(call.errors, 0);
         }
         session.validate(&graph).unwrap();
-        let timing = session.operation_timings();
+        let timing = session
+            .operation_timings()
+            .expect("requested import timings");
         assert_eq!(
             (
                 timing.begin.calls,
@@ -1690,16 +1745,15 @@ mod tests {
         let session_uuid = session.session_uuid();
         drop(session);
         let mut session = graph.resume_import_session(session_uuid).unwrap();
-        assert_eq!(
-            session.operation_timings(),
-            ImportOperationTimings::default()
-        );
+        assert!(session.operation_timings().is_none());
         assert_eq!(fs::read(&manifest_path).unwrap(), persisted);
         let cancelled = CancellationToken::new();
         cancelled.cancel();
         let error = session.commit(&graph, Some(&cancelled)).unwrap_err();
         assert_eq!(error.code(), "GF_CANCELLED");
-        let timing = session.operation_timings();
+        let timing = session
+            .operation_timings()
+            .expect("requested import timings");
         assert_eq!(
             (
                 timing.resume.calls,
@@ -1712,7 +1766,9 @@ mod tests {
         assert_eq!(session.status().0, ImportPhase::Validated);
         assert_eq!(fs::read(&manifest_path).unwrap(), persisted);
         session.commit(&graph, None).unwrap();
-        let timing = session.operation_timings();
+        let timing = session
+            .operation_timings()
+            .expect("requested import timings");
         assert_eq!(
             (
                 timing.begin.calls,
@@ -1740,7 +1796,7 @@ mod tests {
         assert!(session.commit(&graph, None).is_err());
         assert_eq!(
             session.operation_timings(),
-            ImportOperationTimings::default()
+            Some(ImportOperationTimings::default())
         );
     }
 
@@ -1793,9 +1849,10 @@ mod tests {
             .iter()
             .any(|entry| entry.relative_path == "topology/runtime_entity_label_encoding.json");
         drop(graph);
-        let before = graphforge_storage::io_stats::snapshot();
+        let _io_capture = graphforge_storage::io_stats::CaptureScope::install();
+        let before = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
         let reopened = GraphForge::new(project.to_str()).unwrap();
-        let reads = graphforge_storage::io_stats::snapshot();
+        let reads = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
         assert_eq!(
             reads.node_full_reads - before.node_full_reads,
             0,
@@ -1834,10 +1891,14 @@ mod tests {
             None,
         )
         .unwrap();
-        let before = graphforge_storage::io_stats::snapshot();
+        let _io_capture = graphforge_storage::io_stats::CaptureScope::install();
+        let before = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
         let portable = GraphForge::new(imported.to_str()).unwrap();
         assert_eq!(
-            graphforge_storage::io_stats::snapshot().node_full_reads - before.node_full_reads,
+            graphforge_storage::io_stats::snapshot()
+                .expect("requested I/O statistics")
+                .node_full_reads
+                - before.node_full_reads,
             0
         );
         assert_eq!(portable.node_count("Person").unwrap(), 2);

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from graphforge_bench.progressive_run import Executables, assemble_rung_evidence
+
 from tests.test_progressive_run import authoritative_receipts, benchexec, graphforge
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +21,7 @@ def executables(base: Path) -> Executables:
 def write_host_bundle(output: Path, scale: int, plan: dict | None = None) -> None:
     from graphforge_bench.progressive_host_run import producer_digest
     from graphforge_bench.progressive_qualification import load_profiles, project
+
     from tests.test_progressive_host_run import host_capacity, host_result, passed_rung, sha256
 
     output.mkdir(parents=True, exist_ok=True)

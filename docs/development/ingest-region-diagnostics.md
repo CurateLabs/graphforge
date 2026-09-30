@@ -1,9 +1,33 @@
 # Ingest region diagnostics
 
-Stock `gf --json import-session ...` receipts include `region_diagnostics`.
-No test feature or custom engine build is needed. Rust callers can capture the
-same tree with `graphforge_api::concurrency_attribution::RegionCapture::start`;
-finish the capture after its nested guards have dropped. Captures are thread-bound,
+Stock `gf --json --diagnostics import-session ...` receipts include
+`region_diagnostics`. Ordinary commands leave optional lifecycle I/O, storage
+read counters, construction diagnostics, and region timing disabled; an absent
+observation is unavailable, never a measured zero. The explicit
+`storage-attribution` command and `--allocation-diagnostics` also request their
+collectors. Required receipt identities, allocation accounting, recovery
+authority, and durability barriers run independently of these observers.
+Import operation timings are also optional: their getter returns `None` without
+capture and commands omit them or return `null`. Required progress elapsed time
+and cancellation checks retain their normal clocks. Custom property-scan
+execution metrics are collected only when requested; an explicit execution-demand
+capture enables them while resource reservations and decoder limits remain active
+for every query.
+Storage APIs that explicitly return exact `PropertyOverlayMetrics` continue to
+collect the work promised by that return value. Ordinary facade scans and
+targeted reads use internal data-only paths; they do not allocate or update
+those optional read and authentication counters. Decoder admission, retained
+buffer ownership, and header bounds are still enforced on both paths.
+
+No test feature or custom engine build is needed. Rust callers request lifecycle
+and storage read measurements with `graphforge_api::LifecycleIoCapture::install()`.
+Keep that guard alive around the operation, and read
+`graphforge_api::lifecycle_io_snapshot()` before dropping it. The snapshot is
+`None` without a requested, valid capture. Each operation owns its counters;
+worker jobs and deferred readers carry the originating capture and nested guards
+restore the previous one. Region timing has its own explicit
+`graphforge_api::concurrency_attribution::RegionCapture::start` guard;
+finish it after its nested guards have dropped. Captures are thread-bound,
 non-durable, and contain static region names and counters, never source paths or
 row payloads. A later status call measures that call; it does not replay prior work.
 
@@ -21,8 +45,8 @@ most 256 distinct paths and 16 nesting levels; exceeding either invalidates it.
   process CPU execution, at Linux `/proc`'s 10 ms CPU resolution. It includes all
   process threads, including unrelated embedding-host work. Captured region
   paths describe the calling thread; worker scopes are not assigned duplicate
-  process CPU. The legacy process-global `snapshot()` also contains inclusive
-  totals and must not be summed across overlapping phases.
+  process CPU. The explicitly captured phase `snapshot()` also contains
+  inclusive totals and must not be summed across overlapping phases.
 - `thread_running_ns` measures calling-thread execution; `thread_runnable_ns`
   measures time waiting to run. They do not measure pool occupancy.
 - `thread_sleeping_ns` measures completed non-runnable sleep, including
@@ -164,7 +188,7 @@ The method and reviewed classification inputs are pinned by SHA-256:
 `digest-census.py` is
 `066813e6666c1a77782402cee7ae957b450ccd47a7e14874c4e47b996aabb0eb`;
 `digest-census-overrides.json` is
-`64d460016093dc4b7cbfbfbd4c8aafe76d032bf3f302ae20053314085227e58a`.
+`0790fa9b161182f53f84eb02ef529a251b0b00089f2e89b4bf47727cff29b705`.
 Run the parser and stale-review regression fixtures with
 `python3 scripts/development/test-digest-census.py`. Reviewed function bodies
 are pinned individually; changed inputs, added producers in the same function,
@@ -218,7 +242,7 @@ hash totals mix domains and cannot prove that bound.
 
 ## Written and hashed bytes and barriers
 
-Stock `gf --json import-session validate --session-uuid UUID` stages and seals
+Stock `gf --json --diagnostics import-session validate --session-uuid UUID` stages and seals
 sources. Its outcome and measured region are `stage+seal`; `validate` remains
 the CLI command. `status` uses the same outcome after sealing. The persisted
 `ImportPhase::Validated` state and its existing binding labels remain readable;

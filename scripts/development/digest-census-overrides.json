@@ -881,7 +881,7 @@
       "role": "contract_identity",
       "input_contract": "Domain plus node/edge counts and recorded shard bounds/digests define stable shard-set identity; does not hash shard payload here.",
       "function_bodies_sha256": [
-        "0c377240afaf2f185f7f47139a73a8589bf9bfab5c6c1a6ab0b2377049da6114"
+        "bc2fd560ef0f963e8fbf5ac8b14531ac54651e1c994b6cbe2171044f77901ab7"
       ]
     },
     {
@@ -1071,7 +1071,7 @@
       "role": "durable_artifact_or_trust_boundary",
       "input_contract": "Runtime catalog Parquet bytes are authenticated at construction parent admission.",
       "function_bodies_sha256": [
-        "9ce2f77be89e53f076c5e31c0654098121ef5426ce53494ae4c328fbbcec18fc"
+        "b5b6b65b97fc5d82b24a14cccb0de71dc193dd3046b0586fcbc6994581e2c03a"
       ]
     },
     {

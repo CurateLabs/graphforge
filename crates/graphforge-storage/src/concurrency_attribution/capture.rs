@@ -162,6 +162,7 @@ struct State {
     next_id: u64,
     invalid: bool,
     rows: BTreeMap<String, RegionRow>,
+    phases: BTreeMap<crate::StorageIoPhase, super::RegionConcurrency>,
     work: BTreeMap<String, BTreeMap<String, u64>>,
 }
 
@@ -220,6 +221,24 @@ impl Drop for RegionCapture {
     }
 }
 
+pub(super) fn phase_snapshot() -> Option<BTreeMap<crate::StorageIoPhase, super::RegionConcurrency>>
+{
+    ACTIVE.with(|active| {
+        let states = active.borrow();
+        let state = states.last()?.borrow();
+        (!state.invalid).then(|| state.phases.clone())
+    })
+}
+pub(super) fn reset_phases() {
+    ACTIVE.with(|active| {
+        if let Some(state) = active.borrow().last() {
+            state.borrow_mut().phases.clear();
+        }
+    });
+}
+#[cfg(any(test, feature = "test-support"))]
+thread_local! { pub(super) static SAMPLE_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+
 #[derive(Debug)]
 pub(super) struct CaptureRegion {
     state: Rc<RefCell<State>>,
@@ -228,6 +247,20 @@ pub(super) struct CaptureRegion {
 }
 
 impl CaptureRegion {
+    pub(super) fn record_phase(
+        &self,
+        phase: crate::StorageIoPhase,
+        region: super::RegionConcurrency,
+    ) {
+        let mut state = self.state.borrow_mut();
+        if !state.invalid {
+            state
+                .phases
+                .entry(phase)
+                .and_modify(|total| total.merge(&region))
+                .or_insert(region);
+        }
+    }
     pub(super) fn enter(name: &'static str) -> Option<Self> {
         ACTIVE.with(|active| {
             let state = active.borrow().last()?.clone();
@@ -333,6 +366,8 @@ struct Sample {
 
 impl Sample {
     fn now() -> Self {
+        #[cfg(any(test, feature = "test-support"))]
+        SAMPLE_COUNT.with(|count| count.set(count.get() + 1));
         let wall = Instant::now();
         let cpu = process_cpu_time().and_then(|d| u64::try_from(d.as_nanos()).ok());
         let scheduler = scheduler::sample();

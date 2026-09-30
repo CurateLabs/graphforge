@@ -614,7 +614,7 @@ fn require_capabilities(
     Ok(())
 }
 
-use graphforge_storage::resolve_existing_edge_property_owners;
+use graphforge_storage::resolve_existing_edge_property_owner_data;
 
 #[allow(clippy::too_many_lines)]
 fn build_validation_snapshot(
@@ -759,7 +759,7 @@ fn build_validation_snapshot(
             }
         }
     }
-    resolve_existing_edge_property_owners(
+    resolve_existing_edge_property_owner_data(
         &graph.property_inventory_for_session(),
         &mut routes.edges,
     )?;
@@ -1590,6 +1590,7 @@ mod tests {
         let same_request = uuid7(181);
         let endpoints = BTreeSet::from([existing, same_request]);
         let same_request_nodes = BTreeSet::from([same_request]);
+        let _io_capture = graphforge_storage::io_stats::CaptureScope::install();
         graphforge_storage::io_stats::reset();
         let mut writer =
             graphforge_storage::GraphWriter::open_at(directory.path(), OntologyMode::Strict, 2)
@@ -1601,7 +1602,7 @@ mod tests {
             &same_request_nodes,
         )
         .unwrap();
-        let io = graphforge_storage::io_stats::snapshot();
+        let io = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
         assert_eq!(io.node_full_reads, 0);
         assert_eq!(io.node_filtered_reads, 0);
 

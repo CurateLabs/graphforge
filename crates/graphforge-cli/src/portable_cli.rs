@@ -538,12 +538,15 @@ pub(crate) fn run_query(
             .execute_to_result_sink_with_evidence(cypher, &params, path, format, &options, None)?;
         if json {
             let snapshot = graphforge_api::lifecycle_io_snapshot();
-            let application_io = match &previous_io {
-                Some(earlier) => snapshot.since(earlier)?,
-                None => snapshot.clone(),
+            let application_io = match (&snapshot, &previous_io) {
+                (Some(snapshot), Some(earlier)) => Some(snapshot.since(earlier)?),
+                (Some(snapshot), None) => Some(snapshot.clone()),
+                _ => None,
             };
-            application_io.validate_for_qualification()?;
-            previous_io = Some(snapshot);
+            if let Some(application_io) = &application_io {
+                application_io.validate_for_qualification()?;
+            }
+            previous_io = snapshot;
             write_json(
                 &serde_json::json!({
                     "contract": "graphforge-result-sink/2",
@@ -642,7 +645,7 @@ pub(crate) fn run_import_session(
     json: bool,
     output: &mut dyn Write,
 ) -> Result<(), graphforge_api::GfError> {
-    if !json {
+    if !json || !graphforge_api::lifecycle_io_is_active() {
         return run_import_session_inner(graph, command, json, output);
     }
     let capture = graphforge_api::concurrency_attribution::RegionCapture::start("import_command");
@@ -716,7 +719,7 @@ fn run_import_session_inner(
                 session.session_uuid(),
                 "stage+seal",
                 &progress,
-                Some(session.operation_timings()),
+                session.operation_timings(),
                 json,
                 output,
             )

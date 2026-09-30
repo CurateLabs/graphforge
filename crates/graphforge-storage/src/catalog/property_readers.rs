@@ -96,12 +96,12 @@ pub(crate) fn visit_property_overlay_batched_projected<F>(
     batch_size: usize,
     selected_properties: Option<&std::collections::BTreeSet<String>>,
     mut visit: F,
-) -> Result<crate::PropertyOverlayMetrics, DataFusionError>
+) -> Result<Option<crate::PropertyOverlayMetrics>, DataFusionError>
 where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
 {
     if !dir.exists() {
-        return Ok(crate::PropertyOverlayMetrics::default());
+        return Ok(crate::lifecycle_io::is_active().then(crate::PropertyOverlayMetrics::default));
     }
     let kind = if is_edge {
         crate::property_overlay::PropertyRouteKind::Edge
@@ -124,7 +124,7 @@ where
     let mut rows = Vec::with_capacity(batch_size.max(1));
     let mut stopped = false;
     let metrics = inventory
-        .visit_route_projected(
+        .visit_route_projected_optional(
             kind,
             stem,
             scratch.path(),
@@ -302,11 +302,12 @@ where
     for route in routes {
         let mut rows = Vec::with_capacity(batch_size.max(1));
         inventory
-            .visit_route(
+            .visit_route_projected_optional(
                 crate::property_overlay::PropertyRouteKind::Node,
                 &route,
                 scratch.path(),
                 crate::property_overlay::PropertyOverlayLimits::default(),
+                None,
                 |mut row| {
                     if stopped {
                         return Ok(());

@@ -156,17 +156,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: checkpoint-fragments
+          path: checkpoint-fragments/
           key: checkpoint-transfer-${{ github.run_id }}-rust
           fail-on-cache-miss: true
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: checkpoint-fragments
+          path: checkpoint-fragments/
           key: checkpoint-transfer-${{ github.run_id }}-python
           fail-on-cache-miss: true
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: checkpoint-fragments
+          path: checkpoint-fragments/
           key: checkpoint-transfer-${{ github.run_id }}-node
           fail-on-cache-miss: true
       - name: Produce exact SHA-bound report

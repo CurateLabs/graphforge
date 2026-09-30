@@ -1273,17 +1273,48 @@ def main() -> None:
         # silently omits it when the running Node is older, and the toolchain then
         # fails with "Cannot find native binding", so pin the cross lane's build
         # host ahead of the executing lanes rather than letting it inherit them.
-        arm_node_version = re.search(r'node_version: "(\d+)"', arm_entry)
-        assert arm_node_version is not None, (
-            f"{workflow.name} must pin an explicit Node build host on the ARM64 cross lane"
-        )
-        assert int(arm_node_version.group(1)) >= 22, (
-            f"{workflow.name} ARM64 cross lane needs Node >= 22 for the "
-            "@napi-rs/cross-toolchain decompressor's native binding"
-        )
-        assert all("node_version:" not in entry for entry in entries if entry != arm_entry), (
-            f"{workflow.name} must leave the executing Node lanes on the default runtime"
-        )
+        # Every lane that uses the napi cross toolchain pins a Node >= 22 build
+        # host; every lane that executes its addon runs it on the Node 20
+        # `engines.node` floor, either by default or by switching back after
+        # the build (#1670).
+        for entry in entries:
+            build_node = re.search(r'^\s+node_version: "(\d+)"', entry, re.M)
+            runtime_node = re.search(r'^\s+runtime_node_version: "(\d+)"', entry, re.M)
+            if "--use-napi-cross" in entry:
+                assert build_node is not None and int(build_node.group(1)) >= 22, (
+                    f"{workflow.name} napi-cross lane needs Node >= 22 for the "
+                    "@napi-rs/cross-toolchain decompressor's native binding"
+                )
+            else:
+                assert build_node is None, (
+                    f"{workflow.name} pins a build Node on a lane without napi-cross"
+                )
+            if "execution_mode: native" in entry and build_node is not None:
+                assert runtime_node is not None and runtime_node.group(1) == "20", (
+                    f"{workflow.name} must execute every native addon on the Node 20 floor"
+                )
+            if runtime_node is not None:
+                assert "execution_mode: native" in entry and build_node is not None
+        assert workflow_text.count("node-version: ${{ matrix.runtime_node_version }}") == 1
+        assert "if: matrix.runtime_node_version != ''" in workflow_text
+        # Every Linux glibc addon declares the glibc 2.17 floor, and the
+        # fail-closed step reads it from the built addon.
+        for entry in entries:
+            if "-unknown-linux-gnu" in entry:
+                assert 'glibc_floor: "2.17"' in entry, (
+                    f"{workflow.name} Linux glibc lane must declare the 2.17 floor"
+                )
+            else:
+                assert "glibc_floor:" not in entry
+        assert "- name: Require the declared glibc floor" in workflow_text
+        assert "readelf --dyn-syms --wide" in workflow_text
+        floor_step = workflow_text.split("- name: Require the declared glibc floor", 1)[1]
+        floor_step = floor_step.split("\n      - name:", 1)[0]
+        assert "set -euo pipefail" in floor_step and "exit 1" in floor_step
+        assert "||" not in floor_step, f"{workflow.name} glibc floor check must fail closed"
+        assert workflow_text.index("- name: Require the declared glibc floor") < (
+            workflow_text.index("- name: Execute native parity and smoke contract")
+        ), f"{workflow.name} must check the glibc floor before executing the addon"
         assert "node-version: ${{ matrix.node_version || '20' }}" in workflow_text, (
             f"{workflow.name} must source the Node lane runtime from its matrix entry"
         )

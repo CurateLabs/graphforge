@@ -121,7 +121,7 @@ fn capture_rebase_field(
         graphforge_storage::PropertyRouteKind::Node
     };
     let inventory = graph.property_inventory_for_session();
-    let (rows, _) = graphforge_storage::read_authenticated_property_snapshots_for_inventory(
+    let rows = graphforge_storage::read_authenticated_property_snapshot_data_for_inventory(
         &inventory,
         kind,
         route,

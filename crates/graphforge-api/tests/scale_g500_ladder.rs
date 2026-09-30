@@ -1599,7 +1599,7 @@ fn ingest_subphase() -> &'static str {
 }
 
 fn storage_io_value() -> Value {
-    let io = graphforge_storage::io_stats::snapshot();
+    let io = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
     json!({
         "node_full_reads": io.node_full_reads,
         "node_full_rows": io.node_full_rows,
@@ -1631,15 +1631,26 @@ impl IngestHeartbeat {
                 handle: None,
             };
         };
+        Self::start_at(PathBuf::from(path), profile, rung, completed_rungs, steps)
+    }
+
+    fn start_at(
+        path: PathBuf,
+        profile: &ScaleProfile,
+        rung: &Rung,
+        completed_rungs: &[Value],
+        steps: &[Value],
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
-        let path = PathBuf::from(path);
         let profile_schema = profile.schema.clone();
         let rung_id = rung.id.clone();
         let scale = rung.scale;
         let completed_rungs = completed_rungs.to_vec();
         let steps = steps.to_vec();
+        let lifecycle_context = graphforge_storage::lifecycle_io::CaptureContext::current();
         let handle = thread::spawn(move || {
+            let _capture = lifecycle_context.attach();
             loop {
                 let value = json!({
                     "schema": EVIDENCE_SCHEMA,
@@ -1807,6 +1818,7 @@ fn run_rung(
         let ingest_started = Instant::now();
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
             .expect("open GraphForge for ingest");
+        let _io_capture = graphforge_storage::io_stats::CaptureScope::install();
         graphforge_storage::io_stats::reset();
         INGEST_CHUNK_INDEX.store(0, Ordering::Relaxed);
         INGEST_SUBPHASE.store(1, Ordering::Relaxed);
@@ -8033,6 +8045,33 @@ fn submitted_chunk_count(evidence: &graphforge_storage::GraphConstructionEvidenc
         .input_batches
         .checked_add(evidence.replayed_chunks)
         .expect("submitted construction chunk count overflow")
+}
+
+#[test]
+fn ingest_heartbeat_retains_requested_io_capture_on_its_worker() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("heartbeat.json");
+    let profile = load_profile();
+    let _capture = graphforge_storage::io_stats::CaptureScope::install();
+    let batch = RecordBatch::try_from_iter([(
+        "id",
+        Arc::new(UInt64Array::from(vec![1_u64])) as Arc<dyn Array>,
+    )])
+    .unwrap();
+    let mut staged = graphforge_storage::RewriteBatch::new();
+    staged
+        .stage(
+            &root.path().join("observed.parquet"),
+            batch.schema(),
+            &batch,
+        )
+        .unwrap();
+    staged.commit_at(root.path()).unwrap();
+    let heartbeat = IngestHeartbeat::start_at(path.clone(), &profile, &profile.rungs[0], &[], &[]);
+    heartbeat.stop();
+    let value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(value["run_state"], "ingest_heartbeat");
+    assert_eq!(value["storage_io"]["rewrite_commits"], 1);
 }
 
 #[test]

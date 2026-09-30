@@ -554,15 +554,51 @@ impl RewriteBatch {
             return Ok(());
         }
         self.commit_retained(&root_handle, &relative_destinations, allocation)
+            .map(|_| ())
     }
 
+    /// Commit a batch of retained, non-authoritative files only, returning the
+    /// directory barriers the install completed so the caller can attribute
+    /// them to its lifecycle phase (#1449).
+    ///
+    /// # Errors
+    /// Refuses any batch that would need a sealed or durable-rewrite path —
+    /// moves, pending routes, property windows or a reserved authority — so
+    /// the returned count always describes the barriers actually performed.
+    pub(crate) fn commit_retained_at_observed(
+        self,
+        project_root: &Path,
+        allocation: Option<&crate::StorageAllocationOperation>,
+    ) -> Result<u64, GfError> {
+        if !self.moves.is_empty()
+            || !self.pending_routes.is_empty()
+            || !self.property_windows.is_empty()
+        {
+            return Err(GfError::Storage(
+                "counted retained install requires non-authoritative files".into(),
+            ));
+        }
+        let (root_handle, relative_destinations) = admit_commit_root(project_root, &self.staged)?;
+        if relative_destinations
+            .iter()
+            .any(|relative| is_reserved_authority(relative))
+        {
+            return Err(GfError::Storage(
+                "reserved graph authority must commit through its sealed publication path".into(),
+            ));
+        }
+        self.commit_retained(&root_handle, &relative_destinations, allocation)
+    }
+
+    /// Install every staged file and return the directory barriers completed.
     fn commit_retained(
         self,
         root: &graphforge_filesystem::StableDirectory,
         destinations: &[PathBuf],
         allocation: Option<&crate::StorageAllocationOperation>,
-    ) -> Result<(), GfError> {
+    ) -> Result<u64, GfError> {
         let non_empty = !self.staged.is_empty();
+        let mut barriers = 0_u64;
         for ((temporary, destination), relative) in self.staged.into_iter().zip(destinations) {
             let (parent, target) = retained_parent(root, relative)?;
             let temporary_path = temporary.path();
@@ -594,11 +630,12 @@ impl RewriteBatch {
             parent
                 .sync()
                 .map_err(|error| GfError::Storage(error.to_string()))?;
+            barriers += 1;
         }
         if non_empty {
             crate::io_stats::record_rewrite_commit();
         }
-        Ok(())
+        Ok(barriers)
     }
 
     #[cfg(test)]
@@ -1176,6 +1213,8 @@ mod tests {
         first.stage(&path, Arc::clone(&schema), &initial).unwrap();
         first.commit_unsealed_for_test().unwrap();
 
+        let _io_capture = crate::io_stats::CaptureScope::install();
+
         crate::io_stats::reset();
         let (_, appended) = int_batch(&[900_001, 900_002, 900_003]);
         let mut rewrite = RewriteBatch::new();
@@ -1185,7 +1224,7 @@ mod tests {
         rewrite.commit_unsealed_for_test().unwrap();
 
         assert_eq!(existing, initial_values.len() as u64);
-        let io = crate::io_stats::snapshot();
+        let io = crate::io_stats::snapshot().expect("requested I/O statistics");
         assert_eq!(io.topology_rewrite_peak_batch_rows, ROW_GROUP_SIZE as u64);
         let values = read_values(&path);
         assert_eq!(&values[..initial_values.len()], initial_values.as_slice());

@@ -1,4 +1,4 @@
-.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-clean pre-push-preflight pre-push-fast clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-build-walltime codspeed-run bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal bench-m4-entry bench-adjacency-200m m4-entry-matrix-check durability-isolation-check native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
+.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-clean pre-push-preflight pre-push-fast clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-build-walltime codspeed-run bench-traversal bench-tck-scenarios tck-perf bench-fixed-hop-limit bench-fixed-hop-livejournal bench-m4-entry bench-adjacency-200m m4-entry-matrix-check durability-isolation-check native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -311,6 +311,12 @@ codspeed-run:  ## Run the CodSpeed benchmarks locally (requires the codspeed CLI
 
 bench-traversal:  ## Run the #767 traversal scaling Divan benchmarks (release, manual; see benchmarks/traversal_scaling.md)
 	cargo bench -p graphforge-exec --bench traversal_scaling -- --sample-count 5
+
+bench-tck-scenarios:  ## Run the #1653 per-scenario openCypher TCK Divan benchmark (manual; raw results under CODSPEED_ENV)
+	cargo bench -p graphforge-api --bench tck_scenarios
+
+tck-perf:  ## Host-local TCK performance run: BenchExec whole-TCK + Divan per-scenario, provenance-gated (#1654; manual, native Linux)
+	PYTHONPATH=$(CURDIR)/benchmarks/harness /usr/bin/python3 -m graphforge_bench.tck_perf run --repo-root $(CURDIR) $(TCK_PERF_ARGS)
 
 bench-merge-scaling:  ## Run the #1400 node MERGE scaling Divan benchmarks (release, manual)
 	cargo bench -p graphforge-exec --bench merge_scaling -- --sample-count 5

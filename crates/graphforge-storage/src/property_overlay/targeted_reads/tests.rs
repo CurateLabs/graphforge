@@ -425,17 +425,42 @@ fn targeted_reader_n_2n_4n_has_bounded_retention_and_exact_work() {
             );
             assert_eq!(selected.metrics.physical_rows, (rows * 2) as u64);
             assert_eq!(selected.metrics.decoder_peak_rows, 2);
-            // Each decoded row is charged for its individual limit, live
-            // decode admission, and peak evidence. Each retained target is
+            // Each decoded row is charged for its individual limit and live
+            // decode admission. Peak evidence reuses that admission charge. Each retained target is
             // charged when inserted and once by the independent test-only
             // final counter audit. Rescanning all retained rows for every
             // two-row batch exceeds this linear work ceiling.
             assert!(
-                charge_calls <= 3 * rows + 2 * targets.len(),
+                charge_calls <= 2 * rows + 2 * targets.len(),
                 "rows={rows} targets={} charge_calls={charge_calls}",
                 targets.len()
             );
             assert!(charge_calls >= rows, "counter must observe real row work");
+            let before = crate::lifecycle_io::observer_work();
+            SNAPSHOT_CHARGE_CALLS.with(|calls| calls.set(Some(0)));
+            let unobserved = read_property_targets(
+                &inventory,
+                PropertyRouteKind::Node,
+                "Person",
+                &targets,
+                None,
+                false,
+            )
+            .unwrap();
+            let unobserved_charges =
+                SNAPSHOT_CHARGE_CALLS.with(|calls| calls.replace(None).unwrap());
+            assert_eq!(unobserved.rows, selected.rows);
+            assert!(unobserved.unresolved.is_empty());
+            assert_eq!(unobserved.metrics, PropertyOverlayMetrics::default());
+            assert_eq!(crate::lifecycle_io::observer_work(), before);
+            assert!(
+                unobserved_charges <= 2 * rows + 2 * targets.len(),
+                "unobserved read repeats optional charges: {unobserved_charges}"
+            );
+            assert!(
+                unobserved_charges >= rows,
+                "resource admission remains active"
+            );
         }
     }
     assert_eq!(byte_deltas.len(), 2);

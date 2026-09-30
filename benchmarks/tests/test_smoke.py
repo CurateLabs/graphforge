@@ -8,6 +8,7 @@ import unittest
 
 from graphforge_bench.smoke import FIXTURE_DIRECTORIES, discover_fixtures, workspace_root
 from jsonschema import Draft202012Validator
+
 from tests.lifecycle_storage_fixture import retained_owners
 
 

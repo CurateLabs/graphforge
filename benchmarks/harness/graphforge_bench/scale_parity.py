@@ -297,7 +297,7 @@ def coverage_map() -> dict[str, str]:
             "graphforge_bench.scale_parity + progressive schemas"
         ),
         ".github/workflows/g500-certification.yml (retired)": (
-            ".github/workflows/progressive-ladder.yml + config/gate-registry.json"
+            "qualification-operator GATE=progressive-ladder + config/gate-registry.json"
         ),
     }
 

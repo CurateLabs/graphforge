@@ -167,6 +167,11 @@ assert_classification "$rust_only" \
   tests/release_workflows/atomic-recovery/workflow.feature release-workflow-feature
 # Unknown paths must fail closed toward full validation.
 assert_classification "$all" totally/unknown/path.xyz unknown-path
+# The Benchmark Harness Tests lane follows rust_tests (#1679); harness edits
+# must reach it.
+assert_classification "$all" benchmarks/tests/test_new_module.py benchmark-test
+assert_classification "$all" benchmarks/harness/graphforge_bench/smoke.py benchmark-harness
+assert_classification "$all" benchmarks/schemas/new-evidence.json benchmark-schema
 
 # Packaging-only Cargo metadata must not compile the workspace.
 perl -0pi -e 's/license = "MIT"/license = "Apache-2.0"/' "$fixture/Cargo.toml"

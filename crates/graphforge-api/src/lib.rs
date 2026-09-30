@@ -60,6 +60,10 @@ use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
 use graphforge_storage::ResolvedProjectGeneration;
 /// Non-durable lifecycle region diagnostics for stock callers.
 pub use graphforge_storage::concurrency_attribution;
+/// Explicit, thread-bound lifecycle I/O observation boundary.
+pub use graphforge_storage::lifecycle_io::CaptureScope as LifecycleIoCapture;
+/// Whether lifecycle I/O was explicitly requested on this thread.
+pub use graphforge_storage::lifecycle_io::is_active as lifecycle_io_is_active;
 pub use graphforge_storage::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkReceipt,
     GraphConstructionBudgets, GraphConstructionEvidence, GraphConstructionState,
@@ -634,7 +638,7 @@ pub struct GraphForge {
     /// Structural evidence for how the graph workspace was opened.
     graph_open_evidence: graphforge_storage::GraphFilesOpenEvidence,
     /// Per-phase application I/O this facade's own open performed (#1389).
-    open_io_attribution: graphforge_storage::LifecyclePhaseAttribution,
+    open_io_attribution: Option<graphforge_storage::LifecyclePhaseAttribution>,
     /// Safe recovery-on-open summary (cleanup, deferral, or checkpoint skip).
     project_open_recovery: graphforge_storage::ProjectOpenRecoveryEvidence,
     /// Keeps an in-memory instance's temp directory alive for the engine's life.
@@ -892,8 +896,9 @@ impl GraphForge {
                 _owner: workspace,
             })),
             graph_open_evidence,
-            open_io_attribution: graphforge_storage::lifecycle_io_snapshot()
-                .since(&open_io_before)?,
+            open_io_attribution: graphforge_storage::lifecycle_io::snapshot_since(
+                open_io_before.as_ref(),
+            )?,
             project_open_recovery,
             tempdir: Some(Arc::new(tmp)),
             research_materialization: None,
@@ -920,16 +925,16 @@ impl GraphForge {
         &self.graph_open_evidence
     }
 
-    /// Per-phase application I/O performed by this facade's own open.
+    /// Requested per-phase I/O for this facade's own open, or unavailable.
     ///
-    /// The document is the same shape the construction path already emits, so
-    /// the analysis written against construction attribution reads it without
-    /// new tooling. Process-global counters back it, so a facade opened
-    /// concurrently with unrelated storage work over-reports; the benchmark
-    /// ladder opens one project per process.
+    /// Install [`LifecycleIoCapture`] before open to collect this observation.
+    /// Captures route to one operation and its explicitly attached workers.
+    /// Starting a capture after open does not recover retrospective measurements.
     #[must_use]
-    pub const fn open_io_attribution(&self) -> &graphforge_storage::LifecyclePhaseAttribution {
-        &self.open_io_attribution
+    pub const fn open_io_attribution(
+        &self,
+    ) -> Option<&graphforge_storage::LifecyclePhaseAttribution> {
+        self.open_io_attribution.as_ref()
     }
 
     /// Safe recovery-on-open summary for this facade instance.
@@ -968,7 +973,7 @@ impl GraphForge {
         // Report resolution and recovery-on-open alongside hydration: they are
         // all work an open pays before the first query can run.
         graph.open_io_attribution =
-            graphforge_storage::lifecycle_io_snapshot().since(&open_io_before)?;
+            graphforge_storage::lifecycle_io::snapshot_since(open_io_before.as_ref())?;
         Ok(graph)
     }
 
@@ -1135,8 +1140,9 @@ impl GraphForge {
                 _owner: workspace,
             })),
             graph_open_evidence,
-            open_io_attribution: graphforge_storage::lifecycle_io_snapshot()
-                .since(&open_io_before)?,
+            open_io_attribution: graphforge_storage::lifecycle_io::snapshot_since(
+                open_io_before.as_ref(),
+            )?,
             project_open_recovery,
             tempdir: None,
             research_materialization: None,

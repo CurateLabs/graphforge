@@ -10,6 +10,7 @@ from graphforge_bench.esc_readiness import (
     esc_readiness_status,
 )
 from graphforge_bench.progressive_esc import FLY_TOKEN_ENV, SPEND_AUTHORIZATION_ENV
+
 from tests.test_progressive_provider_attempt import authorization_document
 
 

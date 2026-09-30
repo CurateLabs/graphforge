@@ -37,6 +37,7 @@ struct EncodingJob {
     batch: RecordBatch,
     #[cfg(any(test, feature = "test-support"))]
     digest_context: graphforge_core::hash_observation::operation::Context,
+    lifecycle_context: crate::lifecycle_io::CaptureContext,
 }
 
 struct Pool {
@@ -68,6 +69,7 @@ impl Pool {
                         };
                         #[cfg(any(test, feature = "test-support"))]
                         let _digest_guard = job.digest_context.attach();
+                        let _lifecycle_capture = job.lifecycle_context.attach();
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             compress(&job.batch, &stop)
                         }))
@@ -96,6 +98,7 @@ impl Pool {
                 batch,
                 #[cfg(any(test, feature = "test-support"))]
                 digest_context: graphforge_core::hash_observation::operation::Context::capture(),
+                lifecycle_context: crate::lifecycle_io::CaptureContext::current(),
             })
             .map_err(storage)
     }
