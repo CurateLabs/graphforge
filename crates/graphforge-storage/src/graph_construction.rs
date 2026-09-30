@@ -378,11 +378,7 @@ fn compact_parent_inventory(
     })?;
     let inventory = crate::graph_files::inventory_from_entries_with_version(
         entries,
-        if root.format_version == crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION {
-            crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
-        } else {
-            crate::GRAPH_FILES_RECORD_VERSION
-        },
+        crate::graph_files::expanded_version_for_root(root.format_version)?,
     )?;
     Ok((
         Some(inventory),

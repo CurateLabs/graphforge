@@ -10,7 +10,7 @@ bindings=false
 agent_skills=false
 pulumi=false
 terraform=false
-bazel=false
+rust_tests=false
 epistemic_contract=false
 knowledge_contract=false
 non_cypher_surface=false
@@ -22,7 +22,7 @@ emit() {
   printf 'agent_skills=%s\n' "$agent_skills"
   printf 'pulumi=%s\n' "$pulumi"
   printf 'terraform=%s\n' "$terraform"
-  printf 'bazel=%s\n' "$bazel"
+  printf 'rust_tests=%s\n' "$rust_tests"
   printf 'epistemic_contract=%s\n' "$epistemic_contract"
   printf 'knowledge_contract=%s\n' "$knowledge_contract"
   printf 'non_cypher_surface=%s\n' "$non_cypher_surface"
@@ -35,14 +35,14 @@ enable_all() {
   agent_skills=true
   pulumi=true
   terraform=true
-  bazel=true
+  rust_tests=true
   epistemic_contract=true
   knowledge_contract=true
   non_cypher_surface=true
 }
 
 # Paths that do not affect CI Gate suites. Anything else unmatched must
-# fail closed via enable_all so Bazel-mapped test data cannot merge untested.
+# fail closed via enable_all so Rust test data cannot merge untested.
 is_inert_path() {
   case "$1" in
     *.md | *.mdx | *.txt | \
@@ -152,16 +152,20 @@ while IFS= read -r -d '' path; do
       if ! manifest_is_metadata_only "$path"; then
         rust=true
         bindings=true
-        bazel=true
+        rust_tests=true
       fi
       ;;
 
     Cargo.lock | rust-toolchain.toml | .cargo/* | fuzz/*)
       rust=true
       bindings=true
-      bazel=true
+      rust_tests=true
       ;;
 
+    # Bazel build descriptions feed no CI Gate lane: Cargo is the only build
+    # description the gate compiles (ADR 0048). They stay in the tree until
+    # #1646 deletes them. The Bazel scripts and docs fall through to the
+    # ordinary Python and documentation rules below.
     MODULE.bazel | MODULE.bazel.lock | BUILD.bazel | .bazelrc | .bazelversion | \
       cargo-bazel-lock.json | tools/bazel/* | tools/bazel/**/* | \
       platforms/BUILD.bazel | \
@@ -170,19 +174,7 @@ while IFS= read -r -d '' path; do
       tests/features/BUILD.bazel | tests/tck/BUILD.bazel | \
       tests/release_workflows/BUILD.bazel | \
       examples/agent_grounding/BUILD.bazel | \
-      docs/development/bazel-migration.md | \
-      scripts/ci/cargo-bazel-drift-check.py | \
-      scripts/ci/test-cargo-bazel-drift-check.py | \
-      scripts/ci/assemble_bazel_binding_packages.py | \
-      scripts/ci/test-assemble-bazel-binding-packages.py | \
-      scripts/ci/bazel-migration-ledger-check.py | \
-      scripts/ci/test-bazel-migration-ledger-check.py | \
-      scripts/ci/cargo-bazel-parity-check.py | \
-      scripts/ci/test-cargo-bazel-parity-check.py | \
-      scripts/ci/bazel-cache-perf.py | \
-      scripts/ci/test-bazel-cache-perf.py | \
       scripts/ci/BUILD.bazel)
-      bazel=true
       ;;
 
     tests/features/api/* | tests/features/api/**/* | \
@@ -193,15 +185,15 @@ while IFS= read -r -d '' path; do
     tests/features/node/* | tests/features/node/**/*)
       ;;
 
-    # Bazel-mapped hermetic crate test data must win over the binding crate
-    # globs below. Without this ordering, e.g. graphforge-api fixtures only
-    # enable bindings and skip the authoritative Rust/Bazel suite.
+    # Crate test data must win over the binding crate globs below. Without
+    # this ordering, e.g. graphforge-api fixtures only enable bindings and
+    # skip the Rust test suite.
     crates/*/tests/*goldens/* | crates/*/tests/*goldens/**/* | \
       crates/*/tests/**/*.snap | \
       crates/*/tests/fixtures/* | crates/*/tests/fixtures/**/* | \
       crates/*/tests/corpus/* | crates/*/tests/corpus/**/*)
       rust=true
-      bazel=true
+      rust_tests=true
       case "$path" in
         crates/graphforge-api/* | crates/graphforge-bindings-py/* | \
           crates/graphforge-bindings-node/*)
@@ -305,7 +297,7 @@ while IFS= read -r -d '' path; do
       terraform=true
       ;;
 
-    # Bazel-mapped hermetic test data outside binding crate globs (crate
+    # Rust test data outside the binding crate globs (crate
     # goldens/fixtures/corpus/snaps are classified earlier so they win over
     # crates/graphforge-api|bindings-* globs).
     tests/tck/* | tests/tck/**/* | \
@@ -313,12 +305,12 @@ while IFS= read -r -d '' path; do
       docs/contracts/examples/* | docs/contracts/examples/**/* | \
       docs/reference/* | docs/reference/**/*)
       rust=true
-      bazel=true
+      rust_tests=true
       ;;
 
     examples/agent_grounding/* | examples/agent_grounding/**/*)
       rust=true
-      bazel=true
+      rust_tests=true
       bindings=true
       ;;
 
@@ -331,10 +323,11 @@ while IFS= read -r -d '' path; do
   esac
 done <"$changed_files"
 
-# After #4 cutover, Bazel is the authoritative Rust compile/test path under
-# CI Gate. Any Rust-classified change must also enable the Bazel job.
+# rust_tests runs the full Cargo test suite (nextest, custom harnesses, and
+# doctests). Every Rust-classified change runs it; test data above can enable
+# it without enabling the rest of the Rust lanes.
 if [[ "$rust" == "true" ]]; then
-  bazel=true
+  rust_tests=true
 fi
 
 emit

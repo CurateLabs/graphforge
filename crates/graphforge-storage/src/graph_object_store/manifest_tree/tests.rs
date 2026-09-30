@@ -16,6 +16,25 @@ use crate::graph_object_store::read_graph_object_by_digest;
 use crate::graph_object_store::verify_graph_object;
 
 #[test]
+fn legacy_compact_roots_are_refused_without_publication_upgrade() {
+    let container = tempfile::tempdir().unwrap();
+    let lease = begin_graph_object_publication(container.path()).unwrap();
+    for version in [2, 4] {
+        let legacy = crate::GraphFilesRootV2 {
+            format: crate::GRAPH_FILES_V2_FORMAT.into(),
+            format_version: version,
+            root_node_sha256: "0".repeat(64),
+            logical_file_count: 0,
+            logical_byte_length: 0,
+        };
+        assert!(
+            GraphManifestState::open(&lease, legacy, crate::GraphManifestLimits::default())
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn migrates_v1_tree_once_and_reopens_from_compact_root() {
     let container = tempfile::tempdir().unwrap();
     let graph = tempfile::tempdir().unwrap();
@@ -27,7 +46,7 @@ fn migrates_v1_tree_once_and_reopens_from_compact_root() {
     .unwrap();
     let (inventory, _) = crate::capture_graph_files(graph.path()).unwrap();
     let lease = begin_graph_object_publication(container.path()).unwrap();
-    let (root, evidence) = migrate_graph_files_v1_to_v2(&lease, graph.path(), &inventory).unwrap();
+    let (root, evidence) = compact_graph_files(&lease, graph.path(), &inventory).unwrap();
     assert_eq!(evidence.payload_objects, 1);
     assert_eq!(evidence.payload_bytes_hashed, 4);
     let (files, _) =
@@ -40,7 +59,7 @@ fn migrates_v1_tree_once_and_reopens_from_compact_root() {
 
 #[cfg(unix)]
 #[test]
-fn migrates_windows_authored_v1_path_into_canonical_v2_manifest() {
+fn compacts_windows_authored_current_inventory_into_canonical_manifest() {
     let container = tempfile::tempdir().unwrap();
     let graph = tempfile::tempdir().unwrap();
     let source = graph.path().join("topology/nodes.parquet");
@@ -48,8 +67,9 @@ fn migrates_windows_authored_v1_path_into_canonical_v2_manifest() {
     fs::write(&source, b"nodes").unwrap();
     let inventory = crate::GraphFilesInventory {
         format: "graphforge-graph-files".into(),
-        format_version: 1,
+        format_version: crate::GRAPH_FILES_CHECKSUM_RECORD_VERSION,
         files: vec![crate::GraphFileEntry {
+            content_xxh64: crate::corruption_checksum::checksum(b"nodes"),
             relative_path: "topology\\nodes.parquet".into(),
             byte_length: 5,
             content_sha256: hex_digest(Sha256::digest(b"nodes").into()),
@@ -59,7 +79,7 @@ fn migrates_windows_authored_v1_path_into_canonical_v2_manifest() {
         total_byte_length: 5,
     };
     let lease = begin_graph_object_publication(container.path()).unwrap();
-    let (root, _) = migrate_graph_files_v1_to_v2(&lease, graph.path(), &inventory).unwrap();
+    let (root, _) = compact_graph_files(&lease, graph.path(), &inventory).unwrap();
     let (files, _) =
         crate::resolve_graph_manifest(&root, crate::GraphManifestLimits::default(), |digest| {
             read_graph_object_by_digest(container.path(), digest, 1024 * 1024)
@@ -92,7 +112,7 @@ fn migration_rejects_noncanonical_v1_before_installing_objects() {
     for inventory in invalid {
         let container = tempfile::tempdir().unwrap();
         let lease = begin_graph_object_publication(container.path()).unwrap();
-        assert!(migrate_graph_files_v1_to_v2(&lease, graph.path(), &inventory,).is_err());
+        assert!(compact_graph_files(&lease, graph.path(), &inventory,).is_err());
         let digest_root = container.path().join(GRAPH_OBJECTS_DIR).join(SHA256_DIR);
         assert_eq!(
             fs::read_dir(digest_root)

@@ -712,7 +712,7 @@ mod tests {
         bytes[0] ^= 1;
         std::fs::write(&object, bytes).unwrap();
         let error = GraphForge::new(Some(path)).unwrap_err();
-        assert!(error.to_string().contains("digest"), "{error}");
+        assert!(error.to_string().contains("XXH64 checksum"), "{error}");
     }
 
     #[test]

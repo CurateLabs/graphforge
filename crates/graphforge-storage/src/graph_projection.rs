@@ -42,10 +42,11 @@ impl TransformRoutes {
         inventory: crate::GraphFilesInventory,
     ) -> Result<Self, GfError> {
         let table = match inventory.format_version {
-            crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION => Some(
+            crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION => Some(
                 crate::graph_files::authenticate_route_table(root, &inventory)?,
             ),
-            crate::graph_files::GRAPH_FILES_RECORD_VERSION => None,
+
+            crate::graph_files::GRAPH_FILES_CHECKSUM_RECORD_VERSION => None,
             _ => {
                 return Err(validation(
                     "graph transform requires an expanded graph inventory",

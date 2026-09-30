@@ -46,10 +46,10 @@ pub(super) fn stage_optional_graph_tree(
         participant.capability_id == crate::GRAPH_CAPABILITY_ID
             && participant.record_family_id == "snapshot"
     });
-    if files_participant.is_some() && snapshot_participant.is_some() {
+    if snapshot_participant.is_some() {
         return Err(project_error(
             ProjectErrorCode::PublicationFailed,
-            "graph generation cannot declare both snapshot and files participants",
+            "unsupported legacy graph snapshot format; recreate the pre-v1 project",
         ));
     }
     let Some(files_participant) = files_participant else {
@@ -64,10 +64,10 @@ pub(super) fn stage_optional_graph_tree(
     if files_participant.capability_version != crate::GRAPH_CAPABILITY_VERSION
         || !matches!(
             files_participant.record_version,
-            crate::GRAPH_FILES_RECORD_VERSION
-                | crate::GRAPH_FILES_V2_RECORD_VERSION
-                | crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
-                | crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+            crate::graph_files::GRAPH_FILES_CHECKSUM_RECORD_VERSION
+                | crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
+                | crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+                | crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
         )
         || files_participant.encoding != ProjectParticipantEncoding::Json.extension()
     {

@@ -84,6 +84,7 @@ pub(super) fn install_graph_object_bytes_with_lease(
         Ok(0)
     })
     .and_then(|mut evidence| {
+        evidence.content_xxh64 = Some(crate::corruption_checksum::checksum(bytes));
         if evidence.attempted_install {
             evidence.write_bytes = expected_length;
             evidence.write_calls = u64::from(!bytes.is_empty());
@@ -127,6 +128,7 @@ pub(super) fn install_graph_object_file_with_lease(
     let read_calls = std::cell::Cell::new(0_u64);
     let write_calls = std::cell::Cell::new(0_u64);
     let file_sync_calls = std::cell::Cell::new(0_u64);
+    let payload_checksum = std::cell::Cell::new(None);
     let result =
         install_object(
             &lease.cas,
@@ -169,7 +171,8 @@ pub(super) fn install_graph_object_file_with_lease(
                             error,
                         )
                     })?;
-                let mut hasher = Sha256::new();
+                let mut hasher = crate::payload_digest::PayloadSha256::new();
+                let mut checksum = crate::corruption_checksum::Checksum::new();
                 let mut total = 0_u64;
                 let mut buffer = vec![0_u8; BUFFER_BYTES];
                 let copied =
@@ -206,6 +209,7 @@ pub(super) fn install_graph_object_file_with_lease(
                                 validation("object install write calls overflow")
                             })?);
                             hasher.update(&buffer[..read]);
+                            checksum.update(&buffer[..read]);
                             total = total
                                 .checked_add(u64::try_from(read).map_err(|_| {
                                     validation("object install read length exceeds u64")
@@ -219,6 +223,7 @@ pub(super) fn install_graph_object_file_with_lease(
                                 "graph object source digest or length changed during install",
                             ));
                         }
+                        payload_checksum.set(Some(checksum.finish()));
                         Ok(total)
                     })();
                 let released = input
@@ -263,6 +268,7 @@ pub(super) fn install_graph_object_file_with_lease(
         );
     result.and_then(|mut evidence| {
         if evidence.attempted_install {
+            evidence.content_xxh64 = payload_checksum.get();
             evidence.read_calls = evidence
                 .read_calls
                 .checked_add(read_calls.get())
@@ -379,6 +385,7 @@ where
         .checked_add(concurrent_io.calls)
         .ok_or_else(|| validation("graph object read call count overflows"))?;
     Ok(GraphObjectInstallEvidence {
+        content_xxh64: preseal_io.content_xxh64.or(concurrent_io.content_xxh64),
         bytes_hashed,
         bytes_installed: if installed { expected_length } else { 0 },
         reused_existing: !installed,
@@ -396,6 +403,7 @@ where
 fn reused_object_evidence(expected_length: u64, io: ReadIoEvidence) -> GraphObjectInstallEvidence {
     debug_assert_eq!(io.bytes, expected_length);
     GraphObjectInstallEvidence {
+        content_xxh64: io.content_xxh64,
         bytes_hashed: io.bytes,
         reused_existing: true,
         read_calls: io.calls,

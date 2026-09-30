@@ -84,7 +84,7 @@ fn legacy_raw_layout_admission_is_preserved_after_semantic_rollback() {
     let raw = crate::capture_graph_files(dir.path()).unwrap().0;
     assert_eq!(
         raw.format_version,
-        crate::graph_files::GRAPH_FILES_RECORD_VERSION
+        crate::graph_files::GRAPH_FILES_CHECKSUM_RECORD_VERSION
     );
     let projection =
         SemanticStorageBindings::project_legacy_unambiguous(&composition, dir.path()).unwrap();
@@ -96,7 +96,7 @@ fn legacy_raw_layout_admission_is_preserved_after_semantic_rollback() {
     let admitted = crate::capture_graph_files(dir.path()).unwrap().0;
     assert_eq!(
         admitted.format_version,
-        crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
+        crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
     );
     let table = crate::graph_files::authenticate_route_table(dir.path(), &admitted).unwrap();
     table
