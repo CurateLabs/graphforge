@@ -37,8 +37,8 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 import re
-import tomllib
 
+import tomllib
 from workflow_policy import (
     job_needs,
     job_required_run_scalars,
@@ -611,7 +611,8 @@ def validate_test_suite_sticky_negative_fixtures() -> None:
 """
 
     assert_test_suite_sticky(
-        RUST_TESTS_JOB, workflow_jobs(fixture(RUST_TESTS_JOB, RUST_TESTS_TARGET_KEY))[RUST_TESTS_JOB]
+        RUST_TESTS_JOB,
+        workflow_jobs(fixture(RUST_TESTS_JOB, RUST_TESTS_TARGET_KEY))[RUST_TESTS_JOB],
     )
     hostile = (
         ("probe", RUST_TESTS_TARGET_KEY, "target"),
