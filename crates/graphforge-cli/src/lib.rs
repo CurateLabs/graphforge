@@ -1198,15 +1198,7 @@ impl From<graphforge_api::MultiOntologyError> for CliRuntimeError {
 
 #[allow(clippy::too_many_lines)]
 fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
-    if cli.diagnostics && !cli.json {
-        return Err(
-            graphforge_api::GfError::Validation("diagnostics require --json".into()).into(),
-        );
-    }
-    let requested = cli.diagnostics
-        || cli.allocation_diagnostics
-        || matches!(cli.command.as_ref(), Some(Command::StorageAttribution(_)));
-    let _capture = requested.then(graphforge_api::LifecycleIoCapture::install);
+    let _capture = storage_attribution_cli::capture(&cli)?;
     let allocation = if cli.allocation_diagnostics {
         if !cli.json {
             return Err(graphforge_api::GfError::Validation(

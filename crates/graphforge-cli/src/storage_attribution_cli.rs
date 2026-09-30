@@ -9,6 +9,24 @@ use graphforge_api::GraphForge;
 
 use crate::open_cli_graph;
 
+/// Activate requested observations before opening the facade.
+pub(super) fn capture(
+    cli: &super::Cli,
+) -> Result<Option<graphforge_api::LifecycleIoCapture>, graphforge_api::GfError> {
+    if cli.diagnostics && !cli.json {
+        return Err(graphforge_api::GfError::Validation(
+            "diagnostics require --json".into(),
+        ));
+    }
+    let requested = cli.diagnostics
+        || cli.allocation_diagnostics
+        || matches!(
+            cli.command.as_ref(),
+            Some(super::Command::StorageAttribution(_))
+        );
+    Ok(requested.then(graphforge_api::LifecycleIoCapture::install))
+}
+
 #[derive(Args)]
 pub(crate) struct StorageAttributionArgs {
     /// Also emit the recovery-on-open evidence of this command's first open as
@@ -32,9 +50,9 @@ struct StorageAttributionCommandReceipt {
 
 /// Per-phase application I/O of the explicitly requested operation, if active.
 ///
-/// One `gf` invocation is one lifecycle phase, so the process-wide counters are
-/// explicitly captured phase's attribution (`gf query` splits them per statement so
-/// its receipts still sum to the process). The document carries no paths,
+/// One `gf` invocation requests one operation-owned capture; `gf query` splits
+/// its attribution per statement so
+/// its receipts still sum to the operation. The document carries no paths,
 /// identifiers, query text or graph content — only the closed phase inventory
 /// and its counters.
 pub(crate) fn lifecycle_application_io()
