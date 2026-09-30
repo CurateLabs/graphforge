@@ -1,7 +1,7 @@
 # Parser and explanation ownership in v0.6.0
 
 `graphforge-cypher` parses query text into the syntax-faithful AST. Its production
-Cargo and Bazel dependencies are only `graphforge-ast` and `graphforge-core`.
+Cargo dependencies are only `graphforge-ast` and `graphforge-core`.
 Parsing takes no project path, ontology, runtime catalog, IR, or DataFusion value.
 The lexer, parser, parse errors, AST, tokens, and spans remain available there.
 

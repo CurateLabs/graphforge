@@ -58,24 +58,20 @@ Consequences:
   treat a remembered pass/fail number as a contract.
 
 `make cargo-test`, `make test`, `make test-unit`, `make test-tck`,
-`make bazel-test`, and the `make pre-push` entrypoints use the launcher.
+and the `make pre-push` entrypoints use the launcher.
 Linux PR binding and Rust test lanes use the same setup. For direct commands:
 
 ```bash
 python3 scripts/test_environment.py -- cargo test -p graphforge-api --lib
 python3 scripts/test_environment.py -- uv run pytest tests/unit
 python3 scripts/test_environment.py -- pnpm --filter @curatelabs/graphforge test
-python3 scripts/test_environment.py -- bazelisk test --config=correctness //:ci_rust_tests
 ```
 
-The launcher exports `TMPDIR`, `TMP`, and `TEMP`. Its Bazel adapter also passes
-test environment flags, a native test root, and sandbox write permission.
+The launcher exports `TMPDIR`, `TMP`, and `TEMP`.
 The default root stays outside the checkout so temporary Git fixtures cannot
 accidentally discover the enclosing repository or use its shared build cache.
-This setup is shared by Cargo and Bazel; it does not depend on the build-system
-decision tracked in [#1618](https://github.com/CurateLabs/graphforge/issues/1618).
-Build/cache comparisons should use this same setup for both lanes and record
-the temporary root's filesystem along with the runner and cache state.
+Build/cache comparisons should use this same setup and record the temporary
+root's filesystem along with the runner and cache state.
 
 ### Runtime hydration workspaces
 
@@ -97,9 +93,31 @@ automatic crash-orphan reclamation is not provided. These directories are not
 commit authority. In-memory instances keep their process-owned ephemeral roots
 and continue to work on tmpfs.
 
-## Bazel
+## Rust test gate
 
-`bazelisk` must be on `PATH` (Bazel version pinned by `.bazelversion`).
-`make pre-push-fast` checks for it and runs the Cargo/Bazel drift check;
-`make bazel-test` runs the authoritative `//:ci_rust_tests` suite locally.
-See [bazel.md](bazel.md).
+Cargo with nextest is the CI compile/test authority
+([ADR 0048](../adr/0048-cargo-is-the-ci-build-authority.md)). The CI Gate Rust
+lane is the `rust-tests` job in `.github/workflows/test.yml`; these are its
+commands, run from the repository root:
+
+```bash
+python3 scripts/test_environment.py -- \
+  cargo nextest run --workspace --locked --no-fail-fast \
+  -E 'not ((package(graphforge-api) and binary(bdd)) or (package(graphforge-observability) and binary(disabled_allocations)))'
+python3 scripts/test_environment.py -- \
+  cargo test --workspace --locked --test bdd --test disabled_allocations
+python3 scripts/test_environment.py -- cargo test --workspace --locked --doc
+```
+
+The `-E` filterset is required: `bdd` (cucumber) and `disabled_allocations`
+are custom-harness targets that cannot answer nextest's `--list` protocol, so
+they run under `cargo test` instead. Install nextest with
+`cargo install --locked cargo-nextest` (CI pins the version in the job). The
+lane uses the dev/test profile, which keeps debug assertions and overflow
+checks on; do not substitute a release profile.
+
+Cargo discovers each crate's `tests/*.rs` files itself, so adding a Rust test
+file needs no build-description edit; at most a `[[test]]` entry in the crate's
+`Cargo.toml` when the target needs a custom harness or features. `scripts/ci/test-ci-storage-policy.py`
+pins the lane's commands, and `scripts/ci/property-overlay-contract.py` checks
+that its filterset still selects the property-overlay scale evidence.

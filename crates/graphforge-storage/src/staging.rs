@@ -494,6 +494,24 @@ impl RewriteBatch {
     /// parent is retained through no-follow directory capabilities. Canonical
     /// graph authorities remain reserved for their generation-sealed paths.
     pub fn commit_at(self, project_root: &Path) -> Result<(), GfError> {
+        self.commit_at_observed(project_root, None)
+    }
+
+    /// Observe simple retained installs used inside an exclusively owned import stage.
+    pub(crate) fn commit_at_observed(
+        self,
+        project_root: &Path,
+        allocation: Option<&crate::StorageAllocationOperation>,
+    ) -> Result<(), GfError> {
+        if allocation.is_some()
+            && (!self.moves.is_empty()
+                || !self.pending_routes.is_empty()
+                || !self.property_windows.is_empty())
+        {
+            return Err(GfError::Storage(
+                "observed retained install requires non-authoritative files".into(),
+            ));
+        }
         let (root_handle, relative_destinations) = admit_commit_root(project_root, &self.staged)?;
         if self
             .moves
@@ -530,13 +548,14 @@ impl RewriteBatch {
             crate::durable_rewrite::commit(self, project_root, false, false, false, None)?;
             return Ok(());
         }
-        self.commit_retained(&root_handle, &relative_destinations)
+        self.commit_retained(&root_handle, &relative_destinations, allocation)
     }
 
     fn commit_retained(
         self,
         root: &graphforge_filesystem::StableDirectory,
         destinations: &[PathBuf],
+        allocation: Option<&crate::StorageAllocationOperation>,
     ) -> Result<(), GfError> {
         let non_empty = !self.staged.is_empty();
         for ((temporary, destination), relative) in self.staged.into_iter().zip(destinations) {
@@ -552,10 +571,21 @@ impl RewriteBatch {
                 .ok_or_else(|| GfError::Storage("staged temporary has no child name".into()))?;
             let expected = graphforge_filesystem::file_identity(temporary.as_file())
                 .map_err(|error| GfError::Storage(error.to_string()))?;
+            if let Some(allocation) = allocation {
+                allocation.replace_file_at(temporary_path, temporary.as_file())?;
+            }
             run_before_retained_install_hook();
             parent
                 .replace_child(temporary_name, expected, &target)
                 .map_err(|error| GfError::Storage(error.to_string()))?;
+            if let Some(allocation) = allocation {
+                allocation.remove_file_at(destination.as_path())?;
+                allocation.remove_file_at(temporary_path)?;
+                let installed = parent
+                    .open_child_file(&target)
+                    .map_err(|error| GfError::Storage(error.to_string()))?;
+                allocation.replace_file_at(destination.as_path(), &installed)?;
+            }
             parent
                 .sync()
                 .map_err(|error| GfError::Storage(error.to_string()))?;

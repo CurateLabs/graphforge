@@ -21,16 +21,18 @@ suite → open a focused PR against `main`. For release operators, start at
 
 **Prerequisites:** Python 3.10+, Rust stable (pinned by `rust-toolchain.toml`),
 [uv](https://github.com/astral-sh/uv), maturin, pnpm for the Node binding, and
-[Bazelisk](https://github.com/bazelbuild/bazelisk) (`bazelisk` on `PATH`).
-CI Rust compile/test authority is Bazel — start with [bazel.md](bazel.md).
+[cargo-nextest](https://nexte.st/). Cargo with nextest is the CI Rust
+compile/test authority
+([ADR 0048](../adr/0048-cargo-is-the-ci-build-authority.md)); the exact CI
+commands are in [agent-environment.md](agent-environment.md#rust-test-gate).
 
 ```bash
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup update stable
 
-# Install Bazelisk (example: macOS Homebrew)
-brew install bazelisk
+# Install cargo-nextest
+cargo install --locked cargo-nextest
 
 git clone https://github.com/CurateLabs/graphforge.git
 cd graphforge
@@ -44,9 +46,7 @@ maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml
 # Verify
 cargo test --workspace
 python -c "import graphforge; print(graphforge.__version__)"
-make pre-push-fast   # requires bazelisk; runs Cargo/Bazel drift
-# Optional heavy local Bazel suite (mirrors CI authority):
-# make bazel-test
+make pre-push-fast
 ```
 
 See [Installation](../guide/installation.md) for the published-package path.
@@ -63,15 +63,14 @@ See [Installation](../guide/installation.md) for the published-package path.
 cargo fmt --all -- --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
-make pre-push-fast   # bazelisk + drift, then format/lint/security/…
+make pre-push-fast   # policy/inventory checks, then ruff format/lint/security/…
 make pre-push
-make bazel-test      # optional: bazelisk test //:ci_rust_tests
 ```
 
-`make pre-push` mirrors the CI gate for the changed surface. Fast path requires
-`bazelisk` and fails closed on Cargo/Bazel feature drift
-(`scripts/ci/cargo-bazel-drift-check.py`). Full local Bazel suite:
-`make bazel-test` (see [bazel.md](bazel.md)).
+`make pre-push` mirrors the CI gate for the changed surface. The CI Gate Rust
+lane's own commands (nextest over the workspace, then the custom-harness
+targets and doctests) are in
+[agent-environment.md](agent-environment.md#rust-test-gate).
 
 ### Running Tests
 
@@ -115,7 +114,7 @@ graphforge/
 │   ├── graphforge-knowledge/            # knowledge + epistemic record domains
 │   ├── graphforge-bindings-py/          # PyO3 Python binding
 │   ├── graphforge-bindings-node/        # napi-rs Node binding
-│   └── …                                # (Swift/Kotlin UniFFI not a Bazel-migration deliverable)
+│   └── …
 ├── packages/                    # Node packaging and agent skills
 ├── docs/                        # Markdown sources (Starlight syncs an allowlist)
 ├── docs-site/                   # Astro Starlight site
@@ -282,16 +281,6 @@ oversize files under `docs/` and on any `docs/development/*.md` that no other
 tracked file references; a page named after an issue is folded into its topic
 page or deleted when the issue closes. `docs/` is the only hand-maintained
 source: the published site renders an allowlisted subset and keeps no copies.
-
-Bazel migration work follows the sub-agent contracts in
-[bazel-migration.md § Orchestration (#1)](bazel-migration.md#orchestration-1)
-(canonical issue [#1](https://github.com/CurateLabs/graphforge/issues/1)).
-Start with the developer guide [bazel.md](bazel.md). The frozen inventory,
-baseline, and #1 close-readiness evidence map live in
-[bazel-migration.md § Ledger (#12)](bazel-migration.md#ledger-12),
-[bazel-migration.md § Baseline (#12)](bazel-migration.md#baseline-12), and
-[bazel-migration.md § Close-readiness evidence map (#3)](bazel-migration.md#close-readiness-evidence-map-3).
-Mobile (Swift/Kotlin/UniFFI) bindings are not a Bazel-migration deliverable.
 
 ---
 

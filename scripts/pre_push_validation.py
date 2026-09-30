@@ -325,15 +325,14 @@ class Coordinator:
     def run_preflight(self, environment: Mapping[str, str]) -> None:
         missing = [
             name
-            for name in ("cargo", "rustc", "rustup", "uv", "node", "pnpm", "bazelisk")
+            for name in ("cargo", "rustc", "rustup", "uv", "node", "pnpm")
             if not shutil.which(name)
         ]
         if missing:
             raise ValidationError(
                 "missing prerequisite(s): "
                 + ", ".join(missing)
-                + ". Install the pinned toolchain described in docs/development/contributing.md "
-                "(Bazelisk: docs/development/bazel.md)."
+                + ". Install the pinned toolchain described in docs/development/contributing.md."
             )
         # Never wait here: another worktree's heavy build holds the lock and prunes itself.
         with self.heavy_lock(blocking=False) as held:

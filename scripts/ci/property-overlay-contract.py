@@ -12,13 +12,24 @@ import re
 import sys
 from typing import Any
 
+import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workflow_policy import job_run_scalars, normalize_run, workflow_jobs
+
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT = ROOT / "tests/contracts/property-overlay-v1.json"
 OVERLAY = Path("crates/graphforge-storage/src/property_overlay.rs")
 LIB = Path("crates/graphforge-storage/src/lib.rs")
 WRITER = Path("crates/graphforge-storage/src/writer.rs")
-STORAGE_BUILD = Path("crates/graphforge-storage/BUILD.bazel")
-ROOT_BUILD = Path("BUILD.bazel")
+WORKSPACE_MANIFEST = Path("Cargo.toml")
+STORAGE_MANIFEST = Path("crates/graphforge-storage/Cargo.toml")
+STORAGE_MEMBER = "crates/graphforge-storage"
+TEST_WORKFLOW = Path(".github/workflows/test.yml")
+NEXTEST_CONFIG = Path(".config/nextest.toml")
+RUST_TESTS_JOB = "rust-tests"
+SCALE_TARGET = "property_overlay_scale"
+SCALE_SOURCE = "tests/property_overlay_scale.rs"
 
 
 class ContractError(ValueError):
@@ -57,22 +68,6 @@ def block(text: str, start_pattern: str) -> str:
             if depth == 0:
                 return text[opening + 1 : index]
     raise ContractError(f"unterminated Rust block: {start_pattern}")
-
-
-def call_block(text: str, start_pattern: str) -> str:
-    match = re.search(start_pattern, text)
-    if match is None:
-        raise ContractError(f"missing Bazel call: {start_pattern}")
-    opening = text.rfind("(", match.start(), match.end())
-    depth = 0
-    for index in range(opening, len(text)):
-        if text[index] == "(":
-            depth += 1
-        elif text[index] == ")":
-            depth -= 1
-            if depth == 0:
-                return text[opening + 1 : index]
-    raise ContractError(f"unterminated Bazel call: {start_pattern}")
 
 
 @lru_cache(maxsize=128)
@@ -299,12 +294,89 @@ def test_body(text: str, symbol: str) -> str:
     return block(text[match.start() :], rf"fn\s+{re.escape(symbol)}\s*\(")
 
 
-def bazel_list(call: str, attribute: str) -> set[str]:
-    uncommented = re.sub(r"#[^\n]*", "", call)
-    match = re.search(rf"\b{re.escape(attribute)}\s*=\s*\[(?P<body>.*?)\]", uncommented, re.S)
+def check_scale_target_builds(root: Path) -> None:
+    """The scale evidence must stay an auto-discovered, default-built Cargo test.
+
+    ``graphforge-storage`` must be a workspace member, keep test
+    autodiscovery on, and must not declare the scale target behind
+    ``required-features``, ``test = false`` or a custom harness, or under a
+    renamed binary; any of these would drop it from ``cargo nextest run
+    --workspace`` without a failure.
+    """
+    workspace = tomllib.loads((root / WORKSPACE_MANIFEST).read_text(encoding="utf-8"))
+    members = workspace.get("workspace", {}).get("members", [])
+    if STORAGE_MEMBER not in members:
+        raise ContractError("graphforge-storage left the Cargo workspace members")
+    if STORAGE_MEMBER in workspace.get("workspace", {}).get("exclude", []):
+        raise ContractError("graphforge-storage is excluded from the Cargo workspace")
+    manifest = tomllib.loads((root / STORAGE_MANIFEST).read_text(encoding="utf-8"))
+    if manifest.get("package", {}).get("autotests", True) is not True:
+        raise ContractError("graphforge-storage disabled Cargo test autodiscovery")
+    for target in manifest.get("test", []):
+        if target.get("name") != SCALE_TARGET and target.get("path") != SCALE_SOURCE:
+            continue
+        if target.get("name") != SCALE_TARGET or target.get("path", SCALE_SOURCE) != SCALE_SOURCE:
+            raise ContractError("property-overlay production scale Cargo target was renamed")
+        if target.get("required-features") or target.get("test", True) is not True:
+            raise ContractError("property-overlay production scale target is not built by default")
+        if target.get("harness", True) is not True:
+            raise ContractError("property-overlay production scale target left the libtest harness")
+    if not (root / "crates/graphforge-storage" / SCALE_SOURCE).is_file():
+        raise ContractError("property-overlay production scale test source is missing")
+
+
+NEXTEST_EXCLUSION = re.compile(r"\(package\(([\w-]+)\) and binary\(([\w-]+)\)\)")
+
+
+def excluded_binaries(expression: str) -> set[tuple[str, str]]:
+    """Parse the only admitted filterset shape: ``not (<pair> or <pair> ...)``.
+
+    Each pair names one package and one binary. Any other shape is refused,
+    because the gate could not prove the scale target is still selected.
+    """
+    match = re.fullmatch(r"not \((.*)\)", expression.strip())
     if match is None:
-        raise ContractError(f"Bazel call lacks {attribute} list")
-    return set(re.findall(r'["\']([^"\']+)["\']', match.group("body")))
+        raise ContractError(f"unrecognised nextest filterset: {expression}")
+    pairs = NEXTEST_EXCLUSION.findall(match.group(1))
+    rebuilt = " or ".join(f"(package({package}) and binary({binary}))" for package, binary in pairs)
+    if not pairs or rebuilt != match.group(1).strip():
+        raise ContractError(f"unrecognised nextest filterset: {expression}")
+    return set(pairs)
+
+
+def check_scale_target_runs_in_ci(root: Path) -> None:
+    """The CI Gate Rust lane (ADR 0048) must select the scale target under nextest."""
+    jobs = workflow_jobs((root / TEST_WORKFLOW).read_text(encoding="utf-8"))
+    if RUST_TESTS_JOB not in jobs:
+        raise ContractError(f"CI Rust lane {RUST_TESTS_JOB!r} is missing")
+    runs = [
+        normalize_run(scalar)
+        for scalar in job_run_scalars(jobs[RUST_TESTS_JOB])
+        if "cargo nextest run" in scalar
+    ]
+    if len(runs) != 1:
+        raise ContractError(f"{RUST_TESTS_JOB} must run exactly one cargo nextest invocation")
+    command = runs[0].split("cargo nextest run", 1)[1]
+    if not re.search(r"(?:^|\s)--workspace(?:\s|$)", command):
+        raise ContractError(f"{RUST_TESTS_JOB} nextest run is not workspace-wide")
+    if re.search(r"(?:^|\s)(?:--exclude|-p|--package)(?:[\s=]|$)", command):
+        raise ContractError(f"{RUST_TESTS_JOB} nextest run narrows the workspace")
+    flag = r"(?:^|\s)(?:-E|--filterset|--filter-expr)(?:\s+|=)"
+    filters = re.findall(flag + r"'([^']*)'", command)
+    if len(filters) != len(re.findall(flag, command)):
+        raise ContractError(f"{RUST_TESTS_JOB} nextest filterset must be single-quoted")
+    for expression in filters:
+        for package, binary in excluded_binaries(expression):
+            if package == "graphforge-storage" or binary == SCALE_TARGET:
+                raise ContractError("CI nextest filterset excludes the production scale target")
+    # Positional arguments after the options would act as a test-name filter.
+    remainder = re.sub(r"(?:-E|--filterset|--filter-expr)(?:\s+|=)'[^']*'", "", command)
+    for token in remainder.split():
+        if not token.startswith("-"):
+            raise ContractError(f"{RUST_TESTS_JOB} nextest run has a test-name filter: {token}")
+    config = root / NEXTEST_CONFIG
+    if config.exists() and "default-filter" in config.read_text(encoding="utf-8"):
+        raise ContractError("nextest default-filter would hide targets from the CI Rust lane")
 
 
 def normalized_source(text: str) -> str:
@@ -360,8 +432,6 @@ def validate(root: Path, contract_path: Path) -> None:
     overlay = overlay_sources[()]
     lib = (root / LIB).read_text(encoding="utf-8")
     writer = "\n".join(writer_sources[key] for key in sorted(writer_sources))
-    storage_build = (root / STORAGE_BUILD).read_text(encoding="utf-8")
-    root_build = (root / ROOT_BUILD).read_text(encoding="utf-8")
 
     expected_format = {
         "PROPERTY_OVERLAY_FORMAT": "full-snapshot-v1",
@@ -489,24 +559,8 @@ def validate(root: Path, contract_path: Path) -> None:
     )
     if "#![cfg(unix)]" not in scale_source or "libc::RUSAGE_SELF" not in scale_source:
         raise ContractError("production RSS evidence lost explicit Unix getrusage scope")
-    storage_rules = re.sub(r"#[^\n]*", "", storage_build)
-    scale_target = call_block(
-        storage_rules, r"gf_rust_integration_test\(\s*name\s*=\s*\"property_overlay_scale\""
-    )
-    if bazel_list(scale_target, "srcs") != {"tests/property_overlay_scale.rs"}:
-        raise ContractError("property-overlay production scale Bazel source mapping drifted")
-    suite = call_block(storage_rules, r"test_suite\(\s*name\s*=\s*\"storage_integration_tests\"")
-    if ":property_overlay_scale" not in bazel_list(suite, "tests"):
-        raise ContractError("production scale target left storage integration suite")
-    root_rules = re.sub(r"#[^\n]*", "", root_build)
-    integration_suite = call_block(root_rules, r"test_suite\(\s*name\s*=\s*\"integration_tests\"")
-    if "//crates/graphforge-storage:storage_integration_tests" not in bazel_list(
-        integration_suite, "tests"
-    ):
-        raise ContractError("storage integration suite left root integration tests")
-    ci_suite = call_block(root_rules, r"test_suite\(\s*name\s*=\s*\"ci_rust_tests\"")
-    if ":integration_tests" not in bazel_list(ci_suite, "tests"):
-        raise ContractError("root integration tests left ci_rust_tests")
+    check_scale_target_builds(root)
+    check_scale_target_runs_in_ci(root)
 
 
 def main() -> int:

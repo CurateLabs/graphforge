@@ -4,7 +4,7 @@ use super::{
     ALL_RELATIONS_STEM, AdjacencyManifestRow, BuildEntry, DEFAULT_ADJACENCY_BATCH_SIZE,
     DEFAULT_CSR_SHARD_EDGES, DEFAULT_CSR_SHARD_NODES, Direction, ShardedCsrWriter, adjacency_dir,
     csr_path, for_each_adjacency_edge_path, named_column, storage_err, string_column,
-    uint64_column, usable_stem, write_manifest,
+    uint64_column, usable_stem,
 };
 use graphforge_core::GfError;
 use std::path::{Path, PathBuf};
@@ -290,6 +290,31 @@ pub(crate) fn build_adjacency_index_for_edge_files_on_lanes(
     admission: Option<
         &std::sync::Arc<crate::graph_construction::cpu_admission::ConstructionCpuAdmission>,
     >,
+    checkpoint: impl FnMut() -> Result<(), GfError>,
+) -> Result<(Vec<AdjacencyManifestRow>, AdjacencyBuildMetrics), GfError> {
+    build_adjacency_index_for_edge_files_observed(
+        artifact_project_dir,
+        edge_files,
+        topology_generation,
+        built_at_micros,
+        options,
+        admission,
+        None,
+        checkpoint,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_adjacency_index_for_edge_files_observed(
+    artifact_project_dir: &Path,
+    edge_files: &[(String, PathBuf)],
+    topology_generation: u64,
+    built_at_micros: i64,
+    options: &AdjacencyBuildOptions,
+    admission: Option<
+        &std::sync::Arc<crate::graph_construction::cpu_admission::ConstructionCpuAdmission>,
+    >,
+    allocation: Option<&crate::StorageAllocationOperation>,
     mut checkpoint: impl FnMut() -> Result<(), GfError>,
 ) -> Result<(Vec<AdjacencyManifestRow>, AdjacencyBuildMetrics), GfError> {
     let generation = topology_generation;
@@ -309,6 +334,7 @@ pub(crate) fn build_adjacency_index_for_edge_files_on_lanes(
     };
     let mut spill = SpillSession::create(&spill_root)?.with_max_bytes(options.spill_max_bytes);
     spill.admission = admission.cloned();
+    spill.allocation = allocation.cloned();
     let mut metrics = AdjacencyBuildMetrics::default();
 
     let build_result = (|| {
@@ -341,7 +367,7 @@ pub(crate) fn build_adjacency_index_for_edge_files_on_lanes(
         drop(csr_region);
         // Manifest LAST: a crash before this point leaves the manifest absent or
         // old, so a torn build always reads as stale.
-        write_manifest(artifact_project_dir, &manifest)?;
+        super::write_manifest_observed(artifact_project_dir, &manifest, allocation)?;
         checkpoint()?;
 
         // Phase-1 compaction (#765): the rebuilt base subsumes every delta segment
@@ -357,11 +383,11 @@ pub(crate) fn build_adjacency_index_for_edge_files_on_lanes(
 
     match build_result {
         Ok(result) => {
-            spill.cleanup();
+            spill.cleanup()?;
             Ok(result)
         }
         Err(error) => {
-            spill.cleanup();
+            let _ = spill.cleanup();
             Err(error)
         }
     }
@@ -370,6 +396,8 @@ pub(crate) fn build_adjacency_index_for_edge_files_on_lanes(
 /// RAII spill directory: always removed on drop / explicit cleanup so cancel
 /// and failure cannot leave temporary runs behind as a published artifact.
 struct SpillSession {
+    allocation: Option<crate::StorageAllocationOperation>,
+    recorded_paths: std::collections::BTreeSet<PathBuf>,
     admission:
         Option<std::sync::Arc<crate::graph_construction::cpu_admission::ConstructionCpuAdmission>>,
     root: PathBuf,
@@ -386,6 +414,8 @@ impl SpillSession {
         // parent spill root (it may be shared with DataFusion / other ops).
         std::fs::create_dir_all(root).map_err(storage_err)?;
         Ok(Self {
+            allocation: None,
+            recorded_paths: std::collections::BTreeSet::new(),
             admission: None,
             root: root.to_path_buf(),
             bytes_current: 0,
@@ -427,16 +457,34 @@ impl SpillSession {
     fn remove_run(&mut self, path: &Path) -> Result<(), GfError> {
         let bytes = std::fs::metadata(path).map_err(storage_err)?.len();
         std::fs::remove_file(path).map_err(storage_err)?;
+        if let Some(allocation) = &self.allocation {
+            allocation.remove_file_at(path)?;
+        }
+        self.recorded_paths.remove(path);
         self.bytes_current = self.bytes_current.saturating_sub(bytes);
         Ok(())
     }
 
-    fn cleanup(&mut self) {
-        if self.cleaned {
-            return;
+    fn observe_run(&mut self, path: &Path, file: &std::fs::File) -> Result<(), GfError> {
+        if let Some(allocation) = &self.allocation {
+            allocation.replace_file_at(path, file)?;
+            self.recorded_paths.insert(path.to_path_buf());
         }
-        self.cleaned = true;
-        let _ = std::fs::remove_dir_all(&self.root);
+        Ok(())
+    }
+
+    fn cleanup(&mut self) -> Result<(), GfError> {
+        if self.cleaned {
+            return Ok(());
+        }
+        if let Some(allocation) = &self.allocation {
+            std::fs::remove_dir_all(&self.root).map_err(storage_err)?;
+            for path in &self.recorded_paths {
+                allocation.remove_file_at(path)?;
+            }
+        } else {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
         // Best-effort: remove an empty project-local `.spill` parent we created.
         // Never delete a shared policy spill root that may hold other files.
         if let Some(parent) = self.root.parent()
@@ -446,12 +494,14 @@ impl SpillSession {
         {
             let _ = std::fs::remove_dir(parent);
         }
+        self.cleaned = true;
+        Ok(())
     }
 }
 
 impl Drop for SpillSession {
     fn drop(&mut self) {
-        self.cleanup();
+        let _ = self.cleanup();
     }
 }
 
@@ -527,7 +577,13 @@ impl EntryGroup {
         checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
     ) -> Result<ShardedWriteOutcome, GfError> {
         self.prepare_direction(direction, options, spill, checkpoint)?;
-        self.write_sharded_csr(direction, path, options, checkpoint)
+        self.write_sharded_csr(
+            direction,
+            path,
+            options,
+            spill.allocation.as_ref(),
+            checkpoint,
+        )
     }
 
     fn prepare_direction(
@@ -566,6 +622,7 @@ impl EntryGroup {
         direction: Direction,
         path: &Path,
         options: &AdjacencyBuildOptions,
+        allocation: Option<&crate::StorageAllocationOperation>,
         checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
     ) -> Result<ShardedWriteOutcome, GfError> {
         let had_runs = match direction {
@@ -574,6 +631,7 @@ impl EntryGroup {
         };
         let mut writer =
             ShardedCsrWriter::create(path, options.shard_max_edges, options.shard_max_nodes)?;
+        writer.allocation = allocation.cloned();
         let mut max_key = None::<u64>;
         let mut emit = |entry: (u64, u64, u64)| {
             max_key = Some(max_key.map_or(entry.0, |prior| prior.max(entry.0)));
@@ -651,6 +709,7 @@ fn write_keyed_run(
     // cancel and never publish). Avoid per-run sync_all — it dominated >200M
     // build wall time on agent hosts without improving published-index safety.
     file.flush().map_err(storage_err)?;
+    spill.observe_run(path, file.get_ref())?;
     Ok(())
 }
 
@@ -797,6 +856,7 @@ fn merge_keyed_runs_to_run(
             .map_err(storage_err)
     })?;
     writer.flush().map_err(storage_err)?;
+    spill.observe_run(output, writer.get_ref())?;
     crate::lifecycle_io::record_write(crate::StorageIoPhase::ReadPathScan, bytes, 1);
     Ok(())
 }
@@ -941,7 +1001,14 @@ fn finish_groups(
                 group.prepare_direction(direction, options, spill, checkpoint)?;
             }
         }
-        outcomes = finish_groups_on_lanes(root, &ordered, options, lanes, checkpoint)?;
+        outcomes = finish_groups_on_lanes(
+            root,
+            &ordered,
+            options,
+            lanes,
+            spill.allocation.as_ref(),
+            checkpoint,
+        )?;
     }
     let mut manifest = Vec::with_capacity(outcomes.len());
     for (index, outcome) in outcomes.into_iter().enumerate() {
@@ -969,6 +1036,7 @@ fn finish_groups_on_lanes(
     ordered: &[(String, EntryGroup)],
     options: &AdjacencyBuildOptions,
     lanes: usize,
+    allocation: Option<&crate::StorageAllocationOperation>,
     checkpoint: &mut impl FnMut() -> Result<(), GfError>,
 ) -> Result<Vec<ShardedWriteOutcome>, GfError> {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -999,13 +1067,14 @@ fn finish_groups_on_lanes(
                     if index >= count {
                         break;
                     }
-                    let result = write_group_job(root, ordered, options, index, &mut || {
-                        if stop.load(Ordering::Acquire) {
-                            Err(storage_err("adjacency construction cancelled"))
-                        } else {
-                            Ok(())
-                        }
-                    });
+                    let result =
+                        write_group_job(root, ordered, options, index, allocation, &mut || {
+                            if stop.load(Ordering::Acquire) {
+                                Err(storage_err("adjacency construction cancelled"))
+                            } else {
+                                Ok(())
+                            }
+                        });
                     results
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)[index] = Some(result);
@@ -1022,7 +1091,7 @@ fn finish_groups_on_lanes(
             reversed,
         );
         if index < count {
-            let result = write_group_job(root, ordered, options, index, &mut || {
+            let result = write_group_job(root, ordered, options, index, allocation, &mut || {
                 let result = checkpoint();
                 if result.is_err() {
                     stop.store(true, Ordering::Release);
@@ -1105,6 +1174,7 @@ fn write_group_job(
     ordered: &[(String, EntryGroup)],
     options: &AdjacencyBuildOptions,
     index: usize,
+    allocation: Option<&crate::StorageAllocationOperation>,
     checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
 ) -> Result<ShardedWriteOutcome, GfError> {
     let (stem, group) = &ordered[index / 2];
@@ -1117,6 +1187,7 @@ fn write_group_job(
         direction,
         &csr_path(root, stem, direction),
         options,
+        allocation,
         checkpoint,
     )
 }

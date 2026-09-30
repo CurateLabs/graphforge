@@ -112,8 +112,8 @@ struct Rung {
     note: Option<String>,
 }
 
-/// The profile is embedded at compile time so the runner is hermetic under both
-/// Cargo and Bazel (no runtime `CARGO_MANIFEST_DIR` path dependency).
+/// The profile is embedded at compile time so the runner is hermetic (no
+/// runtime `CARGO_MANIFEST_DIR` path dependency).
 const PROFILE_JSON: &str = include_str!("fixtures/scale_g500_ladder.v1.json");
 const CERTIFICATION_PROFILE_JSON: &str = include_str!("fixtures/scale_g500_certification.v1.json");
 

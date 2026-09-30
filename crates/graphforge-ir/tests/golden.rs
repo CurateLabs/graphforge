@@ -20,10 +20,9 @@ use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
 
 /// Resolve `CARGO_MANIFEST_DIR` to an absolute path.
 ///
-/// Cargo bakes an absolute path; Bazel may bake a workspace-relative path.
-/// Insta falls back to the manifest directory when `cargo metadata` is
-/// unavailable and will double-prefix relative snapshot paths unless this is
-/// absolute.
+/// Cargo bakes an absolute path; a relative one is still made absolute here
+/// because insta falls back to the manifest directory when `cargo metadata` is
+/// unavailable and will double-prefix relative snapshot paths.
 fn manifest_dir() -> std::path::PathBuf {
     let raw = Path::new(env!("CARGO_MANIFEST_DIR"));
     if raw.is_absolute() {

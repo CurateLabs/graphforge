@@ -184,7 +184,7 @@ profile that merely labels no-op commands as lifecycle work is intentionally not
 shipped.
 
 Required native-Linux CI builds the real generator and certification runner,
-uses the Bazel-built public `gf`, and executes that scale-1 profile through all
+uses the Cargo-built public `gf`, and executes that scale-1 profile through all
 ten phases. The test requires exactly one closed lifecycle storage receipt in
 the assembled evidence and does not invoke BenchExec or a provider.
 

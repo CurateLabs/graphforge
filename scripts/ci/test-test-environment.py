@@ -99,16 +99,6 @@ class TestEnvironmentTests(unittest.TestCase):
                 [f"{name}={raw}" for name in ENV.TEMP_VARIABLES],
             )
 
-    def test_bazel_receives_environment_and_writable_native_test_root(self) -> None:
-        command = ENV.command_with_environment(
-            ["bazelisk", "test", "//:ci_rust_tests"], Path("/native/tmp")
-        )
-        for name in ENV.TEMP_VARIABLES:
-            self.assertIn(f"--test_env={name}=/native/tmp", command)
-        self.assertIn("--test_tmpdir=/native/tmp/bazel", command)
-        self.assertIn("--sandbox_writable_path=/native/tmp", command)
-        self.assertEqual(command[-1], "//:ci_rust_tests")
-
     def test_probe_permission_error_is_actionable_and_does_not_launch_child(self) -> None:
         with (
             patch.object(ENV, "prepare", side_effect=PermissionError("read-only root")),

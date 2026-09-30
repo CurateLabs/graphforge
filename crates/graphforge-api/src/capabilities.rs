@@ -22,11 +22,11 @@ use crate::GraphForge;
 /// Frozen knowledge public API contract version.
 pub const KNOWLEDGE_API_VERSION: u32 = 1;
 
-/// Stable idempotency identity for a Bazel-migration0 write.
+/// Stable idempotency identity for a knowledge write.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationId(pub Uuid);
 
-/// Shared context for a Bazel-migration0 write.
+/// Shared context for a knowledge write.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WriteContext {
     /// Required operation/idempotency UUID.

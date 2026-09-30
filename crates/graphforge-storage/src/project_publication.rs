@@ -17,9 +17,8 @@ use participants::{
 mod control;
 pub(crate) use control::{
     AtomicPublishError, JournalPhase, JournalRecord, cleanup_atomicwrite_temp,
-    cleanup_atomicwrite_temp_with_allocation, publish_atomic_bytes,
-    publish_atomic_bytes_with_allocation, read_journal, sync_directory,
-    write_journal_with_allocation,
+    cleanup_atomicwrite_temp_with_allocation, publish_atomic_bytes_with_allocation, read_journal,
+    sync_directory, write_journal_with_allocation,
 };
 use control::{
     CancelledBeforeReplace, CapabilityRecord, CurrentRecord, GenerationManifestRecord,
@@ -460,6 +459,10 @@ pub(crate) fn stage_project_generation_from_admitted_parent_with_fingerprint(
             ));
         }
         let writer_lock = acquire_writer_lock(&root, request)?;
+        if let Some(allocation) = allocation {
+            allocation
+                .replace_file_at(&root.join(LOCKS_DIR).join(WRITER_LOCK_FILE), &writer_lock)?;
+        }
         project_failpoint::hit(
             "project.after_writer_lock",
             Some(request.transaction_uuid),
@@ -510,6 +513,10 @@ pub(crate) fn stage_project_generation_from_files_admitted(
         admission.revalidate_identity()?;
         let root = canonical_supported_root(admission.root())?;
         let writer_lock = acquire_writer_lock(&root, request)?;
+        if let Some(allocation) = allocation {
+            allocation
+                .replace_file_at(&root.join(LOCKS_DIR).join(WRITER_LOCK_FILE), &writer_lock)?;
+        }
         project_failpoint::hit(
             "project.after_writer_lock",
             Some(request.transaction_uuid),
