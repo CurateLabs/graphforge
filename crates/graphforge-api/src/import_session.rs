@@ -847,11 +847,7 @@ impl GraphImportSession {
                                 construction.append_edges(&chunk_id, &batch)
                             }
                         };
-                        if let (Some(timings), Some(started)) =
-                            (&mut self.operation_timings, started)
-                        {
-                            timings.append.record(started, staged.is_err());
-                        }
+                        self.record_append_timing(started, staged.is_err());
                         if staged.is_ok() {
                             RegionScope::record_work("rows", batch.num_rows() as u64);
                         }
@@ -896,6 +892,12 @@ impl GraphImportSession {
             }
         }
         self.seal_construction(&mut construction, cancellation)
+    }
+
+    fn record_append_timing(&mut self, started: Option<CallStart>, failed: bool) {
+        if let (Some(timings), Some(started)) = (&mut self.operation_timings, started) {
+            timings.append.record(started, failed);
+        }
     }
 
     fn seal_construction(
