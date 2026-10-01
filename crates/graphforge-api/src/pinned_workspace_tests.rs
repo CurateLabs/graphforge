@@ -139,6 +139,30 @@ pub(crate) fn assert_published_trees_untouched(
     }
 }
 
+#[cfg(feature = "research")]
+/// Whether the generation's graph participant is a compact root. A compact root
+/// always hydrates into a private workspace; only a generation tree can be aliased.
+pub(crate) fn has_compact_graph_root(generation: &ResolvedProjectGeneration) -> bool {
+    let snapshot = generation
+        .participant_snapshot(GRAPH_CAPABILITY_ID, GRAPH_FILES_FAMILY)
+        .unwrap()
+        .expect("the generation records a graph files participant");
+    matches!(
+        snapshot.record_version,
+        GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION | GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
+    )
+}
+
+#[cfg(feature = "research")]
+/// The owner project's graph is a generation tree, so a pinned alias of it is
+/// possible; a test over a compact-root owner could not exhibit the hazard.
+pub(crate) fn assert_tree_backed_owner(graph: &GraphForge) {
+    assert!(
+        !has_compact_graph_root(&graph.generation_for_read().unwrap()),
+        "the owner must be tree-backed, otherwise a pinned alias cannot arise and the test proves nothing"
+    );
+}
+
 fn durable_project() -> (tempfile::TempDir, GraphForge) {
     let directory = tempfile::tempdir().unwrap();
     let graph = GraphForge::new(directory.path().join("project").to_str()).unwrap();

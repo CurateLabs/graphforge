@@ -151,6 +151,8 @@ mod mutation_transaction_fault_tests;
 mod permanent_parquet_test_support;
 #[cfg(test)]
 mod pinned_workspace_tests;
+#[cfg(test)]
+mod workspace_flip_policy_tests;
 #[cfg(feature = "research")]
 pub use multi_ontology::{
     ActivationProfileChangeRequest, BridgeAdoptionRequest, BridgeCandidate, BridgeDeleteRequest,
