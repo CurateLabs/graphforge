@@ -909,7 +909,7 @@
       "role": "contract_identity",
       "input_contract": "Domain plus node/edge counts and recorded shard bounds/digests define stable shard-set identity; does not hash shard payload here.",
       "function_bodies_sha256": [
-        "c2f0de38d0de1759e9fe4b4e900ed0440e27d4d790114304e47239e46c269d24"
+        "e49f3594103b8e2d9401dcd39f72d48311d2ea50f5fd62ab7510c19c7cd5675c"
       ]
     },
     {
@@ -1542,7 +1542,7 @@
       "role": "control_authentication",
       "input_contract": "Canonical checkpoint registry JSON authenticates registry/checksum pair and durable replacement intent.",
       "function_bodies_sha256": [
-        "13d20c14013f8413dfd3d98f23a5d846c6e4b443c0268198604e7526b1bb02c9"
+        "07a7c8114548d4c835904d99b02983506dc4c03859d72bedfc3476dee0c9b120"
       ]
     },
     {

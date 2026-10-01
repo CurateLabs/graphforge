@@ -8,6 +8,8 @@ use std::io;
 use std::path::Path;
 
 mod atomic;
+mod barrier_observation;
+pub use barrier_observation::observe_barriers;
 #[cfg(test)]
 pub(crate) mod fault;
 mod namespace;
@@ -22,11 +24,22 @@ pub use namespace::{
     retire_owned_tree,
 };
 
+/// Admit the exact private source descriptor for sealing and native publication.
+/// This grants namespace/durability access only, never content authentication.
+pub fn open_publisher(
+    parent: &StableDirectory,
+    name: &std::ffi::OsStr,
+    expected: graphforge_filesystem::FileIdentity,
+) -> io::Result<File> {
+    parent.open_publishing_child_file(name, expected)
+}
+
 /// Complete the durability barrier for an admitted writer's actual descriptor.
 pub fn seal_file(file: &(impl ObservedSync + ?Sized)) -> io::Result<()> {
     let _wait = crate::concurrency_attribution::RegionScope::named("fsync");
     #[cfg(test)]
     fault::hit(fault::Point::FileFence)?;
+    barrier_observation::record_attempt();
     file.observed_sync_all()
 }
 
@@ -42,6 +55,7 @@ pub fn acknowledge_directory(directory: &StableDirectory) -> io::Result<()> {
     let _wait = crate::concurrency_attribution::RegionScope::named("fsync");
     #[cfg(test)]
     fault::hit(fault::Point::ParentFence)?;
+    barrier_observation::record_attempt();
     directory.sync()
 }
 
@@ -214,6 +228,9 @@ pub fn install_guarded_sealed(
     if guard.identity()? != identity {
         return Err(io::Error::other("guarded seal witness identity changed"));
     }
+    // A normal Windows reader excludes DELETE sharing. Validation is complete;
+    // release this auxiliary handle before opening the native rename handle.
+    drop(named);
     install_guarded(guard, target)
 }
 

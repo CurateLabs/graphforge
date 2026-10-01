@@ -129,6 +129,23 @@ pub(super) fn stable_open_child_file(
 }
 
 #[cfg(unix)]
+pub(super) fn stable_open_publishing_child_file(
+    parent: &File,
+    _path: &Path,
+    name: &OsStr,
+) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags};
+    rustix::fs::openat(
+        parent,
+        name,
+        OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
 pub(super) fn stable_open_replaceable_child_file(
     parent: &File,
     path: &Path,
@@ -363,6 +380,25 @@ pub(super) fn stable_open_child_file(
 }
 
 #[cfg(windows)]
+pub(super) fn stable_open_publishing_child_file(
+    _parent: &File,
+    path: &Path,
+    _name: &OsStr,
+) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(windows)]
 pub(super) fn stable_open_replaceable_child_file(
     _parent: &File,
     path: &Path,
@@ -593,6 +629,18 @@ pub(super) fn stable_open_child_file(
     _create_new: bool,
 ) -> io::Result<File> {
     stable_open_directory(Path::new(""))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+pub(super) fn stable_open_publishing_child_file(
+    _parent: &File,
+    _path: &Path,
+    _name: &OsStr,
+) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "publication descriptors unsupported",
+    ))
 }
 
 #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "redox"))]

@@ -407,7 +407,12 @@ pub(super) fn publish_source(
     let destination_name = destination
         .file_name()
         .ok_or_else(|| storage("import source has no name"))?;
-    let file = directory.open_child_file(temporary_name).map_err(storage)?;
+    let file = graphforge_storage::durable_commit::open_publisher(
+        &directory,
+        temporary_name,
+        seal.identity(),
+    )
+    .map_err(storage)?;
     if let Some(allocation) = allocation {
         allocation.replace_file_at(temporary, &file)?;
     }

@@ -232,6 +232,9 @@ pub(super) fn recover_pair(root: &Path) -> Result<(), GfError> {
             let name = std::ffi::OsStr::new(&intent.checksum_temp);
             let file = directory.open_child_file(name).map_err(storage_io)?;
             let identity = graphforge_filesystem::file_identity(&file).map_err(storage_io)?;
+            drop(file);
+            let file = crate::durable_commit::open_publisher(&directory, name, identity)
+                .map_err(storage_io)?;
             crate::durable_commit::SealedArtifact::seal_recoverable_existing(
                 &directory, name, file, identity, None,
             )

@@ -386,16 +386,18 @@ fn copy_single_link_materialized_object(
             })?;
         io.fsync_calls = output.evidence().sync_operations;
         io.file_fsync_calls = io.fsync_calls;
-        // Release the writer before admitting the exact sealed source. Windows
-        // publication must not retain a conflicting writable handle.
+        // Close the cache writer before admitting the exact sealed source. The
+        // publisher descriptor permits Windows rename and the acknowledgment
+        // fence; immutable readers keep their stricter sharing policy.
         drop(output.into_file());
-        let file = parent.open_child_file(&temporary_name).map_err(|error| {
-            storage(
-                "reopen private materialization file",
-                &cas.diagnostic_root,
-                error,
-            )
-        })?;
+        let file = crate::durable_commit::open_publisher(parent, &temporary_name, seal.identity())
+            .map_err(|error| {
+                storage(
+                    "reopen private materialization file",
+                    &cas.diagnostic_root,
+                    error,
+                )
+            })?;
         crate::durable_commit::SealedArtifact::adopt_sealed(
             parent,
             &temporary_name,

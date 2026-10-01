@@ -49,6 +49,7 @@ use platform::stable_open_directory;
 #[cfg(windows)]
 use platform::stable_open_directory_for_sync;
 use platform::stable_open_or_create_child_file;
+use platform::stable_open_publishing_child_file;
 use platform::stable_open_replaceable_child_file;
 use platform::stable_remove_child_directory_if_identity;
 use platform::stable_unlink_child_if_identity;
@@ -614,6 +615,28 @@ impl StableDirectory {
         let path = self.path.join(name);
         let file = stable_open_child_file(&self.file, &path, name, false)?;
         validate_stable_child_file(&file, &path)?;
+        self.revalidate_named()?;
+        Ok(file)
+    }
+
+    /// Reopen an already-admitted private publication source with write access
+    /// for its file barrier and Windows delete sharing for its native rename.
+    /// Ordinary immutable readers retain their existing anti-delete sharing.
+    pub fn open_publishing_child_file(
+        &self,
+        name: &OsStr,
+        expected: FileIdentity,
+    ) -> io::Result<File> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        let path = self.path.join(name);
+        let file = stable_open_publishing_child_file(&self.file, &path, name)?;
+        validate_stable_child_file(&file, &path)?;
+        if file_identity(&file)? != expected || file_link_count(&file)? != 1 {
+            return Err(io::Error::other(
+                "publication source identity or link count changed",
+            ));
+        }
         self.revalidate_named()?;
         Ok(file)
     }

@@ -48,7 +48,9 @@ pub use builder::{
 pub(crate) use builder::{
     build_adjacency_index_for_edge_files_observed, build_adjacency_index_for_edge_files_on_lanes,
 };
-use installation::{persist_temp_observed, write_csr_shard_bytes_observed};
+use installation::{
+    observe_csr_barriers, persist_temp_observed, promote_shards, write_csr_shard_bytes_observed,
+};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -598,13 +600,7 @@ impl ShardedCsrWriter {
             if stable_root.exists() {
                 self.remove_scratch_tree(&stable_root)?;
             }
-            crate::durable_commit::promote_no_replace(
-                &self.root,
-                &stable_root,
-                || Ok(()),
-                || Ok(()),
-            )
-            .map_err(storage_err)?;
+            promote_shards(&self.root, &stable_root)?;
             if let Some(allocation) = &self.allocation {
                 for record in &self.records {
                     let source = self.root.join(&record.file);
@@ -643,7 +639,6 @@ impl ShardedCsrWriter {
         if let Some(allocation) = &self.allocation {
             allocation.replace_file_at(temp.path(), temp.as_file())?;
         }
-        crate::lifecycle_io::record_fsync(crate::StorageIoPhase::ReadPathScan, 1);
         persist_temp_observed(
             temp,
             &self.path.with_extension("csr.json"),
@@ -1269,7 +1264,7 @@ fn write_manifest_observed(
         Arc::clone(&ADJACENCY_MANIFEST_SCHEMA),
         &batch,
     )?;
-    let barriers = staged.commit_retained_at_observed(project_dir, allocation)?;
+    observe_csr_barriers(|| staged.commit_retained_at_observed(project_dir, allocation))?;
     crate::lifecycle_io::record_write(
         crate::StorageIoPhase::ReadPathScan,
         std::fs::metadata(manifest_path(project_dir))
@@ -1277,7 +1272,6 @@ fn write_manifest_observed(
             .len(),
         1,
     );
-    crate::lifecycle_io::record_fsync(crate::StorageIoPhase::ReadPathScan, barriers);
     Ok(())
 }
 

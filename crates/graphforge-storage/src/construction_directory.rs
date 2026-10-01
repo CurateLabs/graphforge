@@ -227,7 +227,7 @@ impl ConstructionDirectory {
         target: &OsStr,
         mode: crate::durable_commit::PublishMode,
     ) -> io::Result<()> {
-        let file = self.directory.open_child_file(temporary)?;
+        let file = crate::durable_commit::open_publisher(&self.directory, temporary, identity)?;
         let witness = {
             let mut state = self
                 .commits

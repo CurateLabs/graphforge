@@ -575,13 +575,23 @@ pub fn begin_graph_object_publication(root: &Path) -> Result<GraphObjectPublicat
         .map_err(|error| storage("lock graph object publication lease", root, error))?;
     pending.lease_locked = true;
     returned_error_boundary("publication:lease-lock")?;
-    crate::durable_commit::acknowledge_created(
+    let mut lease_sync_error = None;
+    let acknowledged = crate::durable_commit::acknowledge_created(
         &cas.active,
         &lease_name,
         pending.file.as_ref().unwrap(),
-        || returned_error_boundary("publication:lease-sync").map_err(std::io::Error::other),
-    )
-    .map_err(|error| storage("acknowledge graph object publication lease", root, error))?;
+        || {
+            returned_error_boundary("publication:lease-sync").map_err(|error| {
+                lease_sync_error = Some(error);
+                std::io::Error::other("graph object publication lease sync callback failed")
+            })
+        },
+    );
+    if let Some(error) = lease_sync_error {
+        return Err(error);
+    }
+    acknowledged
+        .map_err(|error| storage("acknowledge graph object publication lease", root, error))?;
     returned_error_boundary("publication:active-sync")?;
     let file = pending.file.take().unwrap();
     pending.lease_locked = false;

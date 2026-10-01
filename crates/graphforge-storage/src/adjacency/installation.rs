@@ -5,6 +5,21 @@ use graphforge_core::GfError;
 use std::path::Path;
 use tempfile::NamedTempFile;
 
+pub(super) fn observe_csr_barriers<T>(
+    operation: impl FnOnce() -> Result<T, GfError>,
+) -> Result<T, GfError> {
+    let (result, barriers) = crate::durable_commit::observe_barriers(operation);
+    crate::lifecycle_io::record_fsync(crate::StorageIoPhase::ReadPathScan, barriers);
+    result
+}
+
+pub(super) fn promote_shards(source: &Path, destination: &Path) -> Result<(), GfError> {
+    observe_csr_barriers(|| {
+        crate::durable_commit::promote_no_replace(source, destination, || Ok(()), || Ok(()))
+            .map_err(storage_err)
+    })
+}
+
 pub(super) fn write_csr_shard_bytes_observed(
     path: &Path,
     bytes: &[u8],
@@ -34,6 +49,14 @@ pub(super) fn write_csr_shard_bytes_observed(
 
 /// Atomically rename `tmp` into place at `path`.
 pub(super) fn persist_temp_observed(
+    tmp: NamedTempFile,
+    path: &Path,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<(), GfError> {
+    observe_csr_barriers(|| persist_sealed_temp(tmp, path, allocation))
+}
+
+fn persist_sealed_temp(
     tmp: NamedTempFile,
     path: &Path,
     allocation: Option<&crate::StorageAllocationOperation>,

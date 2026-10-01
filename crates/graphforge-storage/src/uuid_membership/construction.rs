@@ -1704,9 +1704,13 @@ fn describe_and_install_construction_run(
     };
     merge_cache_release_evidence(&mut work.cache_release, read_cache_release);
     let name = format!("{prefix}-{generation}-{}.uuidx", &sha256[..16]);
-    let file = output
-        .open_child_file(std::ffi::OsStr::new(temporary))
-        .map_err(storage_err)?;
+    drop(file);
+    let file = crate::durable_commit::open_publisher(
+        output.physical(),
+        std::ffi::OsStr::new(temporary),
+        identity,
+    )
+    .map_err(storage_err)?;
     if graphforge_filesystem::file_identity(&file).map_err(storage_err)? != identity {
         return Err(storage_err(
             "construction run identity changed before publication",

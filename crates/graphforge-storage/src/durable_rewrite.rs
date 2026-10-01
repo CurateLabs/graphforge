@@ -536,6 +536,10 @@ fn install(root_path: &Path, root: &StableDirectory, entry: &Entry) -> Result<()
 
     match parent.open_child_file(&temporary) {
         Ok(temp) => {
+            let expected = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
+            drop(temp);
+            let temp = crate::durable_commit::open_publisher(&parent, &temporary, expected)
+                .map_err(storage)?;
             authenticate_staged_file(&temp, entry)?;
             let prior = authenticate_prior_destination(
                 &parent,
@@ -543,7 +547,6 @@ fn install(root_path: &Path, root: &StableDirectory, entry: &Entry) -> Result<()
                 entry.prior_destination.as_ref(),
                 rewrite_file_domain(&entry.destination),
             )?;
-            let expected = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
             let sealed = crate::durable_commit::SealedArtifact::seal_recoverable_existing(
                 &parent, &temporary, temp, expected, None,
             )
