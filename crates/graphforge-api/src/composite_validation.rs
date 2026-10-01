@@ -117,7 +117,20 @@ impl RequestIdentities {
     }
 }
 
+impl crate::composite_transaction::PreparedCompositeOperation<'_> {
+    pub(crate) fn validate_ontology_and_identities(
+        &self,
+        snapshot: &CompositeValidationSnapshot,
+    ) -> Result<RequestIdentities, GfError> {
+        let request = self.request();
+        request.validate_request_envelope()?;
+        request.validate_ontology(&snapshot.ontology)?;
+        request.collect_identities(snapshot)
+    }
+}
+
 impl CompositeTransactionRequest {
+    #[cfg(test)]
     pub(crate) fn validate_ontology_and_identities(
         &self,
         snapshot: &CompositeValidationSnapshot,
