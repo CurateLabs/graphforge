@@ -36,9 +36,9 @@ pub(crate) fn generate_bulk_graph(dir: &Path, nodes: usize, fan_out: usize) -> B
 }
 
 /// [`generate_bulk_graph`] with the trailing `index_adjacency` optional.
-/// That call republishes the project as an expanded (V1) generation tree, so
-/// a fixture that must stay as the construction session published it (compact
-/// V2 with its shipped adjacency CSR) passes `false`.
+/// That call publishes one more compact (V2) generation, so a fixture that must
+/// stay exactly as the construction session published it (with its shipped
+/// adjacency CSR) passes `false`.
 pub(crate) fn generate_bulk_graph_with_index(
     dir: &Path,
     nodes: usize,

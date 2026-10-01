@@ -1221,12 +1221,26 @@ mod tests {
         let corrupt = identity(&corrupt_graph);
         let generation = corrupt_graph.generation_for_read().unwrap();
         let inventory = generation.graph_files_inventory().unwrap().unwrap();
-        let relative = &inventory.files[0].relative_path;
-        fs::write(
-            generation.graph_tree_root().join(relative),
-            b"corrupt fixture",
+        // A compact generation's payloads live in the content store. Flip one
+        // byte of the node payload in place: same inode, same length.
+        let victim = inventory
+            .files
+            .iter()
+            .find(|entry| entry.relative_path.starts_with("topology/nodes") && entry.byte_length > 16)
+            .unwrap();
+        let object = graphforge_storage::graph_object_path(
+            generation.container_root(),
+            &victim.content_sha256,
         )
         .unwrap();
+        let mut permissions = fs::metadata(&object).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&object, permissions).unwrap();
+        let mut bytes = fs::read(&object).unwrap();
+        bytes[8] ^= 1;
+        let mut file = fs::OpenOptions::new().write(true).open(&object).unwrap();
+        std::io::Write::write_all(&mut file, &bytes).unwrap();
+        drop(file);
         assert_eq!(
             corrupt_graph
                 .diff_committed_generations(&request(corrupt, corrupt))

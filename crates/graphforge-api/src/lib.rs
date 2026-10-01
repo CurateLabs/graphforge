@@ -150,6 +150,8 @@ mod mutation_transaction_fault_tests;
 #[cfg(test)]
 mod permanent_parquet_test_support;
 #[cfg(test)]
+mod expanded_generation_test_support;
+#[cfg(test)]
 mod pinned_workspace_tests;
 #[cfg(test)]
 mod workspace_flip_policy_tests;

@@ -350,6 +350,7 @@ pub fn admit_path(path: &Path) -> Result<(), GfError> {
 }
 
 /// Admit every regular file beneath `root`; used for directory-shaped readers.
+/// A `root` that does not exist has nothing to admit.
 ///
 /// # Errors
 /// Returns the first traversal failure or corruption refusal.
@@ -359,12 +360,18 @@ pub fn admit_tree(root: &Path) -> Result<(), GfError> {
     }
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
-        let entries = std::fs::read_dir(&directory).map_err(|error| {
-            GfError::Storage(format!(
-                "read graph payload directory {}: {error}",
-                directory.display()
-            ))
-        })?;
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            // A directory that is not there holds no payload to admit: a
+            // reader that finds nothing reports an absent artifact itself.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(GfError::Storage(format!(
+                    "read graph payload directory {}: {error}",
+                    directory.display()
+                )));
+            }
+        };
         for entry in entries {
             let entry = entry.map_err(|error| {
                 GfError::Storage(format!(

@@ -11,6 +11,10 @@ pub(crate) struct KnownGraphFile {
     pub(crate) byte_length: u64,
     pub(crate) content_sha256: String,
     pub(crate) content_xxh64: u64,
+    /// Native identity of the content-store object this entry names. A workspace
+    /// file with this identity is that object (hydration hard-links it), so its
+    /// bytes carry the declared identity without another read.
+    pub(crate) object_identity: Option<graphforge_filesystem::FileIdentity>,
 }
 
 impl From<&GraphFileEntry> for KnownGraphFile {
@@ -19,14 +23,17 @@ impl From<&GraphFileEntry> for KnownGraphFile {
             byte_length: entry.byte_length,
             content_sha256: entry.content_sha256.clone(),
             content_xxh64: entry.content_xxh64,
+            object_identity: None,
         }
     }
 }
 
 /// Capture a private workspace for publication over `parent`, reusing the
-/// parent's authenticated declared SHA-256 for every file whose path, exact
-/// length and freshly computed XXH64 all match the parent inventory. Changed and new
-/// files are hashed once. Only newly written bytes pay for a new identity.
+/// parent's authenticated declared SHA-256 for every file whose path and exact
+/// length match the parent inventory and which either is the parent's own
+/// content-store object (same native identity, so unchanged and already
+/// admitted) or carries its freshly computed XXH64. Changed and new files are
+/// hashed once. Only newly written bytes pay for a new identity.
 ///
 /// # Errors
 /// Rejects links, special files, unsafe relative paths, duplicates, and
@@ -52,9 +59,22 @@ pub fn capture_graph_files_over_parent(
         }
         None => Vec::new(),
     };
+    let compact = matches!(
+        parent.declared_graph_files_participant()?,
+        Some(GraphFilesParticipant::V2(_))
+    );
     let known = entries
         .iter()
-        .map(|entry| (entry.relative_path.clone(), KnownGraphFile::from(entry)))
+        .map(|entry| {
+            let mut known = KnownGraphFile::from(entry);
+            if compact {
+                known.object_identity =
+                    crate::graph_object_path(parent.container_root(), &entry.content_sha256)
+                        .ok()
+                        .and_then(|object| graphforge_filesystem::path_identity(&object).ok());
+            }
+            (entry.relative_path.clone(), known)
+        })
         .collect::<std::collections::HashMap<_, _>>();
     capture_graph_files_reusing_digests(source_root, &known, ARTIFACT_IDENTITY)
 }

@@ -6,6 +6,10 @@ use graphforge_api::{FindOptions, NodeSelector, SearchIndexOptions};
 use graphforge_api::{GraphForge, PropValue};
 use graphforge_storage::payload_digest::PayloadDigestCapture;
 
+#[allow(dead_code, reason = "each test binary uses a subset")]
+#[path = "support/project_fixture.rs"]
+mod project_fixture;
+
 #[test]
 fn durable_reopen_properties_uuid_and_delta_query_hash_no_payload_bytes() {
     let root = tempfile::tempdir().unwrap();
@@ -148,10 +152,68 @@ fn published_vector_find_and_property_shaping_hash_no_payload_bytes() {
     );
 }
 
+/// Flip one byte of `object` in place: same inode, same length.
+#[cfg(unix)]
+fn flip_byte_in_place(object: &std::path::Path) {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let original = std::fs::metadata(object).unwrap();
+    let mut bytes = std::fs::read(object).unwrap();
+    bytes[8] ^= 1;
+    std::fs::set_permissions(
+        object,
+        std::fs::Permissions::from_mode(original.mode() | 0o200),
+    )
+    .unwrap();
+    std::fs::write(object, &bytes).unwrap();
+    std::fs::set_permissions(object, original.permissions()).unwrap();
+    let changed = std::fs::metadata(object).unwrap();
+    assert_eq!(changed.ino(), original.ino());
+    assert_eq!(changed.len(), original.len());
+}
+
+/// An expanded generation (as projects published before compact commits are)
+/// still verifies its whole tree and refuses the corruption at open.
+#[cfg(unix)]
+#[test]
+fn expanded_facade_refuses_same_inode_same_length_payload_mutation() {
+    let source = tempfile::tempdir().unwrap();
+    let graph = GraphForge::new(Some(source.path().to_str().unwrap())).unwrap();
+    graph.add_node("Person", &HashMap::new()).unwrap();
+    drop(graph);
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().to_str().unwrap();
+    project_fixture::publish_expanded_copy(source.path(), root.path());
+    let generation = graphforge_storage::resolve_project_generation(root.path()).unwrap();
+    let inventory = generation.graph_files_inventory().unwrap().unwrap();
+    let victim = inventory
+        .files
+        .iter()
+        .find(|entry| {
+            entry.role == graphforge_storage::GraphFileRole::Topology && entry.byte_length > 16
+        })
+        .unwrap();
+    flip_byte_in_place(&generation.graph_tree_root().join(&victim.relative_path));
+    let capture = PayloadDigestCapture::start();
+    let error = GraphForge::new(Some(path)).unwrap_err();
+    assert!(error.to_string().contains("GF_PROJECT_CORRUPT"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("generation graph file has no authenticated legacy path resolution"),
+        "{error}"
+    );
+    let work = capture.snapshot();
+    eprintln!("corruption refusal digest work: {work:?}");
+    assert_eq!(work.artifact_payload_sha256_bytes, 0);
+    assert_eq!(work.unclassified_sha256_bytes, 0);
+    assert!(work.checksum_bytes > 0, "{work:?}");
+}
+
+/// A compact generation, which every mutating commit publishes, opens without
+/// reading payload content and refuses the corruption when a query touches it.
 #[cfg(unix)]
 #[test]
 fn current_facade_refuses_same_inode_same_length_payload_mutation() {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let root = tempfile::tempdir().unwrap();
     let path = root.path().to_str().unwrap();
     let graph = GraphForge::new(Some(path)).unwrap();
@@ -163,32 +225,19 @@ fn current_facade_refuses_same_inode_same_length_payload_mutation() {
         .files
         .iter()
         .find(|entry| {
-            entry.role == graphforge_storage::GraphFileRole::Topology && entry.byte_length > 16
+            entry.relative_path.starts_with("topology/nodes") && entry.byte_length > 16
         })
         .unwrap();
-    let object = generation.graph_tree_root().join(&victim.relative_path);
-    let original = std::fs::metadata(&object).unwrap();
-    let mut bytes = std::fs::read(&object).unwrap();
-    bytes[8] ^= 1;
-    std::fs::set_permissions(
-        &object,
-        std::fs::Permissions::from_mode(original.mode() | 0o200),
-    )
-    .unwrap();
-    std::fs::write(&object, &bytes).unwrap();
-    std::fs::set_permissions(&object, original.permissions()).unwrap();
-    let changed = std::fs::metadata(&object).unwrap();
-    assert_eq!(changed.ino(), original.ino());
-    assert_eq!(changed.len(), original.len());
-    let capture = PayloadDigestCapture::start();
-    let error = GraphForge::new(Some(path)).unwrap_err();
-    assert!(error.to_string().contains("GF_PROJECT_CORRUPT"), "{error}");
-    assert!(
-        error
-            .to_string()
-            .contains("generation graph file has no authenticated legacy path resolution"),
-        "{error}"
+    flip_byte_in_place(
+        &graphforge_storage::graph_object_path(root.path(), &victim.content_sha256).unwrap(),
     );
+    drop(generation);
+    let capture = PayloadDigestCapture::start();
+    let reopened = GraphForge::new(Some(path)).expect("a compact open reads no node payload");
+    let error = reopened
+        .execute("MATCH (p:Person) RETURN p.node_uuid")
+        .unwrap_err();
+    assert!(error.to_string().contains("XXH64 checksum"), "{error}");
     let work = capture.snapshot();
     eprintln!("corruption refusal digest work: {work:?}");
     assert_eq!(work.artifact_payload_sha256_bytes, 0);
@@ -392,9 +441,8 @@ fn compact_cas_facade_reopen_and_query_hash_no_payload_bytes() {
         ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
         ProjectStageOutcome,
     };
-    let root = tempfile::tempdir().unwrap();
-    let path = root.path().to_str().unwrap();
-    let graph = GraphForge::new(Some(path)).unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let graph = GraphForge::new(Some(source.path().to_str().unwrap())).unwrap();
     graph
         .add_node(
             "Person",
@@ -402,6 +450,11 @@ fn compact_cas_facade_reopen_and_query_hash_no_payload_bytes() {
         )
         .unwrap();
     drop(graph);
+    // The conversion under test starts from an expanded generation, which a
+    // mutating commit no longer publishes.
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().to_str().unwrap();
+    project_fixture::publish_expanded_copy(source.path(), root.path());
     let parent = graphforge_storage::resolve_project_generation(root.path()).unwrap();
     let inventory = parent.graph_files_inventory().unwrap().unwrap();
     assert_eq!(inventory.format_version, 7);

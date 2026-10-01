@@ -418,7 +418,7 @@ static OPTIMISTIC_PUBLISH_BARRIER: std::sync::OnceLock<
 #[cfg(test)]
 static OPTIMISTIC_PUBLISH_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn reconcile_workspace_to(
+pub(crate) fn reconcile_workspace_to(
     graph: &GraphForge,
     generation: &ResolvedProjectGeneration,
 ) -> Result<(), GfError> {
@@ -2207,7 +2207,7 @@ mod tests {
     }
 
     #[test]
-    fn eligible_property_commit_preserves_complete_generation_and_reopens_from_delta() {
+    fn property_set_publishes_no_delta_run() {
         let directory = TempDir::new().unwrap();
         let graph = GraphForge::new(directory.path().to_str()).unwrap();
         graph
@@ -2228,7 +2228,7 @@ mod tests {
             .into_iter()
             .filter(|snapshot| snapshot.capability_id != "graph")
             .collect::<Vec<_>>();
-        let request = property_request(124, 122, "nickname", "delta-visible");
+        let request = property_request(124, 122, "nickname", "set-visible");
         let first = graph
             .publish_composite_transaction(request.clone())
             .unwrap();
@@ -2245,18 +2245,46 @@ mod tests {
                 .filter(|snapshot| snapshot.capability_id != "graph")
                 .collect::<Vec<_>>()
         );
+        // A property SET installs changed files into a compact root. It
+        // publishes no journal run, because a delta-bearing open would verify,
+        // copy and re-stream the whole graph (#1388).
         let published_graph = published.graph_files_inventory().unwrap().unwrap();
-        assert_eq!(
+        assert!(
+            !published_graph
+                .files
+                .iter()
+                .any(|entry| entry.relative_path.starts_with("deltas/")),
+            "a property SET published a delta run"
+        );
+        assert!(
             graphforge_storage::list_delta_runs(&published_graph, Default::default())
                 .unwrap()
-                .len(),
-            1
+                .is_empty()
         );
+        let record_version = published
+            .participant_snapshot(
+                graphforge_storage::GRAPH_CAPABILITY_ID,
+                graphforge_storage::GRAPH_FILES_FAMILY,
+            )
+            .unwrap()
+            .unwrap()
+            .record_version;
+        assert!(
+            matches!(
+                record_version,
+                graphforge_storage::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+                    | graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
+            ),
+            "a property SET published record version {record_version}, not a compact root"
+        );
+        let catalog = published_graph
+            .files
+            .iter()
+            .find(|entry| entry.relative_path == "topology/runtime_catalog.parquet")
+            .expect("the published generation carries a runtime catalog");
         let expected_catalog = graph.runtime_catalog.lock().unwrap().to_record_batch();
         let persisted_catalog = crate::read_runtime_catalog(
-            &published
-                .graph_tree_root()
-                .join("topology/runtime_catalog.parquet"),
+            &graphforge_storage::graph_object_path(root, &catalog.content_sha256).unwrap(),
         )
         .unwrap()
         .to_record_batch();
@@ -2265,7 +2293,7 @@ mod tests {
             "the newly observed nickname must be published in the runtime catalog"
         );
         for entry in parent_graph.files.iter().filter(|entry| {
-            entry.relative_path != "topology/runtime_catalog.parquet"
+            entry.relative_path.starts_with("topology/nodes")
                 && std::path::Path::new(&entry.relative_path)
                     .extension()
                     .is_some_and(|extension| extension == "parquet")
@@ -2286,7 +2314,7 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert_eq!(values.value(0), "delta-visible");
+        assert_eq!(values.value(0), "set-visible");
     }
 
     #[test]

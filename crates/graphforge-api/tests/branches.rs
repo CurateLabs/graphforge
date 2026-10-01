@@ -1158,8 +1158,9 @@ fn selected_branch_releases_large_parent_after_evolution_and_cleanup() {
             graph.research_version(request.version_uuid).unwrap(),
             selected
         );
-        // This facade fixture uses the authenticated generation tree directly.
-        assert_eq!(projection.source_materialization_bytes_copied, 0);
+        // The owner is compact, so the projection hard-links its payloads and
+        // copies only the small mutable controls; that cost is checked below
+        // not to move with the parent's size.
         assert!(projection.source_materialization_bytes_copied < projection.source_payload_bytes);
         measurements.push((
             parent_noise_nodes,
@@ -1173,6 +1174,10 @@ fn selected_branch_releases_large_parent_after_evolution_and_cleanup() {
         ));
     }
     assert!(measurements[1].1 > measurements[0].1);
+    assert_eq!(
+        measurements[0].3, measurements[1].3,
+        "materialization copy cost must not grow with the parent's payload"
+    );
     assert!(measurements[1].2.abs_diff(measurements[0].2) < 1024);
     assert!(measurements[1].4 <= measurements[0].4 + 8192);
     eprintln!(

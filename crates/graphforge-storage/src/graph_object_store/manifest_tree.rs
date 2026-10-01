@@ -275,12 +275,34 @@ pub(crate) fn append_replayed_graph_files(
             crate::graph_files::read_route_table_counted(workspace, entry).map(|(bytes, _)| bytes)
         },
     )?;
+    // The inventory already holds each changed file's digest and length, from
+    // the capture that read these exact bytes. Installing authenticates them
+    // again as it copies, so a stale claim fails there; passing them only spares
+    // a redundant standalone pre-hash of every changed payload.
+    let authenticated = sealed_paths
+        .iter()
+        .map(|path| {
+            let name = path
+                .to_str()
+                .ok_or_else(|| validation("sealed graph path is not UTF-8"))?;
+            let index = inventory
+                .files
+                .binary_search_by(|entry| entry.relative_path.as_str().cmp(name))
+                .map_err(|_| validation("sealed graph path is absent from its inventory"))?;
+            let entry = &inventory.files[index];
+            Ok(AuthenticatedGraphFile {
+                relative_path: path.clone(),
+                byte_length: entry.byte_length,
+                content_sha256: entry.content_sha256.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, GfError>>()?;
     append_graph_files_v2_inner(
         lease,
         workspace,
         state,
         sealed_paths,
-        None,
+        Some(&authenticated),
         tombstones,
         routes.as_ref(),
         None,

@@ -33,6 +33,193 @@ use uuid::Uuid;
 type Node = (Uuid, String, Option<i64>);
 type Edge = (Uuid, Uuid, Uuid, String, Option<i64>, Option<String>);
 
+
+/// Authoritative property delta runs for the replay and compaction fixtures.
+///
+/// No commit publishes delta runs any more (#1388): a delta-bearing generation
+/// opens by checksumming, copying and re-streaming the whole graph. Generations
+/// that already carry runs must still replay and compact, so these fixtures
+/// publish them through the journal API, which is how such a generation is
+/// produced today. `_untyped` is the owner of every exploratory node.
+mod delta_runs {
+    use super::Uuid;
+    use graphforge_storage::{
+        GraphDeltaJournalLimits, GraphDeltaOp, GraphDeltaOpKind, GraphDeltaPayload,
+        GraphDeltaPublishRequest, encode_graph_delta_value,
+    };
+
+    pub(super) const UNTYPED: &str = "_untyped";
+
+    fn op(kind: GraphDeltaOpKind, payload: GraphDeltaPayload) -> GraphDeltaOp {
+        GraphDeltaOp {
+            operation_uuid: Uuid::now_v7(),
+            kind,
+            payload,
+        }
+    }
+
+    pub(super) fn set_node(node: Uuid, stem: &str, key: &str, value: i64) -> GraphDeltaOp {
+        op(
+            GraphDeltaOpKind::SetNodeProperty,
+            GraphDeltaPayload::SetNodeProperty {
+                node_uuid: node.hyphenated().to_string(),
+                property_stem: stem.into(),
+                key: key.into(),
+                value: encode_graph_delta_value(&graphforge_ir::IrLiteral::Int(value)).unwrap(),
+            },
+        )
+    }
+
+    pub(super) fn remove_node(node: Uuid, stem: &str, key: &str) -> GraphDeltaOp {
+        op(
+            GraphDeltaOpKind::RemoveNodeProperty,
+            GraphDeltaPayload::RemoveNodeProperty {
+                node_uuid: node.hyphenated().to_string(),
+                property_stem: stem.into(),
+                key: key.into(),
+            },
+        )
+    }
+
+    pub(super) fn set_edge(edge: Uuid, stem: &str, key: &str, value: i64) -> GraphDeltaOp {
+        op(
+            GraphDeltaOpKind::SetEdgeProperty,
+            GraphDeltaPayload::SetEdgeProperty {
+                edge_uuid: edge.hyphenated().to_string(),
+                property_stem: stem.into(),
+                key: key.into(),
+                value: encode_graph_delta_value(&graphforge_ir::IrLiteral::Int(value)).unwrap(),
+            },
+        )
+    }
+
+    pub(super) fn remove_edge(edge: Uuid, stem: &str, key: &str) -> GraphDeltaOp {
+        op(
+            GraphDeltaOpKind::RemoveEdgeProperty,
+            GraphDeltaPayload::RemoveEdgeProperty {
+                edge_uuid: edge.hyphenated().to_string(),
+                property_stem: stem.into(),
+                key: key.into(),
+            },
+        )
+    }
+
+    /// The property owner of every node and edge that already has property
+    /// data, read from the published fragments the way replay resolves it: a
+    /// run must name the owner that holds a value, or replay finds two.
+    pub(super) struct Owners {
+        nodes: std::collections::BTreeMap<Uuid, String>,
+        edges: std::collections::BTreeMap<Uuid, String>,
+    }
+
+    impl Owners {
+        pub(super) fn read(project: &std::path::Path) -> Self {
+            use arrow::array::{Array, FixedSizeBinaryArray};
+            let inventory = graphforge_storage::resolve_project_generation(project)
+                .unwrap()
+                .graph_files_inventory()
+                .unwrap()
+                .unwrap();
+            let object = |entry: &graphforge_storage::GraphFileEntry| {
+                graphforge_storage::graph_object_path(project, &entry.content_sha256).unwrap()
+            };
+            // A mapped project names directories by opaque component.
+            let components: std::collections::BTreeMap<String, String> = inventory
+                .files
+                .iter()
+                .find(|entry| entry.relative_path == "semantic-routes.json")
+                .map(|entry| {
+                    let table: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(object(entry)).unwrap()).unwrap();
+                    table["entries"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|row| {
+                            (
+                                row["component"].as_str().unwrap().to_owned(),
+                                row["route"].as_str().unwrap().to_owned(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut owners = Self {
+                nodes: Default::default(),
+                edges: Default::default(),
+            };
+            for entry in &inventory.files {
+                let (prefix, column, edge) =
+                    if entry.relative_path.starts_with("edge_properties/") {
+                        ("edge_properties/", "edge_uuid", true)
+                    } else if entry.relative_path.starts_with("properties/") {
+                        ("properties/", "node_uuid", false)
+                    } else {
+                        continue;
+                    };
+                if !entry.relative_path.ends_with(".parquet") {
+                    continue;
+                }
+                let component = entry.relative_path[prefix.len()..]
+                    .split('/')
+                    .next()
+                    .unwrap();
+                let route = components
+                    .get(component)
+                    .cloned()
+                    .unwrap_or_else(|| component.to_owned());
+                let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                    std::fs::File::open(object(entry)).unwrap(),
+                )
+                .unwrap()
+                .build()
+                .unwrap();
+                for batch in reader {
+                    let batch = batch.unwrap();
+                    let uuids = batch
+                        .column_by_name(column)
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<FixedSizeBinaryArray>()
+                        .unwrap();
+                    for row in 0..uuids.len() {
+                        let uuid = Uuid::from_slice(uuids.value(row)).unwrap();
+                        let map = if edge { &mut owners.edges } else { &mut owners.nodes };
+                        map.insert(uuid, route.clone());
+                    }
+                }
+            }
+            owners
+        }
+
+        /// The owner of `node`, or `default` for a node with no property data.
+        pub(super) fn node(&self, node: Uuid, default: &str) -> String {
+            self.nodes.get(&node).cloned().unwrap_or_else(|| default.to_owned())
+        }
+
+        /// The owner of `edge`, or its relation type for an edge with no data.
+        pub(super) fn edge(&self, edge: Uuid, relation: &str) -> String {
+            self.edges.get(&edge).cloned().unwrap_or_else(|| relation.to_owned())
+        }
+    }
+
+    /// Publish one run over the project's current generation. The project must
+    /// not be open through a facade that will compact afterwards: reopen it.
+    pub(super) fn publish(project: &std::path::Path, operations: Vec<GraphDeltaOp>) {
+        graphforge_storage::publish_graph_delta(
+            project,
+            &GraphDeltaPublishRequest {
+                transaction_uuid: Uuid::now_v7(),
+                generation_uuid: Uuid::now_v7(),
+                run_uuid: Uuid::now_v7(),
+                operations,
+                limits: GraphDeltaJournalLimits::default(),
+            },
+        )
+        .unwrap();
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Identifiers {
     Sequential,
@@ -467,8 +654,9 @@ fn adjacency_codec_experiment(source: &Path) -> Value {
         writer::{FileWriter, IpcWriteOptions},
     };
     let selected = graphforge_storage::resolve_project_generation(source).unwrap();
-    selected.graph_files_inventory().unwrap().unwrap();
-    let mut pending = vec![selected.graph_tree_root()];
+    // The generation is compact (every mutating commit publishes one), so its
+    // CSR shards are content-store objects named by the inventory.
+    let inventory = selected.graph_files_inventory().unwrap().unwrap();
     let mut sizes = [0_u64; 3];
     let mut allocations = [0_u64; 3];
     let mut encode_ns = [0_u128; 3];
@@ -480,24 +668,19 @@ fn adjacency_codec_experiment(source: &Path) -> Value {
     let source_allocated_bytes = 0_u64;
     let mut shards = 0_u64;
     let mut largest_decoded_batch = 0_usize;
-    while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(directory).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_type().unwrap().is_dir() {
-                pending.push(entry.path());
-                continue;
-            }
-            if entry
-                .path()
-                .extension()
-                .is_none_or(|extension| extension != "csr")
-            {
-                continue;
-            }
-            let reader = FileReader::try_new(File::open(entry.path()).unwrap(), None).unwrap();
+    {
+        for entry in inventory
+            .files
+            .iter()
+            .filter(|entry| entry.relative_path.ends_with(".csr"))
+        {
+            let object =
+                graphforge_storage::graph_object_path(source, &entry.content_sha256).unwrap();
+            let file = File::open(object).unwrap();
+            let metadata = file.metadata().unwrap();
+            let reader = FileReader::try_new(file, None).unwrap();
             let schema = reader.schema();
             let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
-            let metadata = entry.metadata().unwrap();
             source_bytes += metadata.len();
             #[cfg(unix)]
             {
@@ -1136,30 +1319,20 @@ fn cas_construction_composite_mutation_and_compaction_preserve_values() {
     let graph = GraphForge::new(source.to_str()).unwrap();
     verify_graph(&graph, fixture, &nodes, &edges);
     drop(graph);
-    use graphforge_api::{
-        COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeGraphMutation,
-        CompositeKnowledgeParticipants, CompositeTransactionRequest, PropValue, WriteContext,
-    };
     let graph = GraphForge::new(source.to_str()).unwrap();
     let snapshot_query =
         "MATCH (n) WHERE n.score IS NOT NULL RETURN n.node_uuid, n.score ORDER BY n.node_uuid";
     let expected_snapshot = graph.execute(snapshot_query).unwrap();
     let old_stream = graph.execute_stream(snapshot_query).unwrap();
-    graph
-        .publish_composite_transaction(CompositeTransactionRequest {
-            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
-            context: WriteContext {
-                operation_uuid: OperationId(Uuid::now_v7()),
-                actor_uuid: None,
-            },
-            graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
-                node_uuid: nodes[0].0,
-                property: "score".into(),
-                value: PropValue::Int(123),
-            }],
-            knowledge: CompositeKnowledgeParticipants::default(),
-        })
-        .unwrap();
+    delta_runs::publish(
+        &source,
+        vec![delta_runs::set_node(
+            nodes[0].0,
+            delta_runs::UNTYPED,
+            "score",
+            123,
+        )],
+    );
     use futures::TryStreamExt as _;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1763,21 +1936,49 @@ fn exercise_qualified_property_publication(
     let (snapshot, _, _snapshot_guard) = graph
         .execute_stream_owned(snapshot_query, &Default::default())
         .unwrap();
-    graph
-        .publish_composite_transaction(CompositeTransactionRequest {
-            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
-            context: WriteContext {
-                operation_uuid: OperationId(Uuid::now_v7()),
-                actor_uuid: None,
-            },
-            graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
-                node_uuid: changed_node,
-                property: "score".into(),
-                value: PropValue::Int(124),
-            }],
-            knowledge: CompositeKnowledgeParticipants::default(),
-        })
-        .unwrap();
+    let mut graph = if mixed {
+        graph
+            .publish_composite_transaction(CompositeTransactionRequest {
+                contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                context: WriteContext {
+                    operation_uuid: OperationId(Uuid::now_v7()),
+                    actor_uuid: None,
+                },
+                graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
+                    node_uuid: changed_node,
+                    property: "score".into(),
+                    value: PropValue::Int(124),
+                }],
+                knowledge: CompositeKnowledgeParticipants::default(),
+            })
+            .unwrap();
+        graph
+    } else {
+        // The single-writer project carries a real GFDR run over its qualified
+        // fragment. No commit publishes one now, so the journal API does, and
+        // the facade is reopened over it.
+        drop(graph);
+        let entity_route = bindings
+            .bindings
+            .iter()
+            .find(|binding| {
+                binding.route_kind == graphforge_storage::SemanticRouteKind::Entity
+                    && binding.symbol.local_id == "NewNode"
+            })
+            .unwrap()
+            .route
+            .clone();
+        delta_runs::publish(
+            &source,
+            vec![delta_runs::set_node(
+                changed_node,
+                &entity_route,
+                "score",
+                124,
+            )],
+        );
+        GraphForge::new(source.to_str()).unwrap()
+    };
     let delta = graphforge_storage::resolve_project_generation(&source).unwrap();
     assert_eq!(
         graphforge_storage::list_delta_runs(
@@ -2284,31 +2485,21 @@ fn exploratory_parent_construction_replays_and_compacts_exact_routes() {
     let graph = GraphForge::new(source.to_str()).unwrap();
     verify_graph(&graph, fixture, &nodes, &edges);
     drop(graph);
-    use graphforge_api::{
-        COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeGraphMutation,
-        CompositeKnowledgeParticipants, CompositeTransactionRequest, PropValue, WriteContext,
-    };
     let graph = GraphForge::new(source.to_str()).unwrap();
     let snapshot_query = "MATCH (n) RETURN n.node_uuid, n.score ORDER BY n.node_uuid";
     let expected_snapshot = graph.execute(snapshot_query).unwrap();
     let (old_stream, _, _snapshot_guard) = graph
         .execute_stream_owned(snapshot_query, &Default::default())
         .unwrap();
-    graph
-        .publish_composite_transaction(CompositeTransactionRequest {
-            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
-            context: WriteContext {
-                operation_uuid: OperationId(Uuid::now_v7()),
-                actor_uuid: None,
-            },
-            graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
-                node_uuid: nodes[0].0,
-                property: "score".into(),
-                value: PropValue::Int(123),
-            }],
-            knowledge: CompositeKnowledgeParticipants::default(),
-        })
-        .unwrap();
+    delta_runs::publish(
+        &source,
+        vec![delta_runs::set_node(
+            nodes[0].0,
+            delta_runs::UNTYPED,
+            "score",
+            123,
+        )],
+    );
     drop(graph);
     nodes[0].2 = Some(123);
     let mut graph = GraphForge::new(source.to_str()).unwrap();
@@ -2493,24 +2684,44 @@ fn exploratory_parent_and_qualified_child_replay_preserve_semantic_routes() {
         schemas
     };
     let before = schemas(&source);
-    // First write establishes qualified schema authority; the next is real GFDR.
-    for score in [122, 123] {
-        graph
-            .publish_composite_transaction(CompositeTransactionRequest {
-                contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
-                context: WriteContext {
-                    operation_uuid: OperationId(Uuid::now_v7()),
-                    actor_uuid: None,
-                },
-                graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
-                    node_uuid: changed_node,
-                    property: "score".into(),
-                    value: PropValue::Int(score),
-                }],
-                knowledge: CompositeKnowledgeParticipants::default(),
-            })
-            .unwrap();
-    }
+    // First write establishes qualified schema authority; the next is real GFDR,
+    // published through the journal API because no commit publishes runs now.
+    graph
+        .publish_composite_transaction(CompositeTransactionRequest {
+            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
+                node_uuid: changed_node,
+                property: "score".into(),
+                value: PropValue::Int(122),
+            }],
+            knowledge: CompositeKnowledgeParticipants::default(),
+        })
+        .unwrap();
+    drop(graph);
+    let entity_route = bindings
+        .bindings
+        .iter()
+        .find(|binding| {
+            binding.route_kind == graphforge_storage::SemanticRouteKind::Entity
+                && binding.symbol.local_id == "NewNode"
+        })
+        .unwrap()
+        .route
+        .clone();
+    delta_runs::publish(
+        &source,
+        vec![delta_runs::set_node(
+            changed_node,
+            &entity_route,
+            "score",
+            123,
+        )],
+    );
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
     let delta = graphforge_storage::resolve_project_generation(&source).unwrap();
     assert_eq!(
         graphforge_storage::list_delta_runs(
@@ -2776,27 +2987,15 @@ fn permanent_publishing_policy_construction_mutation_and_compaction() {
         "PUBLISHING_PRE_DELTA {}",
         json!({"construction":construction, "mutation":mutation})
     );
-    use graphforge_api::{
-        COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeGraphMutation,
-        CompositeKnowledgeParticipants, CompositeTransactionRequest, PropValue, WriteContext,
-    };
-    let graph = GraphForge::new(source.to_str()).unwrap();
-    graph
-        .publish_composite_transaction(CompositeTransactionRequest {
-            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
-            context: WriteContext {
-                operation_uuid: OperationId(Uuid::now_v7()),
-                actor_uuid: None,
-            },
-            graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
-                node_uuid: nodes[0].0,
-                property: "score".into(),
-                value: PropValue::Int(123),
-            }],
-            knowledge: CompositeKnowledgeParticipants::default(),
-        })
-        .unwrap();
-    drop(graph);
+    delta_runs::publish(
+        &source,
+        vec![delta_runs::set_node(
+            nodes[0].0,
+            delta_runs::UNTYPED,
+            "score",
+            123,
+        )],
+    );
     nodes[0].2 = Some(123);
     let mut graph = GraphForge::new(source.to_str()).unwrap();
     verify_graph(&graph, fixture, &nodes, &edges);
@@ -3783,10 +3982,6 @@ fn facade_compaction_rejects_partial_chain_then_refreshes_full_chain() {
 
 fn exercise_facade_compaction_refresh(node_count: usize, multiple_deltas: bool) {
     use futures::TryStreamExt as _;
-    use graphforge_api::{
-        COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeGraphMutation as Mutation,
-        CompositeKnowledgeParticipants, CompositeTransactionRequest, PropValue, WriteContext,
-    };
     use graphforge_storage::{
         GraphDeltaCompactionLimits, GraphDeltaCompactionRequest, ProjectRetentionLimits,
         ProjectRetentionPolicy,
@@ -3807,63 +4002,43 @@ fn exercise_facade_compaction_refresh(node_count: usize, multiple_deltas: bool) 
     construct(&source, fixture, &nodes, &edges);
     let parent_objects = cas_uuid_parent_objects(&source);
     let original_ids = cas_uuid_node_surrogates(&source);
-    let mut graph = GraphForge::new_with_options(
-        source.to_str(),
-        graphforge_api::GraphForgeOptions {
-            resource: graphforge_api::ExecutionResourcePolicy {
-                batch_size: Some(7),
-                target_partitions: Some(1),
-                ..Default::default()
-            },
+    let options = || graphforge_api::GraphForgeOptions {
+        resource: graphforge_api::ExecutionResourcePolicy {
+            batch_size: Some(7),
+            target_partitions: Some(1),
             ..Default::default()
         },
-    )
-    .unwrap();
+        ..Default::default()
+    };
     if multiple_deltas {
+        let graph = GraphForge::new_with_options(source.to_str(), options()).unwrap();
         graph.index_adjacency().unwrap();
     }
-    graph
-        .publish_composite_transaction(CompositeTransactionRequest {
-            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
-            context: WriteContext {
-                operation_uuid: OperationId(Uuid::now_v7()),
-                actor_uuid: None,
-            },
-            graph_mutations: vec![
-                Mutation::SetNodeProperty {
-                    node_uuid: nodes[0].0,
-                    property: "score".into(),
-                    value: PropValue::Int(9),
-                },
-                Mutation::RemoveNodeProperty {
-                    node_uuid: nodes[1].0,
-                    property: "score".into(),
-                },
-            ],
-            knowledge: CompositeKnowledgeParticipants::default(),
-        })
-        .unwrap();
+    // The delta chain is published through the journal API (no commit publishes
+    // runs now) before the facade opens over it.
+    delta_runs::publish(
+        &source,
+        vec![
+            delta_runs::set_node(nodes[0].0, delta_runs::UNTYPED, "score", 9),
+            delta_runs::remove_node(nodes[1].0, delta_runs::UNTYPED, "score"),
+        ],
+    );
     nodes[0].2 = Some(9);
     nodes[1].2 = None;
-    verify_graph(&graph, fixture, &nodes, &edges);
     if multiple_deltas {
-        graph
-            .publish_composite_transaction(CompositeTransactionRequest {
-                contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
-                context: WriteContext {
-                    operation_uuid: OperationId(Uuid::now_v7()),
-                    actor_uuid: None,
-                },
-                graph_mutations: vec![Mutation::SetNodeProperty {
-                    node_uuid: nodes[2].0,
-                    property: "score".into(),
-                    value: PropValue::Int(7),
-                }],
-                knowledge: CompositeKnowledgeParticipants::default(),
-            })
-            .unwrap();
+        delta_runs::publish(
+            &source,
+            vec![delta_runs::set_node(
+                nodes[2].0,
+                delta_runs::UNTYPED,
+                "score",
+                7,
+            )],
+        );
         nodes[2].2 = Some(7);
     }
+    let mut graph = GraphForge::new_with_options(source.to_str(), options()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
     let expected_snapshot = nodes
         .iter()
         .map(|row| (row.0, row.2))
@@ -4095,26 +4270,16 @@ fn facade_compaction_faults_preserve_authority_and_allow_mutation() {
             };
             let (mut nodes, edges) = rows(fixture);
             construct(&source, fixture, &nodes, &edges);
-            let graph = GraphForge::new(source.to_str()).unwrap();
-            graph
-                .publish_composite_transaction(graphforge_api::CompositeTransactionRequest {
-                    contract_version: graphforge_api::COMPOSITE_TRANSACTION_CONTRACT_VERSION,
-                    context: graphforge_api::WriteContext {
-                        operation_uuid: OperationId(Uuid::now_v7()),
-                        actor_uuid: None,
-                    },
-                    graph_mutations: vec![
-                        graphforge_api::CompositeGraphMutation::SetNodeProperty {
-                            node_uuid: nodes[0].0,
-                            property: "score".into(),
-                            value: graphforge_api::PropValue::Int(9),
-                        },
-                    ],
-                    knowledge: graphforge_api::CompositeKnowledgeParticipants::default(),
-                })
-                .unwrap();
+            delta_runs::publish(
+                &source,
+                vec![delta_runs::set_node(
+                    nodes[0].0,
+                    delta_runs::UNTYPED,
+                    "score",
+                    9,
+                )],
+            );
             nodes[0].2 = Some(9);
-            drop(graph);
             let parent = graphforge_storage::resolve_project_generation(&source)
                 .unwrap()
                 .generation_uuid();
@@ -4360,41 +4525,31 @@ fn composite_constructed_edge_properties_preserve_authenticated_owner() {
         verify_named_edge_property_owners(&graph, &edges);
         let ordinary = edges[129].0;
         let empty = edges[130].0;
-        graph
-            .publish_composite_transaction(graphforge_api::CompositeTransactionRequest {
-                contract_version: graphforge_api::COMPOSITE_TRANSACTION_CONTRACT_VERSION,
-                context: graphforge_api::WriteContext {
-                    operation_uuid: OperationId(Uuid::now_v7()),
-                    actor_uuid: None,
-                },
-                graph_mutations: vec![
-                    graphforge_api::CompositeGraphMutation::SetEdgeProperty {
-                        edge_uuid: ordinary,
-                        property: "weight".into(),
-                        value: graphforge_api::PropValue::Int(23),
-                    },
-                    graphforge_api::CompositeGraphMutation::RemoveEdgeProperty {
-                        edge_uuid: ordinary,
-                        property: "text".into(),
-                    },
-                    graphforge_api::CompositeGraphMutation::SetEdgeProperty {
-                        edge_uuid: empty,
-                        property: "weight".into(),
-                        value: graphforge_api::PropValue::Int(29),
-                    },
-                    graphforge_api::CompositeGraphMutation::SetEdgeProperty {
-                        edge_uuid: edges[0].0,
-                        property: "weight".into(),
-                        value: graphforge_api::PropValue::Int(19),
-                    },
-                    graphforge_api::CompositeGraphMutation::RemoveEdgeProperty {
-                        edge_uuid: edges[1].0,
-                        property: "text".into(),
-                    },
-                ],
-                knowledge: graphforge_api::CompositeKnowledgeParticipants::default(),
-            })
-            .unwrap();
+        // Edge properties are owned by their relation type. The run is published
+        // through the journal API (no commit publishes one now) and the facade
+        // reopens over it.
+        drop(graph);
+        let owners = delta_runs::Owners::read(&source);
+        delta_runs::publish(
+            &source,
+            vec![
+                delta_runs::set_edge(ordinary, &owners.edge(ordinary, &edges[129].3), "weight", 23),
+                delta_runs::remove_edge(ordinary, &owners.edge(ordinary, &edges[129].3), "text"),
+                delta_runs::set_edge(empty, &owners.edge(empty, &edges[130].3), "weight", 29),
+                delta_runs::set_edge(
+                    edges[0].0,
+                    &owners.edge(edges[0].0, &edges[0].3),
+                    "weight",
+                    19,
+                ),
+                delta_runs::remove_edge(
+                    edges[1].0,
+                    &owners.edge(edges[1].0, &edges[1].3),
+                    "text",
+                ),
+            ],
+        );
+        let mut graph = GraphForge::new(source.to_str()).unwrap();
         edges[129].4 = Some(23);
         edges[129].5 = None;
         edges[130].4 = Some(29);
@@ -5462,36 +5617,48 @@ fn exercise_publishing_contract(count: usize, typed: bool) {
         assert_eq!(error.code(), "GF_UNSUPPORTED_PROJECT_FORMAT");
         assert_eq!(clear_publication_files(&source), before);
     }
-    graph
-        .publish_composite_transaction(CompositeTransactionRequest {
-            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
-            context: WriteContext {
-                operation_uuid: OperationId(Uuid::now_v7()),
-                actor_uuid: None,
-            },
-            graph_mutations: vec![
-                Mutation::SetNodeProperty {
-                    node_uuid: nodes[0].0,
-                    property: "score".into(),
-                    value: PropValue::Int(1221),
-                },
-                Mutation::RemoveNodeProperty {
-                    node_uuid: nodes[1].0,
-                    property: "score".into(),
-                },
-                Mutation::SetEdgeProperty {
-                    edge_uuid: edges[0].0,
-                    property: "weight".into(),
-                    value: PropValue::Int(1221),
-                },
-                Mutation::RemoveEdgeProperty {
-                    edge_uuid: edges[1].0,
-                    property: "text".into(),
-                },
-            ],
-            knowledge: CompositeKnowledgeParticipants::default(),
-        })
-        .unwrap();
+    // A run over the journal API: no commit publishes one now. Each operation
+    // names the owner that already holds the value. A node with no property data
+    // is owned by its declared label's route (typed) or `_untyped`; an edge with
+    // none by its relation type.
+    drop(graph);
+    let owners = delta_runs::Owners::read(&source);
+    let default_node_owner = |label: &str| {
+        if typed && label == "Node0" {
+            "Node0"
+        } else {
+            delta_runs::UNTYPED
+        }
+        .to_owned()
+    };
+    delta_runs::publish(
+        &source,
+        vec![
+            delta_runs::set_node(
+                nodes[0].0,
+                &owners.node(nodes[0].0, &default_node_owner(&nodes[0].1)),
+                "score",
+                1221,
+            ),
+            delta_runs::remove_node(
+                nodes[1].0,
+                &owners.node(nodes[1].0, &default_node_owner(&nodes[1].1)),
+                "score",
+            ),
+            delta_runs::set_edge(
+                edges[0].0,
+                &owners.edge(edges[0].0, &edges[0].3),
+                "weight",
+                1221,
+            ),
+            delta_runs::remove_edge(
+                edges[1].0,
+                &owners.edge(edges[1].0, &edges[1].3),
+                "text",
+            ),
+        ],
+    );
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
     assert!(
         graphforge_storage::resolve_project_generation(&source)
             .unwrap()
@@ -6646,7 +6813,6 @@ fn wide_property_public_query_probe() {
 /// distinguish mutation cost, query work and existing maintenance cost.
 #[test]
 fn fragmentation_statistics_public_probe() {
-    use graphforge_api::{CompositeGraphMutation as Mutation, PropValue};
     use graphforge_storage::{
         GraphDeltaCompactionRequest, ProjectRetentionLimits, ProjectRetentionPolicy,
     };
@@ -6704,44 +6870,39 @@ fn fragmentation_statistics_public_probe() {
         }
         assert!(nodes[64].2.is_some());
         let mut mutation_ns = Vec::new();
-        // Topology publications can fold earlier deltas. Accumulate the measured
-        // property chain afterwards and report its actual verified length.
+        // No commit publishes delta runs now, so the property chain is built
+        // through the journal API, one run per round, over the topology the
+        // facade published. Report its actual verified length.
+        drop(graph);
         for round in 0..rounds {
             let started = Instant::now();
-            graph
-                .publish_composite_transaction(graphforge_api::CompositeTransactionRequest {
-                    contract_version: graphforge_api::COMPOSITE_TRANSACTION_CONTRACT_VERSION,
-                    context: graphforge_api::WriteContext {
-                        operation_uuid: OperationId(Uuid::now_v7()),
-                        actor_uuid: None,
+            delta_runs::publish(
+                &source,
+                vec![
+                    delta_runs::set_node(
+                        nodes[1].0,
+                        delta_runs::UNTYPED,
+                        "score",
+                        10_000 + round as i64,
+                    ),
+                    if round % 2 == 0 {
+                        assert!(nodes[64].2.is_some());
+                        delta_runs::remove_node(nodes[64].0, delta_runs::UNTYPED, "score")
+                    } else {
+                        delta_runs::set_node(
+                            nodes[64].0,
+                            delta_runs::UNTYPED,
+                            "score",
+                            20_000 + round as i64,
+                        )
                     },
-                    graph_mutations: vec![
-                        Mutation::SetNodeProperty {
-                            node_uuid: nodes[1].0,
-                            property: "score".into(),
-                            value: PropValue::Int(10_000 + round as i64),
-                        },
-                        if round % 2 == 0 {
-                            assert!(nodes[64].2.is_some());
-                            Mutation::RemoveNodeProperty {
-                                node_uuid: nodes[64].0,
-                                property: "score".into(),
-                            }
-                        } else {
-                            Mutation::SetNodeProperty {
-                                node_uuid: nodes[64].0,
-                                property: "score".into(),
-                                value: PropValue::Int(20_000 + round as i64),
-                            }
-                        },
-                    ],
-                    knowledge: graphforge_api::CompositeKnowledgeParticipants::default(),
-                })
-                .unwrap();
+                ],
+            );
             nodes[1].2 = Some(10_000 + round as i64);
             nodes[64].2 = (round % 2 == 1).then_some(20_000 + round as i64);
             mutation_ns.push(started.elapsed().as_nanos());
         }
+        let graph = GraphForge::new(source.to_str()).unwrap();
         let status = graph
             .graph_delta_compaction_status(Default::default(), Default::default())
             .unwrap();
@@ -7596,3 +7757,4 @@ fn count_row_marker_avoids_property_values_through_public_lifecycle() {
         after_import_mutation
     );
 }
+

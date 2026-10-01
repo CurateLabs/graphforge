@@ -80,11 +80,12 @@ fn install_composition_authority(forge: &GraphForge, context: &CompositionBindin
             .collect(),
         participants,
     };
+    let graph_objects = forge.begin_graph_object_publication().unwrap();
     match forge.stage_project_generation(&request).unwrap() {
         ProjectStageOutcome::Staged(staged) => staged
             .validate(|_| Ok(()), |_, _| Ok(()))
             .unwrap()
-            .publish()
+            .publish_with_graph_objects(&graph_objects)
             .unwrap(),
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
     };

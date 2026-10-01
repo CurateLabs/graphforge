@@ -411,11 +411,14 @@ impl GraphForge {
         let bindings = graphforge_storage::semantic_storage_bindings(&parent)
             .map_err(MultiOntologyError::from)?
             .ok_or_else(|| GfError::Validation("semantic storage bindings are missing"))?;
+        // A compact parent has no generation tree: read it through a private
+        // hydration, which aliases the tree itself only for an expanded parent.
+        let (parent_tree, _parent_guard, _) = crate::hydrate_graph_workspace(&parent, true)?;
         let plan = graphforge_storage::SemanticStorageBindings::plan_retained_data_migration(
             &previous_compiled,
             &next_compiled,
             &bindings,
-            &parent.graph_tree_root(),
+            &parent_tree,
         )
         .map_err(MultiOntologyError::from)?;
         Ok(ModuleMigrationPreview {
@@ -468,9 +471,11 @@ impl GraphForge {
             GfError::Validation("module migration private staging cannot be created")
         })?;
         let candidate_graph = private.path().join("graph");
+        let (source_tree, _source_guard, _) =
+            crate::hydrate_graph_workspace(&self.resolved_generation, true)?;
         let evidence = graphforge_storage::materialize_semantic_migration(
             &preview.plan,
-            &self.resolved_generation.graph_tree_root(),
+            &source_tree,
             &candidate_graph,
             graphforge_storage::SemanticMigrationLimits::default(),
             || cancellation.map_or(Ok(()), CancellationToken::checkpoint),

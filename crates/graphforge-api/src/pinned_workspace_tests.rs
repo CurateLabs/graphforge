@@ -110,17 +110,31 @@ pub(crate) fn tree_drift(
     drift
 }
 
-/// Every published generation of the project, each with its current stamp.
+/// Every published generation of the project that owns a graph tree, each with
+/// its current stamp. A compact generation has no tree to hold, and mutating
+/// commits publish compact roots, so a project's history mixes both: only the
+/// expanded generations carry the hazard these tests watch.
 pub(crate) fn published_generations(root: &Path) -> Vec<(ResolvedProjectGeneration, TreeStamp)> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(root.join("generations")).unwrap() {
         let entry = entry.unwrap();
         let uuid = Uuid::parse_str(entry.file_name().to_str().unwrap()).unwrap();
         let generation = graphforge_storage::resolve_generation_by_uuid(root, uuid).unwrap();
+        if generation
+            .participant_snapshot(GRAPH_CAPABILITY_ID, GRAPH_FILES_FAMILY)
+            .unwrap()
+            .is_some()
+            && has_compact_graph_root(&generation)
+        {
+            continue;
+        }
         let stamp = TreeStamp::capture(&generation.graph_tree_root());
         out.push((generation, stamp));
     }
-    assert!(!out.is_empty());
+    assert!(
+        !out.is_empty(),
+        "the project holds no expanded generation, so these tests would be vacuous"
+    );
     out
 }
 
@@ -139,7 +153,6 @@ pub(crate) fn assert_published_trees_untouched(
     }
 }
 
-#[cfg(feature = "research")]
 /// Whether the generation's graph participant is a compact root. A compact root
 /// always hydrates into a private workspace; only a generation tree can be aliased.
 pub(crate) fn has_compact_graph_root(generation: &ResolvedProjectGeneration) -> bool {
@@ -153,7 +166,6 @@ pub(crate) fn has_compact_graph_root(generation: &ResolvedProjectGeneration) -> 
     )
 }
 
-#[cfg(feature = "research")]
 /// The owner project's graph is a generation tree, so a pinned alias of it is
 /// possible; a test over a compact-root owner could not exhibit the hazard.
 pub(crate) fn assert_tree_backed_owner(graph: &GraphForge) {
@@ -163,10 +175,15 @@ pub(crate) fn assert_tree_backed_owner(graph: &GraphForge) {
     );
 }
 
+/// A durable project whose current generation is an expanded tree. A mutating
+/// commit publishes a compact root, which hydrates privately and can never be
+/// aliased, so the hazard under test exists only for an expanded generation.
 fn durable_project() -> (tempfile::TempDir, GraphForge) {
     let directory = tempfile::tempdir().unwrap();
     let graph = GraphForge::new(directory.path().join("project").to_str()).unwrap();
     graph.execute("CREATE (:Person {name:'original'})").unwrap();
+    let graph = crate::expanded_generation_test_support::into_expanded(graph);
+    assert_tree_backed_owner(&graph);
     (directory, graph)
 }
 

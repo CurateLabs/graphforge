@@ -58,3 +58,16 @@ pub(crate) fn publish_graph_workspace(container: &Path, workspace: &Path) {
         .publish()
         .unwrap();
 }
+
+/// Publish a copy of `source`'s current graph as an expanded (V1) generation of
+/// a fresh project at `target`. Mutating commits publish compact roots, so an
+/// expanded generation (as projects published before that change are) has to be
+/// built this way: the source's payloads are materialized into a private
+/// workspace on the project volume and republished with a generation tree.
+pub(crate) fn publish_expanded_copy(source: &Path, target: &Path) {
+    let generation = resolve_project_generation(source).unwrap();
+    let inventory = generation.graph_files_inventory().unwrap().unwrap();
+    let workspace = tempfile::tempdir_in(source).unwrap();
+    graphforge_storage::materialize_graph_objects(source, &inventory, workspace.path()).unwrap();
+    publish_graph_workspace(target, workspace.path());
+}

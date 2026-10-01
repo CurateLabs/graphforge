@@ -910,6 +910,16 @@ fn capture_payload_identity(
     crate::graph_admission::admit_file(&file)?;
     let mut prior_calls = 0;
     if let Some(known) = reused {
+        // The workspace file is the parent's own content-store object: nothing
+        // was written, so there are no new bytes to name and none to read. The
+        // reuse references the existing object by its existing digest, never a
+        // fresh one, so a corrupted object stays corrupted and is refused by
+        // its reader (admitted above where it is first-touch).
+        if let Some(object) = known.object_identity
+            && graphforge_filesystem::file_identity(&file).is_ok_and(|identity| identity == object)
+        {
+            return Ok((known.content_sha256.clone(), known.content_xxh64, 0));
+        }
         // Reuse the authenticated identity only when these exact bytes still
         // carry its checksum. A mismatch is a change, never a stale reuse.
         let (checksum, calls) = checksum_reader(&mut file, path)?;

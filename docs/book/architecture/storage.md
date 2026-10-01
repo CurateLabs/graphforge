@@ -341,8 +341,10 @@ chosen by path in `graphforge_storage::graph_admission`:
 `bytes_checksummed` is content actually read and checksummed while hydrating.
 `ResolvedProjectGeneration::graph_files_inventory` still checks every payload
 (memoized); `unadmitted_graph_files_inventory` is the length-only form an open
-uses. Expanded (V1) generations, which every mutating commit publishes today,
-still verify the whole tree at open.
+uses. Every mutating commit publishes a compact root, so a mutated project opens
+as cheaply as a constructed one. Expanded (V1) and delta-bearing generations
+that already exist are still readable: they verify and copy the whole tree at
+open, and convert to a compact root on their next commit.
 
 The same-inode, same-length corruption tests in
 `graphforge-api/src/workspace_hydration/tests.rs` cover every role, including
@@ -587,7 +589,10 @@ checksums; version-1 framing is refused. Control-chain identities and publicatio
 SHA-256 names remain required, while default replay performs corruption checks
 without cryptographic payload rehashing.
 
-Authoritative small-write delta runs, when present, live under
+No commit publishes delta runs any longer (#1388): a delta-bearing open verifies,
+copies and re-streams the whole graph, which a bounded open cannot afford. Runs
+that generations already carry stay readable and compactable. Authoritative
+small-write delta runs, when present, live under
 `graph/deltas/` inside the same generation and are inventory-verified
 ([ADR 0019](../../adr/0019-authoritative-graph-delta-journal.md)). GFDR's
 binary framing and JSON payload schema are a permanent, versioned exception to
@@ -1283,7 +1288,7 @@ Every applicable graph publisher preserves these authorities together:
 | --- | --- |
 | Public construction → canonical graph generation → facade/reopen | Typed/exploratory topology and properties, sharded nodes, routes, all graph identity authorities and continuation tails. Construction, CAS ownership and publishing-budget facade regressions cover exact reopening and portable interchange. |
 | Ordinary Cypher/analyst mutation → MutationTransaction/GraphWriter → generation readers | Canonical topology and property mutation; complete participant publication. Public CREATE/DELETE/SET, active streams, fault recovery and next-ID tests apply. |
-| Composite property mutation → GFDR preparation → verified replay/compaction | Only the four property operations are admitted. Qualified/constructed ownership fixtures cover sparse latest values, removals, nulls, route identity and shared immutable base payloads. Canonical property publication remains available when eligibility requires it. |
+| Composite property mutation → compact root publication (GFDR preparation retained for existing generations) | Composite property mutation publishes a compact root and no delta run (#1388). The GFDR storage APIs and their verified replay/compaction remain for generations that already carry runs: only the four property operations are admitted, and ownership fixtures cover sparse latest values, removals, nulls, route identity and shared immutable base payloads. |
 | Composite topology mutation → canonical GraphWriter publication → facade | Never GFDR. Qualified create and owner-routing regressions cover identities and subsequent property mutation. |
 | Storage GFDR APIs → framed runs → direct replay, open, checkpoint, compaction/import | All topology operations are unsupported, including checksum-valid records, duplicate operation IDs and matching transaction retries. Refusal precedes authority changes; direct replay leaves the entire supplied state unchanged. |
 | Public compaction → complete new generation → refreshed facade | Full verified property chain, same-facade subsequent mutation, exact retry, retained streams and imported continuation. Private hydration and selected permanent ownership are measured separately. |
