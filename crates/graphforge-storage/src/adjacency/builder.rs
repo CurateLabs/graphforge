@@ -667,12 +667,12 @@ impl EntryGroup {
         let (shards, peak_shard_edges, peak_shard_nodes, captured_artifacts) =
             writer.finish(node_count)?;
         Ok(ShardedWriteOutcome {
+            captured_artifacts,
             node_count,
             edge_count,
             shards,
             peak_shard_edges,
             peak_shard_nodes,
-            captured_artifacts,
         })
     }
 }

@@ -1485,7 +1485,3 @@ pub(super) fn v4_manifest_artifact_names(
 
 #[cfg(test)]
 mod tests;
-
-fn artifact_sha256(bytes: &[u8]) -> String {
-    hex_bytes(&Sha256::digest(bytes))
-}

@@ -223,7 +223,7 @@ pub fn rebuild_v4_ordinal_identity_with_evidence(
             // generation record remains the durable transaction's last switch.
             batch.move_staged_destination_to_end(&manifest_path);
             Ok(Some(crate::AuxiliaryReceipt {
-                kind: "uuid-membership/ordinal-v5".to_owned(),
+                kind: "uuid-membership/ordinal-v6".to_owned(),
                 schema_version: crate::ORDINAL_IDENTITY_V4,
                 path: format!("{INDEX_DIR}/{V4_ORDINAL_RECEIPT}"),
                 digest: hex_sha256(&receipt_bytes),
@@ -452,7 +452,7 @@ fn migrate_uuid_membership_indexes(
                 &receipt_bytes,
             )?;
             Ok(Some(crate::AuxiliaryReceipt {
-                kind: "uuid-membership/v6".to_owned(),
+                kind: "uuid-membership/v7".to_owned(),
                 schema_version: FORMAT_VERSION,
                 path: format!("{INDEX_DIR}/{TOPOLOGY_RECEIPT}"),
                 digest: hex_sha256(&receipt_bytes),

@@ -126,16 +126,40 @@ pub(super) fn encode_adjacency(
         return Err(storage("adjacency build published no manifest rows"));
     }
 
+    register_adjacency_artifacts(
+        output,
+        &graph_root,
+        &adjacency,
+        metrics.captured_artifacts,
+        cancelled,
+        artifacts,
+        evidence,
+    )?;
+    evidence.adjacency.source_rows = metrics.source_rows;
+    evidence.adjacency.spill_runs = metrics.spill_runs;
+    evidence.adjacency.spill_peak_bytes = metrics.spill_bytes;
+    evidence.adjacency.csr_shards = metrics.csr_shards;
+    Ok(())
+}
+
+fn register_adjacency_artifacts(
+    output: &StableDirectory,
+    graph_root: &Path,
+    adjacency: &Path,
+    shard_outputs: Vec<crate::adjacency::CapturedAdjacencyArtifact>,
+    cancelled: &mut impl FnMut() -> bool,
+    artifacts: &mut Vec<ConstructionEncodedArtifact>,
+    evidence: &mut GraphConstructionEncodingEvidence,
+) -> Result<(), GfError> {
     let mut relative_paths = Vec::new();
-    collect_relative_files(&graph_root, &adjacency, &mut relative_paths)?;
+    collect_relative_files(graph_root, adjacency, &mut relative_paths)?;
     relative_paths.sort();
-    let mut captured = metrics
-        .captured_artifacts
+    let mut captured = shard_outputs
         .into_iter()
         .map(|artifact| {
             let path = artifact
                 .path
-                .strip_prefix(&graph_root)
+                .strip_prefix(graph_root)
                 .map_err(storage)?
                 .to_str()
                 .ok_or_else(|| storage("captured adjacency path is not UTF-8"))?
@@ -191,10 +215,6 @@ pub(super) fn encode_adjacency(
             "captured adjacency inventory includes absent files",
         ));
     }
-    evidence.adjacency.source_rows = metrics.source_rows;
-    evidence.adjacency.spill_runs = metrics.spill_runs;
-    evidence.adjacency.spill_peak_bytes = metrics.spill_bytes;
-    evidence.adjacency.csr_shards = metrics.csr_shards;
     Ok(())
 }
 

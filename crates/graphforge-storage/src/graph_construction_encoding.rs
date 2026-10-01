@@ -55,9 +55,9 @@ use crate::{SemanticRouteKind, SemanticStorageBindings};
 mod adjacency;
 mod inventory;
 mod lanes;
-pub(crate) use inventory::{
-    authenticate_inventory, authenticate_inventory_control, authenticate_inventory_payloads,
-};
+#[cfg(test)]
+pub(crate) use inventory::authenticate_inventory_payloads;
+pub(crate) use inventory::{authenticate_inventory, authenticate_inventory_control};
 #[cfg(any(test, feature = "test-support"))]
 mod seam_spike;
 

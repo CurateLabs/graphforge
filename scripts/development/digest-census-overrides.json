@@ -2251,15 +2251,6 @@
     },
     {
       "path": "crates/graphforge-storage/src/uuid_membership/ordinal_artifacts.rs",
-      "function": "artifact_sha256",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Ordinal artifact block payload bytes receive mandatory durable artifact content digest.",
-      "function_bodies_sha256": [
-        "d8c7e46a6505a6f3e14ba859ef3b32a4e437a569dfefed77e36a801da118c82e"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/uuid_membership/ordinal_artifacts.rs",
       "function": "create_with_window",
       "role": "durable_artifact",
       "input_contract": "New ordinal artifact bytes are hashed inline with required construction output.",
@@ -2282,7 +2273,7 @@
       "role": "control_authentication",
       "input_contract": "Canonical UUID index receipt JSON receives control authority commitment.",
       "function_bodies_sha256": [
-        "5a1aaa3d7aaf62918c7d0d2a2f0e3a4c591657e386df054bb0f9a6baf88eda49"
+        "6a9da3185acf07710966c030c495186465ab9789fb86ae0a7142baacb075f1f1"
       ]
     },
     {

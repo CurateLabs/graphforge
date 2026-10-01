@@ -188,7 +188,7 @@ The method and reviewed classification inputs are pinned by SHA-256:
 `digest-census.py` is
 `640e8221d88c8065f9e60aa0e9182545c3e43b52bbb9618c885717d5d3b2f1ba`;
 `digest-census-overrides.json` is
-`24ab0d1f06db5665c097cbc7f4d8c9d2245ce40bacc58e0c3d473b30b70ccf51`.
+`1cfcb38fb58af43dc7f78920c722c8ff723f429d47e43c395015e51c1bd94e18`.
 The parser fixture `test-digest-census.py` is
 `77224ebc214e8c8793baced7d105bdc576cd0015feb436a0af701260998a48f1`.
 Run the parser and stale-review regression fixtures with
@@ -252,13 +252,13 @@ are read; checksum refusal and unchanged `CURRENT` are asserted independently.
 
 Current capture-method inputs are pinned by SHA-256:
 
-- `crates/graphforge-storage/src/graph_construction_encoding.rs`: `f481da842fab59e498f107c4cba1cdc350fd868d6db4037d065ce3c0c0175360`.
-- `crates/graphforge-storage/src/graph_construction/encoding_publication/tests.rs`: `b01a23cbeb1c2d32a757c4624d0e3be5567d1a07deb017b44826c91d2b038a8c`.
+- `crates/graphforge-storage/src/graph_construction_encoding.rs`: `14388c1e44eb8580a38edf9920bd8c9e13daddc3ee14f9ff78fd57ed15cd0299`.
+- `crates/graphforge-storage/src/graph_construction/encoding_publication/tests.rs`: `845ad69865cd17ad8ee8be8beafb89809202fa0d15027a90c5e7ade55353bd12`.
 - `crates/graphforge-storage/src/uuid_membership/construction/tests.rs`: `8e19f543465d06b837a8d63736c91e08f3cc0ccd5b54a972933a656b161d8262`.
 - `crates/graphforge-storage/src/uuid_membership/ordinal_artifacts/tests.rs`: `553018c2b4b91aa53cfc8a7a047db14040ab8e6c08282a4a2e10bdd74e1acf0f`.
 - `crates/graphforge-storage/src/adjacency.rs`: `91fb91b26c0aa8a29a0591e73457b630449dfae1534be6d2c961334a01f676a3`.
 
-- `crates/graphforge-storage/src/graph_construction_encoding/inventory.rs`: `9507eb594b4f9585aa47a2579ab463f54b1bc6ad5a5f6167b1943b9a9a16cf92`.
+- `crates/graphforge-storage/src/graph_construction_encoding/inventory.rs`: `0dc9be1a049388eb1ff433137eca6f217e23ad1badb97ec96aa26f61cd374b19`.
 - `crates/graphforge-storage/src/graph_construction/encoding_publication/tests/captures.rs`: `eb4c8e133a71ffec2a379144bdd73b74e00ef6871341a3e18be84f472dbd30da`.
 - `crates/graphforge-storage/src/adjacency/capture_tests.rs`: `1c4e0011ae633b531eabd8f3aad8fcf42422bc9282f35837de2855cd97f4ba22`.
 

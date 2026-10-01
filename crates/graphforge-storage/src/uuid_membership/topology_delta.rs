@@ -496,7 +496,7 @@ pub(crate) fn prepare_uuid_membership_delta(
         metrics,
         manifest,
         auxiliary: crate::AuxiliaryReceipt {
-            kind: "uuid-membership/v6".to_owned(),
+            kind: "uuid-membership/v7".to_owned(),
             schema_version: FORMAT_VERSION,
             path: format!("{INDEX_DIR}/{TOPOLOGY_RECEIPT}"),
             digest: hex_bytes(&digest),
@@ -1974,7 +1974,7 @@ pub(crate) fn prepare_v4_ordinal_delta(
     let prepared = PreparedV4OrdinalDelta {
         expected_generation: generation,
         auxiliary: crate::AuxiliaryReceipt {
-            kind: "uuid-membership/ordinal-v5".to_owned(),
+            kind: "uuid-membership/ordinal-v6".to_owned(),
             schema_version: crate::ORDINAL_IDENTITY_V4,
             path: format!("{INDEX_DIR}/{V4_ORDINAL_RECEIPT}"),
             digest: hex_sha256(&receipt_bytes),

@@ -2411,24 +2411,43 @@ fn canonical_publication_cancels_at_named_immediate_pre_current_boundary() {
     let encoding = session.encode_canonical(&shape, 1).unwrap();
     let target = Uuid::from_u128(9_466);
     let transaction = Uuid::from_u128(9_467);
-    let mut checkpoints = 0_u8;
+    let checkpoints = std::cell::Cell::new(0_u64);
+    let prepared_checkpoints = std::cell::Cell::new(0_u64);
+    let prepared = std::cell::Cell::new(false);
     let error = session
         .publish_canonical_with_cancellation(
             &encoding,
             target,
             transaction,
             || {
-                checkpoints += 1;
-                checkpoints == 2
+                checkpoints.set(checkpoints.get() + 1);
+                prepared.get()
             },
-            None,
+            Some(&mut |_candidate| {
+                assert_eq!(
+                    std::fs::read(root.path().join("CURRENT")).unwrap(),
+                    prior_current
+                );
+                prepared_checkpoints.set(checkpoints.get());
+                prepared.set(true);
+                Ok(())
+            }),
         )
         .unwrap_err();
+    assert!(
+        prepared.get(),
+        "candidate preparation must precede cancellation"
+    );
+    assert!(
+        prepared_checkpoints.get() > 1,
+        "copy polls remain cooperative"
+    );
     assert_eq!(error.code(), "GF_CANCELLED");
     assert!(error.to_string().contains("before_current_replace"));
     assert_eq!(
-        checkpoints, 2,
-        "entry and immediate pre-CURRENT checkpoints"
+        checkpoints.get(),
+        prepared_checkpoints.get() + 1,
+        "exactly one cancellation poll follows candidate preparation"
     );
     assert_eq!(
         std::fs::read(root.path().join("CURRENT")).unwrap(),

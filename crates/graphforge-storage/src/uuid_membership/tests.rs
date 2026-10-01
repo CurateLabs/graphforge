@@ -1145,7 +1145,7 @@ fn v4_rebuild_subprocess_crash_retry_selects_one_complete_authority() {
                 generation,
                 generation,
                 &crate::AuxiliaryReceipt {
-                    kind: "uuid-membership/ordinal-v5".to_owned(),
+                    kind: "uuid-membership/ordinal-v6".to_owned(),
                     schema_version: crate::ORDINAL_IDENTITY_V4,
                     path: format!("{INDEX_DIR}/{V4_ORDINAL_RECEIPT}"),
                     digest: hex_sha256(&receipt_bytes),

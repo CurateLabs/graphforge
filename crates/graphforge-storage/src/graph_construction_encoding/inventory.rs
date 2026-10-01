@@ -1,6 +1,16 @@
 //! Checksum admission of checkpoint-authenticated encoded inventory.
 
-use super::*;
+use std::ffi::OsStr;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Component, Path};
+
+use super::{
+    AuthenticatedUuidIndexSnapshot, COPY_BUFFER_BYTES, ConstructionEncodedArtifact, ENCODED_ROOT,
+    ENCODING_FORMAT_VERSION, GfError, GraphConstructionEncoding, GraphConstructionEncodingEvidence,
+    StableDirectory, account_cache_release, add_evidence_counter, file_identity, file_link_count,
+    storage,
+};
 
 pub(crate) fn authenticate_inventory(
     root: &StableDirectory,

@@ -810,6 +810,27 @@ where
         expected_length,
         authentication,
     )?;
+    Ok(InstalledObject {
+        evidence: installation_evidence(
+            expected_length,
+            installed,
+            bytes_hashed,
+            authentication,
+            preseal_io,
+            concurrent_io,
+        )?,
+        identity,
+    })
+}
+
+fn installation_evidence(
+    expected_length: u64,
+    installed: bool,
+    bytes_hashed: u64,
+    authentication: ObjectAuthentication,
+    preseal_io: ReadIoEvidence,
+    concurrent_io: ReadIoEvidence,
+) -> Result<GraphObjectInstallEvidence, GfError> {
     let read_bytes = [preseal_io.bytes, concurrent_io.bytes]
         .into_iter()
         .try_fold(bytes_hashed, u64::checked_add)
@@ -822,25 +843,22 @@ where
         .calls
         .checked_add(concurrent_io.calls)
         .ok_or_else(|| validation("graph object read call count overflows"))?;
-    Ok(InstalledObject {
-        evidence: GraphObjectInstallEvidence {
-            content_xxh64: preseal_io.content_xxh64.or(concurrent_io.content_xxh64),
-            bytes_hashed,
-            checksum_read_bytes: read_bytes
-                .checked_sub(bytes_hashed)
-                .ok_or_else(|| validation("CAS SHA read count exceeds native reads"))?,
-            bytes_installed: if installed { expected_length } else { 0 },
-            reused_existing: !installed,
-            attempted_install: true,
-            read_calls,
-            // The source-copy/authentication submissions are added by the caller.
-            // Finalization synchronizes both namespaces even if a concurrent winner
-            // supplied the retained object. Early reuse returns before this path.
-            fsync_calls: 2,
-            directory_fsync_calls: 2,
-            ..GraphObjectInstallEvidence::default()
-        },
-        identity,
+    Ok(GraphObjectInstallEvidence {
+        content_xxh64: preseal_io.content_xxh64.or(concurrent_io.content_xxh64),
+        bytes_hashed,
+        checksum_read_bytes: read_bytes
+            .checked_sub(bytes_hashed)
+            .ok_or_else(|| validation("CAS SHA read count exceeds native reads"))?,
+        bytes_installed: if installed { expected_length } else { 0 },
+        reused_existing: !installed,
+        attempted_install: true,
+        read_calls,
+        // The source-copy/authentication submissions are added by the caller.
+        // Finalization synchronizes both namespaces even if a concurrent winner
+        // supplied the retained object. Early reuse returns before this path.
+        fsync_calls: 2,
+        directory_fsync_calls: 2,
+        ..GraphObjectInstallEvidence::default()
     })
 }
 
