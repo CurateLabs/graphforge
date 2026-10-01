@@ -8,10 +8,7 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::{
-    PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2Mode, PortableV2PackageClass,
-    verify_portable_v2,
-};
+use crate::{PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2PackageClass};
 use uuid::Uuid;
 pub(crate) mod planning;
 mod transport;
@@ -319,11 +316,11 @@ pub fn export_complete_portable_v2_with_allocation(
         return Err(err("GF_CANCELLED", "portable export cancelled")
             .with_allocation_identities(staged_allocation));
     }
-    let verified =
-        verify_written_export(plan, &stage, digest, limits, cancelled).map_err(|error| {
-            allocation.remove(&stage);
-            error.with_allocation_identities(staged_allocation.clone())
-        })?;
+    // No post-write re-verification: the writer emits each member from a
+    // pinned source, authenticating it against its manifest digest while the
+    // same pass computes the transport digest, and every importer performs
+    // mandatory full authentication before admitting anything. Tests verify
+    // that an independent full verification agrees with every receipt field.
     publish_no_replace(&stage, dst).map_err(|error| {
         allocation.remove(&stage);
         storage(error).with_allocation_identities(staged_allocation.clone())
@@ -337,8 +334,7 @@ pub fn export_complete_portable_v2_with_allocation(
         generation_uuid: plan.generation_uuid,
         package_digest: plan.package_digest,
         transport_digest: digest,
-        entry_count: usize::try_from(verified.entry_count)
-            .map_err(|_| limit("verified entry count exceeds platform capacity"))?,
+        entry_count: plan.files.len() + PACKAGE_CONTROL_ENTRIES,
         payload_bytes: plan.payload_bytes,
         output,
         selection_fingerprint: plan.selection_fingerprint.clone(),
@@ -348,31 +344,9 @@ pub fn export_complete_portable_v2_with_allocation(
     })
 }
 
-fn verify_written_export(
-    plan: &PortableV2ExportPlan,
-    stage: &Path,
-    digest: [u8; 32],
-    limits: PortableV2ExportLimits,
-    cancelled: &AtomicBool,
-) -> Result<crate::PortableV2Report, ExportError> {
-    let verified = verify_portable_v2(stage, PortableV2Mode::Full, limits, Some(cancelled))?;
-    let expected_transport = format!("sha256:{}", hex(digest));
-    if verified.package_class != plan.package_class
-        || verified.package_digest != format!("sha256:{}", hex(plan.package_digest))
-    {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::DigestMismatch,
-            "writer and verifier semantic receipts disagree",
-        ));
-    }
-    if verified.transport_digest.as_deref() != Some(expected_transport.as_str()) {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::DigestMismatch,
-            "writer and verifier transport receipts disagree",
-        ));
-    }
-    Ok(verified)
-}
+/// Entries every package carries besides its planned files: the semantic
+/// manifest and the four BagIt tag files.
+const PACKAGE_CONTROL_ENTRIES: usize = 5;
 
 /// Repack a fully verified expanded portable-v2 package into canonical bundle bytes.
 ///
@@ -716,6 +690,7 @@ mod tests {
     use crate::project_portable_v2::{
         PortableV2ExactIdentity, PortableV2OntologyComposition, canonical_json,
     };
+    use crate::{PortableV2Mode, verify_portable_v2};
     use crate::{
         PortableV2SelectionProfile, PortableV2SelectionRequest, ResolvedProjectGeneration,
         preview_portable_v2_selection,

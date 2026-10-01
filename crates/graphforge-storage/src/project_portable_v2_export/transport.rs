@@ -365,10 +365,11 @@ pub(super) fn open_planned_source(
             digest,
             length,
         } => {
-            let source = lease
-                .open_for_portable(digest, *length)
+            // `stream` authenticates the emitted bytes against the CAS name in
+            // the same pass that computes the transport digest.
+            let mut file = lease
+                .open_for_attribution(digest, *length)
                 .map_err(|_| err("GF_SOURCE_CHANGED", "pinned CAS source changed"))?;
-            let mut file = source.try_clone_file().map_err(storage)?;
             file.seek(SeekFrom::Start(0)).map_err(storage)?;
             Ok((file, None))
         }

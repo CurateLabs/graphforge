@@ -1,5 +1,7 @@
 use super::super::tests::{package, tar_entry};
+use super::super::walk;
 use super::*;
+use std::io::Write;
 use std::sync::atomic::Ordering;
 
 #[test]
@@ -74,16 +76,48 @@ fn observed_materialization_failure_and_cancel_cleanup_retry_both_forms() {
 }
 
 #[test]
-fn materialization_reports_actual_bounded_payload_reads() {
-    let parent = tempfile::tempdir().unwrap();
-    let input_path = parent.path().join("input");
-    fs::write(&input_path, vec![7_u8; 10]).unwrap();
-    let mut input = File::open(input_path).unwrap();
-    let mut output = Vec::new();
-    let (bytes, operations) =
-        copy_exact_materialized(&mut input, &mut output, 10, 4, None).unwrap();
-    assert_eq!((bytes, operations), (10, 3));
-    assert_eq!(output, vec![7_u8; 10]);
+fn materialization_reports_the_authenticated_component_bytes_it_writes() {
+    let source = package();
+    let bundle = bundle_from_expanded(source.path());
+    let mut paths = Vec::new();
+    walk(
+        source.path(),
+        source.path(),
+        &mut paths,
+        PortableV2Limits::default(),
+        None,
+    )
+    .unwrap();
+    let component_bytes: u64 = paths
+        .iter()
+        .filter(|path| path.starts_with("data/components/"))
+        .map(|path| fs::metadata(source.path().join(path)).unwrap().len())
+        .sum();
+    assert!(component_bytes > 0);
+    for input in [source.path(), bundle.path()] {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("materialized");
+        let materialized = materialize_verified_portable_v2_observed(
+            input,
+            &destination,
+            PortableV2Limits::default(),
+            None,
+            |_, _| Ok(()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(materialized.application_read_bytes, component_bytes);
+        assert!(materialized.application_read_operations > 0);
+        for path in paths
+            .iter()
+            .filter(|path| path.starts_with("data/components/"))
+        {
+            assert_eq!(
+                fs::read(destination.join(path)).unwrap(),
+                fs::read(source.path().join(path)).unwrap()
+            );
+        }
+    }
 }
 
 fn bundle_from_expanded(source: &Path) -> tempfile::NamedTempFile {
@@ -163,8 +197,14 @@ fn source_changes_during_materialization_release_routes_and_allow_retry() {
             true,
         );
         assert!(injected);
-        let error = result.err().expect("changed source must be refused");
-        assert_eq!(error.code, PortableV2ErrorCode::ConcurrentMutation);
+        let error = result
+            .err()
+            .unwrap_or_else(|| panic!("{mutation}: changed source must be refused"));
+        assert_eq!(
+            error.code,
+            PortableV2ErrorCode::ConcurrentMutation,
+            "{mutation}: {error:?}"
+        );
         assert!(!destination.exists());
         assert_eq!(allocation.totals().unwrap().0, 0);
         assert!(allocation.totals().unwrap().1 > 0);

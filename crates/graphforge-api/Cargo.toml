@@ -221,6 +221,10 @@ required-features = ["research", "search"]
 
 # Includes knowledge/capability publication on a compact imported graph.
 [[test]]
+name = "portable_payload_identity"
+required-features = ["portable"]
+
+[[test]]
 name = "publication_payload_identity"
 required-features = ["knowledge", "provenance"]
 

@@ -1100,7 +1100,10 @@ fn inspect_cas(
     if *total > limits.max_total_bytes {
         return Err(limit("total too large"));
     }
-    let _authenticated = lease.open_for_portable(digest, expected_length)?;
+    // The CAS name was authenticated when the object was installed. Planning
+    // pins its identity and exact length; the export stream hashes the bytes
+    // it actually emits against this name.
+    lease.open_for_attribution(digest, expected_length)?;
     let digest_bytes = parse_sha256(digest)?;
     Ok(PlannedFile {
         source: PlannedSource::Cas {

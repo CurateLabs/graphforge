@@ -7,7 +7,6 @@
 mod materialization;
 pub use materialization::materialize_verified_portable_v2;
 pub(crate) use materialization::materialize_verified_portable_v2_observed;
-use materialization::{materialize_bundle, materialize_expanded};
 pub(crate) mod research;
 mod semantic_validation;
 use semantic_validation::{
@@ -140,6 +139,80 @@ struct Entry {
     length: u64,
     digest: [u8; 32],
     bytes: Option<Vec<u8>>,
+    /// Payload offset within a bundle; expanded entries are read by path.
+    offset: Option<u64>,
+}
+
+/// Receives authenticated component members while the single verification
+/// pass hashes them. Bytes reach the destination only through that pass, so
+/// nothing is copied that was not authenticated in the same read.
+pub(super) struct ComponentSink<'a> {
+    pub(super) destination: &'a Path,
+    pub(super) observed: &'a mut dyn FnMut(&Path, Option<&File>) -> Result<(), PortableV2Error>,
+    pub(super) written_bytes: u64,
+    pub(super) write_operations: u64,
+}
+
+impl ComponentSink<'_> {
+    fn open(&mut self, entry: &str) -> Result<Option<(std::path::PathBuf, File)>, PortableV2Error> {
+        if !entry.starts_with("data/components/") {
+            return Ok(None);
+        }
+        let path = self.destination.join(entry);
+        fs::create_dir_all(path.parent().expect("component entry has a parent")).map_err(|_| {
+            PortableV2Error::at(
+                PortableV2ErrorCode::Io,
+                entry,
+                "cannot create staged parent",
+            )
+        })?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|_| {
+                PortableV2Error::at(PortableV2ErrorCode::Io, entry, "cannot stage entry")
+            })?;
+        (self.observed)(&path, Some(&file))?;
+        Ok(Some((path, file)))
+    }
+
+    fn finish(
+        &mut self,
+        entry: &str,
+        path: &Path,
+        file: &File,
+        length: u64,
+        buffer: usize,
+    ) -> Result<(), PortableV2Error> {
+        use graphforge_filesystem::ObservedSync as _;
+        let refreshed = (self.observed)(path, Some(file));
+        let synced = file
+            .observed_sync_all()
+            .map_err(|_| PortableV2Error::at(PortableV2ErrorCode::Io, entry, "cannot sync entry"));
+        let observed = (self.observed)(path, Some(file));
+        refreshed?;
+        synced?;
+        observed?;
+        self.written_bytes = self.written_bytes.saturating_add(length);
+        self.write_operations = self
+            .write_operations
+            .saturating_add(length.div_ceil(buffer.max(1) as u64));
+        Ok(())
+    }
+}
+
+fn write_staged(
+    output: Option<&mut File>,
+    bytes: &[u8],
+    entry: &str,
+) -> Result<(), PortableV2Error> {
+    if let Some(output) = output {
+        std::io::Write::write_all(output, bytes).map_err(|_| {
+            PortableV2Error::at(PortableV2ErrorCode::Io, entry, "cannot stage entry")
+        })?;
+    }
+    Ok(())
 }
 
 /// Verify an expanded directory or canonical uncompressed bundle without mutation.
@@ -149,6 +222,18 @@ pub fn verify_portable_v2(
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
 ) -> Result<PortableV2Report, PortableV2Error> {
+    verify_portable_v2_into(source.as_ref(), mode, limits, cancelled, None)
+}
+
+/// Verify once, optionally streaming authenticated component members into a
+/// private destination in the same pass.
+pub(super) fn verify_portable_v2_into(
+    source: &Path,
+    mode: PortableV2Mode,
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
+    sink: Option<&mut ComponentSink<'_>>,
+) -> Result<PortableV2Report, PortableV2Error> {
     if limits.copy_buffer_bytes == 0 {
         return Err(PortableV2Error::new(
             PortableV2ErrorCode::LimitExceeded,
@@ -156,7 +241,6 @@ pub fn verify_portable_v2(
         ));
     }
     check_cancel(cancelled)?;
-    let source = source.as_ref();
     let metadata = fs::symlink_metadata(source)
         .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "source unavailable"))?;
     if metadata.file_type().is_symlink() {
@@ -170,10 +254,10 @@ pub fn verify_portable_v2(
     } else if metadata.is_file() {
         preflight_bundle(source, limits, cancelled)?;
     }
-    let report = if metadata.is_dir() {
-        verify_expanded(source, mode, limits, cancelled)
+    let (report, entries) = if metadata.is_dir() {
+        verify_expanded(source, mode, limits, cancelled, sink)
     } else if metadata.is_file() {
-        verify_bundle(source, mode, limits, cancelled)
+        verify_bundle(source, mode, limits, cancelled, sink)
     } else {
         return Err(PortableV2Error::new(
             PortableV2ErrorCode::InvalidStructure,
@@ -183,33 +267,86 @@ pub fn verify_portable_v2(
     if mode == PortableV2Mode::Full
         && (report.ontology_composition.is_some() || report.research_interchange)
     {
-        let staging = tempfile::tempdir().map_err(|_| {
-            PortableV2Error::new(
-                PortableV2ErrorCode::Io,
-                "cannot stage semantic verification",
-            )
-        })?;
-        if metadata.is_dir() {
-            materialize_expanded(
-                source,
-                staging.path(),
-                limits,
-                cancelled,
-                &mut |_, _| Ok(()),
-            )?;
-        } else {
-            materialize_bundle(
-                source,
-                staging.path(),
-                limits,
-                cancelled,
-                &mut |_, _| Ok(()),
-            )?;
-        }
-        validate_materialized_ontology_composition(staging.path(), &report, limits, cancelled)?;
-        research::validate_stage(staging.path(), &report, limits, cancelled)?;
+        // Semantic validation reads only the bounded members it inspects,
+        // directly from the package, and authenticates each against the
+        // digest this pass recorded. The payload is never materialized here.
+        let members = entries
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+        let mut read = |path: &str, bound: u64| -> Result<Vec<u8>, PortableV2Error> {
+            let entry = members.get(path).ok_or_else(|| {
+                PortableV2Error::at(
+                    PortableV2ErrorCode::InvalidStructure,
+                    path,
+                    "semantic member is absent",
+                )
+            })?;
+            read_authenticated_member(source, entry, bound)
+        };
+        validate_materialized_ontology_composition(&mut read, &report, limits, cancelled)?;
+        research::validate_with(&mut read, &report, limits, cancelled)?;
     }
     Ok(report)
+}
+
+/// Read one bounded member of a verified package and authenticate it against
+/// the digest recorded by the verification pass.
+fn read_authenticated_member(
+    source: &Path,
+    entry: &Entry,
+    bound: u64,
+) -> Result<Vec<u8>, PortableV2Error> {
+    if entry.length > bound {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::LimitExceeded,
+            &entry.path,
+            "semantic member bound",
+        ));
+    }
+    let length = usize::try_from(entry.length).map_err(|_| {
+        PortableV2Error::at(
+            PortableV2ErrorCode::LimitExceeded,
+            &entry.path,
+            "member size",
+        )
+    })?;
+    let mut file = match entry.offset {
+        Some(offset) => {
+            let mut bundle = File::open(source).map_err(|_| {
+                PortableV2Error::new(PortableV2ErrorCode::Io, "cannot reopen bundle")
+            })?;
+            bundle.seek(SeekFrom::Start(offset)).map_err(|_| {
+                PortableV2Error::at(PortableV2ErrorCode::Io, &entry.path, "cannot seek member")
+            })?;
+            bundle
+        }
+        None => crate::project_portable_v2_export::open_source_no_follow(&source.join(&entry.path))
+            .map_err(|_| {
+                PortableV2Error::at(
+                    PortableV2ErrorCode::InvalidStructure,
+                    &entry.path,
+                    "cannot safely open member",
+                )
+            })?,
+    };
+    let mut bytes = vec![0; length];
+    file.read_exact(&mut bytes).map_err(|_| {
+        PortableV2Error::at(
+            PortableV2ErrorCode::ConcurrentMutation,
+            &entry.path,
+            "member changed after verification",
+        )
+    })?;
+    let digest: [u8; 32] = Sha256::digest(&bytes).into();
+    if !constant_time_eq(&digest, &entry.digest) {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::ConcurrentMutation,
+            &entry.path,
+            "member changed after verification",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn admit_manifest(bytes: &[u8], limits: PortableV2Limits) -> Result<Manifest, PortableV2Error> {
@@ -469,7 +606,8 @@ fn verify_expanded(
     mode: PortableV2Mode,
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
-) -> Result<PortableV2Report, PortableV2Error> {
+    mut sink: Option<&mut ComponentSink<'_>>,
+) -> Result<(PortableV2Report, Vec<Entry>), PortableV2Error> {
     let mut paths = Vec::new();
     walk(root, root, &mut paths, limits, cancelled)?;
     paths.sort();
@@ -497,6 +635,10 @@ fn verify_expanded(
         }
         let length = before.len();
         enforce_length(path, length, &mut total, limits)?;
+        let mut staged = match sink.as_deref_mut() {
+            Some(sink) => sink.open(path)?,
+            None => None,
+        };
         let (digest, bytes) = hash_file(
             &full,
             path,
@@ -504,7 +646,11 @@ fn verify_expanded(
             limits.copy_buffer_bytes,
             retained_limit(path, limits),
             cancelled,
+            staged.as_mut().map(|(_, file)| file),
         )?;
+        if let (Some(sink), Some((staged_path, file))) = (sink.as_deref_mut(), staged.as_ref()) {
+            sink.finish(path, staged_path, file, length, limits.copy_buffer_bytes)?;
+        }
         let after = fs::metadata(&full).map_err(|_| {
             PortableV2Error::at(
                 PortableV2ErrorCode::ConcurrentMutation,
@@ -527,16 +673,18 @@ fn verify_expanded(
             length,
             digest,
             bytes,
+            offset: None,
         });
     }
     let transport = expanded_transport(&entries)?;
-    validate_package(
+    let report = validate_package(
         &entries,
         PortableV2Representation::Expanded,
         mode,
         limits,
         Some(transport),
-    )
+    )?;
+    Ok((report, entries))
 }
 
 fn walk(
@@ -599,7 +747,8 @@ fn verify_bundle(
     mode: PortableV2Mode,
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
-) -> Result<PortableV2Report, PortableV2Error> {
+    mut sink: Option<&mut ComponentSink<'_>>,
+) -> Result<(PortableV2Report, Vec<Entry>), PortableV2Error> {
     let before = fs::metadata(path)
         .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot stat bundle"))?;
     if has_multiple_links(&before) {
@@ -633,10 +782,18 @@ fn verify_bundle(
                 .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "bundle read"))?
                 != 0
             {
-                return Err(PortableV2Error::new(
-                    PortableV2ErrorCode::InvalidStructure,
-                    "trailing bytes",
-                ));
+                // Bytes past the end marker of a bundle that changed while
+                // it was read are a concurrent mutation, not a format defect.
+                let changed = file.metadata().map_or(true, |after| {
+                    !same_identity(&before, &after)
+                        || before.len() != after.len()
+                        || modified(&before) != modified(&after)
+                });
+                return Err(if changed {
+                    PortableV2Error::new(PortableV2ErrorCode::ConcurrentMutation, "bundle changed")
+                } else {
+                    PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "trailing bytes")
+                });
             }
             break;
         }
@@ -694,6 +851,13 @@ fn verify_bundle(
         verify_canonical_header_path(&header, &entry_path, used_pax)?;
         validate_path(&entry_path, limits.max_path_bytes)?;
         enforce_length(&entry_path, size, &mut total, limits)?;
+        let offset = file.stream_position().map_err(|_| {
+            PortableV2Error::at(PortableV2ErrorCode::Io, &entry_path, "bundle position")
+        })?;
+        let mut staged = match sink.as_deref_mut() {
+            Some(sink) => sink.open(&entry_path)?,
+            None => None,
+        };
         let (digest, bytes) = hash_payload(
             &mut file,
             size,
@@ -701,12 +865,26 @@ fn verify_bundle(
             limits.copy_buffer_bytes,
             retained_limit(&entry_path, limits),
             cancelled,
+            staged.as_mut().map(|(_, file)| file),
+            &entry_path,
         )?;
+        if let (Some(sink), Some((staged_path, staged_file))) =
+            (sink.as_deref_mut(), staged.as_ref())
+        {
+            sink.finish(
+                &entry_path,
+                staged_path,
+                staged_file,
+                size,
+                limits.copy_buffer_bytes,
+            )?;
+        }
         entries.push(Entry {
             path: entry_path,
             length: size,
             digest,
             bytes,
+            offset: Some(offset),
         });
         if entries.len() as u64 > limits.max_entries {
             return Err(PortableV2Error::new(
@@ -743,13 +921,14 @@ fn verify_bundle(
             "bundle changed",
         ));
     }
-    validate_package(
+    let report = validate_package(
         &entries,
         PortableV2Representation::Bundle,
         mode,
         limits,
         Some(hex(&transport.finalize())),
-    )
+    )?;
+    Ok((report, entries))
 }
 
 fn validate_package(
@@ -1189,6 +1368,7 @@ fn hash_file(
     buffer: usize,
     retain_limit: Option<u64>,
     cancelled: Option<&AtomicBool>,
+    mut output: Option<&mut File>,
 ) -> Result<([u8; 32], Option<Vec<u8>>), PortableV2Error> {
     let mut f = crate::project_portable_v2_export::open_source_no_follow(path).map_err(|_| {
         PortableV2Error::at(
@@ -1245,6 +1425,7 @@ fn hash_file(
             ));
         }
         h.update(&b[..n]);
+        write_staged(output.as_deref_mut(), &b[..n], entry)?;
         if let Some(bytes) = &mut kept {
             bytes.extend_from_slice(&b[..n]);
         }
@@ -1459,6 +1640,7 @@ fn read_payload(
     check_cancel(c)?;
     Ok(v)
 }
+#[allow(clippy::too_many_arguments)] // one pass hashes, retains and stages the same bytes
 fn hash_payload(
     reader: &mut File,
     size: u64,
@@ -1466,6 +1648,8 @@ fn hash_payload(
     buffer: usize,
     retain_limit: Option<u64>,
     cancelled: Option<&AtomicBool>,
+    mut output: Option<&mut File>,
+    entry: &str,
 ) -> Result<([u8; 32], Option<Vec<u8>>), PortableV2Error> {
     let mut payload_hash = Sha256::new();
     if retain_limit.is_some_and(|limit| size > limit) {
@@ -1496,6 +1680,7 @@ fn hash_payload(
             "truncated payload",
         )?;
         payload_hash.update(&copy_buffer[..chunk_len]);
+        write_staged(output.as_deref_mut(), &copy_buffer[..chunk_len], entry)?;
         if let Some(v) = &mut kept {
             v.extend_from_slice(&copy_buffer[..chunk_len]);
         }

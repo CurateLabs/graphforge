@@ -13,6 +13,22 @@ pub(crate) fn validate_stage(
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
 ) -> Result<Option<ResearchArchive>, PortableV2Error> {
+    validate_with(
+        &mut |path, bound| super::read_bounded_file(&stage.join(path), bound, path),
+        report,
+        limits,
+        cancelled,
+    )
+}
+
+/// Validate research members through `read`, which returns the exact bytes
+/// of one authenticated member up to `bound`.
+pub(crate) fn validate_with(
+    read: &mut dyn FnMut(&str, u64) -> Result<Vec<u8>, PortableV2Error>,
+    report: &graphforge_core::portable::PortableV2Report,
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
+) -> Result<Option<ResearchArchive>, PortableV2Error> {
     if !report.research_interchange {
         return Ok(None);
     }
@@ -28,10 +44,9 @@ pub(crate) fn validate_stage(
         return Err(invalid());
     }
     let descriptor = descriptors[0];
-    let bytes = super::read_bounded_file(
-        &stage.join(&descriptor.path),
-        crate::research_versions::MAX_REGISTRY_BYTES as u64,
+    let bytes = read(
         &descriptor.path,
+        crate::research_versions::MAX_REGISTRY_BYTES as u64,
     )?;
     let registry = portable::portable_registry(&bytes).map_err(|_| invalid())?;
     let mut provided = BTreeMap::new();
@@ -59,10 +74,9 @@ pub(crate) fn validate_stage(
                 "research object is missing or oversized".into(),
             ));
         }
-        super::read_bounded_file(
-            &stage.join(format!("{PREFIX}{digest}")),
+        read(
+            &format!("{PREFIX}{digest}"),
             bound.min(limits.max_entry_bytes),
-            "research object",
         )
         .map_err(|_| graphforge_core::GfError::Validation("research object unavailable".into()))
     })

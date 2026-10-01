@@ -1275,11 +1275,56 @@
     },
     {
       "path": "crates/graphforge-storage/src/graph_object_store.rs",
+      "function": "verify_file_counted_in_domain",
+      "role": "caller_selected",
+      "input_contract": "Complete opened CAS object bytes undergo genuine SHA/address verification and XXH64. Private installation selects ControlAuthentication only for validated bounded radix manifest nodes; generic file/byte installation and artifact trust wrappers select ArtifactPayload. Domain propagation changes observation, never bytes or refusal.",
+      "function_bodies_sha256": [
+        "1557ad2756ced24c4dd5cb816e07f55d95a6366650911398787d0383e14d837b"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store.rs",
       "function": "verify_stream_counted",
       "role": "durable_artifact",
       "input_contract": "Generic artifact stream-verification wrapper selects ArtifactPayload and delegates unchanged full SHA/address, length and checksum verification to verify_stream_counted_in_domain; the wrapper creates no separate SHA producer.",
       "function_bodies_sha256": [
         "d8c6abdd74ab6b33c648c445616375b0b201b58629f082643bce22740f8033a0"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store.rs",
+      "function": "verify_stream_counted_in_domain",
+      "role": "caller_selected",
+      "input_contract": "Complete temporary or Windows adoption stream bytes undergo genuine SHA/address, exact-length and XXH64 verification. Private installation propagates ControlAuthentication only from validated bounded radix manifest nodes; generic artifact callers remain ArtifactPayload, including reuse and concurrent installation winners.",
+      "function_bodies_sha256": [
+        "a5fec22ec4260a2ab80e936c851bfbeddd13ba6c129106add10242f81f68892a"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
+      "function": "finalize_temporary_object",
+      "role": "caller_selected",
+      "input_contract": "Finalization orchestrator forwards the selected caller domain unchanged through Windows sealing and genuine SHA authentication of a concurrent installation winner. It preserves identity, allocation, durability and cleanup order. This delegate creates no SHA state or extra pass; temporary path extraction preserves the exact diagnostic_root.join(GRAPH_OBJECTS_DIR).join(TEMP_DIR).join(name) expression.",
+      "function_bodies_sha256": [
+        "736f2cb6b34dfa21f051eda5171573a53a2fa13c12140945f43018f3c9d3c4d7"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
+      "function": "install_graph_manifest_node_with_lease",
+      "role": "control_authentication",
+      "input_contract": "Typed GraphManifestNode is structurally validated, canonically encoded and bounded to 256 KiB before its private ControlAuthentication installation call. Only paths, lengths, payload SHA/XXH64/role descriptors or child-digest references occur in these control bytes; this wrapper delegates one genuine SHA producer and adds no crypto pass.",
+      "function_bodies_sha256": [
+        "8c65f0b85e5abcb045a9ad5c3bd8495478d31eb06c971e5e1aaa57efe0da763c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
+      "function": "install_graph_object_bytes_in_domain",
+      "role": "caller_selected",
+      "input_contract": "Exact resident bytes receive the genuine SHA-256 CAS name. Generic byte installation selects ArtifactPayload; only the private typed GraphManifestNode installer validates and bounds canonical radix control JSON then selects ControlAuthentication. The selected domain propagates to every existing-object, concurrent-winner and platform sealing SHA check; all crypto bytes remain counted inclusively.",
+      "function_bodies_sha256": [
+        "dc0632e822de52dbf4f0c935ee91a5fbdc3c32c4de81f06114d5146a59f99ab6"
       ]
     },
     {
@@ -1301,12 +1346,30 @@
       ]
     },
     {
+      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
+      "function": "install_object",
+      "role": "caller_selected",
+      "input_contract": "Installation orchestrator forwards its already selected caller domain unchanged through existing-object SHA authentication, optional temporary stream authentication and final sealing. Only its private validated typed manifest caller selects Control; generic payload callers select Artifact. This delegate creates no SHA state or extra pass. Its temporary path is the same diagnostic_root.join(GRAPH_OBJECTS_DIR).join(TEMP_DIR).join(name) expression as before extraction.",
+      "function_bodies_sha256": [
+        "64f02d47fa8c8436a4058dd91c0803bad41892fb2d8158e1733ee2cb01da572a"
+      ]
+    },
+    {
       "path": "crates/graphforge-storage/src/graph_object_store/manifest_tree.rs",
       "function": "append_graph_files_v2_inner",
       "role": "control_authentication",
       "input_contract": "Canonical sealed semantic route table JSON authenticates mapped publication authority.",
       "function_bodies_sha256": [
         "35c66a08a4bca651952a6f96e42f1dd772e9c9af2b9f7c72ec1a98d57867e4e3"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/manifest_tree.rs",
+      "function": "install_manifest_node",
+      "role": "control_authentication",
+      "input_contract": "Radix manifest publication passes the typed GraphManifestNode to its validated bounded ControlAuthentication installer and records manifest I/O; this delegate creates no extra SHA producer or payload fast path.",
+      "function_bodies_sha256": [
+        "e565a15b929a48690def17a73bf3757114004add168cfba037df461f2a795eb3"
       ]
     },
     {
@@ -1641,18 +1704,27 @@
       "path": "crates/graphforge-storage/src/project_portable_v2.rs",
       "function": "hash_file",
       "role": "portable_authentication",
-      "input_contract": "Existing portable regular member bytes are fully authenticated for package verification/import, separate from subsequent durable participant naming.",
+      "input_contract": "Existing portable regular member bytes are fully authenticated once for package verification/import; when importing, the same bytes are written to the private stage as they are hashed. Separate from subsequent durable participant naming.",
       "function_bodies_sha256": [
-        "294f8625eccdbf7c925c0029e0c933ee6b17f310178058fc5cf09f85f0798f26"
+        "36f702ca7a0ff31bae7a7aa1d8a48ddc5ffc80e340d617f71002cf3802e20c50"
       ]
     },
     {
       "path": "crates/graphforge-storage/src/project_portable_v2.rs",
       "function": "hash_payload",
       "role": "portable_authentication",
-      "input_contract": "Each complete archive member is cryptographically authenticated against its portable manifest identity; the enclosing archive producer separately counts all physical transport bytes.",
+      "input_contract": "Each complete archive member is cryptographically authenticated against its portable manifest identity in the single verification pass; when importing, the same bytes are written to the private stage as they are hashed, so the stage holds exactly the authenticated bytes. The enclosing archive producer separately counts all physical transport bytes.",
       "function_bodies_sha256": [
-        "c83b6457dfd87a82b85a49a17a9fe501b418e647cc5188d9efde9feaa894f65d"
+        "9f8408562e26ea9bad94b11601aef4ed366777fdc841802f3d4f3634b078fca4"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2.rs",
+      "function": "read_authenticated_member",
+      "role": "portable_authentication",
+      "input_contract": "One bounded semantic member (ontology composition entry or research registry/object) is re-read from the package after the verification pass and authenticated against the digest that pass recorded, so semantic validation never materializes the payload.",
+      "function_bodies_sha256": [
+        "4ec32369612bf6ed88640d6832f7cabf5734fd445efa057d214a0137618b81fb"
       ]
     },
     {
@@ -1679,7 +1751,7 @@
       "role": "caller_selected",
       "input_contract": "Full archive headers/member bytes/padding form the genuine transport identity; the separate path-only digest chooses a canonical PAX name.",
       "function_bodies_sha256": [
-        "aa87ab2964d390733be819d0f6492013eb9b816bae9deca69dfd05cc973353ec"
+        "dd13658ff99f96ffe846b5d193c0dad9b45e36221e727e00a38abc04f63519f7"
       ]
     },
     {
@@ -2318,7 +2390,7 @@
       "role": "contract_identity",
       "input_contract": "Workspace schema literal or canonical authored ontology JSON defines required schema/ontology identity.",
       "function_bodies_sha256": [
-        "bfb8f28e9de0844d003551f00aec0c40ad1c12000c7cad4798908f700b86f5d6"
+        "b299830fc9dba88939f346cbed9dbd2d1a393e4d402bff6bdf337b25886e1a4e"
       ]
     },
     {
@@ -2336,70 +2408,7 @@
       "role": "contract_identity",
       "input_contract": "Workspace/family/version schema contract literal defines required schema fingerprint.",
       "function_bodies_sha256": [
-        "0789a5b926476eae6d19e0a0b1335bc39c842fd7c7df3fad2ac2648c4fd9f067"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_object_store.rs",
-      "function": "verify_file_counted_in_domain",
-      "role": "caller_selected",
-      "input_contract": "Complete opened CAS object bytes undergo genuine SHA/address verification and XXH64. Private installation selects ControlAuthentication only for validated bounded radix manifest nodes; generic file/byte installation and artifact trust wrappers select ArtifactPayload. Domain propagation changes observation, never bytes or refusal.",
-      "function_bodies_sha256": [
-        "1557ad2756ced24c4dd5cb816e07f55d95a6366650911398787d0383e14d837b"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_object_store.rs",
-      "function": "verify_stream_counted_in_domain",
-      "role": "caller_selected",
-      "input_contract": "Complete temporary or Windows adoption stream bytes undergo genuine SHA/address, exact-length and XXH64 verification. Private installation propagates ControlAuthentication only from validated bounded radix manifest nodes; generic artifact callers remain ArtifactPayload, including reuse and concurrent installation winners.",
-      "function_bodies_sha256": [
-        "a5fec22ec4260a2ab80e936c851bfbeddd13ba6c129106add10242f81f68892a"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
-      "function": "install_graph_object_bytes_in_domain",
-      "role": "caller_selected",
-      "input_contract": "Exact resident bytes receive the genuine SHA-256 CAS name. Generic byte installation selects ArtifactPayload; only the private typed GraphManifestNode installer validates and bounds canonical radix control JSON then selects ControlAuthentication. The selected domain propagates to every existing-object, concurrent-winner and platform sealing SHA check; all crypto bytes remain counted inclusively.",
-      "function_bodies_sha256": [
-        "dc0632e822de52dbf4f0c935ee91a5fbdc3c32c4de81f06114d5146a59f99ab6"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
-      "function": "install_graph_manifest_node_with_lease",
-      "role": "control_authentication",
-      "input_contract": "Typed GraphManifestNode is structurally validated, canonically encoded and bounded to 256 KiB before its private ControlAuthentication installation call. Only paths, lengths, payload SHA/XXH64/role descriptors or child-digest references occur in these control bytes; this wrapper delegates one genuine SHA producer and adds no crypto pass.",
-      "function_bodies_sha256": [
-        "8c65f0b85e5abcb045a9ad5c3bd8495478d31eb06c971e5e1aaa57efe0da763c"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_object_store/manifest_tree.rs",
-      "function": "install_manifest_node",
-      "role": "control_authentication",
-      "input_contract": "Radix manifest publication passes the typed GraphManifestNode to its validated bounded ControlAuthentication installer and records manifest I/O; this delegate creates no extra SHA producer or payload fast path.",
-      "function_bodies_sha256": [
-        "e565a15b929a48690def17a73bf3757114004add168cfba037df461f2a795eb3"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
-      "function": "install_object",
-      "role": "caller_selected",
-      "input_contract": "Installation orchestrator forwards its already selected caller domain unchanged through existing-object SHA authentication, optional temporary stream authentication and final sealing. Only its private validated typed manifest caller selects Control; generic payload callers select Artifact. This delegate creates no SHA state or extra pass. Its temporary path is the same diagnostic_root.join(GRAPH_OBJECTS_DIR).join(TEMP_DIR).join(name) expression as before extraction.",
-      "function_bodies_sha256": [
-        "64f02d47fa8c8436a4058dd91c0803bad41892fb2d8158e1733ee2cb01da572a"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
-      "function": "finalize_temporary_object",
-      "role": "caller_selected",
-      "input_contract": "Finalization orchestrator forwards the selected caller domain unchanged through Windows sealing and genuine SHA authentication of a concurrent installation winner. It preserves identity, allocation, durability and cleanup order. This delegate creates no SHA state or extra pass; temporary path extraction preserves the exact diagnostic_root.join(GRAPH_OBJECTS_DIR).join(TEMP_DIR).join(name) expression.",
-      "function_bodies_sha256": [
-        "736f2cb6b34dfa21f051eda5171573a53a2fa13c12140945f43018f3c9d3c4d7"
+        "940724fa2a4e8d8c2b6a2d4b0fd60883d2909e79bfa833b08300b3c0dd908996"
       ]
     }
   ],

@@ -543,7 +543,10 @@ fn participant(family: &str, bytes: Vec<u8>) -> ProjectParticipant {
         record_family_id: family.into(),
         record_version: WORKSPACE_RESEARCH_METADATA_VERSION,
         encoding: ProjectParticipantEncoding::Json,
-        schema_fingerprint: Sha256::digest(format!("workspace/{family}@1")).into(),
+        schema_fingerprint: graphforge_core::hash_observation::ContractSha256::digest(format!(
+            "workspace/{family}@1"
+        ))
+        .into(),
         row_count: 1,
         bytes,
     }
