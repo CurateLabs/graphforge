@@ -825,10 +825,6 @@ fn storage(action: &str, path: &Path, error: impl std::fmt::Display) -> GfError 
 mod crash_oracle_tests {
     use super::*;
     use crate::GraphDeltaOp;
-    use crate::project_fault_oracle::{
-        AuthorityClass, PublicationIds, PublicationPhase, default_durable_ids, expected_authority,
-        publication_ops, simulate_crash,
-    };
 
     #[test]
     fn canonical_topology_rows_counts_nested_edge_shards() {

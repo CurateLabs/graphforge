@@ -197,7 +197,7 @@ are pinned individually; changed inputs, added producers in the same function,
 missing review pins, and unknown digest algorithms make a strict run fail.
 Refresh a classification only after reviewing its actual inputs and consumers.
 The reviewed application source inventory SHA-256 is
-`8e0719bfa3ac179d786666301a0a2c4b615a0737661155aae643651f58d8ea01`; the method computes this over its ordered Rust path/file-digest map.
+`7c29c2d4f3f1c863a71aabf29cfa4ff1f5bcdf4d17cf6759c936f8051ab20f63`; the method computes this over its ordered Rust path/file-digest map.
 Static sites are distinct from measured update bytes and runtime passes.
 
 Compact publication reuses a payload identity only from the authenticated

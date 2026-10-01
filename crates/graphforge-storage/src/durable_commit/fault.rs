@@ -3,7 +3,7 @@ use std::cell::Cell;
 use std::fs::File;
 use std::io::{self, Write};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Point {
+pub(crate) enum Point {
     PartialWrite,
     FileFence,
     BeforeVisible,
@@ -11,7 +11,7 @@ pub(super) enum Point {
     ParentFence,
 }
 thread_local! { static NEXT: Cell<Option<Point>> = const { Cell::new(None) }; }
-pub(super) fn arm(point: Point) {
+pub(crate) fn arm(point: Point) {
     NEXT.with(|next| next.set(Some(point)));
 }
 pub(super) fn hit(point: Point) -> io::Result<()> {

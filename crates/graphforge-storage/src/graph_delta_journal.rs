@@ -2357,10 +2357,6 @@ fn storage(action: &str, path: &Path, error: impl std::fmt::Display) -> GfError 
 #[cfg(test)]
 mod crash_oracle_tests {
     use super::*;
-    use crate::project_fault_oracle::{
-        AuthorityClass, PublicationIds, PublicationPhase, default_durable_ids, expected_authority,
-        publication_ops, simulate_crash,
-    };
 
     #[test]
     fn raw_parent_path_spelling_preserves_exact_parquet_digest_evidence() {
