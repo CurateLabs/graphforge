@@ -1059,8 +1059,10 @@ fn bounded_ordered_leaf(
         && hop.projected_columns == 1
         && hop.identity_ranges_selected > 0
         && hop.identity_ranges_selected <= hop.projected_rows
-        && hop.identity_read_calls > 0
-        && hop.identity_bytes_read > 0
+        // The handle holds the blocks it has authenticated (#1388), so a query
+        // that follows another over the same ordinals may read none; calls and
+        // bytes still never disagree.
+        && (hop.identity_read_calls == 0) == (hop.identity_bytes_read == 0)
         && hop.identity_peak_buffer_bytes > 0
         && hop
             .identity_ranges_selected
