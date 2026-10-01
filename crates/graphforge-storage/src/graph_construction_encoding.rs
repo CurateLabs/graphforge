@@ -15,7 +15,6 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::cell::RefCell;
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use crate::construction_detail_codec::DetailCodec;
 use crate::construction_directory::ConstructionDirectory as StableDirectory;
 use arrow::array::{
@@ -27,6 +26,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
 use graphforge_core::OntologyMode;
+use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use graphforge_filesystem::{file_identity, file_link_count};
 use graphforge_ir::{CompositionBindingContext, SymbolBinding};
 use graphforge_ontology::{QualifiedSymbol, SymbolKind};
@@ -38,7 +38,7 @@ use uuid::Uuid;
 
 use crate::graph_construction::{
     ArtifactReceipt, ConstructionSemanticAuthority, ConstructionShape, CountingChunkReader,
-    GraphConstructionBudgets, IoCounter, open_authenticated_shape_source, shaped_output_sha256,
+    GraphConstructionBudgets, IoCounter, open_authenticated_shape_source, shaped_output_xxh64,
 };
 use crate::property_overlay::{
     PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
@@ -152,7 +152,7 @@ fn authenticated_source_spool<'a>(
     let authenticated = open_authenticated_shape_source(source, outputs, name)?;
     let expected_identity = authenticated.identity;
     let expected_bytes = authenticated.bytes;
-    let expected_sha256 = authenticated.sha256;
+    let expected_xxh64 = authenticated.xxh64;
     let cache_window =
         graphforge_filesystem::cache_release_window_for_streams(2).map_err(storage)?;
     let mut authenticated = graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
@@ -175,7 +175,7 @@ fn authenticated_source_spool<'a>(
         identity: spool_identity,
         armed: true,
     };
-    let mut digest = Sha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut bytes = 0_u64;
     let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
     let authentication = (|| -> Result<(), GfError> {
@@ -186,7 +186,7 @@ fn authenticated_source_spool<'a>(
             if read == 0 {
                 break;
             }
-            digest.update(&buffer[..read]);
+            checksum.update(&buffer[..read]);
             spool.write_all(&buffer[..read]).map_err(storage)?;
             add_evidence_counter(&mut bytes, read as u64, "read bytes")?;
             account_spooled_bytes(evidence, read as u64)?;
@@ -194,7 +194,7 @@ fn authenticated_source_spool<'a>(
         if file_identity(authenticated.file()).map_err(storage)? != expected_identity
             || file_link_count(authenticated.file()).map_err(storage)? != 1
             || bytes != expected_bytes
-            || hex(&digest.finalize()) != expected_sha256
+            || crate::corruption_checksum::hex(checksum.finish()) != expected_xxh64
         {
             return Err(storage(
                 "shaped source changed during authenticated spooling",
@@ -509,7 +509,7 @@ struct EncodingIntent {
 pub(crate) fn inventory_authority_sha256(
     inventory: &GraphConstructionEncoding,
 ) -> Result<String, GfError> {
-    let mut digest = Sha256::new();
+    let mut digest = graphforge_core::hash_observation::ControlSha256::default();
     digest.update(b"graphforge-construction-encoding-inventory/v1\0");
     digest.update(serde_json::to_vec(inventory).map_err(storage)?);
     Ok(hex(&digest.finalize()))
@@ -690,13 +690,13 @@ pub(crate) fn encode(
         "ordinal control calls",
     )?;
 
-    let identities_sha256 = shaped_output_sha256(shape_outputs, &shape.identities)?;
+    let identities_xxh64 = shaped_output_xxh64(shape_outputs, &shape.identities)?;
     let membership_region =
         crate::concurrency_attribution::RegionScope::named("membership_encoding");
     let mut index = crate::uuid_membership::encode_construction_index(
         source.physical(),
         &shape.identities,
-        identities_sha256,
+        identities_xxh64,
         output.physical(),
         generation,
         shape.parent_topology_generation,
@@ -750,7 +750,7 @@ pub(crate) fn encode(
                 output.physical(),
                 bundle,
                 generation,
-                identities_sha256,
+                &index.source_sha256,
                 parent_ordinal
                     .as_ref()
                     .and_then(|(_, manifest)| parent_generation.map(|parent| (parent, manifest))),
@@ -2778,8 +2778,8 @@ struct FixedReader<const N: usize> {
     counter: IoCounter,
     identity: graphforge_filesystem::FileIdentity,
     expected_bytes: u64,
-    expected_sha256: String,
-    digest: Sha256,
+    expected_xxh64: String,
+    checksum: crate::corruption_checksum::Checksum,
     consumed_bytes: u64,
 }
 
@@ -2825,8 +2825,8 @@ impl<const N: usize> FixedReader<N> {
             counter,
             identity: authenticated.identity,
             expected_bytes: authenticated.bytes,
-            expected_sha256: authenticated.sha256,
-            digest: Sha256::new(),
+            expected_xxh64: authenticated.xxh64,
+            checksum: crate::corruption_checksum::Checksum::new(),
             consumed_bytes: 0,
         })
     }
@@ -2856,7 +2856,7 @@ impl<const N: usize> FixedReader<N> {
             Some(codec) => codec.wire(&record).map_err(storage)?,
             None => &record,
         };
-        self.digest.update(wire);
+        self.checksum.update(wire);
         self.consumed_bytes = self
             .consumed_bytes
             .checked_add(u64::try_from(wire.len()).map_err(storage)?)
@@ -2875,7 +2875,8 @@ impl<const N: usize> FixedReader<N> {
                     != self.identity
                     || file_link_count(self.reader.get_ref().inner.file()).map_err(storage)? != 1
                     || self.consumed_bytes != self.expected_bytes
-                    || hex(&self.digest.clone().finalize()) != self.expected_sha256
+                    || crate::corruption_checksum::hex(self.checksum.finish())
+                        != self.expected_xxh64
                 {
                     return Err(storage(
                         "fixed-width shaped source changed during consumption",

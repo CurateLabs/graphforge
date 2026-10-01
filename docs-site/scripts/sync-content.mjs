@@ -172,6 +172,7 @@ const PAGES = [
   'adr/0047-over-budget-partitions-and-instance-cpu-budget.md',
   'adr/0048-cargo-is-the-ci-build-authority.md',
   'adr/0049-published-payload-checksums.md',
+  'adr/0050-read-path-fast-path-selection.md',
   // END generated ADR records
   'releases/roadmap.md',
   'legal/licensing.md',

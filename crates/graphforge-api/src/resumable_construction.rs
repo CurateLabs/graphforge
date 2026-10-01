@@ -4,8 +4,8 @@
 mod codec_tests;
 
 use arrow::record_batch::RecordBatch;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_core::uuid::Uuid;
-use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::concurrency_attribution::RegionScope;
 use sha2::Digest;
 

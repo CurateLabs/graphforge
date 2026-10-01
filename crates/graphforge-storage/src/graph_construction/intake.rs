@@ -782,7 +782,6 @@ pub(super) fn write_parquet_with_properties(
         allocated_bytes: graphforge_filesystem::file_space_usage(hashing.inner.file())
             .map_err(storage)?
             .allocated_bytes,
-        sha256: hex(&hashing.digest.clone().finalize()),
         xxh64: crate::corruption_checksum::hex(hashing.checksum.finish()),
         identity: identity.into(),
         write_operations: hashing.operations,
@@ -842,7 +841,6 @@ pub(super) fn write_run<const N: usize>(
         allocated_bytes: graphforge_filesystem::file_space_usage(writer.inner.file())
             .map_err(storage)?
             .allocated_bytes,
-        sha256: hex(&writer.digest.finalize()),
         xxh64: crate::corruption_checksum::hex(writer.checksum.finish()),
         identity: identity.into(),
         write_operations: writer.operations,
@@ -870,8 +868,8 @@ pub(super) fn validate_artifact_name(receipt: &ArtifactReceipt) -> Result<(), Gf
         || receipt.name.starts_with('.')
         || receipt.name.contains('/')
         || receipt.name.contains('\\')
-        || !is_canonical_sha256(&receipt.sha256)
         || !is_canonical_lower_hex(&receipt.identity.file_id, 32)
+        || !is_canonical_lower_hex(&receipt.xxh64, 16)
         || receipt.bytes == 0
         || receipt.write_operations == 0
         || receipt.fsync_operations == 0

@@ -417,6 +417,10 @@ export default defineConfig({
                   label: '0049 — Versioned checksums for published graph payload admission',
                   slug: 'adr/0049-published-payload-checksums',
                 },
+                {
+                  label: '0050 — The read path keeps its adjacency operators and chooses fast paths in the lowerer',
+                  slug: 'adr/0050-read-path-fast-path-selection',
+                },
                 // END generated ADR records
               ],
             },

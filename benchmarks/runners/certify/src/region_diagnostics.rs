@@ -83,7 +83,7 @@ const MEASUREMENTS: [&str; 14] = [
     "fsync_calls",
     "fsync_elapsed_ns",
 ];
-const REGIONS: [&str; 49] = [
+const REGIONS: [&str; 54] = [
     "import_command",
     "begin_import",
     "resume_import",
@@ -95,6 +95,11 @@ const REGIONS: [&str; 49] = [
     "append_edges",
     "source_read",
     "manifest_persistence",
+    "journal_append",
+    "journal_sync",
+    "journal_namespace_publication",
+    "source_publication",
+    "source_cleanup",
     "validate",
     "commit",
     "open_construction",
@@ -174,6 +179,11 @@ pub(crate) fn valid_snapshot(value: &Value) -> bool {
                                     | "append_edges"
                                     | "source_read"
                                     | "manifest_persistence"
+                                    | "journal_append"
+                                    | "journal_sync"
+                                    | "journal_namespace_publication"
+                                    | "source_publication"
+                                    | "source_cleanup"
                             )
                         } else {
                             part != "validate"
@@ -226,6 +236,70 @@ mod tests {
         assert!(valid_snapshot(&value));
         value["regions"]["private/path"] = value["regions"]["import_command"].clone();
         assert!(!valid_snapshot(&value));
+    }
+
+    #[test]
+    fn journal_region_contract_accepts_only_production_leaves() {
+        let journal_regions = [
+            "journal_append",
+            "journal_sync",
+            "journal_namespace_publication",
+            "source_publication",
+            "source_cleanup",
+        ];
+        let capture =
+            graphforge_storage::concurrency_attribution::RegionCapture::start("import_command");
+        {
+            let _begin =
+                graphforge_storage::concurrency_attribution::RegionScope::named("begin_import");
+            // Names emitted by the journal writer, independent of the validator
+            // allowlist. The real begin receipt includes the namespace and sync
+            // leaves; subsequent mutation receipts include the remaining leaves.
+            for name in journal_regions {
+                let _scope = graphforge_storage::concurrency_attribution::RegionScope::named(name);
+            }
+        }
+        let value = serde_json::to_value(capture.finish()).unwrap();
+        assert!(valid_snapshot(&value));
+
+        let mut unknown = value.clone();
+        unknown["regions"]["import_command/begin_import/private_source_path"] =
+            unknown["regions"]["import_command/begin_import/journal_sync"].clone();
+        assert!(!valid_snapshot(&unknown));
+
+        let mut malformed = value.clone();
+        malformed["regions"]["import_command/begin_import/journal_sync"]["inclusive"]["fsync_calls"] =
+            json!("one");
+        assert!(!valid_snapshot(&malformed));
+
+        let mut legacy = value;
+        legacy["contract"] = json!("graphforge-region-diagnostics/1");
+        legacy.as_object_mut().unwrap().remove("io_scope");
+        for row in legacy["regions"].as_object_mut().unwrap().values_mut() {
+            for scope in ["inclusive", "residual"] {
+                row[scope]
+                    .as_object_mut()
+                    .unwrap()
+                    .retain(|key, _| MEASUREMENTS[..9].contains(&key.as_str()));
+            }
+        }
+        assert!(!valid_snapshot(&legacy));
+        legacy["regions"]
+            .as_object_mut()
+            .unwrap()
+            .retain(|path, _| {
+                matches!(
+                    path.as_str(),
+                    "import_command" | "import_command/begin_import"
+                )
+            });
+        assert!(valid_snapshot(&legacy));
+        for name in journal_regions {
+            let mut invalid_legacy = legacy.clone();
+            invalid_legacy["regions"][format!("import_command/begin_import/{name}")] =
+                legacy["regions"]["import_command/begin_import"].clone();
+            assert!(!valid_snapshot(&invalid_legacy), "{name} accepted as v1");
+        }
     }
 
     #[test]

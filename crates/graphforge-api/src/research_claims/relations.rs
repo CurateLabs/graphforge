@@ -77,6 +77,7 @@ impl GraphForge {
             b"research_relation",
             OperationId(request.operation_uuid),
             &replacements,
+            &k::participant_content_sha256(&replacements),
         );
         replacements.push(attempt.receipt(generation)?);
         publication::publish(

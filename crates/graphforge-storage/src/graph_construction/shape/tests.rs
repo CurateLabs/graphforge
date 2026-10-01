@@ -245,8 +245,8 @@ fn batch_partition_and_resume_produce_identical_canonical_data_fingerprints() {
     let two_identity = receipt_for_existing(&resumed.root, &two_shape.identities).unwrap();
     let two_details =
         receipt_for_existing(&resumed.root, two_shape.node_details.as_ref().unwrap()).unwrap();
-    assert_eq!(one_identity.sha256, two_identity.sha256);
-    assert_eq!(one_details.sha256, two_details.sha256);
+    assert_eq!(one_identity.xxh64, two_identity.xxh64);
+    assert_eq!(one_details.xxh64, two_details.xxh64);
     assert_eq!((one_shape.node_count, one_shape.edge_count), (8, 0));
     assert_eq!((two_shape.node_count, two_shape.edge_count), (8, 0));
 }
@@ -574,7 +574,8 @@ fn packed_endpoint_wire_preserves_full_width_fields_and_refuses_malformed_roles(
         std::fs::write(&path, &malformed).unwrap();
         let mut authority = receipt.clone();
         authority.bytes = malformed.len() as u64;
-        authority.sha256 = sha256(&malformed);
+        authority.xxh64 =
+            crate::corruption_checksum::hex(crate::corruption_checksum::checksum(&malformed));
         assert!(authenticate_artifact(&session.root, &authority, DetailCodec::Compact).is_err());
         assert_eq!(std::fs::read(root.path().join("CURRENT")).unwrap(), current);
     }

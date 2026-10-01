@@ -448,8 +448,8 @@ fn serial_and_parallel_import_publish_identical_payloads_with_recorded_clock_fix
                 .find(|receipt| receipt["name"] == name)
                 .unwrap_or_else(|| panic!("missing receipt for {name}"));
             assert!(receipt["bytes"].as_u64().unwrap() > 0, "{name}");
-            let digest = receipt["sha256"].as_str().unwrap();
-            assert_eq!(digest.len(), 64);
+            let digest = receipt["xxh64"].as_str().unwrap();
+            assert_eq!(digest.len(), 16);
             fingerprint.insert(format!("shape/{name}"), digest.as_bytes().to_vec());
         }
         session.commit(&graph, None).unwrap();

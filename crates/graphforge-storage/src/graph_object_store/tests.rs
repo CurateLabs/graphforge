@@ -608,3 +608,65 @@ fn object_payload_read_requires_exact_length_and_consumes_no_excess() {
     assert!(read_exact_object_payload(&mut source, 4, root).is_err());
     assert_eq!(source.position(), 5);
 }
+
+#[test]
+fn portable_cas_authentication_has_its_own_domain_and_still_refuses_corruption() {
+    use graphforge_core::hash_observation::operation::Capture;
+
+    let root = tempfile::tempdir().unwrap();
+    let payload = b"portable authenticated source";
+    let (digest, _) = install_graph_object_bytes(root.path(), payload).unwrap();
+    let lease = begin_graph_object_read(root.path()).unwrap();
+    let capture = Capture::start();
+    let mut object = lease
+        .open_for_portable(&digest, payload.len() as u64)
+        .unwrap();
+    let mut bytes = Vec::new();
+    object.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, payload);
+    assert_eq!(object.authenticated_length(), payload.len() as u64);
+    let work = capture.snapshot();
+    drop(object);
+    drop(capture);
+    assert_eq!(
+        work.portable_authentication_sha256_bytes,
+        payload.len() as u64
+    );
+    assert_eq!(work.artifact_payload_sha256_bytes, 0);
+    assert_eq!(work.unclassified_sha256_bytes, 0);
+
+    let capture = Capture::start();
+    drop(lease.open(&digest, payload.len() as u64).unwrap());
+    let work = capture.snapshot();
+    drop(capture);
+    assert_eq!(work.artifact_payload_sha256_bytes, payload.len() as u64);
+    assert_eq!(work.portable_authentication_sha256_bytes, 0);
+    assert_eq!(work.unclassified_sha256_bytes, 0);
+
+    let path = graph_object_path(root.path(), &digest).unwrap();
+    let before = graphforge_filesystem::file_identity(&File::open(&path).unwrap()).unwrap();
+    let permissions = fs::metadata(&path).unwrap().permissions();
+    let mut changed = payload.to_vec();
+    changed[0] ^= 1;
+    corrupt_sealed_graph_object_for_test(&path, &changed);
+    fs::set_permissions(&path, permissions).unwrap();
+    assert_eq!(
+        graphforge_filesystem::file_identity(&File::open(&path).unwrap()).unwrap(),
+        before
+    );
+    let capture = Capture::start();
+    let error = lease
+        .open_for_portable(&digest, payload.len() as u64)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("graph object digest does not match its address")
+    );
+    assert_eq!(
+        capture.snapshot().portable_authentication_sha256_bytes,
+        payload.len() as u64
+    );
+    assert_eq!(capture.snapshot().artifact_payload_sha256_bytes, 0);
+    assert_eq!(capture.snapshot().unclassified_sha256_bytes, 0);
+}

@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use serde::Serialize;
 use sha2::Digest;
 use uuid::Uuid;

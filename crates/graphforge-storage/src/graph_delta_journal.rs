@@ -28,7 +28,7 @@ use crate::graph_files::{
 use crate::project_generation::resolve_project_generation;
 use crate::project_publication::{
     ProjectCapability, ProjectGenerationRequest, ProjectPublicationReceipt, ProjectStageOutcome,
-    published_project_transaction, stage_project_generation_from_admitted_parent,
+    published_project_transaction, stage_project_generation_from_installed_objects,
 };
 #[cfg(test)]
 use crate::{GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, empty_workspace_participants};
@@ -1390,11 +1390,16 @@ fn bounded_materialized_fingerprint(
         }
         known_unchanged.insert(
             entry.relative_path.clone(),
-            (entry.byte_length, entry.content_sha256.clone()),
+            crate::graph_files::KnownGraphFile::from(entry),
         );
     }
-    let (materialized, _) =
-        crate::graph_files::capture_graph_files_reusing_digests(target.path(), &known_unchanged)?;
+    // The materialized view is temporary and never published. Its per-file
+    // identities feed only the delta's contract state fingerprint.
+    let (materialized, _) = crate::graph_files::capture_graph_files_reusing_digests(
+        target.path(),
+        &known_unchanged,
+        graphforge_core::hash_observation::HashDomain::ContractIdentity,
+    )?;
     let mut hasher = Sha256::new();
     hasher.update(b"graphforge-materialized-graph-tree/1\n");
     for entry in materialized.files {
@@ -1860,12 +1865,14 @@ fn publish_graph_delta_after_prepare(
     )?;
     before_stage(container_root)?;
     prepared.revalidate_for_publish()?;
-    let publication = match stage_project_generation_from_admitted_parent(
+    let publication = match stage_project_generation_from_installed_objects(
         admission,
         parent,
         &generation_request,
         prepared.graph_tree_source(),
         None,
+        None,
+        prepared.publication_lease.as_ref(),
     )? {
         ProjectStageOutcome::Staged(staged) => {
             prepared.publish(staged.validate(|_| Ok(()), |_, _| Ok(()))?)?

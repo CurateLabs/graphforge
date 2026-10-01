@@ -4,7 +4,6 @@ use super::{
     PortableV2ExportPlan, PortableV2PackageClass, err, hex, identity, limit, open_source_no_follow,
     storage, validate_limits,
 };
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use crate::project_portable_v2::{
     PortableV2ActivationOverride, PortableV2ActivationProfile, PortableV2BridgeSet,
     PortableV2ExactIdentity, PortableV2OntologyComposition, PortableV2OntologyModule,
@@ -14,6 +13,7 @@ use crate::{
     PortableV2SelectionPlan, PortableV2SelectionProfile, PortableV2SelectionRequest,
     ResolvedProjectGeneration, preview_portable_v2_selection, project_portable_v2::canonical_json,
 };
+use graphforge_core::hash_observation::{ContractSha256, ControlSha256 as Sha256, PortableSha256};
 use serde::Serialize;
 use sha2::Digest;
 use std::io::Read;
@@ -927,7 +927,10 @@ pub fn plan_selected_portable_v2(
     let selection_fingerprint = if let Some(registry) = &research {
         format!(
             "sha256:{}",
-            hex(Sha256::digest(serde_json::to_vec(&registry.interchange).map_err(storage)?).into())
+            hex(ContractSha256::digest(
+                serde_json::to_vec(&registry.interchange).map_err(storage)?
+            )
+            .into())
         )
     } else {
         selection.selection_fingerprint.clone()
@@ -1055,7 +1058,7 @@ pub(super) fn inspect(
     if *total > limits.max_total_bytes {
         return Err(limit("total too large"));
     }
-    let mut digest = Sha256::new();
+    let mut digest = PortableSha256::new();
     let mut buffer = vec![0; limits.copy_buffer_bytes];
     let mut bytes_read = 0;
     loop {
@@ -1097,7 +1100,7 @@ fn inspect_cas(
     if *total > limits.max_total_bytes {
         return Err(limit("total too large"));
     }
-    let _authenticated = lease.open(digest, expected_length)?;
+    let _authenticated = lease.open_for_portable(digest, expected_length)?;
     let digest_bytes = parse_sha256(digest)?;
     Ok(PlannedFile {
         source: PlannedSource::Cas {
@@ -1187,7 +1190,7 @@ pub(super) fn portable_id(s: &str) -> String {
 pub(crate) fn portable_participant_id(capability: &str, family: &str) -> String {
     let mut prefix = portable_id(&format!("{capability}-{family}"));
     prefix.truncate(220);
-    let mut digest = Sha256::new();
+    let mut digest = ContractSha256::new();
     digest.update(capability.as_bytes());
     digest.update([0]);
     digest.update(family.as_bytes());

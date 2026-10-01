@@ -186,14 +186,42 @@ python3 scripts/development/digest-census.py --repo . --output /tmp/gf-digest-ce
 
 The method and reviewed classification inputs are pinned by SHA-256:
 `digest-census.py` is
-`066813e6666c1a77782402cee7ae957b450ccd47a7e14874c4e47b996aabb0eb`;
+`640e8221d88c8065f9e60aa0e9182545c3e43b52bbb9618c885717d5d3b2f1ba`;
 `digest-census-overrides.json` is
-`7e6904dfc1a3cbcf9b06bcd69e046aa7ac3b40c4b1cfa88c1ea3d8b48f236553`.
+`bdde8cff097b818265a49ebcfa1876e8b7f48a67306b218a1b2b1016a24533bc`.
+The parser fixture `test-digest-census.py` is
+`77224ebc214e8c8793baced7d105bdc576cd0015feb436a0af701260998a48f1`.
 Run the parser and stale-review regression fixtures with
 `python3 scripts/development/test-digest-census.py`. Reviewed function bodies
 are pinned individually; changed inputs, added producers in the same function,
 missing review pins, and unknown digest algorithms make a strict run fail.
 Refresh a classification only after reviewing its actual inputs and consumers.
+
+Compact publication reuses a payload identity only from the authenticated
+published parent or from a successful installation captured privately by its
+CAS lease. A caller's new checksum cannot authenticate an existing SHA address:
+unknown or mismatched entries receive a genuine SHA and checksum pass. Private
+install captures bind the actual final inode, length and checksum, including a
+concurrent installation winner. Their bounded scalar registry keeps no per-file
+handles. Publication still checks payload corruption under the lease before
+changing `CURRENT`; the registry grants no authority after a failed install.
+
+Radix manifest installation selects control authentication only through a
+private typed `GraphManifestNode` helper, after structural validation, canonical
+encoding and the existing node byte limit. Generic byte and file installers
+retain artifact accounting. The selected domain follows genuine SHA verification
+through existing-object reuse, concurrent installation and platform sealing;
+CAS names and refusal checks remain identical. Shared producers are classified
+by their callers, and typed wrappers add no extra hash pass.
+
+Private construction checkpoint wire 11 binds intermediate spill receipts by
+exact length and mandatory seed-zero XXH64. Spill writers and resume admission
+count checksum work separately and perform no SHA pass at those boundaries.
+Published UUID wire 6 and ordinal descriptor wire 5 remain unchanged here.
+Encoding still counts the full raw identity-run SHA as artifact work and forwards
+its genuine digest to the existing topology receipt. Control SHA covers the
+private intent, shape, progress and encoding-inventory metadata, including their
+expected checksums.
 
 The method records the source revision, source-file SHA-256 digests, the working
 diff digest when present, and digests of the method and semantic override inputs.
@@ -205,17 +233,21 @@ Production producer sites exclude test-only items and descendants. A constructor
 or static digest invocation is a producer site; calls into a digest-owning helper
 form a separate delegate population. Do not add wrapper levels to infer runtime
 passes. The semantic input and consumer, rather than an alias name, determine
-classification: durable artifact/trust-boundary work, contract identity, or
-optional evidence. Required control authentication is recorded separately within
-the trust-boundary category. Mixed helpers list their input-specific callers.
+classification: durable artifact identity, contract identity, optional evidence,
+control authentication, or portable authentication. Complete portable archive and
+member cryptographic inputs have their own class; bounded control documents and
+canonical selection tuples retain their actual control or contract classes.
+Mixed helpers list their input-specific callers.
 The method refuses unresolved or stale classifications by default and records
 its lexical limitations. Resolve remaining candidates against current source;
 a text match alone is neither a runtime hash pass nor proof of exhaustiveness.
 
 `graphforge_core::hash_observation::operation::Capture` is test-only scoped
 accounting. It counts actual SHA update input bytes by artifact payload,
-contract identity, control authentication, optional evidence, and unclassified
-producer; actual XXH64 input is counted separately. Worker jobs capture and
+contract identity, control authentication, portable authentication, optional
+evidence, and unclassified producer; actual XXH64 input is counted separately.
+Portable counters identify archive/member trust work; they do not remove its
+SHA input from inclusive process-wide cryptographic totals. Worker jobs capture and
 attach the current operation context. Nested operations and unrelated parallel
 tests retain separate collectors; there is no process-wide reset. Production
 context wrappers are zero-sized when test support is disabled.
@@ -291,8 +323,11 @@ not inclusive parents and children; unknown or inconsistent differences stay
 
 `source_read` covers iterator decode/canonicalization calls; `normalization`
 covers bounded normalization windows. Appends are split into `append_nodes`
-and `append_edges`; `manifest_persistence` covers each full manifest rewrite
-including its barrier and install. Seal, encoding, hydration and commit retain
+and `append_edges`; `manifest_persistence` covers complete manifest checkpoints
+including their barriers and installs. Import progress journal work uses the
+disjoint `journal_append`, `journal_sync`, and `journal_namespace_publication`
+leaves. `source_publication` covers the source rename and its retained parent
+barrier. Seal, encoding, hydration and commit retain
 their existing boundaries. Reader setup and uninstrumented work stay in the
 reported residual; do not call the entire residual hashing or source reading.
 
@@ -338,3 +373,162 @@ The deterministic worker-thread counter and residual regression runs with:
 cargo test -p graphforge-storage --test region_work
 cargo test -p graphforge-cli --test portable import_operation_timings_survive_separate_cli_processes
 ```
+
+## Matched import journal measurements
+
+The [lane runner](../../scripts/development/import-journal/measure-lane.py),
+[five-command driver](../../scripts/development/import-journal/driver.sh),
+[comparator](../../scripts/development/import-journal/compare-pair.py), and
+[qualification contract](../../scripts/development/import-journal/measurement_contract.py)
+reproduce a journal-only comparison. Use the immediate integrated `main` as
+baseline; the candidate may differ in only the three import-session Rust files.
+Historical runs do not supply a matched baseline. Both lanes use the input
+digests and populations above, the same release profile/features, explicit
+`--json --diagnostics`, cores 0–15, and independent fresh projects on supported
+native storage. All artifacts and build targets stay outside both checkouts.
+
+Build each lane after fixing `task_worktree`, `task_target`, `task_artifacts`,
+and the absolute `task_methods` path to `scripts/development/import-journal`.
+Run the following from the same build environment for both lanes. This records
+the actual build command, profile, feature settings, toolchain, source and
+binary identities, and the whitelisted build environment before measurement:
+
+```bash
+mkdir -p "$task_artifacts"
+PYTHONPATH="$task_methods" CARGO_TARGET_DIR="$task_target" \
+  CARGO_BUILD_JOBS=4 CARGO_PROFILE_RELEASE_DEBUG=0 \
+  python3 - "$task_worktree" "$task_target" "$task_artifacts" <<'PY'
+import os
+from pathlib import Path
+import subprocess
+import sys
+from measurement_contract import BUILD_ENV, digest, require_external_output, write_json
+
+tree, target, artifacts = (Path(value).resolve() for value in sys.argv[1:])
+require_external_output(artifacts, tree, Path(os.environ["PYTHONPATH"]))
+require_external_output(target, tree, Path(os.environ["PYTHONPATH"]))
+def command(arguments):
+    return subprocess.check_output(arguments, cwd=tree, text=True).strip()
+source = command(["git", "rev-parse", "HEAD"])
+subprocess.run(["git", "diff", "--quiet", "HEAD"], cwd=tree, check=True)
+arguments = ["build", "--locked", "--release", "-p", "graphforge-cli", "--bin", "gf"]
+metadata = {
+    "source_sha": source, "profile": "release", "features": [], "default_features": True,
+    "target": next(line[6:] for line in command(["rustc", "-vV"]).splitlines()
+                   if line.startswith("host: ")),
+    "rustc_version": command(["rustc", "-vV"]), "cargo_version": command(["cargo", "-V"]),
+    "cargo_args": arguments, "build_environment": {key: os.environ.get(key) for key in BUILD_ENV},
+}
+with (artifacts / "build.log").open("w") as log:
+    subprocess.run(["cargo", *arguments], cwd=tree, check=True,
+                   stdout=log, stderr=subprocess.STDOUT)
+assert source == command(["git", "rev-parse", "HEAD"])
+subprocess.run(["git", "diff", "--quiet", "HEAD"], cwd=tree, check=True)
+metadata["binary_sha256"] = digest(target / "release/gf")
+write_json(artifacts / "build-provenance.json", metadata)
+(artifacts / "build-source.sha").write_text(source + "\n")
+PY
+```
+
+Finish all builds and tests before launching lanes. Set `task_evidence` to an
+external output directory, `task_nodes` and `task_edges` to the absolute S22
+input paths, and create `inputs.sha256` there with the two pinned digests and
+those exact absolute paths in `sha256sum` format. For each lane, set
+`task_lane` to `baseline` or `candidate`, its worktree/target/build artifacts,
+and the same positive `task_pair` number, then run sequentially:
+
+```bash
+python3 "$task_methods/measure-lane.py" --lane "$task_lane" --pair "$task_pair" \
+  --worktree "$task_worktree" --binary "$task_target/release/gf" \
+  --expected-source-sha "$(cat "$task_artifacts/build-source.sha")" \
+  --build-source-file "$task_artifacts/build-source.sha" \
+  --build-provenance-file "$task_artifacts/build-provenance.json" \
+  --evidence-root "$task_evidence" --inputs-sha-file "$task_evidence/inputs.sha256" \
+  --nodes "$task_nodes" --edges "$task_edges"
+# Compare only after both baseline and candidate lanes finish:
+python3 "$task_methods/compare-pair.py" --pair "$task_pair" \
+  --repository "$task_worktree" --evidence-root "$task_evidence"
+```
+
+The runner resets cold caches and requires passwordless operator permission
+for `drop_caches`; schedule it on an exclusively available host. It persists
+a 60-second quiet window (mean ≤0.2 and peak ≤0.5 busy cores), samples process
+names every five seconds, and refuses observed compiler overlap. Sampling does
+not prove absence of a process that starts and finishes between samples.
+Qualification binds the five command receipts, quiet/during observations,
+build/input identities and workload log by SHA-256. The comparator requires
+both completed, qualified lanes and matching ambient resource settings.
+Resource provenance resolves the current cgroup2 membership against mountinfo
+and records every visible leaf-to-root ancestor: CPU quotas/weights/bursts,
+CPU/NUMA sets, memory limits/protection/throttling/swap, I/O limits/weights and
+controller exposure. Each unavailable field retains its reason. Derived CPU
+quota/set and memory bounds use the minimum/intersection of observed ancestor
+constraints; a missing finite limit remains unavailable, never invented
+unlimited. Completeness is explicit. Unreadable, malformed, unmapped or hidden
+ancestor policy is refused before cache reset. The saved
+`resource-policy-after.json` must equal the initial policy, and both snapshots
+are bound into qualification and revalidated by the comparator. It
+reparses BenchExec's workload `returnvalue`, signal and termination fields:
+the `runexec` process's successful exit alone cannot qualify a failed ingest.
+Optimized Python (`-O` or `PYTHONOPTIMIZE`) is refused at shared-module import
+before any lane work; qualification assertions cannot be disabled.
+Missing/unavailable measurements and nested persistence rows are refused.
+Manifest checkpoint, journal append, sync, journal namespace and source
+publication costs are reported separately as disjoint leaves, including the
+startup namespace barriers. The baseline source-publication helper is pinned
+to its reviewed body digest
+`30f1a0bf1ff07ab1ecfe842a3f6b57dd6cd3a165af234b7d801375d686b71637`;
+unknown helper bodies are refused before assuming zero namespace barriers.
+The baseline already renames each source without a measured source-publication
+leaf, so its new directory-barrier count/time are known zero, while rename
+wall/CPU and other unobserved costs remain unavailable. All candidate leaf
+costs and the complete barrier count/time delta are included. Whole-persistence
+wall comparison remains unavailable; manifest-checkpoint wall deltas retain
+matched boundaries and remain comparable.
+
+After each measurement, use the [reopen verifier](../../scripts/development/import-journal/verify-reopen.py)
+from a Python environment with PyArrow installed:
+
+```bash
+python3 "$task_methods/verify-reopen.py" --lane "$task_lane" --pair "$task_pair" \
+  --worktree "$task_worktree" --binary "$task_target/release/gf" \
+  --evidence-root "$task_evidence"
+```
+
+It starts a new CLI process against the measured project and runs node and
+directed-edge count queries plus one bounded non-count query into external
+Parquet sinks. It requires one-row integer counts of exactly 4,194,304 nodes
+and 67,108,864 edges, and one sample row. The lane's `reopen/proof.json` records
+completion/verification, the exact command, query exit status, source/binary
+and input identities, counts, and the SHA-256 of each output/receipt/log. A
+failed query or count check retains a refused proof; existing proof directories
+are never overwritten. The verifier checks the measured lane's qualification
+and the unchanged binary/source before opening the project.
+
+Keep these reopening/query proofs outside the measured workflow. A qualified
+timing comparison alone does not establish published graph correctness.
+Attach comparison, qualification, receipts, host samples and reopen proofs to
+the producing issue or PR.
+
+Method SHA-256 pins:
+
+| Method | SHA-256 |
+| --- | --- |
+| `driver.sh` | `a011e6b682c49a59d08ef919cca6997971f3cbb0d52ff27fa0c2dd0e4aa8a498` |
+| `measure-lane.py` | `a6eceaaccbeccf1b70d453bd40c26c2206e6ce2114d5e2f6d76e24b50acf8af7` |
+| `measurement_contract.py` | `87d1861b62bb8313037338027c3e78c50b2fea00dc11913b6c60b002240be87f` |
+| `compare-pair.py` | `e948cd34b6b3a4b16778f1afc3644f22806c1fd5e6676c47f8cdf70c276079a3` |
+| `test-measurement-method.py` | `25d643c77ae7fa70310c711b5ae2b36b564f6164f50d4b6e0128cdba7f45b13d` |
+| `verify-reopen.py` | `6cb6da70c9a0d7ee2d0f1d2debb3c39838daaa44c35a3d04b3e5b4caf937e3a5` |
+| `test-reopen-method.py` | `ce22331249b55d5bb56f907f727c8ff98892b2c4aa0ee44cdfcaf1833dfb7d1e` |
+
+The [method regression](../../scripts/development/import-journal/test-measurement-method.py)
+runs with `python3 scripts/development/import-journal/test-measurement-method.py`.
+It uses synthetic lanes plus tiny shell exit probes; it never resets caches,
+builds GraphForge or imports the S22 inputs.
+
+The [reopen-method regression](../../scripts/development/import-journal/test-reopen-method.py)
+runs with `python3 scripts/development/import-journal/test-reopen-method.py` in
+the same PyArrow environment. It decodes tiny real Parquet query-result
+fixtures and checks persisted positive/refused proofs; GraphForge invocation
+is replaced by a fixture producer, so it does not claim actual reopen evidence.

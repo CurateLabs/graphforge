@@ -6,17 +6,13 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use arrow::array::{
-    Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Int64Array, StringArray,
-    UInt64Array,
-};
+use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ExecutionResourcePolicy,
-    GraphConstructionBudgets, GraphForge, GraphForgeOptions, OperationId, PortableSelection,
+    ExecutionResourcePolicy, GraphForge, GraphForgeOptions, OperationId, PortableSelection,
     PortableV2ExportRequest, PortableV2ImportRequest, PortableVerifyRequest, ResourcePolicyMode,
     ResultSinkFormat, ResultSinkOptions, verify_portable_v2,
 };
@@ -31,8 +27,14 @@ use graphforge_storage::{
 };
 use tempfile::TempDir;
 
+#[path = "support/bulk_fixture.rs"]
+mod bulk_fixture;
 #[path = "support/project_fixture.rs"]
 mod project_fixture;
+
+use bulk_fixture::{
+    BulkFixtureEvidence, WRITE_WINDOW, encoded_node_files, fixture_node_uuid, generate_bulk_graph,
+};
 
 const TS: i64 = 1_700_000_000_000_000;
 const NODE_TYPE: graphforge_value::EntityTypeId = match graphforge_value::EntityTypeId::decode(0) {
@@ -41,7 +43,6 @@ const NODE_TYPE: graphforge_value::EntityTypeId = match graphforge_value::Entity
 };
 const FAN_OUT: usize = 8;
 const LIMIT: usize = 1_000;
-const WRITE_WINDOW: usize = 32 * 1024;
 
 /// Serializes the process-global storage counters used by the assertions.
 ///
@@ -179,118 +180,6 @@ fn generate_graph(dir: &Path, nodes: usize, fan_out: usize, compact_v4: bool) {
     project_fixture::publish_graph_workspace(dir, workspace.path());
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct BulkFixtureEvidence {
-    node_rows: usize,
-    edge_rows: usize,
-    node_batches: usize,
-    edge_batches: usize,
-    accepted_chunks: u64,
-    input_rows: u64,
-    peak_batch_rows: u64,
-}
-
-/// Construct scale fixtures through the same bounded Arrow publication path
-/// used by ordinary high-volume ingestion. Scalar `GraphWriter::create_edge`
-/// deliberately checks its in-flight topology window for duplicate UUIDs and
-/// is therefore not a realistic bulk-ingestion primitive.
-fn generate_bulk_graph(dir: &Path, nodes: usize, fan_out: usize) -> BulkFixtureEvidence {
-    assert!(nodes > fan_out);
-    let forge = GraphForge::new(Some(dir.to_str().expect("temp path is UTF-8"))).unwrap();
-    let mut session = forge
-        .begin_graph_construction(GraphConstructionBudgets {
-            max_batch_rows: WRITE_WINDOW,
-            max_run_records: 4 * WRITE_WINDOW,
-            ..GraphConstructionBudgets::default()
-        })
-        .unwrap();
-
-    let mut node_batches = 0;
-    for start in (0..nodes).step_by(WRITE_WINDOW) {
-        let end = start.saturating_add(WRITE_WINDOW).min(nodes);
-        let rows = end - start;
-        let mut identities = FixedSizeBinaryBuilder::with_capacity(rows, 16);
-        for node in start..end {
-            identities
-                .append_value(fixture_node_uuid(node).as_bytes())
-                .unwrap();
-        }
-        let batch = RecordBatch::try_new(
-            Arc::clone(&CONSTRUCTION_NODE_SCHEMA),
-            vec![
-                Arc::new(identities.finish()) as ArrayRef,
-                Arc::new(StringArray::from(vec!["Entity"; rows])),
-            ],
-        )
-        .unwrap();
-        session
-            .append_nodes(&format!("nodes-{start}"), &batch)
-            .unwrap();
-        node_batches += 1;
-    }
-
-    let edge_rows = nodes.saturating_mul(fan_out);
-    let mut edge_batches = 0;
-    for start in (0..edge_rows).step_by(WRITE_WINDOW) {
-        let end = start.saturating_add(WRITE_WINDOW).min(edge_rows);
-        let rows = end - start;
-        let mut identities = FixedSizeBinaryBuilder::with_capacity(rows, 16);
-        let mut sources = FixedSizeBinaryBuilder::with_capacity(rows, 16);
-        let mut targets = FixedSizeBinaryBuilder::with_capacity(rows, 16);
-        for edge in start..end {
-            let source = edge / fan_out;
-            let offset = edge % fan_out + 1;
-            identities
-                .append_value(fixture_edge_uuid(edge).as_bytes())
-                .unwrap();
-            sources
-                .append_value(fixture_node_uuid(source).as_bytes())
-                .unwrap();
-            targets
-                .append_value(fixture_node_uuid((source + offset) % nodes).as_bytes())
-                .unwrap();
-        }
-        let batch = RecordBatch::try_new(
-            Arc::clone(&CONSTRUCTION_EDGE_SCHEMA),
-            vec![
-                Arc::new(identities.finish()) as ArrayRef,
-                Arc::new(StringArray::from(vec!["LINK"; rows])),
-                Arc::new(sources.finish()),
-                Arc::new(targets.finish()),
-            ],
-        )
-        .unwrap();
-        session
-            .append_edges(&format!("edges-{start}"), &batch)
-            .unwrap();
-        edge_batches += 1;
-    }
-
-    session.seal_and_publish().unwrap();
-    let progress = session.progress();
-    drop(session);
-    forge.index_adjacency().unwrap();
-    drop(forge);
-
-    BulkFixtureEvidence {
-        node_rows: nodes,
-        edge_rows,
-        node_batches,
-        edge_batches,
-        accepted_chunks: progress.accepted_chunks,
-        input_rows: progress.evidence.input_rows,
-        peak_batch_rows: progress.evidence.peak_batch_rows,
-    }
-}
-
-fn fixture_node_uuid(index: usize) -> Uuid {
-    Uuid::from_u128(0x1000_0000_0000_0000_0000_0000_0000_0000 | index as u128 + 1)
-}
-
-fn fixture_edge_uuid(index: usize) -> Uuid {
-    Uuid::from_u128(0x2000_0000_0000_0000_0000_0000_0000_0000 | index as u128 + 1)
-}
-
 fn open_forge(dir: &Path) -> GraphForge {
     GraphForge::new(Some(dir.to_str().expect("temp path is UTF-8"))).unwrap()
 }
@@ -408,37 +297,6 @@ fn generate_semantic_v4_graph_with_nodes(dir: &Path, nodes: Vec<Uuid>) -> Vec<Uu
     build_adjacency_index(workspace.path(), TS).unwrap();
     project_fixture::publish_graph_workspace_v4(dir, workspace.path());
     nodes
-}
-
-/// Encoded node files under `dir` (construction staging included): the
-/// published topology spans one file per 65,536-row window.
-fn encoded_node_files(dir: &Path) -> usize {
-    fn walk(path: &Path, found: &mut usize) {
-        let Ok(entries) = std::fs::read_dir(path) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let child = entry.path();
-            if child.is_dir() {
-                walk(&child, found);
-            } else if child.extension().is_some_and(|ext| ext == "parquet")
-                && child
-                    .parent()
-                    .and_then(Path::file_name)
-                    .is_some_and(|name| name == "nodes")
-                && child
-                    .parent()
-                    .and_then(Path::parent)
-                    .and_then(Path::file_name)
-                    .is_some_and(|name| name == "topology")
-            {
-                *found += 1;
-            }
-        }
-    }
-    let mut found = 0;
-    walk(dir, &mut found);
-    found
 }
 
 /// #1513: the certification fast paths must survive a node table that spans

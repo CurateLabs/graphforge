@@ -43,6 +43,7 @@ ROLE_CODES = {
     "contract_identity": "b",
     "optional_evidence": "c",
     "control_authentication": "control_authentication",
+    "portable_authentication": "portable_authentication",
     "caller_selected": "caller_selected",
     "primitive_implementation": "primitive_implementation",
     "producer_delegate": "producer_delegate",
@@ -293,7 +294,7 @@ for path, (original, code, functions, excluded) in parsed.items():
         m.group(2): m.group(1)
         for m in re.finditer(
             (
-                "\\b(ArtifactSha256|ContractSha256|ControlSha256|EvidenceSha256|Pay"
+                "\\b(ArtifactSha256|ContractSha256|ControlSha256|EvidenceSha256|PortableSha256|Pay"
                 "loadSha256|ObservedSha256)\\s+as\\s+(\\w+)"
             ),
             code,
@@ -320,8 +321,19 @@ for path, (original, code, functions, excluded) in parsed.items():
             "PayloadSha256": "durable_artifact",
             "ContractSha256": "contract_identity",
             "ControlSha256": "control_authentication",
+            "PortableSha256": "portable_authentication",
             "EvidenceSha256": "optional_evidence",
         }.get(primitive, "needs_input_review")
+        if (
+            primitive in ("ObservedSha256", "PayloadSha256")
+            and m.group("method") == "for_domain"
+            and m.group("invoked") is not None
+            and re.match(
+                r"\s*(?:\w+\s*::\s*)*HashDomain\s*::\s*PortableAuthentication\s*,?\s*\)",
+                code[code.index("(", m.start()) + 1 :],
+            )
+        ):
+            role = "portable_authentication"
         line = original.count("\n", 0, m.start()) + 1
         record = {
             "path": relative,
@@ -652,6 +664,9 @@ for c in d["delegate_candidates"]:
         if re.search(r"HashDomain\s*::\s*ControlAuthentication\b", call):
             role = "control_authentication"
             reason = "Caller explicitly selects bounded manifest/route control authority bytes."
+        elif re.search(r"HashDomain\s*::\s*PortableAuthentication\b", call):
+            role = "portable_authentication"
+            reason = "Caller explicitly selects portable archive/member/payload authentication."
         elif re.search(r"HashDomain\s*::\s*ArtifactPayload\b", call):
             role = "durable_artifact_or_trust_boundary"
             reason = "Caller explicitly selects artifact payload authentication."
@@ -700,7 +715,10 @@ for c in d["delegate_candidates"]:
                 "crates/graphforge-ontology/src/composition/canonical.rs",
                 "domain_digest",
             ),
-            "hash_reader": ("crates/graphforge-storage/src/durable_rewrite.rs", "hash_reader"),
+            "participant_content_sha256": (
+                "crates/graphforge-api/src/knowledge/ledger.rs",
+                "participant_content_sha256",
+            ),
             "category_map_authority_sha256": (
                 "crates/graphforge-storage/src/storage_attribution.rs",
                 "category_map_authority_sha256",

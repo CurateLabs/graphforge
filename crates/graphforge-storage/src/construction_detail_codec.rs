@@ -216,7 +216,7 @@ mod tests {
             DetailCodec::from_version(crate::construction_record_layout::FORMAT_VERSION).unwrap(),
             DetailCodec::Compact
         );
-        for version in [0, 5, 6, 7, 8, 9, 11] {
+        for version in [0, 5, 6, 7, 8, 9, 10] {
             assert!(DetailCodec::from_version(version).is_err());
         }
     }

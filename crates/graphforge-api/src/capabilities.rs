@@ -231,6 +231,7 @@ impl GraphForge {
             capabilities,
             participants,
         };
+        let graph_objects = self.begin_graph_object_publication()?;
         let generation_uuid = match self.stage_project_generation(&publication)? {
             ProjectStageOutcome::AlreadyPublished(receipt) => receipt.generation_uuid,
             ProjectStageOutcome::Staged(staged) => {
@@ -248,7 +249,7 @@ impl GraphForge {
                             Ok(())
                         },
                     )?
-                    .publish()?
+                    .publish_with_graph_objects(&graph_objects)?
                     .generation_uuid
             }
         };

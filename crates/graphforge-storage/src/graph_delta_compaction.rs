@@ -26,7 +26,7 @@ use crate::project_generation::resolve_project_generation;
 use crate::project_publication::{ProjectCapability, ProjectGenerationRequest};
 use crate::project_publication::{
     ProjectPublicationReceipt, ProjectStageOutcome, published_project_transaction,
-    stage_project_generation_from_admitted_parent,
+    stage_project_generation_from_installed_objects,
 };
 use crate::project_retention::{
     ProjectCleanupReport, ProjectRetentionLimits, ProjectRetentionPolicy,
@@ -383,12 +383,14 @@ fn compact_graph_delta_after_prepare(
     if let Some(lease) = &publication_lease {
         lease.revalidate_for_publish()?;
     }
-    let publication = match stage_project_generation_from_admitted_parent(
+    let publication = match stage_project_generation_from_installed_objects(
         admission,
         parent,
         &generation_request,
         publication_lease.is_none().then(|| staging.path()),
         None,
+        None,
+        publication_lease.as_ref(),
     )? {
         ProjectStageOutcome::Staged(staged) => {
             // Pre-publication verification authenticates the exact bounded

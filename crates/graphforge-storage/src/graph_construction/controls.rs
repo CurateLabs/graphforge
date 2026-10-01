@@ -1,11 +1,11 @@
 //! Controls for graph construction.
 
 use super::{
-    CHECKPOINT, Checkpoint, ConstructionPublicationState, Deserialize, DetailCodec, File,
-    FileIdentity, GfError, GraphConstructionBudgets, GraphConstructionState, MAX_CONTROL_BYTES,
-    MAX_SHAPE_CONTROL_BYTES, OsStr, OsString, Read, SHAPE_INTENT, Serialize, ShapeIntent,
-    StableDirectory, Uuid, Write, checked_evidence_sum, construction_failpoint, file_identity,
-    file_link_count, is_control_temp, sha256, storage,
+    CHECKPOINT, Checkpoint, ConstructionPublicationState, Deserialize, DetailCodec, FORMAT_VERSION,
+    File, FileIdentity, GfError, GraphConstructionBudgets, GraphConstructionState,
+    MAX_CONTROL_BYTES, MAX_SHAPE_CONTROL_BYTES, OsStr, OsString, Read, SHAPE_INTENT, Serialize,
+    ShapeIntent, StableDirectory, Uuid, Write, checked_evidence_sum, construction_failpoint,
+    file_identity, file_link_count, is_control_temp, sha256, storage,
 };
 use graphforge_filesystem::ObservedSync as _;
 
@@ -81,6 +81,11 @@ pub(super) fn validate_checkpoint(
         .len()
         .checked_add(checkpoint.edge_schema_sha256.len())
         .ok_or_else(|| storage("checkpoint schema-group count overflow"))?;
+    if checkpoint.format_version < FORMAT_VERSION {
+        return Err(storage(
+            "construction checkpoint format is outdated: discard the in-progress import and restart",
+        ));
+    }
     if DetailCodec::from_version(checkpoint.format_version).is_err()
         || checkpoint.operation_uuid != operation
         || !checkpoint.project_identity.matches(project)

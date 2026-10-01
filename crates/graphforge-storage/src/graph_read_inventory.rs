@@ -144,8 +144,18 @@ impl GraphReadInventory {
 /// # Errors
 /// Refuses unsafe or ambiguous paths, changed files, excess work, and I/O failures.
 pub fn capture_graph_read_inventory(root: &Path) -> Result<GraphReadInventory, GfError> {
-    let mut paths = Vec::new();
-    crate::graph_files::collect_source_files(root, &mut paths)?;
+    capture_graph_read_inventory_excluding(root, &std::collections::BTreeMap::new())
+}
+
+/// Capture read authority for a private tree while a rewrite retains staged
+/// temporaries in it. Each excluded path must keep its exact file identity
+/// for the whole capture; any other unregistered file is refused as usual.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn capture_graph_read_inventory_excluding(
+    root: &Path,
+    excluded: &Exclusions,
+) -> Result<GraphReadInventory, GfError> {
+    let paths = paths_outside_exclusions(root, excluded)?;
     if paths.len() > crate::graph_files::MAX_GRAPH_FILES {
         return Err(invalid("graph read file count exceeds limit"));
     }
@@ -240,7 +250,50 @@ pub fn capture_graph_read_inventory(root: &Path) -> Result<GraphReadInventory, G
         .files
         .sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     inventory.file_count = inventory.files.len() as u64;
+    verify_exclusions(excluded)?;
     Ok(inventory)
+}
+
+type Exclusions =
+    std::collections::BTreeMap<std::path::PathBuf, graphforge_filesystem::FileIdentity>;
+
+/// Every file under `root` except identity-pinned exclusions, which must
+/// still name their recorded file.
+fn paths_outside_exclusions(
+    root: &Path,
+    excluded: &Exclusions,
+) -> Result<Vec<std::path::PathBuf>, GfError> {
+    let mut paths = Vec::new();
+    crate::graph_files::collect_source_files(root, &mut paths)?;
+    let mut retained = Vec::with_capacity(paths.len());
+    for path in paths {
+        match excluded.get(&path) {
+            Some(identity)
+                if graphforge_filesystem::path_identity(&path).ok() != Some(*identity) =>
+            {
+                return Err(corrupt_temporary());
+            }
+            Some(_) => {}
+            None => retained.push(path),
+        }
+    }
+    Ok(retained)
+}
+
+fn verify_exclusions(excluded: &Exclusions) -> Result<(), GfError> {
+    for (path, identity) in excluded {
+        if graphforge_filesystem::path_identity(path).ok() != Some(*identity) {
+            return Err(corrupt_temporary());
+        }
+    }
+    Ok(())
+}
+
+fn corrupt_temporary() -> GfError {
+    GfError::Project {
+        code: graphforge_core::ProjectErrorCode::ProjectCorrupt,
+        message: "rewrite temporary changed during baseline capture".into(),
+    }
 }
 
 pub(crate) fn resolve_entry_retained(

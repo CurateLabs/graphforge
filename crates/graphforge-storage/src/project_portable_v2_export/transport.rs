@@ -5,7 +5,7 @@ use super::{
     PortableV2ExportProgress, err, fs, hex, identity, limit, observed_write_result,
     open_source_no_follow, storage, sync_dir,
 };
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
+use graphforge_core::hash_observation::{ContractSha256, ControlSha256, PortableSha256 as Sha256};
 use graphforge_filesystem::ObservedSync as _;
 use sha2::Digest;
 use std::fs::OpenOptions;
@@ -29,7 +29,7 @@ pub(super) fn expanded(
     let mut payload = vec![(
         "data/graphforge-project.json".into(),
         plan.manifest.len() as u64,
-        Sha256::digest(&plan.manifest).into(),
+        ControlSha256::digest(&plan.manifest).into(),
     )];
     let mut done = 0;
     for (i, f) in plan.files.iter().enumerate() {
@@ -71,7 +71,13 @@ pub(super) fn expanded(
     ];
     let tag_rows = tags
         .iter()
-        .map(|(p, b)| (p.to_string(), b.len() as u64, Sha256::digest(b).into()))
+        .map(|(p, b)| {
+            (
+                p.to_string(),
+                b.len() as u64,
+                ControlSha256::digest(b).into(),
+            )
+        })
         .collect::<Vec<_>>();
     let tag = inventory(&tag_rows, l.max_tag_manifest_bytes)?;
     write_bytes(stage, "tagmanifest-sha256.txt", &tag, allocation)?;
@@ -85,7 +91,7 @@ pub(super) fn expanded(
     let mut all = payload;
     all.extend(tag_rows);
     all.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut h = Sha256::new();
+    let mut h = ContractSha256::new();
     h.update(b"graphforge-expanded/2\0");
     for (p, n, d) in all {
         h.update((p.len() as u64).to_be_bytes());
@@ -126,7 +132,7 @@ pub(super) fn entries(
                     p.clone(),
                     s.len(),
                     match s {
-                        Src::Bytes(b) => Sha256::digest(b).into(),
+                        Src::Bytes(b) => ControlSha256::digest(b).into(),
                         Src::File(f) => f.digest,
                     },
                 )
@@ -142,7 +148,13 @@ pub(super) fn entries(
     let tag = inventory(
         &tags
             .iter()
-            .map(|(p, b)| (p.to_string(), b.len() as u64, Sha256::digest(b).into()))
+            .map(|(p, b)| {
+                (
+                    p.to_string(),
+                    b.len() as u64,
+                    ControlSha256::digest(b).into(),
+                )
+            })
             .collect::<Vec<_>>(),
         max_tag_manifest_bytes,
     )?;
@@ -354,7 +366,7 @@ pub(super) fn open_planned_source(
             length,
         } => {
             let source = lease
-                .open(digest, *length)
+                .open_for_portable(digest, *length)
                 .map_err(|_| err("GF_SOURCE_CHANGED", "pinned CAS source changed"))?;
             let mut file = source.try_clone_file().map_err(storage)?;
             file.seek(SeekFrom::Start(0)).map_err(storage)?;
@@ -368,7 +380,7 @@ fn header(out: &mut File, h: &mut Sha256, path: &str, size: u64) -> Result<(), E
     if let Ok((name, prefix)) = split(path) {
         return raw_header(out, h, name, prefix, size, b'0');
     }
-    let suffix = &hex(Sha256::digest(path.as_bytes()).into())[..16];
+    let suffix = &hex(ContractSha256::digest(path.as_bytes()).into())[..16];
     let body = pax_path_record(path);
     raw_header(
         out,
