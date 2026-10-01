@@ -164,11 +164,12 @@ Storage contributes the scan nodes `GraphForgeParquetExec`, `OrderedPartitionStr
 and `PropertyOverlayExec`. Writes plan into `GraphCreateExec`, `GraphDeleteExec`,
 `GraphSetExec`, and `GraphRemoveExec`.
 
-`EdgeCountExec` and the two ordered nodes are not lowered directly: the physical rule
-`FixedHopDemandRule` substitutes them when it recognizes the physical plan shape, and leaves
-the plan unchanged when it does not. A physical shape change therefore removes these fast
-paths without an error; `regression1513_fast_paths_survive_multi_file_node_tables` guards
-the known shapes.
+`EdgeCountExec` and the two ordered nodes are chosen by the lowerer from the Graph IR, through a
+`FastPath` logical node ([ADR 0050](../../adr/0050-read-path-fast-path-selection.md)). The choice
+never reads the physical plan, so DataFusion's partitioning and transport operators cannot remove a
+fast path. When a session precondition fails (for example, no ordinal identity authority), the
+generic plan runs under `FastPathFallbackExec`, which names the reason in `explain()`. `ExpandExec`
+charges the batches it holds to the session memory pool.
 
 Filter, project, aggregate, sort, limit, joins, union, and Cartesian products run through
 standard DataFusion physical nodes. The full operator and rewrite inventory, with source

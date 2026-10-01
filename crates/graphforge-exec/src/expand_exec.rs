@@ -1206,18 +1206,8 @@ impl ExpandExec {
         })
     }
 
-    pub(crate) fn rel_type_name(&self) -> &str {
-        &self.rel_type_name
-    }
-
-    pub(crate) fn direction(&self) -> graphforge_ir::Direction {
-        self.direction
-    }
-
     /// The owned per-stream configuration of one `execute` call.
     fn single_hop_config(&self, context: &TaskContext) -> SingleHopConfig {
-        #[cfg(not(feature = "read-path-experiment"))]
-        let _ = context;
         SingleHopConfig {
             rel_type_name: self.rel_type_name.clone(),
             direction: self.direction,
@@ -1234,57 +1224,8 @@ impl ExpandExec {
             required_output: self.required_output.clone(),
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
-            #[cfg(feature = "read-path-experiment")]
-            reservation: crate::fast_path::expand_reservation(context).map(std::sync::Mutex::new),
+            reservation: std::sync::Mutex::new(crate::fast_path::expand_reservation(context)),
         }
-    }
-
-    pub(crate) fn provider(&self) -> &Arc<dyn AdjacencyProvider> {
-        &self.provider
-    }
-
-    pub(crate) fn ordinal_identities(&self) -> Option<Arc<V4OrdinalIdentitySession>> {
-        self.ordinal_identities.clone()
-    }
-
-    pub(crate) fn is_destination_identity_only(&self) -> bool {
-        self.is_identity_projection_only(true)
-    }
-
-    pub(crate) fn is_intermediate_topology_only(&self) -> bool {
-        self.is_identity_projection_only(false)
-    }
-
-    fn is_identity_projection_only(&self, require_destination_uuid: bool) -> bool {
-        let Some(required) = self.required_output.as_deref() else {
-            return false;
-        };
-        let dst_width = graphforge_storage::TOPOLOGY_NODES_SCHEMA.fields().len();
-        let edge_end = self.schema.fields().len().saturating_sub(dst_width);
-        let destination_uuid_index = edge_end;
-        let destination_id_index = edge_end + 1;
-        let edge_materialization_unused =
-            required
-                .get(self.input_width..edge_end)
-                .is_some_and(|fields| {
-                    fields.iter().enumerate().all(|(offset, needed)| {
-                        !needed || self.schema.field(self.input_width + offset).name() == "edge_id"
-                    })
-                });
-        let required_destination = if require_destination_uuid {
-            destination_uuid_index
-        } else {
-            destination_id_index
-        };
-        edge_materialization_unused
-            && required
-                .iter()
-                .enumerate()
-                .skip(edge_end)
-                .all(|(index, needed)| {
-                    !needed || index == destination_uuid_index || index == destination_id_index
-                })
-            && required.get(required_destination).copied().unwrap_or(false)
     }
 }
 
@@ -1469,7 +1410,6 @@ impl ExecutionPlan for ExpandExec {
                         if position.row >= input_batch.num_rows() {
                             pending = None;
                         }
-                        #[cfg(feature = "read-path-experiment")]
                         cfg.account(pending.as_ref().map(|(batch, _)| batch), &output)?;
                         if let Some(left) = remaining.as_mut() {
                             *left = left.saturating_sub(output.num_rows());
@@ -1497,7 +1437,6 @@ impl ExecutionPlan for ExpandExec {
                     };
                     let input_batch = input_batch?;
                     demand::record_input(cfg.capture_epoch, cfg.edge_var, input_batch.num_rows());
-                    #[cfg(feature = "read-path-experiment")]
                     cfg.account(
                         Some(&input_batch),
                         &RecordBatch::new_empty(cfg.out_schema.clone()),
@@ -1529,25 +1468,20 @@ struct SingleHopConfig {
     ordinal_identities: Option<Arc<V4OrdinalIdentitySession>>,
     ordinal_identity_required: bool,
     /// #1688 candidate C: the memory-pool reservation for held batches.
-    #[cfg(feature = "read-path-experiment")]
-    reservation: Option<std::sync::Mutex<datafusion::execution::memory_pool::MemoryReservation>>,
+    /// Memory-pool reservation for the batches this hop holds (ADR 0050).
+    reservation: std::sync::Mutex<datafusion::execution::memory_pool::MemoryReservation>,
 }
 
-#[cfg(feature = "read-path-experiment")]
 impl SingleHopConfig {
-    /// Charge the held input batch and the output batch to the session memory
-    /// pool, when the session accounts for them (#1688 candidate C).
+    /// Charge the held input batch and the output batch to the session memory pool.
     fn account(
         &self,
         held: Option<&RecordBatch>,
         output: &RecordBatch,
     ) -> Result<(), DataFusionError> {
-        let Some(reservation) = self.reservation.as_ref() else {
-            return Ok(());
-        };
         let bytes =
             held.map_or(0, RecordBatch::get_array_memory_size) + output.get_array_memory_size();
-        reservation
+        self.reservation
             .lock()
             .map_err(|_| DataFusionError::Internal("ExpandExec reservation poisoned".into()))?
             .try_resize(bytes)

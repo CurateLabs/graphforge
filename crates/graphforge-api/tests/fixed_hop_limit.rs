@@ -376,6 +376,44 @@ fn regression1513_fast_paths_survive_multi_file_node_tables() {
     }
 }
 
+/// ADR 0050: `ExpandExec` charges the batches it holds to the session memory
+/// pool. With every node in one input batch and the smallest admitted pool, a
+/// generic hop that returns whole rows is refused by the pool, naming the
+/// `ExpandExec` reservation.
+#[test]
+fn expand_charges_held_batches_to_the_memory_pool() {
+    let _guard = io_guard();
+    const NODES: usize = 40_000;
+    const MULTI_FILE_FAN_OUT: usize = 4;
+    let dir = TempDir::new().unwrap();
+    generate_bulk_graph(dir.path(), NODES, MULTI_FILE_FAN_OUT);
+    let options = GraphForgeOptions {
+        resource: ExecutionResourcePolicy {
+            mode: ResourcePolicyMode::Explicit,
+            tokio_worker_threads: Some(1),
+            target_partitions: Some(1),
+            io_concurrency: Some(1),
+            compute_threads: Some(1),
+            batch_size: Some(1_048_576),
+            memory_budget_bytes: Some(16 * 1024 * 1024),
+            ..ExecutionResourcePolicy::default()
+        },
+        ..GraphForgeOptions::default()
+    };
+    let forge = GraphForge::new_with_options(
+        Some(dir.path().to_str().expect("temp path is UTF-8")),
+        options,
+    )
+    .unwrap();
+    let refused = forge
+        .execute("MATCH (a)-[r]->(b) RETURN a, r, b")
+        .expect_err("the pool must refuse an ExpandExec holding every row");
+    assert!(
+        format!("{refused:?}").contains("ExpandExec"),
+        "the refusal must name the ExpandExec reservation: {refused:?}"
+    );
+}
+
 #[test]
 fn poisoned_io_guard_recovers_for_subsequent_tests() {
     let seeded = std::thread::spawn(|| {
