@@ -224,6 +224,7 @@ fn shared_v4_builder_rejects_sparse_manifest_above_reader_bound() {
         }],
         ordinal_ranges: ranges,
         tombstones: Vec::new(),
+        uuid_order_matches_ordinals: None,
     };
     assert!(
         serde_json::to_vec(&manifest).unwrap().len() as u64

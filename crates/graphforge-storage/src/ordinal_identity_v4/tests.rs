@@ -101,6 +101,7 @@ impl Fixture {
                 ),
                 blocks: tombstone_blocks(tombstones),
             }],
+            uuid_order_matches_ordinals: None,
         };
         fs::write(
             index.join(MANIFEST_NAME),

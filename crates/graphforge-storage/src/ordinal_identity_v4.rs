@@ -182,6 +182,15 @@ pub struct V4OrdinalIdentityManifest {
     pub ordinal_ranges: Vec<V4OrdinalRange>,
     /// Sparse deletion overrides in strictly increasing generation order.
     pub tombstones: Vec<V4OrdinalTombstones>,
+    /// Whether UUIDs increase strictly across every ordinal, tombstoned or not,
+    /// computed by the publisher from the records it streamed. Absent means
+    /// unknown (every manifest written before the field existed), and readers
+    /// then prove it by reading the ordinals; a publisher that cannot derive it
+    /// omits it. Sits inside the SHA-256-authenticated manifest. It lets the
+    /// ordered fast path decide in O(1) whether destinations can be walked in
+    /// ordinal order, so a bounded query never pays for a scan of the graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uuid_order_matches_ordinals: Option<bool>,
 }
 
 /// Generation authority pinned by the caller's authenticated project receipt.
@@ -534,6 +543,9 @@ struct ArtifactStamp {
 struct OpenRange {
     descriptor: V4OrdinalRange,
     artifact: OpenArtifact,
+    /// A caller is relying on the manifest's claim that UUIDs ascend with
+    /// ordinals, so every block this range serves must still ascend.
+    verify_order: bool,
 }
 
 #[derive(Debug)]
@@ -549,6 +561,57 @@ struct OpenTombstones {
 pub(crate) struct PinnedV4OrdinalArtifact {
     pub(crate) descriptor: V4OrdinalArtifact,
     pub(crate) file: File,
+}
+
+/// The order of a manifest extended by a delta whose ordinals all follow the
+/// parent's. Exact when both sides are known: a recorded inversion on either
+/// side persists, and the boundary between the parent's last UUID and the
+/// delta's first decides the rest. Unknown stays unknown.
+pub(crate) fn combine_uuid_order(
+    prior: Option<bool>,
+    prior_last: Option<[u8; UUID_WIDTH_USIZE]>,
+    delta: Option<bool>,
+    delta_first: Option<[u8; UUID_WIDTH_USIZE]>,
+) -> Option<bool> {
+    match (prior, delta) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(match (prior_last, delta_first) {
+            (Some(last), Some(first)) => last < first,
+            _ => true,
+        }),
+        _ => None,
+    }
+}
+
+impl V4OrdinalPinnedUpdateInputs {
+    /// The UUID of the highest ordinal retained, read from the pinned,
+    /// already-authenticated final range. `None` for an empty ordinal set.
+    pub(crate) fn last_ordinal_uuid(
+        &self,
+    ) -> Result<Option<[u8; UUID_WIDTH_USIZE]>, graphforge_core::GfError> {
+        let Some(last) = self
+            .manifest
+            .ordinal_ranges
+            .iter()
+            .max_by_key(|range| range.first_node_id)
+        else {
+            return Ok(None);
+        };
+        let pinned = self
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.descriptor.name == last.artifact.name)
+            .ok_or_else(|| {
+                graphforge_core::GfError::Storage("authenticated v4 update input is absent".into())
+            })?;
+        let storage = |error: std::io::Error| graphforge_core::GfError::Storage(error.to_string());
+        let mut file = pinned.file.try_clone().map_err(storage)?;
+        // The final record: UUID_WIDTH bytes back from the end.
+        file.seek(SeekFrom::End(-16)).map_err(storage)?;
+        let mut uuid = [0_u8; UUID_WIDTH_USIZE];
+        file.read_exact(&mut uuid).map_err(storage)?;
+        Ok(Some(uuid))
+    }
 }
 
 /// Authenticated, inode-pinned inputs for planning the next v4 generation.
@@ -604,8 +667,10 @@ pub struct V4OrdinalIdentityHandle {
     /// reads no artifact bytes: ordinal and tombstone blocks authenticate on
     /// the lookup that reads them.
     complete: bool,
-    /// Memoized proof that UUIDs increase strictly across ordinals.
+    /// Memoized proof, by reading the ordinals, that UUIDs increase strictly.
     uuid_order_matches_ordinals: Option<bool>,
+    /// The publisher's claim, from the authenticated manifest.
+    recorded_order: Option<bool>,
 }
 
 impl V4OrdinalIdentityHandle {
@@ -641,6 +706,7 @@ impl V4OrdinalIdentityHandle {
                     blocks: run.blocks.clone(),
                 })
                 .collect(),
+            uuid_order_matches_ordinals: self.recorded_order,
         };
         let artifacts = self
             .forward
@@ -773,6 +839,7 @@ impl V4OrdinalIdentityHandle {
             ranges.push(OpenRange {
                 descriptor: range.clone(),
                 artifact: open_admission_file(&root, &range.artifact)?,
+                verify_order: false,
             });
         }
         let mut tombstones = Vec::with_capacity(manifest.tombstones.len());
@@ -809,6 +876,7 @@ impl V4OrdinalIdentityHandle {
             admission,
             complete: false,
             uuid_order_matches_ordinals: None,
+            recorded_order: manifest.uuid_order_matches_ordinals,
         })))
     }
 
@@ -864,6 +932,14 @@ impl V4OrdinalIdentityHandle {
                 &mut self.admission,
             )?;
         }
+        if self
+            .recorded_order
+            .is_some_and(|recorded| recorded != uuid_order_matches_ordinals)
+        {
+            return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "recorded ordinal UUID order disagrees with the ordinals",
+            ));
+        }
         self.uuid_order_matches_ordinals = Some(uuid_order_matches_ordinals);
         self.complete = true;
         Ok(())
@@ -883,11 +959,16 @@ impl V4OrdinalIdentityHandle {
 
     /// Whether authenticated UUIDs increase strictly across all ordinal ranges.
     /// This conservative proof includes tombstoned identities: removing any of
-    /// them preserves ordering. It needs no durable data beyond the ordinal
-    /// artifacts, but it does need every ordinal block: the first call reads
-    /// and authenticates all of them once, stops at the first inversion, and
-    /// memoizes the answer. Handles that never ask (no ordered fast path) never
-    /// pay for it.
+    /// them preserves ordering.
+    ///
+    /// A manifest that records the fact answers in O(1) without reading an
+    /// ordinal. A recorded `true` is a claim the publisher computed from the
+    /// records it streamed, not something this call proved, so from then on
+    /// every block a lookup reads must itself ascend; a block that does not is
+    /// refused ([`Self::admit_complete`] checks the whole claim). A manifest
+    /// that is silent (published before the field) is proven by reading and
+    /// authenticating every ordinal block once, stopping at the first
+    /// inversion, and memoized.
     ///
     /// # Errors
     /// Returns the refusal for a block that fails authentication; a corrupted
@@ -895,6 +976,16 @@ impl V4OrdinalIdentityHandle {
     pub fn uuid_order_matches_ordinals(&mut self) -> Result<bool, V4OrdinalIdentityError> {
         if let Some(ordered) = self.uuid_order_matches_ordinals {
             return Ok(ordered);
+        }
+        match self.recorded_order {
+            Some(false) => return Ok(false),
+            Some(true) => {
+                for range in &mut self.ranges {
+                    range.verify_order = true;
+                }
+                return Ok(true);
+            }
+            None => {}
         }
         let ordered = scan_uuid_order(&mut self.ranges, &mut self.admission)?;
         self.uuid_order_matches_ordinals = Some(ordered);
@@ -1526,6 +1617,15 @@ fn admit_forward_artifact(
     finish_admission(artifact, &whole, metrics)
 }
 
+/// Whether consecutive packed UUIDs strictly ascend, including across the
+/// block boundaries inside one contiguous read.
+fn uuids_strictly_ascend(packed: &[u8]) -> bool {
+    packed
+        .chunks_exact(UUID_WIDTH_USIZE)
+        .zip(packed.chunks_exact(UUID_WIDTH_USIZE).skip(1))
+        .all(|(prior, next)| prior < next)
+}
+
 /// Prove that UUIDs increase strictly across every ordinal, reading each block
 /// once and authenticating it against its required checksum. A block that fails
 /// is refused, never counted as an inversion. Stops at the first inversion:
@@ -1992,6 +2092,11 @@ fn read_range_coalesced(
             {
                 return Err(V4OrdinalIdentityError::Authentication);
             }
+        }
+        if range.verify_order && !uuids_strictly_ascend(&buffer) {
+            return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "ordinal UUIDs contradict the recorded UUID order",
+            ));
         }
         for block in &range.descriptor.blocks[first_index..=last_index] {
             let block_first = first + block.offset / UUID_WIDTH;
