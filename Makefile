@@ -222,10 +222,10 @@ test-python:  ## Run every Python binding suite against the installed wheel
 test-node:  ## Run every Node binding and CLI suite against the built addon
 	python3 scripts/test_environment.py -- pnpm --filter @curatelabs/graphforge test
 	pnpm --filter @curatelabs/graphforge format:check
-	pnpm test:node-cli
+	python3 scripts/test_environment.py -- pnpm test:node-cli
 	pnpm format:node-cli
-	pnpm smoke:node-cli
-	pnpm --filter @curatelabs/graphforge-cli test:lifecycle
+	python3 scripts/test_environment.py -- pnpm smoke:node-cli
+	python3 scripts/test_environment.py -- pnpm --filter @curatelabs/graphforge-cli test:lifecycle
 
 test-scripts:  ## Run the scripts/ci self-test suites (needs uv sync --all-extras and pnpm install)
 	scripts/ci/run-self-tests.sh
