@@ -24,7 +24,7 @@ fn pax_and_structural_budgets_are_canonical_without_payload_allocation() {
     assert!(PortableV2ExportLimits::default().copy_buffer_bytes <= 8 * 1024 * 1024);
     let out = tempfile::NamedTempFile::new().unwrap();
     let mut file = out.reopen().unwrap();
-    let mut digest = Sha256::new();
+    let mut digest = TransportHash::new();
     // The >16 GiB structural case is represented by multiple bounded
     // shards; no individual ustar size field requires a base-256 escape.
     header(&mut file, &mut digest, &long, 1_073_741_824).unwrap();
@@ -108,7 +108,7 @@ fn portable_member_copy_counts_crypto_and_refuses_same_identity_content_mutation
     drop(capture);
     assert_eq!(
         observed.portable_authentication_sha256_bytes,
-        2 * bytes.len() as u64
+        bytes.len() as u64
     );
     assert_eq!(observed.artifact_payload_sha256_bytes, 0);
     assert_eq!(observed.unclassified_sha256_bytes, 0);
@@ -123,7 +123,7 @@ fn portable_member_copy_counts_crypto_and_refuses_same_identity_content_mutation
     changed[0] ^= 1;
     fs::write(&source, &changed).unwrap();
     // Keep the metadata identity exactly as planned, so this refusal proves
-    // full member authentication rather than only an mtime observation.
+    // captured-byte checksum refusal rather than only an mtime observation.
     OpenOptions::new()
         .write(true)
         .open(&source)
@@ -144,10 +144,8 @@ fn portable_member_copy_counts_crypto_and_refuses_same_identity_content_mutation
     let refused = capture.snapshot();
     drop(capture);
     assert_eq!(error.code, crate::PortableV2ErrorCode::ConcurrentMutation);
-    assert_eq!(
-        refused.portable_authentication_sha256_bytes,
-        bytes.len() as u64
-    );
+    assert_eq!(refused.portable_authentication_sha256_bytes, 0);
+    assert!(refused.checksum_bytes >= bytes.len() as u64);
     assert_eq!(refused.artifact_payload_sha256_bytes, 0);
     assert_eq!(refused.unclassified_sha256_bytes, 0);
 }

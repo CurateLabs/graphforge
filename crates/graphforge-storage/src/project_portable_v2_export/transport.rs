@@ -11,6 +11,51 @@ use sha2::Digest;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
+/// Private evidence minted only by successful writes of the canonical package.
+/// Public/untrusted packages cannot manufacture this authority.
+pub(crate) struct WrittenPackage {
+    digest: [u8; 32],
+    bundle_checksum: Option<u64>,
+    entries: std::collections::BTreeMap<String, (u64, [u8; 32], u64)>,
+}
+impl WrittenPackage {
+    pub(crate) fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+    pub(crate) fn bundle_identity(&self) -> Option<([u8; 32], u64)> {
+        self.bundle_checksum.map(|checksum| (self.digest, checksum))
+    }
+    pub(crate) fn entry_identity(&self, path: &str, length: u64) -> Option<([u8; 32], u64)> {
+        self.entries
+            .get(path)
+            .filter(|(expected, _, _)| *expected == length)
+            .map(|(_, digest, checksum)| (*digest, *checksum))
+    }
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+struct TransportHash {
+    digest: Sha256,
+    checksum: crate::corruption_checksum::Checksum,
+}
+impl TransportHash {
+    fn new() -> Self {
+        Self {
+            digest: Sha256::new(),
+            checksum: crate::corruption_checksum::Checksum::new(),
+        }
+    }
+    fn update(&mut self, bytes: impl AsRef<[u8]>) {
+        self.digest.update(bytes.as_ref());
+        self.checksum.update(bytes.as_ref());
+    }
+    fn finish(self) -> ([u8; 32], u64) {
+        (self.digest.finalize().into(), self.checksum.finish())
+    }
+}
+
 pub(super) fn expanded(
     plan: &PortableV2ExportPlan,
     stage: &Path,
@@ -18,7 +63,7 @@ pub(super) fn expanded(
     cancelled: &impl Fn() -> bool,
     progress: &mut impl FnMut(PortableV2ExportProgress),
     allocation: &mut ExportAllocationObserver,
-) -> Result<[u8; 32], ExportError> {
+) -> Result<WrittenPackage, ExportError> {
     fs::create_dir(stage).map_err(storage)?;
     write_bytes(
         stage,
@@ -31,11 +76,12 @@ pub(super) fn expanded(
         plan.manifest.len() as u64,
         ControlSha256::digest(&plan.manifest).into(),
     )];
+    let mut captured = std::collections::BTreeMap::new();
     let mut done = 0;
     for (i, f) in plan.files.iter().enumerate() {
         let target = stage.join(&f.path);
         parent(&target)?;
-        copy(
+        let checksum = copy(
             f,
             &target,
             l.copy_buffer_bytes,
@@ -57,6 +103,7 @@ pub(super) fn expanded(
             entries_total: plan.files.len() + 5,
             bytes_total: plan.payload_bytes,
         });
+        captured.insert(f.path.clone(), (f.length, f.digest, checksum));
         payload.push((f.path.clone(), f.length, f.digest));
     }
     payload.sort_by(|a, b| a.0.cmp(&b.0));
@@ -100,7 +147,32 @@ pub(super) fn expanded(
         h.update(d);
     }
     h.update(tag);
-    Ok(h.finalize().into())
+    capture_controls(plan, l.max_tag_manifest_bytes, &mut captured)?;
+    Ok(WrittenPackage {
+        digest: h.finalize().into(),
+        bundle_checksum: None,
+        entries: captured,
+    })
+}
+
+fn capture_controls(
+    plan: &PortableV2ExportPlan,
+    limit: u64,
+    captured: &mut std::collections::BTreeMap<String, (u64, [u8; 32], u64)>,
+) -> Result<(), ExportError> {
+    for (path, source) in entries(plan, limit)? {
+        if let Src::Bytes(bytes) = source {
+            captured.insert(
+                path,
+                (
+                    bytes.len() as u64,
+                    ControlSha256::digest(&bytes).into(),
+                    crate::corruption_checksum::checksum(&bytes),
+                ),
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(super) enum Src<'a> {
@@ -169,7 +241,7 @@ pub(super) fn bundle(
     cancelled: &impl Fn() -> bool,
     progress: &mut impl FnMut(PortableV2ExportProgress),
     allocation: &mut ExportAllocationObserver,
-) -> Result<[u8; 32], ExportError> {
+) -> Result<WrittenPackage, ExportError> {
     let mut items = entries(plan, l.max_tag_manifest_bytes)?;
     items.sort_by(|a, b| a.0.cmp(&b.0));
     let mut out = OpenOptions::new()
@@ -178,7 +250,8 @@ pub(super) fn bundle(
         .open(stage)
         .map_err(storage)?;
     allocation.register(stage, &out)?;
-    let mut h = Sha256::new();
+    let mut h = TransportHash::new();
+    let mut captured = std::collections::BTreeMap::new();
     let mut done = 0;
     for (i, (path, src)) in items.iter().enumerate() {
         if cancelled() {
@@ -186,29 +259,37 @@ pub(super) fn bundle(
         }
         observed_write_result(header(&mut out, &mut h, path, src.len()), &out, allocation)?;
         allocation.observe(&out)?;
-        match src {
+        let (digest, checksum) = match src {
             Src::Bytes(b) => {
                 observed_write_result(emit(&mut out, &mut h, b), &out, allocation)?;
                 allocation.observe(&out)?;
+                (
+                    ControlSha256::digest(b).into(),
+                    crate::corruption_checksum::checksum(b),
+                )
             }
-            Src::File(f) => stream(
-                &mut out,
-                &mut h,
-                f,
-                l.copy_buffer_bytes,
-                cancelled,
-                allocation,
-                |n| {
-                    done += n;
-                    progress(PortableV2ExportProgress {
-                        entries_completed: i,
-                        bytes_completed: done,
-                        entries_total: items.len(),
-                        bytes_total: plan.payload_bytes,
-                    });
-                },
-            )?,
-        }
+            Src::File(f) => (
+                f.digest,
+                stream(
+                    &mut out,
+                    &mut h,
+                    f,
+                    l.copy_buffer_bytes,
+                    cancelled,
+                    allocation,
+                    |n| {
+                        done += n;
+                        progress(PortableV2ExportProgress {
+                            entries_completed: i,
+                            bytes_completed: done,
+                            entries_total: items.len(),
+                            bytes_total: plan.payload_bytes,
+                        });
+                    },
+                )?,
+            ),
+        };
+        captured.insert(path.clone(), (src.len(), digest, checksum));
         observed_write_result(pad(&mut out, &mut h, src.len()), &out, allocation)?;
         allocation.observe(&out)?;
         progress(PortableV2ExportProgress {
@@ -224,7 +305,12 @@ pub(super) fn bundle(
     h.update(end);
     out.observed_sync_all().map_err(storage)?;
     allocation.observe(&out)?;
-    Ok(h.finalize().into())
+    let (digest, checksum) = h.finish();
+    Ok(WrittenPackage {
+        digest,
+        bundle_checksum: Some(checksum),
+        entries: captured,
+    })
 }
 
 fn copy(
@@ -234,7 +320,7 @@ fn copy(
     cancelled: &impl Fn() -> bool,
     allocation: &mut ExportAllocationObserver,
     mut tick: impl FnMut(u64),
-) -> Result<(), ExportError> {
+) -> Result<u64, ExportError> {
     let mut output = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -242,6 +328,11 @@ fn copy(
         .map_err(storage)?;
     allocation.register(target, &output)?;
     if let PlannedSource::Control(bytes) = &planned.source {
+        if bytes.len() as u64 != planned.length
+            || <[u8; 32]>::from(ControlSha256::digest(bytes)) != planned.digest
+        {
+            return Err(err("GF_SOURCE_CHANGED", "planned control identity changed"));
+        }
         if cancelled() {
             return Err(err("GF_CANCELLED", "portable export cancelled"));
         }
@@ -254,17 +345,23 @@ fn copy(
         output.observed_sync_all().map_err(storage)?;
         allocation.observe(&output)?;
         tick(bytes.len() as u64);
-        return Ok(());
+        return Ok(crate::corruption_checksum::checksum(bytes));
     }
     let (mut input, planned_identity) = open_planned_source(planned)?;
     let mut buffer = vec![0; size];
-    let mut digest = Sha256::new();
+    let mut digest = planned.checksum.is_none().then(Sha256::new);
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut bytes_read = 0;
+    let bound = planned
+        .length
+        .checked_add(1)
+        .ok_or_else(|| limit("planned source length overflow"))?;
+    let mut reader = (&mut input).take(bound);
     loop {
         if cancelled() {
             return Err(err("GF_CANCELLED", "portable export cancelled"));
         }
-        let count = input.read(&mut buffer).map_err(storage)?;
+        let count = reader.read(&mut buffer).map_err(storage)?;
         if count == 0 {
             break;
         }
@@ -276,13 +373,21 @@ fn copy(
         if allocation.operation.is_some() {
             allocation.observe(&output)?;
         }
-        digest.update(&buffer[..count]);
+        if let Some(digest) = &mut digest {
+            digest.update(&buffer[..count]);
+        }
+        checksum.update(&buffer[..count]);
         bytes_read += count as u64;
         tick(count as u64);
     }
     output.observed_sync_all().map_err(storage)?;
     allocation.observe(&output)?;
-    if bytes_read != planned.length || <[u8; 32]>::from(digest.finalize()) != planned.digest {
+    if bytes_read != planned.length
+        || digest.is_some_and(|digest| <[u8; 32]>::from(digest.finalize()) != planned.digest)
+        || planned
+            .checksum
+            .is_some_and(|expected| expected != checksum.finish())
+    {
         return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
     }
     if let Some(expected) = planned_identity
@@ -290,18 +395,24 @@ fn copy(
     {
         return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
     }
-    Ok(())
+    revalidate_source(planned, &input)?;
+    Ok(checksum.finish())
 }
 fn stream(
     out: &mut File,
-    transport: &mut Sha256,
+    transport: &mut TransportHash,
     planned: &PlannedFile,
     size: usize,
     cancelled: &impl Fn() -> bool,
     allocation: &mut ExportAllocationObserver,
     mut tick: impl FnMut(u64),
-) -> Result<(), ExportError> {
+) -> Result<u64, ExportError> {
     if let PlannedSource::Control(bytes) = &planned.source {
+        if bytes.len() as u64 != planned.length
+            || <[u8; 32]>::from(ControlSha256::digest(bytes)) != planned.digest
+        {
+            return Err(err("GF_SOURCE_CHANGED", "planned control identity changed"));
+        }
         if cancelled() {
             return Err(err("GF_CANCELLED", "portable export cancelled"));
         }
@@ -309,17 +420,23 @@ fn stream(
         allocation.observe(out)?;
         transport.update(bytes);
         tick(bytes.len() as u64);
-        return Ok(());
+        return Ok(crate::corruption_checksum::checksum(bytes));
     }
     let (mut input, planned_identity) = open_planned_source(planned)?;
     let mut buffer = vec![0; size];
-    let mut digest = Sha256::new();
+    let mut digest = planned.checksum.is_none().then(Sha256::new);
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut bytes_read = 0;
+    let bound = planned
+        .length
+        .checked_add(1)
+        .ok_or_else(|| limit("planned source length overflow"))?;
+    let mut reader = (&mut input).take(bound);
     loop {
         if cancelled() {
             return Err(err("GF_CANCELLED", "portable export cancelled"));
         }
-        let count = input.read(&mut buffer).map_err(storage)?;
+        let count = reader.read(&mut buffer).map_err(storage)?;
         if count == 0 {
             break;
         }
@@ -332,11 +449,19 @@ fn stream(
             allocation.observe(out)?;
         }
         transport.update(&buffer[..count]);
-        digest.update(&buffer[..count]);
+        if let Some(digest) = &mut digest {
+            digest.update(&buffer[..count]);
+        }
+        checksum.update(&buffer[..count]);
         bytes_read += count as u64;
         tick(count as u64);
     }
-    if bytes_read != planned.length || <[u8; 32]>::from(digest.finalize()) != planned.digest {
+    if bytes_read != planned.length
+        || digest.is_some_and(|digest| <[u8; 32]>::from(digest.finalize()) != planned.digest)
+        || planned
+            .checksum
+            .is_some_and(|expected| expected != checksum.finish())
+    {
         return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
     }
     if let Some(expected) = planned_identity
@@ -344,7 +469,8 @@ fn stream(
     {
         return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
     }
-    Ok(())
+    revalidate_source(planned, &input)?;
+    Ok(checksum.finish())
 }
 pub(super) fn open_planned_source(
     planned: &PlannedFile,
@@ -365,10 +491,9 @@ pub(super) fn open_planned_source(
             digest,
             length,
         } => {
-            let source = lease
-                .open_for_portable(digest, *length)
+            let mut file = lease
+                .open_for_attribution(digest, *length)
                 .map_err(|_| err("GF_SOURCE_CHANGED", "pinned CAS source changed"))?;
-            let mut file = source.try_clone_file().map_err(storage)?;
             file.seek(SeekFrom::Start(0)).map_err(storage)?;
             Ok((file, None))
         }
@@ -376,7 +501,17 @@ pub(super) fn open_planned_source(
     }
 }
 
-fn header(out: &mut File, h: &mut Sha256, path: &str, size: u64) -> Result<(), ExportError> {
+fn revalidate_source(planned: &PlannedFile, input: &File) -> Result<(), ExportError> {
+    let (named, _) = open_planned_source(planned)?;
+    if identity(&input.metadata().map_err(storage)?)?
+        != identity(&named.metadata().map_err(storage)?)?
+    {
+        return Err(err("GF_SOURCE_CHANGED", "source replaced during export"));
+    }
+    Ok(())
+}
+
+fn header(out: &mut File, h: &mut TransportHash, path: &str, size: u64) -> Result<(), ExportError> {
     if let Ok((name, prefix)) = split(path) {
         return raw_header(out, h, name, prefix, size, b'0');
     }
@@ -396,7 +531,7 @@ fn header(out: &mut File, h: &mut Sha256, path: &str, size: u64) -> Result<(), E
 }
 fn raw_header(
     out: &mut File,
-    h: &mut Sha256,
+    h: &mut TransportHash,
     name: &str,
     prefix: &str,
     size: u64,
@@ -457,12 +592,12 @@ fn oct(dst: &mut [u8], n: u64) -> Result<(), ExportError> {
 fn put(d: &mut [u8], s: &[u8]) {
     d[..s.len()].copy_from_slice(s);
 }
-fn emit(o: &mut File, h: &mut Sha256, b: &[u8]) -> Result<(), ExportError> {
+fn emit(o: &mut File, h: &mut TransportHash, b: &[u8]) -> Result<(), ExportError> {
     o.write_all(b).map_err(storage)?;
     h.update(b);
     Ok(())
 }
-fn pad(output: &mut File, digest: &mut Sha256, length: u64) -> Result<(), ExportError> {
+fn pad(output: &mut File, digest: &mut TransportHash, length: u64) -> Result<(), ExportError> {
     let padding = ((512 - length % 512) % 512) as usize;
     let zeroes = [0u8; 512];
     emit(output, digest, &zeroes[..padding])

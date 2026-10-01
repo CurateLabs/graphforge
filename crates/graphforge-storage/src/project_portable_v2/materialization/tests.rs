@@ -75,15 +75,166 @@ fn observed_materialization_failure_and_cancel_cleanup_retry_both_forms() {
 
 #[test]
 fn materialization_reports_actual_bounded_payload_reads() {
-    let parent = tempfile::tempdir().unwrap();
-    let input_path = parent.path().join("input");
-    fs::write(&input_path, vec![7_u8; 10]).unwrap();
-    let mut input = File::open(input_path).unwrap();
-    let mut output = Vec::new();
-    let (bytes, operations) =
-        copy_exact_materialized(&mut input, &mut output, 10, 4, None).unwrap();
-    assert_eq!((bytes, operations), (10, 3));
-    assert_eq!(output, vec![7_u8; 10]);
+    use graphforge_core::hash_observation::operation::Capture;
+    let source = package();
+    let bundle = bundle_from_expanded(source.path());
+    let limits = PortableV2Limits {
+        copy_buffer_bytes: 4,
+        ..Default::default()
+    };
+    for input in [source.path(), bundle.path()] {
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("materialized");
+        let capture = Capture::start();
+        let materialized = materialize_verified_portable_v2_observed(
+            input,
+            &destination,
+            limits,
+            None,
+            |_, _| Ok(()),
+            false,
+        )
+        .unwrap();
+        let observed = capture.snapshot();
+        drop(capture);
+        assert_eq!(materialized.application_read_bytes, 2);
+        assert_eq!(materialized.application_read_operations, 1);
+        assert_eq!(
+            fs::read(destination.join("data/components/ontology/core-ontology/ontology.json"))
+                .unwrap(),
+            b"{}"
+        );
+        let transport = if input.is_file() {
+            fs::metadata(input).unwrap().len()
+        } else {
+            0
+        };
+        assert_eq!(
+            observed.portable_authentication_sha256_bytes,
+            materialized.report.payload_bytes + transport
+        );
+        assert_eq!(observed.artifact_payload_sha256_bytes, 0);
+        assert_eq!(observed.unclassified_sha256_bytes, 0);
+    }
+}
+
+#[test]
+fn import_authenticates_consumed_bytes_when_source_is_changed_and_restored() {
+    let relative = "data/components/ontology/core-ontology/ontology.json";
+    for bundled in [false, true] {
+        let source = package();
+        let bundle = bundle_from_expanded(source.path());
+        let input = if bundled {
+            bundle.path()
+        } else {
+            source.path()
+        };
+        let changed = if bundled {
+            bundle.path().to_owned()
+        } else {
+            source.path().join(relative)
+        };
+        let original = fs::read(&changed).unwrap();
+        let modified = fs::metadata(&changed).unwrap().modified().unwrap();
+        let offset = if bundled {
+            original
+                .windows(relative.len())
+                .position(|bytes| bytes == relative.as_bytes())
+                .unwrap()
+                + 512
+        } else {
+            0
+        };
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("materialized");
+        let mut injected = false;
+        let mut restored = false;
+        let result = materialize_verified_portable_v2_observed(
+            input,
+            &destination,
+            PortableV2Limits {
+                copy_buffer_bytes: 1,
+                ..Default::default()
+            },
+            None,
+            |_, file| {
+                let Some(file) = file else {
+                    return Ok(());
+                };
+                match file.metadata().unwrap().len() {
+                    1 if !injected => {
+                        let mut bytes = original.clone();
+                        bytes[offset + 1] = b']';
+                        fs::write(&changed, bytes).unwrap();
+                        injected = true;
+                    }
+                    2 if injected && !restored => {
+                        fs::write(&changed, &original).unwrap();
+                        fs::OpenOptions::new()
+                            .write(true)
+                            .open(&changed)
+                            .unwrap()
+                            .set_modified(modified)
+                            .unwrap();
+                        restored = true;
+                    }
+                    _ => {}
+                }
+                Ok(())
+            },
+            false,
+        );
+        assert!(injected && restored);
+        assert_eq!(fs::read(changed).unwrap(), original);
+        assert_eq!(
+            result
+                .err()
+                .expect("copied corruption must be refused")
+                .code,
+            PortableV2ErrorCode::DigestMismatch
+        );
+        assert!(!destination.exists());
+    }
+}
+
+#[test]
+fn materialization_refuses_corruption_of_written_output_with_unchanged_source() {
+    let source = package();
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("materialized");
+    let mut corrupted = false;
+    let result = materialize_verified_portable_v2_observed(
+        source.path(),
+        &destination,
+        PortableV2Limits::default(),
+        None,
+        |path, file| {
+            if !corrupted && file.is_some_and(|file| file.metadata().unwrap().len() == 2) {
+                fs::write(path, b"[]").unwrap();
+                corrupted = true;
+            }
+            Ok(())
+        },
+        false,
+    );
+    assert!(corrupted);
+    assert_eq!(
+        result
+            .err()
+            .expect("physical staged corruption must be refused")
+            .code,
+        PortableV2ErrorCode::ConcurrentMutation
+    );
+    assert!(!destination.exists());
+    assert_eq!(
+        fs::read(
+            source
+                .path()
+                .join("data/components/ontology/core-ontology/ontology.json")
+        )
+        .unwrap(),
+        b"{}"
+    );
 }
 
 fn bundle_from_expanded(source: &Path) -> tempfile::NamedTempFile {

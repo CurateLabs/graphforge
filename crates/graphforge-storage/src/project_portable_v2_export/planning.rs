@@ -69,7 +69,15 @@ impl PortableV2ExportPlan {
             let relative =
                 crate::graph_files::canonical_inventory_relative_text(&entry.relative_path)?;
             let path = format!("data/components/graph-data/graph-tree/{relative}");
-            let planned = inspect(&source, &path, limits, &mut total)?;
+            let planned = inspect_admitted(
+                &source,
+                &path,
+                entry.byte_length,
+                parse_sha256(&entry.content_sha256)?,
+                entry.content_xxh64,
+                limits,
+                &mut total,
+            )?;
             if planned.length != entry.byte_length || hex(planned.digest) != entry.content_sha256 {
                 return Err(err(
                     "GF_SOURCE_CHANGED",
@@ -707,7 +715,16 @@ pub fn plan_selected_portable_v2(
             "data/components/{kind}/{id}/participant.{}",
             extension(&d.encoding)
         );
-        let f = inspect(&source, &path, limits, &mut total)?;
+        let authority = g.portable_participant_identity(&d.capability_id, &d.record_family_id)?;
+        let f = inspect_admitted(
+            &source,
+            &path,
+            authority.byte_length(),
+            authority.content_sha256(),
+            authority.content_xxh64(),
+            limits,
+            &mut total,
+        )?;
         let cf = ComponentFile {
             media_type: media_type(&d.encoding).into(),
             path: path.clone(),
@@ -767,20 +784,27 @@ pub fn plan_selected_portable_v2(
                 crate::graph_files::canonical_inventory_relative_text(&e.relative_path)?;
             let path = format!("data/components/graph-data/{id}/{canonical}");
             let f = match &graph_authority {
-                Some(crate::GraphFilesParticipant::V1(_)) => inspect(
+                Some(crate::GraphFilesParticipant::V1(_)) => inspect_admitted(
                     &crate::graph_files::resolve_v1_inventory_entry(&g.graph_tree_root(), &e)?,
                     &path,
-                    limits,
-                    &mut total,
-                )?,
-                Some(crate::GraphFilesParticipant::V2(_)) => inspect_cas(
-                    graph_cas.as_ref().expect("compact authority has CAS lease"),
-                    &e.content_sha256,
                     e.byte_length,
-                    &path,
+                    parse_sha256(&e.content_sha256)?,
+                    e.content_xxh64,
                     limits,
                     &mut total,
                 )?,
+                Some(crate::GraphFilesParticipant::V2(_)) => {
+                    let mut file = inspect_cas(
+                        graph_cas.as_ref().expect("compact authority has CAS lease"),
+                        &e.content_sha256,
+                        e.byte_length,
+                        &path,
+                        limits,
+                        &mut total,
+                    )?;
+                    file.checksum = Some(e.content_xxh64);
+                    file
+                }
                 None => return Err(err("GF_SOURCE_CHANGED", "graph authority disappeared")),
             };
             if f.length != e.byte_length || hex(f.digest) != e.content_sha256 {
@@ -1059,6 +1083,7 @@ pub(super) fn inspect(
         return Err(limit("total too large"));
     }
     let mut digest = PortableSha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut buffer = vec![0; limits.copy_buffer_bytes];
     let mut bytes_read = 0;
     loop {
@@ -1067,6 +1092,7 @@ pub(super) fn inspect(
             break;
         }
         digest.update(&buffer[..count]);
+        checksum.update(&buffer[..count]);
         bytes_read += count as u64;
     }
     if bytes_read != before.len || identity(&input.metadata().map_err(storage)?)? != before {
@@ -1080,8 +1106,49 @@ pub(super) fn inspect(
         path: path.into(),
         length: bytes_read,
         digest: digest.finalize().into(),
+        checksum: Some(checksum.finish()),
     })
 }
+#[expect(
+    clippy::too_many_arguments,
+    reason = "private planner forwards one manifest-authenticated file identity"
+)]
+fn inspect_admitted(
+    source: &Path,
+    path: &str,
+    length: u64,
+    digest: [u8; 32],
+    checksum: u64,
+    limits: PortableV2ExportLimits,
+    total: &mut u64,
+) -> Result<PlannedFile, ExportError> {
+    valid_path(path)?;
+    if path.len() > limits.max_path_bytes || length > limits.max_entry_bytes {
+        return Err(limit("admitted entry exceeds configured limit"));
+    }
+    *total = total
+        .checked_add(length)
+        .ok_or_else(|| limit("size overflow"))?;
+    if *total > limits.max_total_bytes {
+        return Err(limit("total too large"));
+    }
+    let input = open_source_no_follow(source)?;
+    let before = identity(&input.metadata().map_err(storage)?)?;
+    if before.len != length {
+        return Err(err("GF_SOURCE_CHANGED", "admitted source length changed"));
+    }
+    Ok(PlannedFile {
+        source: PlannedSource::File {
+            path: source.into(),
+            identity: before,
+        },
+        path: path.into(),
+        length,
+        digest,
+        checksum: Some(checksum),
+    })
+}
+
 fn inspect_cas(
     lease: &crate::graph_object_store::GraphObjectReadLease,
     digest: &str,
@@ -1100,7 +1167,7 @@ fn inspect_cas(
     if *total > limits.max_total_bytes {
         return Err(limit("total too large"));
     }
-    let _authenticated = lease.open_for_portable(digest, expected_length)?;
+    let _descriptor = lease.open_for_attribution(digest, expected_length)?;
     let digest_bytes = parse_sha256(digest)?;
     Ok(PlannedFile {
         source: PlannedSource::Cas {
@@ -1111,6 +1178,7 @@ fn inspect_cas(
         path: path.into(),
         length: expected_length,
         digest: digest_bytes,
+        checksum: None,
     })
 }
 fn inline_control(
@@ -1132,6 +1200,7 @@ fn inline_control(
         path: path.into(),
         length: bytes.len() as u64,
         digest: Sha256::digest(&bytes).into(),
+        checksum: Some(crate::corruption_checksum::checksum(&bytes)),
         source: PlannedSource::Control(bytes),
     })
 }

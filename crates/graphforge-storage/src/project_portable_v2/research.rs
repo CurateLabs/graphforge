@@ -13,6 +13,17 @@ pub(crate) fn validate_stage(
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
 ) -> Result<Option<ResearchArchive>, PortableV2Error> {
+    validate_with_reader(report, limits, cancelled, |path, bound| {
+        super::read_bounded_file(&stage.join(path), bound, path)
+    })
+}
+
+pub(super) fn validate_with_reader(
+    report: &graphforge_core::portable::PortableV2Report,
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
+    mut read: impl FnMut(&str, u64) -> Result<Vec<u8>, PortableV2Error>,
+) -> Result<Option<ResearchArchive>, PortableV2Error> {
     if !report.research_interchange {
         return Ok(None);
     }
@@ -28,10 +39,9 @@ pub(crate) fn validate_stage(
         return Err(invalid());
     }
     let descriptor = descriptors[0];
-    let bytes = super::read_bounded_file(
-        &stage.join(&descriptor.path),
-        crate::research_versions::MAX_REGISTRY_BYTES as u64,
+    let bytes = read(
         &descriptor.path,
+        crate::research_versions::MAX_REGISTRY_BYTES as u64,
     )?;
     let registry = portable::portable_registry(&bytes).map_err(|_| invalid())?;
     let mut provided = BTreeMap::new();
@@ -47,25 +57,32 @@ pub(crate) fn validate_stage(
             return Err(invalid());
         }
     }
-    let required = portable::portable_objects(&registry, |digest, bound| {
-        super::check_cancel(cancelled).map_err(|_| {
-            graphforge_core::GfError::Validation("research verification cancelled".into())
-        })?;
-        if provided
-            .get(digest)
-            .is_none_or(|length| *length > bound.min(limits.max_entry_bytes))
-        {
-            return Err(graphforge_core::GfError::Validation(
-                "research object is missing or oversized".into(),
-            ));
-        }
-        super::read_bounded_file(
-            &stage.join(format!("{PREFIX}{digest}")),
-            bound.min(limits.max_entry_bytes),
-            "research object",
-        )
-        .map_err(|_| graphforge_core::GfError::Validation("research object unavailable".into()))
-    })
+    let required = portable::portable_objects_admitted(
+        &registry,
+        |digest| {
+            provided.get(digest).copied().ok_or_else(|| {
+                graphforge_core::GfError::Validation("research object is missing".into())
+            })
+        },
+        |digest, bound| {
+            super::check_cancel(cancelled).map_err(|_| {
+                graphforge_core::GfError::Validation("research verification cancelled".into())
+            })?;
+            if provided
+                .get(digest)
+                .is_none_or(|length| *length > bound.min(limits.max_entry_bytes))
+            {
+                return Err(graphforge_core::GfError::Validation(
+                    "research object is missing or oversized".into(),
+                ));
+            }
+            read(
+                &format!("{PREFIX}{digest}"),
+                bound.min(limits.max_entry_bytes),
+            )
+            .map_err(|_| graphforge_core::GfError::Validation("research object unavailable".into()))
+        },
+    )
     .map_err(|_| super::check_cancel(cancelled).err().unwrap_or_else(invalid))?;
     if required.len() != provided.len()
         || required.iter().any(|(digest, length)| {

@@ -252,6 +252,33 @@ attach the current operation context. Nested operations and unrelated parallel
 tests retain separate collectors; there is no process-wide reset. Production
 context wrappers are zero-sized when test support is disabled.
 
+Portable pass counts are reproduced with the focused storage tests below. They
+exercise actual producer update calls and real package files in both expanded
+and canonical bundle representations; their collectors remain isolated from
+parallel tests. `materialization_reports_actual_bounded_payload_reads` records
+one component copy and one untrusted authentication pass, while
+`captured_export_has_one_transport_hash_and_refuses_written_corruption` separates
+private writer checksums from full public portable SHA authentication. The
+member-copy regression preserves the historical two-SHA baseline in its Git
+history and checks that the source identity is now hashed once. Corruption and
+mutate/read/restore cases run alongside those counters. Keep raw test output on
+the producing issue or PR, outside this documentation tree. Large two-size
+portable measurements are optional follow-up work under the maintainer waiver.
+
+```bash
+cargo nextest run -p graphforge-storage -E 'test(project_portable_v2::materialization::tests::) | test(project_portable_v2_export::transport::tests::portable_member_copy_counts_crypto_and_refuses_same_identity_content_mutation) | test(captured_export_has_one_transport_hash_and_refuses_written_corruption)' --nocapture
+```
+
+The bounded input is the existing ontology-only fixture at
+`tests/fixtures/portable-v2/ontology-only.manifest.json`, with a two-byte `{}`
+ontology member. Its SHA-256 is
+`ef18ecc2ee374ca4c29ee3870c2a78ad8d91f854bcfe521827c0eac84328d4ae`.
+The export fixture builds a real retained generation with
+ontology composition. These tests assert exact actual SHA input counts rather
+than estimated file sizes as a substitute for producer observations. Total
+checksum work and required control/contract work remain separate from portable
+SHA input, and remain part of inclusive process-level work.
+
 The actual facade regressions are in
 `crates/graphforge-api/tests/facade_checksum_admission.rs`, identified by SHA-256
 `0a9ac8fa6785ad0702e3de0be34f6d461ad122e6e32331ee4617377a9f4ddc56`.

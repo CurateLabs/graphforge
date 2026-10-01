@@ -115,6 +115,24 @@ pub struct ResolvedProjectGeneration {
     inventory_cache: Arc<OnceLock<Result<Option<Arc<crate::GraphFilesInventory>>, GfError>>>,
 }
 
+/// Portable export authority minted from this generation's authenticated manifest.
+pub(crate) struct PortableParticipantIdentity {
+    byte_length: u64,
+    content_sha256: [u8; 32],
+    content_xxh64: u64,
+}
+impl PortableParticipantIdentity {
+    pub(crate) fn byte_length(&self) -> u64 {
+        self.byte_length
+    }
+    pub(crate) fn content_sha256(&self) -> [u8; 32] {
+        self.content_sha256
+    }
+    pub(crate) fn content_xxh64(&self) -> u64 {
+        self.content_xxh64
+    }
+}
+
 #[derive(Debug)]
 struct GenerationLease(File);
 
@@ -615,6 +633,24 @@ impl ResolvedProjectGeneration {
                 })
             })
             .collect()
+    }
+
+    pub(crate) fn portable_participant_identity(
+        &self,
+        capability: &str,
+        family: &str,
+    ) -> Result<PortableParticipantIdentity, GfError> {
+        let descriptor = self
+            .manifest
+            .participants
+            .iter()
+            .find(|entry| entry.capability_id == capability && entry.record_family_id == family)
+            .ok_or_else(|| corrupt("portable participant is absent from retained generation"))?;
+        Ok(PortableParticipantIdentity {
+            byte_length: descriptor.byte_length,
+            content_sha256: parse_sha256(&descriptor.content_sha256)?,
+            content_xxh64: descriptor.content_xxh64,
+        })
     }
 
     /// Read and verify one requested participant without opening any sibling

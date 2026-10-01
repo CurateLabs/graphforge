@@ -47,13 +47,24 @@ pub(crate) fn validate_materialized_ontology_composition(
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
 ) -> Result<(), PortableV2Error> {
+    validate_with_reader(report, limits, cancelled, |entry| {
+        read_canonical_semantic_payload(root, entry)
+    })
+}
+
+pub(super) fn validate_with_reader(
+    report: &PortableV2Report,
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
+    mut read: impl FnMut(&PortableV2CompositionEntry) -> Result<Value, PortableV2Error>,
+) -> Result<(), PortableV2Error> {
     let Some(control) = &report.ontology_composition else {
         return Ok(());
     };
     validate_semantic_payload_budget(report, limits)?;
     for entry in &report.ontology_composition_entries {
         check_cancel(cancelled)?;
-        let value = read_canonical_semantic_payload(root, entry)?;
+        let value = read(entry)?;
         if entry.kind == "ontology" {
             validate_materialized_ontology(entry, value)?;
         } else {
