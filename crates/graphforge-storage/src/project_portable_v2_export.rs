@@ -1336,6 +1336,83 @@ mod tests {
     }
 
     #[test]
+    fn public_export_refuses_completed_stage_corruption_from_progress_callback() {
+        let (project, generation) = graph_generation_with_composition(true);
+        let current = fs::read(project.path().join("CURRENT")).unwrap();
+        let limits = PortableV2ExportLimits::default();
+        let plan = plan_complete_portable_v2(&generation, limits).unwrap();
+        let member = plan
+            .files
+            .iter()
+            .find(|file| file.path.ends_with("/a.parquet"))
+            .unwrap();
+        for output in [PortableV2Output::Expanded, PortableV2Output::Bundle] {
+            let root = tempfile::tempdir().unwrap();
+            let destination = root.path().join("exported");
+            let mut injected = false;
+            let result = export_complete_portable_v2(
+                &plan,
+                &destination,
+                output,
+                limits,
+                &AtomicBool::new(false),
+                |progress| {
+                    if injected || progress.entries_completed != progress.entries_total {
+                        return;
+                    }
+                    let mut stages = fs::read_dir(root.path())
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path())
+                        .filter(|path| {
+                            path.file_name()
+                                .unwrap()
+                                .to_string_lossy()
+                                .ends_with(".partial")
+                        });
+                    let stage = stages.next().unwrap();
+                    assert!(stages.next().is_none());
+                    let path = if output == PortableV2Output::Expanded {
+                        stage.join(&member.path)
+                    } else {
+                        stage
+                    };
+                    let before = fs::metadata(&path).unwrap();
+                    let identity = graphforge_filesystem::path_identity(&path).unwrap();
+                    let mut bytes = fs::read(&path).unwrap();
+                    let position = bytes
+                        .windows(b"graph-a".len())
+                        .position(|bytes| bytes == b"graph-a")
+                        .expect("the completed graph member was written");
+                    bytes[position] ^= 1;
+                    fs::write(&path, bytes).unwrap();
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open(&path)
+                        .unwrap()
+                        .set_modified(before.modified().unwrap())
+                        .unwrap();
+                    let after = fs::metadata(&path).unwrap();
+                    assert_eq!(after.len(), before.len());
+                    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+                    assert_eq!(
+                        graphforge_filesystem::path_identity(&path).unwrap(),
+                        identity
+                    );
+                    injected = true;
+                },
+            );
+            assert!(injected, "{output:?}");
+            assert_eq!(
+                result.unwrap_err().code,
+                PortableV2ErrorCode::DigestMismatch
+            );
+            assert!(!destination.exists());
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+            assert_eq!(fs::read(project.path().join("CURRENT")).unwrap(), current);
+        }
+    }
+
+    #[test]
     fn export_failed_partial_write_is_observed_before_cleanup() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("partial");
