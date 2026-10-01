@@ -39,7 +39,7 @@ pub(super) fn admit_composition_features(bytes: &[u8]) -> Result<(), PortableV2E
 }
 
 pub(crate) fn validate_materialized_ontology_composition(
-    read: &mut dyn FnMut(&str, u64) -> Result<Vec<u8>, PortableV2Error>,
+    read: &mut super::MemberReader<'_>,
     report: &PortableV2Report,
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
@@ -50,7 +50,7 @@ pub(crate) fn validate_materialized_ontology_composition(
     validate_semantic_payload_budget(report, limits)?;
     for entry in &report.ontology_composition_entries {
         check_cancel(cancelled)?;
-        let value = parse_canonical_semantic_payload(entry, read(&entry.path, entry.length)?)?;
+        let value = parse_canonical_semantic_payload(entry, &read(&entry.path, entry.length)?)?;
         if entry.kind == "ontology" {
             validate_materialized_ontology(entry, value)?;
         } else {
@@ -84,7 +84,7 @@ fn validate_semantic_payload_budget(
 
 fn parse_canonical_semantic_payload(
     entry: &PortableV2CompositionEntry,
-    bytes: Vec<u8>,
+    bytes: &[u8],
 ) -> Result<Value, PortableV2Error> {
     if bytes.len() as u64 != entry.length {
         return Err(PortableV2Error::at(
@@ -93,14 +93,14 @@ fn parse_canonical_semantic_payload(
             "semantic payload is not the authenticated member",
         ));
     }
-    let value = serde_json::from_slice(&bytes).map_err(|_| {
+    let value = serde_json::from_slice(bytes).map_err(|_| {
         PortableV2Error::at(
             PortableV2ErrorCode::InvalidStructure,
             &entry.path,
             "semantic payload JSON",
         )
     })?;
-    if canonical_json(&value)? != bytes {
+    if canonical_json(&value)? != *bytes {
         return Err(PortableV2Error::at(
             PortableV2ErrorCode::Incompatible,
             &entry.path,

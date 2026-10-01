@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+#[cfg(test)]
 use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::{GfError, OntologyMode, ProjectErrorCode};
 use graphforge_ontology::{

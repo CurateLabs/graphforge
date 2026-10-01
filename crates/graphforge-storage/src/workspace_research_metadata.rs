@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_filesystem::FileIdentity;
 use serde::{Deserialize, Serialize};

@@ -143,12 +143,19 @@ struct Entry {
     offset: Option<u64>,
 }
 
+/// Returns the exact bytes of one authenticated package member, up to a bound.
+pub(crate) type MemberReader<'a> = dyn FnMut(&str, u64) -> Result<Vec<u8>, PortableV2Error> + 'a;
+
+/// Observes each staged file as it is created, written and synchronized.
+pub(super) type StagedObserver<'a> =
+    dyn FnMut(&Path, Option<&File>) -> Result<(), PortableV2Error> + 'a;
+
 /// Receives authenticated component members while the single verification
 /// pass hashes them. Bytes reach the destination only through that pass, so
 /// nothing is copied that was not authenticated in the same read.
 pub(super) struct ComponentSink<'a> {
     pub(super) destination: &'a Path,
-    pub(super) observed: &'a mut dyn FnMut(&Path, Option<&File>) -> Result<(), PortableV2Error>,
+    pub(super) observed: &'a mut StagedObserver<'a>,
     pub(super) written_bytes: u64,
     pub(super) write_operations: u64,
 }

@@ -24,7 +24,7 @@ pub(crate) fn validate_stage(
 /// Validate research members through `read`, which returns the exact bytes
 /// of one authenticated member up to `bound`.
 pub(crate) fn validate_with(
-    read: &mut dyn FnMut(&str, u64) -> Result<Vec<u8>, PortableV2Error>,
+    read: &mut super::MemberReader<'_>,
     report: &graphforge_core::portable::PortableV2Report,
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
