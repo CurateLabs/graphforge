@@ -1,9 +1,8 @@
 //! #1688: the #1619 read-path candidates over the #1513 multi-file fixture.
 //!
-//! Run with `--features read-path-experiment`; without it this binary is empty.
-//! One test owns the process environment, because the candidate is read from
-//! `GF_READ_PATH_CANDIDATE` whenever a session is created.
-#![cfg(feature = "read-path-experiment")]
+//! Requires `--features read-path-experiment`. One test owns the process
+//! environment, because the candidate is read from `GF_READ_PATH_CANDIDATE`
+//! whenever a session is created.
 
 use std::collections::HashMap;
 
@@ -46,6 +45,10 @@ fn set_env(key: &str, value: Option<&str>) {
 }
 
 fn open(dir: &TempDir, partitions: usize) -> GraphForge {
+    open_with(dir, partitions, ExecutionResourcePolicy::default())
+}
+
+fn open_with(dir: &TempDir, partitions: usize, base: ExecutionResourcePolicy) -> GraphForge {
     let options = GraphForgeOptions {
         resource: ExecutionResourcePolicy {
             mode: ResourcePolicyMode::Explicit,
@@ -53,7 +56,7 @@ fn open(dir: &TempDir, partitions: usize) -> GraphForge {
             target_partitions: Some(partitions),
             io_concurrency: Some(1),
             compute_threads: Some(1),
-            ..ExecutionResourcePolicy::default()
+            ..base
         },
         ..GraphForgeOptions::default()
     };
@@ -102,17 +105,14 @@ fn candidates_agree_and_lowerer_chosen_fast_paths_survive_shape_changes() {
                     &rendered, expected,
                     "{context}: answer differs from current"
                 );
-                match candidate {
-                    "stock" => {
-                        for custom in [exec, "ExpandExec", "FastPathFallbackExec"] {
-                            assert!(!plan.contains(custom), "{context}: {custom} in {plan}");
-                        }
+                if candidate == "stock" {
+                    for custom in [exec, "ExpandExec", "FastPathFallbackExec"] {
+                        assert!(!plan.contains(custom), "{context}: {custom} in {plan}");
                     }
-                    _ => {
-                        assert!(plan.contains(exec), "{context}: {plan}");
-                        assert!(!plan.contains("FastPathFallbackExec"), "{context}: {plan}");
-                        assert!(operators.contains(&label), "{context}: {operators:?}");
-                    }
+                } else {
+                    assert!(plan.contains(exec), "{context}: {plan}");
+                    assert!(!plan.contains("FastPathFallbackExec"), "{context}: {plan}");
+                    assert!(operators.contains(&label), "{context}: {operators:?}");
                 }
             }
         }
@@ -141,5 +141,33 @@ fn candidates_agree_and_lowerer_chosen_fast_paths_survive_shape_changes() {
         }
     }
     set_env(READ_PATH_INJECT_ENV, None);
+
+    // Known positive for C's ExpandExec pool reservation: with every node in
+    // one input batch and the smallest admitted pool, a generic hop that
+    // returns whole rows fits when ExpandExec is unaccounted (current) and is
+    // refused by the pool when it is accounted (structural).
+    let whole_rows = "MATCH (a)-[r]->(b) RETURN a, r, b";
+    let small_pool = ExecutionResourcePolicy {
+        batch_size: Some(1_048_576),
+        memory_budget_bytes: Some(16 * 1024 * 1024),
+        ..ExecutionResourcePolicy::default()
+    };
+    set_env(READ_PATH_CANDIDATE_ENV, Some("current"));
+    let rows: usize = open_with(&dir, 1, small_pool.clone())
+        .execute(whole_rows)
+        .expect("an unaccounted ExpandExec fits the small pool")
+        .batches
+        .iter()
+        .map(arrow::record_batch::RecordBatch::num_rows)
+        .sum();
+    assert_eq!(rows, NODES * FAN_OUT);
+    set_env(READ_PATH_CANDIDATE_ENV, Some("structural"));
+    let refused = open_with(&dir, 1, small_pool)
+        .execute(whole_rows)
+        .expect_err("an accounted ExpandExec must be refused by the small pool");
+    assert!(
+        format!("{refused:?}").contains("ExpandExec"),
+        "the pool must name the ExpandExec reservation: {refused:?}"
+    );
     set_env(READ_PATH_CANDIDATE_ENV, None);
 }

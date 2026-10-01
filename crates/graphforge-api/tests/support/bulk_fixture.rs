@@ -121,11 +121,11 @@ pub(crate) fn generate_bulk_graph(dir: &Path, nodes: usize, fan_out: usize) -> B
 }
 
 pub(crate) fn fixture_node_uuid(index: usize) -> Uuid {
-    Uuid::from_u128(0x1000_0000_0000_0000_0000_0000_0000_0000 | index as u128 + 1)
+    Uuid::from_u128(0x1000_0000_0000_0000_0000_0000_0000_0000 | (index as u128 + 1))
 }
 
 pub(crate) fn fixture_edge_uuid(index: usize) -> Uuid {
-    Uuid::from_u128(0x2000_0000_0000_0000_0000_0000_0000_0000 | index as u128 + 1)
+    Uuid::from_u128(0x2000_0000_0000_0000_0000_0000_0000_0000 | (index as u128 + 1))
 }
 
 /// Encoded node files under `dir` (construction staging included): the

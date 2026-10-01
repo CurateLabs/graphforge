@@ -68,6 +68,10 @@ path = "src/bin/graphforge-fly-filesystem-smoke.rs"
 required-features = ["portable"]
 
 [[example]]
+name = "read_path_explain"
+required-features = ["read-path-experiment"]
+
+[[example]]
 name = "release_load_probe"
 required-features = ["search"]
 
@@ -106,6 +110,10 @@ required-features = ["knowledge", "provenance", "search", "research"]
 [[example]]
 name = "knowledge_evolution_workflow"
 required-features = ["knowledge", "provenance", "search", "research"]
+
+[[test]]
+name = "read_path_candidates"
+required-features = ["read-path-experiment"]
 
 [[test]]
 name = "discovery_portable_v2"

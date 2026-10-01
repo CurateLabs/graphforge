@@ -1286,6 +1286,13 @@ jobs:
           cargo nextest run --locked --no-fail-fast
           -p graphforge-exec --features differential-testing --test differential_traversal
 
+      - name: Rust feature-gated tests (read-path candidates, #1688)
+        if: ${{ !cancelled() && (steps.nextest.outcome == 'success' || steps.nextest.outcome == 'failure') }}
+        run: >-
+          python3 scripts/test_environment.py --
+          cargo nextest run --locked --no-fail-fast
+          -p graphforge-api --features read-path-experiment --test read_path_candidates
+
       - name: Real tiny and ownership-growth lifecycle producer
         if: ${{ !cancelled() && (steps.nextest.outcome == 'success' || steps.nextest.outcome == 'failure') }}
         shell: bash

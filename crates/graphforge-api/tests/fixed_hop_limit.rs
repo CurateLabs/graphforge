@@ -6,17 +6,13 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use arrow::array::{
-    Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Int64Array, StringArray,
-    UInt64Array,
-};
+use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ExecutionResourcePolicy,
-    GraphConstructionBudgets, GraphForge, GraphForgeOptions, OperationId, PortableSelection,
+    ExecutionResourcePolicy, GraphForge, GraphForgeOptions, OperationId, PortableSelection,
     PortableV2ExportRequest, PortableV2ImportRequest, PortableVerifyRequest, ResourcePolicyMode,
     ResultSinkFormat, ResultSinkOptions, verify_portable_v2,
 };
@@ -37,8 +33,7 @@ mod bulk_fixture;
 mod project_fixture;
 
 use bulk_fixture::{
-    BulkFixtureEvidence, WRITE_WINDOW, encoded_node_files, fixture_edge_uuid, fixture_node_uuid,
-    generate_bulk_graph,
+    BulkFixtureEvidence, WRITE_WINDOW, encoded_node_files, fixture_node_uuid, generate_bulk_graph,
 };
 
 const TS: i64 = 1_700_000_000_000_000;
