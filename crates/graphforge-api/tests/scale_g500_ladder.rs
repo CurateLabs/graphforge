@@ -5933,6 +5933,22 @@ enum CategoryBehavior {
     StructurallyZero,
 }
 
+/// The catalog and manifest object count, and the filesystem allocation those
+/// objects take (a page each), must not follow the data. A compact manifest's
+/// chunks follow the radix shape of its path set, and many of those paths embed
+/// content-hash names, so a rung may gain or lose a few chunks (version-one
+/// inventories were one object, which is why this once demanded equality). A
+/// fourth of the smallest value is that allowance; growth in step with the data,
+/// which doubles and quadruples it, exceeds it.
+fn validate_stable_manifest_inventory(name: &str, values: [u64; 3]) -> Result<(), String> {
+    let smallest = values.into_iter().min().unwrap_or(0);
+    let largest = values.into_iter().max().unwrap_or(0);
+    if smallest == 0 || largest - smallest > smallest / 4 {
+        return Err(format!("{name} object inventory changed: {values:?}"));
+    }
+    Ok(())
+}
+
 fn category_behavior(category: &str) -> Result<CategoryBehavior, String> {
     match category {
         "topology_nodes" => Ok(CategoryBehavior::NodeBearing),
@@ -6005,8 +6021,8 @@ fn validate_category_taxonomy(
                         // lengths in its JSON manifests can gain digits.
                         validate_positive_normalized_ceiling(&name, values, denominators)?;
                     }
-                    (CategoryBehavior::FixedInventory, 4 | 5) => {
-                        validate_quantized_allocation(&name, values, denominators)?;
+                    (CategoryBehavior::FixedInventory, 0 | 2 | 4 | 5) => {
+                        validate_stable_manifest_inventory(&name, values)?;
                     }
                     (_, 0 | 2)
                         if values[0] > 0 && values[0] == values[1] && values[0] == values[2] => {}
@@ -7291,6 +7307,79 @@ fn controlled_fixture_policies_reject_coherent_zero_and_excess_work() {
             validate_lifecycle_metric_policies_for_axis(axis, &retained_chunks)
                 .unwrap_err()
                 .contains("retained encoding inventory changed")
+        );
+        // Manifest chunks may shift a little with the radix shape of the path set,
+        // and may not scale with the data.
+        // A compact manifest has many chunks (the fixtures publish a single
+        // catalog object), so grow the catalog inventory in every rung first,
+        // then let one rung gain a chunk.
+        let mut tolerated = observations.clone();
+        for (rung, observation) in tolerated.iter_mut().enumerate() {
+            for owner in ["source", "clean_import"] {
+                let key = format!("{owner}.catalog_and_manifests");
+                let chunks = observation.category_metrics[&key][0];
+                let pages = observation.category_metrics[&key][4];
+                let extra_objects = 7 * chunks + u64::from(rung == 2);
+                let extra_pages = 7 * pages + 4096 * u64::from(rung == 2);
+                for metrics in [
+                    &mut observation.category_metrics,
+                    &mut observation.category_authority_metrics,
+                ] {
+                    let fields = metrics.get_mut(&key).unwrap();
+                    fields[0] += extra_objects;
+                    fields[2] += extra_objects;
+                    fields[4] += extra_pages;
+                    fields[5] += extra_pages;
+                }
+                for name in ["logical_references", "physical_objects"] {
+                    *observation
+                        .retained
+                        .get_mut(&format!("{owner}.{name}"))
+                        .unwrap() += extra_objects;
+                }
+                *observation
+                    .retained
+                    .get_mut(&format!("{owner}.allocated_bytes"))
+                    .unwrap() += extra_pages;
+            }
+        }
+        validate_lifecycle_metric_policies_for_axis(axis, &tolerated)
+            .expect("a few manifest chunks may come and go with the path shape");
+        let mut scaled = observations.clone();
+        for (rung, observation) in scaled.iter_mut().enumerate() {
+            for owner in ["source", "clean_import"] {
+                let key = format!("{owner}.catalog_and_manifests");
+                let chunks = observation.category_metrics[&key][0];
+                let pages = observation.category_metrics[&key][4];
+                let extra_objects = ((1 << rung) - 1) * chunks;
+                let extra_pages = ((1 << rung) - 1) * pages;
+                for metrics in [
+                    &mut observation.category_metrics,
+                    &mut observation.category_authority_metrics,
+                ] {
+                    let fields = metrics.get_mut(&key).unwrap();
+                    fields[0] += extra_objects;
+                    fields[2] += extra_objects;
+                    fields[4] += extra_pages;
+                    fields[5] += extra_pages;
+                }
+                for name in ["logical_references", "physical_objects"] {
+                    *observation
+                        .retained
+                        .get_mut(&format!("{owner}.{name}"))
+                        .unwrap() += extra_objects;
+                }
+                *observation
+                    .retained
+                    .get_mut(&format!("{owner}.allocated_bytes"))
+                    .unwrap() += extra_pages;
+            }
+        }
+        assert!(
+            validate_lifecycle_metric_policies_for_axis(axis, &scaled)
+                .unwrap_err()
+                .contains("catalog_and_manifests"),
+            "manifest chunks that follow the data must be refused"
         );
         for (category, field) in [
             ("catalog_and_manifests", 1),
