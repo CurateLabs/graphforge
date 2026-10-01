@@ -52,7 +52,7 @@ left Accepted; superseded records name their successor in `superseded_by`.
 
 Mirrors [`../../adr/README.md`](../../adr/README.md). This table and that one must
 agree with `docs/adr/` itself, and `scripts/ci/adr-index.py check` enforces it in
-the Repository Policy job (#1390).
+the CI Lint job (#1390).
 
 | ADR | Title | Status | Revisit when | Path |
 | --- | --- | --- | --- | --- |

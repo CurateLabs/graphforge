@@ -1,9 +1,7 @@
 # Benchmark measurement policy
 
 GraphForge values correctness over performance, but performance claims still
-require comparable evidence with explicit scope and provenance. The canonical
-inventory lives in `config/benchmark-measurement-inventory.json`; fast CI enforces
-it through `scripts/ci/benchmark-measurement-policy.py`.
+require comparable evidence with explicit scope and provenance.
 
 ## Execution boundaries
 
@@ -94,18 +92,11 @@ bench is not part of the PR CI Gate:
 subprocesses: a passing scenario yields a keyed raw result, a failing step
 aborts without one, and test mode writes none.
 
-Validation:
-
-```bash
-python3 scripts/ci/benchmark-measurement-policy.py
-python3 scripts/ci/test-benchmark-measurement-policy.py
-```
-
 Functional benchmark checks (correctness, read counts, topology/I/O invariants)
-stay in ordinary product CI (`//:ci_rust_tests`, release-only scaling tests).
-Comparable performance measurements use Divan (`cargo bench`, CodSpeed) or
-BenchExec (native Linux cgroups-v2 hosts). Durable temp-root and admitted-host
-requirements are documented per workload in `benchmarks/README.md`.
+stay in ordinary product CI. Comparable performance measurements use Divan
+(`cargo bench`, CodSpeed) or BenchExec (native Linux cgroups-v2 hosts). Durable
+temp-root and admitted-host requirements are documented per workload in
+`benchmarks/README.md`.
 
 # Benchmarking with CodSpeed
 

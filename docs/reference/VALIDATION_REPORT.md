@@ -162,7 +162,7 @@ Verified that all internal documentation links point to existing files.
 | feature-mapping/clause-to-tck.md | ✅ Exists |
 | feature-mapping/function-to-tck.md | ✅ Exists |
 
-**External Links:** 2 GitHub links (CONTRIBUTING.md, ISSUE_WORKFLOW.md) - not validated but expected to exist in repository root.
+**External Links:** CONTRIBUTING.md - not validated but expected to exist in repository root.
 
 **Conclusion:** All internal documentation links are valid ✓
 

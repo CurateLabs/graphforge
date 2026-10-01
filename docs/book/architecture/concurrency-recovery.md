@@ -205,12 +205,13 @@ rewrites them.
 
 There are four CI surfaces for concurrency and durability contracts:
 
-1. **Required short concurrency matrix** (`Test Suite / Concurrency Matrix`) —
-   deterministic Rust, Python, and Node cases from
-   `tests/contracts/concurrency-short-matrix.json`. Barriers/channels/failpoints
-   coordinate interleavings. Timing sleeps, ignored tests, and probabilistic
-   retries are forbidden. This job is required whenever Rust or binding surfaces
-   change and must stay green for merge.
+1. **Required concurrency tests** — the deterministic Rust cases run in
+   `Test Suite / Rust Tests`, and the Python and Node parity cases run with the
+   full binding suites in `Test Suite / Python and Node Bindings`.
+   Barriers/channels/failpoints coordinate interleavings.
+   Timing sleeps, ignored tests, and probabilistic retries are forbidden. These
+   tests run whenever Rust or binding surfaces change and must stay green for
+   merge.
 2. **Scheduled/manual stress lane** (`Concurrency Stress Gate`) — longer mixed
    workload with the published seed `2417`, resource bounds (RSS and file
    descriptors), and cleanup checks for locks/staging. Stress retries are
@@ -218,8 +219,9 @@ There are four CI surfaces for concurrency and durability contracts:
    Throughput or latency figures from stress are non-blocking performance
    observations, not correctness evidence.
 3. **Durability/isolation contract ledger** — `graphforge-durability-isolation/1`
-   maps crash phases and anomalies to covered evidence. Repository Policy
-   validates the ledger without compiling Rust.
+   maps crash phases and anomalies to covered evidence. It is a reference
+   ledger: the scheduled durability certification gate checks only its
+   seeded-certification and write-skew rows.
    Persistent-media faults that process kill cannot express (torn `CURRENT` /
    manifest bytes, lost platform-native namespace durability barrier power-loss
    subsets) are modeled by the deterministic filesystem fault oracle in
@@ -280,22 +282,6 @@ empty, wrong-platform, or mixed-seed report; the production history runner does
 not model a successful API call as proof of a process crash. M6 CPU-simulation, durable walltime, and peak
 RSS fallback evidence use the frozen `m6-storage-v1` / `m6_storage_io` fixture
 contract documented in [Benchmarking](../../development/benchmarking.md).
-
-The finite Rust recovery ledger remains
-`tests/contracts/concurrency-recovery-matrix.json` and is validated by
-Repository Policy without compiling Rust.
-
-Local short-matrix execution after native artifacts are built:
-
-```text
-python3 scripts/ci/concurrency-short-gate.py run --output /tmp/gf-concurrency-short
-```
-
-Local durability/isolation contract validation:
-
-```text
-python3 scripts/ci/durability-isolation-gate.py validate
-```
 
 Local seeded certification (required budget):
 

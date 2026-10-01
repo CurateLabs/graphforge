@@ -114,7 +114,6 @@ a queryable graph; checked-in evidence:
 That is not a universal size ceiling and does not download 8M/128M data in CI.
 
 ```bash
-make m4-entry-matrix-check
 cargo test -p graphforge-api --test m4_entry_baseline
 cargo test -p graphforge-api --test file_backed_graph_generation
 make bench-m4-entry

@@ -114,7 +114,6 @@ const PAGES = [
   'reference/load-matrix-results.md',
   'reference/column-naming-behavior.md',
   'development/contributing.md',
-  'development/workflow.md',
   'development/testing.md',
   'development/g500-certification.md',
   'development/release-load-matrix.md',

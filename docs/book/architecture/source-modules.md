@@ -17,9 +17,8 @@ require an accepted ADR with an exact path, finite bound, and cohesion rationale
 to storage's `adjacency.rs` and `project_generation.rs`, with separate cohesion
 and reviewability rationales. `config/source-size-policy.json` records those exact
 paths and finite bounds. `python3 scripts/source_size_policy.py` enforces the policy
-in Repository Policy CI and `make pre-push-fast`; full pre-push caching includes
-tracked membership, source contents, policy and ADR contents. Obsolete exemptions
-fail once a source fits the default. No transitional exemptions apply.
+in `make check` and the CI Lint job. Obsolete exemptions fail once a source fits
+the default. No transitional exemptions apply.
 
 ## Landed ownership
 
@@ -203,4 +202,4 @@ fault, cancellation, authentication, and budget evidence. Preserve telemetry nam
 error fields, lock/drop order, cache release, seeds, and deterministic reductions.
 
 CI's required status remains `github-status/CI Gate` at the PR's exact head.
-The final size checker belongs to Repository Policy and `make pre-push-fast`.
+The final size checker belongs to `make check` and the CI Lint job.

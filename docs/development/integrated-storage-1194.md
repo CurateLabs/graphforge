@@ -433,8 +433,7 @@ CARGO_TARGET_DIR="$ISOLATED_TARGET" cargo test -p graphforge-storage --release s
 CARGO_TARGET_DIR="$ISOLATED_TARGET" cargo test -p graphforge-storage --release fixed_merge_work_is_exact_across_production_fan_in_boundaries
 cargo fmt --all -- --check
 cargo clippy --workspace -- -D warnings
-make pre-push-fast
-make pre-push
+make check
 make gate-registry-check
 ```
 

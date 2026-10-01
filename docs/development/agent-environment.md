@@ -58,7 +58,8 @@ Consequences:
   treat a remembered pass/fail number as a contract.
 
 `make cargo-test`, `make test`, `make test-unit`, `make test-tck`,
-and the `make pre-push` entrypoints use the launcher.
+`make test-rust`, `make test-python`, `make test-node`, and `make check`
+use the launcher.
 Linux PR binding and Rust test lanes use the same setup. For direct commands:
 
 ```bash
@@ -116,14 +117,12 @@ The `-E` filterset is required: `bdd` (cucumber) and `disabled_allocations`
 are custom-harness targets that cannot answer nextest's `--list` protocol, so
 they run under `cargo test` instead. The last command runs a test target whose
 required feature is outside its package's default set, which the workspace run
-skips; `scripts/ci/test-ci-storage-policy.py` requires such a run for every
-target like it. Install nextest with
+skips; any test target with a `required-features` outside the default set must
+be run with an explicit `--features` flag as shown above. Install nextest with
 `cargo install --locked cargo-nextest` (CI pins the version in the job). The
 lane uses the dev/test profile, which keeps debug assertions and overflow
 checks on; do not substitute a release profile.
 
 Cargo discovers each crate's `tests/*.rs` files itself, so adding a Rust test
 file needs no build-description edit; at most a `[[test]]` entry in the crate's
-`Cargo.toml` when the target needs a custom harness or features. `scripts/ci/test-ci-storage-policy.py`
-pins the lane's commands, and `scripts/ci/property-overlay-contract.py` checks
-that its filterset still selects the property-overlay scale evidence.
+`Cargo.toml` when the target needs a custom harness or features.

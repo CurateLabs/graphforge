@@ -149,8 +149,8 @@ cargo test --workspace
 # Rust: lint
 cargo clippy --workspace -- -D warnings
 
-# Full pre-push suite
-make pre-push
+# Static checks (format, lint, type-check, policy)
+make check
 ```
 
 ---

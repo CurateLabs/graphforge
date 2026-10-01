@@ -64,7 +64,7 @@ operational sequence and recovery boundary.
 cargo fmt --all -- --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
-make pre-push
+make check
 
 # Docs site (Starlight)
 pnpm docs:build

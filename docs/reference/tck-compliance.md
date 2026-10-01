@@ -82,8 +82,8 @@ temporary-storage contention.
 `tests/tck/performance_policy.json` and `tests/tck/performance_baseline.json` are legacy schema-2
 files from when the Cucumber timer was a threshold authority. They still load, with one
 `TCK PERF NOTICE: legacy diagnostic baseline …` line and no comparison. The #1654 consumer rejects
-them, and the Cucumber report, as diagnostic-substituted input. `scripts/ci/benchmark-measurement-policy.py`
-rejects threshold consumers in `crates/graphforge-api/tests/bdd/`.
+them, and the Cucumber report, as diagnostic-substituted input. Threshold consumers in `crates/graphforge-api/tests/bdd/` are forbidden by
+convention; any new Cucumber timer must be classified as diagnostic only.
 
 ### `make tck-perf`: the provenance-gated consumer
 
