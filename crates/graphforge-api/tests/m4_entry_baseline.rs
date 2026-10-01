@@ -1394,7 +1394,6 @@ fn build_evidence(
         "reproduction": {
             "short_ci": "cargo test -p graphforge-api --test m4_entry_baseline -- --nocapture",
             "large_manual": "make bench-m4-entry",
-            "contract_validate": "make m4-entry-matrix-check",
             "thread_parity": "cargo test -p graphforge-api --test m4_entry_baseline thread_parity_matrix_executes_under_resource_policy -- --nocapture",
         },
         "known_limitations": contract.get("known_limitations"),

@@ -2,15 +2,14 @@
 
 GraphForge uses one stable required `CI Gate`. Live default-branch enforcement
 is repository ruleset **19988544** (required status check context exactly
-`CI Gate`); workflow job naming alone is not sufficient — see
-`scripts/ci/verify-ci-gate-enforcement.py` (`--check-live` for maintainers).
+`CI Gate`); workflow job naming alone is not sufficient.
 A deterministic classifier runs only the policy, language, and binding jobs
 relevant to the pull request.
 
 `config/gate-registry.json` is the authoritative inventory for workflow and
 operator gates. It records class, owner, canonical command, evidence contract,
 freshness, and SHA binding. `scripts/ci/gate-registry.py` validates the registry
-in ordinary Repository Policy CI and renders commands for Make or operators.
+in the CI Lint job and renders commands for Make or operators.
 Every gate belongs to exactly one of four classes: required PR check, scheduled
 health/stress, operator qualification, or release certification. Supporting
 automation is inventoried with a non-gate role because it produces no gate
@@ -46,8 +45,7 @@ volumes so maturin, Cargo, and napi share one build volume for packaging lanes
 
 ### Blacksmith-first CI storage policy
 
-`scripts/ci/test-ci-storage-policy.py` encodes these rules (not the GitHub
-Actions cache-era bans that blocked RC speed):
+These rules apply (the earlier GitHub Actions cache-era bans blocked RC speed):
 
 | Allowed | Purpose |
 | --- | --- |
@@ -84,7 +82,7 @@ only when the platform supports them.
   ADR 0014 domain-dependency directions, and license compliance.
 - Documentation and packaging-metadata-only changes do not compile Rust or
   native bindings.
-- Rust changes run Cargo formatting/Clippy (`Rust Quality`) and the Cargo
+- Rust changes run the `Lint` job (Cargo formatting/Clippy) and the Cargo
   test lane (`Rust Tests`: `cargo nextest run --workspace --locked`, then the
   `bdd` and `disabled_allocations` custom-harness targets and the doctests under
   `cargo test --workspace --locked`). Rust test data (TCK features, goldens,
@@ -96,12 +94,13 @@ only when the platform supports them.
   translation, reserved-route adjacency/deletion, lazy stream isolation, and full
   and projected portable export/import/reopen through the Rust facade. Linux
   Rust Tests cannot execute those host-specific contracts.
-- Python, Gherkin, public binding, Pulumi static-validation, and Terraform
-  static-validation gates run only when their owned surfaces change. Shared
-  GraphForge configuration and infrastructure contract fixtures run both IaC
-  gates. Pull requests classify from their base SHA; pushes classify from the
-  event's prior SHA. Missing Git history fails safe by enabling every gate.
-- Ordinary binding PRs build one same-SHA Linux Python wheel and Node addon.
+- Python, Gherkin, public binding, agent-skills, Pulumi static-validation, and
+  Terraform static-validation gates run only when their owned surfaces change.
+  Shared GraphForge configuration and infrastructure contract fixtures run both
+  IaC gates. Pull requests classify from their base SHA; pushes classify from
+  the event's prior SHA. Missing Git history fails safe by enabling every gate.
+- Ordinary binding PRs build one same-SHA Linux Python wheel and Node addon,
+  and run the full binding suites (`Python and Node Bindings` job).
   They never use committed binaries or binding-side algorithm substitutes.
 - SHA-bound checkpoint and non-Cypher evidence are explicit **release
   certification** gates, not duplicate per-PR suites. Maintainers dispatch them
@@ -117,22 +116,28 @@ only when the platform supports them.
 
 ### `test.yml` — Test Suite
 
-Runs the change classifier, repository policy, and only the applicable Rust,
-Python, Gherkin, native binding, Pulumi, Terraform, or Rust test jobs.
+Jobs: **Classify Changes**, **Lint** (Cargo fmt/Clippy + Python quality +
+policy checks), **Rust Tests** (nextest over the workspace, custom-harness
+targets, doctests), **API and Executor Feature Boundary**, **Python and Node
+Bindings** (full binding suites on Linux, same-SHA wheel and addon),
+**Windows graphforge-storage Locks**, **macOS graphforge-storage Durability**,
+**Benchmark Harness**, **Agent Skills**, **Pulumi Static Validation**,
+**Terraform Static Validation**, and **CI Gate**.
+
 Pull-request native binding acceptance is Linux-only and uses Cargo's `dev`
-profile for maturin/napi assembly; the `Python Binding` and `Node Binding` jobs
-build, install, and smoke-test the same-SHA wheel and addon. The Rust test lane
-is `Rust Tests` (Cargo with nextest, dev/test profile, so debug assertions and
-overflow checks stay on). It also runs the offline progressive provider tests
-and the tiny and ownership-growth lifecycle producer against a Cargo-built `gf`.
-When Rust surfaces change, `Windows graphforge-storage Locks` runs the native
-project-root lock, exact filesystem primitive, NTFS admission, and real
-publication-kill/fault-oracle cross-checks on `blacksmith-4vcpu-windows-2025`.
-`macOS graphforge-storage Durability` runs the corresponding native APFS
-primitive, admission, and publication-kill cross-checks. Linux executes the same
-storage unit suite through `Rust Tests`. These platform jobs
-record actual subprocess/handle observations; the simulator does not stand in
-for native evidence.
+profile for maturin/napi assembly; `Python and Node Bindings` builds, installs,
+and runs the full binding suites against the same-SHA wheel and addon. The Rust
+test lane is `Rust Tests` (Cargo with nextest, dev/test profile, so debug
+assertions and overflow checks stay on). It also runs the offline progressive
+provider tests and the tiny and ownership-growth lifecycle producer against a
+Cargo-built `gf`. When Rust surfaces change, `Windows graphforge-storage Locks`
+runs the native project-root lock, exact filesystem primitive, NTFS admission,
+and real publication-kill/fault-oracle cross-checks on
+`blacksmith-4vcpu-windows-2025`. `macOS graphforge-storage Durability` runs the
+corresponding native APFS primitive, admission, and publication-kill
+cross-checks. Linux executes the same storage unit suite through `Rust Tests`.
+These platform jobs record actual subprocess/handle observations; the simulator
+does not stand in for native evidence.
 
 ### Behavioral acceptance
 
@@ -261,12 +266,12 @@ not run a second MSVC `graphforge-storage` release `cargo test` as Binding RC ev
 Windows `#[cfg(windows)]` project-root lock unit tests run in the Test Suite
 job `Windows graphforge-storage Locks` instead.
 
-### `Concurrency Matrix` job in `test.yml`
+### Concurrency tests in `test.yml`
 
-When Rust or binding surfaces change, the required short concurrency matrix runs
-the frozen Rust/Python/Node cases from
-`tests/contracts/concurrency-short-matrix.json` with a bounded timeout. Repository
-Policy always validates that matrix and the scheduled stress configuration.
+When Rust or binding surfaces change, the `Python and Node Bindings` job runs
+the full binding suites, which include concurrency test cases with bounded
+timeouts. The scheduled `concurrency-stress-gate.yml` runs the longer mixed
+workload.
 
 ### `concurrency-stress-gate.yml`
 
@@ -340,26 +345,22 @@ rows, docs/package URL resolve, optional checksum match against a
 `graphforge-release-record-v1` file). Preflight fails closed when the requested
 version is unpublished. Candidate v2 manifests and historical
 `graphforge-release-record-v1` files are both accepted for checksum lookup.
-Ordinary PRs run only the harness unit tests via
-Repository Policy — they never claim clean-env success against missing packages.
+Ordinary PRs run only the harness unit tests via the Lint job — they never
+claim clean-env success against missing packages.
 See [`docs/development/clean-environment-verification.md`](../../docs/development/clean-environment-verification.md).
 
 ## Local equivalents
 
-Default maintainer loop is `make pre-push-fast` (~30s). Run `make coverage-rust`
-when claiming coverage floors; PR CI does not enforce full llvm-cov. The Coverage workflow runs the same ledger on every
-merge to `main` and enforces all floors.
+Default maintainer loop is `make check` (~30s). Run `make coverage-rust`
+when claiming coverage floors; PR CI does not enforce full llvm-cov. The Coverage
+workflow runs the same ledger on every merge to `main` and enforces all floors.
 
 ```bash
-make pre-push-fast
-make cargo-check
-make cargo-clippy
-make cargo-test
-make cargo-fmt-check
-make workflow-lint
-scripts/ci/test-classify-changes.sh
-scripts/ci/check-domain-dependencies.py
-scripts/ci/test-domain-dependencies.py
+make check                          # all static checks (mirrors CI Lint)
+make test-rust                      # CI Rust lane (narrow: make test-rust ARGS="-p <crate>")
+make test-python                    # Python binding suites
+make test-node                      # Node binding suites
+make test-scripts                   # scripts/ci self-tests
 ```
 
 Cross-platform native matrices and release artifact builds remain CI-only. Run

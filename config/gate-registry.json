@@ -82,7 +82,8 @@
       "scripts/ci/test-publish-cli-contract.py"
     ],
     "repository-policy": [
-      "scripts/ci/require-gates.sh"
+      "make",
+      "check"
     ],
     "visualization-stress": [
       "python3",

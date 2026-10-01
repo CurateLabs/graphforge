@@ -203,7 +203,6 @@ export default defineConfig({
           items: [
             { label: 'Documentation map', slug: 'documentation' },
             { label: 'Contributing', slug: 'development/contributing' },
-            { label: 'Workflow', slug: 'development/workflow' },
             { label: 'Testing Strategy', slug: 'development/testing' },
             { label: 'Billion-edge certification', slug: 'development/g500-certification' },
             { label: 'Product roadmap', slug: 'releases/roadmap' },

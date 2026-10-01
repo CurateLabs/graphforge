@@ -7,7 +7,6 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
-import re
 import subprocess
 import sys
 import tempfile
@@ -211,26 +210,6 @@ class SourceSizePolicyTests(unittest.TestCase):
                 target.symlink_to(destination)
                 self.assertTrue(any("non-regular" in error for error in self.check()[1]))
                 target.unlink()
-
-    def test_repository_integration_is_unconditional(self):
-        repository = SCRIPT.parents[1]
-        workflow = (repository / ".github/workflows/test.yml").read_text()
-        job = re.search(r"^  policy:\n(.*?)(?=^  [\w-]+:|\Z)", workflow, re.M | re.S)
-        self.assertIsNotNone(job)
-        body = job.group(1)
-        self.assertNotRegex(body, r"(?m)^    if:")
-        steps = re.split(r"(?m)^      - ", body)
-        makefile = (repository / "Makefile").read_text()
-        recipe = re.search(r"^pre-push-fast:[^\n]*\n(.*?)(?=^\S|\Z)", makefile, re.M | re.S)
-        self.assertIsNotNone(recipe)
-        for command in [
-            "python3 scripts/source_size_policy.py",
-            "python3 scripts/ci/test-source-size-policy.py",
-        ]:
-            matching = [step for step in steps if command in step]
-            self.assertEqual(1, len(matching))
-            self.assertNotRegex(matching[0], r"(?m)^        if:")
-            self.assertIn("\t@" + command + "\n", recipe.group(1))
 
     def test_cli_reports_sorted_failures_and_inventory(self):
         for path in ["crates/z/src/a.rs", "crates/a/src/a.txt"]:

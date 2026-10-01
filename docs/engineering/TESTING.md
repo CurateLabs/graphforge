@@ -14,8 +14,8 @@ local (or coverage-sensitive) honesty tool — **PR CI does not run full coverag
 The **Coverage** workflow runs the same ledger on every merge to `main` and fails
 on a breached floor, so drift surfaces within one merge rather than at release
 time. Repository policy keeps full `llvm-cov` out of pull-request CI, where its
-cost would be paid on every review cycle; `scripts/ci/test-coverage-rust.sh`
-enforces that and fails closed.
+cost would be paid on every review cycle; coverage is excluded from
+pull-request workflows by the `coverage-baseline.yml` trigger condition.
 
 This page is the **v0.5.0 / release-prep testing strategy** that shipped on
 `main`: how layers compose, what each gate proves, and what does not count as
@@ -24,14 +24,13 @@ end-to-end evidence. Command recipes and historical suite layout live in
 in [`.github/workflows/README.md`](../../.github/workflows/README.md).
 
 Benchmark measurement authority (BenchExec vs Divan vs diagnostic-only phase
-timing) is defined in [`../development/benchmarking.md`](../development/benchmarking.md)
-and enforced from `config/benchmark-measurement-inventory.json`.
+timing) is defined in [`../development/benchmarking.md`](../development/benchmarking.md).
 
 ## Dual-track objectives (PR / publish-track / human close)
 
 | Surface | Objective | Required when | Wall-clock target | Must keep | Shed / defer |
 | --- | --- | --- | --- | --- | --- |
-| `pre-push-fast` | Policy/format | Local habit | ~30s | lint/license/workflow | Full coverage |
+| `make check` | Policy/format | Local habit | ~30s | lint/license/workflow | Full coverage |
 | PR Test Suite + CI Gate | Changed-surface correctness | Every PR → `main` | ≤10m p50 / ≤12m p95 | Classifier, same-SHA Linux bindings, workspace tests, Gate | Multi-OS, load, llvm-cov, Binding RC |
 | `make coverage-rust` | Honest floors | Coverage-sensitive changes / floor claims | ≤20m p50 local | Hash/runtime/ledger; real acceptance | HTML by default |
 | Coverage | Floor drift detection | Every merge → `main` | ≤180m ceiling | Every floor, and the recorded baseline | Running on pull requests |
@@ -75,19 +74,16 @@ The shared scenarios in `tests/features/api/` have two execution classes:
   are not duplicated in Gherkin.
 - **Product-excluded:** `@excluded-api-bdd` or
   `@excluded-node-api-bdd` identifies behavior that has a confirmed product
-  defect. The scenario must appear in
-  `tests/contracts/api-bdd-exclusions.json`, carry exactly one matching open
-  `@issue-N` reference, and contributes only to the excluded total—never the
-  passing total.
+  defect. The scenario must carry exactly one matching open `@issue-N`
+  reference and contributes only to the excluded total—never the passing
+  total.
 
-`scripts/ci/api-bdd-policy.py` validates the corpus and writes
-`target/api-bdd-policy.json` as machine-readable classification evidence. Its
-counts require all in-scope API scenarios to run in Rust and require zero
-Python/Node API scenarios. Policy mutation tests reject stale inventory rows,
-untracked exclusions, language skip tags, xfail conversion, pending Node steps,
-and manufactured Rust errors. BDD mutation sentinels separately prove that wrong row
-counts, missing columns, wrong values, wrong error classes, and
-`NotImplementedError` all produce failing test processes.
+The classification tags (`@excluded-api-bdd`, `@excluded-node-api-bdd`,
+`@issue-N`) are enforced by convention: every excluded scenario must carry
+exactly one matching open `@issue-N` reference and must not appear in the
+passing total. BDD mutation sentinels prove that wrong row counts, missing
+columns, wrong values, wrong error classes, and `NotImplementedError` all
+produce failing test processes.
 
 This fail-closed public API model does not change the openCypher TCK. The TCK
 continues to use its separately documented advisory passing-set baseline.
@@ -584,14 +580,14 @@ weakened assertions (`AGENTS.md`).
 | Contract gates | Non-Cypher public surface inventory + evidence | `scripts/ci/non-cypher-surface-gate.py`, surface-gate workflows |
 | Agent skills | Offline pack/install, compatibility, schema fail-closed | `pnpm test:agent-skills`, `pnpm smoke:agent-skills` |
 | Scale posture | Fixed-hop `LIMIT` materialization bounds | `make bench-fixed-hop-limit` (shape gate; see scale-limits) |
-| Policy / docs | Format, lint, license, docs build | `make pre-push`, `.github/workflows/docs.yml` |
+| Policy / docs | Format, lint, license, docs build | `make check`, `.github/workflows/docs.yml` |
 
 ## Behavior coverage
 
 PR CI does **not** enforce full `llvm-cov` floors, by design. Use
 `make coverage-rust` locally (or when claiming floor changes). Default maintainer
-loop is `make pre-push-fast`; run full `make coverage` / `make pre-push` when the
-changed surface needs coverage honesty.
+loop is `make check`; run `make coverage-rust` when the changed surface needs
+coverage honesty.
 
 The floors are enforced by the **Coverage** workflow
 (`.github/workflows/coverage-baseline.yml`).
@@ -604,10 +600,10 @@ and would measure an empty patch.
 Runs never cancel. An earlier draft cancelled in-progress runs, which on a day
 with 21 merges would have left the baseline unmeasured entirely.
 
-Coverage does not run on pull requests. That is policy, not omission, and
-`scripts/ci/test-coverage-rust.sh` refuses any workflow a pull request can
-trigger that invokes it. The trade is deliberate: pull-request cycles stay fast,
-and the floors are enforced one merge later instead of never.
+Coverage does not run on pull requests. That is policy, not omission — the
+Coverage workflow's trigger is `push` to `main`, never `pull_request`. The trade
+is deliberate: pull-request cycles stay fast, and the floors are enforced one
+merge later instead of never.
 
 ### Rust coverage evidence
 
@@ -678,19 +674,17 @@ unfiltered because their functional runtime suites are the measured surface.
 ## Running the tests
 
 ```bash
-# Default maintainer loop (policy/format; ~30s)
-make pre-push-fast
+# Default loop: static checks for every surface (~30s)
+make check
 
 # Changed-surface validation
 cargo fmt --all -- --check
 cargo clippy --workspace -- -D warnings
-cargo test --workspace
+make test-rust                     # CI Rust lane (narrow: make test-rust ARGS="-p <crate>")
 make test-tck
 
 # Coverage-sensitive changes / floor claims (local; not PR CI)
 make coverage-rust
-# Full local gate when needed
-make pre-push
 
 # Non-Cypher surface (Rust)
 python3 scripts/ci/non-cypher-surface-gate.py
@@ -744,7 +738,7 @@ cargo mutants --file <path/to/module.rs> --package <crate> -- --tests
 Always scope it to the module a change touches. A workspace-wide run rebuilds
 and retests once per mutant and does not finish at this size; one module is
 minutes. Tests that write project directories need `TMPDIR` on a filesystem the
-admission policy accepts, the same as the native pre-push runs, because the
+admission policy accepts, the same as CI test runs, because the
 default temporary directory is refused as `filesystem_class_unproven`.
 
 Report the score and every surviving mutant. A survivor is either killed by a

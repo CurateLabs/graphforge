@@ -47,7 +47,6 @@ ledger and does not block M4.
 
 ```bash
 git rev-parse HEAD   # expect 53b369598ba748144b531a50dbed34de36bef0f2 on the accepted tip
-make m4-entry-matrix-check
 cargo test -p graphforge-api --test m4_entry_baseline -- --nocapture --test-threads=1
 cargo test -p graphforge-api --test file_backed_graph_generation -- --test-threads=1
 GF_M4_ENTRY_EVIDENCE_OUT=docs/development/m4-exit-evidence.json \
@@ -58,7 +57,6 @@ make bench-file-backed-128m
 
 Short CI surfaces on this tip:
 
-- `make m4-entry-matrix-check` — OK
 - `cargo test -p graphforge-api --test m4_entry_baseline` — 6 passed, 1 ignored (large manual)
 
 ## Structural outcomes (not wall-clock)

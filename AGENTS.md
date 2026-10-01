@@ -40,22 +40,24 @@ See `docs/book/architecture/`.
 
 ## Validation
 
-Use targeted checks while iterating; run the gates for the changed surface before pushing.
+Iterate on the narrowest test that covers the change. Run `make check` before pushing. CI runs the full suite on every PR; do not reproduce it locally unless a CI failure needs it.
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --workspace -- -D warnings
-make pre-push-fast   # Python/policy/inventory checks; not Rust fmt or clippy
-make pre-push
+make check                                    # fmt, clippy, ruff, mypy, workflow lint, repo checks; no tests
+make test-rust ARGS="-p graphforge-storage"   # the CI Rust lane, narrowed to what changed
+make test-python                              # every Python binding suite, after rebuilding the wheel
+make test-node                                # every Node binding suite, after rebuilding the addon
 ```
 
-Cargo with nextest is the CI compile/test authority (ADR 0048). The CI Gate Rust lane is the `rust-tests` job in `.github/workflows/test.yml`; `docs/development/agent-environment.md` gives its exact local commands. Adding a Rust test file needs no edit beyond Cargo. After changing Rust, rebuild the native bindings before running Python or Node tests (commands in the same doc).
+Cargo with nextest is the CI compile/test authority (ADR 0048). `.github/workflows/test.yml` is the whole PR gate: lint, the Rust suite, the lean feature builds, the bindings built from the same tree, and the platform storage tests. Adding a Rust test file needs no edit beyond Cargo. After changing Rust, rebuild the native bindings before running Python or Node tests (commands in `docs/development/agent-environment.md`).
+
+A check belongs in the PR gate only if it lints, builds, or tests product code. Do not add checks whose subject is a workflow, a ledger, an inventory, or another check, and do not add a lane that re-runs tests another lane already runs.
 
 Run formatting after the final edit. Review intentional snapshot changes before accepting them. Keep native builds isolated with `CARGO_TARGET_DIR`; run at most two heavy builds concurrently and monitor disk.
 
 ## PR gate
 
-`config/gate-registry.json` is the machine-readable gate authority. Its sole required PR status is `github-status/CI Gate` with `sha_rule=exact_head`, matching repository ruleset 19988544. Scheduled stress, operator qualification, and release certification evidence are not required PR checks. Validate registry changes with `make gate-registry-check`.
+The sole required PR status is `CI Gate`, the last job of `.github/workflows/test.yml`, enforced by repository ruleset 19988544. Scheduled stress, operator qualification, and release certification lanes are not required PR checks; `config/gate-registry.json` lists them and `make check` validates it.
 
 Merge only when:
 

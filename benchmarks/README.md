@@ -1,8 +1,7 @@
 # External benchmark workspace
 
 Repository-wide measurement policy (BenchExec vs Divan vs diagnostic-only
-timings) lives in [`docs/development/benchmarking.md`](../docs/development/benchmarking.md)
-with the checked-in inventory at `config/benchmark-measurement-inventory.json`.
+timings) lives in [`docs/development/benchmarking.md`](../docs/development/benchmarking.md).
 
 This directory contains two deliberately independent benchmark toolchains:
 
