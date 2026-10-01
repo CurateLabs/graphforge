@@ -6019,8 +6019,13 @@ fn validate_fresh_cas_control_bound(
     let minimum_requests = paths
         .checked_add(1)
         .ok_or("CAS minimum request bound overflows")?;
+    // Fresh control bytes are SHA-authenticated by their resident-byte writer;
+    // only reused objects (including concurrent winners) require a file read.
+    // Windows additionally authenticates fresh sealed handles, which can exceed
+    // this portable minimum. Keep actual I/O receipts separate from SHA inputs.
     if requests < minimum_requests
-        || io.manifest.read_calls < requests
+        || io.manifest.read_calls < io.manifest.reused_objects
+        || io.manifest.write_calls < io.manifest.installed_objects
         || io.manifest_reads.read_calls < paths
     {
         return Err("CAS manifest work is below mandatory bootstrap/update authentication".into());
@@ -6985,7 +6990,8 @@ fn cas_control_proof_accepts_path_variation_and_rejects_coherent_overcounts() {
         let io = &mut observation.cas_publication_io;
         io.manifest.installed_objects = installed;
         io.manifest.install_attempts = installed;
-        io.manifest.read_calls = installed + io.manifest.reused_objects;
+        // The Unix fresh writer needs no redundant file authentication pass.
+        io.manifest.read_calls = io.manifest.reused_objects;
         io.manifest.write_calls = installed;
         io.manifest.file_fsync_calls = installed;
         io.manifest.directory_fsync_calls = 2 * installed;
@@ -7004,6 +7010,20 @@ fn cas_control_proof_accepts_path_variation_and_rejects_coherent_overcounts() {
         );
     }
     validate_lifecycle_metric_policies(&observations).unwrap();
+    let mut missing_fresh_write = observations[0].clone();
+    missing_fresh_write.cas_publication_io.manifest.write_calls = 0;
+    assert!(
+        validate_fresh_cas_control_bound(&missing_fresh_write)
+            .unwrap_err()
+            .contains("mandatory bootstrap")
+    );
+    let mut missing_reuse_read = observations[0].clone();
+    missing_reuse_read.cas_publication_io.manifest.read_calls -= 1;
+    assert!(
+        validate_fresh_cas_control_bound(&missing_reuse_read)
+            .unwrap_err()
+            .contains("mandatory bootstrap")
+    );
     let mut missing_manifest = observations[0].clone();
     missing_manifest.cas_publication_io.manifest = Default::default();
     missing_manifest.cas_publication_io.manifest_reads = Default::default();
