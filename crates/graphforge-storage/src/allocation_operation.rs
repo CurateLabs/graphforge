@@ -4,7 +4,7 @@
 //! never an event history. Writers report actual file facts at their existing
 //! installation/removal boundaries. No process-global observer is installed.
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use sha2::Digest;
 use std::collections::BTreeMap;
 use std::fs::File;

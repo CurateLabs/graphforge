@@ -68,6 +68,16 @@ pub struct GraphObjectPublicationLease {
     lease_name: std::ffi::OsString,
     lease_identity: graphforge_filesystem::FileIdentity,
     file: Option<File>,
+    installed_objects: std::sync::Mutex<BTreeMap<String, CapturedGraphObject>>,
+}
+
+// Minted only after the installer authenticates and durably installs the actual
+// final inode. Public install evidence and caller metadata cannot create one.
+#[derive(Clone, Copy)]
+struct CapturedGraphObject {
+    identity: graphforge_filesystem::FileIdentity,
+    byte_length: u64,
+    content_xxh64: u64,
 }
 
 struct HeldCasLocks<'a> {
@@ -490,6 +500,42 @@ impl GraphObjectPublicationLease {
         validate_publication_identity(self)
     }
 
+    /// Admit an object using the identity captured by this exact installation
+    /// lease. Keep only scalar identities, so a large import does not retain one
+    /// file descriptor per object. Reopening still checks inode and checksum.
+    pub(crate) fn admit_captured_object(
+        &self,
+        entry: &crate::GraphFileEntry,
+    ) -> Result<bool, GfError> {
+        let capture = self
+            .installed_objects
+            .lock()
+            .map_err(|_| validation("graph object installation authority poisoned"))?
+            .get(&entry.content_sha256)
+            .copied();
+        let Some(capture) = capture else {
+            return Ok(false);
+        };
+        if capture.byte_length != entry.byte_length || capture.content_xxh64 != entry.content_xxh64
+        {
+            return Ok(false);
+        }
+        self.cas.revalidate_named()?;
+        let file = self.cas.open_digest(&entry.content_sha256)?;
+        if graphforge_filesystem::file_identity(&file).map_err(|error| {
+            storage(
+                "identify captured graph object",
+                &self.cas.diagnostic_root,
+                error,
+            )
+        })? != capture.identity
+        {
+            return Err(validation("captured graph object identity changed"));
+        }
+        admit_checksum_file(file, entry, &self.cas.diagnostic_root)?;
+        Ok(true)
+    }
+
     pub(crate) fn revalidate_for_root(&self, root: &Path) -> Result<(), GfError> {
         let requested_root = crate::filesystem_admission::open_directory_handle(root)
             .map_err(|error| storage("open requested graph object root", root, error))?;
@@ -553,6 +599,7 @@ pub fn begin_graph_object_publication(root: &Path) -> Result<GraphObjectPublicat
         lease_name,
         lease_identity,
         file: Some(file),
+        installed_objects: std::sync::Mutex::new(BTreeMap::new()),
     })
 }
 
@@ -975,14 +1022,57 @@ pub fn verify_graph_object(root: &Path, digest: &str, expected_length: u64) -> R
     verify_file(cas.open_digest(digest)?, digest, expected_length, root)
 }
 
+/// Authenticate a newly supplied SHA address and its checksum in the same read.
+/// A checksum from a caller's new inventory cannot establish the SHA identity.
+pub(crate) fn authenticate_graph_object_entry(
+    root: &Path,
+    entry: &crate::GraphFileEntry,
+) -> Result<(), GfError> {
+    let cas = ReadOnlyCasRoot::open(root)?;
+    let io = verify_file_counted(
+        cas.open_digest(&entry.content_sha256)?,
+        &entry.content_sha256,
+        entry.byte_length,
+        root,
+    )?;
+    if io.content_xxh64 != Some(entry.content_xxh64) {
+        return Err(validation(
+            "graph payload XXH64 checksum does not match its inventory",
+        ));
+    }
+    Ok(())
+}
+
 /// Admit a payload under its required corruption checksum and exact length.
 pub(crate) fn admit_graph_object(
     root: &Path,
     entry: &crate::GraphFileEntry,
 ) -> Result<(), GfError> {
-    let expected = entry.content_xxh64;
     let cas = ReadOnlyCasRoot::open(root)?;
-    let file = cas.open_digest(&entry.content_sha256)?;
+    admit_checksum_file(cas.open_digest(&entry.content_sha256)?, entry, root)
+}
+
+/// Admit a payload by checksum while the publication lease pins its CAS root.
+/// CAS names were authenticated when each object was installed; the commit
+/// boundary refuses corruption by exact length and XXH64 without re-hashing.
+pub(crate) fn admit_graph_object_with_lease(
+    lease: &GraphObjectPublicationLease,
+    entry: &crate::GraphFileEntry,
+) -> Result<(), GfError> {
+    lease.cas.revalidate_named()?;
+    admit_checksum_file(
+        lease.cas.open_digest(&entry.content_sha256)?,
+        entry,
+        &lease.cas.diagnostic_root,
+    )
+}
+
+fn admit_checksum_file(
+    file: File,
+    entry: &crate::GraphFileEntry,
+    root: &Path,
+) -> Result<(), GfError> {
+    let expected = entry.content_xxh64;
     let metadata = file
         .metadata()
         .map_err(|error| storage("inspect checksum payload", root, error))?;
@@ -1020,20 +1110,6 @@ pub(crate) fn admit_graph_object(
     );
     crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
     Ok(())
-}
-
-pub(crate) fn verify_graph_object_with_lease(
-    lease: &GraphObjectPublicationLease,
-    digest: &str,
-    expected_length: u64,
-) -> Result<(), GfError> {
-    lease.cas.revalidate_named()?;
-    verify_file(
-        lease.cas.open_digest(digest)?,
-        digest,
-        expected_length,
-        &lease.cas.diagnostic_root,
-    )
 }
 
 /// Read an object whose digest is known before its declared logical length.
@@ -1092,10 +1168,13 @@ pub(crate) fn begin_graph_object_read(root: &Path) -> Result<GraphObjectReadLeas
 
 impl GraphObjectReadLease {
     /// Authenticate only a construction compaction input, retaining its CAS lease.
+    /// Pin one construction input by its CAS address and admit it by exact
+    /// length and XXH64. The CAS name was authenticated at installation.
     pub(crate) fn open_for_construction(
         &self,
         digest: &str,
         expected_length: u64,
+        expected_xxh64: u64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<
         (
@@ -1127,7 +1206,7 @@ impl GraphObjectReadLease {
                 storage("bound construction input", &self.cas.diagnostic_root, error)
             })?;
         let mut totals = GraphObjectIoTotals::default();
-        let mut digest_state = Sha256::new();
+        let mut checksum = crate::corruption_checksum::Checksum::new();
         let mut buffer = vec![0; 64 * 1024];
         let verified = (|| {
             loop {
@@ -1152,13 +1231,11 @@ impl GraphObjectReadLease {
                     .read_calls
                     .checked_add(1)
                     .ok_or_else(|| validation("construction read calls overflow"))?;
-                digest_state.update(&buffer[..count]);
+                checksum.update(&buffer[..count]);
             }
-            if totals.read_bytes != expected_length
-                || hex_digest(digest_state.finalize().into()) != digest
-            {
+            if totals.read_bytes != expected_length || checksum.finish() != expected_xxh64 {
                 return Err(validation(
-                    "construction object digest does not match its address",
+                    "construction object checksum does not match its inventory",
                 ));
             }
             Ok(())
@@ -1194,7 +1271,27 @@ impl GraphObjectReadLease {
         digest: &str,
         expected_length: u64,
     ) -> Result<AuthenticatedGraphObject, GfError> {
-        open_graph_object_with_read_lease(self, digest, expected_length)
+        open_graph_object_with_read_lease(
+            self,
+            digest,
+            expected_length,
+            graphforge_core::hash_observation::HashDomain::ArtifactPayload,
+        )
+    }
+
+    /// Authenticate a portable source with the same full SHA and descriptor
+    /// checks as generic CAS admission, attributing the actual transport work.
+    pub(crate) fn open_for_portable(
+        &self,
+        digest: &str,
+        expected_length: u64,
+    ) -> Result<AuthenticatedGraphObject, GfError> {
+        open_graph_object_with_read_lease(
+            self,
+            digest,
+            expected_length,
+            graphforge_core::hash_observation::HashDomain::PortableAuthentication,
+        )
     }
 
     /// Open one immutable CAS object for identity and space attribution only.
@@ -1363,6 +1460,7 @@ fn open_graph_object_with_read_lease(
     lease: &GraphObjectReadLease,
     digest: &str,
     expected_length: u64,
+    domain: graphforge_core::hash_observation::HashDomain,
 ) -> Result<AuthenticatedGraphObject, GfError> {
     let mut file = lease.cas.open_digest(digest)?;
     let metadata = file.metadata().map_err(|error| {
@@ -1382,7 +1480,7 @@ fn open_graph_object_with_read_lease(
     {
         return Err(validation("graph object authority changed"));
     }
-    let mut hasher = Sha256::new();
+    let mut hasher = graphforge_core::hash_observation::ObservedSha256::for_domain(domain);
     let mut block = vec![0_u8; 1 << 20];
     let mut authenticated = ReadIoEvidence::default();
     loop {
@@ -1550,13 +1648,22 @@ fn read_graph_object_by_digest_file_counted_in_domain(
     Ok((bytes, io))
 }
 
-pub(crate) fn read_graph_object_by_digest_with_lease(
+/// Authenticate only graph manifest nodes or semantic route control tables
+/// while the publication lease pins the CAS root.
+pub(crate) fn read_graph_control_object_by_digest_with_lease(
     lease: &GraphObjectPublicationLease,
     digest: &str,
     max_length: u64,
 ) -> Result<Vec<u8>, GfError> {
     lease.cas.revalidate_named()?;
-    read_graph_object_by_digest_from_cas(&lease.cas, digest, max_length)
+    read_graph_object_by_digest_file_counted_in_domain(
+        lease.cas.open_digest(digest)?,
+        digest,
+        max_length,
+        &lease.cas.diagnostic_root,
+        graphforge_core::hash_observation::HashDomain::ControlAuthentication,
+    )
+    .map(|(bytes, _)| bytes)
 }
 
 fn checked_read_io_sum(
@@ -1598,6 +1705,22 @@ fn verify_file_counted(
     expected_length: u64,
     diagnostic: &Path,
 ) -> Result<ReadIoEvidence, GfError> {
+    verify_file_counted_in_domain(
+        file,
+        digest,
+        expected_length,
+        diagnostic,
+        graphforge_core::hash_observation::HashDomain::ArtifactPayload,
+    )
+}
+
+fn verify_file_counted_in_domain(
+    file: File,
+    digest: &str,
+    expected_length: u64,
+    diagnostic: &Path,
+    domain: graphforge_core::hash_observation::HashDomain,
+) -> Result<ReadIoEvidence, GfError> {
     let metadata = file
         .metadata()
         .map_err(|error| storage("inspect graph object handle", diagnostic, error))?;
@@ -1608,7 +1731,7 @@ fn verify_file_counted(
     }
     let mut file = graphforge_filesystem::FileCacheReleasingReader::new(file)
         .map_err(|error| storage("open bounded graph object handle", diagnostic, error))?;
-    let mut hasher = crate::payload_digest::PayloadSha256::new();
+    let mut hasher = crate::payload_digest::PayloadSha256::for_domain(domain);
     let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut io = ReadIoEvidence::default();
     let mut buffer = vec![0_u8; BUFFER_BYTES];
@@ -1682,7 +1805,23 @@ fn verify_stream_counted(
     expected_length: u64,
     diagnostic: &Path,
 ) -> Result<ReadIoEvidence, GfError> {
-    let mut hasher = crate::payload_digest::PayloadSha256::new();
+    verify_stream_counted_in_domain(
+        file,
+        digest,
+        expected_length,
+        diagnostic,
+        graphforge_core::hash_observation::HashDomain::ArtifactPayload,
+    )
+}
+
+fn verify_stream_counted_in_domain(
+    file: &mut impl Read,
+    digest: &str,
+    expected_length: u64,
+    diagnostic: &Path,
+    domain: graphforge_core::hash_observation::HashDomain,
+) -> Result<ReadIoEvidence, GfError> {
+    let mut hasher = crate::payload_digest::PayloadSha256::for_domain(domain);
     let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut total = 0_u64;
     let mut calls = 0_u64;
@@ -1811,12 +1950,13 @@ pub(crate) use gc::gc_graph_objects_with_evidence_guarded;
 pub(crate) use gc::{
     capture_retained_graph_object_identities, capture_retained_graph_object_identities_observed,
 };
+use installation::install_graph_manifest_node_with_lease;
 #[allow(
     unused_imports,
     reason = "preserve the existing staged CAS root API across feature and test configurations"
 )]
 pub use installation::install_graph_object_bytes;
-use installation::install_graph_object_bytes_with_lease;
+
 #[allow(
     unused_imports,
     reason = "preserve the existing staged CAS root API across feature and test configurations"

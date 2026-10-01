@@ -18,7 +18,7 @@ pub(crate) use semantic_validation::{
     decode_runtime_map, validate_materialized_ontology_composition,
 };
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
+use graphforge_core::hash_observation::{ContractSha256, ControlSha256, PortableSha256 as Sha256};
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
@@ -223,7 +223,7 @@ fn admit_manifest(bytes: &[u8], limits: PortableV2Limits) -> Result<Manifest, Po
     let (manifest, canonical_without_digest) = parse_manifest(bytes, limits)?;
     let expected = format!(
         "sha256:{}",
-        hex(&Sha256::digest(
+        hex(&ControlSha256::digest(
             [
                 b"graphforge-project/2\0".as_slice(),
                 canonical_without_digest.as_slice()
@@ -662,7 +662,7 @@ fn verify_bundle(
                 PortableV2Error::new(PortableV2ErrorCode::InvalidPath, "PAX path is not UTF-8")
             })?;
             let pax_path = parse_pax(text)?;
-            let suffix = &hex(&Sha256::digest(pax_path.as_bytes()))[..16];
+            let suffix = &hex(&ContractSha256::digest(pax_path.as_bytes()))[..16];
             if raw_path != format!("PaxHeaders/{suffix}") {
                 return Err(PortableV2Error::new(
                     PortableV2ErrorCode::InvalidStructure,
@@ -780,7 +780,7 @@ fn validate_package(
     let (manifest, canonical_without_digest) = parse_manifest(&manifest_bytes, limits)?;
     let expected = format!(
         "sha256:{}",
-        hex(&Sha256::digest(
+        hex(&ControlSha256::digest(
             [
                 b"graphforge-project/2\0".as_slice(),
                 canonical_without_digest.as_slice()
@@ -1116,7 +1116,7 @@ fn parse_digest_manifest(
 }
 
 fn expanded_transport(entries: &[Entry]) -> Result<String, PortableV2Error> {
-    let mut hash = Sha256::new();
+    let mut hash = ContractSha256::new();
     hash.update(b"graphforge-expanded/2\0");
     for e in entries
         .iter()
@@ -1139,7 +1139,7 @@ fn require_exact(
     let e = map.get(path).ok_or_else(|| {
         PortableV2Error::at(PortableV2ErrorCode::InvalidStructure, path, "missing tag")
     })?;
-    if e.length != expected.len() as u64 || e.digest != Sha256::digest(expected)[..] {
+    if e.length != expected.len() as u64 || e.digest != ControlSha256::digest(expected)[..] {
         return Err(PortableV2Error::at(
             PortableV2ErrorCode::DigestMismatch,
             path,

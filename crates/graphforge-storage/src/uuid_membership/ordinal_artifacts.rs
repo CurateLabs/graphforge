@@ -1104,8 +1104,12 @@ fn merge_construction_v4_delta(
         .filter(|artifact| first_consumed.is_some_and(|first| artifact.generation >= first))
     {
         construction_ordinal_event("pin", descriptor.generation);
-        let (object, io, cache) =
-            lease.open_for_construction(&descriptor.sha256, descriptor.bytes, cancelled)?;
+        let (object, io, cache) = lease.open_for_construction(
+            &descriptor.sha256,
+            descriptor.bytes,
+            descriptor.xxh64,
+            cancelled,
+        )?;
         read_bytes = read_bytes
             .checked_add(io.read_bytes)
             .ok_or_else(|| storage_err("ordinal authentication bytes overflow"))?;

@@ -10,26 +10,38 @@ pub use graphforge_core::hash_observation::operation::{
     Snapshot as PayloadDigestSnapshot,
 };
 
-pub(crate) struct PayloadSha256(Sha256);
+pub(crate) struct PayloadSha256(Sha256, #[cfg(test)] bool);
 
 impl PayloadSha256 {
     pub(crate) fn new() -> Self {
-        Self(Sha256::for_domain(
-            graphforge_core::hash_observation::HashDomain::ArtifactPayload,
-        ))
+        Self::for_domain(graphforge_core::hash_observation::HashDomain::ArtifactPayload)
+    }
+
+    /// Stream file payload bytes into an identity of the caller's domain. Only
+    /// artifact-payload identities count toward the payload hashing total.
+    pub(crate) fn for_domain(domain: graphforge_core::hash_observation::HashDomain) -> Self {
+        Self(
+            Sha256::for_domain(domain),
+            #[cfg(test)]
+            {
+                domain == graphforge_core::hash_observation::HashDomain::ArtifactPayload
+            },
+        )
     }
 
     pub(crate) fn update(&mut self, bytes: impl AsRef<[u8]>) {
         let bytes = bytes.as_ref();
         #[cfg(test)]
-        HASHED_BYTES.with(|count| {
-            count.set(
-                count
-                    .get()
-                    .checked_add(bytes.len() as u64)
-                    .expect("test payload hash byte count overflow"),
-            )
-        });
+        if self.1 {
+            HASHED_BYTES.with(|count| {
+                count.set(
+                    count
+                        .get()
+                        .checked_add(bytes.len() as u64)
+                        .expect("test payload hash byte count overflow"),
+                )
+            });
+        }
         self.0.update(bytes);
     }
 

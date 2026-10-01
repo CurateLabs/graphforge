@@ -29,7 +29,7 @@ use super::shape::{
 use super::{
     ArtifactReceipt, Checkpoint, GfError, GraphConstructionBudgets, IdentityRecord,
     MAX_SHAPE_CONTROL_BYTES, OsStr, StableDirectory, Uuid, control_sha256, decode_bounded,
-    install_control, is_canonical_sha256, read_bounded_limit, storage,
+    install_control, is_canonical_lower_hex, is_canonical_sha256, read_bounded_limit, storage,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -319,7 +319,7 @@ fn validate_shape_stage(stage: &ShapeStage, checkpoint: &Checkpoint) -> Result<(
         || !stage
             .outputs
             .iter()
-            .all(|output| is_canonical_sha256(&output.sha256))
+            .all(|output| is_canonical_lower_hex(&output.xxh64, 16))
         || (stage.stage != ShapeStageKind::ResolvedRouted && !stage.rows.is_empty())
         || (stage.stage != ShapeStageKind::Assigned
             && (stage.new_nodes != 0 || stage.new_edges != 0))
@@ -532,7 +532,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let partitions = 4096;
+        let partitions = 6000;
         let segments = (0..partitions)
             .map(|partition| ArtifactReceipt {
                 name: fixed_spill_name(

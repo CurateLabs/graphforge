@@ -186,14 +186,42 @@ python3 scripts/development/digest-census.py --repo . --output /tmp/gf-digest-ce
 
 The method and reviewed classification inputs are pinned by SHA-256:
 `digest-census.py` is
-`066813e6666c1a77782402cee7ae957b450ccd47a7e14874c4e47b996aabb0eb`;
+`640e8221d88c8065f9e60aa0e9182545c3e43b52bbb9618c885717d5d3b2f1ba`;
 `digest-census-overrides.json` is
-`7e6904dfc1a3cbcf9b06bcd69e046aa7ac3b40c4b1cfa88c1ea3d8b48f236553`.
+`bdde8cff097b818265a49ebcfa1876e8b7f48a67306b218a1b2b1016a24533bc`.
+The parser fixture `test-digest-census.py` is
+`77224ebc214e8c8793baced7d105bdc576cd0015feb436a0af701260998a48f1`.
 Run the parser and stale-review regression fixtures with
 `python3 scripts/development/test-digest-census.py`. Reviewed function bodies
 are pinned individually; changed inputs, added producers in the same function,
 missing review pins, and unknown digest algorithms make a strict run fail.
 Refresh a classification only after reviewing its actual inputs and consumers.
+
+Compact publication reuses a payload identity only from the authenticated
+published parent or from a successful installation captured privately by its
+CAS lease. A caller's new checksum cannot authenticate an existing SHA address:
+unknown or mismatched entries receive a genuine SHA and checksum pass. Private
+install captures bind the actual final inode, length and checksum, including a
+concurrent installation winner. Their bounded scalar registry keeps no per-file
+handles. Publication still checks payload corruption under the lease before
+changing `CURRENT`; the registry grants no authority after a failed install.
+
+Radix manifest installation selects control authentication only through a
+private typed `GraphManifestNode` helper, after structural validation, canonical
+encoding and the existing node byte limit. Generic byte and file installers
+retain artifact accounting. The selected domain follows genuine SHA verification
+through existing-object reuse, concurrent installation and platform sealing;
+CAS names and refusal checks remain identical. Shared producers are classified
+by their callers, and typed wrappers add no extra hash pass.
+
+Private construction checkpoint wire 11 binds intermediate spill receipts by
+exact length and mandatory seed-zero XXH64. Spill writers and resume admission
+count checksum work separately and perform no SHA pass at those boundaries.
+Published UUID wire 6 and ordinal descriptor wire 5 remain unchanged here.
+Encoding still counts the full raw identity-run SHA as artifact work and forwards
+its genuine digest to the existing topology receipt. Control SHA covers the
+private intent, shape, progress and encoding-inventory metadata, including their
+expected checksums.
 
 The method records the source revision, source-file SHA-256 digests, the working
 diff digest when present, and digests of the method and semantic override inputs.
@@ -205,17 +233,21 @@ Production producer sites exclude test-only items and descendants. A constructor
 or static digest invocation is a producer site; calls into a digest-owning helper
 form a separate delegate population. Do not add wrapper levels to infer runtime
 passes. The semantic input and consumer, rather than an alias name, determine
-classification: durable artifact/trust-boundary work, contract identity, or
-optional evidence. Required control authentication is recorded separately within
-the trust-boundary category. Mixed helpers list their input-specific callers.
+classification: durable artifact identity, contract identity, optional evidence,
+control authentication, or portable authentication. Complete portable archive and
+member cryptographic inputs have their own class; bounded control documents and
+canonical selection tuples retain their actual control or contract classes.
+Mixed helpers list their input-specific callers.
 The method refuses unresolved or stale classifications by default and records
 its lexical limitations. Resolve remaining candidates against current source;
 a text match alone is neither a runtime hash pass nor proof of exhaustiveness.
 
 `graphforge_core::hash_observation::operation::Capture` is test-only scoped
 accounting. It counts actual SHA update input bytes by artifact payload,
-contract identity, control authentication, optional evidence, and unclassified
-producer; actual XXH64 input is counted separately. Worker jobs capture and
+contract identity, control authentication, portable authentication, optional
+evidence, and unclassified producer; actual XXH64 input is counted separately.
+Portable counters identify archive/member trust work; they do not remove its
+SHA input from inclusive process-wide cryptographic totals. Worker jobs capture and
 attach the current operation context. Nested operations and unrelated parallel
 tests retain separate collectors; there is no process-wide reset. Production
 context wrappers are zero-sized when test support is disabled.

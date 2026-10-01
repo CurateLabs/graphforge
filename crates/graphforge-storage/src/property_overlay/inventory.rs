@@ -1443,12 +1443,13 @@ pub(crate) fn authenticated_property_inventory_for_rewrite_route(
     if project.join(crate::CURRENT_FILE).is_file() {
         return authenticated_property_inventory_for_route(project, kind, route);
     }
-    let (inventory, read_calls) = crate::graph_files::capture_rewrite_baseline(project, rewrite)?;
+    let inventory = crate::graph_files::capture_rewrite_baseline(project, rewrite)?;
+    let read_calls = inventory.authority_read_calls();
     let authority_bytes = inventory.total_byte_length;
     let authority_block_equivalents = inventory.files.iter().fold(0_u64, |blocks, entry| {
         blocks.saturating_add(entry.byte_length.div_ceil(64 * 1024))
     });
-    let mut admitted = AuthenticatedPropertyInventory::from_inventory_at_root(
+    let mut admitted = AuthenticatedPropertyInventory::from_read_inventory_at_root(
         project,
         inventory,
         Some((kind, route)),
@@ -1466,13 +1467,14 @@ pub(crate) fn authenticated_property_inventory_for_rewrite(
     if project.join(crate::CURRENT_FILE).is_file() {
         return authenticated_property_inventory(project);
     }
-    let (inventory, read_calls) = crate::graph_files::capture_rewrite_baseline(project, rewrite)?;
+    let inventory = crate::graph_files::capture_rewrite_baseline(project, rewrite)?;
+    let read_calls = inventory.authority_read_calls();
     let authority_bytes = inventory.total_byte_length;
     let authority_block_equivalents = inventory.files.iter().fold(0_u64, |blocks, entry| {
         blocks.saturating_add(entry.byte_length.div_ceil(64 * 1024))
     });
     let mut admitted =
-        AuthenticatedPropertyInventory::from_inventory_at_root(project, inventory, None)?;
+        AuthenticatedPropertyInventory::from_read_inventory_at_root(project, inventory, None)?;
     admitted.authority_bytes = authority_bytes;
     admitted.authority_block_equivalents = authority_block_equivalents;
     admitted.authority_read_calls = read_calls;

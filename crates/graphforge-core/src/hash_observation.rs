@@ -43,6 +43,8 @@ pub enum HashDomain {
     ContractIdentity,
     /// Authenticated control objects and receipts.
     ControlAuthentication,
+    /// Portable archive, member and payload authentication at the transport boundary.
+    PortableAuthentication,
     /// Optional diagnostic evidence.
     OptionalEvidence,
     /// A producer that has not supplied a domain.
@@ -80,6 +82,8 @@ pub type ContractSha256 = DomainSha256<1>;
 pub type ControlSha256 = DomainSha256<2>;
 /// Optional evidence identity.
 pub type EvidenceSha256 = DomainSha256<3>;
+/// Portable archive, member and payload authentication.
+pub type PortableSha256 = DomainSha256<4>;
 impl<const DOMAIN: u8> Default for DomainSha256<DOMAIN> {
     fn default() -> Self {
         let domain = match DOMAIN {
@@ -87,6 +91,7 @@ impl<const DOMAIN: u8> Default for DomainSha256<DOMAIN> {
             1 => HashDomain::ContractIdentity,
             2 => HashDomain::ControlAuthentication,
             3 => HashDomain::OptionalEvidence,
+            4 => HashDomain::PortableAuthentication,
             _ => HashDomain::Unclassified,
         };
         Self(ObservedSha256::for_domain(domain))
@@ -202,7 +207,7 @@ pub mod operation {
 
     #[derive(Default)]
     struct Counters {
-        hash: [AtomicU64; 5],
+        hash: [AtomicU64; 6],
         checksum: AtomicU64,
         topology_projections: AtomicU64,
     }
@@ -218,6 +223,8 @@ pub mod operation {
         pub contract_identity_sha256_bytes: u64,
         /// Required control object and receipt authentication input bytes.
         pub control_authentication_sha256_bytes: u64,
+        /// Portable transport authentication input bytes, including archive members and payloads.
+        pub portable_authentication_sha256_bytes: u64,
         /// Optional evidence identity input bytes.
         pub optional_evidence_sha256_bytes: u64,
         /// Unclassified cryptographic input bytes; admission tests require zero.
@@ -288,7 +295,8 @@ pub mod operation {
                 contract_identity_sha256_bytes: load(1),
                 control_authentication_sha256_bytes: load(2),
                 optional_evidence_sha256_bytes: load(3),
-                unclassified_sha256_bytes: load(4),
+                portable_authentication_sha256_bytes: load(4),
+                unclassified_sha256_bytes: load(5),
                 checksum_bytes: self.counters.checksum.load(Ordering::Relaxed),
                 topology_projections: self.counters.topology_projections.load(Ordering::Relaxed),
             }
@@ -300,7 +308,8 @@ pub mod operation {
             HashDomain::ContractIdentity => 1,
             HashDomain::ControlAuthentication => 2,
             HashDomain::OptionalEvidence => 3,
-            HashDomain::Unclassified => 4,
+            HashDomain::PortableAuthentication => 4,
+            HashDomain::Unclassified => 5,
         };
         CURRENT.with(|current| {
             if let Some(counters) = current.borrow().as_ref() {
@@ -329,8 +338,114 @@ pub mod operation {
 
 #[cfg(test)]
 mod tests {
-    use super::{HashDomain, ObservedSha256, operation::Capture};
+    use super::{
+        HashDomain, ObservedSha256, OperationContext, PortableSha256,
+        operation::{Capture, Snapshot},
+    };
     use sha2::Digest;
+
+    #[test]
+    fn portable_authentication_keeps_all_operation_domains_disjoint() {
+        let capture = Capture::start();
+        for (domain, bytes) in [
+            (HashDomain::ArtifactPayload, 2),
+            (HashDomain::ContractIdentity, 3),
+            (HashDomain::ControlAuthentication, 5),
+            (HashDomain::OptionalEvidence, 7),
+            (HashDomain::PortableAuthentication, 11),
+            (HashDomain::Unclassified, 13),
+        ] {
+            let mut hash = ObservedSha256::for_domain(domain);
+            hash.update(vec![0_u8; bytes]);
+            hash.finalize();
+        }
+        assert_eq!(
+            capture.snapshot(),
+            Snapshot {
+                artifact_payload_sha256_bytes: 2,
+                contract_identity_sha256_bytes: 3,
+                control_authentication_sha256_bytes: 5,
+                portable_authentication_sha256_bytes: 11,
+                optional_evidence_sha256_bytes: 7,
+                unclassified_sha256_bytes: 13,
+                checksum_bytes: 0,
+                topology_projections: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn portable_sha256_preserves_digest_and_counts_clone_and_reset_inputs() {
+        let capture = Capture::start();
+        let mut hash = PortableSha256::new();
+        hash.update(b"abc");
+        let mut cloned = hash.clone();
+        cloned.update(b"!");
+        assert_eq!(cloned.finalize(), sha2::Sha256::digest(b"abc!"));
+        sha2::digest::Reset::reset(&mut hash);
+        hash.update(b"portable");
+        assert_eq!(hash.finalize(), sha2::Sha256::digest(b"portable"));
+        assert_eq!(
+            capture.snapshot(),
+            Snapshot {
+                portable_authentication_sha256_bytes: 12,
+                ..Snapshot::default()
+            }
+        );
+    }
+
+    #[test]
+    fn portable_captures_isolate_workers_and_restore_nested_and_detached_scopes() {
+        let outer = Capture::start();
+        let context = OperationContext::capture();
+        let independent = std::thread::spawn(|| {
+            let capture = Capture::start();
+            PortableSha256::digest([0_u8; 29]);
+            let context = OperationContext::capture();
+            std::thread::spawn(move || {
+                let _attached = context.attach();
+                PortableSha256::digest([0_u8; 31]);
+            })
+            .join()
+            .unwrap();
+            capture.snapshot()
+        });
+        std::thread::spawn(move || {
+            {
+                let _attached = context.attach();
+                PortableSha256::digest([0_u8; 17]);
+                {
+                    let nested = Capture::start();
+                    PortableSha256::digest([0_u8; 11]);
+                    assert_eq!(
+                        nested.snapshot(),
+                        Snapshot {
+                            portable_authentication_sha256_bytes: 11,
+                            ..Snapshot::default()
+                        }
+                    );
+                }
+                PortableSha256::digest([0_u8; 13]);
+            }
+            PortableSha256::digest([0_u8; 7]);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            outer.snapshot(),
+            Snapshot {
+                portable_authentication_sha256_bytes: 30,
+                ..Snapshot::default()
+            }
+        );
+        assert_eq!(
+            independent.join().unwrap(),
+            Snapshot {
+                portable_authentication_sha256_bytes: 60,
+                ..Snapshot::default()
+            }
+        );
+    }
 
     #[test]
     fn operation_captures_isolate_parallel_workers_and_restore_nested_scopes() {

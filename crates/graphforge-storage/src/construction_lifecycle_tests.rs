@@ -336,7 +336,7 @@ mod lifecycle_budget {
                 std::fs::remove_file(&path).unwrap();
             } else {
                 let mut receipt = outputs[0].clone();
-                receipt.sha256 = "0".repeat(64);
+                receipt.xxh64 = "0".repeat(16);
                 std::fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
             }
             let current = session.evidence().storage_current.clone();
@@ -392,11 +392,10 @@ mod lifecycle_budget {
                 .publish_canonical(&encoding, target, transaction)
                 .map(|_| ()),
         ] {
+            let error = result.unwrap_err().to_string();
             assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("digest does not match its address")
+                error.contains("construction object checksum does not match its inventory"),
+                "{error}"
             );
         }
         drop(session);
@@ -408,11 +407,11 @@ mod lifecycle_budget {
             GraphConstructionBudgets::default(),
         )
         .err()
-        .unwrap();
+        .unwrap()
+        .to_string();
         assert!(
-            error
-                .to_string()
-                .contains("digest does not match its address")
+            error.contains("construction object checksum does not match its inventory"),
+            "{error}"
         );
         assert_eq!(
             std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
@@ -2101,7 +2100,7 @@ mod group_boundary {
         read_completed_shape_outputs(&session.root, &session.checkpoint)
             .unwrap()
             .into_iter()
-            .map(|receipt| (receipt.name, (receipt.bytes, receipt.sha256)))
+            .map(|receipt| (receipt.name, (receipt.bytes, receipt.xxh64)))
             .collect()
     }
 
@@ -2431,13 +2430,13 @@ mod group_boundary {
                 &|session: &Path| {
                 let path = session.join("shape-stage-02.json");
                 let body = std::fs::read_to_string(&path).unwrap();
-                let at = body.find("\"sha256\":\"").unwrap() + "\"sha256\":\"".len();
+                let at = body.find("\"xxh64\":\"").unwrap() + "\"xxh64\":\"".len();
                 let digit = &body[at..=at];
                 let replacement = if digit == "0" { "1" } else { "0" };
                 rewrite(
                     &path,
-                    &format!("\"sha256\":\"{digit}"),
-                    &format!("\"sha256\":\"{replacement}"),
+                    &format!("\"xxh64\":\"{digit}"),
+                    &format!("\"xxh64\":\"{replacement}"),
                 );
             }),
         ];

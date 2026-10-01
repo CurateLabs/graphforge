@@ -7,7 +7,7 @@ use super::{
     RUNTIME_MAP_PATH, RuntimeGenerationMap, UniqueValue, canonical_json, check_cancel,
     constant_time_eq, hex, read_entry_bytes_from_map, sha, validate_path,
 };
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::Digest;

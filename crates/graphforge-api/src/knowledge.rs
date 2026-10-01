@@ -20,12 +20,12 @@ pub(crate) use ledger::encode_reasoning_ledger;
 pub(crate) use ledger::encode_status_ledger;
 pub(crate) use ledger::encode_supersession_ledger;
 use ledger::evidence_publication_participants;
-pub(crate) use ledger::knowledge_generation_uuid;
 use ledger::merged_assertion_evidence_provenance;
 use ledger::merged_confidence_provenance;
 use ledger::merged_evidence_provenance;
 use ledger::merged_provenance;
 pub(crate) use ledger::participant;
+pub(crate) use ledger::prepare_knowledge_request;
 pub(crate) use ledger::read_confidence_ledger;
 pub(crate) use ledger::read_evidence_ledger;
 pub(crate) use ledger::read_ledger;
@@ -55,7 +55,6 @@ use std::sync::Arc;
 use arrow::array::{Array, FixedSizeBinaryArray};
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
-use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use graphforge_core::{ApiErrorCode, GfError, ProjectErrorCode};
 use graphforge_knowledge::{
     ASSERTION_STATUS_SCHEMA, ASSERTION_SUPERSESSION_SCHEMA, Assertion, AssertionGraphRef,
@@ -69,8 +68,8 @@ use graphforge_provenance::{
     EventKind, LineageRecord, LineageRole, ProvenanceEvent, ProvenanceLedger, SubjectKind,
 };
 use graphforge_storage::{
-    ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
-    ProjectStageOutcome, ResolvedProjectGeneration,
+    ProjectCapability, ProjectParticipant, ProjectParticipantEncoding, ProjectStageOutcome,
+    ResolvedProjectGeneration,
 };
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;

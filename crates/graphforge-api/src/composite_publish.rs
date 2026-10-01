@@ -342,7 +342,8 @@ impl GraphForge {
             let graph = if let Some(prepared) = prepared_delta.as_ref() {
                 prepared.files_participant.clone()
             } else {
-                let (inventory, participant) = graphforge_storage::capture_graph_files(&dir)?;
+                let (inventory, participant) =
+                    graphforge_storage::capture_graph_files_over_parent(&dir, parent)?;
                 if routes.requires_canonical {
                     let (participant, lease) = graphforge_storage::prepare_graph_files_replacement(
                         parent, &dir, &inventory,
