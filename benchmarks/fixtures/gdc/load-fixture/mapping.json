@@ -18,7 +18,7 @@
       "properties": [
         {"column": "id", "type": "int64"},
         {"column": "firstName", "name": "first_name", "type": "string"},
-        {"column": "age", "type": "int32"},
+        {"column": "age", "type": "int64"},
         {"column": "score", "type": "float64"},
         {"column": "active", "type": "boolean"}
       ]

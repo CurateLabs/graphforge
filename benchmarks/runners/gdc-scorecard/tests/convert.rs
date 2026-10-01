@@ -1,9 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use arrow::array::{
-    Array, FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array, StringArray,
-};
+use arrow::array::{Array, FixedSizeBinaryArray, Float64Array, Int64Array, StringArray};
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use gdc_scorecard::{Cause, convert, node_uuid};
@@ -61,11 +59,11 @@ fn fixture_converts_to_the_register_parquet_layout() {
         [
             "node_uuid",
             "label",
-            "id",
-            "first_name",
+            "active",
             "age",
-            "score",
-            "active"
+            "first_name",
+            "id",
+            "score"
         ]
     );
     assert_eq!(schema.field(0).data_type(), &DataType::FixedSizeBinary(16));
@@ -84,14 +82,14 @@ fn fixture_converts_to_the_register_parquet_layout() {
         .unwrap();
     assert!((0..3).all(|row| labels.value(row) == "Person"));
     let ages = batch
-        .column(4)
+        .column(3)
         .as_any()
-        .downcast_ref::<Int32Array>()
+        .downcast_ref::<Int64Array>()
         .unwrap();
     assert_eq!(ages.value(0), 30);
     assert!(ages.is_null(2), "empty field is null");
     let scores = batch
-        .column(5)
+        .column(6)
         .as_any()
         .downcast_ref::<Float64Array>()
         .unwrap();
@@ -183,7 +181,7 @@ const PERSON_MAPPING: &str = r#"{
   "schema": "graphforge-gdc-load-mapping/1",
   "node_tables": [{"id": "person", "format": "ldbc-csv", "files": ["person.csv"],
     "label": "Person", "id_column": "id",
-    "properties": [{"column": "age", "type": "int32"}]}],
+    "properties": [{"column": "age", "type": "int64"}]}],
   "edge_tables": [{"id": "knows", "format": "ldbc-csv", "files": ["knows.csv"],
     "rel_type": "KNOWS", "source": {"label": "Person", "column": "a"},
     "target": {"label": "Person", "column": "b"}}]
@@ -299,8 +297,8 @@ fn invalid_mappings_and_existing_output_are_refused() {
             r#""label": "Ghost", "column""#,
         ),
         PERSON_MAPPING.replace(
-            r#"{"column": "age", "type": "int32"}"#,
-            r#"{"column": "age", "name": "label", "type": "int32"}"#,
+            r#"{"column": "age", "type": "int64"}"#,
+            r#"{"column": "age", "name": "label", "type": "int64"}"#,
         ),
         PERSON_MAPPING.replace(r#""id": "knows""#, r#""id": "person""#),
     ] {

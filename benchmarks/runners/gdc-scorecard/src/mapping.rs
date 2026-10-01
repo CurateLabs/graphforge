@@ -30,11 +30,12 @@ pub enum Format {
     GraphalyticsEdges,
 }
 
+/// The property types the storage read path decodes. Narrower integer types
+/// are deliberately absent: import accepts them but queries cannot read them.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum PropertyType {
     String,
-    Int32,
     Int64,
     Float64,
     #[serde(alias = "bool")]

@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int32Builder,
-    Int64Builder, StringArray, StringBuilder,
+    Array, ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int64Builder,
+    StringArray, StringBuilder,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -153,11 +153,18 @@ fn record_inputs(
 fn arrow_type(kind: PropertyType) -> DataType {
     match kind {
         PropertyType::String => DataType::Utf8,
-        PropertyType::Int32 => DataType::Int32,
         PropertyType::Int64 => DataType::Int64,
         PropertyType::Float64 => DataType::Float64,
         PropertyType::Boolean => DataType::Boolean,
     }
+}
+
+/// Import requires property columns in lexicographic name order after the
+/// fixed topology columns, so the output order is the sorted order.
+fn sorted_properties(properties: &[Property]) -> Vec<Property> {
+    let mut sorted = properties.to_vec();
+    sorted.sort_by(|left, right| left.output_name().cmp(right.output_name()));
+    sorted
 }
 
 fn property_fields(properties: &[Property]) -> Vec<Field> {
@@ -169,7 +176,6 @@ fn property_fields(properties: &[Property]) -> Vec<Field> {
 
 enum Column {
     Text(StringBuilder),
-    Int32(Int32Builder),
     Int64(Int64Builder),
     Float64(Float64Builder),
     Boolean(BooleanBuilder),
@@ -179,7 +185,6 @@ impl Column {
     fn new(kind: PropertyType) -> Self {
         match kind {
             PropertyType::String => Self::Text(StringBuilder::new()),
-            PropertyType::Int32 => Self::Int32(Int32Builder::new()),
             PropertyType::Int64 => Self::Int64(Int64Builder::new()),
             PropertyType::Float64 => Self::Float64(Float64Builder::new()),
             PropertyType::Boolean => Self::Boolean(BooleanBuilder::new()),
@@ -191,7 +196,6 @@ impl Column {
         let value = value.filter(|text| !text.is_empty());
         match self {
             Self::Text(builder) => builder.append_option(value),
-            Self::Int32(builder) => builder.append_option(parse(value)?),
             Self::Int64(builder) => builder.append_option(parse(value)?),
             Self::Float64(builder) => builder.append_option(parse(value)?),
             Self::Boolean(builder) => builder.append_option(parse(value)?),
@@ -202,7 +206,6 @@ impl Column {
     fn finish(&mut self) -> ArrayRef {
         match self {
             Self::Text(builder) => Arc::new(builder.finish()),
-            Self::Int32(builder) => Arc::new(builder.finish()),
             Self::Int64(builder) => Arc::new(builder.finish()),
             Self::Float64(builder) => Arc::new(builder.finish()),
             Self::Boolean(builder) => Arc::new(builder.finish()),
@@ -377,11 +380,12 @@ fn convert_nodes(
     keys: &mut HashMap<(u32, i64), Uuid>,
 ) -> Result<Value, ConvertError> {
     let label_id = labels[table.label.as_str()];
+    let properties = sorted_properties(&table.properties);
     let mut fields = vec![
         Field::new("node_uuid", DataType::FixedSizeBinary(16), true),
         Field::new("label", DataType::Utf8, false),
     ];
-    fields.extend(property_fields(&table.properties));
+    fields.extend(property_fields(&properties));
     let mut writer = TableWriter::create(
         output_dir
             .join("nodes")
@@ -421,7 +425,7 @@ fn convert_nodes(
                 uuid_array(&uuids)?,
                 Arc::new(StringArray::from(vec![table.label.as_str(); uuids.len()])) as ArrayRef,
             ];
-            columns.extend(property_arrays(batch, &table.properties, &path, first_row)?);
+            columns.extend(property_arrays(batch, &properties, &path, first_row)?);
             writer.write(columns)
         })?;
     }
@@ -444,6 +448,7 @@ fn convert_edges(
     labels: &HashMap<&str, u32>,
     keys: &HashMap<(u32, i64), Uuid>,
 ) -> Result<Value, ConvertError> {
+    let properties = sorted_properties(&table.properties);
     let source_label = labels[table.source.label.as_str()];
     let target_label = labels[table.target.label.as_str()];
     let mut fields = vec![
@@ -452,7 +457,7 @@ fn convert_edges(
         Field::new("source_uuid", DataType::FixedSizeBinary(16), false),
         Field::new("target_uuid", DataType::FixedSizeBinary(16), false),
     ];
-    fields.extend(property_fields(&table.properties));
+    fields.extend(property_fields(&properties));
     let mut writer = TableWriter::create(
         output_dir
             .join("edges")
@@ -503,7 +508,7 @@ fn convert_edges(
                 uuid_array(&source_ids)?,
                 uuid_array(&target_ids)?,
             ];
-            columns.extend(property_arrays(batch, &table.properties, &path, first_row)?);
+            columns.extend(property_arrays(batch, &properties, &path, first_row)?);
             writer.write(columns)
         })?;
     }
