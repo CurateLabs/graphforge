@@ -198,3 +198,56 @@ pub(crate) fn capture_workspace_over_parent(
         captured,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn known_for(
+        path: &Path,
+        object_identity: Option<graphforge_filesystem::FileIdentity>,
+    ) -> KnownGraphFile {
+        KnownGraphFile {
+            byte_length: std::fs::metadata(path).unwrap().len(),
+            content_sha256: "ab".repeat(32),
+            // A checksum the bytes cannot have: only an identity match can reuse it.
+            content_xxh64: 0,
+            object_identity,
+        }
+    }
+
+    /// The workspace file that is the parent's own content-store object carries
+    /// that object's identity: nothing was written, so nothing is read or hashed.
+    /// A copy of the same bytes is a different file and is captured afresh.
+    #[test]
+    fn a_workspace_file_that_is_the_parents_object_is_reused_without_a_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let object = directory.path().join("object");
+        let linked = directory.path().join("linked");
+        let copied = directory.path().join("copied");
+        std::fs::write(&object, b"immutable payload").unwrap();
+        std::fs::hard_link(&object, &linked).unwrap();
+        std::fs::copy(&object, &copied).unwrap();
+        let identity = graphforge_filesystem::path_identity(&object).unwrap();
+        let known = known_for(&object, Some(identity));
+
+        let (digest, checksum, calls, hashed) =
+            super::super::capture_payload_identity(&linked, Some(&known), ARTIFACT_IDENTITY)
+                .unwrap();
+        assert_eq!(digest, known.content_sha256, "the declared digest is reused");
+        assert_eq!(checksum, known.content_xxh64);
+        assert_eq!(calls, 0, "no byte of the object is read");
+        assert!(hashed.is_none(), "nothing is retained for installation");
+
+        let (digest, checksum, calls, hashed) =
+            super::super::capture_payload_identity(&copied, Some(&known), ARTIFACT_IDENTITY)
+                .unwrap();
+        assert_ne!(digest, known.content_sha256, "a copy is named by its own bytes");
+        assert_eq!(
+            checksum,
+            crate::corruption_checksum::checksum(b"immutable payload")
+        );
+        assert!(calls > 0);
+        assert!(hashed.is_some(), "a freshly hashed file is retained to install");
+    }
+}

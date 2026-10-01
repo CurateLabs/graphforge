@@ -789,4 +789,18 @@ mod tests {
         );
         assert!(registry().get(&key_of(identity)).is_none());
     }
+    /// A directory-shaped reader whose artifact does not exist reports it absent
+    /// itself; admission has nothing to admit and must not turn that into an
+    /// error (a compact project hydrates no empty directories).
+    #[test]
+    fn admit_tree_of_a_missing_directory_admits_nothing() {
+        let fixture = Fixture::new(b"payload");
+        fixture.register();
+        assert!(registry().len() >= 1, "admission is armed");
+        let missing = fixture.directory.path().join("workspace").join("absent");
+        admit_tree(&missing).expect("a missing directory has nothing to admit");
+        // A directory that is there is still walked: the registered link refuses.
+        fixture.flip_first_byte();
+        assert!(admit_tree(&fixture.directory.path().join("workspace")).is_err());
+    }
 }
