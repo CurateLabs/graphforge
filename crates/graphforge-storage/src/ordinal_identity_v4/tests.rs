@@ -553,7 +553,10 @@ fn shared_artifact_inodes_are_admitted_only_when_read_only() {
     let Ok(V4OrdinalIdentityOpen::Ready(mut handle)) = open() else {
         panic!("a read-only shared inode is admissible");
     };
-    assert!(handle.lookup_node_uuids(&[1]).unwrap().values[0].is_some());
+    // A block already authenticated is held by the handle, so only a block
+    // read after the flip meets it.
+    let second = RECORDS_PER_ORDINAL_BLOCK + 1;
+    assert!(handle.lookup_node_uuids(&[second]).unwrap().values[0].is_some());
     // Sharing is not trust: a flip through the other name is refused by
     // the block that reads it.
     set_readonly(false);
@@ -563,12 +566,102 @@ fn shared_artifact_inodes_are_admitted_only_when_read_only() {
         handle.lookup_node_uuids_pinned(&[1]).unwrap_err(),
         V4OrdinalIdentityError::Authentication
     );
-    assert!(
+    assert!(handle.lookup_node_uuids_pinned(&[second]).unwrap().values[0].is_some());
+}
+
+#[test]
+fn an_authenticated_block_is_read_once_per_handle_within_its_budget() {
+    let fixture = Fixture::new(&[4 * RECORDS_PER_ORDINAL_BLOCK], &[]);
+    let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
+    let first = handle.lookup_node_uuids(&[1]).unwrap();
+    assert_eq!(first.metrics.bytes_read, ORDINAL_BLOCK_BYTES);
+    // Sixteen lookups of ids in one block, as a two-hop issues one per
+    // destination, read the block once between them.
+    let mut total = first.metrics.bytes_read;
+    for id in 2..=17 {
+        let again = handle.lookup_node_uuids(&[id]).unwrap();
+        assert_eq!(again.values[0], Some(Uuid::from_u128(u128::from(id))));
+        total += again.metrics.bytes_read;
+    }
+    assert_eq!(total, ORDINAL_BLOCK_BYTES);
+    // A second block costs one more read; the first is still held.
+    let far = handle
+        .lookup_node_uuids(&[2 * RECORDS_PER_ORDINAL_BLOCK + 1])
+        .unwrap();
+    assert_eq!(far.metrics.bytes_read, ORDINAL_BLOCK_BYTES);
+    assert_eq!(
+        handle.lookup_node_uuids(&[1]).unwrap().metrics.bytes_read,
+        0
+    );
+}
+
+#[test]
+fn the_ordinal_block_cache_never_exceeds_its_budget_and_evicts_oldest_first() {
+    let fixture = Fixture::new(&[4 * RECORDS_PER_ORDINAL_BLOCK], &[]);
+    let mut handle = fixture.open(V4OrdinalIdentityLimits {
+        max_ordinal_cache_bytes: 2 * ORDINAL_BLOCK_BYTES as usize,
+        // One block per read, so each lookup caches exactly the block it read.
+        max_coalesced_read_bytes: ORDINAL_BLOCK_BYTES_USIZE,
+        ..V4OrdinalIdentityLimits::default()
+    });
+    let block = |index: u64| index * RECORDS_PER_ORDINAL_BLOCK + 1;
+    for index in 0..3 {
+        handle.lookup_node_uuids(&[block(index)]).unwrap();
+    }
+    // Blocks 1 and 2 are held (cap two); block 0, the oldest, was evicted.
+    assert_eq!(
         handle
-            .lookup_node_uuids_pinned(&[RECORDS_PER_ORDINAL_BLOCK + 1])
+            .lookup_node_uuids(&[block(2)])
             .unwrap()
-            .values[0]
-            .is_some()
+            .metrics
+            .bytes_read,
+        0
+    );
+    assert_eq!(
+        handle
+            .lookup_node_uuids(&[block(1)])
+            .unwrap()
+            .metrics
+            .bytes_read,
+        0
+    );
+    assert_eq!(
+        handle
+            .lookup_node_uuids(&[block(0)])
+            .unwrap()
+            .metrics
+            .bytes_read,
+        ORDINAL_BLOCK_BYTES
+    );
+    assert!(handle.ordinal_cache.charged_bytes <= 2 * ORDINAL_BLOCK_BYTES as usize);
+
+    // Zero disables the cache.
+    let mut uncached = fixture.open(V4OrdinalIdentityLimits {
+        max_ordinal_cache_bytes: 0,
+        ..V4OrdinalIdentityLimits::default()
+    });
+    uncached.lookup_node_uuids(&[1]).unwrap();
+    assert_eq!(
+        uncached.lookup_node_uuids(&[1]).unwrap().metrics.bytes_read,
+        ORDINAL_BLOCK_BYTES
+    );
+}
+
+#[test]
+fn a_cached_block_still_answers_to_the_recorded_order() {
+    // The inversion is inside the cached block: serving it from memory must
+    // refuse exactly as reading it would, once a caller relies on the record.
+    let mut fixture = fixture_with_ordinal_uuids([1, 2, 4, 3]);
+    fixture.manifest.uuid_order_matches_ordinals = Some(true);
+    fixture.publish();
+    let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
+    assert!(handle.lookup_node_uuids(&[6, 7]).unwrap().values[0].is_some());
+    assert_eq!(handle.uuid_order_matches_ordinals(), Ok(true));
+    assert_eq!(
+        handle.lookup_node_uuids(&[6, 7]).unwrap_err(),
+        V4OrdinalIdentityError::InvalidDescriptor(
+            "ordinal UUIDs contradict the recorded UUID order"
+        )
     );
 }
 

@@ -64,6 +64,10 @@ pub struct V4OrdinalIdentityLimits {
     pub max_coalesced_read_bytes: usize,
     /// Total charged capacity retained by the handle-global tombstone cache.
     pub max_tombstone_cache_bytes: usize,
+    /// Bytes of already-authenticated ordinal blocks the handle retains so a
+    /// block is read from disk once per handle, not once per lookup. Zero
+    /// disables the cache.
+    pub max_ordinal_cache_bytes: usize,
     /// Maximum conservatively charged retained manifest/descriptor metadata.
     pub max_descriptor_metadata_bytes: usize,
 }
@@ -75,6 +79,7 @@ impl Default for V4OrdinalIdentityLimits {
             coalesce_gap_bytes: 4_096,
             max_coalesced_read_bytes: STREAM_BYTES,
             max_tombstone_cache_bytes: STREAM_BYTES,
+            max_ordinal_cache_bytes: STREAM_BYTES,
             max_descriptor_metadata_bytes: 16 * STREAM_BYTES,
         }
     }
@@ -647,6 +652,55 @@ impl TombstoneBlockCache {
 
 type TombstoneBlock = V4OrdinalTombstoneBlock;
 
+/// An ordinal block whose bytes already passed their checksum.
+#[derive(Debug)]
+struct CachedOrdinalBlock {
+    bytes: Vec<u8>,
+    /// UUIDs ascend strictly inside this block, so a handle that later relies
+    /// on the recorded order can still refuse it without rereading.
+    ascends: bool,
+}
+
+/// Authenticated ordinal blocks, oldest evicted first, within a byte budget.
+/// Blocks are immutable and were verified when read, so serving one again can
+/// return nothing a fresh read would not.
+#[derive(Debug, Default)]
+struct OrdinalBlockCache {
+    entries: BTreeMap<(usize, usize), CachedOrdinalBlock>,
+    order: VecDeque<(usize, usize)>,
+    charged_bytes: usize,
+}
+
+impl OrdinalBlockCache {
+    fn insert(&mut self, key: (usize, usize), block: CachedOrdinalBlock, maximum: usize) {
+        let charge = block.bytes.len();
+        if charge > maximum || self.entries.contains_key(&key) {
+            return;
+        }
+        while self.charged_bytes.saturating_add(charge) > maximum {
+            let Some(oldest) = self.order.pop_front() else {
+                return;
+            };
+            if let Some(evicted) = self.entries.remove(&oldest) {
+                self.charged_bytes = self.charged_bytes.saturating_sub(evicted.bytes.len());
+            }
+        }
+        self.charged_bytes = self.charged_bytes.saturating_add(charge);
+        self.order.push_back(key);
+        self.entries.insert(key, block);
+    }
+}
+
+/// What one lookup may spend reading one ordinal range.
+struct RangeRead<'a> {
+    range_index: usize,
+    cache: &'a mut OrdinalBlockCache,
+    max_cache_bytes: usize,
+    gap_bytes: u64,
+    maximum_read_bytes: usize,
+    retained_buffer_bytes: u64,
+}
+
 /// Authenticated generation-pinned read handle.
 #[derive(Debug)]
 pub struct V4OrdinalIdentityHandle {
@@ -660,6 +714,7 @@ pub struct V4OrdinalIdentityHandle {
     ranges: Vec<OpenRange>,
     tombstones: Vec<OpenTombstones>,
     tombstone_cache: TombstoneBlockCache,
+    ordinal_cache: OrdinalBlockCache,
     limits: V4OrdinalIdentityLimits,
     admission: V4OrdinalAdmissionMetrics,
     /// Whether every artifact byte has been authenticated and every
@@ -872,6 +927,7 @@ impl V4OrdinalIdentityHandle {
             ranges,
             tombstones,
             tombstone_cache: TombstoneBlockCache::default(),
+            ordinal_cache: OrdinalBlockCache::default(),
             limits,
             admission,
             complete: false,
@@ -1064,7 +1120,7 @@ impl V4OrdinalIdentityHandle {
             .filter(|id| !deleted.contains(id))
             .collect::<Vec<_>>();
         let mut resolved = BTreeMap::new();
-        for range in &mut self.ranges {
+        for (range_index, range) in self.ranges.iter_mut().enumerate() {
             let first = range.descriptor.first_node_id;
             let last = first + range.descriptor.count - 1;
             let start = live.partition_point(|id| *id < first);
@@ -1076,9 +1132,15 @@ impl V4OrdinalIdentityHandle {
             read_range_coalesced(
                 range,
                 &live[start..end],
-                self.limits.coalesce_gap_bytes,
-                self.limits.max_coalesced_read_bytes,
-                request_buffer_bytes.saturating_add(self.tombstone_cache.charged_bytes as u64),
+                RangeRead {
+                    range_index,
+                    cache: &mut self.ordinal_cache,
+                    max_cache_bytes: self.limits.max_ordinal_cache_bytes,
+                    gap_bytes: self.limits.coalesce_gap_bytes,
+                    maximum_read_bytes: self.limits.max_coalesced_read_bytes,
+                    retained_buffer_bytes: request_buffer_bytes
+                        .saturating_add(self.tombstone_cache.charged_bytes as u64),
+                },
                 &mut resolved,
                 &mut metrics,
             )?;
@@ -2016,12 +2078,18 @@ fn artifact_stamp(file: &File) -> Result<ArtifactStamp, V4OrdinalIdentityError> 
 fn read_range_coalesced(
     range: &mut OpenRange,
     ids: &[u64],
-    gap_bytes: u64,
-    maximum_read_bytes: usize,
-    retained_buffer_bytes: u64,
+    read: RangeRead<'_>,
     resolved: &mut BTreeMap<u64, Uuid>,
     metrics: &mut V4OrdinalLookupMetrics,
 ) -> Result<(), V4OrdinalIdentityError> {
+    let RangeRead {
+        range_index,
+        cache,
+        max_cache_bytes,
+        gap_bytes,
+        maximum_read_bytes,
+        retained_buffer_bytes,
+    } = read;
     let first = range.descriptor.first_node_id;
     let selected = range
         .descriptor
@@ -2036,6 +2104,22 @@ fn read_range_coalesced(
             .then_some(index)
         })
         .collect::<Vec<_>>();
+    // Blocks this handle already authenticated are served from memory.
+    let mut uncached = Vec::with_capacity(selected.len());
+    for index in selected {
+        let block = &range.descriptor.blocks[index];
+        let Some(cached) = cache.entries.get(&(range_index, index)) else {
+            uncached.push(index);
+            continue;
+        };
+        if range.verify_order && !cached.ascends {
+            return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "ordinal UUIDs contradict the recorded UUID order",
+            ));
+        }
+        resolve_block_ids(first, block, block.offset, &cached.bytes, ids, resolved)?;
+    }
+    let selected = uncached;
     let mut selected_at = 0;
     while selected_at < selected.len() {
         let first_index = selected[selected_at];
@@ -2098,28 +2182,52 @@ fn read_range_coalesced(
                 "ordinal UUIDs contradict the recorded UUID order",
             ));
         }
-        for block in &range.descriptor.blocks[first_index..=last_index] {
-            let block_first = first + block.offset / UUID_WIDTH;
-            let block_last = block_first + block.count - 1;
-            let start = ids.partition_point(|id| *id < block_first);
-            let end = ids.partition_point(|id| *id <= block_last);
-            if start == end {
-                continue;
-            }
-            for id in &ids[start..end] {
-                let at = usize::try_from(
-                    block.offset - first_block.offset + (id - block_first) * UUID_WIDTH,
-                )
+        for (offset, block) in range.descriptor.blocks[first_index..=last_index]
+            .iter()
+            .enumerate()
+        {
+            resolve_block_ids(first, block, first_block.offset, &buffer, ids, resolved)?;
+            let slice_start = usize::try_from(block.offset - first_block.offset)
                 .map_err(|_| V4OrdinalIdentityError::Authentication)?;
-                let uuid = Uuid::from_bytes(
-                    buffer[at..at + UUID_WIDTH_USIZE]
-                        .try_into()
-                        .expect("fixed UUID"),
-                );
-                resolved.insert(*id, uuid);
-            }
+            let slice_len = usize::try_from(block.count * UUID_WIDTH)
+                .map_err(|_| V4OrdinalIdentityError::Authentication)?;
+            let bytes = buffer[slice_start..slice_start + slice_len].to_vec();
+            let ascends = uuids_strictly_ascend(&bytes);
+            cache.insert(
+                (range_index, first_index + offset),
+                CachedOrdinalBlock { bytes, ascends },
+                max_cache_bytes,
+            );
         }
         selected_at = next;
+    }
+    metrics.retained_cache_bytes = metrics.retained_cache_bytes.max(cache.charged_bytes as u64);
+    Ok(())
+}
+
+/// Resolve the requested IDs that fall in `block` from `buffer`, which holds
+/// the block's bytes starting `buffer_start` bytes into the artifact.
+fn resolve_block_ids(
+    first_node_id: u64,
+    block: &V4OrdinalBlock,
+    buffer_start: u64,
+    buffer: &[u8],
+    ids: &[u64],
+    resolved: &mut BTreeMap<u64, Uuid>,
+) -> Result<(), V4OrdinalIdentityError> {
+    let block_first = first_node_id + block.offset / UUID_WIDTH;
+    let block_last = block_first + block.count - 1;
+    let start = ids.partition_point(|id| *id < block_first);
+    let end = ids.partition_point(|id| *id <= block_last);
+    for id in &ids[start..end] {
+        let at = usize::try_from(block.offset - buffer_start + (id - block_first) * UUID_WIDTH)
+            .map_err(|_| V4OrdinalIdentityError::Authentication)?;
+        let uuid = Uuid::from_bytes(
+            buffer[at..at + UUID_WIDTH_USIZE]
+                .try_into()
+                .expect("fixed UUID"),
+        );
+        resolved.insert(*id, uuid);
     }
     Ok(())
 }
