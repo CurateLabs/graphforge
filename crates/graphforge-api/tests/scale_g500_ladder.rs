@@ -6019,8 +6019,11 @@ fn validate_fresh_cas_control_bound(
     let minimum_requests = paths
         .checked_add(1)
         .ok_or("CAS minimum request bound overflows")?;
+    // Fresh manifest nodes are named from resident bytes and need no read
+    // before sealing (#1691); reusing an existing node still authenticates
+    // it with a read.
     if requests < minimum_requests
-        || io.manifest.read_calls < requests
+        || io.manifest.read_calls < io.manifest.reused_objects
         || io.manifest_reads.read_calls < paths
     {
         return Err("CAS manifest work is below mandatory bootstrap/update authentication".into());
