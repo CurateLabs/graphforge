@@ -2078,6 +2078,62 @@ fn artifact_stamp(file: &File) -> Result<ArtifactStamp, V4OrdinalIdentityError> 
     })
 }
 
+/// Check every block of one contiguous read against its required checksum, and
+/// against the recorded order when a caller relies on it, before any value from
+/// the read is used.
+fn authenticate_run(
+    range: &OpenRange,
+    blocks: std::ops::RangeInclusive<usize>,
+    buffer: &[u8],
+) -> Result<(), V4OrdinalIdentityError> {
+    let run_start = range.descriptor.blocks[*blocks.start()].offset;
+    for block in &range.descriptor.blocks[blocks] {
+        let slice_start = usize::try_from(block.offset - run_start)
+            .map_err(|_| V4OrdinalIdentityError::Authentication)?;
+        let slice_len = usize::try_from(block.count * UUID_WIDTH)
+            .map_err(|_| V4OrdinalIdentityError::Authentication)?;
+        if crate::corruption_checksum::checksum(&buffer[slice_start..slice_start + slice_len])
+            != block.xxh64
+        {
+            return Err(V4OrdinalIdentityError::Authentication);
+        }
+    }
+    if range.verify_order && !uuids_strictly_ascend(buffer) {
+        return Err(V4OrdinalIdentityError::InvalidDescriptor(
+            "ordinal UUIDs contradict the recorded UUID order",
+        ));
+    }
+    Ok(())
+}
+
+/// Answer from memory every selected block this handle already authenticated,
+/// and return the ones that still need reading. A held block that contradicts
+/// a relied-on recorded order is refused exactly as a fresh read would be.
+fn serve_cached_blocks(
+    range: &OpenRange,
+    selected: Vec<usize>,
+    ids: &[u64],
+    (range_index, cache): (usize, &OrdinalBlockCache),
+    resolved: &mut BTreeMap<u64, Uuid>,
+) -> Result<Vec<usize>, V4OrdinalIdentityError> {
+    let first = range.descriptor.first_node_id;
+    let mut uncached = Vec::with_capacity(selected.len());
+    for index in selected {
+        let block = &range.descriptor.blocks[index];
+        let Some(cached) = cache.entries.get(&(range_index, index)) else {
+            uncached.push(index);
+            continue;
+        };
+        if range.verify_order && !cached.ascends {
+            return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "ordinal UUIDs contradict the recorded UUID order",
+            ));
+        }
+        resolve_block_ids(first, block, block.offset, &cached.bytes, ids, resolved)?;
+    }
+    Ok(uncached)
+}
+
 fn read_range_coalesced(
     range: &mut OpenRange,
     ids: &[u64],
@@ -2093,6 +2149,7 @@ fn read_range_coalesced(
         maximum_read_bytes,
         retained_buffer_bytes,
     } = read;
+    let read_cache = (range_index, &*cache);
     let first = range.descriptor.first_node_id;
     let selected = range
         .descriptor
@@ -2107,22 +2164,7 @@ fn read_range_coalesced(
             .then_some(index)
         })
         .collect::<Vec<_>>();
-    // Blocks this handle already authenticated are served from memory.
-    let mut uncached = Vec::with_capacity(selected.len());
-    for index in selected {
-        let block = &range.descriptor.blocks[index];
-        let Some(cached) = cache.entries.get(&(range_index, index)) else {
-            uncached.push(index);
-            continue;
-        };
-        if range.verify_order && !cached.ascends {
-            return Err(V4OrdinalIdentityError::InvalidDescriptor(
-                "ordinal UUIDs contradict the recorded UUID order",
-            ));
-        }
-        resolve_block_ids(first, block, block.offset, &cached.bytes, ids, resolved)?;
-    }
-    let selected = uncached;
+    let selected = serve_cached_blocks(range, selected, ids, read_cache, resolved)?;
     let mut selected_at = 0;
     while selected_at < selected.len() {
         let first_index = selected[selected_at];
@@ -2169,22 +2211,7 @@ fn read_range_coalesced(
         metrics.peak_buffer_bytes = metrics
             .peak_buffer_bytes
             .max(retained_buffer_bytes.saturating_add(bytes));
-        for block in &range.descriptor.blocks[first_index..=last_index] {
-            let slice_start = usize::try_from(block.offset - first_block.offset)
-                .map_err(|_| V4OrdinalIdentityError::Authentication)?;
-            let slice_len = usize::try_from(block.count * UUID_WIDTH)
-                .map_err(|_| V4OrdinalIdentityError::Authentication)?;
-            if crate::corruption_checksum::checksum(&buffer[slice_start..slice_start + slice_len])
-                != block.xxh64
-            {
-                return Err(V4OrdinalIdentityError::Authentication);
-            }
-        }
-        if range.verify_order && !uuids_strictly_ascend(&buffer) {
-            return Err(V4OrdinalIdentityError::InvalidDescriptor(
-                "ordinal UUIDs contradict the recorded UUID order",
-            ));
-        }
+        authenticate_run(range, first_index..=last_index, &buffer)?;
         for (offset, block) in range.descriptor.blocks[first_index..=last_index]
             .iter()
             .enumerate()
