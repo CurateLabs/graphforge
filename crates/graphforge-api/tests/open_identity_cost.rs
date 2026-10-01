@@ -46,8 +46,10 @@ fn workspace(project: &Path) -> PathBuf {
         .expect("project directory")
         .map(|entry| entry.expect("entry").path())
         .find(|path| {
-            path.file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with("graphforge-graph-workspace-"))
+            path.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .starts_with("graphforge-graph-workspace-")
+            })
         })
         .expect("hydrated workspace")
 }

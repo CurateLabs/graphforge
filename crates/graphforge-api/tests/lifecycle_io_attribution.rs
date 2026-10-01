@@ -502,9 +502,11 @@ fn measure_open_cost(nodes: usize, fan_out: usize) -> OpenCost {
 /// while hydrating. A payload's content is checksummed on its first touch, once.
 ///
 /// Node count is fixed and the edge payload grows 16x, so any open-time work
-/// proportional to payload bytes shows up as growth. The residual that does
-/// scale, with nodes and not with edges, is the UUID-membership identity
-/// controls copied into the private workspace (about 40 bytes per node).
+/// proportional to payload bytes shows up as growth. The forward and ordinal
+/// identity runs are hard-linked, not copied, and authenticated block by block
+/// when a lookup reads them, so only small controls are copied. The node axis
+/// (nodes and edges scaling together, whole-process `rchar`) is
+/// `open_identity_cost.rs`.
 #[test]
 fn open_reads_control_bytes_not_payload_bytes() {
     const NODES: usize = 1 << 12;
@@ -514,7 +516,10 @@ fn open_reads_control_bytes_not_payload_bytes() {
     for (label, cost) in [("small", &small), ("large", &large)] {
         for phase in StorageIoPhase::LIFECYCLE {
             let totals = &cost.open.attribution.phases[&phase];
-            eprintln!("  open phase {label} {phase:?}: read {} bytes / {} calls", totals.read_bytes, totals.read_calls);
+            eprintln!(
+                "  open phase {label} {phase:?}: read {} bytes / {} calls",
+                totals.read_bytes, totals.read_calls
+            );
         }
         eprintln!(
             "open cost {label}: payload={} open_read={} checksummed={} copied={} \
@@ -566,9 +571,8 @@ fn open_reads_control_bytes_not_payload_bytes() {
         total_read_bytes(&small.open),
         total_read_bytes(&large.open)
     );
-    // 3. Hydration checksums only what it copies (identity controls, read once
-    //    to copy and once to verify) plus small sidecars, and the copied
-    //    controls are node-linear, not payload-linear.
+    // 3. Hydration checksums only what it copies (small controls, read once to
+    //    copy and once to verify) plus small sidecars.
     for (label, cost) in [("small", &small), ("large", &large)] {
         let evidence = &cost.open_evidence;
         assert!(

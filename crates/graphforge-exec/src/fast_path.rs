@@ -52,9 +52,10 @@ pub(crate) fn plan_extension(
     };
     Some(match choose(fast.kind, logical, input, session_state) {
         Ok(fast) => Ok(fast),
-        Err(Refusal::Precondition(reason)) => {
-            Ok(Arc::new(FastPathFallbackExec::new(Arc::clone(input), reason)))
-        }
+        Err(Refusal::Precondition(reason)) => Ok(Arc::new(FastPathFallbackExec::new(
+            Arc::clone(input),
+            reason,
+        ))),
         Err(Refusal::Failed(error)) => Err(error),
     })
 }

@@ -1835,8 +1835,7 @@ fn plain_name(name: &str) -> bool {
 /// its manifest digest, and the retained stamp detects cooperative change.
 fn has_admissible_links(file: &File) -> Result<bool, V4OrdinalIdentityError> {
     let links = file_link_count(file).map_err(io_error)?;
-    Ok(links == 1
-        || links > 1 && file.metadata().map_err(io_error)?.permissions().readonly())
+    Ok(links == 1 || links > 1 && file.metadata().map_err(io_error)?.permissions().readonly())
 }
 
 fn open_admission_file(
@@ -2186,11 +2185,11 @@ mod tests {
 
         /// The lazy open must succeed (it reads no artifact byte), and complete
         /// admission must refuse with `expected`.
-        fn assert_complete_admission_refuses(&self, expected: V4OrdinalIdentityError) {
+        fn assert_complete_admission_refuses(&self, expected: &V4OrdinalIdentityError) {
             let mut handle = self.open(V4OrdinalIdentityLimits::default());
-            assert_eq!(handle.admit_complete().unwrap_err(), expected);
+            assert_eq!(&handle.admit_complete().unwrap_err(), expected);
             // A refusal is not memoized as success.
-            assert_eq!(handle.admit_complete().unwrap_err(), expected);
+            assert_eq!(&handle.admit_complete().unwrap_err(), expected);
         }
 
         fn authority(&self, topology_generation: u64) -> V4OrdinalIdentityAuthority {
@@ -2591,7 +2590,10 @@ mod tests {
             )
         };
         // Another name for a writable inode could rewrite it under the handle.
-        assert!(matches!(open(), Err(V4OrdinalIdentityError::Authentication)));
+        assert!(matches!(
+            open(),
+            Err(V4OrdinalIdentityError::Authentication)
+        ));
         let set_readonly = |readonly: bool| {
             let mut permissions = fs::metadata(&artifact).unwrap().permissions();
             permissions.set_readonly(readonly);
@@ -2611,7 +2613,13 @@ mod tests {
             handle.lookup_node_uuids_pinned(&[1]).unwrap_err(),
             V4OrdinalIdentityError::Authentication
         );
-        assert!(handle.lookup_node_uuids_pinned(&[RECORDS_PER_ORDINAL_BLOCK + 1]).unwrap().values[0].is_some());
+        assert!(
+            handle
+                .lookup_node_uuids_pinned(&[RECORDS_PER_ORDINAL_BLOCK + 1])
+                .unwrap()
+                .values[0]
+                .is_some()
+        );
     }
 
     #[test]
@@ -2644,7 +2652,11 @@ mod tests {
         flip_byte_in_place(&artifact, ORDINAL_BLOCK_BYTES + 5);
         // Open reads nothing, so it cannot notice.
         let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
-        let (first, middle, last) = (1, RECORDS_PER_ORDINAL_BLOCK + 1, 2 * RECORDS_PER_ORDINAL_BLOCK + 1);
+        let (first, middle, last) = (
+            1,
+            RECORDS_PER_ORDINAL_BLOCK + 1,
+            2 * RECORDS_PER_ORDINAL_BLOCK + 1,
+        );
         // Untouched blocks keep answering, exactly.
         let ok = handle.lookup_node_uuids(&[first, last]).unwrap();
         assert_eq!(
@@ -2688,7 +2700,10 @@ mod tests {
         let healthy = handle.lookup_node_uuids(&[1, live]).unwrap();
         assert_eq!(healthy.values[0], None);
         assert_eq!(healthy.values[1], Some(Uuid::from_u128(u128::from(live))));
-        assert_eq!(handle.lookup_node_uuids(&[3 * per_block]).unwrap().values, [None]);
+        assert_eq!(
+            handle.lookup_node_uuids(&[3 * per_block]).unwrap().values,
+            [None]
+        );
         for request in [vec![per_block + 1], vec![1, per_block + 1, live]] {
             assert_eq!(
                 handle.lookup_node_uuids(&request).unwrap_err(),
@@ -2726,14 +2741,19 @@ mod tests {
         let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
         let _capture = crate::lifecycle_io::CaptureScope::install();
         let before = crate::lifecycle_io::snapshot().unwrap();
-        let lookup = handle.lookup_node_uuids(&[1, 2, RECORDS_PER_ORDINAL_BLOCK + 2]).unwrap();
+        let lookup = handle
+            .lookup_node_uuids(&[1, 2, RECORDS_PER_ORDINAL_BLOCK + 2])
+            .unwrap();
         let recorded = crate::lifecycle_io::snapshot()
             .unwrap()
             .since(&before)
             .unwrap();
         assert!(lookup.metrics.bytes_read >= 2 * ORDINAL_BLOCK_BYTES);
         assert_eq!(recorded.totals.read_bytes, lookup.metrics.bytes_read);
-        assert_eq!(recorded.totals.read_calls, lookup.metrics.sequential_read_calls);
+        assert_eq!(
+            recorded.totals.read_calls,
+            lookup.metrics.sequential_read_calls
+        );
     }
 
     #[test]
@@ -3016,7 +3036,7 @@ mod tests {
             ),
         ];
         fixture.publish();
-        fixture.assert_complete_admission_refuses(V4OrdinalIdentityError::InvalidDescriptor(
+        fixture.assert_complete_admission_refuses(&V4OrdinalIdentityError::InvalidDescriptor(
             "forward identity UUID is repeated across generations",
         ));
 
@@ -3144,7 +3164,7 @@ mod tests {
         );
         fixture.manifest.tombstones[0].blocks = tombstone_blocks(&[99]);
         fixture.publish();
-        fixture.assert_complete_admission_refuses(V4OrdinalIdentityError::InvalidDescriptor(
+        fixture.assert_complete_admission_refuses(&V4OrdinalIdentityError::InvalidDescriptor(
             "tombstone IDs are noncanonical",
         ));
     }
@@ -3238,9 +3258,15 @@ mod tests {
         for (count, expected_calls) in [(4_096_u64, 3_u64), (8_192, 4), (16_384, 6)] {
             let fixture = Fixture::new(&[count], &[]);
             // Opening reads no artifact byte at any size: the node-count axis.
-            let lazy = fixture.open(V4OrdinalIdentityLimits::default()).admission_metrics();
+            let lazy = fixture
+                .open(V4OrdinalIdentityLimits::default())
+                .admission_metrics();
             assert_eq!(
-                (lazy.artifacts, lazy.authenticated_bytes, lazy.sequential_read_calls),
+                (
+                    lazy.artifacts,
+                    lazy.authenticated_bytes,
+                    lazy.sequential_read_calls
+                ),
                 (0, 0, 0)
             );
             let handle = fixture.open_complete(V4OrdinalIdentityLimits::default());

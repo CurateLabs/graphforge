@@ -67,7 +67,11 @@ fn flip_in_place(object: &Path, offset: u64) {
     let mut writable = original.clone();
     writable.set_mode(0o644);
     std::fs::set_permissions(object, writable).unwrap();
-    let file = std::fs::OpenOptions::new().write(true).read(true).open(object).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .read(true)
+        .open(object)
+        .unwrap();
     let modified = file.metadata().unwrap().modified().unwrap();
     let mut byte = [0_u8; 1];
     file.read_exact_at(&mut byte, offset).unwrap();
@@ -143,8 +147,12 @@ fn mutating_commit_never_writes_through_a_shared_identity_run() {
     let before = objects(&path);
     let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
     assert_eq!(rows(&forge, "MATCH (n) RETURN n"), Ok(2_048));
-    forge.execute("CREATE (:Entity), (:Entity), (:Entity)").unwrap();
-    forge.execute("MATCH (n:Entity) WITH n LIMIT 5 DETACH DELETE n").unwrap();
+    forge
+        .execute("CREATE (:Entity), (:Entity), (:Entity)")
+        .unwrap();
+    forge
+        .execute("MATCH (n:Entity) WITH n LIMIT 5 DETACH DELETE n")
+        .unwrap();
     assert_eq!(rows(&forge, "MATCH (n) RETURN n"), Ok(2_048 + 3 - 5));
     drop(forge);
 

@@ -135,7 +135,11 @@ fn orphan_collection_never_unlinks_shared_v4_runs_or_their_store_names() {
     fs::write(index.join(orphan_name), b"orphan").unwrap();
     let mut shared = selected
         .iter()
-        .filter(|name| name.ends_with(".uuidx"))
+        .filter(|name| {
+            std::path::Path::new(name)
+                .extension()
+                .is_some_and(|e| e == "uuidx")
+        })
         .cloned()
         .collect::<Vec<_>>();
     assert!(!shared.is_empty());
@@ -154,10 +158,17 @@ fn orphan_collection_never_unlinks_shared_v4_runs_or_their_store_names() {
         maintain_uuid_membership_orphans_with_ordinal_authority(dir.path(), 16, Some(&authority))
             .unwrap();
     assert_eq!(work.removed, 0);
-    assert_eq!(work.deferred_linked, 1, "the shared orphan is deferred, not unlinked");
+    assert_eq!(
+        work.deferred_linked, 1,
+        "the shared orphan is deferred, not unlinked"
+    );
     for (name, bytes) in before {
         assert_eq!(fs::read(index.join(&name)).unwrap(), bytes, "{name}");
-        assert_eq!(fs::read(store.join(&name)).unwrap(), bytes, "{name} store name");
+        assert_eq!(
+            fs::read(store.join(&name)).unwrap(),
+            bytes,
+            "{name} store name"
+        );
     }
 }
 

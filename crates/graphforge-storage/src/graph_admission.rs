@@ -62,7 +62,9 @@ fn is_hard_linked_identity_artifact(relative_path: &str) -> bool {
         .strip_prefix("topology/uuid-membership/")
         .is_some_and(|name| {
             !name.contains('/')
-                && name.ends_with(".uuidx")
+                && Path::new(name)
+                    .extension()
+                    .is_some_and(|extension| extension == "uuidx")
                 && (name.starts_with("forward-v4-") || name.starts_with("ordinal-v4-"))
         })
 }
