@@ -3289,7 +3289,7 @@ mod tests {
         fs::write(
             &executable,
             format!(
-                "#!/bin/sh\nstate='{}'\nn=0\n[ ! -f \"$state\" ] || n=$(cat \"$state\")\ncase \"$*\" in\n  *'import-session begin') expected=0;;\n  *'import-session register-parquet') if [ \"$n\" = 1 ]; then expected=1; else expected=2; fi;;\n  *'import-session validate') expected=3;;\n  *'import-session commit') expected=4;;\n  *) exit 41;;\nesac\n[ \"$n\" = \"$expected\" ] || exit 42\necho $((n + 1)) > \"$state\"\n",
+                "#!/bin/sh\nstate='{}'\nn=0\n[ ! -f \"$state\" ] || n=$(cat \"$state\")\ncase \"$*\" in\n  *'import-session begin'*) expected=0;;\n  *'import-session register-parquet'*) if [ \"$n\" = 1 ]; then expected=1; else expected=2; fi;;\n  *'import-session validate'*) expected=3;;\n  *'import-session commit'*) expected=4;;\n  *) exit 41;;\nesac\n[ \"$n\" = \"$expected\" ] || exit 42\necho $((n + 1)) > \"$state\"\n",
                 state.display()
             ),
         )
