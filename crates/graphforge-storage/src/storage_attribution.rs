@@ -1258,7 +1258,7 @@ pub fn capture_storage_attribution(
                 &root,
                 crate::GraphManifestLimits::default(),
                 |digest| {
-                    let bytes = crate::read_graph_object_by_digest(
+                    let bytes = crate::graph_object_store::read_graph_control_object_by_digest(
                         generation.container_root(),
                         digest,
                         crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
