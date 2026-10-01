@@ -906,8 +906,10 @@ fn corrupted_sidecars_are_refused_at_open() {
 }
 
 /// Every search reader begins at `current_search_artifact`, so the artifact's
-/// pointer, manifest and segments are checksummed there on first touch, before
-/// any of them is trusted or mapped.
+/// manifest and segments are checksummed there on first touch, before any of
+/// them is trusted or mapped. The pointer is the exception: the search
+/// lifecycle replaces it by name, so it is copied to a private single-link
+/// file and verified at open.
 #[test]
 #[cfg(feature = "search")]
 fn corrupted_search_artifact_is_refused_on_first_touch() {
@@ -947,9 +949,19 @@ fn corrupted_search_artifact_is_refused_on_first_touch() {
         "the published artifact owns a pointer, a manifest and segments"
     );
     for entry in &segments {
-        // Every payload under the artifact, including the pointer and manifest
-        // themselves, is refused before it is parsed.
         let _corruption = semantically_inert_corruption(project.path(), entry);
+        if entry.relative_path.ends_with("/current.json") {
+            // The pointer is a single-link control, verified as it is copied,
+            // so its corruption is refused at open.
+            assert!(
+                GraphForge::new(Some(project.path().to_str().unwrap())).is_err(),
+                "{} was accepted at open after in-place corruption",
+                entry.relative_path
+            );
+            continue;
+        }
+        // Every other payload under the artifact, including the manifest, is
+        // refused on first touch, before it is parsed.
         let reopened = GraphForge::new(Some(project.path().to_str().unwrap()))
             .expect("opening reads no search payload");
         let error = read(&reopened).unwrap_err();
@@ -1066,4 +1078,146 @@ fn compact_graph_root_refuses_same_inode_corruption_for_every_role() {
     );
     let _corruption = semantically_inert_corruption(project.path(), &entry);
     assert_open_inventory_defers_content_to_first_touch(project.path(), &entry);
+}
+
+/// `find` on a text index published in a compact project must answer, and a
+/// same-inode, same-length corruption of any search payload must be refused by
+/// `find` itself rather than answered.
+///
+/// Two independent layers refuse it, and either alone is enough to keep the
+/// corrupted bytes out of an answer: the property-source capture that every
+/// text `find` begins with (`capture_graph_read_inventory`) admits every
+/// payload in the tree, and `current_search_artifact` admits the artifact
+/// directory. The first is what surfaces here as an error: the second reports
+/// the corruption as a rebuildable derived index, which a text `find` heals by
+/// rebuilding rather than failing. Removing both makes `find` answer over the
+/// corrupted segment and fails this test; removing only the artifact admission
+/// does not, because the capture refuses first.
+#[test]
+#[cfg(feature = "search")]
+fn find_serves_a_compact_text_index_and_refuses_segment_corruption() {
+    let project = tempfile::tempdir().unwrap();
+    let graph = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    graph
+        .execute("CREATE (:Person {name:'Ada'}), (:Person {name:'Bob'})")
+        .unwrap();
+    graph
+        .index_search(
+            "Person",
+            crate::SearchIndexOptions::Text {
+                properties: Some(vec!["name".into()]),
+                rebuild: false,
+            },
+        )
+        .unwrap();
+    publish_compact_graph_workspace(project.path(), &graph.dir());
+    drop(graph);
+    let find = |graph: &GraphForge| {
+        graph.find(crate::FindOptions {
+            label: Some("Person".into()),
+            query: Some("Ada".into()),
+            limit: 3,
+            ..crate::FindOptions::default()
+        })
+    };
+
+    let clean = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    let found = find(&clean).expect("find on a compact text index");
+    assert_eq!(found.num_rows(), 1);
+    drop(clean);
+
+    let resolved = graphforge_storage::resolve_project_generation(project.path()).unwrap();
+    let segments = resolved
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap()
+        .files
+        .into_iter()
+        .filter(|entry| entry.relative_path.starts_with("indexes/search/") && entry.byte_length > 0)
+        .collect::<Vec<_>>();
+    drop(resolved);
+    assert!(segments.len() >= 4, "pointer, manifest and segments");
+    for entry in &segments {
+        let _corruption = semantically_inert_corruption(project.path(), entry);
+        if entry.relative_path.ends_with("/current.json") {
+            // The pointer is a single-link control, verified as it is copied.
+            assert!(
+                GraphForge::new(Some(project.path().to_str().unwrap())).is_err(),
+                "{} was accepted at open after in-place corruption",
+                entry.relative_path
+            );
+            continue;
+        }
+        let reopened = GraphForge::new(Some(project.path().to_str().unwrap()))
+            .expect("opening reads no search segment");
+        let error = find(&reopened).expect_err(&entry.relative_path);
+        assert!(
+            error.to_string().contains("XXH64 checksum"),
+            "{}: {error}",
+            entry.relative_path
+        );
+    }
+}
+
+/// A vector index published in a compact project must accept an upsert and
+/// answer `find`: its writer lock, pointer and mutation journal are replaced
+/// or opened for writing by name, so they cannot share a content-store inode.
+#[test]
+#[cfg(feature = "search")]
+fn vector_upsert_and_find_work_on_a_compact_project() {
+    use crate::{FindOptions, NodeSelector, PropValue, SearchIndexOptions};
+    let project = tempfile::tempdir().unwrap();
+    let graph = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    let alpha = graph
+        .add_node(
+            "Paper",
+            &std::collections::HashMap::from([("title".into(), PropValue::Str("alpha".into()))]),
+        )
+        .unwrap();
+    let beta = graph
+        .add_node(
+            "Paper",
+            &std::collections::HashMap::from([("title".into(), PropValue::Str("beta".into()))]),
+        )
+        .unwrap();
+    graph
+        .index_search(
+            "Paper",
+            SearchIndexOptions::Vector {
+                node: NodeSelector::Handle(alpha.clone()),
+                vector: vec![1.0, 0.0],
+                space: "sbert".into(),
+            },
+        )
+        .unwrap();
+    publish_compact_graph_workspace(project.path(), &graph.dir());
+    drop(graph);
+
+    let graph = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    graph
+        .index_search(
+            "Paper",
+            SearchIndexOptions::Vector {
+                node: NodeSelector::Uuid(beta.uuid),
+                vector: vec![0.0, 1.0],
+                space: "sbert".into(),
+            },
+        )
+        .expect("vector upsert on a compact project");
+    let found = graph
+        .find(FindOptions {
+            label: Some("Paper".into()),
+            vector: Some(vec![0.0, 1.0]),
+            space: Some("sbert".into()),
+            limit: 2,
+            ..FindOptions::default()
+        })
+        .expect("find on a compact vector index");
+    assert_eq!(found.num_rows(), 2);
+    let ids = found
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+        .unwrap();
+    assert_eq!(ids.value(0), beta.uuid.as_bytes());
 }

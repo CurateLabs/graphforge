@@ -1093,7 +1093,8 @@ pub(crate) fn is_graph_operational_file(relative: &Path) -> bool {
         | [".graphforge-rewrite.lock"]
         | ["embeddings", ".catalog.lock" | ".refresh.lock"]
         | ["graph-objects", "lifecycle.lock"]
-        | ["indexes", "search", .., ".writer.lock"] => true,
+        | ["indexes", "search", .., ".writer.lock"]
+        | ["embeddings", "space", .., ".writer.lock"] => true,
         ["embeddings", name]
             if name
                 .strip_prefix(".writer-")

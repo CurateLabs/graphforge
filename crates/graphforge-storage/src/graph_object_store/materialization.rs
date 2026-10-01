@@ -323,8 +323,47 @@ struct MaterializeIoEvidence {
     directory_fsync_calls: u64,
 }
 
+/// Files of a search or embedding artifact that the lifecycle replaces by name
+/// or opens for writing, so they cannot share a content-store inode:
+///
+/// - `current.json` is an artifact pointer, and `mutations.json` is the
+///   embedding mutation journal; each is published with a replacing rename,
+///   which refuses a multiply linked target.
+/// - `.tantivy-meta.lock` is flocked by every Tantivy reader, opened
+///   `O_WRONLY|O_CREAT`. It is empty, so every empty lock in every project and
+///   every index would otherwise be one content-store object: a read-only
+///   inode that cannot be opened for writing and, if it could, a lock shared
+///   by unrelated indexes. A reader of a compact text index failed with
+///   `EACCES` here.
+///
+/// - An embedding artifact's `.writer.lock` is opened for writing by every
+///   upsert. New publications exclude it from the inventory
+///   (`graph_files.rs`); a manifest published before that exclusion matched the
+///   real layout still lists it, and is copied here instead of linked.
+///
+/// The segments, manifests and `meta.json` stay shared and are admitted on
+/// first touch. The Tantivy writer lock is not copied: a build writes a new
+/// version directory and creates its own.
+fn is_mutable_artifact_control(relative_path: &str) -> bool {
+    let name = Path::new(relative_path)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str);
+    if relative_path.starts_with("indexes/search/") {
+        matches!(name, Some("current.json" | ".tantivy-meta.lock"))
+    } else if relative_path.starts_with("embeddings/") {
+        matches!(
+            name,
+            Some("current.json" | "mutations.json" | ".writer.lock")
+        )
+    } else {
+        false
+    }
+}
+
 fn requires_single_link_materialization(relative_path: &str) -> bool {
-    if relative_path == crate::route_component::TABLE_FILE {
+    if relative_path == crate::route_component::TABLE_FILE
+        || is_mutable_artifact_control(relative_path)
+    {
         return true;
     }
     let Some(name) = relative_path.strip_prefix("topology/uuid-membership/") else {
