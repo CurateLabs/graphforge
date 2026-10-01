@@ -1828,6 +1828,17 @@ fn plain_name(name: &str) -> bool {
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
+/// An immutable artifact is private (one link) or, when hydration hard-linked
+/// it from the content-addressed store, a read-only shared inode. A writable
+/// shared inode is refused: another name could rewrite it under this handle.
+/// Neither case is the integrity boundary; every block read is checked against
+/// its manifest digest, and the retained stamp detects cooperative change.
+fn has_admissible_links(file: &File) -> Result<bool, V4OrdinalIdentityError> {
+    let links = file_link_count(file).map_err(io_error)?;
+    Ok(links == 1
+        || links > 1 && file.metadata().map_err(io_error)?.permissions().readonly())
+}
+
 fn open_admission_file(
     root: &StableDirectory,
     descriptor: &V4OrdinalArtifact,
@@ -1836,7 +1847,7 @@ fn open_admission_file(
         .open_child_file(descriptor.name.as_ref())
         .map_err(io_error)?;
     let stamp = artifact_stamp(&file)?;
-    if file_link_count(&file).map_err(io_error)? != 1 || stamp.length != descriptor.bytes {
+    if !has_admissible_links(&file)? || stamp.length != descriptor.bytes {
         return Err(V4OrdinalIdentityError::Authentication);
     }
     Ok(OpenArtifact {
