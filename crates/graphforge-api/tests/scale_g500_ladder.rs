@@ -5290,6 +5290,52 @@ fn validate_affine_metric(
     Ok(())
 }
 
+/// The regime a phase metric declares (#1433). The redesign stopped doing
+/// work proportional to the data in many phases, so "grows with the rung" is
+/// no longer a safe default: every policy variant names which of these it is,
+/// and [`PhaseMetricPolicy::regime`] is an exhaustive match so a new variant
+/// cannot be added without choosing one.
+///
+/// A flat metric is not evidence of a regime change. Of the rows #1433
+/// catalogued, #1430's fsync flattening was a real durability regression and
+/// #1425's was memoization (while the content check it also removed was a
+/// separate, real integrity loss restored by #1435). Measure `main` on the
+/// same rungs before moving any row out of `DataProportional`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MetricRegime {
+    /// (a) The value tracks the data: it must grow with the rung (affine in
+    /// the live-count denominators) or be derived from a paired byte field
+    /// that does. A held-constant value is the regression.
+    DataProportional,
+    /// (b) Tied to a small, mostly-fixed structural count (objects, files,
+    /// pages, one buffer). Carries an upper bound (a spread tolerance or a
+    /// structural ceiling) AND a floor, because an upper bound alone cannot
+    /// see a component dropped from every rung alike. A value that tracks
+    /// the data is the regression, and so is a value that falls below its
+    /// floor.
+    StructureBounded,
+    /// (c) Genuinely constant: structurally zero, or pinned by a fixed
+    /// protocol. Any movement is the regression.
+    FixedProtocol,
+    /// Not one of the issue's three regimes: the value is a conservation law
+    /// over independently counted components (`read == 2 * write + route
+    /// table`, aggregate `==` the sum of native component counters, and the
+    /// durability relations between them). It asserts no growth at all, so a
+    /// legitimately flat value passes and a value that diverges from its
+    /// components fails. Each such validator also rejects the all-zero state
+    /// (components that stop being counted), because a conservation law over
+    /// zeros holds vacuously: hydration reads need a residual of at least 1,
+    /// the component-call policies reject a zero sum, hydration fsyncs reject
+    /// zero copies and barriers, encode fsyncs need an output barrier, CAS
+    /// needs an installed payload object and manifest root, and shape blocks
+    /// need merge bytes. The tests
+    /// `every_declared_nonzero_phase_metric_rejects_a_uniform_drop_to_zero`
+    /// (aggregate) plus the coherent-zero cases for encode fsyncs, CAS and
+    /// shape blocks exercise that; the policy variants carry no parameter
+    /// for it, so it is not checked from the table itself.
+    Reconciled,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PhaseMetricPolicy {
     ScaleBearing,
@@ -5349,6 +5395,39 @@ enum PhaseMetricPolicy {
     StructurallyZero,
 }
 
+impl PhaseMetricPolicy {
+    /// The declared regime. Deliberately has no wildcard arm.
+    const fn regime(self) -> MetricRegime {
+        match self {
+            // The value follows the data on its axis (affine against the
+            // live-count denominators), or follows a paired byte field that
+            // does (`BufferedCalls`: ceil(bytes / buffer) ..= bytes), or an
+            // exactly reconciled count of data-proportional append batches.
+            Self::ScaleBearing
+            | Self::NodeBearingBytes
+            | Self::BufferedCalls { .. }
+            | Self::AppendObjectInventory => MetricRegime::DataProportional,
+            // Spread cap + absolute floor on a fixed set of authenticated
+            // objects, and a single-buffer ceiling + floor on the control
+            // inventory read.
+            Self::BoundedObjectCalls { .. } | Self::InventoryControlBytes { .. } => {
+                MetricRegime::StructureBounded
+            }
+            Self::StructurallyZero => MetricRegime::FixedProtocol,
+            Self::HydrationReadReconciliation { .. }
+            | Self::ShapeReadComponentCalls
+            | Self::ShapeWriteComponentCalls
+            | Self::EncodeWriteComponentCalls
+            | Self::ShapeBlockInventory
+            | Self::CasFsyncInventory
+            | Self::CasReadComponentCalls
+            | Self::CasWriteComponentCalls
+            | Self::EncodeFsyncInventory
+            | Self::HydrationFsyncInventory => MetricRegime::Reconciled,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct PhasePolicyRow {
     phase: &'static str,
@@ -5402,7 +5481,45 @@ const RECOVERY_REAUTHENTICATION_MIN_ABSOLUTE_CALLS: u64 = 45;
 const HYDRATION_ROUTE_TABLE_CONTROL_BYTES: u64 = 2 * 1024;
 
 // This is deliberately exhaustive: adding a storage phase or counter requires
-// choosing semantics here instead of silently inheriting an affine assertion.
+// choosing a policy here, and every policy declares its `MetricRegime`
+// (`PhaseMetricPolicy::regime`), instead of silently inheriting an affine
+// assertion (#1433). Per row, the regime of each field and what a regression
+// would have to do to fail it:
+//
+// append_merge: write_bytes and write_calls are data-proportional (the rows
+//   appended; calls derive from the staged-block size), object_count is the
+//   data-proportional batch count reconciled to the append inventory. Reads
+//   and fsyncs are fixed-protocol zero (append reads nothing; its barriers
+//   are accounted in fsync_synchronization).
+// seal_authentication: fixed-protocol zero on every field; no I/O is
+//   attributed to the seal itself (#1623 split it from append).
+// shape_consume_reauthentication: bytes are data-proportional; calls and
+//   blocks reconcile to the native component counters (blocks additionally to
+//   ceil(bytes / staged block) ..= bytes); object count and fsyncs are zero.
+// encode_write_postwrite_authentication: bytes and read calls are data-
+//   proportional; write calls and fsyncs reconcile to the native encoder
+//   components (output, spool, membership, ordinal barriers).
+// publication_preauthentication: the encoded-inventory control read is
+//   structure-bounded by one encoding buffer, and its call count derives from
+//   those bytes; every other field is zero.
+// cas_install_read_write: bytes are data-proportional; calls and fsyncs
+//   reconcile to the CAS publication components and the one-publication,
+//   every-path-installed-or-reused inventory; payload calls are bounded by
+//   the payload bytes.
+// hydration_verification: read_bytes is a conservation law over the copy
+//   protocol (not growth); write_bytes is data-proportional on the node axis
+//   and fixed on the edge axis; calls derive from bytes; fsyncs reconcile to
+//   the protocol's file plus directory barriers.
+// fsync_synchronization: fsync_calls is data-proportional on the ladder
+//   fixture. #1430 measured it as one durable barrier per cut partition with
+//   the cut `min(partition_count, max(1, staged_identity_records / 16))`, so
+//   below saturation it follows the data; above it the row would be
+//   structure-bounded by the recorded partition count and has to be
+//   redeclared before this table is applied at S20 and above. Everything
+//   else is zero.
+// recovery_reauthentication: read_bytes is data-proportional; read_calls is
+//   structure-bounded (spread cap plus floor) by the fixed set of
+//   authenticated objects.
 const PHASE_METRIC_POLICIES: [PhasePolicyRow; 9] = [
     PhasePolicyRow {
         phase: "append_merge",
@@ -5739,13 +5856,17 @@ fn validate_shape_block_inventory(
             observation.shape_merge_bytes[1],
         ),
     ] {
+        // Floor: `validate_axis_denominators` rejects an empty graph, so the
+        // shape consumed identity records through the counted reader
+        // (merge_read_bytes, shape.rs) and routed them through the partition
+        // writer (merge_written_bytes, partition_shaping.rs). Zero bytes with
+        // zero blocks reconciles trivially and is what a shape that stopped
+        // running (or counting) would report; the ceiling bound below then
+        // forces at least one block.
         if bytes == 0 {
-            if blocks != 0 {
-                return Err(format!(
-                    "{name} {direction} blocks lack merge bytes at rung {rung}"
-                ));
-            }
-            continue;
+            return Err(format!(
+                "{name} {direction} has no merge bytes although a non-empty graph was shaped at rung {rung}"
+            ));
         }
         // Production accumulates ceil(artifact_bytes / block_bytes) for every
         // authenticated artifact. Therefore ceil(total_bytes / block_bytes) is
@@ -6334,6 +6455,27 @@ fn validate_lifecycle_metric_policies_for_axis(
                                 .installed_objects
                                 .checked_add(component.reused_objects)
                                 .ok_or_else(|| format!("{name} object request total overflows"))?;
+                            // Floor: the ladder publishes one fresh generation
+                            // into a single-writer store
+                            // (`validate_fresh_cas_control_bound` requires
+                            // `initial_entries == 0`), so nothing can already
+                            // exist on the first request for an object and at
+                            // least one payload object and the manifest root
+                            // (always installed) are installed. This also
+                            // implies the one-directional counter laws
+                            // (`write_bytes > 0` or `installed_bytes > 0`
+                            // only under an attempted, installed object):
+                            // `installation_evidence` is the only path setting
+                            // `attempted_install`, and with
+                            // `install_attempts >= installed_objects >= 1`
+                            // they cannot fail independently. Relies on that
+                            // fresh single-writer store; a resumed or shared
+                            // store may legitimately reuse everything.
+                            if component.installed_objects == 0 {
+                                return Err(format!(
+                                    "{name} {kind} installs nothing in a fresh publication at rung {rung}"
+                                ));
+                            }
                             if component.install_attempts < component.installed_objects
                                 || component.install_attempts > requests
                                 || component.install_attempts.checked_mul(2)
@@ -6373,6 +6515,22 @@ fn validate_lifecycle_metric_policies_for_axis(
                         if values[rung] != expected {
                             return Err(format!(
                                 "{name} does not reconcile output/spool/membership/ordinal barriers at rung {rung}"
+                            ));
+                        }
+                        // Floor: a non-empty graph always writes at least one
+                        // topology parquet artifact, and each lane's namespace
+                        // and file barriers are counted into the output
+                        // component (lanes.rs). Reconciling the aggregate to
+                        // its components alone accepts both reading zero,
+                        // which is what an encoder that stopped issuing (or
+                        // counting) its barriers would produce. Do not
+                        // tighten this to `>= canonical_artifact_objects`:
+                        // adjacency artifacts (adjacency.rs) add write bytes
+                        // but no attributed barrier, so that bound would be
+                        // false.
+                        if observation.encode_fsync_components[0] == 0 {
+                            return Err(format!(
+                                "{name} has no output barrier although encoded output was written at rung {rung}"
                             ));
                         }
                     }
@@ -7280,6 +7438,246 @@ fn lifecycle_hydration_read_policy_reconciles_to_the_copy_protocol() {
             phase[0] = 2 * phase[1];
         }
         assert!(validate_lifecycle_metric_policies_for_axis(axis, &no_route_table_read).is_err());
+    }
+}
+
+#[test]
+fn phase_metric_regimes_are_declared_and_structure_bounds_carry_a_floor() {
+    let mut declared = Vec::new();
+    for row in PHASE_METRIC_POLICIES {
+        for (field, policy) in LINEARITY_PHASE_FIELDS.iter().zip(row.fields) {
+            let regime = policy.regime();
+            declared.push(regime);
+            match (regime, policy) {
+                // (b) must carry both an upper bound and a floor, so that a
+                // component dropped from every rung alike is still caught.
+                (
+                    MetricRegime::StructureBounded,
+                    PhaseMetricPolicy::BoundedObjectCalls {
+                        max_growth_percent,
+                        min_absolute_calls,
+                        ..
+                    },
+                ) => assert!(
+                    (1..100).contains(&max_growth_percent) && min_absolute_calls > 0,
+                    "{}.{field}: spread {max_growth_percent}% and floor {min_absolute_calls}",
+                    row.phase
+                ),
+                (
+                    MetricRegime::StructureBounded,
+                    PhaseMetricPolicy::InventoryControlBytes { maximum },
+                ) => assert!(
+                    (1..=ENCODING_BUFFER_BYTES).contains(&maximum),
+                    "{}.{field}: ceiling {maximum} must be 1..=one encoding buffer",
+                    row.phase
+                ),
+                (MetricRegime::StructureBounded, other) => panic!(
+                    "{}.{field}: {other:?} is structure-bounded but its spread/ceiling and floor are not checked here",
+                    row.phase
+                ),
+                (MetricRegime::FixedProtocol, other)
+                    if other != PhaseMetricPolicy::StructurallyZero =>
+                {
+                    panic!("{}.{field}: {other:?} is not a fixed protocol", row.phase)
+                }
+                (
+                    MetricRegime::FixedProtocol
+                    | MetricRegime::DataProportional
+                    | MetricRegime::Reconciled,
+                    _,
+                ) => {}
+            }
+        }
+    }
+    // Every regime is exercised by the table, so none is dead vocabulary.
+    for regime in [
+        MetricRegime::DataProportional,
+        MetricRegime::StructureBounded,
+        MetricRegime::FixedProtocol,
+        MetricRegime::Reconciled,
+    ] {
+        assert!(declared.contains(&regime), "no row declares {regime:?}");
+    }
+    // Rows this issue relaxed from the pre-redesign "grows with the data"
+    // default keep the named replacement property, not a silent weakening.
+    let policy = |phase: &str, field: &str| {
+        let row = PHASE_METRIC_POLICIES
+            .iter()
+            .find(|row| row.phase == phase)
+            .unwrap();
+        let index = LINEARITY_PHASE_FIELDS
+            .iter()
+            .position(|name| *name == field)
+            .unwrap();
+        row.fields[index]
+    };
+    assert_eq!(
+        policy("recovery_reauthentication", "read_calls").regime(),
+        MetricRegime::StructureBounded
+    );
+    assert_eq!(
+        policy("hydration_verification", "read_bytes").regime(),
+        MetricRegime::Reconciled
+    );
+    // #1430: fsync flattening was a durability regression, not a regime
+    // change; the row stays data-proportional.
+    assert_eq!(
+        policy("fsync_synchronization", "fsync_calls").regime(),
+        MetricRegime::DataProportional
+    );
+}
+
+#[test]
+fn every_declared_nonzero_phase_metric_rejects_a_uniform_drop_to_zero() {
+    // "Stopped running": the whole metric vanishes on every rung alike. A
+    // spread or monotonicity check is blind to that. Only the aggregate is
+    // zeroed here, so the rejection may come from the reconciliation mismatch
+    // against its (unzeroed) components or from a sibling field of the same
+    // phase rather than the field's own floor; coherent zeros of the
+    // components are exercised separately. The error must still name the
+    // mutated phase, so an unrelated validator is not what rejected it.
+    for axis in [LinearityAxis::Nodes, LinearityAxis::Edges] {
+        let base = synthetic_linearity_observations_for_axis(axis);
+        validate_lifecycle_metric_policies_for_axis(axis, &base).expect("synthetic baseline");
+        for row in PHASE_METRIC_POLICIES {
+            for (index, (field, policy)) in
+                LINEARITY_PHASE_FIELDS.iter().zip(row.fields).enumerate()
+            {
+                if policy.regime() == MetricRegime::FixedProtocol {
+                    continue;
+                }
+                let mut dropped = base.clone();
+                for observation in &mut dropped {
+                    observation.phases.get_mut(row.phase).unwrap()[index] = 0;
+                }
+                let error = validate_lifecycle_metric_policies_for_axis(axis, &dropped).expect_err(
+                    &format!(
+                        "{axis:?}: {}.{field} dropped to zero on every rung must fail",
+                        row.phase
+                    ),
+                );
+                // Append bytes carry a second floor anchored to the accepted
+                // input row count (at least one byte per row), checked before
+                // the row's own policy.
+                let append_row_floor = row.phase == "append_merge"
+                    && *field == "write_bytes"
+                    && error.contains("append bytes are below accepted row count");
+                assert!(
+                    error.contains(row.phase) || append_row_floor,
+                    "{}.{field}: {error}",
+                    row.phase
+                );
+            }
+        }
+    }
+}
+
+fn reconcile_cas_phase_aggregate(observation: &mut LifecycleLinearityObservation) {
+    let totals = observation.cas_publication_io.totals().expect("CAS totals");
+    observation.phases.insert(
+        "cas_install_read_write".to_owned(),
+        [
+            totals.read_bytes,
+            totals.write_bytes,
+            totals.read_calls,
+            totals.write_calls,
+            0,
+            0,
+            totals.file_fsync_calls + totals.directory_fsync_calls,
+        ],
+    );
+}
+
+#[test]
+fn cas_fsync_inventory_rejects_a_fresh_publication_that_installed_nothing() {
+    // Reconciling the aggregate to its components accepts a publication whose
+    // objects were all "reused" with no install attempt and no barrier, even
+    // though the ladder publishes into a fresh store (`initial_entries == 0`)
+    // where the first request for any object must install it.
+    for axis in [LinearityAxis::Nodes, LinearityAxis::Edges] {
+        for kind in ["payload", "manifest"] {
+            let mut nothing_installed = synthetic_linearity_observations_for_axis(axis);
+            for observation in &mut nothing_installed {
+                let component = if kind == "payload" {
+                    &mut observation.cas_publication_io.payload
+                } else {
+                    &mut observation.cas_publication_io.manifest
+                };
+                component.reused_objects += component.installed_objects;
+                component.installed_objects = 0;
+                component.install_attempts = 0;
+                component.installed_bytes = 0;
+                if kind == "manifest" {
+                    // The fresh-publication control bound requires one
+                    // manifest write call per install attempt.
+                    component.write_calls = 0;
+                    component.write_bytes = 0;
+                }
+                component.file_fsync_calls = 0;
+                component.directory_fsync_calls = 0;
+                reconcile_cas_phase_aggregate(observation);
+            }
+            let error = validate_lifecycle_metric_policies_for_axis(axis, &nothing_installed)
+                .expect_err("a fresh publication that installed no object must fail");
+            assert!(
+                error.contains("cas_install_read_write.fsync_calls")
+                    && error.contains(kind)
+                    && error.contains("installs nothing"),
+                "{axis:?} {kind}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn shape_block_inventory_rejects_a_shape_that_merged_no_bytes() {
+    // A non-empty graph's identity records are read through the counted
+    // reader and routed through the partition writer, so both merge byte
+    // totals are positive. Zero bytes with zero blocks reconciles trivially.
+    for axis in [LinearityAxis::Nodes, LinearityAxis::Edges] {
+        let mut no_merge = synthetic_linearity_observations_for_axis(axis);
+        for observation in &mut no_merge {
+            observation.shape_merge_bytes = [0, 0];
+            observation.shape_block_components = [0, 0];
+            observation
+                .phases
+                .get_mut("shape_consume_reauthentication")
+                .unwrap()[5] = 0;
+        }
+        let error = validate_lifecycle_metric_policies_for_axis(axis, &no_merge)
+            .expect_err("a non-empty graph shaped with zero merge bytes must fail");
+        assert!(
+            error.contains("shape_consume_reauthentication.block_count")
+                && error.contains("no merge bytes"),
+            "{axis:?}: {error}"
+        );
+    }
+}
+
+#[test]
+fn encode_fsync_inventory_rejects_barriers_that_stop_being_counted() {
+    // The aggregate and its native components can both read zero if the
+    // encoder stops issuing (or stops counting) its durability barriers.
+    // Reconciling the aggregate to the components alone accepts that.
+    for axis in [LinearityAxis::Nodes, LinearityAxis::Edges] {
+        let mut no_barriers = synthetic_linearity_observations_for_axis(axis);
+        let fsync_index = LINEARITY_PHASE_FIELDS
+            .iter()
+            .position(|field| *field == "fsync_calls")
+            .unwrap();
+        for observation in &mut no_barriers {
+            observation.encode_fsync_components = [0; 4];
+            observation
+                .phases
+                .get_mut("encode_write_postwrite_authentication")
+                .unwrap()[fsync_index] = 0;
+        }
+        let error = validate_lifecycle_metric_policies_for_axis(axis, &no_barriers)
+            .expect_err("encoding durable output with zero barriers must fail");
+        assert!(
+            error.contains("encode_write_postwrite_authentication.fsync_calls"),
+            "{error}"
+        );
     }
 }
 
