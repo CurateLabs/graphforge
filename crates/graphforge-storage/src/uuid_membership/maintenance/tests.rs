@@ -114,6 +114,53 @@ fn ordinal_orphan_admission_rejects_link_fifo_and_oversized_manifest() {
     );
 }
 
+/// Hydration hard-links forward and ordinal runs from the content store. The
+/// collector may only retire private names: a shared run, live or orphaned, and
+/// the store's name for it, survive untouched (#1388).
+#[cfg(unix)]
+#[test]
+fn orphan_collection_never_unlinks_shared_v4_runs_or_their_store_names() {
+    let (dir, nodes, _) = fixture();
+    fs::write(
+        dir.path().join("topology/generation.json"),
+        b"{\"topology_generation\":7,\"search_generation\":0,\"property_generation\":0}\n",
+    )
+    .unwrap();
+    rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+    let (selected, authority) = install_test_v4_facet(dir.path(), 7, &nodes);
+    let index = dir.path().join(INDEX_DIR);
+    let store = dir.path().join("store");
+    fs::create_dir(&store).unwrap();
+    let orphan_name = "ordinal-v4-7-0000000000000000.uuidx";
+    fs::write(index.join(orphan_name), b"orphan").unwrap();
+    let mut shared = selected
+        .iter()
+        .filter(|name| name.ends_with(".uuidx"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(!shared.is_empty());
+    shared.push(orphan_name.to_owned());
+    let mut before = Vec::new();
+    for name in &shared {
+        let linked = store.join(name);
+        fs::hard_link(index.join(name), &linked).unwrap();
+        let mut permissions = fs::metadata(&linked).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&linked, permissions).unwrap();
+        before.push((name.clone(), fs::read(&linked).unwrap()));
+    }
+
+    let work =
+        maintain_uuid_membership_orphans_with_ordinal_authority(dir.path(), 16, Some(&authority))
+            .unwrap();
+    assert_eq!(work.removed, 0);
+    assert_eq!(work.deferred_linked, 1, "the shared orphan is deferred, not unlinked");
+    for (name, bytes) in before {
+        assert_eq!(fs::read(index.join(&name)).unwrap(), bytes, "{name}");
+        assert_eq!(fs::read(store.join(&name)).unwrap(), bytes, "{name} store name");
+    }
+}
+
 #[test]
 fn orphan_maintenance_is_bounded_and_preserves_linked_and_live_runs() {
     let dir = tempfile::tempdir().unwrap();

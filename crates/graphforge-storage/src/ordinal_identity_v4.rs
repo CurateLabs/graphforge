@@ -2578,6 +2578,43 @@ mod tests {
     const RECORDS_PER_ORDINAL_BLOCK: u64 = ORDINAL_BLOCK_BYTES / UUID_WIDTH;
 
     #[test]
+    fn shared_artifact_inodes_are_admitted_only_when_read_only() {
+        let fixture = Fixture::new(&[2 * RECORDS_PER_ORDINAL_BLOCK], &[]);
+        let artifact = fixture.root.path().join(INDEX_DIR).join("ordinal-0.uuidx");
+        let store_name = fixture.root.path().join("content-store-name");
+        fs::hard_link(&artifact, &store_name).unwrap();
+        let open = || {
+            V4OrdinalIdentityHandle::open(
+                fixture.root.path(),
+                &fixture.authority(7),
+                V4OrdinalIdentityLimits::default(),
+            )
+        };
+        // Another name for a writable inode could rewrite it under the handle.
+        assert!(matches!(open(), Err(V4OrdinalIdentityError::Authentication)));
+        let set_readonly = |readonly: bool| {
+            let mut permissions = fs::metadata(&artifact).unwrap().permissions();
+            permissions.set_readonly(readonly);
+            fs::set_permissions(&artifact, permissions).unwrap();
+        };
+        set_readonly(true);
+        let Ok(V4OrdinalIdentityOpen::Ready(mut handle)) = open() else {
+            panic!("a read-only shared inode is admissible");
+        };
+        assert!(handle.lookup_node_uuids(&[1]).unwrap().values[0].is_some());
+        // Sharing is not trust: a flip through the other name is refused by
+        // the block that reads it.
+        set_readonly(false);
+        flip_byte_in_place(&store_name, 3);
+        set_readonly(true);
+        assert_eq!(
+            handle.lookup_node_uuids_pinned(&[1]).unwrap_err(),
+            V4OrdinalIdentityError::Authentication
+        );
+        assert!(handle.lookup_node_uuids_pinned(&[RECORDS_PER_ORDINAL_BLOCK + 1]).unwrap().values[0].is_some());
+    }
+
+    #[test]
     fn opening_reads_no_artifact_byte_at_any_node_count() {
         // 1x, 8x and 64x nodes: open is O(descriptors), never O(nodes).
         for blocks in [1, 8, 64] {
