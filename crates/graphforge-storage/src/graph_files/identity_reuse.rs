@@ -170,6 +170,9 @@ impl CapturedWorkspaceFile {
 pub(crate) struct WorkspaceCapture {
     pub(crate) inventory: GraphFilesInventory,
     pub(crate) captured: BTreeMap<String, CapturedWorkspaceFile>,
+    /// Payload read calls the capture made: none for a file that is its parent's
+    /// own object, one pass for every other.
+    pub(crate) read_calls: u64,
 }
 
 /// Capture a private workspace for compact publication over `parent`: the
@@ -185,7 +188,7 @@ pub(crate) fn capture_workspace_over_parent(
 ) -> Result<WorkspaceCapture, GfError> {
     let known = known_files(parent)?;
     let mut captured = BTreeMap::new();
-    let (inventory, _) = build_inventory_for_owned_layout(
+    let (inventory, read_calls) = build_inventory_for_owned_layout(
         source_root,
         false,
         Some(&known),
@@ -196,6 +199,7 @@ pub(crate) fn capture_workspace_over_parent(
     Ok(WorkspaceCapture {
         inventory,
         captured,
+        read_calls,
     })
 }
 
@@ -249,5 +253,113 @@ mod tests {
         );
         assert!(calls > 0);
         assert!(hashed.is_some(), "a freshly hashed file is retained to install");
+    }
+    /// Publishing a workspace over a compact parent installs what changed and
+    /// reads nothing else: hydrated files are the parent's own objects, so a
+    /// capture of them reads no byte; a new file is read once and retained.
+    #[test]
+    fn a_capture_over_a_compact_parent_reads_only_what_changed() {
+        use crate::{
+            GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, ProjectCapability,
+            ProjectGenerationRequest, ProjectStageOutcome, empty_workspace_participants,
+        };
+        let root = tempfile::tempdir().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let workspace = tempfile::tempdir_in(root.path()).unwrap();
+        std::fs::create_dir_all(workspace.path().join("topology")).unwrap();
+        std::fs::write(workspace.path().join("topology/nodes.parquet"), vec![7_u8; 8 * 64 * 1024]).unwrap();
+        std::fs::write(workspace.path().join("topology/generation.json"), b"{}\n").unwrap();
+
+        let publish = |workspace: &Path| {
+            let parent = crate::resolve_project_generation(root.path()).unwrap();
+            let (participant, lease) =
+                crate::prepare_compact_graph_publication(&parent, workspace).unwrap();
+            let mut participants = empty_workspace_participants().unwrap();
+            participants.insert(0, participant);
+            let request = ProjectGenerationRequest {
+                transaction_uuid: uuid::Uuid::now_v7(),
+                generation_uuid: uuid::Uuid::now_v7(),
+                capabilities: vec![
+                    ProjectCapability {
+                        capability_id: GRAPH_CAPABILITY_ID.into(),
+                        capability_version: GRAPH_CAPABILITY_VERSION,
+                    },
+                    ProjectCapability {
+                        capability_id: "workspace".into(),
+                        capability_version: 1,
+                    },
+                ],
+                participants,
+            };
+            let ProjectStageOutcome::Staged(staged) =
+                crate::stage_project_generation_with_graph_tree(root.path(), &request, None)
+                    .unwrap()
+            else {
+                panic!("fresh publication replayed");
+            };
+            staged
+                .validate(|_| Ok(()), |_, _| Ok(()))
+                .unwrap()
+                .publish_with_graph_objects(&lease)
+                .unwrap();
+            crate::resolve_project_generation(root.path()).unwrap()
+        };
+        // The first commit has no graph parent and still publishes compact.
+        let first = publish(workspace.path());
+        assert!(first.declared_graph_files_inventory().unwrap().is_none());
+        let inventory = first.graph_files_inventory().unwrap().unwrap();
+
+        // Hydrate it as an open does, then capture the untouched workspace.
+        let hydrated = tempfile::tempdir_in(root.path()).unwrap();
+        crate::materialize_graph_objects(root.path(), &inventory, hydrated.path()).unwrap();
+        let untouched = capture_workspace_over_parent(hydrated.path(), &first).unwrap();
+        // Hydration writes the route table afresh as a private single-link file, so
+        // it alone is read; the payload files are the parent's own objects.
+        assert!(
+            untouched
+                .captured
+                .keys()
+                .all(|path| path == "semantic-routes.json"),
+            "only the private route table is new: {:?}",
+            untouched.captured.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            untouched.read_calls <= 2,
+            "the 512 KiB payload is not read to capture it: {} read calls",
+            untouched.read_calls
+        );
+        let payload = |inventory: &GraphFilesInventory| {
+            inventory
+                .files
+                .iter()
+                .filter(|entry| entry.relative_path != "semantic-routes.json")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(payload(&untouched.inventory), payload(&inventory));
+
+        // A new file is read once and kept; the payload still reads nothing.
+        std::fs::write(hydrated.path().join("topology/added.bin"), vec![9_u8; 2048]).unwrap();
+        let changed = capture_workspace_over_parent(hydrated.path(), &first).unwrap();
+        assert!(changed.captured.contains_key("topology/added.bin"));
+        assert!(!changed.captured.contains_key("topology/nodes.parquet"));
+        assert_eq!(
+            changed.read_calls,
+            untouched.read_calls + 1,
+            "one pass over the one new file"
+        );
+
+        // Publishing that workspace installs the one object and keeps the rest.
+        let second = publish(hydrated.path());
+        let after = second.graph_files_inventory().unwrap().unwrap();
+        assert!(
+            after
+                .files
+                .iter()
+                .any(|entry| entry.relative_path == "topology/added.bin")
+        );
+        for entry in payload(&inventory) {
+            assert!(after.files.contains(&entry), "{} is carried over", entry.relative_path);
+        }
     }
 }
