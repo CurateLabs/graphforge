@@ -829,7 +829,14 @@ fn admission_lanes_preserve_spilled_csr_and_metrics() {
             || Ok(()),
         );
         crate::graph_construction::REVERSE_LANE_JOBS.with(|value| value.set(false));
-        let (rows, metrics) = result.unwrap();
+        let (rows, mut metrics) = result.unwrap();
+        for artifact in &mut metrics.captured_artifacts {
+            artifact.path = artifact
+                .path
+                .strip_prefix(output.path())
+                .expect("captured CSR must remain under its output root")
+                .to_path_buf();
+        }
         assert_eq!(admission.in_use(), 0);
         let mut bytes = Vec::new();
         fn collect(root: &Path, dir: &Path, result: &mut Vec<(PathBuf, Vec<u8>)>) {

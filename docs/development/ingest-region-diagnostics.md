@@ -188,7 +188,7 @@ The method and reviewed classification inputs are pinned by SHA-256:
 `digest-census.py` is
 `640e8221d88c8065f9e60aa0e9182545c3e43b52bbb9618c885717d5d3b2f1ba`;
 `digest-census-overrides.json` is
-`bdde8cff097b818265a49ebcfa1876e8b7f48a67306b218a1b2b1016a24533bc`.
+`1cfcb38fb58af43dc7f78920c722c8ff723f429d47e43c395015e51c1bd94e18`.
 The parser fixture `test-digest-census.py` is
 `77224ebc214e8c8793baced7d105bdc576cd0015feb436a0af701260998a48f1`.
 Run the parser and stale-review regression fixtures with
@@ -217,11 +217,50 @@ by their callers, and typed wrappers add no extra hash pass.
 Private construction checkpoint wire 11 binds intermediate spill receipts by
 exact length and mandatory seed-zero XXH64. Spill writers and resume admission
 count checksum work separately and perform no SHA pass at those boundaries.
-Published UUID wire 6 and ordinal descriptor wire 5 remain unchanged here.
+Published UUID wire 7 and ordinal descriptor wire 6 retain whole-artifact SHA
+names and required whole/block XXH64, and refuse retired per-block SHA fields.
+Private encoded inventory wire 2 requires whole-artifact checksums for both new
+and retained entries. Checkpoint/inventory, generation, shape and current-parent
+controls admit those expected values before replay or copying. Final writers
+forward genuine SHA/XXH64/length captures, including existing CSR shard records.
+A private retained-source capability checks native identity, path, link, length
+and active allocation while one source is copied at a time. The copying boundary
+checksums actual accepted bytes, detecting same-inode mutate/read/restore.
+An existing CAS object still requires genuine SHA unless the same installation
+lease binds its exact native identity. Unknown objects, concurrent winners,
+public untrusted input and orphan deletion authority retain SHA authentication.
+Encoder replay and retained-parent admission use authenticated checksums. Reclaim
+continues to read zero encoded payload; this change removes no reclaim sweep.
 Encoding still counts the full raw identity-run SHA as artifact work and forwards
 its genuine digest to the existing topology receipt. Control SHA covers the
 private intent, shape, progress and encoding-inventory metadata, including their
 expected checksums.
+
+Reproduce the encoded capture and refusal tests with the real storage runner:
+
+```bash
+python3 scripts/test_environment.py -- cargo nextest run --locked -p graphforge-storage --lib -E 'test(graph_construction_encoding::) or test(graph_construction::encoding_publication::) or test(uuid_membership::) or test(ordinal_identity_v4::) or test(adjacency::)'
+```
+
+Direct operation counters assert whole-artifact capture bytes once, no additional
+artifact SHA for admitted replay/copy and known native CAS reuse, and genuine SHA
+for unknown CAS. SHA names and mapping commitments are compared with independently
+computed payload identities and existing canonical goldens. Strict metadata tests
+cover current missing/malformed checksums and header-first unsupported versions.
+The copied-byte mutation fixture restores valid same-length bytes after they
+are read; checksum refusal and unchanged `CURRENT` are asserted independently.
+
+Current capture-method inputs are pinned by SHA-256:
+
+- `crates/graphforge-storage/src/graph_construction_encoding.rs`: `14388c1e44eb8580a38edf9920bd8c9e13daddc3ee14f9ff78fd57ed15cd0299`.
+- `crates/graphforge-storage/src/graph_construction/encoding_publication/tests.rs`: `845ad69865cd17ad8ee8be8beafb89809202fa0d15027a90c5e7ade55353bd12`.
+- `crates/graphforge-storage/src/uuid_membership/construction/tests.rs`: `8e19f543465d06b837a8d63736c91e08f3cc0ccd5b54a972933a656b161d8262`.
+- `crates/graphforge-storage/src/uuid_membership/ordinal_artifacts/tests.rs`: `553018c2b4b91aa53cfc8a7a047db14040ab8e6c08282a4a2e10bdd74e1acf0f`.
+- `crates/graphforge-storage/src/adjacency.rs`: `91fb91b26c0aa8a29a0591e73457b630449dfae1534be6d2c961334a01f676a3`.
+
+- `crates/graphforge-storage/src/graph_construction_encoding/inventory.rs`: `0dc9be1a049388eb1ff433137eca6f217e23ad1badb97ec96aa26f61cd374b19`.
+- `crates/graphforge-storage/src/graph_construction/encoding_publication/tests/captures.rs`: `eb4c8e133a71ffec2a379144bdd73b74e00ef6871341a3e18be84f472dbd30da`.
+- `crates/graphforge-storage/src/adjacency/capture_tests.rs`: `1c4e0011ae633b531eabd8f3aad8fcf42422bc9282f35837de2855cd97f4ba22`.
 
 The method records the source revision, source-file SHA-256 digests, the working
 diff digest when present, and digests of the method and semantic override inputs.

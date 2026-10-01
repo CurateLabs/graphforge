@@ -424,7 +424,6 @@ pub(super) fn install_test_v4_facet(
             blocks: vec![crate::V4OrdinalBlock {
                 offset: 0,
                 count: nodes.len() as u64,
-                sha256: hex_sha256(&ordinal_bytes),
                 xxh64: crate::corruption_checksum::checksum(&ordinal_bytes),
             }],
         }],
@@ -443,7 +442,6 @@ pub(super) fn install_test_v4_facet(
                 count: 1,
                 first: nodes.len() as u64,
                 last: nodes.len() as u64,
-                sha256: tombstone_digest,
                 xxh64: crate::corruption_checksum::checksum(&tombstone_bytes),
             }],
         }],
@@ -1147,7 +1145,7 @@ fn v4_rebuild_subprocess_crash_retry_selects_one_complete_authority() {
                 generation,
                 generation,
                 &crate::AuxiliaryReceipt {
-                    kind: "uuid-membership/ordinal-v5".to_owned(),
+                    kind: "uuid-membership/ordinal-v6".to_owned(),
                     schema_version: crate::ORDINAL_IDENTITY_V4,
                     path: format!("{INDEX_DIR}/{V4_ORDINAL_RECEIPT}"),
                     digest: hex_sha256(&receipt_bytes),

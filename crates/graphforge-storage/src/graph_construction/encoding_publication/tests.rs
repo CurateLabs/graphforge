@@ -819,7 +819,20 @@ fn canonical_encoder_reuse_accounts_only_second_invocation_io() {
     let cache_after_first = session.evidence().cache_release_operations;
     let writes_after_first = session.evidence().encode_application_write_bytes;
 
+    let capture = graphforge_core::hash_observation::operation::Capture::start();
     let second = session.encode_canonical(&shape, 1).unwrap();
+    let observed = capture.snapshot();
+    assert_eq!(observed.artifact_payload_sha256_bytes, 0);
+    assert_eq!(observed.unclassified_sha256_bytes, 0);
+    assert!(
+        observed.checksum_bytes
+            >= first
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.bytes)
+                .sum::<u64>()
+    );
+    drop(capture);
     assert!(!second.invocation.performed);
     assert!(second.invocation.reused);
     assert_eq!(second.invocation.evidence.output_write_bytes, 0);
@@ -1004,7 +1017,7 @@ fn ladder_path_refuses_same_inode_encoded_corruption_at_cas_install() {
     assert!(
         error
             .to_string()
-            .contains("graph object source digest or length changed during install"),
+            .contains("captured encoded source checksum or length changed during copy"),
         "expected the CAS install boundary to refuse the mutation, got: {error}"
     );
     assert_ne!(
@@ -2197,9 +2210,8 @@ fn canonical_publication_rejects_tampered_artifact_before_current() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("authenticated graph file metadata changed")
-            || error.contains("digest or length changed")
-            || error.contains("graph object source is not the declared regular file"),
+        error.contains("captured encoded source identity or length changed")
+            || error.contains("captured encoded source allocation identity changed"),
         "unexpected corruption error: {error}"
     );
     assert_eq!(
@@ -2399,24 +2411,43 @@ fn canonical_publication_cancels_at_named_immediate_pre_current_boundary() {
     let encoding = session.encode_canonical(&shape, 1).unwrap();
     let target = Uuid::from_u128(9_466);
     let transaction = Uuid::from_u128(9_467);
-    let mut checkpoints = 0_u8;
+    let checkpoints = std::cell::Cell::new(0_u64);
+    let prepared_checkpoints = std::cell::Cell::new(0_u64);
+    let prepared = std::cell::Cell::new(false);
     let error = session
         .publish_canonical_with_cancellation(
             &encoding,
             target,
             transaction,
             || {
-                checkpoints += 1;
-                checkpoints == 2
+                checkpoints.set(checkpoints.get() + 1);
+                prepared.get()
             },
-            None,
+            Some(&mut |_candidate| {
+                assert_eq!(
+                    std::fs::read(root.path().join("CURRENT")).unwrap(),
+                    prior_current
+                );
+                prepared_checkpoints.set(checkpoints.get());
+                prepared.set(true);
+                Ok(())
+            }),
         )
         .unwrap_err();
+    assert!(
+        prepared.get(),
+        "candidate preparation must precede cancellation"
+    );
+    assert!(
+        prepared_checkpoints.get() > 1,
+        "copy polls remain cooperative"
+    );
     assert_eq!(error.code(), "GF_CANCELLED");
     assert!(error.to_string().contains("before_current_replace"));
     assert_eq!(
-        checkpoints, 2,
-        "entry and immediate pre-CURRENT checkpoints"
+        checkpoints.get(),
+        prepared_checkpoints.get() + 1,
+        "exactly one cancellation poll follows candidate preparation"
     );
     assert_eq!(
         std::fs::read(root.path().join("CURRENT")).unwrap(),
@@ -2700,7 +2731,7 @@ fn publication_refuses_same_inode_encoded_payload_corruption_at_cas_install() {
     assert!(
         error
             .to_string()
-            .contains("graph object source digest or length changed during install"),
+            .contains("captured encoded source checksum or length changed during copy"),
         "expected the CAS install boundary to refuse the mutation, got: {error}"
     );
     assert_ne!(
@@ -2719,7 +2750,7 @@ fn publication_refuses_same_inode_encoded_payload_corruption_at_cas_install() {
     assert!(
         sweep
             .to_string()
-            .contains("canonical artifact differs from inventory"),
+            .contains("canonical artifact checksum differs from inventory"),
         "{sweep}"
     );
 }
@@ -2786,3 +2817,5 @@ fn property_encoding_lanes_preserve_heterogeneous_artifacts_and_evidence() {
         }
     }
 }
+
+mod captures;

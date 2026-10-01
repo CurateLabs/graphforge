@@ -30,6 +30,25 @@ use super::verify_file_counted_in_domain;
 use super::verify_stream_counted_in_domain;
 use graphforge_core::hash_observation::HashDomain;
 
+#[cfg(test)]
+type CapturedCopyHook = Box<dyn FnMut(&str)>;
+#[cfg(test)]
+thread_local! {
+    static CAPTURED_COPY_HOOK: std::cell::RefCell<Option<CapturedCopyHook>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(crate) fn set_captured_copy_hook(hook: Option<CapturedCopyHook>) {
+    CAPTURED_COPY_HOOK.with(|slot| *slot.borrow_mut() = hook);
+}
+fn captured_copy_boundary(_phase: &str) {
+    #[cfg(test)]
+    CAPTURED_COPY_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook(_phase);
+        }
+    });
+}
+
 struct InstalledObject {
     evidence: GraphObjectInstallEvidence,
     identity: graphforge_filesystem::FileIdentity,
@@ -344,6 +363,181 @@ pub(crate) fn install_graph_object_file_with_lease(
     )
 }
 
+/// Only a checkpoint-admitted encoded source can choose checksum authentication.
+/// Public file and byte installers remain full SHA trust boundaries.
+pub(crate) fn install_captured_encoded_artifact_with_lease(
+    lease: &GraphObjectPublicationLease,
+    source: &crate::graph_construction::CapturedEncodedArtifact<'_>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<GraphObjectInstallEvidence, GfError> {
+    source.revalidate()?;
+    crate::graph_construction::reject_cancelled(cancelled)?;
+    let reads = std::cell::Cell::new(0_u64);
+    let writes = std::cell::Cell::new(0_u64);
+    let syncs = std::cell::Cell::new(0_u64);
+    let captured_identity = lease
+        .installed_objects
+        .lock()
+        .map_err(|_| validation("graph object installation authority poisoned"))?
+        .get(source.content_sha256())
+        .filter(|capture| {
+            capture.byte_length == source.bytes() && capture.content_xxh64 == source.checksum()
+        })
+        .map(|capture| capture.identity);
+    let installed = install_object_admitted(
+        &lease.cas,
+        source.content_sha256(),
+        source.bytes(),
+        ObjectAuthentication::CapturedChecksum {
+            checksum: source.checksum(),
+            identity: captured_identity,
+        },
+        true,
+        |output| copy_captured_encoded_source(source, output, cancelled, &reads, &writes, &syncs),
+    )?;
+    source.revalidate()?;
+    let InstalledObject {
+        mut evidence,
+        identity,
+    } = installed;
+    if evidence.attempted_install {
+        evidence.content_xxh64 = Some(source.checksum());
+        evidence.read_calls = evidence
+            .read_calls
+            .checked_add(reads.get())
+            .ok_or_else(|| validation("captured read calls overflow"))?;
+        evidence.write_calls = writes.get();
+        evidence.write_bytes = source.bytes();
+        evidence.file_fsync_calls = syncs.get();
+        evidence.fsync_calls = evidence
+            .fsync_calls
+            .checked_add(syncs.get())
+            .ok_or_else(|| validation("captured synchronization calls overflow"))?;
+    }
+    capture_installed_object(
+        lease,
+        source.content_sha256(),
+        source.bytes(),
+        identity,
+        evidence.content_xxh64,
+    )?;
+    Ok(evidence)
+}
+
+fn copy_captured_encoded_source(
+    source: &crate::graph_construction::CapturedEncodedArtifact<'_>,
+    output: &mut CasTemporaryWriter,
+    cancelled: &mut impl FnMut() -> bool,
+    reads: &std::cell::Cell<u64>,
+    writes: &std::cell::Cell<u64>,
+    syncs: &std::cell::Cell<u64>,
+) -> Result<u64, GfError> {
+    let window = graphforge_filesystem::cache_release_window_for_streams(2)
+        .map_err(|error| validation(error.to_string()))?;
+    let mut input = graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
+        source
+            .source()
+            .try_clone()
+            .map_err(|error| validation(error.to_string()))?,
+        window,
+        graphforge_filesystem::FileCacheReleaseTracker::default(),
+    )
+    .map_err(|error| validation(error.to_string()))?;
+    input
+        .rewind()
+        .map_err(|error| validation(error.to_string()))?;
+    #[cfg(unix)]
+    let mut output_stream = graphforge_filesystem::DurableFileCacheWriter::with_window_bytes(
+        output
+            .try_clone()
+            .map_err(|error| validation(error.to_string()))?,
+        window,
+    )
+    .map_err(|error| validation(error.to_string()))?;
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut total = 0_u64;
+    let mut buffer = vec![0; BUFFER_BYTES];
+    let copied = (|| {
+        loop {
+            crate::graph_construction::reject_cancelled(cancelled)?;
+            captured_copy_boundary("before_read");
+            let count = input
+                .read(&mut buffer)
+                .map_err(|error| validation(error.to_string()))?;
+            captured_copy_boundary("after_read");
+            if count == 0 {
+                break;
+            }
+            total = total
+                .checked_add(count as u64)
+                .ok_or_else(|| validation("captured source length overflow"))?;
+            if total > source.bytes() {
+                return Err(validation("captured encoded source grew during copy"));
+            }
+            reads.set(
+                reads
+                    .get()
+                    .checked_add(1)
+                    .ok_or_else(|| validation("captured read calls overflow"))?,
+            );
+            #[cfg(unix)]
+            output_stream
+                .write_all(&buffer[..count])
+                .map_err(|error| validation(error.to_string()))?;
+            #[cfg(windows)]
+            output
+                .write_all(&buffer[..count])
+                .map_err(|error| validation(error.to_string()))?;
+            writes.set(
+                writes
+                    .get()
+                    .checked_add(1)
+                    .ok_or_else(|| validation("captured write calls overflow"))?,
+            );
+            checksum.update(&buffer[..count]);
+        }
+        source.revalidate()?;
+        if total != source.bytes() || checksum.finish() != source.checksum() {
+            return Err(validation(
+                "captured encoded source checksum or length changed during copy",
+            ));
+        }
+        Ok(total)
+    })();
+    let cleanup = input
+        .finish()
+        .map_err(|error| validation(error.to_string()));
+    let total = finish_captured_source_copy(copied, cleanup)?;
+    #[cfg(unix)]
+    {
+        output_stream
+            .sync_all_and_release()
+            .map_err(|error| validation(error.to_string()))?;
+        syncs.set(output_stream.evidence().sync_operations);
+    }
+    #[cfg(windows)]
+    {
+        output
+            .observed_sync_all()
+            .map_err(|error| validation(error.to_string()))?;
+        syncs.set(1);
+    }
+    Ok(total)
+}
+
+fn finish_captured_source_copy(
+    copied: Result<u64, GfError>,
+    cleanup: Result<graphforge_filesystem::FileCacheReleaseEvidence, GfError>,
+) -> Result<u64, GfError> {
+    match (copied, cleanup) {
+        (Ok(total), Ok(_)) => Ok(total),
+        (Err(primary), Ok(_)) | (Ok(_), Err(primary)) => Err(primary),
+        (Err(primary), Err(cleanup)) => Err(validation(format!(
+            "{primary}; captured source cache cleanup also failed: {cleanup}"
+        ))),
+    }
+}
+
 fn capture_installed_object(
     lease: &GraphObjectPublicationLease,
     digest: &str,
@@ -374,11 +568,167 @@ fn capture_installed_object(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum ObjectAuthentication {
+    Sha(HashDomain),
+    CapturedChecksum {
+        checksum: u64,
+        identity: Option<graphforge_filesystem::FileIdentity>,
+    },
+}
+
+impl ObjectAuthentication {
+    #[cfg(windows)]
+    fn without_existing_identity(self) -> Self {
+        match self {
+            Self::Sha(_) => self,
+            Self::CapturedChecksum { .. } => Self::Sha(HashDomain::ArtifactPayload),
+        }
+    }
+
+    fn sha_bytes(self, bytes: u64) -> u64 {
+        match self {
+            Self::Sha(_) => bytes,
+            Self::CapturedChecksum { .. } => 0,
+        }
+    }
+}
+
 fn install_object<F>(
     cas: &CasRoot,
     digest: &str,
     expected_length: u64,
     domain: HashDomain,
+    writer_authenticated: bool,
+    write_temporary: F,
+) -> Result<InstalledObject, GfError>
+where
+    F: FnOnce(&mut CasTemporaryWriter) -> Result<u64, GfError>,
+{
+    install_object_admitted(
+        cas,
+        digest,
+        expected_length,
+        ObjectAuthentication::Sha(domain),
+        writer_authenticated,
+        write_temporary,
+    )
+}
+
+fn verify_stream_admitted(
+    file: &mut impl Read,
+    digest: &str,
+    expected_length: u64,
+    diagnostic: &Path,
+    authentication: ObjectAuthentication,
+) -> Result<ReadIoEvidence, GfError> {
+    let ObjectAuthentication::CapturedChecksum {
+        checksum: expected, ..
+    } = authentication
+    else {
+        let ObjectAuthentication::Sha(domain) = authentication else {
+            unreachable!()
+        };
+        return verify_stream_counted_in_domain(file, digest, expected_length, diagnostic, domain);
+    };
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut io = ReadIoEvidence::default();
+    let mut buffer = vec![0; BUFFER_BYTES];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| storage("read captured CAS object", diagnostic, error))?;
+        if count == 0 {
+            break;
+        }
+        io.bytes = io
+            .bytes
+            .checked_add(count as u64)
+            .ok_or_else(|| validation("captured CAS read bytes overflow"))?;
+        io.calls = io
+            .calls
+            .checked_add(1)
+            .ok_or_else(|| validation("captured CAS read calls overflow"))?;
+        if io.bytes > expected_length {
+            return Err(validation("captured CAS object grew"));
+        }
+        checksum.update(&buffer[..count]);
+    }
+    if io.bytes != expected_length || checksum.finish() != expected {
+        return Err(validation("captured CAS object checksum or length changed"));
+    }
+    io.content_xxh64 = Some(expected);
+    crate::lifecycle_io::record_read(
+        crate::StorageIoPhase::HydrationVerification,
+        io.bytes,
+        io.calls,
+    );
+    crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
+    Ok(io)
+}
+
+fn verify_file_admitted(
+    file: File,
+    digest: &str,
+    expected_length: u64,
+    diagnostic: &Path,
+    authentication: ObjectAuthentication,
+) -> Result<ReadIoEvidence, GfError> {
+    if let ObjectAuthentication::Sha(domain) = authentication {
+        return verify_file_counted_in_domain(file, digest, expected_length, diagnostic, domain);
+    }
+    let identity = graphforge_filesystem::file_identity(&file)
+        .map_err(|error| storage("identify captured CAS object", diagnostic, error))?;
+    if file
+        .metadata()
+        .map_err(|error| storage("inspect captured CAS object", diagnostic, error))?
+        .len()
+        != expected_length
+    {
+        return Err(validation("captured CAS object length changed"));
+    }
+    let mut reader = graphforge_filesystem::FileCacheReleasingReader::new(file)
+        .map_err(|error| storage("bound captured CAS object", diagnostic, error))?;
+    reader
+        .rewind()
+        .map_err(|error| storage("rewind captured CAS object", diagnostic, error))?;
+    let checked = verify_stream_admitted(
+        &mut reader,
+        digest,
+        expected_length,
+        diagnostic,
+        authentication,
+    )
+    .and_then(|io| {
+        if graphforge_filesystem::file_identity(reader.file())
+            .map_err(|error| storage("reidentify captured CAS object", diagnostic, error))?
+            != identity
+            || reader
+                .file()
+                .metadata()
+                .map_err(|error| storage("reinspect captured CAS object", diagnostic, error))?
+                .len()
+                != expected_length
+        {
+            return Err(validation("captured CAS object identity changed"));
+        }
+        Ok(io)
+    });
+    let cleanup = reader
+        .finish()
+        .map_err(|error| storage("release captured CAS cache", diagnostic, error));
+    match (checked, cleanup) {
+        (Ok(io), Ok(_)) => Ok(io),
+        (Err(primary), Ok(_)) | (Ok(_), Err(primary)) => Err(primary),
+        (Err(primary), Err(cleanup)) => Err(validation(format!("{primary}; {cleanup}"))),
+    }
+}
+
+fn install_object_admitted<F>(
+    cas: &CasRoot,
+    digest: &str,
+    expected_length: u64,
+    authentication: ObjectAuthentication,
     writer_authenticated: bool,
     write_temporary: F,
 ) -> Result<InstalledObject, GfError>
@@ -394,7 +744,7 @@ where
         destination_name,
         digest,
         expected_length,
-        domain,
+        authentication,
     )? {
         return Ok(evidence);
     }
@@ -437,18 +787,18 @@ where
         temporary.rewind().map_err(|error| {
             storage("rewind temporary graph object", &cas.diagnostic_root, error)
         })?;
-        verify_stream_counted_in_domain(
+        verify_stream_admitted(
             &mut temporary,
             digest,
             expected_length,
             &cas.diagnostic_root,
-            domain,
+            authentication,
         )?
     };
     // Windows must close the writable handle and reopen an exact-identity,
     // protected read handle before publication. That transition authenticates
     // the complete payload below, so a second pre-seal read would be redundant.
-    let (installed, identity, sealed_bytes_hashed, concurrent_io) = finalize_temporary_object(
+    let (installed, identity, _sealed_bytes_hashed, concurrent_io) = finalize_temporary_object(
         cas,
         &bucket,
         TemporaryObject {
@@ -458,36 +808,57 @@ where
         },
         digest,
         expected_length,
-        domain,
+        authentication,
     )?;
-    let bytes_hashed = [
-        preseal_io.bytes,
-        sealed_bytes_hashed,
-        if installed { 0 } else { expected_length },
-    ]
-    .into_iter()
-    .try_fold(bytes_hashed, u64::checked_add)
-    .ok_or_else(|| validation("graph object hashed byte count overflows"))?;
+    Ok(InstalledObject {
+        evidence: installation_evidence(
+            expected_length,
+            installed,
+            bytes_hashed,
+            authentication,
+            preseal_io,
+            concurrent_io,
+        )?,
+        identity,
+    })
+}
+
+fn installation_evidence(
+    expected_length: u64,
+    installed: bool,
+    bytes_hashed: u64,
+    authentication: ObjectAuthentication,
+    preseal_io: ReadIoEvidence,
+    concurrent_io: ReadIoEvidence,
+) -> Result<GraphObjectInstallEvidence, GfError> {
+    let read_bytes = [preseal_io.bytes, concurrent_io.bytes]
+        .into_iter()
+        .try_fold(bytes_hashed, u64::checked_add)
+        .ok_or_else(|| validation("graph object read byte count overflows"))?;
+    let bytes_hashed = [preseal_io.sha_bytes, concurrent_io.sha_bytes]
+        .into_iter()
+        .try_fold(authentication.sha_bytes(bytes_hashed), u64::checked_add)
+        .ok_or_else(|| validation("graph object hashed byte count overflows"))?;
     let read_calls = preseal_io
         .calls
         .checked_add(concurrent_io.calls)
         .ok_or_else(|| validation("graph object read call count overflows"))?;
-    Ok(InstalledObject {
-        evidence: GraphObjectInstallEvidence {
-            content_xxh64: preseal_io.content_xxh64.or(concurrent_io.content_xxh64),
-            bytes_hashed,
-            bytes_installed: if installed { expected_length } else { 0 },
-            reused_existing: !installed,
-            attempted_install: true,
-            read_calls,
-            // The source-copy/authentication submissions are added by the caller.
-            // Finalization synchronizes both namespaces even if a concurrent winner
-            // supplied the retained object. Early reuse returns before this path.
-            fsync_calls: 2,
-            directory_fsync_calls: 2,
-            ..GraphObjectInstallEvidence::default()
-        },
-        identity,
+    Ok(GraphObjectInstallEvidence {
+        content_xxh64: preseal_io.content_xxh64.or(concurrent_io.content_xxh64),
+        bytes_hashed,
+        checksum_read_bytes: read_bytes
+            .checked_sub(bytes_hashed)
+            .ok_or_else(|| validation("CAS SHA read count exceeds native reads"))?,
+        bytes_installed: if installed { expected_length } else { 0 },
+        reused_existing: !installed,
+        attempted_install: true,
+        read_calls,
+        // The source-copy/authentication submissions are added by the caller.
+        // Finalization synchronizes both namespaces even if a concurrent winner
+        // supplied the retained object. Early reuse returns before this path.
+        fsync_calls: 2,
+        directory_fsync_calls: 2,
+        ..GraphObjectInstallEvidence::default()
     })
 }
 
@@ -495,7 +866,8 @@ fn reused_object_evidence(expected_length: u64, io: ReadIoEvidence) -> GraphObje
     debug_assert_eq!(io.bytes, expected_length);
     GraphObjectInstallEvidence {
         content_xxh64: io.content_xxh64,
-        bytes_hashed: io.bytes,
+        bytes_hashed: io.sha_bytes,
+        checksum_read_bytes: io.bytes - io.sha_bytes,
         reused_existing: true,
         read_calls: io.calls,
         ..GraphObjectInstallEvidence::default()
@@ -509,7 +881,7 @@ fn try_reuse_existing_object(
     destination_name: &std::ffi::OsStr,
     digest: &str,
     expected_length: u64,
-    domain: HashDomain,
+    authentication: ObjectAuthentication,
 ) -> Result<Option<InstalledObject>, GfError> {
     let file = match bucket.open_child_file(destination_name) {
         Ok(file) => file,
@@ -528,7 +900,7 @@ fn try_reuse_existing_object(
         expected_length,
         &graph_object_path(&cas.diagnostic_root, digest)?,
         &cas.diagnostic_root,
-        domain,
+        authentication,
     )?;
     if let Some(allocation) = &cas.allocation {
         allocation.replace_file_at(&graph_object_path(&cas.diagnostic_root, digest)?, &file)?;
@@ -553,7 +925,7 @@ fn try_reuse_existing_object(
     destination_name: &std::ffi::OsStr,
     digest: &str,
     expected_length: u64,
-    domain: HashDomain,
+    authentication: ObjectAuthentication,
 ) -> Result<Option<InstalledObject>, GfError> {
     let mut adoption_io = ReadIoEvidence::default();
     let file = match bucket.open_cas_child_file(destination_name) {
@@ -573,12 +945,12 @@ fn try_reuse_existing_object(
                         },
                     )
                 })?;
-            adoption_io = verify_stream_counted_in_domain(
+            adoption_io = verify_stream_admitted(
                 &mut legacy,
                 digest,
                 expected_length,
                 &cas.diagnostic_root,
-                domain,
+                authentication.without_existing_identity(),
             )?;
             bucket
                 .adopt_legacy_cas_child(destination_name, legacy)
@@ -598,13 +970,12 @@ fn try_reuse_existing_object(
         expected_length,
         &graph_object_path(&cas.diagnostic_root, digest)?,
         &cas.diagnostic_root,
-        domain,
+        authentication,
     )?;
     let mut evidence = reused_object_evidence(expected_length, io);
-    evidence.bytes_hashed = adoption_io
-        .bytes
-        .checked_add(io.bytes)
-        .ok_or_else(|| validation("reused object hashed byte count overflows"))?;
+    let combined = checked_read_io_sum(adoption_io, io)?;
+    evidence.bytes_hashed = combined.sha_bytes;
+    evidence.checksum_read_bytes = combined.bytes - combined.sha_bytes;
     evidence.read_calls = adoption_io
         .calls
         .checked_add(io.calls)
@@ -641,7 +1012,7 @@ fn finalize_temporary_object(
     temporary: TemporaryObject,
     digest: &str,
     expected_length: u64,
-    domain: HashDomain,
+    authentication: ObjectAuthentication,
 ) -> Result<
     (
         bool,
@@ -672,7 +1043,7 @@ fn finalize_temporary_object(
         digest,
         expected_length,
         &cas.diagnostic_root,
-        domain,
+        authentication,
     )?;
     if let Some(allocation) = &cas.allocation {
         allocation.replace_file_at(&temporary_path, &temporary.file)?;
@@ -715,7 +1086,7 @@ fn finalize_temporary_object(
             expected_length,
             &graph_object_path(&cas.diagnostic_root, digest)?,
             &cas.diagnostic_root,
-            domain,
+            authentication,
         )?;
         if let Some(allocation) = &cas.allocation {
             allocation
@@ -813,7 +1184,7 @@ fn transition_temporary_to_sealed_reader(
     digest: &str,
     expected_length: u64,
     diagnostic: &Path,
-    domain: HashDomain,
+    authentication: ObjectAuthentication,
 ) -> Result<(SealedTemporaryObject, ReadIoEvidence), GfError> {
     temporary.file.observed_sync_all().map_err(|error| {
         storage(
@@ -840,7 +1211,7 @@ fn transition_temporary_to_sealed_reader(
             "temporary graph object identity changed while sealing",
         ));
     }
-    let io = verify_file_counted_in_domain(
+    let io = verify_file_admitted(
         file.try_clone().map_err(|error| {
             storage(
                 "clone sealed temporary graph object for authentication",
@@ -851,7 +1222,7 @@ fn transition_temporary_to_sealed_reader(
         digest,
         expected_length,
         diagnostic,
-        domain,
+        authentication,
     )?;
     Ok((
         SealedTemporaryObject {
@@ -876,7 +1247,7 @@ fn verify_and_seal_graph_object(
         expected_length,
         object_path,
         diagnostic,
-        HashDomain::ArtifactPayload,
+        ObjectAuthentication::Sha(HashDomain::ArtifactPayload),
     )
     .map(|_| ())
 }
@@ -887,7 +1258,7 @@ fn verify_and_seal_graph_object_counted(
     expected_length: u64,
     object_path: &Path,
     diagnostic: &Path,
-    domain: HashDomain,
+    authentication: ObjectAuthentication,
 ) -> Result<ReadIoEvidence, GfError> {
     // Reuse is safe only after the exact opened inode is no longer writable.
     // Hashing first would leave a window in which the already-authenticated
@@ -906,13 +1277,24 @@ fn verify_and_seal_graph_object_counted(
             return Err(validation("graph object is not canonically sealed"));
         }
     }
-    let io = verify_file_counted_in_domain(
+    let authentication = match authentication {
+        ObjectAuthentication::CapturedChecksum { identity, .. }
+            if identity
+                != Some(graphforge_filesystem::file_identity(file).map_err(|error| {
+                    storage("identify existing CAS authority", diagnostic, error)
+                })?) =>
+        {
+            ObjectAuthentication::Sha(HashDomain::ArtifactPayload)
+        }
+        value => value,
+    };
+    let io = verify_file_admitted(
         file.try_clone()
             .map_err(|error| storage("clone graph object for authentication", diagnostic, error))?,
         digest,
         expected_length,
         diagnostic,
-        domain,
+        authentication,
     )?;
     if !file
         .metadata()

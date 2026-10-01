@@ -259,6 +259,7 @@ impl GraphConstructionSession {
                 .ok_or_else(|| storage("supersession retained parent artifact is absent"))?;
             let source = crate::graph_object_path(&self.project_path, &entry.content_sha256)?;
             if entry.content_sha256 != retained.sha256
+                || entry.content_xxh64 != retained.xxh64
                 || entry.byte_length != retained.bytes
                 || source
                     .strip_prefix(&self.project_path)

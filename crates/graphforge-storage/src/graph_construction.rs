@@ -45,6 +45,7 @@ use shape::{
 pub(crate) use shape::{open_authenticated_shape_source, shaped_output_xxh64};
 mod encoding_publication;
 use encoding_publication::recover_publication;
+pub(crate) use encoding_publication::{CapturedEncodedArtifact, CapturedEncodedInventory};
 mod recovery;
 use recovery::{
     ReadWork, authenticate_artifact, canonical_artifact_target,

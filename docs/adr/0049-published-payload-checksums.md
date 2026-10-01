@@ -73,12 +73,35 @@ boundaries retain required authentication. Internal snapshots used for live
 construction rollback remain an implementation detail.
 
 The same mandatory-checksum policy applies to the other persisted payload
-readers: CSR shard manifests use version 3, UUID membership manifests version 6,
-the logical ordinal-v4 facet descriptor uses wire version 5, GFDR run envelopes
+readers: CSR shard manifests use version 3, UUID membership manifests version 7,
+the logical ordinal-v4 facet descriptor uses wire version 6, GFDR run envelopes
 and records use version 2, and embedding generation manifests use version 2.
 These versions bind exact payload lengths and required file/block checksums;
 older descriptors are refused without a SHA read fallback. Publication names,
 control authentication, and canonical identity commitments remain SHA-256.
+
+Private encoded construction inventories use wire version 2 with required
+whole-artifact XXH64 for new and retained entries. Their checkpoint, generation,
+shape and current-parent controls authorize those expected checksums before
+replay or publication. UUID wire 7 and ordinal wire 6 retire unused per-block
+SHA fields while preserving whole-artifact SHA names, checksum fences, counts
+and semantic mapping commitments. Unsupported inventory and index versions
+are refused before decoding current required fields; retired block fields
+are refused rather than silently ignored.
+
+Final writer SHA/XXH64/length captures are forwarded into the inventory,
+including already captured CSR shards. Private publication opens one retained
+encoded source at a time, binds its native identity and allocation to checkpoint
+authority, and checksums the actual copied bytes. Same-inode mutate/read/restore
+therefore refuses at the consuming boundary. Existing CAS objects use this
+shortcut only when an installation lease already binds their exact native
+identity; unknown objects and concurrent winners retain genuine SHA trust
+checks. Public untrusted installation and orphan deletion authority retain
+SHA authentication. This changes SHA work, not the checksum I/O required for
+corruption refusal. Reclaim retains its existing zero-payload-read behavior.
+
+The reproduction commands and current source/test hashes are in the
+[ingest diagnostics method](../development/ingest-region-diagnostics.md).
 
 The project generation manifest uses wire version 2 with mandatory participant
 checksums. Arrow/Parquet participant reads use checksum/length admission, while

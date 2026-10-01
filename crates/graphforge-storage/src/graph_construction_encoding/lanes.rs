@@ -312,6 +312,7 @@ pub(super) fn write_parquet_chunks(
             .map_err(storage)?,
         counter: counter.clone(),
         digest: Sha256::new(),
+        checksum: crate::corruption_checksum::Checksum::new(),
     };
     let mut writer = if let Some(chunks) = chunks {
         let mut sink = sink;
@@ -354,6 +355,7 @@ pub(super) fn write_parquet_chunks(
         path: relative.to_owned(),
         bytes: written,
         sha256: hex(&writer.digest.finalize()),
+        xxh64: writer.checksum.finish(),
     };
     directory
         .replace_child(OsStr::new(&temporary), identity, OsStr::new(&name))

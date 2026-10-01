@@ -85,7 +85,15 @@ pub const DEFAULT_CSR_SHARD_EDGES: usize = 1_048_576;
 /// Default maximum local CSR rows (offset entries minus one) per shard.
 pub const DEFAULT_CSR_SHARD_NODES: usize = 1_048_576;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CapturedAdjacencyArtifact {
+    pub(crate) path: PathBuf,
+    pub(crate) bytes: u64,
+    pub(crate) sha256: String,
+    pub(crate) xxh64: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct CsrShardRecord {
     first_node: u64,
@@ -565,7 +573,10 @@ impl ShardedCsrWriter {
         Ok(())
     }
 
-    fn finish(mut self, node_count: u64) -> Result<(u64, u64, u64), GfError> {
+    fn finish(
+        mut self,
+        node_count: u64,
+    ) -> Result<(u64, u64, u64, Vec<CapturedAdjacencyArtifact>), GfError> {
         use std::io::Write as _;
 
         self.flush()?;
@@ -640,6 +651,16 @@ impl ShardedCsrWriter {
             manifest.shards.len() as u64,
             self.peak_shard_edges,
             self.peak_shard_nodes,
+            manifest
+                .shards
+                .iter()
+                .map(|record| CapturedAdjacencyArtifact {
+                    path: self.root.join(&record.file),
+                    bytes: record.encoded_bytes,
+                    sha256: record.sha256.clone(),
+                    xxh64: record.xxh64,
+                })
+                .collect(),
         ))
     }
 
@@ -1976,6 +1997,9 @@ fn string_column<'a>(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+mod capture_tests;
+
+#[cfg(test)]
 mod tests {
     use tempfile::TempDir;
 
@@ -2448,7 +2472,7 @@ mod tests {
         let mut writer = ShardedCsrWriter::create(&path, 8, 2).unwrap();
         writer.emit((0, 1, 100)).unwrap();
         writer.emit((1_000_000, 2, 0)).unwrap();
-        let (shards, _, peak_nodes) = writer.finish(1_000_001).unwrap();
+        let (shards, _, peak_nodes, _) = writer.finish(1_000_001).unwrap();
         assert_eq!(shards, 2);
         assert!(peak_nodes <= 2);
         let reader = ShardedCsrIndex::open(&path).unwrap();
