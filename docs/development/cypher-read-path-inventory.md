@@ -157,7 +157,7 @@ A run whose plan doesn't match is invalid, not slow. The mismatch is itself a re
 
 The candidate is selected per session by `GF_READ_PATH_CANDIDATE` (`current`, `stock`, `structural`) in a `gf` built with `--features read-path-experiment`. `GF_READ_PATH_INJECT=between-expands` adds the §6.3 fast-path survival variant.
 
-- **Driver.** [`benchmarks/tools/read-path-candidates/ab.sh`](../../benchmarks/tools/read-path-candidates/ab.sh) runs the pairs. [`summarize.py`](../../benchmarks/tools/read-path-candidates/summarize.py) produces the per-pair table and the same-sign verdicts. Besides the quiet helper, the driver treats any `cargo`, `rustc`, `gf`, `runexec` or test process as busy.
+- **Driver.** `benchmarks/tools/read-path-candidates/ab.sh` runs the pairs. `summarize.py` produces the per-pair table and the same-sign verdicts. Besides the quiet helper, the driver treats any `cargo`, `rustc`, `gf`, `runexec` or test process as busy.
 - **Plan path.** `gf` has no `explain` command, so verification uses two sources:
   - The `read_path_explain` example in `graphforge-api` prints each candidate's plan for the four queries, once per scale.
   - Every timed run's receipt lists its `operator_rss` labels. `summarize.py` rejects any run whose labels contradict the candidate. B's only label on the ordered queries is the stock `sort`.
@@ -176,4 +176,5 @@ In addition to #1505 §5.6, #1688 reports for each candidate:
 ## 7. Changelog
 
 - 2026-09-30: recorded (#1687).
+- 2026-10-01: the experiment, its driver and summarizer were retired by #1696 after [ADR 0050](../adr/0050-read-path-fast-path-selection.md). They remain in git history at `646c032cd`. The §6.5 paired timing runs were stopped by maintainer decision before any were accepted.
 - 2026-10-01 (#1688, before any timed run): added §6.5a. It records how plan paths are verified without `gf explain`, the result digests, the project-state check, and that one refusal ends a series. None of these replaces an earlier rule.

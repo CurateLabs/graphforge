@@ -7,11 +7,6 @@ license.workspace = true
 license-file.workspace = true
 repository.workspace = true
 
-[features]
-# #1688 experiment: the lowerer-chosen fast-path node for the read-path
-# candidate comparison (#1619). Never enabled by default builds.
-read-path-experiment = []
-
 [dependencies]
 graphforge-value = { version = "0.5.2", path = "../graphforge-value" }
 graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
