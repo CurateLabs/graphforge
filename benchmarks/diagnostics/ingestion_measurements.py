@@ -24,7 +24,7 @@ import time
 from graphforge_bench.ingestion_attribution import expected_commands
 import pyarrow
 from pyarrow import parquet
-from rss_1278 import active_campaigns, digest, input_oracle
+from rss_diagnostic import active_campaigns, digest, input_oracle
 
 RESERVE = 141258578535
 ROOT = Path(__file__).resolve().parents[2]
@@ -414,9 +414,9 @@ stop_tree(int(sys.argv[1]))
                 "ingest",
                 case,
                 {
-                    "GF_1282_PROJECT": str(workspace / "source"),
-                    "GF_1282_NODES": str(case["nodes"]),
-                    "GF_1282_EDGES": str(case["edges"]),
+                    "GF_INGESTION_ATTRIBUTION_PROJECT": str(workspace / "source"),
+                    "GF_INGESTION_ATTRIBUTION_NODES": str(case["nodes"]),
+                    "GF_INGESTION_ATTRIBUTION_EDGES": str(case["edges"]),
                 },
             )
         for phase in profile["phases"]:

@@ -10,7 +10,7 @@ from graphforge_bench.lifecycle_runtime import analyze, summarize
 from graphforge_bench.native_rung import read_native_rung
 
 ROOT = Path(__file__).resolve().parents[1]
-EVIDENCE = ROOT / "tests/fixtures/rungs/integrated-storage-1194"
+EVIDENCE = ROOT / "tests/fixtures/rungs/integrated-storage"
 
 
 class RuntimeDiagnosisTests(unittest.TestCase):
@@ -34,7 +34,7 @@ class RuntimeDiagnosisTests(unittest.TestCase):
         self.assertNotEqual(
             s22["process_peak_rss_bytes"], s22["whole_lifecycle_benchexec"]["peak_rss_bytes"]
         )
-        saved = json.loads((EVIDENCE.parent / "lifecycle-runtime-1279-baseline.json").read_text())
+        saved = json.loads((EVIDENCE.parent / "lifecycle-runtime-baseline.json").read_text())
         self.assertEqual(report, saved)
 
     def test_individually_valid_but_different_sources_are_not_comparable(self) -> None:

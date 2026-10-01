@@ -120,7 +120,7 @@ def test_examples_preserve_data_and_secret_boundaries() -> None:
     serialized = json.dumps(resolved).lower().replace("service-token", "")
     assert "secret_value" not in serialized and "credential" not in serialized
     infra_serialized = json.dumps(infra)
-    sentinel = "_".join(("GRAPHFORGE_SECRET", "SENTINEL_231"))
+    sentinel = "_".join(("GRAPHFORGE_SECRET", "SENTINEL_VALUE"))
     assert sentinel not in infra_serialized
     assert infra["static_validity"] == {"status": "valid"}
     assert infra["planned_infrastructure"]["mutation"] == "none"

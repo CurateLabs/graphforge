@@ -255,7 +255,7 @@ class ParityWithPreviousRustThresholds(unittest.TestCase):
         self.assert_case("D")
         self.assert_case("E")
 
-    def test_issue_1467_observations_under_the_committed_policy(self):
+    def test_recorded_observations_under_the_committed_policy(self):
         self.assert_case("F")
 
     def test_absolute_threshold_is_strict_and_wins_over_relative(self):

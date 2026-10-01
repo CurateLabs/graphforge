@@ -1,4 +1,4 @@
-.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test test-rust test-python test-node test-scripts check clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-build-walltime codspeed-run bench-traversal bench-tck-scenarios tck-perf bench-fixed-hop-limit bench-fixed-hop-livejournal bench-m4-entry bench-adjacency-200m native-consumers bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build install build release-version-check package-license-verify publish-dry-run
+.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test test-rust test-python test-node test-scripts check clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-build-walltime codspeed-run bench-traversal bench-tck-scenarios tck-perf bench-fixed-hop-limit bench-fixed-hop-livejournal bench-embedded-performance bench-adjacency-200m native-consumers bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build install build release-version-check package-license-verify publish-dry-run
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -194,6 +194,9 @@ check-patch-coverage:  ## Validate patch coverage for changed files (90% thresho
 check:  ## Format, lint, and static checks for every surface (no test run)
 	cargo fmt --all -- --check
 	cargo clippy --workspace -- -D warnings
+	# Benches build only in the nightly CodSpeed workflow; compile them here so
+	# an API change that breaks one fails the PR, not the next nightly.
+	cargo check --workspace --benches --locked
 	uv run ruff format --check .
 	uv run ruff check .
 	uv run mypy crates/graphforge-bindings-py/python/graphforge --strict-optional --show-error-codes
@@ -267,10 +270,10 @@ coverage-rust:  ## Core + same-SHA Python/Node adapter Rust coverage ledger
 
 codspeed-build:  ## Build the CodSpeed benchmark targets (simulation mode; see docs/development/benchmarking.md)
 	cargo codspeed build -m simulation -p graphforge-core -p graphforge-cypher
-	cargo codspeed build -m simulation -p graphforge-storage --bench m6_storage
+	cargo codspeed build -m simulation -p graphforge-storage --bench storage_kernels
 
-codspeed-build-walltime:  ## Build only M6 durable I/O benchmarks in walltime mode
-	cargo codspeed build -m walltime -p graphforge-storage --bench m6_storage_io
+codspeed-build-walltime:  ## Build only the durable storage I/O benchmarks in walltime mode
+	cargo codspeed build -m walltime -p graphforge-storage --bench storage_io
 
 codspeed-run:  ## Run the CodSpeed benchmarks locally (requires the codspeed CLI)
 	codspeed run --mode simulation -- cargo codspeed run
@@ -299,8 +302,8 @@ durability-certification-check:  ## Validate seeded durability certification gat
 	python3 scripts/ci/durability-certification-gate.py validate
 	python3 scripts/ci/test-durability-certification-gate.py
 
-bench-m4-entry:  ## Emit the M4 entry large/manual evidence envelope (#334; hardware-specific)
-	cargo test -p graphforge-api --release --test m4_entry_baseline large_manual_matrix_emits_hardware_dataset_evidence -- --ignored --nocapture --test-threads=1
+bench-embedded-performance:  ## Emit the embedded performance baseline large/manual evidence envelope (#334; hardware-specific)
+	cargo test -p graphforge-api --release --test embedded_performance_baseline large_manual_matrix_emits_hardware_dataset_evidence -- --ignored --nocapture --test-threads=1
 
 bench-adjacency-200m:  ## >200M-edge public adjacency build evidence (#336; ignored, scale-host)
 	GF_ADJACENCY_SCALE_EVIDENCE_OUT="$(CURDIR)/build/adjacency-200m-evidence.json" \

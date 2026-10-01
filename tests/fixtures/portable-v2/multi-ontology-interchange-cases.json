@@ -1,5 +1,5 @@
 {
-  "contract": "graphforge-portable-v2-m9-interchange-cases/1",
+  "contract": "graphforge-portable-v2-multi-ontology-interchange-cases/1",
   "representations": ["expanded", "bundle"],
   "positive_package_classes": [
     "complete",

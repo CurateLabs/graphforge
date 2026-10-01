@@ -1687,7 +1687,7 @@ pub fn simulate_all_phases_for_profile(
     Ok(outcomes)
 }
 
-/// Project-relative generation manifest path for later M6 harness reuse.
+/// Project-relative generation manifest path for later harness reuse.
 #[must_use]
 pub fn generation_manifest_path(generation: Uuid) -> PathBuf {
     PathBuf::from(GENERATIONS_DIR)

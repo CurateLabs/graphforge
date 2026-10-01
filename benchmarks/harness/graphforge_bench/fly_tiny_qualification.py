@@ -26,6 +26,7 @@ import urllib.error
 import urllib.request
 
 from graphforge_bench.fly_adapter import (
+    PREREQUISITES,
     AdapterError,
     ResourceLedger,
     classify_provider_build_failure,
@@ -167,7 +168,7 @@ class TinyQualificationInvocation:
     region: str
     volume_name: str
     machine_name: str
-    prerequisites: Mapping[int, str]
+    prerequisites: Mapping[str, str]
     machine_class: str = "performance-1x"
     volume_gib: int = 10
     build_authority: str = "provider"
@@ -187,7 +188,7 @@ def validate_invocation(invocation: TinyQualificationInvocation) -> None:
     """Validate static inputs without treating the smoke as an S18 rung."""
     if not COMMIT.fullmatch(invocation.commit):
         raise AdapterError("commit is invalid")
-    if set(invocation.prerequisites) != {955, 956, 957} or any(
+    if set(invocation.prerequisites) != PREREQUISITES or any(
         state != "merged" for state in invocation.prerequisites.values()
     ):
         raise AdapterError("prerequisite ledger is not fully merged")
@@ -1077,9 +1078,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--region", required=True)
     result.add_argument("--volume-name", required=True)
     result.add_argument("--machine-name", required=True)
-    result.add_argument("--prerequisite-955", choices=("merged",), required=True)
-    result.add_argument("--prerequisite-956", choices=("merged",), required=True)
-    result.add_argument("--prerequisite-957", choices=("merged",), required=True)
+    result.add_argument("--prerequisite-certification-runner", choices=("merged",), required=True)
+    result.add_argument("--prerequisite-qualification-ladder", choices=("merged",), required=True)
+    result.add_argument("--prerequisite-benchexec-limits", choices=("merged",), required=True)
     result.add_argument("--machine-class", default="performance-1x")
     result.add_argument(
         "--build-authority",
@@ -1111,9 +1112,9 @@ def main(argv: list[str] | None = None) -> int:
         volume_name=args.volume_name,
         machine_name=args.machine_name,
         prerequisites={
-            955: args.prerequisite_955,
-            956: args.prerequisite_956,
-            957: args.prerequisite_957,
+            "certification-runner": args.prerequisite_certification_runner,
+            "qualification-ladder": args.prerequisite_qualification_ladder,
+            "benchexec-limits": args.prerequisite_benchexec_limits,
         },
         build_authority=args.build_authority,
         machine_class=args.machine_class,

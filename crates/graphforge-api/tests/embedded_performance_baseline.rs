@@ -1,4 +1,4 @@
-//! M4 embedded performance entry baseline (#334) + resource-policy parity (#337).
+//! Embedded performance baseline (#334) + resource-policy parity (#337).
 //!
 //! Short CI matrix: structural + determinism gates through the public
 //! `GraphForge` facade under the default Explicit two-worker resource policy,
@@ -42,10 +42,11 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
 /// Serializes process-global I/O / demand counters used by structural gates.
 static IO_GUARD: Mutex<()> = Mutex::new(());
 
-const CONTRACT_SCHEMA: &str = "graphforge-m4-entry-matrix/1";
-const EVIDENCE_SCHEMA: &str = "graphforge-m4-entry-evidence/1";
+const CONTRACT_SCHEMA: &str = "graphforge-embedded-performance-matrix/1";
+const EVIDENCE_SCHEMA: &str = "graphforge-embedded-performance-evidence/1";
 const SUPPORTED_TOKIO_WORKERS: u64 = 2;
-const CONTRACT_JSON: &str = include_str!("../../../tests/contracts/m4-entry-matrix.json");
+const CONTRACT_JSON: &str =
+    include_str!("../../../tests/contracts/embedded-performance-matrix.json");
 const FIXED_HOP_LIMIT: &str = "MATCH (a)-[r:KNOWS]->(b) RETURN b.node_uuid AS id LIMIT 3";
 const SCAN_COUNT: &str = "MATCH (n:Person) RETURN count(n) AS total";
 const AGGREGATE_TOP_N: &str =
@@ -66,7 +67,7 @@ const CREATE_FIXTURE: &str = "CREATE \
          (alice)-[:PIPE {capacity:1.0, cost:5.0}]->(dave)";
 
 fn load_contract_json() -> serde_json::Value {
-    serde_json::from_str(CONTRACT_JSON).expect("parse m4-entry-matrix.json")
+    serde_json::from_str(CONTRACT_JSON).expect("parse embedded-performance-matrix.json")
 }
 
 /// Deterministic synthetic fixture for the short CI matrix.
@@ -1392,9 +1393,9 @@ fn build_evidence(
         "discovery_evidence": contract.get("discovery_evidence"),
         "spill_bytes": null,
         "reproduction": {
-            "short_ci": "cargo test -p graphforge-api --test m4_entry_baseline -- --nocapture",
-            "large_manual": "make bench-m4-entry",
-            "thread_parity": "cargo test -p graphforge-api --test m4_entry_baseline thread_parity_matrix_executes_under_resource_policy -- --nocapture",
+            "short_ci": "cargo test -p graphforge-api --test embedded_performance_baseline -- --nocapture",
+            "large_manual": "make bench-embedded-performance",
+            "thread_parity": "cargo test -p graphforge-api --test embedded_performance_baseline thread_parity_matrix_executes_under_resource_policy -- --nocapture",
         },
         "known_limitations": contract.get("known_limitations"),
     })
@@ -1461,7 +1462,7 @@ fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
     assert!(executed >= 1, "expected at least one executed parity cell");
     // Report observations without gating on them.
     eprintln!(
-        "M4_ENTRY_SHORT_EVIDENCE={}",
+        "EMBEDDED_PERFORMANCE_SHORT_EVIDENCE={}",
         serde_json::to_string_pretty(&evidence).expect("evidence json")
     );
 }
@@ -1490,7 +1491,7 @@ fn thread_parity_matrix_executes_under_resource_policy() {
 }
 
 #[test]
-fn contract_classifies_thread_parity_configurations_for_337() {
+fn contract_classifies_thread_parity_configurations() {
     let contract = load_contract_json();
     let deferred = contract["deferred_runtime_configurations"]
         .as_array()
@@ -1556,7 +1557,7 @@ fn fixed_hop_demand_contract_remains_intact() {
     assert_fixed_hop_demand(&gf);
 }
 
-#[ignore = "manual/scheduled large M4 entry matrix; hardware-specific timing"]
+#[ignore = "manual/scheduled large embedded performance matrix; hardware-specific timing"]
 #[test]
 fn large_manual_matrix_emits_hardware_dataset_evidence() {
     // Reuse the short fixture path for a documented evidence envelope. Opt-in
@@ -1586,7 +1587,7 @@ fn large_manual_matrix_emits_hardware_dataset_evidence() {
             "env": "GF_LIVEJOURNAL_PROJECT"
         }
     ]);
-    if let Some(path) = std::env::var_os("GF_M4_ENTRY_EVIDENCE_OUT") {
+    if let Some(path) = std::env::var_os("GF_EMBEDDED_PERFORMANCE_EVIDENCE_OUT") {
         let path = PathBuf::from(path);
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
@@ -1596,7 +1597,7 @@ fn large_manual_matrix_emits_hardware_dataset_evidence() {
         eprintln!("wrote {}", path.display());
     }
     eprintln!(
-        "M4_ENTRY_LARGE_EVIDENCE={}",
+        "EMBEDDED_PERFORMANCE_LARGE_EVIDENCE={}",
         serde_json::to_string_pretty(&evidence).expect("evidence json")
     );
 }

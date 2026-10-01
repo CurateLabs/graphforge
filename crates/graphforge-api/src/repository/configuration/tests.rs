@@ -299,7 +299,7 @@ fn target_semantics_fail_closed_before_state_or_secret_materialization() {
         "GF_VALIDATION"
     );
 
-    let sentinel = ["GRAPHFORGE_SECRET", "SENTINEL_231"].join("_");
+    let sentinel = ["GRAPHFORGE_SECRET", "SENTINEL_VALUE"].join("_");
     fs::write(
         root.path().join(CONFIG),
         format!(

@@ -280,7 +280,7 @@ remain the process-death and persistent-media authority. Required CI aggregates
 the Windows and macOS reports under the exact tested SHA and rejects a missing,
 empty, wrong-platform, or mixed-seed report; the production history runner does
 not model a successful API call as proof of a process crash. M6 CPU-simulation, durable walltime, and peak
-RSS fallback evidence use the frozen `m6-storage-v1` / `m6_storage_io` fixture
+RSS fallback evidence use the frozen `storage-benchmarks-v1` / `storage_io` fixture
 contract documented in [Benchmarking](../../development/benchmarking.md).
 
 Local seeded certification (required budget):

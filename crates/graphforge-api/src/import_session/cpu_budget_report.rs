@@ -3,12 +3,12 @@
 //! claims, on a quiet host:
 //!
 //! ```text
-//! TMPDIR=<ext4 dir> GF_1586_COMPUTE=4 taskset -c 0-3 cargo test --release -p graphforge-api --lib \
+//! TMPDIR=<ext4 dir> GF_CPU_BUDGET_COMPUTE=4 taskset -c 0-3 cargo test --release -p graphforge-api --lib \
 //!   import_session::cpu_budget_report -- --ignored --nocapture --test-threads=1
 //! ```
 //!
 //! One project holds a committed base graph. For each configuration a fresh
-//! instance opens it with `GF_1586_COMPUTE` compute threads, runs a fixed `rank` (PageRank)
+//! instance opens it with `GF_CPU_BUDGET_COMPUTE` compute threads, runs a fixed `rank` (PageRank)
 //! workload alone, then runs the same workload while two imports validate
 //! concurrently on the same instance (they are aborted, so the project never
 //! changes). Configurations rotate every round. `unbounded` replaces the
@@ -16,9 +16,9 @@
 //! before #1586. Each observation is printed as one `CPU_BUDGET_REPORT` JSON
 //! line.
 //!
-//! Knobs: `GF_1586_COMPUTE` (compute threads, default 4), `GF_1586_EDGES` (edges per import, default 2,000,000),
-//! `GF_1586_BASE_EDGES` (default 400,000), `GF_1586_ROUNDS` (default 3),
-//! `GF_1586_ALONE_QUERIES` (default 10).
+//! Knobs: `GF_CPU_BUDGET_COMPUTE` (compute threads, default 4), `GF_CPU_BUDGET_EDGES` (edges per import, default 2,000,000),
+//! `GF_CPU_BUDGET_BASE_EDGES` (default 400,000), `GF_CPU_BUDGET_ROUNDS` (default 3),
+//! `GF_CPU_BUDGET_ALONE_QUERIES` (default 10).
 
 use super::*;
 use crate::{GraphForgeOptions, bulk_edge_input_schema, bulk_node_input_schema};
@@ -159,11 +159,11 @@ fn import_and_abort(graph: &GraphForge, nodes: &[RecordBatch], edges: &[RecordBa
 #[test]
 #[ignore = "measurement; run alone on a quiet host, see module docs"]
 fn construction_cpu_reserve_report() {
-    let edges = knob("GF_1586_EDGES", 2_000_000) as u64;
-    let base_edges = knob("GF_1586_BASE_EDGES", 400_000) as u64;
-    let rounds = knob("GF_1586_ROUNDS", 3);
-    let alone_queries = knob("GF_1586_ALONE_QUERIES", 10);
-    let compute = knob("GF_1586_COMPUTE", 4);
+    let edges = knob("GF_CPU_BUDGET_EDGES", 2_000_000) as u64;
+    let base_edges = knob("GF_CPU_BUDGET_BASE_EDGES", 400_000) as u64;
+    let rounds = knob("GF_CPU_BUDGET_ROUNDS", 3);
+    let alone_queries = knob("GF_CPU_BUDGET_ALONE_QUERIES", 10);
+    let compute = knob("GF_CPU_BUDGET_COMPUTE", 4);
     let directory = tempfile::tempdir().unwrap();
     let project = directory.path().join("project");
     fs::create_dir(&project).unwrap();

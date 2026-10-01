@@ -131,7 +131,7 @@ def _load_module(name: str, path: Path) -> Any | None:
     return module
 
 
-def _try_load_298_projection() -> Any | None:
+def _try_load_shared_projection() -> Any | None:
     return _load_module("graphforge_viz_shared_projection", SHARED_DIR / "projection.py")
 
 
@@ -345,7 +345,7 @@ def projection_from_edges(
     )
 
 
-def projection_from_298_dict(payload: dict[str, Any], *, elapsed: float) -> GraphProjection:
+def projection_from_shared_dict(payload: dict[str, Any], *, elapsed: float) -> GraphProjection:
     nodes = [
         ProjectionNode(
             id=str(row["id"]),
@@ -484,7 +484,7 @@ def build_step_projection(
     use_graphforge: bool = True,
 ) -> tuple[GraphProjection, float]:
     """Return projection for a ladder step and GraphForge projection seconds."""
-    shared = _try_load_298_projection()
+    shared = _try_load_shared_projection()
     # Shared projection covers full karate (34). Use it when the step fits
     # and GraphForge is requested; still apply deterministic subgraph sampling.
     if shared is not None and use_graphforge and target_nodes <= 34 and hasattr(shared, "project"):

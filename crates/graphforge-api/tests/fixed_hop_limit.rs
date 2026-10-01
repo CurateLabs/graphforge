@@ -306,7 +306,7 @@ fn generate_semantic_v4_graph_with_nodes(dir: &Path, nodes: Vec<Uuid>) -> Vec<Uu
 /// that combination the S18 recount fell back to a per-batch edge scan and the
 /// two-hop query ran for hours.
 #[test]
-fn regression1513_fast_paths_survive_multi_file_node_tables() {
+fn fast_paths_survive_multi_file_node_tables() {
     let _guard = io_guard();
     // Two 32 Ki-row publication windows: the fixture spans two node files.
     const NODES: usize = 40_000;
@@ -426,7 +426,7 @@ fn poisoned_io_guard_recovers_for_subsequent_tests() {
 }
 
 #[test]
-fn regression1094_property_free_shortcuts() {
+fn property_free_shortcuts() {
     let _guard = io_guard();
     for ordinals in [[3, 1, 2], [1, 2, 3]] {
         let dir = TempDir::new().unwrap();
@@ -584,7 +584,7 @@ fn regression1094_property_free_shortcuts() {
 }
 
 #[test]
-fn regression1094_recount_and_ordered_frontier_semantics() {
+fn recount_and_ordered_frontier_semantics() {
     let _guard = io_guard();
     let dir = TempDir::new().unwrap();
     let nodes = generate_semantic_v4_graph_with_nodes(
@@ -678,7 +678,7 @@ fn regression1094_recount_and_ordered_frontier_semantics() {
 }
 
 #[test]
-fn regression1094_identity_lookup_limit_is_chunked() {
+fn identity_lookup_limit_is_chunked() {
     let _guard = io_guard();
     let dir = TempDir::new().unwrap();
     let limit = graphforge_storage::V4OrdinalIdentityLimits::default().max_requested + 1;
@@ -699,7 +699,7 @@ fn regression1094_identity_lookup_limit_is_chunked() {
 }
 
 #[test]
-fn regression1094_sharded_hubs_keep_one_and_two_hop_work_bounded() {
+fn sharded_hubs_keep_one_and_two_hop_work_bounded() {
     let _guard = io_guard();
     for degree in [16_384, 32_768] {
         let dir = TempDir::new().unwrap();

@@ -673,7 +673,7 @@ mod tests {
     #[test]
     fn versioned_m9_positive_matrix_executes_both_representations() {
         let ledger: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/portable-v2/m9-interchange-cases.json"
+            "../../../tests/fixtures/portable-v2/multi-ontology-interchange-cases.json"
         ))
         .unwrap();
         let (root, nodes, _edges) = publish_graph_project();

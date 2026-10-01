@@ -13,7 +13,7 @@ from graphforge_bench.ingestion_attribution import validate_boundary_families
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "diagnostics"))
 SPEC = importlib.util.spec_from_file_location(
-    "report_parquet_root_1286", ROOT / "diagnostics/report_parquet_root_1286.py"
+    "report_parquet_root", ROOT / "diagnostics/report_parquet_root.py"
 )
 REPORT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(REPORT)
@@ -23,7 +23,7 @@ EVIDENCE = ROOT / "tests/fixtures/rungs"
 class ParquetRootTests(unittest.TestCase):
     def test_historical_and_retained_root_oracles_are_distinct(self):
         report = json.loads(
-            (EVIDENCE / "ingestion-attribution-1282-boundary-diagnostic.json").read_text()
+            (EVIDENCE / "ingestion-attribution-boundary-diagnostic.json").read_text()
         )
         for command in report["commands"]:
             if "merge_families" not in command:
@@ -47,7 +47,7 @@ class ParquetRootTests(unittest.TestCase):
                     validate_boundary_families(n, e, candidate)
 
     def test_comparison_requires_frozen_comparable_complete_evidence(self):
-        baseline = json.loads((EVIDENCE / "ingestion-attribution-1282-scaling.json").read_text())
+        baseline = json.loads((EVIDENCE / "ingestion-attribution-scaling.json").read_text())
         for key in REPORT.COMPARABLE:
             baseline.setdefault(key, "fixture-only")
         end = max(c["started_unix"] + c["wall_seconds"] for c in baseline["commands"])

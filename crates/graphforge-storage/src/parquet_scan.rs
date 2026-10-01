@@ -775,7 +775,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_fragment_yields_empty_schema_shaped_batch() {
-        let path = PathBuf::from("/nonexistent/graphforge-339.parquet");
+        let path = PathBuf::from("/nonexistent/graphforge-missing.parquet");
         let plan = GraphForgeParquetExec::try_new(
             edge_schema(),
             vec![ParquetFragment::for_path(path, false)],
@@ -797,7 +797,7 @@ mod tests {
     async fn stale_exists_flag_missing_file_yields_empty_not_error() {
         // Planning-time `exists: true` must still match `read_parquet_or_empty`
         // when the path is gone by execute (TOCTOU / clear).
-        let path = PathBuf::from("/nonexistent/graphforge-339-stale.parquet");
+        let path = PathBuf::from("/nonexistent/graphforge-missing-stale.parquet");
         let fragment = ParquetFragment {
             path,
             exists: true,

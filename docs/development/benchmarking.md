@@ -167,8 +167,8 @@ still execute the targets as ordinary divan benchmarks:
 ```bash
 cargo bench -p graphforge-core --bench canonical
 cargo bench -p graphforge-cypher --bench compile
-cargo bench -p graphforge-storage --bench m6_storage
-cargo bench -p graphforge-storage --bench m6_storage_io -- --sample-count 1
+cargo bench -p graphforge-storage --bench storage_kernels
+cargo bench -p graphforge-storage --bench storage_io -- --sample-count 1
 cargo bench -p graphforge-exec --bench traversal_scaling -- --sample-count 5
 cargo bench -p graphforge-exec --bench merge_scaling -- --sample-count 5
 ```
@@ -176,7 +176,7 @@ cargo bench -p graphforge-exec --bench merge_scaling -- --sample-count 5
 ## The ingest floor gate is a ratchet
 
 `GF_INGEST_FLOOR_GATE=1 cargo bench -p graphforge-storage --bench
-m6_storage_io` runs the bulk-ingest gate instead of the divan benchmarks. Its
+storage_io` runs the bulk-ingest gate instead of the divan benchmarks. Its
 banked constants fail in **both** directions (#1476): a measurement past its
 constant the wrong way is a regression, and a measurement beating its constant
 by more than that metric's margin is an **unbanked gain** — the gate fails and
@@ -210,9 +210,9 @@ Manual scaling studies also expose Makefile entry points (`make bench-traversal`
 `make bench-merge-scaling`). Divan test mode (`--sample-count 1`) exercises every
 case without treating the output as performance evidence.
 
-## M6 storage evidence
+## Storage benchmark evidence
 
-`m6_storage` uses synthetic, versioned fixtures and the `1 / 100 / 10,000`
+`storage_kernels` uses synthetic, versioned fixtures and the `1 / 100 / 10,000`
 operation ladder. GFDR framing, checksum verification, replay/merge fingerprints,
 reachability, and transaction classification belong to CPU simulation; fixture
 construction and correctness assertions stay outside timed closures.
@@ -236,13 +236,13 @@ their measured tradeoff; samples and thresholds must not be weakened.
 The frozen pre-M6 comparison commit is
 `aeb46d1b012d40e8a0af7873af9152b3aab752c6`, the first parent immediately
 before the #777 replay merge. The walltime host contract is CodSpeed's
-`codspeed-macro` ARM64 runner, Rust 1.96.0, `m6_storage_io` fixture v1, and
+`codspeed-macro` ARM64 runner, Rust 1.96.0, `storage_io` fixture v1, and
 CodSpeed walltime mode. The scheduled memory fallback remains a separately
 labelled Blacksmith diagnostic and uploads `/usr/bin/time -v` peak-resident
 output for replay and spill/compaction, named with the exact head SHA.
 Certification #756 records the
 base/head SHAs, result URLs or artifact IDs, benchmark mode and any accepted
-tradeoff. `scripts/ci/check-m6-benchmarks.py` freezes the v1 names and count.
+tradeoff. `scripts/ci/check-storage-benchmarks.py` freezes the v1 names and count.
 
 ## Adding a benchmark
 
@@ -258,6 +258,6 @@ tradeoff. `scripts/ci/check-m6-benchmarks.py` freezes the v1 names and count.
 ## Related manual benchmarks
 
 The scaling studies under `benchmarks/` (`make bench-traversal`,
-`make bench-merge-scaling`, `make bench-m4-entry`, and the fixed-hop LIMIT
+`make bench-merge-scaling`, `make bench-embedded-performance`, and the fixed-hop LIMIT
 matrices) remain hardware-specific manual evidence. They are unrelated to the
 continuous CodSpeed lane.
