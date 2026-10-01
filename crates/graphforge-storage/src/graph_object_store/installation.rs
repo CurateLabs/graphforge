@@ -1,6 +1,5 @@
 //! installation ownership for immutable graph objects.
 use super::{Seek, fs};
-use graphforge_filesystem::ObservedSync as _;
 
 use super::BUFFER_BYTES;
 use super::CasRoot;
@@ -61,12 +60,14 @@ struct TemporaryObject {
     #[cfg(windows)]
     file: graphforge_filesystem::WindowsCasWriter,
     identity: graphforge_filesystem::FileIdentity,
+    seal: crate::durable_commit::FileSeal,
 }
 
 struct SealedTemporaryObject {
     name: std::ffi::OsString,
     file: File,
     identity: graphforge_filesystem::FileIdentity,
+    seal: crate::durable_commit::FileSeal,
 }
 
 #[cfg(unix)]
@@ -119,7 +120,11 @@ fn install_graph_object_bytes_in_domain(
                 error,
             )
         })?;
-        file.observed_sync_all().map_err(|error| {
+        #[cfg(unix)]
+        let descriptor = &*file;
+        #[cfg(windows)]
+        let descriptor = file.as_file();
+        let seal = crate::durable_commit::seal_file_witness(descriptor).map_err(|error| {
             storage(
                 "fsync temporary graph object",
                 &lease.cas.diagnostic_root,
@@ -128,7 +133,7 @@ fn install_graph_object_bytes_in_domain(
         })?;
         // The source is already resident memory; only the mandatory temporary
         // file verification below is an application-observed payload read.
-        Ok(0)
+        Ok((0, seal))
     })
     .and_then(
         |InstalledObject {
@@ -302,28 +307,34 @@ pub(crate) fn install_graph_object_file_with_lease(
                     }
                 };
                 #[cfg(unix)]
-                {
-                    bounded_output.sync_all_and_release().map_err(|error| {
-                        storage(
-                            "fsync temporary graph object",
-                            &lease.cas.diagnostic_root,
-                            error,
-                        )
-                    })?;
+                let seal = {
+                    let seal =
+                        crate::durable_commit::seal_cache_writer_witness(&mut bounded_output)
+                            .map_err(|error| {
+                                storage(
+                                    "fsync temporary graph object",
+                                    &lease.cas.diagnostic_root,
+                                    error,
+                                )
+                            })?;
                     file_sync_calls.set(bounded_output.evidence().sync_operations);
-                }
+                    seal
+                };
                 #[cfg(windows)]
-                {
-                    output.observed_sync_all().map_err(|error| {
-                        storage(
-                            "fsync temporary graph object",
-                            &lease.cas.diagnostic_root,
-                            error,
-                        )
-                    })?;
+                let seal = {
+                    let seal = crate::durable_commit::seal_file_witness(output.as_file()).map_err(
+                        |error| {
+                            storage(
+                                "fsync temporary graph object",
+                                &lease.cas.diagnostic_root,
+                                error,
+                            )
+                        },
+                    )?;
                     file_sync_calls.set(1);
-                }
-                Ok(total)
+                    seal
+                };
+                Ok((total, seal))
             },
         );
     result.and_then(
@@ -491,7 +502,7 @@ fn copy_captured_source(
     reads: &std::cell::Cell<u64>,
     writes: &std::cell::Cell<u64>,
     syncs: &std::cell::Cell<u64>,
-) -> Result<u64, GfError> {
+) -> Result<(u64, crate::durable_commit::FileSeal), GfError> {
     let window = graphforge_filesystem::cache_release_window_for_streams(2)
         .map_err(|error| validation(error.to_string()))?;
     let mut input = graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
@@ -573,20 +584,20 @@ fn copy_captured_source(
         .map_err(|error| validation(error.to_string()));
     let total = finish_captured_source_copy(copied, cleanup)?;
     #[cfg(unix)]
-    {
-        output_stream
-            .sync_all_and_release()
+    let seal = {
+        let seal = crate::durable_commit::seal_cache_writer_witness(&mut output_stream)
             .map_err(|error| validation(error.to_string()))?;
         syncs.set(output_stream.evidence().sync_operations);
-    }
+        seal
+    };
     #[cfg(windows)]
-    {
-        output
-            .observed_sync_all()
+    let seal = {
+        let seal = crate::durable_commit::seal_file_witness(output.as_file())
             .map_err(|error| validation(error.to_string()))?;
         syncs.set(1);
-    }
-    Ok(total)
+        seal
+    };
+    Ok((total, seal))
 }
 
 fn finish_captured_source_copy(
@@ -667,7 +678,7 @@ fn install_object<F>(
     write_temporary: F,
 ) -> Result<InstalledObject, GfError>
 where
-    F: FnOnce(&mut CasTemporaryWriter) -> Result<u64, GfError>,
+    F: FnOnce(&mut CasTemporaryWriter) -> Result<(u64, crate::durable_commit::FileSeal), GfError>,
 {
     install_object_admitted(
         cas,
@@ -797,7 +808,7 @@ fn install_object_admitted<F>(
     write_temporary: F,
 ) -> Result<InstalledObject, GfError>
 where
-    F: FnOnce(&mut CasTemporaryWriter) -> Result<u64, GfError>,
+    F: FnOnce(&mut CasTemporaryWriter) -> Result<(u64, crate::durable_commit::FileSeal), GfError>,
 {
     validate_digest(digest)?;
     let bucket = cas.digest_bucket(digest, true)?;
@@ -843,7 +854,7 @@ where
     let observed = cas.allocation.as_ref().map_or(Ok(()), |allocation| {
         allocation.replace_file_at(&temporary_path, observed_file)
     });
-    let bytes_hashed = written?;
+    let (bytes_hashed, seal) = written?;
     observed?;
     let preseal_io = if writer_authenticated || cfg!(windows) {
         ReadIoEvidence::default()
@@ -869,6 +880,7 @@ where
             name: temporary_name,
             file: temporary,
             identity: temporary_identity,
+            seal,
         },
         digest,
         expected_length,
@@ -1057,19 +1069,6 @@ fn try_reuse_existing_object(
     Ok(Some(InstalledObject { evidence, identity }))
 }
 
-fn authenticated_object_identity(
-    file: &File,
-    cas: &CasRoot,
-) -> Result<graphforge_filesystem::FileIdentity, GfError> {
-    graphforge_filesystem::file_identity(file).map_err(|error| {
-        storage(
-            "identify authenticated graph object",
-            &cas.diagnostic_root,
-            error,
-        )
-    })
-}
-
 fn finalize_temporary_object(
     cas: &CasRoot,
     bucket: &StableDirectory,
@@ -1096,6 +1095,7 @@ fn finalize_temporary_object(
                 name: temporary.name,
                 file: temporary.file,
                 identity: temporary.identity,
+                seal: temporary.seal,
             },
             ReadIoEvidence::default(),
         )
@@ -1115,82 +1115,71 @@ fn finalize_temporary_object(
     let sealed_bytes_hashed = sealed_io.bytes;
     validate_sealed_temporary(&temporary, expected_length, &cas.diagnostic_root)?;
     returned_error_boundary("install:temp-sealed")?;
-    let mut concurrent_io = ReadIoEvidence::default();
-    let (installed, identity) = if let Ok((installed, identity)) = cas.tmp.link_child_into(
+    let sealed = crate::durable_commit::SealedArtifact::adopt_sealed(
+        &cas.tmp,
         &temporary.name,
-        &temporary.file,
-        temporary.identity,
+        temporary.file,
+        temporary.seal,
+        cas.allocation.as_ref(),
+    )
+    .map_err(|error| storage("adopt sealed graph object", &cas.diagnostic_root, error))?;
+    let mut concurrent_io = ReadIoEvidence::default();
+    let installed = crate::durable_commit::install_immutable(
+        sealed,
         bucket,
         destination_name,
-    ) {
-        if let Some(allocation) = &cas.allocation {
-            allocation.replace_file_at(
-                &graph_object_path(&cas.diagnostic_root, digest)?,
-                &installed,
-            )?;
-        }
-        (true, identity)
-    } else {
-        #[cfg(unix)]
-        let existing = bucket.open_child_file(destination_name);
-        #[cfg(windows)]
-        let existing = bucket
-            .open_cas_child_file(destination_name)
-            .map(graphforge_filesystem::WindowsSealedCasFile::into_file);
-        let existing = existing.map_err(|error| {
-            storage(
-                "open concurrently installed graph object",
+        |existing, _identity| {
+            concurrent_io = verify_and_seal_graph_object_counted(
+                existing,
+                digest,
+                expected_length,
+                &graph_object_path(&cas.diagnostic_root, digest).map_err(std::io::Error::other)?,
                 &cas.diagnostic_root,
-                error,
+                authentication,
             )
-        })?;
-        concurrent_io = verify_and_seal_graph_object_counted(
-            &existing,
-            digest,
-            expected_length,
-            &graph_object_path(&cas.diagnostic_root, digest)?,
-            &cas.diagnostic_root,
-            authentication,
-        )?;
-        if let Some(allocation) = &cas.allocation {
-            allocation
-                .replace_file_at(&graph_object_path(&cas.diagnostic_root, digest)?, &existing)?;
-        }
-        let identity = authenticated_object_identity(&existing, cas)?;
-        (false, identity)
-    };
-    returned_error_boundary("install:final-linked")?;
-    // The destination namespace must be durable before its temporary alias is
-    // removed; after a crash, retry can therefore authenticate the final CAS
-    // name without depending on the temporary namespace.
-    bucket.sync().map_err(|error| {
-        storage(
-            "sync stable graph object bucket",
-            &cas.diagnostic_root,
-            error,
-        )
-    })?;
-    returned_error_boundary("install:bucket-synced")?;
-    // Windows cannot open a deletion handle while the original temporary
-    // handle remains open without delete sharing. Publication and concurrent
-    // winner authentication are complete, so release it before exact-identity
-    // cleanup; the fresh CAS-owned inode remains sealed at its final name.
-    drop(temporary.file);
-    remove_finalized_temporary(cas, &temporary.name, temporary.identity, &temporary_path)?;
-    returned_error_boundary("install:temp-unlinked")?;
-    cas.tmp.sync().map_err(|error| {
-        storage(
-            "sync stable graph object temporary directory",
-            &cas.diagnostic_root,
-            error,
-        )
-    })?;
+            .map_err(std::io::Error::other)?;
+            Ok(())
+        },
+        |_reused, file| {
+            if let Some(allocation) = &cas.allocation {
+                allocation
+                    .replace_file_at(
+                        &graph_object_path(&cas.diagnostic_root, digest)
+                            .map_err(std::io::Error::other)?,
+                        file,
+                    )
+                    .map_err(std::io::Error::other)?;
+            }
+            returned_error_boundary("install:final-linked").map_err(std::io::Error::other)
+        },
+        |_reused, _file| {
+            returned_error_boundary("install:bucket-synced").map_err(std::io::Error::other)
+        },
+        || returned_error_boundary("install:temp-unlinked").map_err(std::io::Error::other),
+    )
+    .map_err(|error| immutable_commit_error(error, cas))?;
+    let (_file, identity, reused) = installed;
+    let installed = !reused;
     Ok((
         installed,
         identity,
         sealed_bytes_hashed,
         checked_read_io_sum(sealed_io, concurrent_io)?,
     ))
+}
+
+fn immutable_commit_error(error: std::io::Error, cas: &CasRoot) -> GfError {
+    let message = error.to_string();
+    if let Some(cause) = error.into_inner()
+        && let Ok(cause) = cause.downcast::<GfError>()
+    {
+        return *cause;
+    }
+    storage(
+        "commit immutable graph object",
+        &cas.diagnostic_root,
+        message,
+    )
 }
 
 fn temporary_object_path(cas: &CasRoot, name: &std::ffi::OsStr) -> std::path::PathBuf {
@@ -1200,26 +1189,6 @@ fn temporary_object_path(cas: &CasRoot, name: &std::ffi::OsStr) -> std::path::Pa
         .join(name)
 }
 
-fn remove_finalized_temporary(
-    cas: &CasRoot,
-    name: &std::ffi::OsStr,
-    identity: graphforge_filesystem::FileIdentity,
-    path: &Path,
-) -> Result<(), GfError> {
-    cas.tmp
-        .unlink_child_if_identity(name, identity)
-        .map_err(|error| {
-            storage(
-                "remove stable temporary graph object",
-                &cas.diagnostic_root,
-                error,
-            )
-        })?;
-    if let Some(allocation) = &cas.allocation {
-        allocation.remove_file_at(path)?;
-    }
-    Ok(())
-}
 fn validate_sealed_temporary(
     temporary: &SealedTemporaryObject,
     expected_length: u64,
@@ -1250,13 +1219,6 @@ fn transition_temporary_to_sealed_reader(
     diagnostic: &Path,
     authentication: ObjectAuthentication,
 ) -> Result<(SealedTemporaryObject, ReadIoEvidence), GfError> {
-    temporary.file.observed_sync_all().map_err(|error| {
-        storage(
-            "sync temporary graph object before sealing",
-            diagnostic,
-            error,
-        )
-    })?;
     let identity = temporary.identity;
     let name = temporary.name;
     let file = temporary_directory
@@ -1293,6 +1255,7 @@ fn transition_temporary_to_sealed_reader(
             name,
             file,
             identity,
+            seal: temporary.seal,
         },
         io,
     ))

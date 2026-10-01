@@ -7,7 +7,6 @@ use super::{
     acquire_mutation_locks, delete_request_digest_values, fs, project_error, project_failpoint,
     storage_io, sync_directory, validate_description, validate_name, validate_record_identity,
 };
-use graphforge_filesystem::ObservedSync as _;
 use sha2::Digest as _;
 use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
@@ -111,8 +110,8 @@ pub(super) fn commit_registry(
     let checksum_temp = format!(".registry.{transaction_uuid}.sha256.next");
     prepare_temp_path(&root.join(&registry_temp))?;
     prepare_temp_path(&root.join(&checksum_temp))?;
-    write_new_synced(&root.join(&registry_temp), &next)?;
-    write_new_synced(
+    let registry_artifact = write_new_synced(&root.join(&registry_temp), &next)?;
+    let checksum_artifact = write_new_synced(
         &root.join(&checksum_temp),
         format!("{next_digest}\n").as_bytes(),
     )?;
@@ -141,7 +140,13 @@ pub(super) fn commit_registry(
         "REGISTRY_INTENT_DURABLE",
         false,
     )?;
-    fs::rename(root.join(&registry_temp), root.join(REGISTRY_FILE)).map_err(storage_io)?;
+    let registry_pending = registry_artifact
+        .make_visible(
+            std::ffi::OsStr::new(REGISTRY_FILE),
+            crate::durable_commit::PublishMode::Replace,
+            || Ok(()),
+        )
+        .map_err(storage_io)?;
     project_failpoint::hit(
         "checkpoint.registry.after_replace",
         Some(transaction_uuid),
@@ -149,8 +154,18 @@ pub(super) fn commit_registry(
         "REGISTRY_REPLACED",
         true,
     )?;
-    fs::rename(root.join(&checksum_temp), root.join(CHECKSUM_FILE)).map_err(storage_io)?;
-    sync_directory(root)?;
+    let checksum_pending = checksum_artifact
+        .make_visible(
+            std::ffi::OsStr::new(CHECKSUM_FILE),
+            crate::durable_commit::PublishMode::Replace,
+            || Ok(()),
+        )
+        .map_err(storage_io)?;
+    crate::durable_commit::PendingCommit::acknowledge_group(
+        vec![registry_pending, checksum_pending],
+        None,
+    )
+    .map_err(storage_io)?;
     project_failpoint::hit(
         "checkpoint.registry.after_dir_fsync",
         Some(transaction_uuid),
@@ -158,8 +173,14 @@ pub(super) fn commit_registry(
         "REGISTRY_DURABLE",
         true,
     )?;
-    fs::remove_file(root.join(INTENT_FILE)).map_err(storage_io)?;
-    sync_directory(root)
+    let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_io)?;
+    let file = directory
+        .open_child_file(std::ffi::OsStr::new(INTENT_FILE))
+        .map_err(storage_io)?;
+    let identity = graphforge_filesystem::file_identity(&file).map_err(storage_io)?;
+    drop(file);
+    crate::durable_commit::retire_files(&directory, [(std::ffi::OsStr::new(INTENT_FILE), identity)])
+        .map_err(storage_io)
 }
 
 pub(super) fn recover_pair(root: &Path) -> Result<(), GfError> {
@@ -206,9 +227,26 @@ pub(super) fn recover_pair(root: &Path) -> Result<(), GfError> {
     if hex(&Sha256::digest(&registry_bytes).into()) == intent.next_sha256 {
         let checksum_bytes = read_regular_bounded(&root.join(&intent.checksum_temp), 128)?;
         if checksum_bytes == format!("{}\n", intent.next_sha256).as_bytes() {
-            fs::rename(root.join(&intent.checksum_temp), root.join(CHECKSUM_FILE))
+            let directory =
+                graphforge_filesystem::StableDirectory::open(root).map_err(storage_io)?;
+            let name = std::ffi::OsStr::new(&intent.checksum_temp);
+            let file = directory.open_child_file(name).map_err(storage_io)?;
+            let identity = graphforge_filesystem::file_identity(&file).map_err(storage_io)?;
+            drop(file);
+            let file = crate::durable_commit::open_publisher(&directory, name, identity)
                 .map_err(storage_io)?;
-            sync_directory(root)?;
+            crate::durable_commit::SealedArtifact::seal_recoverable_existing(
+                &directory, name, file, identity, None,
+            )
+            .map_err(storage_io)?
+            .make_visible(
+                std::ffi::OsStr::new(CHECKSUM_FILE),
+                crate::durable_commit::PublishMode::Replace,
+                || Ok(()),
+            )
+            .map_err(storage_io)?
+            .acknowledge(None)
+            .map_err(storage_io)?;
             cleanup_intent(root, &intent)?;
             read_registry(root)?;
             return Ok(());
@@ -251,19 +289,32 @@ fn read_valid_pair(root: &Path) -> Result<Option<(Registry, String)>, GfError> {
 }
 
 fn cleanup_intent(root: &Path, intent: &RegistryIntent) -> Result<(), GfError> {
+    let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_io)?;
+    let mut retirement =
+        crate::durable_commit::RetirementBatch::new(&directory).map_err(storage_io)?;
     for name in [&intent.registry_temp, &intent.checksum_temp] {
         let path = root.join(name);
         if path.exists() {
             validate_single_link_regular(&path, "registry transaction temporary file")?;
         }
-        match fs::remove_file(path) {
-            Ok(()) => {}
+        match directory.open_child_file(std::ffi::OsStr::new(name)) {
+            Ok(file) => {
+                let identity = graphforge_filesystem::file_identity(&file).map_err(storage_io)?;
+                drop(file);
+                retirement
+                    .unlink(std::ffi::OsStr::new(name), identity)
+                    .map_err(storage_io)?;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(storage_io(error)),
         }
     }
-    fs::remove_file(root.join(INTENT_FILE)).map_err(storage_io)?;
-    sync_directory(root)
+    let name = std::ffi::OsStr::new(INTENT_FILE);
+    let file = directory.open_child_file(name).map_err(storage_io)?;
+    let identity = graphforge_filesystem::file_identity(&file).map_err(storage_io)?;
+    drop(file);
+    retirement.unlink(name, identity).map_err(storage_io)?;
+    retirement.acknowledge().map_err(storage_io)
 }
 
 fn write_intent(root: &Path, intent: &RegistryIntent) -> Result<(), GfError> {
@@ -271,7 +322,7 @@ fn write_intent(root: &Path, intent: &RegistryIntent) -> Result<(), GfError> {
     let mut bytes = serde_json::to_vec(intent).map_err(registry_serde)?;
     bytes.push(b'\n');
     prepare_temp_path(&temp)?;
-    write_new_synced(&temp, &bytes)?;
+    let staged = write_new_synced(&temp, &bytes)?;
     project_failpoint::hit(
         "checkpoint.registry.after_intent_file_fsync",
         Some(intent.transaction_uuid),
@@ -279,11 +330,21 @@ fn write_intent(root: &Path, intent: &RegistryIntent) -> Result<(), GfError> {
         "REGISTRY_INTENT_STAGED",
         false,
     )?;
-    fs::rename(temp, root.join(INTENT_FILE)).map_err(storage_io)?;
-    sync_directory(root)
+    staged
+        .make_visible(
+            std::ffi::OsStr::new(INTENT_FILE),
+            crate::durable_commit::PublishMode::Replace,
+            || Ok(()),
+        )
+        .map_err(storage_io)?
+        .acknowledge(None)
+        .map_err(storage_io)
 }
 
-fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), GfError> {
+fn write_new_synced(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<crate::durable_commit::SealedArtifact, GfError> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -293,7 +354,20 @@ fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), GfError> {
     }
     let mut file = options.open(path).map_err(storage_io)?;
     file.write_all(bytes).map_err(storage_io)?;
-    file.observed_sync_all().map_err(storage_io)
+    let directory = graphforge_filesystem::StableDirectory::open(
+        path.parent().expect("registry temporary parent"),
+    )
+    .map_err(storage_io)?;
+    let identity = graphforge_filesystem::file_identity(&file).map_err(storage_io)?;
+    // The registry intent, including failed publication, owns these named inputs.
+    crate::durable_commit::SealedArtifact::seal_recoverable_existing(
+        &directory,
+        path.file_name().expect("registry temporary name"),
+        file,
+        identity,
+        None,
+    )
+    .map_err(storage_io)
 }
 
 fn prepare_temp_path(path: &Path) -> Result<(), GfError> {

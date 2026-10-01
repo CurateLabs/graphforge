@@ -4,7 +4,6 @@
 //! enumerate `generations/`, inspect transaction journals, or decode any
 //! participant table.
 
-use graphforge_filesystem::ObservedSync as _;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
@@ -1145,17 +1144,20 @@ fn validate_partial_generation(generation: &Path) -> Result<(), GfError> {
 }
 
 fn remove_partial_generation(generations: &Path, generation_uuid: Uuid) -> Result<(), GfError> {
-    let generation = generations.join(generation_uuid.hyphenated().to_string());
-    reset_partial_generation(generations, generation_uuid)?;
-    let participants = generation.join(PARTICIPANTS_DIR);
-    if participants.exists() {
-        std::fs::remove_dir(&participants).map_err(|error| {
+    let name = generation_uuid.hyphenated().to_string();
+    let parent = graphforge_filesystem::StableDirectory::open(generations).map_err(|error| {
+        GfError::Storage(format!("failed to retain interrupted generations: {error}"))
+    })?;
+    crate::durable_commit::retire_owned_tree(
+        &parent,
+        std::ffi::OsStr::new(&name),
+        graphforge_filesystem::path_identity(&generations.join(&name)).map_err(|error| {
             GfError::Storage(format!(
-                "failed to remove interrupted participants directory: {error}"
+                "failed to identify interrupted generation: {error}"
             ))
-        })?;
-    }
-    std::fs::remove_dir(&generation).map_err(|error| {
+        })?,
+    )
+    .map_err(|error| {
         GfError::Storage(format!(
             "failed to remove interrupted generation directory: {error}"
         ))
@@ -1164,34 +1166,52 @@ fn remove_partial_generation(generations: &Path, generation_uuid: Uuid) -> Resul
 
 fn reset_partial_generation(generations: &Path, generation_uuid: Uuid) -> Result<(), GfError> {
     let generation = generations.join(generation_uuid.hyphenated().to_string());
+    let parent = graphforge_filesystem::StableDirectory::open(&generation).map_err(|error| {
+        GfError::Storage(format!("failed to retain interrupted generation: {error}"))
+    })?;
     let workspace = generation.join(PARTICIPANTS_DIR).join("workspace");
     if workspace.exists() {
-        for family in [
-            "configuration.json",
-            "ontology.json",
-            "ontology_composition.json",
-            "research_metadata.json",
-        ] {
-            let path = workspace.join(family);
-            if path.exists() {
-                std::fs::remove_file(&path).map_err(|error| {
-                    GfError::Storage(format!("failed to reset workspace participant: {error}"))
-                })?;
-            }
-        }
-        std::fs::remove_dir(&workspace).map_err(|error| {
+        let participants = parent
+            .open_child_directory(std::ffi::OsStr::new(PARTICIPANTS_DIR))
+            .map_err(|error| {
+                GfError::Storage(format!("failed to retain workspace participants: {error}"))
+            })?;
+        crate::durable_commit::retire_owned_tree(
+            &participants,
+            std::ffi::OsStr::new("workspace"),
+            graphforge_filesystem::path_identity(&workspace).map_err(|error| {
+                GfError::Storage(format!("failed to identify workspace directory: {error}"))
+            })?,
+        )
+        .map_err(|error| {
             GfError::Storage(format!("failed to reset workspace directory: {error}"))
         })?;
     }
+    let mut retirement = crate::durable_commit::RetirementBatch::new(&parent).map_err(|error| {
+        GfError::Storage(format!("failed to retain generation retirement: {error}"))
+    })?;
     for name in [LEASE_FILE, MANIFEST_FILE] {
         let path = generation.join(name);
         if path.exists() {
-            std::fs::remove_file(&path).map_err(|error| {
-                GfError::Storage(format!("failed to reset interrupted generation: {error}"))
-            })?;
+            retirement
+                .unlink(
+                    std::ffi::OsStr::new(name),
+                    graphforge_filesystem::path_identity(&path).map_err(|error| {
+                        GfError::Storage(format!(
+                            "failed to identify interrupted generation file: {error}"
+                        ))
+                    })?,
+                )
+                .map_err(|error| {
+                    GfError::Storage(format!("failed to reset interrupted generation: {error}"))
+                })?;
         }
     }
-    sync_directory(&generation)
+    retirement.acknowledge().map_err(|error| {
+        GfError::Storage(format!(
+            "failed to acknowledge interrupted generation reset: {error}"
+        ))
+    })
 }
 
 fn validate_partial_workspace_participants(participants: &Path) -> Result<(), GfError> {
@@ -1347,7 +1367,6 @@ fn initialize_empty_generation(
         allocation,
     )
     .map_err(|error| GfError::Storage(format!("failed to write CURRENT: {error}")))?;
-    sync_directory(root)?;
     resolve_project_generation(root)
 }
 
@@ -1408,18 +1427,21 @@ fn write_new_synced(
     allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), GfError> {
     use std::io::Write as _;
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|error| GfError::Storage(format!("failed to create {name}: {error}")))?;
-    file.write_all(bytes)
-        .and_then(|()| file.observed_sync_all())
-        .map_err(|error| GfError::Storage(format!("failed to write {name}: {error}")))?;
-    if let Some(allocation) = allocation {
-        allocation.replace_file_at(path, &file)?;
-    }
+    let parent = graphforge_filesystem::StableDirectory::open(
+        path.parent()
+            .ok_or_else(|| GfError::Storage(format!("{name} has no parent")))?,
+    )
+    .map_err(|error| GfError::Storage(format!("failed to create {name}: {error}")))?;
+    let file = crate::durable_commit::stage_private_file(
+        &parent,
+        path.file_name()
+            .ok_or_else(|| GfError::Storage(format!("{name} has no name")))?,
+        |file| file.write_all(bytes),
+        || Ok(()),
+        allocation,
+    )
+    .map_err(|error| GfError::Storage(format!("failed to write {name}: {error}")))?;
+    drop(file);
     Ok(())
 }
 

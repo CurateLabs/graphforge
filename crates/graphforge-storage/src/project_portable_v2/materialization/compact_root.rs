@@ -1,7 +1,6 @@
 //! Capture the actual bounded compact-root bytes emitted during import.
 use super::{MaterializedCapture, PortableV2Error, PortableV2ErrorCode, fs};
 use graphforge_core::hash_observation::ControlSha256;
-use graphforge_filesystem::ObservedSync as _;
 use sha2::Digest;
 
 /// Encode and publish the root before minting authority over its exact bytes.
@@ -30,7 +29,7 @@ pub(crate) fn publish_compact_import_root(
     #[cfg(windows)]
     let file = fs::OpenOptions::new().write(true).open(&participant.source);
     let file = file.map_err(|_| failed("cannot reopen imported compact graph root"))?;
-    file.observed_sync_all()
+    crate::durable_commit::seal_file(&file)
         .map_err(|_| failed("cannot sync imported compact graph root"))?;
     let capture = MaterializedCapture {
         identity: graphforge_filesystem::file_identity(&file)

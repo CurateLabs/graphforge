@@ -344,7 +344,9 @@ pub(super) fn write_parquet_chunks(
         };
         writer
     };
-    writer.inner.sync_all_and_release().map_err(storage)?;
+    directory
+        .seal_cache_writer(&mut writer.inner)
+        .map_err(storage)?;
     let cache_release = writer.inner.evidence();
     account_cache_release(cache_release, evidence)?;
     crate::graph_construction::construction_failpoint(&format!(
@@ -361,7 +363,7 @@ pub(super) fn write_parquet_chunks(
         .replace_child(OsStr::new(&temporary), identity, OsStr::new(&name))
         .map_err(storage)?;
     temporary_guard.disarm();
-    directory.sync().map_err(storage)?;
+    directory.acknowledge().map_err(storage)?;
     crate::graph_construction::construction_failpoint(&format!(
         "encode.parquet.after_install.{relative}"
     ));

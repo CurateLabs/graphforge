@@ -7,10 +7,19 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+#[derive(Default)]
+struct ConstructionCommits {
+    seals: Vec<(FileIdentity, crate::durable_commit::FileSeal)>,
+    pending: Vec<crate::durable_commit::PendingCommit>,
+    retirement: Option<crate::durable_commit::RetirementBatch>,
+}
 
 pub(crate) struct ConstructionDirectory {
-    directory: StableDirectory,
+    directory: Arc<StableDirectory>,
     allocation: Option<StorageAllocationOperation>,
+    commits: Arc<Mutex<ConstructionCommits>>,
 }
 impl ConstructionDirectory {
     pub(crate) fn from_physical(
@@ -18,15 +27,17 @@ impl ConstructionDirectory {
         allocation: Option<&StorageAllocationOperation>,
     ) -> io::Result<Self> {
         Ok(Self {
-            directory: directory.try_clone()?,
+            directory: Arc::new(directory.try_clone()?),
             allocation: allocation.cloned(),
+            commits: Arc::default(),
         })
     }
 
     pub(crate) fn open(path: &Path) -> io::Result<Self> {
         Ok(Self {
-            directory: StableDirectory::open(path)?,
+            directory: Arc::new(StableDirectory::open(path)?),
             allocation: None,
+            commits: Arc::default(),
         })
     }
     pub(crate) fn with_allocation(
@@ -51,26 +62,97 @@ impl ConstructionDirectory {
     pub(crate) fn revalidate_named(&self) -> io::Result<()> {
         self.directory.revalidate_named()
     }
-    pub(crate) fn sync(&self) -> io::Result<()> {
-        let _wait = crate::concurrency_attribution::RegionScope::named("fsync");
-        self.directory.sync()
+    pub(crate) fn acknowledge(&self) -> io::Result<()> {
+        let (pending, retirement) = {
+            let mut state = self
+                .commits
+                .lock()
+                .map_err(|_| io::Error::other("construction commit batch poisoned"))?;
+            (std::mem::take(&mut state.pending), state.retirement.take())
+        };
+        if pending.is_empty() && retirement.is_none() {
+            return crate::durable_commit::acknowledge_directory(&self.directory);
+        }
+        let acknowledged = match retirement {
+            Some(retirement) => retirement.acknowledge_with(pending, self.allocation.as_ref()),
+            None => crate::durable_commit::PendingCommit::acknowledge_group(
+                pending,
+                self.allocation.as_ref(),
+            ),
+        };
+        match acknowledged {
+            Ok(()) => Ok(()),
+            Err(failure) => {
+                let mut state = self
+                    .commits
+                    .lock()
+                    .map_err(|_| io::Error::other("construction commit batch poisoned"))?;
+                state.pending.extend(failure.pending);
+                state.retirement = failure.retirement;
+                Err(failure.cause)
+            }
+        }
+    }
+
+    pub(crate) fn install_guarded(
+        &self,
+        guard: &mut graphforge_filesystem::UnpublishedArtifactGuard,
+        target: &OsStr,
+    ) -> io::Result<()> {
+        let identity = guard.identity()?;
+        let witness = {
+            let mut state = self
+                .commits
+                .lock()
+                .map_err(|_| io::Error::other("construction commit batch poisoned"))?;
+            state
+                .seals
+                .iter()
+                .position(|(candidate, _)| *candidate == identity)
+                .map(|position| state.seals.swap_remove(position).1)
+        }
+        .ok_or_else(|| io::Error::other("construction guarded producer is not sealed"))?;
+        crate::durable_commit::install_guarded_sealed(guard, target, witness)
+    }
+    pub(crate) fn seal_file(&self, file: &File) -> io::Result<()> {
+        self.remember_seal(crate::durable_commit::seal_file_witness(file)?)
+    }
+    pub(crate) fn seal_cache_writer(
+        &self,
+        writer: &mut graphforge_filesystem::DurableFileCacheWriter,
+    ) -> io::Result<()> {
+        self.remember_seal(crate::durable_commit::seal_cache_writer_witness(writer)?)
+    }
+    fn remember_seal(&self, witness: crate::durable_commit::FileSeal) -> io::Result<()> {
+        let identity = witness.identity();
+        let mut state = self
+            .commits
+            .lock()
+            .map_err(|_| io::Error::other("construction commit batch poisoned"))?;
+        state.seals.retain(|(prior, _)| *prior != identity);
+        state.seals.push((identity, witness));
+        Ok(())
     }
     pub(crate) fn try_clone(&self) -> io::Result<Self> {
+        self.directory.revalidate_named()?;
         Ok(Self {
-            directory: self.directory.try_clone()?,
+            directory: self.directory.clone(),
             allocation: self.allocation.clone(),
+            commits: self.commits.clone(),
         })
     }
     pub(crate) fn open_child_directory(&self, name: &OsStr) -> io::Result<Self> {
         Ok(Self {
-            directory: self.directory.open_child_directory(name)?,
+            directory: Arc::new(self.directory.open_child_directory(name)?),
             allocation: self.allocation.clone(),
+            commits: Arc::default(),
         })
     }
     pub(crate) fn create_child_directory(&self, name: &OsStr) -> io::Result<Self> {
         Ok(Self {
-            directory: self.directory.create_child_directory(name)?,
+            directory: Arc::new(self.directory.create_child_directory(name)?),
             allocation: self.allocation.clone(),
+            commits: Arc::default(),
         })
     }
     pub(crate) fn open_child_file(&self, name: &OsStr) -> io::Result<File> {
@@ -118,13 +200,12 @@ impl ConstructionDirectory {
         identity: FileIdentity,
         target: &OsStr,
     ) -> io::Result<()> {
-        if self.allocation.is_none() {
-            return self.directory.install_child(temporary, identity, target);
-        }
-        let file = self.directory.open_child_file(temporary)?;
-        self.observe_file(temporary, &file)?;
-        self.directory.install_child(temporary, identity, target)?;
-        self.record_replacement(temporary, target, &file)
+        self.publish_child(
+            temporary,
+            identity,
+            target,
+            crate::durable_commit::PublishMode::CreateOnly,
+        )
     }
     pub(crate) fn replace_child(
         &self,
@@ -132,13 +213,58 @@ impl ConstructionDirectory {
         identity: FileIdentity,
         target: &OsStr,
     ) -> io::Result<()> {
-        if self.allocation.is_none() {
-            return self.directory.replace_child(temporary, identity, target);
-        }
-        let file = self.directory.open_child_file(temporary)?;
-        self.observe_file(temporary, &file)?;
-        self.directory.replace_child(temporary, identity, target)?;
-        self.record_replacement(temporary, target, &file)
+        self.publish_child(
+            temporary,
+            identity,
+            target,
+            crate::durable_commit::PublishMode::Replace,
+        )
+    }
+    fn publish_child(
+        &self,
+        temporary: &OsStr,
+        identity: FileIdentity,
+        target: &OsStr,
+        mode: crate::durable_commit::PublishMode,
+    ) -> io::Result<()> {
+        let file = crate::durable_commit::open_publisher(&self.directory, temporary, identity)?;
+        let witness = {
+            let mut state = self
+                .commits
+                .lock()
+                .map_err(|_| io::Error::other("construction commit batch poisoned"))?;
+            state
+                .seals
+                .iter()
+                .position(|(candidate, _)| *candidate == identity)
+                .map(|position| state.seals.swap_remove(position).1)
+        };
+        let staged = match witness {
+            Some(witness) => crate::durable_commit::SealedArtifact::adopt_sealed_shared(
+                self.directory.clone(),
+                temporary,
+                file,
+                witness,
+                self.allocation.as_ref(),
+            )?,
+            None => crate::durable_commit::SealedArtifact::seal_existing_shared(
+                self.directory.clone(),
+                temporary,
+                file,
+                identity,
+                self.allocation.as_ref(),
+            )?,
+        };
+        let mut pending = staged
+            .make_visible(target, mode, || Ok(()))
+            .map_err(io::Error::other)?;
+        pending.release_unlocked_producer()?;
+        self.commits
+            .lock()
+            .map_err(|_| io::Error::other("construction commit batch poisoned"))?
+            .pending
+            .push(pending);
+        Ok(())
     }
     pub(crate) fn record_replacement(
         &self,
@@ -162,7 +288,26 @@ impl ConstructionDirectory {
         name: &OsStr,
         identity: FileIdentity,
     ) -> io::Result<()> {
-        self.directory.unlink_child_if_identity(name, identity)?;
+        {
+            let mut state = self
+                .commits
+                .lock()
+                .map_err(|_| io::Error::other("construction commit batch poisoned"))?;
+            if state.retirement.is_none() {
+                state.retirement = Some(crate::durable_commit::RetirementBatch::new(
+                    &self.directory,
+                )?);
+            }
+            state
+                .retirement
+                .as_mut()
+                .expect("retirement initialized")
+                .unlink(name, identity)?;
+            state
+                .pending
+                .retain(|pending| !pending.matches_target(name, identity));
+            state.seals.retain(|(sealed, _)| *sealed != identity);
+        }
         if let Some(allocation) = &self.allocation {
             allocation
                 .remove_file_at(&self.path().join(name))

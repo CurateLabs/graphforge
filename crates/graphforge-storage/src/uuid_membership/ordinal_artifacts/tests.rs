@@ -240,7 +240,8 @@ fn v4_observed_guard_tracks_install_and_failed_cleanup() {
     let mut guard = V4PublicationGuard::create(&directory, ".temporary", Some(&operation)).unwrap();
     let mut file = guard.take_file().unwrap();
     file.write_all(&vec![7_u8; 32768]).unwrap();
-    file.sync_all().unwrap();
+    let seal = crate::durable_commit::seal_file_witness(&file).unwrap();
+    guard.record_seal(seal);
     guard.observe(&file).unwrap();
     let actual = graphforge_filesystem::file_space_usage(&file)
         .unwrap()

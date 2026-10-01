@@ -300,6 +300,8 @@ pub(super) fn collect_uuid_orphans_locked(
     let mut names = index.child_names().map_err(storage_err)?;
     names.sort();
     let mut work = UuidIndexOrphanGcWork::default();
+    let mut retirement =
+        crate::durable_commit::RetirementBatch::new(&index).map_err(storage_err)?;
     for name in names {
         let Some(text) = name.to_str() else { continue };
         if referenced.contains(text) || !is_canonical_run_name(text) {
@@ -332,9 +334,7 @@ pub(super) fn collect_uuid_orphans_locked(
                 false,
             )?;
         }
-        index
-            .unlink_child_if_identity(&name, identity)
-            .map_err(storage_err)?;
+        retirement.unlink(&name, identity).map_err(storage_err)?;
         if text.starts_with("forward-v4-")
             || text.starts_with("ordinal-v4-")
             || text.starts_with("tombstones-v4-")
@@ -351,7 +351,7 @@ pub(super) fn collect_uuid_orphans_locked(
         work.bytes = work.bytes.saturating_add(bytes);
     }
     if work.removed != 0 {
-        index.sync().map_err(storage_err)?;
+        retirement.acknowledge().map_err(storage_err)?;
     }
     index.revalidate_named().map_err(storage_err)?;
     topology.revalidate_named().map_err(storage_err)?;
@@ -433,16 +433,18 @@ pub(super) fn cleanup_superseded_files(
 ) -> Result<(), GfError> {
     let retained = manifest_file_names(manifest);
     let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
+    let mut retirement =
+        crate::durable_commit::RetirementBatch::new(&directory).map_err(storage_err)?;
     for name in prior.difference(&retained) {
         let file = directory
             .open_child_file(std::ffi::OsStr::new(name))
             .map_err(storage_err)?;
         let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
-        directory
-            .unlink_child_if_identity(std::ffi::OsStr::new(name), identity)
+        retirement
+            .unlink(std::ffi::OsStr::new(name), identity)
             .map_err(storage_err)?;
     }
-    directory.sync().map_err(storage_err)
+    retirement.acknowledge().map_err(storage_err)
 }
 
 #[cfg(test)]

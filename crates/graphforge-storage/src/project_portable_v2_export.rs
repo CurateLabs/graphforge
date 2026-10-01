@@ -1,5 +1,6 @@
 //! Bounded deterministic portable-project v2 complete-package export.
 
+#[cfg(test)]
 use graphforge_filesystem::ObservedSync as _;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(windows)]
@@ -318,20 +319,25 @@ pub fn export_complete_portable_v2_with_allocation(
         return Err(err("GF_CANCELLED", "portable export cancelled")
             .with_allocation_identities(staged_allocation));
     }
-    let verified =
-        verify_written_export(plan, &stage, &written, limits, cancelled).map_err(|error| {
+    // Retain the same native artifact across physical checksum verification
+    // and namespace publication, rather than admitting a fresh stage inode.
+    let stage_authority = RetainedExportStage::open(&stage).map_err(|error| {
+        allocation.remove(&stage);
+        error.with_allocation_identities(staged_allocation.clone())
+    })?;
+    let verified = match verify_written_export(plan, &stage, &written, limits, cancelled) {
+        Ok(verified) => verified,
+        Err(error) => {
+            drop(stage_authority);
             allocation.remove(&stage);
-            error.with_allocation_identities(staged_allocation.clone())
-        })?;
-    publish_no_replace(&stage, dst).map_err(|error| {
+            return Err(error.with_allocation_identities(staged_allocation));
+        }
+    };
+    stage_authority.publish(&stage, dst).map_err(|error| {
         allocation.remove(&stage);
         storage(error).with_allocation_identities(staged_allocation.clone())
     })?;
     allocation.published(&stage, dst)?;
-    if let Err(error) = sync_dir(parent) {
-        allocation.remove(dst);
-        return Err(error.with_allocation_identities(staged_allocation));
-    }
     Ok(PortableV2ExportReceipt {
         generation_uuid: plan.generation_uuid,
         package_digest: plan.package_digest,
@@ -345,6 +351,46 @@ pub fn export_complete_portable_v2_with_allocation(
         allocation_logical_bytes,
         allocation_physical_objects,
     })
+}
+
+enum RetainedExportStage {
+    File(File),
+    Directory(graphforge_filesystem::StableDirectory),
+}
+impl RetainedExportStage {
+    fn open(path: &Path) -> Result<Self, ExportError> {
+        let metadata = fs::symlink_metadata(path).map_err(storage)?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            return graphforge_filesystem::StableDirectory::open(path)
+                .map(Self::Directory)
+                .map_err(storage);
+        }
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(err(
+                "GF_UNSUPPORTED_ENTRY_TYPE",
+                "export stage is not a regular artifact",
+            ));
+        }
+        open_source_no_follow(path).map(Self::File)
+    }
+    fn publish(self, source: &Path, destination: &Path) -> std::io::Result<()> {
+        let expected = match &self {
+            Self::File(file) => graphforge_filesystem::file_identity(file)?,
+            Self::Directory(directory) => directory.identity(),
+        };
+        // Windows directory authorities exclude deletion; carry the admitted
+        // native identity across that required close, never a fresh path ID.
+        #[cfg(windows)]
+        drop(self);
+        crate::durable_commit::promote_no_replace_authenticated(
+            source,
+            destination,
+            expected,
+            || Ok(()),
+            || Ok(()),
+        )
+        .map_err(|failure| failure.cause)
+    }
 }
 
 fn verify_written_export(
@@ -648,25 +694,8 @@ fn reject_destination(p: &Path) -> Result<(), ExportError> {
     }
     Ok(())
 }
-pub(crate) fn publish_no_replace(stage: &Path, destination: &Path) -> std::io::Result<()> {
-    graphforge_filesystem::rename_no_replace(stage, destination)
-}
-fn sync_dir(p: &Path) -> Result<(), ExportError> {
-    sync_directory_handle(p).map_err(storage)
-}
-#[cfg(not(windows))]
-fn sync_directory_handle(p: &Path) -> std::io::Result<()> {
-    File::open(p)?.observed_sync_all()
-}
-#[cfg(windows)]
-fn sync_directory_handle(p: &Path) -> std::io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt as _;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    OpenOptions::new()
-        .write(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(p)?
-        .observed_sync_all()
+fn sync_dir(path: &Path) -> Result<(), ExportError> {
+    crate::durable_commit::sync_directory(path).map_err(storage)
 }
 fn remove(p: &Path) {
     if p.is_dir() {

@@ -2,13 +2,12 @@
 
 use super::{
     ATTEMPTS_DIR, Digest, File, GENERATIONS_DIR, GfError, MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
-    OpenOptions, Ordering, PARTICIPANTS_DIR, ParticipantPayloads, Path, PathBuf, ProjectCapability,
+    Ordering, PARTICIPANTS_DIR, ParticipantPayloads, Path, PathBuf, ProjectCapability,
     ProjectErrorCode, ProjectGenerationRequest, ProjectParticipantEncoding, Read,
     ResolvedProjectGeneration, Serialize, StagedParticipant, Write, canonical_line,
     ensure_machine_directory, hex_digest, project_error, project_failpoint, publication_io,
     sync_directory, transaction_conflict,
 };
-use graphforge_filesystem::ObservedSync as _;
 
 pub(super) fn prepare_generation_directory(
     root: &Path,
@@ -295,47 +294,65 @@ pub(super) fn stage_participant_files(
             .strip_prefix(generation_root)
             .expect("machine-derived participant parent is contained");
         ensure_machine_directory(generation_root, relative_parent)?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&destination)
-            .map_err(publication_io)?;
-        let write_result = (|| -> Result<(), GfError> {
-            match payloads {
-                ParticipantPayloads::Memory(_) => {
-                    file.write_all(&input.bytes).map_err(publication_io)?;
-                }
-                ParticipantPayloads::Files(files, cancelled, copy_buffer_bytes, captures) => {
-                    copy_file_participant(
-                        &mut file,
-                        &files[index],
-                        metadata,
-                        cancelled,
-                        copy_buffer_bytes,
-                        captures
-                            .and_then(|authorities| authorities.get(&files[index].source))
-                            .copied(),
-                    )?;
-                }
-            }
-            Ok(())
-        })();
-        let observed = allocation.map_or(Ok(()), |allocation| {
-            allocation.replace_file_at(&destination, &file)
-        });
-        write_result?;
-        observed?;
-        project_failpoint::hit(
-            "project.after_participant_write",
-            Some(request.transaction_uuid),
-            Some(request.generation_uuid),
-            "STAGED",
-            false,
-        )?;
-        file.observed_sync_all().map_err(publication_io)?;
-        if let Some(allocation) = allocation {
-            allocation.replace_file_at(&destination, &file)?;
-        }
+        let parent =
+            graphforge_filesystem::StableDirectory::open(parent_dir).map_err(publication_io)?;
+        let primary = std::cell::RefCell::new(None);
+        let result = crate::durable_commit::stage_private_file(
+            &parent,
+            destination.file_name().expect("participant has a name"),
+            |file| {
+                let write_result = (|| -> Result<(), GfError> {
+                    match payloads {
+                        ParticipantPayloads::Memory(_) => {
+                            file.write_all(&input.bytes).map_err(publication_io)?;
+                        }
+                        ParticipantPayloads::Files(
+                            files,
+                            cancelled,
+                            copy_buffer_bytes,
+                            captures,
+                        ) => {
+                            copy_file_participant(
+                                file,
+                                &files[index],
+                                metadata,
+                                cancelled,
+                                copy_buffer_bytes,
+                                captures
+                                    .and_then(|authorities| authorities.get(&files[index].source))
+                                    .copied(),
+                            )?;
+                        }
+                    }
+                    Ok(())
+                })();
+                write_result.map_err(|error| {
+                    let cause = std::io::Error::other(error.to_string());
+                    *primary.borrow_mut() = Some(error);
+                    cause
+                })
+            },
+            || {
+                project_failpoint::hit(
+                    "project.after_participant_write",
+                    Some(request.transaction_uuid),
+                    Some(request.generation_uuid),
+                    "STAGED",
+                    false,
+                )
+                .map_err(|error| {
+                    let cause = std::io::Error::other(error.to_string());
+                    *primary.borrow_mut() = Some(error);
+                    cause
+                })
+            },
+            allocation,
+        );
+        let file = result.map_err(|error| {
+            primary
+                .into_inner()
+                .unwrap_or_else(|| publication_io(error))
+        })?;
         project_failpoint::hit(
             "project.after_participant_fsync",
             Some(request.transaction_uuid),
@@ -343,6 +360,7 @@ pub(super) fn stage_participant_files(
             "STAGED",
             false,
         )?;
+        drop(file);
         verify_participant_file(&destination, metadata)?;
     }
     Ok(())

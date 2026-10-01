@@ -6,7 +6,6 @@ use super::{
     open_source_no_follow, storage, sync_dir,
 };
 use graphforge_core::hash_observation::{ContractSha256, ControlSha256, PortableSha256 as Sha256};
-use graphforge_filesystem::ObservedSync as _;
 use sha2::Digest;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -303,7 +302,7 @@ pub(super) fn bundle(
     observed_write_result(out.write_all(&end).map_err(storage), &out, allocation)?;
     allocation.observe(&out)?;
     h.update(end);
-    out.observed_sync_all().map_err(storage)?;
+    crate::durable_commit::seal_file(&out).map_err(storage)?;
     allocation.observe(&out)?;
     let (digest, checksum) = h.finish();
     Ok(WrittenPackage {
@@ -342,7 +341,7 @@ fn copy(
             allocation,
         )?;
         allocation.observe(&output)?;
-        output.observed_sync_all().map_err(storage)?;
+        crate::durable_commit::seal_file(&output).map_err(storage)?;
         allocation.observe(&output)?;
         tick(bytes.len() as u64);
         return Ok(crate::corruption_checksum::checksum(bytes));
@@ -380,7 +379,7 @@ fn copy(
         bytes_read += count as u64;
         tick(count as u64);
     }
-    output.observed_sync_all().map_err(storage)?;
+    crate::durable_commit::seal_file(&output).map_err(storage)?;
     allocation.observe(&output)?;
     if bytes_read != planned.length
         || digest.is_some_and(|digest| <[u8; 32]>::from(digest.finalize()) != planned.digest)
@@ -639,7 +638,7 @@ fn write_bytes(
     allocation.register(&p, &f)?;
     observed_write_result(f.write_all(b).map_err(storage), &f, allocation)?;
     allocation.observe(&f)?;
-    f.observed_sync_all().map_err(storage)?;
+    crate::durable_commit::seal_file(&f).map_err(storage)?;
     allocation.observe(&f)
 }
 fn sync_tree(root: &Path) -> Result<(), ExportError> {

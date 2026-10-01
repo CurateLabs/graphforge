@@ -1618,3 +1618,28 @@ reachability before deletion. Recovery/read-side reachability acquires shared
 CAS access before the writer lock. No callback reacquires a shared CAS lock
 while cleanup holds it exclusively. Historical materialization writes only to
 an empty private target and preserves the Project's read-only state.
+
+
+## Physical durability owner
+
+`graphforge-storage::durable_commit` owns physical staging, descriptor seals,
+atomic visibility, retained-parent acknowledgment and exact owned retirement.
+Callers retain content checksums/authentication, logical predicates and recovery
+formats. `SealedArtifact` consumes the actual producer descriptor or an opaque
+seal witness; `PendingCommit` retains uncertain visibility and acknowledgment.
+A directory batch validates all visible identities before one fence. Construction
+batches share their parent and close unlocked producer handles after visibility;
+recovery-owned inputs survive failed publication. No failed acknowledgment may
+remove visible authority. Append journals bind their accepted offset to the same
+retained descriptor and namespace. Cache release retains its final dirty window.
+
+The [durability inventory method](../../development/ingest-region-diagnostics.md#durability-source-inventory) records the reproducible counting unit and input digests.
+
+Only uncheckpointed sorting/merge scratch barriers are retired: rebuilt outputs
+still receive their durable seal before publication. Durable rewrite inputs,
+UUID intents and checkpoint recovery inputs remain sealed. Two duplicate delta
+and compaction tests that ran only the generic crash model are replaced by five
+actual primitive fault tests. Real family reopen, native replacement and modeled
+power-loss omission witnesses remain. The standard Cargo CI discovers the new
+owner tests automatically. No additional product workflow/job is retired here;
+the gate registry and platform lanes retain their existing coverage.

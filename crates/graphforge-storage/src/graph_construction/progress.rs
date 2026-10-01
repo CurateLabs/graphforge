@@ -465,7 +465,7 @@ fn unlink_segment_file(root: &StableDirectory, name: &str) -> Result<(), GfError
     drop(file);
     root.unlink_child_if_identity(OsStr::new(name), identity)
         .map_err(storage)?;
-    root.sync().map_err(storage)
+    root.acknowledge().map_err(storage)
 }
 
 /// Authenticate every claimed segment payload once at the resume boundary and

@@ -602,10 +602,19 @@ impl GraphImportSession {
     pub fn operation_timings(&self) -> Option<ImportOperationTimings> {
         self.operation_timings
     }
-    fn publish_source(&mut self, temporary: &Path, destination: &Path) -> Result<(), GfError> {
+    fn publish_source(
+        &mut self,
+        temporary: &Path,
+        destination: &Path,
+        seal: graphforge_storage::durable_commit::FileSeal,
+    ) -> Result<(), GfError> {
         self.journal.ensure_writable()?;
-        let result =
-            journal::publish_source(temporary, destination, self.allocation_operation.as_ref());
+        let result = journal::publish_source(
+            temporary,
+            destination,
+            seal,
+            self.allocation_operation.as_ref(),
+        );
         if result.is_err() {
             self.journal.poison();
         }
@@ -740,12 +749,12 @@ impl GraphImportSession {
         }
         writer.finish().map_err(storage)?;
         writer.flush().map_err(storage)?;
-        writer
-            .get_mut()
-            .get_mut()
-            .sync_all_and_release()
-            .map_err(storage)?;
-        self.publish_source(&temporary, &destination)?;
+        let seal = graphforge_storage::durable_commit::seal_cache_writer_witness(
+            writer.get_mut().get_mut(),
+        )
+        .map_err(storage)?;
+        drop(writer);
+        self.publish_source(&temporary, &destination, seal)?;
         let result = self.register_record(
             source_kind,
             name,
@@ -787,7 +796,7 @@ impl GraphImportSession {
         let name = format!("{sequence:020}.parquet");
         let destination = self.root.join("sources").join(&name);
         let temporary = self.root.join("sources").join(format!(".{name}.tmp"));
-        let (bytes, cache_release) = copy_parquet_source(source, &temporary)?;
+        let (bytes, cache_release, seal) = copy_parquet_source(source, &temporary)?;
         let writer_release = cache_release.writer;
         debug_assert!(writer_release.sync_operations > 0);
         #[cfg(target_os = "linux")]
@@ -807,7 +816,7 @@ impl GraphImportSession {
             let _ = fs::remove_file(&temporary);
             return Err(storage("Parquet source length changed while copying"));
         }
-        self.publish_source(&temporary, &destination)?;
+        self.publish_source(&temporary, &destination, seal)?;
         let result = self.register_record(
             match kind {
                 BulkInputKind::Node => ImportSourceKind::ParquetNodes,
@@ -1419,17 +1428,25 @@ fn finish_parquet_copy_source(
 
 fn synchronize_parquet_copy_output(
     writer: &mut graphforge_filesystem::DurableFileCacheWriter,
-) -> Result<(), GfError> {
-    writer.sync_all_and_release().map_err(storage)?;
+) -> Result<graphforge_storage::durable_commit::FileSeal, GfError> {
+    let seal =
+        graphforge_storage::durable_commit::seal_cache_writer_witness(writer).map_err(storage)?;
     #[cfg(test)]
     copy_parquet_failure("writer release")?;
-    Ok(())
+    Ok(seal)
 }
 
 fn copy_parquet_source(
     source: &Path,
     temporary: &Path,
-) -> Result<(u64, CopyCacheReleaseEvidence), GfError> {
+) -> Result<
+    (
+        u64,
+        CopyCacheReleaseEvidence,
+        graphforge_storage::durable_commit::FileSeal,
+    ),
+    GfError,
+> {
     let parent = source
         .parent()
         .ok_or_else(|| validation("Parquet source must have a parent directory"))?;
@@ -1472,7 +1489,14 @@ fn copy_parquet_source(
     let writer_release = synchronize_parquet_copy_output(&mut writer);
     let mut result =
         append_copy_cleanup(copied_result, reader_release.map(|_| ()), "source release");
-    result = append_copy_cleanup(result, writer_release, "writer synchronization/release");
+    let mut seal = None;
+    result = append_copy_cleanup(
+        result,
+        writer_release.map(|witness| {
+            seal = Some(witness);
+        }),
+        "writer synchronization/release",
+    );
     let reader_evidence = tracker.evidence();
     let writer_evidence = writer.evidence();
     let peak_combined_window_bytes = reader_evidence
@@ -1492,6 +1516,7 @@ fn copy_parquet_source(
             writer: writer_evidence,
             peak_combined_window_bytes,
         },
+        seal.expect("successful writer release supplies its seal"),
     ))
 }
 
@@ -2221,7 +2246,7 @@ mod tests {
         output.observed_sync_all().unwrap();
         drop(output);
 
-        let (copied, evidence) = copy_parquet_source(&source, &destination).unwrap();
+        let (copied, evidence, _seal) = copy_parquet_source(&source, &destination).unwrap();
         assert_eq!(copied, length);
         assert_eq!(destination.metadata().unwrap().len(), length);
         #[cfg(target_os = "linux")]

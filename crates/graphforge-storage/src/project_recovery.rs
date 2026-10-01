@@ -860,9 +860,8 @@ pub(crate) fn cleanup_unreachable_generation(
         return Ok(GenerationCleanupOutcome::Retained);
     }
 
-    std::fs::rename(&generation_path, &trash_path).map_err(storage_io)?;
-    sync_directory(&root.join(GENERATIONS_DIR))?;
-    sync_directory(&trash_root)?;
+    crate::durable_commit::promote_no_replace(&generation_path, &trash_path, || Ok(()), || Ok(()))
+        .map_err(storage_io)?;
     project_failpoint::hit(
         "project.after_gc_move",
         Some(generation_uuid),
@@ -901,16 +900,22 @@ fn cleanup_abandoned_generation(
     if attempt_path.exists() {
         reject_real_directory(&attempt_path)?;
         remove_recovery_tree_with_allocation(&attempt_path, allocation)?;
-        sync_directory(
-            attempt_path
-                .parent()
-                .expect("machine attempt path has a parent"),
-        )?;
+
         let transaction_attempt_root = attempt_path
             .parent()
             .expect("machine attempt path has a parent");
-        match std::fs::remove_dir(transaction_attempt_root) {
-            Ok(()) => sync_directory(&root.join(ATTEMPTS_DIR))?,
+        let attempts = graphforge_filesystem::StableDirectory::open(&root.join(ATTEMPTS_DIR))
+            .map_err(storage_io)?;
+        let identity =
+            graphforge_filesystem::path_identity(transaction_attempt_root).map_err(storage_io)?;
+        match crate::durable_commit::retire_directory(
+            &attempts,
+            transaction_attempt_root
+                .file_name()
+                .expect("attempt root has a name"),
+            identity,
+        ) {
+            Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
             Err(error) => return Err(storage_io(error)),
         }
@@ -944,9 +949,8 @@ fn cleanup_abandoned_generation(
             "cleanup candidate became the committed generation",
         ));
     }
-    std::fs::rename(&generation_path, &trash_path).map_err(storage_io)?;
-    sync_directory(&root.join(GENERATIONS_DIR))?;
-    sync_directory(&trash_root)?;
+    crate::durable_commit::promote_no_replace(&generation_path, &trash_path, || Ok(()), || Ok(()))
+        .map_err(storage_io)?;
     project_failpoint::hit(
         "project.after_gc_move",
         Some(transaction_uuid),
@@ -984,7 +988,7 @@ fn remove_trash_entry(
 
 fn remove_trash_entry_with_allocation(
     root: &Path,
-    trash_root: &Path,
+    _trash_root: &Path,
     trash_path: &Path,
     transaction_uuid: Uuid,
     generation_uuid: Uuid,
@@ -1020,7 +1024,6 @@ fn remove_trash_entry_with_allocation(
     };
     let owners = recovery_removal_owners(trash_path, allocation, previous_root)?;
     remove_recovery_tree_owners(trash_path, owners, allocation)?;
-    sync_directory(trash_root)?;
     project_failpoint::hit(
         "project.after_gc_delete",
         Some(transaction_uuid),
@@ -1098,7 +1101,18 @@ fn remove_recovery_tree_owners(
     owners: Vec<String>,
     allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), GfError> {
-    std::fs::remove_dir_all(root).map_err(storage_io)?;
+    let parent = graphforge_filesystem::StableDirectory::open(
+        root.parent()
+            .ok_or_else(|| storage_io("recovery tree has no parent"))?,
+    )
+    .map_err(storage_io)?;
+    crate::durable_commit::retire_owned_tree(
+        &parent,
+        root.file_name()
+            .ok_or_else(|| storage_io("recovery tree has no name"))?,
+        graphforge_filesystem::path_identity(root).map_err(storage_io)?,
+    )
+    .map_err(storage_io)?;
     forget_recovery_owners(owners, allocation)
 }
 

@@ -909,7 +909,7 @@
       "role": "contract_identity",
       "input_contract": "Domain plus node/edge counts and recorded shard bounds/digests define stable shard-set identity; does not hash shard payload here.",
       "function_bodies_sha256": [
-        "36740fe45737d68648e6f3d91b88f9a510e7a547d9f866561016b2a6e9210755"
+        "e49f3594103b8e2d9401dcd39f72d48311d2ea50f5fd62ab7510c19c7cd5675c"
       ]
     },
     {
@@ -1153,7 +1153,7 @@
       "role": "durable_artifact_or_trust_boundary",
       "input_contract": "Construction source/run/artifact byte stream authenticates input or computes output publication receipt.",
       "function_bodies_sha256": [
-        "da11bb5932cc4d83e94fc638ada41996ac1b092d91e2b892310d73523990dd44"
+        "7574839ae7d2ad0cab95e83e31332861dd94a9cc48dcf8ee7ca91bd4c93d9524"
       ]
     },
     {
@@ -1171,7 +1171,7 @@
       "role": "durable_artifact_or_trust_boundary",
       "input_contract": "Newly written Parquet payload bytes produce durable construction artifact receipt.",
       "function_bodies_sha256": [
-        "072f0eda0d290f4ede0f97b933c0a2bbe83e80dd873a627346824198a1665a1c"
+        "8f2cde76c2c909c8012026d529855b62f0840eaa5667475f5d1f1e61f6aeff5f"
       ]
     },
     {
@@ -1324,7 +1324,7 @@
       "role": "caller_selected",
       "input_contract": "Finalization preserves native sealing, identity, allocation, barrier and cleanup order. Generic callers retain selected genuine SHA domains. Privately captured encoded temporaries use expected checksums; an unknown or different-inode concurrent winner requires genuine Artifact SHA, while exact lease-recorded identities may use their checksum. This delegate creates no SHA state or extra pass.",
       "function_bodies_sha256": [
-        "95abe5438d531b7e0dc1ca8400f669855f1f20aa1cd51e166d64372135304435"
+        "137d34416910062f2eb8d65479bd3c03de365c95038870abae9e2fa0f896f735"
       ]
     },
     {
@@ -1342,7 +1342,7 @@
       "role": "caller_selected",
       "input_contract": "Exact resident bytes receive the genuine SHA-256 CAS name. Generic byte installation selects ArtifactPayload; only the private typed GraphManifestNode installer validates and bounds canonical radix control JSON then selects ControlAuthentication. The selected domain propagates to every existing-object, concurrent-winner and platform sealing SHA check; all crypto bytes remain counted inclusively.",
       "function_bodies_sha256": [
-        "dc0632e822de52dbf4f0c935ee91a5fbdc3c32c4de81f06114d5146a59f99ab6"
+        "9d93f0a259f70a0998ca506044974c88a288a88a7ca78adb844bc81600ce99bd"
       ]
     },
     {
@@ -1360,7 +1360,7 @@
       "role": "durable_artifact",
       "input_contract": "Copied graph artifact bytes undergo unchanged genuine SHA/address and checksum authentication in one streamed pass; installation explicitly keeps ArtifactPayload for initial copy, reuse, concurrent winners and platform sealing. Successful installation captures private final-inode, length and checksum authority.",
       "function_bodies_sha256": [
-        "6601ff8c239b31e2417f49792c8446ae2e26e63da35ce23ff53fc833af3f8fdf"
+        "5df6c5dd1a613557b57ed7403706f74248873ec139fc207a98162a927c0798ad"
       ]
     },
     {
@@ -1369,7 +1369,7 @@
       "role": "caller_selected",
       "input_contract": "Generic installation delegates genuine SHA to its selected Artifact or private typed bounded-manifest Control domain. Encoded sources use a separate checkpoint-admitted private checksum capability; public file/byte installation retains genuine SHA. This wrapper creates no SHA state or extra pass.",
       "function_bodies_sha256": [
-        "9f0d3317ce5aa64a5928e5d7b09e1e18b6ce2dce8c8a1098f29d0ef8696a8db3"
+        "2431640cac200e069aa9f3c31975d0e919856f38f77780f7cda038bdfc95f9df"
       ]
     },
     {
@@ -1515,7 +1515,7 @@
       "role": "control_authentication",
       "input_contract": "Canonical checkpoint registry JSON authenticates registry/checksum pair and durable replacement intent.",
       "function_bodies_sha256": [
-        "b434e164906841f095d29ad6e1a93326211f3bd32523ba7775d5b028b5506771"
+        "d6f8c096e7ce9d855c72617adbd8167d4a3be90682cf0c1fb077174e3dc4ae46"
       ]
     },
     {
@@ -1542,7 +1542,7 @@
       "role": "control_authentication",
       "input_contract": "Canonical checkpoint registry JSON authenticates registry/checksum pair and durable replacement intent.",
       "function_bodies_sha256": [
-        "d27d247e006a407d5b458adbc9a32ebafb2b61b869ef5843a4acf0112a1e0a59"
+        "07a7c8114548d4c835904d99b02983506dc4c03859d72bedfc3476dee0c9b120"
       ]
     },
     {
@@ -1614,7 +1614,7 @@
       "role": "control_authentication",
       "input_contract": "Canonical empty generation manifest JSON receives CURRENT authority commitment.",
       "function_bodies_sha256": [
-        "baf56302c0ab73d9fd0b6082290f3b6edd0cba79bc8b30be1d4e310c3e2bfe2f"
+        "25088cdc136f6c67987ea8689b197e19dc5363e10999ee259d7f7dbfc660f362"
       ]
     },
     {
@@ -1787,7 +1787,7 @@
       "role": "control_authentication",
       "input_contract": "The factory encodes bounded canonical GraphFilesRootV2 JSON itself, names that control with SHA once, publishes its own bytes and checks actual output checksum/native identity before minting private capture. It receives no caller-provided payload digest tuple and never hashes Arrow/Parquet rows.",
       "function_bodies_sha256": [
-        "2f6204dae120f2643619bfa76e1cd56f03f1e369f98364aa8ea65ad9f1cb0bdf"
+        "2b016a1ca9ca4b5bc608219862f83da8dc5a90550c0bb6e30e0a89c2b5c73859"
       ]
     },
     {
@@ -1796,7 +1796,7 @@
       "role": "control_authentication",
       "input_contract": "Only typed ontology staging/composition canonical encoders reach this private writer. Enforced manifest byte bound precedes genuine ControlSHA naming; completed output CRC/native identity/length/link/allocation validation mints the exact-byte private capture.",
       "function_bodies_sha256": [
-        "d134454f1e1c280985849d9ee182e4d741c34b0addff5840ca4c5735d6139ade"
+        "862afc3521db6518d0207a5728dc51b84a78b9e9ff577b75292519720f812669"
       ]
     },
     {
@@ -1877,7 +1877,7 @@
       "role": "control_authentication",
       "input_contract": "Bounded resident canonical tag/control bytes receive their emitted member identity; actual enclosing transport SHA is owned separately by TransportHash.",
       "function_bodies_sha256": [
-        "bd1c99ca55347550b9e0f63652cdaac090a5d7c329402950de0daf083a39ed1b"
+        "2e86c8e98a4c3c83e88c374552bbf7f2a1dffe341dcb90b1499a3e12fe46415d"
       ]
     },
     {
@@ -1895,7 +1895,7 @@
       "role": "caller_selected",
       "input_contract": "Bounded resident canonical control bytes select explicit ControlSha256; uncaptured regular-file members select genuine Portable SHA and admitted writer sources use actual copy CRC.",
       "function_bodies_sha256": [
-        "abbca70b94834a3271c9174d35c456389b836154d6bc4e3c44bf59eaeb5f4b03"
+        "cb2a766897b6633aaa2ca64edf44aeaa363776e43b0a0fe9bbcc730e8d804b8e"
       ]
     },
     {
@@ -2030,7 +2030,7 @@
       "role": "control_authentication",
       "input_contract": "New generation manifest JSON receives durable authority commitment.",
       "function_bodies_sha256": [
-        "8c5b7d429483ab785dd1660071e0d0bdd6ee73d09ca15400917662738f7394b2"
+        "9deffab7de5376708a003a67d9652384f3c390c3cb7142e7fda81c0be9859460"
       ]
     },
     {
@@ -2043,12 +2043,12 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_publication/control.rs",
-      "function": "unique_atomic_temp_name",
+      "path": "crates/graphforge-storage/src/durable_commit/atomic.rs",
+      "function": "temporary_name",
       "role": "contract_identity",
       "input_contract": "Target path text and fresh UUID derive publication temporary namespace.",
       "function_bodies_sha256": [
-        "c67c8b83170d1ddeac8be05008b6eed7b83a2fa8372b479416edeae8f77df6d6"
+        "6992c8672cfe5ff1e5adee27cd8a960c4ff7e74bd6a34a7f04c9318849c50a80"
       ]
     },
     {
@@ -2363,7 +2363,7 @@
       "role": "durable_artifact",
       "input_contract": "Full raw 26-byte identity-run records are SHA-hashed while encoding, independently of their expected XXH64 check; the actual source SHA is forwarded to the existing topology receipt binding. This whole-file work remains Artifact rather than control.",
       "function_bodies_sha256": [
-        "c63969f9a28852e4a0dd0008a255c5a6ebe2c3fd5a132660fd55bb4f2ad0c3d2"
+        "93281d6e1c5169b3388a03e2880ab6b4bf0fcd271df4b1a745944772a4678e5e"
       ]
     },
     {
@@ -2372,7 +2372,7 @@
       "role": "control_authentication",
       "input_contract": "The direct SHA invocation hashes only the empty ordinal-v4.lock control marker at its sole fallback caller; manifest and receipt JSON use the separate control helper. Payload writers retain their own Artifact producers.",
       "function_bodies_sha256": [
-        "52d9b37f4021b9a04db1b0fe704bd9232eeaa2e4d81ce465ab6f3ece31fb3cf6"
+        "f1c682942803d7900f1a9510b1bd958a333bb8fde61770cce573b5b948812e1c"
       ]
     },
     {

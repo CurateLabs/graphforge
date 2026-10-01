@@ -6,7 +6,6 @@
 //! replacing a small `current.json` pointer. The prior pointer remains readable
 //! until that final replace.
 
-use graphforge_filesystem::ObservedSync as _;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -410,22 +409,33 @@ pub fn cleanup_abandoned_search_builds(
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if file_type.is_dir() && valid_owned_name(&name, BUILD_PREFIX) {
-                remove.push((entry.path(), true));
+                let identity = graphforge_filesystem::path_identity(&entry.path())
+                    .map_err(|source| io("inspect abandoned build", &entry.path(), source))?;
+                remove.push((entry.path(), true, identity));
             } else if file_type.is_dir() && !file_type.is_symlink() {
                 stack.push(entry.path());
             } else if file_type.is_file() && valid_pointer_temp(&name) {
-                remove.push((entry.path(), false));
+                let identity = graphforge_filesystem::path_identity(&entry.path())
+                    .map_err(|source| io("inspect abandoned pointer", &entry.path(), source))?;
+                remove.push((entry.path(), false, identity));
             }
         }
     }
 
     remove.sort_unstable_by(|left, right| right.0.cmp(&left.0));
-    for (path, directory) in &remove {
+    for (path, directory, identity) in &remove {
+        let parent = graphforge_filesystem::StableDirectory::open(
+            path.parent().expect("abandoned artifact has a parent"),
+        )
+        .map_err(|source| io("remove abandoned build", path, source))?;
+        let name = path
+            .file_name()
+            .expect("abandoned artifact has a child name");
         if *directory {
-            std::fs::remove_dir_all(path)
+            crate::durable_commit::retire_owned_tree(&parent, name, *identity)
                 .map_err(|source| io("remove abandoned build", path, source))?;
         } else {
-            std::fs::remove_file(path)
+            crate::durable_commit::retire_files(&parent, [(name, *identity)])
                 .map_err(|source| io("remove abandoned pointer", path, source))?;
         }
     }
@@ -538,16 +548,25 @@ impl PendingPublication {
             .map_err(|source| io("create versions directory", &versions, source))?;
         let version_path = versions.join(&version_name);
         let temp_path = self.temp.keep();
-        if let Err(source) = std::fs::rename(&temp_path, &version_path) {
-            let _ = std::fs::remove_dir_all(&temp_path);
-            return Err(io("publish immutable version", &version_path, source));
+        if let Err(error) = crate::durable_commit::promote_no_replace(
+            &temp_path,
+            &version_path,
+            || Ok(()),
+            || Ok(()),
+        ) {
+            if error.visibility == crate::durable_commit::Visibility::NotPublished {
+                let _ = std::fs::remove_dir_all(&temp_path);
+            }
+            return Err(io(
+                "publish immutable version",
+                &version_path,
+                std::io::Error::other(error),
+            ));
         }
-        sync_directory(&versions)?;
 
         let pointer = serde_json::to_vec(&serde_json::json!({ "version": version_name }))
             .map_err(|error| SearchArtifactError::Build(error.to_string()))?;
         persist_synced_pointer(&self.root.join(CURRENT_FILE), &pointer)?;
-        sync_directory(&self.root)?;
         Ok(PublishedSearchArtifact {
             path: version_path,
             manifest: manifest.clone(),
@@ -589,7 +608,7 @@ fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), SearchArtifactErro
         .map_err(|source| io("create publication file", path, source))?;
     file.write_all(bytes)
         .map_err(|source| io("write publication file", path, source))?;
-    file.observed_sync_all()
+    crate::durable_commit::seal_file(&file)
         .map_err(|source| io("sync publication file", path, source))
 }
 
@@ -604,11 +623,42 @@ fn persist_synced_pointer(path: &Path, bytes: &[u8]) -> Result<(), SearchArtifac
         .map_err(|source| io("create current pointer temp", path, source))?;
     temp.write_all(bytes)
         .map_err(|source| io("write current pointer temp", path, source))?;
-    temp.as_file()
-        .observed_sync_all()
+    let directory = graphforge_filesystem::StableDirectory::open(parent)
+        .map_err(|source| io("publish current pointer", path, source))?;
+    let temporary = temp
+        .path()
+        .file_name()
+        .expect("named temporary has a child name");
+    let identity = graphforge_filesystem::file_identity(temp.as_file())
         .map_err(|source| io("sync current pointer temp", path, source))?;
-    temp.persist(path)
-        .map_err(|error| io("publish current pointer", path, error.error))?;
+    let file = temp
+        .as_file()
+        .try_clone()
+        .map_err(|source| io("sync current pointer temp", path, source))?;
+    crate::durable_commit::SealedArtifact::seal_existing(
+        &directory, temporary, file, identity, None,
+    )
+    .map_err(|source| io("sync current pointer temp", path, source))?
+    .make_visible(
+        path.file_name().expect("publication has a child name"),
+        crate::durable_commit::PublishMode::Replace,
+        || Ok(()),
+    )
+    .map_err(|error| {
+        io(
+            "publish current pointer",
+            path,
+            std::io::Error::other(error),
+        )
+    })?
+    .acknowledge(None)
+    .map_err(|error| {
+        io(
+            "publish current pointer",
+            path,
+            std::io::Error::other(error),
+        )
+    })?;
     Ok(())
 }
 
@@ -655,20 +705,12 @@ fn sync_file(path: &Path) -> Result<(), SearchArtifactError> {
         .read(true)
         .write(true)
         .open(path)
-        .and_then(|file| file.observed_sync_all())
+        .and_then(|file| crate::durable_commit::seal_file(&file))
         .map_err(|source| io("sync build file", path, source))
 }
 
-#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), SearchArtifactError> {
-    File::open(path)
-        .and_then(|file| file.observed_sync_all())
-        .map_err(|source| io("sync directory", path, source))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<(), SearchArtifactError> {
-    Ok(())
+    crate::durable_commit::sync_directory(path).map_err(|source| io("sync directory", path, source))
 }
 
 fn valid_owned_name(name: &str, prefix: &str) -> bool {

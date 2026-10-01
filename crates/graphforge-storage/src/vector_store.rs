@@ -5,7 +5,6 @@
 //! resolved UUID membership and publish the resulting `vectors.parquet` file
 //! through the shared search-publication foundation.
 
-use graphforge_filesystem::ObservedSync as _;
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -321,7 +320,7 @@ fn sync_vector_snapshot(path: &Path) -> Result<(), SearchArtifactError> {
         .read(true)
         .write(true)
         .open(path)
-        .and_then(|file| file.observed_sync_all())
+        .and_then(|file| crate::durable_commit::seal_file(&file))
         .map_err(|source| io("sync vector snapshot", path, source))
 }
 

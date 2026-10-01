@@ -35,7 +35,6 @@
 //! Indexes. [`ShardedCsrIndex`] resolves only the shard(s) containing a requested
 //! row. Only the current versioned shard representation is supported.
 
-use graphforge_filesystem::ObservedSync as _;
 mod builder;
 mod codec;
 mod installation;
@@ -49,7 +48,9 @@ pub use builder::{
 pub(crate) use builder::{
     build_adjacency_index_for_edge_files_observed, build_adjacency_index_for_edge_files_on_lanes,
 };
-use installation::{persist_temp_observed, write_csr_shard_bytes_observed};
+use installation::{
+    observe_csr_barriers, persist_temp_observed, promote_shards, write_csr_shard_bytes_observed,
+};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -599,7 +600,7 @@ impl ShardedCsrWriter {
             if stable_root.exists() {
                 self.remove_scratch_tree(&stable_root)?;
             }
-            std::fs::rename(&self.root, &stable_root).map_err(storage_err)?;
+            promote_shards(&self.root, &stable_root)?;
             if let Some(allocation) = &self.allocation {
                 for record in &self.records {
                     let source = self.root.join(&record.file);
@@ -629,8 +630,7 @@ impl ShardedCsrWriter {
             .tempfile_in(parent)
             .map_err(storage_err)?;
         temp.write_all(&bytes).map_err(storage_err)?;
-        // #1449: the per-CSR manifest and its barrier belong to the same phase
-        // as the shards it names; unscoped, a rebuild reported `fsync_calls: 0`.
+        // The CSR manifest barrier is attributed to its shard phase (#1449).
         crate::lifecycle_io::record_write(
             crate::StorageIoPhase::ReadPathScan,
             bytes.len() as u64,
@@ -639,8 +639,6 @@ impl ShardedCsrWriter {
         if let Some(allocation) = &self.allocation {
             allocation.replace_file_at(temp.path(), temp.as_file())?;
         }
-        temp.as_file().observed_sync_all().map_err(storage_err)?;
-        crate::lifecycle_io::record_fsync(crate::StorageIoPhase::ReadPathScan, 1);
         persist_temp_observed(
             temp,
             &self.path.with_extension("csr.json"),
@@ -1266,7 +1264,7 @@ fn write_manifest_observed(
         Arc::clone(&ADJACENCY_MANIFEST_SCHEMA),
         &batch,
     )?;
-    let barriers = staged.commit_retained_at_observed(project_dir, allocation)?;
+    observe_csr_barriers(|| staged.commit_retained_at_observed(project_dir, allocation))?;
     crate::lifecycle_io::record_write(
         crate::StorageIoPhase::ReadPathScan,
         std::fs::metadata(manifest_path(project_dir))
@@ -1274,7 +1272,6 @@ fn write_manifest_observed(
             .len(),
         1,
     );
-    crate::lifecycle_io::record_fsync(crate::StorageIoPhase::ReadPathScan, barriers);
     Ok(())
 }
 

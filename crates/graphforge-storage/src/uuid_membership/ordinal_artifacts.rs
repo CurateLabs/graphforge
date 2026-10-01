@@ -48,6 +48,7 @@ pub(crate) struct V4ConstructionArtifactBundle {
 pub(super) struct V4PublicationGuard {
     directory: Option<graphforge_filesystem::StableDirectory>,
     inner: Option<graphforge_filesystem::UnpublishedArtifactGuard>,
+    seal: Option<crate::durable_commit::FileSeal>,
     path: PathBuf,
     allocation: Option<crate::StorageAllocationOperation>,
 }
@@ -62,6 +63,7 @@ impl V4PublicationGuard {
             inner: Some(
                 directory.create_unpublished_replaceable_child(std::ffi::OsStr::new(name))?,
             ),
+            seal: None,
             path: directory.path().join(name),
             allocation: allocation.cloned(),
         })
@@ -83,6 +85,9 @@ impl V4PublicationGuard {
     }
     pub(super) fn take_file(&mut self) -> std::io::Result<File> {
         self.inner_mut().take_file()
+    }
+    pub(super) fn record_seal(&mut self, seal: crate::durable_commit::FileSeal) {
+        self.seal = Some(seal);
     }
     fn open_sibling(&self, name: &std::ffi::OsStr) -> std::io::Result<File> {
         self.inner().open_sibling(name)
@@ -143,7 +148,11 @@ impl V4PublicationGuard {
     }
     pub(super) fn install_child(&mut self, target: &std::ffi::OsStr) -> std::io::Result<()> {
         self.observe_named()?;
-        let installed = self.inner_mut().install_child(target);
+        let seal = self.seal.take().ok_or_else(|| {
+            std::io::Error::other("v4 publication requires a sealed producer descriptor")
+        })?;
+        let installed =
+            crate::durable_commit::install_guarded_sealed(self.inner_mut(), target, seal);
         if installed.is_err() {
             // Installation can rename successfully before a later validation
             // fails. Rebind only the actual retained artifact, never a collision.
@@ -172,9 +181,6 @@ impl V4PublicationGuard {
                 .map_err(std::io::Error::other)?;
         }
         Ok(())
-    }
-    pub(super) fn sync_parent(&mut self) -> std::io::Result<()> {
-        self.inner_mut().sync_parent()
     }
     fn commit(mut self) -> std::io::Result<()> {
         let identity = self.identity().ok();
@@ -272,7 +278,7 @@ where
     F: FnMut() -> bool,
 {
     let bundle = stage_v4_ordinal_bundle(records, generation, index, &mut cancelled)?;
-    index.sync().map_err(storage_err)?;
+    crate::durable_commit::acknowledge_directory(&index).map_err(storage_err)?;
     let V4ConstructionArtifactBundle {
         manifest,
         metrics,
@@ -693,11 +699,8 @@ impl StreamingV4Artifact {
         Result<(), GfError>,
     ) {
         let flushed = self.writer.flush().map_err(storage_err);
-        let synchronized = self
-            .writer
-            .get_mut()
-            .sync_all_and_release()
-            .map_err(storage_err);
+        let synchronized =
+            crate::durable_commit::seal_cache_writer(self.writer.get_mut()).map_err(storage_err);
         let observed = self
             .publication
             .observe(self.writer.get_ref().file())
@@ -729,17 +732,18 @@ pub(super) fn finish_streamed_v4_artifact(
     metrics: &mut V4OrdinalBuildMetrics,
 ) -> Result<GuardedV4Artifact, GfError> {
     let finalized = writer.writer.flush().map_err(storage_err).and_then(|()| {
-        writer
-            .writer
-            .get_mut()
-            .sync_all_and_release()
+        crate::durable_commit::seal_cache_writer_witness(writer.writer.get_mut())
             .map_err(storage_err)
     });
-    if let Err(primary) = finalized {
-        let (cache_release, cleanup) = writer.cleanup_unpublished();
-        merge_cache_release_evidence(&mut metrics.cache_release, cache_release);
-        return combine_v4_cleanup(Err(primary), cleanup, "v4 failed output cleanup");
-    }
+    let seal = match finalized {
+        Ok(seal) => seal,
+        Err(primary) => {
+            let (cache_release, cleanup) = writer.cleanup_unpublished();
+            merge_cache_release_evidence(&mut metrics.cache_release, cache_release);
+            return combine_v4_cleanup(Err(primary), cleanup, "v4 failed output cleanup");
+        }
+    };
+    writer.publication.record_seal(seal);
     writer
         .publication
         .observe(writer.writer.get_ref().file())
@@ -803,7 +807,6 @@ pub(super) fn finish_streamed_v4_artifact(
             .install_child(std::ffi::OsStr::new(&artifact.name))
         {
             Ok(()) => {
-                writer.publication.sync_parent().map_err(storage_err)?;
                 v4_publication_failure("directory_sync")?;
                 v4_publication_failure("post_publication_metric_overflow")?;
                 Ok(true)
@@ -1240,7 +1243,7 @@ fn publish_v4_construction_artifacts_inner(
         .collect::<Vec<_>>();
     crate::graph_construction::construction_failpoint("v4_publish.after_artifacts");
     v4_authority_failure("after_artifacts")?;
-    index.sync().map_err(storage_err)?;
+    crate::durable_commit::acknowledge_directory(&index).map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
     crate::graph_construction::construction_failpoint("v4_publish.after_artifacts_fsync");
     let artifact_bytes = outputs.iter().try_fold(0_u64, |total, output| {
@@ -1276,10 +1279,10 @@ fn publish_v4_construction_artifacts_inner(
     outputs.push(lock_output);
     publications.push(("ordinal-v4.lock".to_owned(), lock_publication));
     crate::graph_construction::construction_failpoint("v4_publish.after_lock_install");
-    index.sync().map_err(storage_err)?;
-    topology.sync().map_err(storage_err)?;
-    graph.sync().map_err(storage_err)?;
-    encoded.sync().map_err(storage_err)?;
+    crate::durable_commit::acknowledge_directory(&index).map_err(storage_err)?;
+    crate::durable_commit::acknowledge_directory(&topology).map_err(storage_err)?;
+    crate::durable_commit::acknowledge_directory(&graph).map_err(storage_err)?;
+    crate::durable_commit::acknowledge_directory(encoded).map_err(storage_err)?;
     v4_authority_failure("directory_sync")?;
     work.fsync_operations = work.fsync_operations.saturating_add(4);
     let publication_metrics = V4OrdinalPublicationMetrics {

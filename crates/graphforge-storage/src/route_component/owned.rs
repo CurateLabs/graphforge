@@ -172,12 +172,8 @@ fn remove_owned_migration_temps(root: &StableDirectory) -> Result<(), GfError> {
             let identity = graphforge_filesystem::file_identity(&file)
                 .map_err(|_| invalid("migration temporary identity failed"))?;
             drop(file);
-            directory
-                .unlink_child_if_identity(&name, identity)
-                .map_err(|_| invalid("migration temporary cleanup failed"))?;
-            directory
-                .sync()
-                .map_err(|_| invalid("migration cleanup sync failed"))?;
+            crate::durable_commit::retire_files(directory, [(name.as_os_str(), identity)])
+                .map_err(|_| invalid("migration temporary retirement failed"))?;
         }
         Ok(())
     }
@@ -190,12 +186,10 @@ fn create_destination_parent(root: &StableDirectory, relative: &str) -> Result<(
         .map_err(|_| invalid("owned graph root changed"))?;
     let parts = relative.split('/').collect::<Vec<_>>();
     for name in &parts[..parts.len() - 1] {
-        directory = directory
-            .create_child_directory(std::ffi::OsStr::new(name))
+        directory = crate::durable_commit::create_directory(&directory, std::ffi::OsStr::new(name))
             .map_err(|_| invalid("owned route destination parent admission failed"))?;
     }
-    directory
-        .sync()
+    crate::durable_commit::acknowledge_directory(&directory)
         .map_err(|_| invalid("owned route destination parent sync failed"))
 }
 
@@ -270,6 +264,7 @@ fn authenticate_staged_inventory_copy(
 fn remove_owned_table_temps(root: &Path) -> Result<(), GfError> {
     let directory = StableDirectory::open(root)
         .map_err(|_| invalid("owned route cleanup root admission failed"))?;
+    let mut retired = Vec::new();
     for name in directory
         .child_names_bounded(100_000)
         .map_err(|_| limit("owned route cleanup entry budget exceeded"))?
@@ -293,13 +288,15 @@ fn remove_owned_table_temps(root: &Path) -> Result<(), GfError> {
         let identity = graphforge_filesystem::file_identity(&file)
             .map_err(|_| invalid("owned route temporary identity failed"))?;
         drop(file);
-        directory
-            .unlink_child_if_identity(&name, identity)
-            .map_err(|_| invalid("owned route temporary changed during cleanup"))?;
+        retired.push((name, identity));
     }
-    directory
-        .sync()
-        .map_err(|_| invalid("owned route cleanup sync failed"))
+    crate::durable_commit::retire_files(
+        &directory,
+        retired
+            .iter()
+            .map(|(name, identity)| (name.as_os_str(), *identity)),
+    )
+    .map_err(|_| invalid("owned route cleanup retirement failed"))
 }
 
 #[cfg(test)]

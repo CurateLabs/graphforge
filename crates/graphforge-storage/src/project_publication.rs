@@ -7,7 +7,6 @@
 //! Participant validation/staging and journal/atomic-file controls have private
 //! owners; commit sequencing, reconciliation, and mutation locks stay here.
 
-use graphforge_filesystem::ObservedSync as _;
 mod participants;
 use participants::{
     prepare_generation_directory, request_metadata_with_payloads, stage_optional_graph_tree,
@@ -23,8 +22,7 @@ pub(crate) use control::{
 };
 use control::{
     CancelledBeforeReplace, CapabilityRecord, CurrentRecord, GenerationManifestRecord,
-    canonical_line, failpoint_as_io, hex_digest, parse_digest, publish_atomic_bytes_in,
-    verify_exact_file, write_new,
+    canonical_line, failpoint_as_io, hex_digest, parse_digest, verify_exact_file,
 };
 
 #[cfg(test)]
@@ -32,12 +30,11 @@ pub(crate) use control::write_journal;
 #[cfg(test)]
 use participants::request_metadata;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
 
 use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_core::{ApiErrorCode, GfError, ProjectErrorCode};
@@ -1100,7 +1097,7 @@ fn cleanup_aborted_attempts(
         ));
     }
     crate::project_recovery::remove_recovery_tree_with_allocation(&transaction_root, allocation)?;
-    sync_directory(&attempts_root)
+    Ok(())
 }
 
 /// Load the canonical revert extension for direct idempotent replay lookup.
@@ -1512,14 +1509,14 @@ impl ValidatedProjectGeneration {
             )?;
             prepare(&candidate)?;
         }
-        replace_current(
+        let pending = replace_current(
             staged,
             manifest_sha256,
             graph_object_lease,
             lifecycle_admission,
             cancellation,
         )?;
-        finish_published_generation(staged, manifest_sha256)?;
+        finish_published_generation(staged, manifest_sha256, pending)?;
         Ok(ProjectPublicationReceipt {
             transaction_uuid: staged.transaction_uuid,
             generation_uuid: staged.generation_uuid,
@@ -1601,27 +1598,56 @@ fn abort_stale_generation(staged: &StagedProjectGeneration) -> Result<(), GfErro
             &staged.generation_root,
             staged.allocation.as_ref(),
         )?;
-        sync_directory(
-            staged
-                .generation_root
-                .parent()
-                .expect("machine attempt path has a parent"),
-        )?;
     }
     Ok(())
 }
 
+fn stage_generation_manifest(
+    staged: &StagedProjectGeneration,
+    generation_parent: &graphforge_filesystem::StableDirectory,
+    manifest_bytes: &[u8],
+) -> Result<(), GfError> {
+    let manifest_failure = std::cell::RefCell::new(None);
+    let manifest_result = crate::durable_commit::stage_private_file(
+        generation_parent,
+        std::ffi::OsStr::new(MANIFEST_FILE),
+        |file| file.write_all(manifest_bytes),
+        || {
+            project_failpoint::hit(
+                "project.after_manifest_write",
+                Some(staged.transaction_uuid),
+                Some(staged.generation_uuid),
+                "DURABLE",
+                false,
+            )
+            .map_err(|error| {
+                let cause = std::io::Error::other(error.to_string());
+                *manifest_failure.borrow_mut() = Some(error);
+                cause
+            })
+        },
+        staged.allocation.as_ref(),
+    );
+    let manifest_file = manifest_result.map_err(|error| {
+        manifest_failure
+            .into_inner()
+            .unwrap_or_else(|| publication_io(error))
+    })?;
+    drop(manifest_file);
+    Ok(())
+}
+
 fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32], GfError> {
-    let lease_path = staged.generation_root.join(LEASE_FILE);
-    let lease = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lease_path)
+    let generation_parent = graphforge_filesystem::StableDirectory::open(&staged.generation_root)
         .map_err(publication_io)?;
-    lease.observed_sync_all().map_err(publication_io)?;
-    if let Some(allocation) = &staged.allocation {
-        allocation.replace_file_at(&lease_path, &lease)?;
-    }
+    let lease = crate::durable_commit::stage_private_file(
+        &generation_parent,
+        std::ffi::OsStr::new(LEASE_FILE),
+        |_| Ok(()),
+        || Ok(()),
+        staged.allocation.as_ref(),
+    )
+    .map_err(publication_io)?;
     // Windows rejects a parent-directory rename while a descendant file handle
     // is still live. The transaction lock, not this newly created lease file,
     // owns the staged attempt, so release the handle after its durability sync.
@@ -1645,21 +1671,8 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
     };
     let manifest_bytes = canonical_line(&manifest)?;
     let manifest_path = staged.generation_root.join(MANIFEST_FILE);
-    let manifest_file = write_new(&manifest_path, &manifest_bytes, staged.allocation.as_ref())?;
-    project_failpoint::hit(
-        "project.after_manifest_write",
-        Some(staged.transaction_uuid),
-        Some(staged.generation_uuid),
-        "DURABLE",
-        false,
-    )?;
-    manifest_file.observed_sync_all().map_err(publication_io)?;
-    if let Some(allocation) = &staged.allocation {
-        allocation.replace_file_at(&manifest_path, &manifest_file)?;
-    }
-    // Optimistic publication promotes the complete staging directory below.
-    // Close the manifest handle before that rename for Windows parity.
-    drop(manifest_file);
+    stage_generation_manifest(staged, &generation_parent, &manifest_bytes)?;
+    drop(generation_parent);
     project_failpoint::hit(
         "project.after_manifest_fsync",
         Some(staged.transaction_uuid),
@@ -1724,15 +1737,27 @@ fn promote_optimistic_generation(staged: &StagedProjectGeneration) -> Result<(),
             ),
         ));
     }
-    std::fs::rename(&staged.generation_root, &destination).map_err(publication_io)?;
+    crate::durable_commit::promote_no_replace(
+        &staged.generation_root,
+        &destination,
+        || Ok(()),
+        || Ok(()),
+    )
+    .map_err(publication_io)?;
     let transaction_attempt_root = staged
         .generation_root
         .parent()
         .expect("machine attempt path has a parent");
-    sync_directory(transaction_attempt_root)?;
-    std::fs::remove_dir(transaction_attempt_root).map_err(publication_io)?;
-    sync_directory(&staged.root.join(ATTEMPTS_DIR))?;
-    sync_directory(&generations_root)?;
+    let attempts = graphforge_filesystem::StableDirectory::open(&staged.root.join(ATTEMPTS_DIR))
+        .map_err(publication_io)?;
+    crate::durable_commit::retire_directory(
+        &attempts,
+        transaction_attempt_root
+            .file_name()
+            .expect("attempt root has a name"),
+        graphforge_filesystem::path_identity(transaction_attempt_root).map_err(publication_io)?,
+    )
+    .map_err(publication_io)?;
     project_failpoint::hit(
         "project.after_optimistic_promotion",
         Some(staged.transaction_uuid),
@@ -1748,7 +1773,7 @@ fn replace_current(
     graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
     lifecycle_admission: Option<&crate::filesystem_admission::ProjectLifecycleAdmission>,
     mut cancellation: Option<&mut dyn FnMut() -> bool>,
-) -> Result<(), GfError> {
+) -> Result<crate::durable_commit::PendingCommit, GfError> {
     let current = CurrentRecord {
         format: "graphforge-project".into(),
         format_version: 1,
@@ -1756,81 +1781,93 @@ fn replace_current(
         generation_manifest_sha256: hex_digest(manifest_sha256),
     };
     let current_bytes = canonical_line(&current)?;
-    let current_path = staged.root.join(CURRENT_FILE);
     let stable_root =
         graphforge_filesystem::StableDirectory::open(&staged.root).map_err(publication_io)?;
-    let replace_result = publish_atomic_bytes_in(
-        &stable_root,
-        &current_path,
+    let replace_result = crate::durable_commit::publish_atomic_in(
+        stable_root,
         std::ffi::OsStr::new(CURRENT_FILE),
         &current_bytes,
-        || {
-            failpoint_as_io(
-                "project.after_current_temp_write",
-                staged.transaction_uuid,
-                staged.generation_uuid,
-                "CURRENT",
-                false,
-            )
-        },
-        || {
-            failpoint_as_io(
-                "project.after_current_temp_fsync",
-                staged.transaction_uuid,
-                staged.generation_uuid,
-                "CURRENT",
-                false,
-            )
-        },
-        || {
-            failpoint_as_io(
-                "project.before_current_replace",
-                staged.transaction_uuid,
-                staged.generation_uuid,
-                "CURRENT",
-                false,
-            )?;
-            if let Some(admission) = lifecycle_admission {
-                admission
-                    .revalidate_identity()
-                    .map_err(std::io::Error::other)?;
-            } else {
-                staged
-                    .admission
-                    .revalidate_identity()
-                    .map_err(std::io::Error::other)?;
-            }
-            if let Some(lease) = graph_object_lease {
-                lease
-                    .revalidate_for_root(staged.parent.container_root())
-                    .map_err(std::io::Error::other)?;
-            }
-            // This is deliberately the final fallible predicate before the
-            // single native replacement commit point. After replacement,
-            // reconciliation owns the result and cancellation cannot undo it.
-            if cancellation.as_mut().is_some_and(|cancelled| cancelled()) {
-                return Err(std::io::Error::other(CancelledBeforeReplace));
-            }
-            Ok(())
+        crate::durable_commit::AtomicHooks {
+            after_write: || {
+                failpoint_as_io(
+                    "project.after_current_temp_write",
+                    staged.transaction_uuid,
+                    staged.generation_uuid,
+                    "CURRENT",
+                    false,
+                )
+            },
+            after_seal: || {
+                failpoint_as_io(
+                    "project.after_current_temp_fsync",
+                    staged.transaction_uuid,
+                    staged.generation_uuid,
+                    "CURRENT",
+                    false,
+                )
+            },
+            before_visible: || {
+                failpoint_as_io(
+                    "project.before_current_replace",
+                    staged.transaction_uuid,
+                    staged.generation_uuid,
+                    "CURRENT",
+                    false,
+                )?;
+                if let Some(admission) = lifecycle_admission {
+                    admission
+                        .revalidate_identity()
+                        .map_err(std::io::Error::other)?;
+                } else {
+                    staged
+                        .admission
+                        .revalidate_identity()
+                        .map_err(std::io::Error::other)?;
+                }
+                if let Some(lease) = graph_object_lease {
+                    lease
+                        .revalidate_for_root(staged.parent.container_root())
+                        .map_err(std::io::Error::other)?;
+                }
+                // This is deliberately the final fallible predicate before the
+                // single native replacement commit point. After replacement,
+                // reconciliation owns the result and cancellation cannot undo it.
+                if cancellation.as_mut().is_some_and(|cancelled| cancelled()) {
+                    return Err(std::io::Error::other(CancelledBeforeReplace));
+                }
+                Ok(())
+            },
         },
         staged.allocation.as_ref(),
     );
-    if let Err(error) = replace_result {
-        reconcile_current_replacement_error(
-            &staged.root,
-            staged.transaction_uuid,
-            staged.generation_uuid,
-            manifest_sha256,
-            &error,
-        )?;
-    }
+    let pending = match replace_result {
+        Ok(pending) => pending,
+        Err(mut failure) => {
+            let pending = failure.pending.take().map(|pending| *pending);
+            let error = AtomicPublishError::from(failure.cause);
+            reconcile_current_replacement_error(
+                &staged.root,
+                staged.transaction_uuid,
+                staged.generation_uuid,
+                manifest_sha256,
+                &error,
+            )?;
+            pending.ok_or_else(|| {
+                project_error(
+                    ProjectErrorCode::ProjectCorrupt,
+                    "CURRENT became authoritative without a retained pending commit",
+                )
+            })?
+        }
+    };
     project_failpoint::hit(
         "project.after_current_replace",
         Some(staged.transaction_uuid),
         Some(staged.generation_uuid),
         "CURRENT",
         true,
-    )
+    )?;
+    Ok(pending)
 }
 
 fn reconcile_current_replacement_error(
@@ -1883,18 +1920,21 @@ fn reconcile_current_replacement_error(
 fn finish_published_generation(
     staged: &StagedProjectGeneration,
     manifest_sha256: [u8; 32],
+    pending: crate::durable_commit::PendingCommit,
 ) -> Result<(), GfError> {
     // Past the sole linearization point: any later failure reports
     // committed=true and never attempts rollback.
-    sync_directory(&staged.root).map_err(|error| {
-        publication_error_from_parts(
-            staged.transaction_uuid,
-            staged.generation_uuid,
-            "CURRENT",
-            true,
-            &error.to_string(),
-        )
-    })?;
+    pending
+        .acknowledge(staged.allocation.as_ref())
+        .map_err(|error| {
+            publication_error_from_parts(
+                staged.transaction_uuid,
+                staged.generation_uuid,
+                "CURRENT",
+                true,
+                &error.to_string(),
+            )
+        })?;
     project_failpoint::hit(
         "project.after_root_fsync",
         Some(staged.transaction_uuid),
@@ -1971,26 +2011,12 @@ pub(crate) fn ensure_machine_directory(root: &Path, relative: &Path) -> Result<P
                 ));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                match std::fs::create_dir(&current) {
-                    Ok(()) => {
-                        sync_directory(
-                            current
-                                .parent()
-                                .expect("machine directory beneath project has a parent"),
-                        )?;
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        let metadata =
-                            std::fs::symlink_metadata(&current).map_err(publication_io)?;
-                        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-                            return Err(project_error(
-                                ProjectErrorCode::ProjectCorrupt,
-                                "concurrently created machine path is linked or not a directory",
-                            ));
-                        }
-                    }
-                    Err(error) => return Err(publication_io(error)),
-                }
+                let parent = graphforge_filesystem::StableDirectory::open(
+                    current.parent().expect("machine directory has a parent"),
+                )
+                .map_err(publication_io)?;
+                crate::durable_commit::create_directory(&parent, component)
+                    .map_err(publication_io)?;
             }
             Err(error) => return Err(publication_io(error)),
         }

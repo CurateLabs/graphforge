@@ -652,9 +652,14 @@ fn a_rebuild_attributes_every_file_it_publishes_and_every_barrier() {
     );
     assert_eq!(scan.write_calls, published.len() as u64, "{region:#?}");
 
-    // One `sync_all` per `*.csr.json`, and one directory barrier for the
-    // index manifest's retained install. #1449: the rebuild reported zero.
-    assert_eq!(scan.fsync_calls, csr_manifests + 1, "{region:#?}");
+    // Each published file has one seal and one parent acknowledgment. Each
+    // CSR set also promotes its sealed shard directory with one parent fence.
+    // Keep the independent actual-filesystem equality below.
+    assert_eq!(
+        scan.fsync_calls,
+        published.len() as u64 * 2 + csr_manifests,
+        "{region:#?}"
+    );
     // Independently, the filesystem's own barrier counter. It is process-wide,
     // so under nextest's process-per-test it is exactly this build; under a
     // threaded harness a concurrent test can only add to it.

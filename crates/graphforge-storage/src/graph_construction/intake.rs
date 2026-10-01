@@ -772,7 +772,8 @@ pub(super) fn write_parquet_with_properties(
     parquet.finish().map_err(storage)?;
     parquet.sync().map_err(storage)?;
     let hashing = parquet.inner_mut().get_mut();
-    hashing.inner.sync_all_and_release().map_err(storage)?;
+    root.seal_cache_writer(&mut hashing.inner)
+        .map_err(storage)?;
     let cache_release = hashing.inner.evidence();
     account_cache_release(cache_release, evidence)?;
     construction_failpoint(&format!("artifact.after_temp_fsync.{name}"));
@@ -790,10 +791,10 @@ pub(super) fn write_parquet_with_properties(
             .checked_add(3)
             .ok_or_else(|| storage("artifact synchronization count overflows"))?,
     };
-    root.sync().map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(name))
         .map_err(storage)?;
-    root.sync().map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     construction_failpoint(&format!("artifact.after_install.{name}"));
     persist_shape_receipt(root, &receipt)?;
     Ok(receipt)
@@ -831,7 +832,7 @@ pub(super) fn write_run<const N: usize>(
         writer.write_all(&block).map_err(storage)?;
     }
     writer.flush().map_err(storage)?;
-    writer.inner.sync_all_and_release().map_err(storage)?;
+    root.seal_cache_writer(&mut writer.inner).map_err(storage)?;
     let cache_release = writer.inner.evidence();
     account_cache_release(cache_release, evidence)?;
     construction_failpoint(&format!("artifact.after_temp_fsync.{name}"));
@@ -849,10 +850,10 @@ pub(super) fn write_run<const N: usize>(
             .checked_add(2)
             .ok_or_else(|| storage("artifact synchronization count overflows"))?,
     };
-    root.sync().map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(name))
         .map_err(storage)?;
-    root.sync().map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     construction_failpoint(&format!("artifact.after_install.{name}"));
     persist_shape_receipt(root, &receipt)?;
     Ok(receipt)

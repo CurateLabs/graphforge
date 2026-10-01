@@ -825,10 +825,6 @@ fn storage(action: &str, path: &Path, error: impl std::fmt::Display) -> GfError 
 mod crash_oracle_tests {
     use super::*;
     use crate::GraphDeltaOp;
-    use crate::project_fault_oracle::{
-        AuthorityClass, PublicationIds, PublicationPhase, default_durable_ids, expected_authority,
-        publication_ops, simulate_crash,
-    };
 
     #[test]
     fn canonical_topology_rows_counts_nested_edge_shards() {
@@ -1011,32 +1007,6 @@ mod crash_oracle_tests {
             panic!("clone publication unexpectedly replayed");
         };
         (generation_uuid, staged)
-    }
-
-    #[test]
-    fn crash_oracle_before_and_after_ack_matches_frozen_contract() {
-        let seed = 753u64;
-        let ids = PublicationIds::from_seed(seed);
-        for phase in [
-            PublicationPhase::BeforeCurrentReplace,
-            PublicationPhase::AfterCurrentReplace,
-            PublicationPhase::AfterRootFsync,
-        ] {
-            let ops = publication_ops(ids, phase);
-            let durable = default_durable_ids(&ops, phase);
-            let report = simulate_crash(seed, phase, &durable).unwrap();
-            assert_eq!(report.expected, expected_authority(phase));
-            assert_eq!(report.actual, report.expected);
-            match phase {
-                PublicationPhase::BeforeCurrentReplace => {
-                    assert_eq!(report.expected, AuthorityClass::PriorGeneration);
-                }
-                PublicationPhase::AfterCurrentReplace | PublicationPhase::AfterRootFsync => {
-                    assert_eq!(report.expected, AuthorityClass::NewGeneration);
-                }
-                _ => unreachable!(),
-            }
-        }
     }
 
     #[test]

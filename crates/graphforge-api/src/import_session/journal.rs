@@ -10,7 +10,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use graphforge_core::hash_observation::ControlSha256 as Sha256;
-use graphforge_filesystem::{ObservedSync as _, StableDirectory};
+use graphforge_filesystem::StableDirectory;
 use graphforge_storage::concurrency_attribution::RegionScope;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -37,6 +37,7 @@ struct Record {
 
 pub(super) struct Journal {
     file: File,
+    lease: graphforge_storage::durable_commit::AppendLease,
     path: PathBuf,
     failed_write: bool,
     pending_bytes: u64,
@@ -73,29 +74,36 @@ impl Journal {
                     .create_unpublished_replaceable_child(OsStr::new(&temporary))
                     .map_err(storage)?;
                 let file = guard.take_file().map_err(storage)?;
-                {
+                let sealed = {
                     let _region = RegionScope::named("journal_sync");
-                    file.observed_sync_all().map_err(storage)?;
-                }
+                    graphforge_storage::durable_commit::seal_guarded(guard, file, allocation)
+                        .map_err(storage)?
+                };
                 let _region = RegionScope::named("journal_namespace_publication");
-                guard.install_child(OsStr::new(NAME)).map_err(storage)?;
-                guard.sync_parent().map_err(storage)?;
-                guard.commit().map_err(storage)?;
+                sealed
+                    .make_visible(
+                        OsStr::new(NAME),
+                        graphforge_storage::durable_commit::PublishMode::CreateOnly,
+                        || Ok(()),
+                    )
+                    .map_err(storage)?
+                    .acknowledge(allocation)
+                    .map_err(storage)?;
+                if let Some(allocation) = allocation {
+                    allocation.remove_file_at(&root.join(&temporary))?;
+                }
                 // Also make creation of the session and import-sessions names
                 // durable before the first manifest becomes a checkpoint.
                 if let Some(parent) = root.parent() {
-                    StableDirectory::open(parent)
-                        .map_err(storage)?
-                        .sync()
-                        .map_err(storage)?;
+                    graphforge_storage::durable_commit::sync_directory(parent).map_err(storage)?;
                     if let Some(container) = parent.parent() {
-                        StableDirectory::open(container)
-                            .map_err(storage)?
-                            .sync()
+                        graphforge_storage::durable_commit::sync_directory(container)
                             .map_err(storage)?;
                     }
                 }
-                file
+                directory
+                    .open_or_create_child_file(OsStr::new(NAME))
+                    .map_err(storage)?
             }
             Err(error) => return Err(storage(error)),
         };
@@ -110,8 +118,15 @@ impl Journal {
         if let Some(allocation) = allocation {
             allocation.replace_file_at(&path, &file)?;
         }
+        let lease = graphforge_storage::durable_commit::AppendLease::admit(
+            &directory,
+            OsStr::new(NAME),
+            &file,
+        )
+        .map_err(storage)?;
         let mut journal = Self {
             file,
+            lease,
             path,
             failed_write: false,
             pending_bytes: 0,
@@ -189,7 +204,10 @@ impl Journal {
         self.failed_write = true;
         #[cfg(test)]
         failure("sync")?;
-        self.file.observed_sync_all().map_err(storage)?;
+        let expected_end = self.file.stream_position().map_err(storage)?;
+        self.lease
+            .acknowledge(&self.file, expected_end)
+            .map_err(storage)?;
         self.pending_bytes = 0;
         if let Some(allocation) = allocation {
             allocation.replace_file_at(&self.path, &self.file)?;
@@ -308,31 +326,30 @@ pub(super) fn write_checkpoint(
         .create_unpublished_replaceable_child(OsStr::new(&temporary))
         .map_err(storage)?;
     let mut file = guard.take_file().map_err(storage)?;
-    serde_json::to_writer(&mut file, manifest).map_err(storage)?;
+    let written = serde_json::to_writer(&mut file, manifest).map_err(storage);
+    let observed = allocation.map_or(Ok(()), |allocation| {
+        allocation.replace_file_at(&temporary_path, &file)
+    });
+    written?;
+    observed?;
     #[cfg(test)]
     failure("checkpoint_before_sync")?;
-    file.observed_sync_all().map_err(storage)?;
-    if let Some(allocation) = allocation {
-        allocation.replace_file_at(&temporary_path, &file)?;
-    }
-    let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
-    // Replacement can report an error after the rename. From this point the
-    // checkpoint may already reference its sources, even without a barrier.
+    let sealed = graphforge_storage::durable_commit::seal_guarded(guard, file, allocation)
+        .map_err(storage)?;
+    // The physical owner may report an error after namespace visibility.
+    // Preserve the session's conservative recovery-required boundary.
     *publication_started = true;
-    directory
-        .replace_child(OsStr::new(&temporary), identity, OsStr::new(MANIFEST))
+    let pending = sealed
+        .make_visible(
+            OsStr::new(MANIFEST),
+            graphforge_storage::durable_commit::PublishMode::Replace,
+            || Ok(()),
+        )
         .map_err(storage)?;
     #[cfg(test)]
     failure("checkpoint_after_replace")?;
-    // The replacement is a complete checkpoint even if the parent barrier
-    // fails: deleting it would also destroy the prior checkpoint. The guard
-    // therefore owns only the preparation name. Cleanup removes that name if
-    // a pre-publication failure left it behind, and syncs the retained parent
-    // after successful replacement without unlinking the installed manifest.
-    guard.cleanup().map_err(storage)?;
+    pending.acknowledge(allocation).map_err(storage)?;
     if let Some(allocation) = allocation {
-        allocation.remove_file_at(&root.join(MANIFEST))?;
-        allocation.replace_file_at(&root.join(MANIFEST), &file)?;
         allocation.remove_file_at(&temporary_path)?;
     }
     Ok(())
@@ -359,10 +376,9 @@ pub(super) fn cleanup_source(
     let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
     #[cfg(test)]
     failure("source_cleanup_before_unlink")?;
-    directory
-        .unlink_child_if_identity(name, identity)
+    drop(file);
+    graphforge_storage::durable_commit::retire_files(&directory, [(name, identity)])
         .map_err(storage)?;
-    directory.sync().map_err(storage)?;
     if let Some(allocation) = allocation {
         allocation.remove_file_at(destination)?;
     }
@@ -374,6 +390,7 @@ pub(super) fn cleanup_source(
 pub(super) fn publish_source(
     temporary: &Path,
     destination: &Path,
+    seal: graphforge_storage::durable_commit::FileSeal,
     allocation: Option<&graphforge_storage::StorageAllocationOperation>,
 ) -> Result<(), GfError> {
     let _region = RegionScope::named("source_publication");
@@ -390,23 +407,34 @@ pub(super) fn publish_source(
     let destination_name = destination
         .file_name()
         .ok_or_else(|| storage("import source has no name"))?;
-    let file = directory.open_child_file(temporary_name).map_err(storage)?;
+    let file = graphforge_storage::durable_commit::open_publisher(
+        &directory,
+        temporary_name,
+        seal.identity(),
+    )
+    .map_err(storage)?;
     if let Some(allocation) = allocation {
         allocation.replace_file_at(temporary, &file)?;
     }
-    directory
-        .replace_child(
-            temporary_name,
-            graphforge_filesystem::file_identity(&file).map_err(storage)?,
+    let sealed = graphforge_storage::durable_commit::SealedArtifact::adopt_sealed(
+        &directory,
+        temporary_name,
+        file,
+        seal,
+        allocation,
+    )
+    .map_err(storage)?;
+    let pending = sealed
+        .make_visible(
             destination_name,
+            graphforge_storage::durable_commit::PublishMode::Replace,
+            || Ok(()),
         )
         .map_err(storage)?;
     #[cfg(test)]
     failure("source_after_replace")?;
-    directory.sync().map_err(storage)?;
+    pending.acknowledge(allocation).map_err(storage)?;
     if let Some(allocation) = allocation {
-        allocation.remove_file_at(destination)?;
-        allocation.replace_file_at(destination, &file)?;
         allocation.remove_file_at(temporary)?;
     }
     Ok(())

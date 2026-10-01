@@ -3,6 +3,12 @@
 use super::*;
 use std::path::PathBuf;
 
+pub(crate) struct StagedMove {
+    pub(crate) temporary: tempfile::NamedTempFile,
+    pub(crate) retirement: SourceRetirement,
+    pub(crate) seal: crate::durable_commit::FileSeal,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SourceRetirement {
@@ -138,7 +144,7 @@ pub(crate) fn stage(
     source_path: &Path,
     destination: &Path,
     temporary_prefix: &str,
-) -> Result<(tempfile::NamedTempFile, SourceRetirement), GfError> {
+) -> Result<StagedMove, GfError> {
     with_rewrite_lock(root_path, |root| {
         stage_retained(root_path, root, source_path, destination, temporary_prefix)
     })
@@ -151,7 +157,7 @@ pub(crate) fn stage_retained(
     source_path: &Path,
     destination: &Path,
     temporary_prefix: &str,
-) -> Result<(tempfile::NamedTempFile, SourceRetirement), GfError> {
+) -> Result<StagedMove, GfError> {
     let parts = components(root_path, source_path)?;
     let destination_relative = canonical_relative(root_path, destination)?;
     if parts.join("/") == destination_relative {
@@ -188,7 +194,7 @@ pub(crate) fn stage_retained(
     let mut input = source.try_clone().map_err(storage)?;
     input.rewind().map_err(storage)?;
     std::io::copy(&mut input, &mut temporary).map_err(storage)?;
-    temporary.as_file().observed_sync_all().map_err(storage)?;
+    let seal = crate::durable_commit::seal_file_witness(temporary.as_file()).map_err(storage)?;
     authenticate(&source, &original)?;
     if !content_matches(
         temporary.as_file().try_clone().map_err(storage)?,
@@ -203,9 +209,9 @@ pub(crate) fn stage_retained(
     destination_parent.revalidate_named().map_err(storage)?;
     let root_id = root.identity();
     let parent_id = source_parent.identity();
-    Ok((
+    Ok(StagedMove {
         temporary,
-        SourceRetirement {
+        retirement: SourceRetirement {
             components: parts.clone(),
             root_volume: root_id.volume_serial,
             root_file: hex(&root_id.file_id),
@@ -213,7 +219,8 @@ pub(crate) fn stage_retained(
             parent_file: hex(&parent_id.file_id),
             original,
         },
-    ))
+        seal,
+    })
 }
 
 pub(super) fn validate(intent: &Intent) -> Result<(), GfError> {
@@ -320,19 +327,21 @@ pub(super) fn retire(
     let (destination_parent, target) = retained_parent_at(root_path, root, &entry.destination)?;
     authenticate_installed_destination(&destination_parent, &target, entry)?;
     let (directory, name) = parent(root, source)?;
-    match directory.open_child_file(&name) {
+    let retired = match directory.open_child_file(&name) {
         Ok(file) => {
             authenticate(&file, &source.original)?;
             let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
             drop(file);
-            directory
-                .unlink_child_if_identity(&name, identity)
-                .map_err(storage)?;
+            Some(identity)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(storage(error)),
-    }
-    directory.sync().map_err(storage)
+    };
+    crate::durable_commit::retire_files(
+        &directory,
+        retired.map(|identity| (name.as_os_str(), identity)),
+    )
+    .map_err(storage)
 }
 
 #[cfg(test)]

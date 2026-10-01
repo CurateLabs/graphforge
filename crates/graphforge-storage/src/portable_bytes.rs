@@ -3,8 +3,9 @@ use graphforge_core::portable::{
     PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2Report,
     PortableV2Representation,
 };
-use graphforge_filesystem::ObservedSync as _;
-use std::fs::{self, File};
+#[cfg(test)]
+use std::fs;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -66,6 +67,8 @@ pub fn read_package_bytes(
 #[derive(Debug)]
 pub struct PortablePackageStage {
     path: PathBuf,
+    file: Option<File>,
+    identity: graphforge_filesystem::FileIdentity,
     published: bool,
 }
 impl PortablePackageStage {
@@ -76,11 +79,16 @@ impl PortablePackageStage {
         source: &mut impl Read,
         max_bytes: u64,
     ) -> Result<Self, PortableV2Error> {
-        let mut file = File::create_new(path).map_err(|_| {
+        let file = File::create_new(path).map_err(|_| {
             PortableV2Error::new(PortableV2ErrorCode::Io, "failed to create staging file")
         })?;
-        let stage = Self {
+        let identity = graphforge_filesystem::file_identity(&file).map_err(|_| {
+            PortableV2Error::new(PortableV2ErrorCode::Io, "failed to identify staging file")
+        })?;
+        let mut stage = Self {
             path: path.to_owned(),
+            file: Some(file),
+            identity,
             published: false,
         };
         let mut remaining = max_bytes;
@@ -98,13 +106,30 @@ impl PortablePackageStage {
                     "package exceeds byte limit",
                 )
             })?;
-            file.write_all(&buffer[..read]).map_err(|_| {
-                PortableV2Error::new(PortableV2ErrorCode::Io, "failed to write staging file")
-            })?;
+            stage
+                .file
+                .as_mut()
+                .expect("owned staging descriptor")
+                .write_all(&buffer[..read])
+                .map_err(|_| {
+                    PortableV2Error::new(PortableV2ErrorCode::Io, "failed to write staging file")
+                })?;
         }
-        file.observed_sync_all().map_err(|_| {
-            PortableV2Error::new(PortableV2ErrorCode::Io, "failed to sync staging file")
-        })?;
+        crate::durable_commit::seal_file(stage.file.as_ref().expect("owned staging descriptor"))
+            .map_err(|_| {
+                PortableV2Error::new(PortableV2ErrorCode::Io, "failed to sync staging file")
+            })?;
+        // Verification on Windows must not coexist with a writable handle.
+        // Reopen only the exact producer inode and keep that read authority.
+        drop(stage.file.take());
+        let retained = crate::project_portable_v2_export::open_source_no_follow(path)?;
+        if graphforge_filesystem::file_identity(&retained).ok() != Some(identity) {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::ConcurrentMutation,
+                "staging identity changed after producer close",
+            ));
+        }
+        stage.file = Some(retained);
         Ok(stage)
     }
     /// The exclusively owned file to verify before publication.
@@ -114,29 +139,36 @@ impl PortablePackageStage {
     }
     /// Atomically publish without replacing any concurrent destination.
     pub fn publish(mut self, destination: &Path) -> Result<(), PortableV2Error> {
-        crate::project_portable_v2_export::publish_no_replace(&self.path, destination).map_err(
-            |error| {
-                if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    PortableV2Error::new(
-                        PortableV2ErrorCode::InvalidPath,
-                        "destination already exists",
-                    )
-                } else {
-                    PortableV2Error::new(
-                        PortableV2ErrorCode::Io,
-                        "failed to publish pulled package",
-                    )
-                }
-            },
-        )?;
+        crate::durable_commit::promote_no_replace_authenticated(
+            &self.path,
+            destination,
+            self.identity,
+            || Ok(()),
+            || Ok(()),
+        )
+        .map_err(|failure| {
+            if failure.cause.kind() == std::io::ErrorKind::AlreadyExists {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::InvalidPath,
+                    "destination already exists",
+                )
+            } else {
+                PortableV2Error::new(PortableV2ErrorCode::Io, "failed to publish pulled package")
+            }
+        })?;
         self.published = true;
         Ok(())
     }
 }
 impl Drop for PortablePackageStage {
     fn drop(&mut self) {
-        if !self.published {
-            let _ = fs::remove_file(&self.path);
+        drop(self.file.take());
+        if !self.published
+            && let Some(parent) = self.path.parent()
+            && let Some(name) = self.path.file_name()
+            && let Ok(directory) = graphforge_filesystem::StableDirectory::open(parent)
+        {
+            let _ = crate::durable_commit::retire_files(&directory, [(name, self.identity)]);
         }
     }
 }

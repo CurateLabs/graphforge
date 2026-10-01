@@ -11,7 +11,6 @@ pub(crate) use identity_reuse::KnownGraphFile;
 pub use identity_reuse::capture_graph_files_over_parent;
 use read_materialization::copy_read_inventory_file;
 
-use graphforge_filesystem::ObservedSync as _;
 use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, File};
 use std::io::Read;
@@ -1409,7 +1408,7 @@ fn sync_file(path: &Path) -> Result<(), GfError> {
     #[cfg(windows)]
     let file = fs::OpenOptions::new().write(true).open(path);
     let file = file.map_err(|error| storage("open graph file for fsync", path, error))?;
-    file.observed_sync_all()
+    crate::durable_commit::seal_file(&file)
         .map_err(|error| storage("fsync graph file", path, error))
 }
 

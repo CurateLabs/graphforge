@@ -1,6 +1,5 @@
 //! Crash-safe publication and reopen validation for complete embedding generations.
 
-use graphforge_filesystem::ObservedSync as _;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -172,18 +171,23 @@ where
     )?;
 
     let private_path = private.keep();
-    if let Err(source) = std::fs::rename(&private_path, &generation_path) {
-        let _ = std::fs::remove_dir_all(&private_path);
+    if let Err(error) = crate::durable_commit::promote_no_replace(
+        &private_path,
+        &generation_path,
+        || Ok(()),
+        || Ok(()),
+    ) {
+        if error.visibility == crate::durable_commit::Visibility::NotPublished {
+            let _ = std::fs::remove_dir_all(&private_path);
+        }
         return Err(io(
             "publish immutable embedding generation",
             &generation_path,
-            source,
+            std::io::Error::other(error),
         ));
     }
-    sync_directory(&generations)?;
     checkpoint()?;
     persist_active_pointer(&root, compatibility_id, generation_id)?;
-    sync_directory(&root)?;
 
     Ok(EmbeddingPublicationOutcome::Published(
         EmbeddingGenerationPublication {
@@ -236,17 +240,35 @@ where
 
     let removed_root = if path_exists(&root)? {
         ensure_space_ancestors(project_dir, &root)?;
-        std::fs::remove_dir_all(&root)
+        let parent = graphforge_filesystem::StableDirectory::open(&spaces)
             .map_err(|source| io("delete embedding space lineage", &root, source))?;
-        sync_directory(&spaces)?;
+        let identity = graphforge_filesystem::path_identity(&root)
+            .map_err(|source| io("delete embedding space lineage", &root, source))?;
+        crate::durable_commit::retire_owned_tree(
+            &parent,
+            root.file_name()
+                .expect("embedding lineage has a child name"),
+            identity,
+        )
+        .map_err(|source| io("delete embedding space lineage", &root, source))?;
         true
     } else {
         false
     };
     checkpoint()?;
-    std::fs::remove_file(&marker)
+    let parent = graphforge_filesystem::StableDirectory::open(&embeddings)
         .map_err(|source| io("clear embedding deletion marker", &marker, source))?;
-    sync_directory(&embeddings)?;
+    let name = marker
+        .file_name()
+        .expect("deletion marker has a child name");
+    let file = parent
+        .open_child_file(name)
+        .map_err(|source| io("clear embedding deletion marker", &marker, source))?;
+    let identity = graphforge_filesystem::file_identity(&file)
+        .map_err(|source| io("clear embedding deletion marker", &marker, source))?;
+    drop(file);
+    crate::durable_commit::retire_files(&parent, [(name, identity)])
+        .map_err(|source| io("clear embedding deletion marker", &marker, source))?;
     checkpoint()?;
     let removed_aliases = remove_embedding_space_catalog_identity(
         project_dir,
@@ -526,8 +548,7 @@ fn persist_or_verify_descriptor(
         read_descriptor(root, descriptor, compatibility_id).map(|_| ())
     } else {
         let bytes = descriptor.to_canonical_json()?;
-        persist_synced_file(&path, ".space.json.", &bytes)?;
-        sync_directory(root)
+        persist_synced_file(&path, ".space.json.", &bytes)
     }
 }
 
@@ -804,12 +825,43 @@ fn persist_synced_file(path: &Path, prefix: &str, bytes: &[u8]) -> Result<(), Se
         .map_err(|source| io("create embedding metadata temp", path, source))?;
     temp.write_all(bytes)
         .map_err(|source| io("write embedding metadata temp", path, source))?;
-    temp.as_file()
-        .observed_sync_all()
+    let directory = graphforge_filesystem::StableDirectory::open(parent)
+        .map_err(|source| io("publish embedding metadata", path, source))?;
+    let temporary = temp
+        .path()
+        .file_name()
+        .expect("named temporary has a child name");
+    let identity = graphforge_filesystem::file_identity(temp.as_file())
         .map_err(|source| io("sync embedding metadata temp", path, source))?;
-    temp.persist(path)
-        .map_err(|error| io("publish embedding metadata", path, error.error))?;
-    sync_directory(parent)
+    let file = temp
+        .as_file()
+        .try_clone()
+        .map_err(|source| io("sync embedding metadata temp", path, source))?;
+    crate::durable_commit::SealedArtifact::seal_existing(
+        &directory, temporary, file, identity, None,
+    )
+    .map_err(|source| io("sync embedding metadata temp", path, source))?
+    .make_visible(
+        path.file_name().expect("publication has a child name"),
+        crate::durable_commit::PublishMode::Replace,
+        || Ok(()),
+    )
+    .map_err(|error| {
+        io(
+            "publish embedding metadata",
+            path,
+            std::io::Error::other(error),
+        )
+    })?
+    .acknowledge(None)
+    .map_err(|error| {
+        io(
+            "publish embedding metadata",
+            path,
+            std::io::Error::other(error),
+        )
+    })?;
+    Ok(())
 }
 
 fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), SearchArtifactError> {
@@ -820,7 +872,7 @@ fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), SearchArtifactErro
         .map_err(|source| io("create embedding generation file", path, source))?;
     file.write_all(bytes)
         .map_err(|source| io("write embedding generation file", path, source))?;
-    file.observed_sync_all()
+    crate::durable_commit::seal_file(&file)
         .map_err(|source| io("sync embedding generation file", path, source))
 }
 
@@ -876,7 +928,7 @@ fn sync_tree(root: &Path) -> Result<(), SearchArtifactError> {
             .read(true)
             .write(true)
             .open(&file)
-            .and_then(|file| file.observed_sync_all())
+            .and_then(|file| crate::durable_commit::seal_file(&file))
             .map_err(|source| io("sync embedding generation file", &file, source))?;
     }
     directories.sort_unstable_by_key(|path| std::cmp::Reverse(path.components().count()));
@@ -930,16 +982,9 @@ fn path_exists(path: &Path) -> Result<bool, SearchArtifactError> {
     }
 }
 
-#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), SearchArtifactError> {
-    File::open(path)
-        .and_then(|file| file.observed_sync_all())
+    crate::durable_commit::sync_directory(path)
         .map_err(|source| io("sync embedding directory", path, source))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<(), SearchArtifactError> {
-    Ok(())
 }
 
 fn primary_from(path: &Path, error: SearchArtifactError) -> SearchArtifactError {

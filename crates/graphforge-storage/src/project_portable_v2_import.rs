@@ -1,6 +1,5 @@
 //! Verification-first, bounded portable-v2 project import.
 
-use graphforge_filesystem::ObservedSync as _;
 mod native_validation;
 pub use native_validation::{
     NativeResearchValidator, import_complete_portable_v2_with_native_validation,
@@ -518,12 +517,9 @@ fn materialize_owned_import(
     ) {
         Ok(materialized) => materialized,
         Err(error) => {
-            if fs::remove_file(&owner).is_ok()
-                && let Some(allocation) = allocation
-            {
-                let _ = allocation.remove_file_at(&owner);
-            }
-            let _ = sync_parent(&owner);
+            drop(owner_file);
+            let mut removed = std::collections::BTreeMap::new();
+            let _ = cleanup_import_owner(&owner, &identities, &mut removed, allocation);
             return Err(error.with_allocation_identities(identities));
         }
     };
@@ -652,17 +648,14 @@ fn cleanup_import_materialization(
         )?;
         let directory_identity = directory.identity();
         drop(directory);
-        parent
-            .remove_child_directory_if_identity(name, directory_identity)
-            .map_err(|_| {
+        crate::durable_commit::retire_directory(&parent, name, directory_identity).map_err(
+            |_| {
                 PortableV2Error::new(
                     PortableV2ErrorCode::Io,
-                    "cannot remove authenticated import staging",
+                    "cannot retire authenticated import staging",
                 )
-            })?;
-        parent.sync().map_err(|_| {
-            PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync import staging parent")
-        })?;
+            },
+        )?;
     }
     cleanup_import_owner(owner, identities, &mut removed_identities, allocation)?;
     Ok(PortableV2ImportCleanupReceipt {
@@ -711,22 +704,17 @@ fn cleanup_import_owner(
         // Authentication handles deny delete sharing on Windows. The removal
         // operation rechecks the saved identity after acquiring its own handle.
         drop(file);
-        parent
-            .unlink_child_if_identity(name, identity)
-            .map_err(|_| {
-                PortableV2Error::new(
-                    PortableV2ErrorCode::Io,
-                    "cannot remove authenticated import owner",
-                )
-            })?;
+        crate::durable_commit::retire_files(&parent, [(name, identity)]).map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "cannot retire authenticated import owner",
+            )
+        })?;
         if let Some(allocation) = allocation {
             allocation
                 .remove_file_at(owner)
                 .map_err(|error| storage(&error))?;
         }
-        parent.sync().map_err(|_| {
-            PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync import owner parent")
-        })?;
     }
     Ok(())
 }
@@ -745,8 +733,9 @@ fn remove_stable_tree(
         )
     })?;
     *remaining = (*remaining).saturating_sub(names.len());
-    for name in names {
-        if let Ok(child) = directory.open_child_directory(&name) {
+    let mut retired = Vec::with_capacity(names.len());
+    for name in &names {
+        if let Ok(child) = directory.open_child_directory(name) {
             remove_stable_tree(
                 &child,
                 identities,
@@ -756,16 +745,12 @@ fn remove_stable_tree(
             )?;
             let child_identity = child.identity();
             drop(child);
-            directory
-                .remove_child_directory_if_identity(&name, child_identity)
-                .map_err(|_| {
-                    PortableV2Error::new(
-                        PortableV2ErrorCode::Io,
-                        "cannot remove authenticated import directory",
-                    )
-                })?;
+            retired.push(crate::durable_commit::RetireEntry::Directory {
+                name,
+                identity: child_identity,
+            });
         } else {
-            let file = directory.open_child_file(&name).map_err(|_| {
+            let file = directory.open_child_file(name).map_err(|_| {
                 PortableV2Error::new(
                     PortableV2ErrorCode::Io,
                     "cannot authenticate import cleanup entry",
@@ -790,27 +775,23 @@ fn remove_stable_tree(
             }
             removed_identities.extend(observed);
             drop(file);
-            directory
-                .unlink_child_if_identity(&name, identity)
-                .map_err(|_| {
-                    PortableV2Error::new(
-                        PortableV2ErrorCode::Io,
-                        "cannot remove authenticated import entry",
-                    )
-                })?;
-            if let Some(allocation) = allocation {
-                allocation
-                    .remove_file_at(&directory.path().join(&name))
-                    .map_err(|error| storage(&error))?;
-            }
+            retired.push(crate::durable_commit::RetireEntry::File { name, identity });
         }
     }
-    directory.sync().map_err(|_| {
+    crate::durable_commit::retire_entries(directory, retired).map_err(|_| {
         PortableV2Error::new(
             PortableV2ErrorCode::Io,
-            "cannot sync authenticated import staging",
+            "cannot retire authenticated import staging",
         )
-    })
+    })?;
+    if let Some(allocation) = allocation {
+        for name in &names {
+            allocation
+                .remove_file_at(&directory.path().join(name))
+                .map_err(|error| storage(&error))?;
+        }
+    }
+    Ok(())
 }
 
 fn claim_stage(
@@ -875,13 +856,26 @@ fn claim_stage(
                 "cannot mark import staging ownership",
             )
         })?;
-        marker.observed_sync_all().map_err(|_| {
+        let parent = graphforge_filesystem::StableDirectory::open(
+            owner.parent().unwrap_or_else(|| Path::new(".")),
+        )
+        .map_err(|_| {
             PortableV2Error::new(
                 PortableV2ErrorCode::Io,
-                "cannot sync import staging ownership",
+                "cannot retain import ownership parent",
             )
         })?;
-        sync_parent(&owner)?;
+        let name = owner.file_name().ok_or_else(|| {
+            PortableV2Error::new(PortableV2ErrorCode::InvalidPath, "import owner has no name")
+        })?;
+        crate::durable_commit::acknowledge_created(&parent, name, &marker, || Ok(())).map_err(
+            |_| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::Io,
+                    "cannot acknowledge import staging ownership",
+                )
+            },
+        )?;
     }
     crate::project_failpoint::hit(
         "portable_import.after_owner",
@@ -892,29 +886,6 @@ fn claim_stage(
     )
     .map_err(|error| storage(&error))?;
     Ok((owner, owned_retry))
-}
-
-fn sync_parent(path: &Path) -> Result<(), PortableV2Error> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    sync_directory_handle(parent).map_err(|_| {
-        PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync import staging parent")
-    })
-}
-
-#[cfg(not(windows))]
-fn sync_directory_handle(path: &Path) -> std::io::Result<()> {
-    fs::File::open(path)?.observed_sync_all()
-}
-
-#[cfg(windows)]
-fn sync_directory_handle(path: &Path) -> std::io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt as _;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    OpenOptions::new()
-        .write(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?
-        .observed_sync_all()
 }
 
 #[expect(clippy::too_many_arguments, reason = "import authority is explicit")]

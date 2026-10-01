@@ -14,6 +14,8 @@
 //! - [`search_manifest`] / [`search_publication`] — shared search freshness and atomic publication
 #![forbid(unsafe_code)]
 
+#[doc(hidden)]
+pub mod durable_commit;
 mod durable_rewrite;
 mod file_lock;
 mod route_component;
