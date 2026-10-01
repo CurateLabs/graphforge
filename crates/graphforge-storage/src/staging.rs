@@ -26,7 +26,6 @@
 //! plain [`commit`](RewriteBatch::commit) remains for tests and explicitly
 //! ephemeral callers; persistent graph mutations use the topology-aware path.
 
-use graphforge_filesystem::ObservedSync as _;
 use std::path::{Path, PathBuf};
 
 use arrow::array::RecordBatch;
@@ -119,9 +118,17 @@ pub(crate) fn is_staged_temp_name(name: &std::ffi::OsStr) -> bool {
 pub struct RewriteBatch {
     /// `(staged temp, final destination)` in insertion = commit order.
     staged: Vec<(NamedTempFile, PathBuf)>,
+    // Opaque barriers belong to current retained temporaries, never public metadata.
+    seals: BTreeMap<PathBuf, crate::durable_commit::FileSeal>,
     pending_routes: crate::route_component::owned::PendingRoutes,
     property_windows: BTreeMap<PropertyWindowKey, PendingPropertyWindow>,
     moves: BTreeMap<PathBuf, crate::durable_rewrite::moves::SourceRetirement>,
+}
+
+pub(crate) struct StagedRewrite {
+    pub(crate) staged: Vec<(NamedTempFile, PathBuf)>,
+    pub(crate) moves: BTreeMap<PathBuf, crate::durable_rewrite::moves::SourceRetirement>,
+    pub(crate) seals: BTreeMap<PathBuf, crate::durable_commit::FileSeal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -186,7 +193,11 @@ impl RewriteBatch {
                 "duplicate rewrite move destination".into(),
             ));
         }
-        let (temporary, retirement) = crate::durable_rewrite::moves::stage_retained(
+        let crate::durable_rewrite::moves::StagedMove {
+            temporary,
+            retirement,
+            seal,
+        } = crate::durable_rewrite::moves::stage_retained(
             project_root,
             directory,
             source,
@@ -194,6 +205,7 @@ impl RewriteBatch {
             "semantic-route-move.parquet.",
         )?;
         self.moves.insert(destination.to_owned(), retirement);
+        self.seals.insert(temporary.path().to_path_buf(), seal);
         self.staged.push((temporary, destination.to_owned()));
         Ok(())
     }
@@ -210,13 +222,18 @@ impl RewriteBatch {
                 "duplicate rewrite move destination".into(),
             ));
         }
-        let (temporary, retirement) = crate::durable_rewrite::moves::stage(
+        let crate::durable_rewrite::moves::StagedMove {
+            temporary,
+            retirement,
+            seal,
+        } = crate::durable_rewrite::moves::stage(
             project_root,
             source,
             destination,
             temporary_prefix,
         )?;
         self.moves.insert(destination.to_owned(), retirement);
+        self.seals.insert(temporary.path().to_path_buf(), seal);
         self.staged.push((temporary, destination.to_owned()));
         Ok(())
     }
@@ -271,12 +288,12 @@ impl RewriteBatch {
             crate::io_stats::record_uuid_file_open();
         }
         std::io::Write::write_all(&mut temp, bytes).map_err(|error| io_err(&error))?;
-        temp.as_file()
-            .observed_sync_all()
+        let seal = crate::durable_commit::seal_file_witness(temp.as_file())
             .map_err(|error| io_err(&error))?;
         if uuid_participant {
             crate::io_stats::record_uuid_file_sync();
         }
+        self.seals.insert(temp.path().to_path_buf(), seal);
         self.staged.push((temp, final_path.to_path_buf()));
         Ok(())
     }
@@ -307,12 +324,12 @@ impl RewriteBatch {
             std::io::Write::write_all(&mut temp, &block[..count])
                 .map_err(|error| io_err(&error))?;
         }
-        temp.as_file()
-            .observed_sync_all()
+        let seal = crate::durable_commit::seal_file_witness(temp.as_file())
             .map_err(|error| io_err(&error))?;
         if uuid_participant {
             crate::io_stats::record_uuid_file_sync();
         }
+        self.seals.insert(temp.path().to_path_buf(), seal);
         self.staged.push((temp, final_path.to_path_buf()));
         Ok(())
     }
@@ -382,6 +399,7 @@ impl RewriteBatch {
         self.refuse_move_replacement(final_path)?;
         let tmp = stage_parquet_temp(final_path, schema, batch)?;
         if let Some(entry) = self.staged.iter_mut().find(|(_, p)| p == final_path) {
+            self.seals.remove(entry.0.path());
             entry.0 = tmp; // the replaced NamedTempFile is removed on drop
         } else {
             self.staged.push((tmp, final_path.to_path_buf()));
@@ -461,6 +479,7 @@ impl RewriteBatch {
         writer.write(batch).map_err(pq_err)?;
         writer.close().map_err(pq_err)?;
         if let Some(entry) = self.staged.iter_mut().find(|(_, path)| path == final_path) {
+            self.seals.remove(entry.0.path());
             entry.0 = tmp;
         } else {
             self.staged.push((tmp, final_path.to_path_buf()));
@@ -592,7 +611,7 @@ impl RewriteBatch {
 
     /// Install every staged file and return the directory barriers completed.
     fn commit_retained(
-        self,
+        mut self,
         root: &graphforge_filesystem::StableDirectory,
         destinations: &[PathBuf],
         allocation: Option<&crate::StorageAllocationOperation>,
@@ -610,14 +629,30 @@ impl RewriteBatch {
             let temporary_name = temporary_path
                 .file_name()
                 .ok_or_else(|| GfError::Storage("staged temporary has no child name".into()))?;
-            let expected = graphforge_filesystem::file_identity(temporary.as_file())
-                .map_err(|error| GfError::Storage(error.to_string()))?;
             if let Some(allocation) = allocation {
                 allocation.replace_file_at(temporary_path, temporary.as_file())?;
             }
-            run_before_retained_install_hook();
-            parent
-                .replace_child(temporary_name, expected, &target)
+            let seal = match self.seals.remove(temporary_path) {
+                Some(seal) => seal,
+                None => crate::durable_commit::seal_file_witness(temporary.as_file())
+                    .map_err(|error| io_err(&error))?,
+            };
+            let sealed = crate::durable_commit::SealedArtifact::adopt_sealed(
+                &parent,
+                temporary_name,
+                temporary
+                    .as_file()
+                    .try_clone()
+                    .map_err(|error| io_err(&error))?,
+                seal,
+                allocation,
+            )
+            .map_err(|error| io_err(&error))?;
+            let pending = sealed
+                .make_visible(&target, crate::durable_commit::PublishMode::Replace, || {
+                    run_before_retained_install_hook();
+                    Ok(())
+                })
                 .map_err(|error| GfError::Storage(error.to_string()))?;
             if let Some(allocation) = allocation {
                 allocation.remove_file_at(destination.as_path())?;
@@ -627,8 +662,8 @@ impl RewriteBatch {
                     .map_err(|error| GfError::Storage(error.to_string()))?;
                 allocation.replace_file_at(destination.as_path(), &installed)?;
             }
-            parent
-                .sync()
+            pending
+                .acknowledge(allocation)
                 .map_err(|error| GfError::Storage(error.to_string()))?;
             barriers += 1;
         }
@@ -806,13 +841,12 @@ impl RewriteBatch {
         std::mem::take(&mut self.property_windows)
     }
 
-    pub(crate) fn into_staged(
-        self,
-    ) -> (
-        Vec<(NamedTempFile, PathBuf)>,
-        BTreeMap<PathBuf, crate::durable_rewrite::moves::SourceRetirement>,
-    ) {
-        (self.staged, self.moves)
+    pub(crate) fn into_staged(self) -> StagedRewrite {
+        StagedRewrite {
+            staged: self.staged,
+            moves: self.moves,
+            seals: self.seals,
+        }
     }
 
     pub(crate) fn move_staged_destination_to_end(&mut self, destination: &Path) {

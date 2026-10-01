@@ -1,6 +1,5 @@
 //! Durable per-lineage mutation evidence for embedding freshness.
 
-use graphforge_filesystem::ObservedSync as _;
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -382,12 +381,43 @@ fn persist(path: &Path, bytes: &[u8]) -> Result<(), SearchArtifactError> {
         .map_err(|source| io("create mutation journal temp", path, source))?;
     temp.write_all(bytes)
         .map_err(|source| io("write mutation journal", path, source))?;
-    temp.as_file()
-        .observed_sync_all()
+    let directory = graphforge_filesystem::StableDirectory::open(parent)
+        .map_err(|source| io("publish mutation journal", path, source))?;
+    let temporary = temp
+        .path()
+        .file_name()
+        .expect("named temporary has a child name");
+    let identity = graphforge_filesystem::file_identity(temp.as_file())
         .map_err(|source| io("sync mutation journal", path, source))?;
-    temp.persist(path)
-        .map_err(|error| io("publish mutation journal", path, error.error))?;
-    sync_dir(parent)
+    let file = temp
+        .as_file()
+        .try_clone()
+        .map_err(|source| io("sync mutation journal", path, source))?;
+    crate::durable_commit::SealedArtifact::seal_existing(
+        &directory, temporary, file, identity, None,
+    )
+    .map_err(|source| io("sync mutation journal", path, source))?
+    .make_visible(
+        path.file_name().expect("publication has a child name"),
+        crate::durable_commit::PublishMode::Replace,
+        || Ok(()),
+    )
+    .map_err(|error| {
+        io(
+            "publish mutation journal",
+            path,
+            std::io::Error::other(error),
+        )
+    })?
+    .acknowledge(None)
+    .map_err(|error| {
+        io(
+            "publish mutation journal",
+            path,
+            std::io::Error::other(error),
+        )
+    })?;
+    Ok(())
 }
 
 struct WriterLock {
@@ -479,18 +509,6 @@ fn decode<const N: usize>(path: &Path, value: &str) -> Result<[u8; N], SearchArt
             .map_err(|error| corrupt(path, error.to_string()))?;
     }
     Ok(output)
-}
-
-#[cfg(unix)]
-fn sync_dir(path: &Path) -> Result<(), SearchArtifactError> {
-    File::open(path)
-        .and_then(|file| file.observed_sync_all())
-        .map_err(|source| io("sync mutation journal directory", path, source))
-}
-
-#[cfg(not(unix))]
-fn sync_dir(_: &Path) -> Result<(), SearchArtifactError> {
-    Ok(())
 }
 
 fn usize_limit(limit: usize) -> u64 {

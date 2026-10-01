@@ -27,6 +27,12 @@ use crate::project_generation::{
 };
 use crate::project_publication::GENERATIONS_DIR;
 
+// Actual physical fault witnesses share the storage commit owner with all
+// durable writers; modeled power-loss omission witnesses remain below.
+#[cfg(test)]
+#[path = "durable_commit/tests.rs"]
+mod primitive;
+
 const MANIFEST_FILE: &str = "manifest.json";
 const PARTICIPANTS_DIR: &str = "participants";
 const LEASE_FILE: &str = "lease.lock";

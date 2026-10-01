@@ -4,7 +4,6 @@
 //! It converts the shaper's authenticated, UUID-ordered streams into the exact
 //! ordinary storage schemas and prepares a streamed UUID-membership manifest.
 
-use graphforge_filesystem::ObservedSync as _;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs::File;
@@ -143,7 +142,7 @@ impl Drop for EncodingTempGuard<'_> {
             let _ = self
                 .directory
                 .unlink_child_if_identity(OsStr::new(&self.name), self.identity);
-            let _ = self.directory.sync();
+            let _ = self.directory.acknowledge();
         }
     }
 }
@@ -221,7 +220,7 @@ fn authenticated_source_spool<'a>(
     };
     account_cache_release(source_release, evidence)?;
     spool.flush().map_err(storage)?;
-    spool.sync_all_and_release().map_err(storage)?;
+    output.seal_cache_writer(&mut spool).map_err(storage)?;
     add_evidence_counter(
         &mut evidence.source_spool_fsync_operations,
         spool.evidence().sync_operations,
@@ -2257,10 +2256,8 @@ fn copy_artifact<R: Read + Seek>(
     );
     let bytes = std::io::copy(&mut input, &mut writer).map_err(storage)?;
     writer.flush().map_err(storage)?;
-    writer
-        .get_mut()
-        .inner
-        .sync_all_and_release()
+    directory
+        .seal_cache_writer(&mut writer.get_mut().inner)
         .map_err(storage)?;
     let cache_release = writer.get_ref().inner.evidence();
     account_cache_release(cache_release, evidence)?;
@@ -2282,7 +2279,7 @@ fn copy_artifact<R: Read + Seek>(
         .replace_child(OsStr::new(&temporary), identity, OsStr::new(&name))
         .map_err(storage)?;
     temporary_guard.disarm();
-    directory.sync().map_err(storage)?;
+    directory.acknowledge().map_err(storage)?;
     crate::graph_construction::construction_failpoint(&format!(
         "encode.copy.after_install.{relative}"
     ));
@@ -2536,7 +2533,7 @@ fn remove_encoding_control(root: &StableDirectory, name: &str) -> Result<(), GfE
     drop(file);
     root.unlink_child_if_identity(OsStr::new(name), identity)
         .map_err(storage)?;
-    root.sync().map_err(storage)
+    root.acknowledge().map_err(storage)
 }
 
 fn cleanup_encoding_temps(
@@ -2592,7 +2589,7 @@ fn cleanup_encoding_directory(
         cleanup_encoding_directory(&child, limit, visited)?;
     }
     if changed {
-        directory.sync().map_err(storage)?;
+        directory.acknowledge().map_err(storage)?;
     }
     Ok(())
 }
@@ -2670,7 +2667,7 @@ fn install_json<T: Serialize>(
     serde_json::to_writer(&mut writer, value).map_err(storage)?;
     writer.flush().map_err(storage)?;
     drop(writer);
-    file.observed_sync_all().map_err(storage)?;
+    root.seal_file(&file).map_err(storage)?;
     crate::graph_construction::construction_failpoint(&format!(
         "encode.control.after_temp_fsync.{name}"
     ));
@@ -2678,7 +2675,7 @@ fn install_json<T: Serialize>(
     root.replace_child(OsStr::new(&temporary), identity, OsStr::new(name))
         .map_err(storage)?;
     temporary_guard.disarm();
-    root.sync().map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     crate::graph_construction::construction_failpoint(&format!(
         "encode.control.after_install.{name}"
     ));

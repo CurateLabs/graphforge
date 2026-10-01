@@ -10,7 +10,6 @@
 use self::probing::ProbeFileKind;
 use self::probing::authenticated_probe_block;
 use graphforge_core::GfError;
-use graphforge_filesystem::ObservedSync as _;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -98,13 +97,6 @@ fn create_uuid_file(path: &Path) -> Result<File, GfError> {
     let file = File::create(path).map_err(storage_err)?;
     crate::io_stats::record_uuid_file_open();
     Ok(file)
-}
-
-fn sync_uuid_file(file: &File) -> Result<(), GfError> {
-    let _wait = crate::concurrency_attribution::RegionScope::named("fsync");
-    file.observed_sync_all().map_err(storage_err)?;
-    crate::io_stats::record_uuid_file_sync();
-    Ok(())
 }
 
 fn open_uuid_child_file(

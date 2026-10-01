@@ -188,7 +188,7 @@ The method and reviewed classification inputs are pinned by SHA-256:
 `digest-census.py` is
 `3a02f98553b682c7a8cb7b3ca0e92ad62cd68ab52241c3e33c795eacb96c44c9`;
 `digest-census-overrides.json` is
-`95e4a70e1ff49b2315a240b10c1780cee56656fc01e530e02ca87529c7524e51`.
+`b8682073972a61e841b3243cae85b0c766f9d7a36b8bc646b7af21ecbde36d4e`.
 The parser fixture `test-digest-census.py` is
 `234118a30c9231d3e860ad22ecbd113f815116688c7d390acc1a28a0c0cb2276`.
 Run the parser and stale-review regression fixtures with
@@ -197,7 +197,7 @@ are pinned individually; changed inputs, added producers in the same function,
 missing review pins, and unknown digest algorithms make a strict run fail.
 Refresh a classification only after reviewing its actual inputs and consumers.
 The reviewed application source inventory SHA-256 is
-`c241f70c0fd13f6582866078827b014ba5bd43703b7c2fac4f9be27027f3b754`; the method computes this over its ordered Rust path/file-digest map.
+`8e0719bfa3ac179d786666301a0a2c4b615a0737661155aae643651f58d8ea01`; the method computes this over its ordered Rust path/file-digest map.
 Static sites are distinct from measured update bytes and runtime passes.
 
 Compact publication reuses a payload identity only from the authenticated
@@ -644,3 +644,25 @@ runs with `python3 scripts/development/import-journal/test-reopen-method.py` in
 the same PyArrow environment. It decodes tiny real Parquet query-result
 fixtures and checks persisted positive/refused proofs; GraphForge invocation
 is replaced by a fixture producer, so it does not claim actual reopen evidence.
+
+## Durability source inventory
+
+Reproduce the source-site inventory outside the repository:
+
+```bash
+python3 scripts/development/fsync-sites.py . f20bdca3561d69b50d60658998c4035dff25a706 /tmp/gf-fsync-before.json
+python3 scripts/development/fsync-sites.py . HEAD /tmp/gf-fsync-after.json
+python3 scripts/ci/check-direct-fsync.py
+python3 scripts/ci/test-direct-fsync.py
+```
+
+The baseline input digest is
+`6ca82e789dbdaac906f89d7ca3679301aa5cc9cb97972cf5817ff00680f3e161`.
+The method digest is `3882b6e9d1d758f53c674043b63033aec502e4086d8c4466c50cc0ee71e451ea`.
+The method masks comments/literals and distinguishes production expressions,
+test/probe evidence, Arrow codec flushes and layered cache/helper requests.
+Rows identify publication, transient, journal/recovery, lock and evidence roles.
+Production source expressions include the admission probes; cache completion
+requests and layered helpers are reported separately and never added as syscalls.
+Source expressions measure ownership concentration, not runtime syscall savings.
+The issue carries before/after results, raw inventory and retirement evidence.

@@ -3,7 +3,6 @@
 //! Manifest updates, authenticated materialization, installation, and collection
 //! have private owners. Shared leases and lifecycle locks stay here.
 
-use graphforge_filesystem::ObservedSync as _;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(windows)]
 use std::fs::OpenOptions;
@@ -128,11 +127,10 @@ impl Drop for PendingPublication<'_> {
         }
         self.file.take();
         if let Some(identity) = self.lease_identity {
-            let _ = self
-                .cas
-                .active
-                .unlink_child_if_identity(&self.lease_name, identity);
-            let _ = self.cas.active.sync();
+            let _ = crate::durable_commit::retire_files(
+                &self.cas.active,
+                [(self.lease_name.as_os_str(), identity)],
+            );
         }
     }
 }
@@ -455,11 +453,10 @@ impl Drop for GraphObjectPublicationLease {
             let _ = crate::file_lock::unlock(&file);
             drop(file);
         }
-        let _ = self
-            .cas
-            .active
-            .unlink_child_if_identity(&self.lease_name, self.lease_identity);
-        let _ = self.cas.active.sync();
+        let _ = crate::durable_commit::retire_files(
+            &self.cas.active,
+            [(self.lease_name.as_os_str(), self.lease_identity)],
+        );
         let _ = crate::file_lock::unlock(&self.cas.lifecycle);
         #[cfg(unix)]
         let _ = self.cas.objects.unlock();
@@ -578,16 +575,13 @@ pub fn begin_graph_object_publication(root: &Path) -> Result<GraphObjectPublicat
         .map_err(|error| storage("lock graph object publication lease", root, error))?;
     pending.lease_locked = true;
     returned_error_boundary("publication:lease-lock")?;
-    pending
-        .file
-        .as_ref()
-        .unwrap()
-        .observed_sync_all()
-        .map_err(|error| storage("sync graph object publication lease", root, error))?;
-    returned_error_boundary("publication:lease-sync")?;
-    cas.active
-        .sync()
-        .map_err(|error| storage("sync graph object active directory", root, error))?;
+    crate::durable_commit::acknowledge_created(
+        &cas.active,
+        &lease_name,
+        pending.file.as_ref().unwrap(),
+        || returned_error_boundary("publication:lease-sync").map_err(std::io::Error::other),
+    )
+    .map_err(|error| storage("acknowledge graph object publication lease", root, error))?;
     returned_error_boundary("publication:active-sync")?;
     let file = pending.file.take().unwrap();
     pending.lease_locked = false;
@@ -638,12 +632,8 @@ pub fn graph_object_publication_is_live(root: &Path) -> Result<bool, GfError> {
             crate::file_lock::unlock(&file)
                 .map_err(|error| storage("unlock graph object lease", root, error))?;
             drop(file);
-            cas.active
-                .unlink_child_if_identity(&entry, identity)
-                .map_err(|error| storage("remove stale graph object lease", root, error))?;
-            cas.active
-                .sync()
-                .map_err(|error| storage("sync graph object active directory", root, error))?;
+            crate::durable_commit::retire_files(&cas.active, [(entry.as_os_str(), identity)])
+                .map_err(|error| storage("retire stale graph object lease", root, error))?;
         } else {
             live = true;
         }

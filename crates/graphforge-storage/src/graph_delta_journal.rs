@@ -4,10 +4,9 @@
 //! inventory-verified graph generation. Derived adjacency deltas remain a
 //! separate rebuildable accelerator (`adjacency_delta`).
 
-use graphforge_filesystem::ObservedSync as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use arrow::array::{
@@ -1756,12 +1755,17 @@ fn write_prepared_run(
         fs::create_dir_all(parent_dir)
             .map_err(|error| storage("create deltas directory", parent_dir, error))?;
     }
-    let mut file =
-        File::create(&new_path).map_err(|error| storage("create delta run", &new_path, error))?;
-    file.write_all(run_bytes)
-        .map_err(|error| storage("write delta run", &new_path, error))?;
-    file.observed_sync_all()
-        .map_err(|error| storage("flush delta run", &new_path, error))?;
+    crate::durable_commit::publish_atomic(
+        &new_path,
+        run_bytes,
+        crate::durable_commit::AtomicHooks {
+            after_write: || Ok(()),
+            after_seal: || Ok(()),
+            before_visible: || Ok(()),
+        },
+        None,
+    )
+    .map_err(|error| storage("publish delta run", &new_path, error))?;
     Ok(())
 }
 
@@ -2498,32 +2502,6 @@ mod crash_oracle_tests {
             panic!("clone publication unexpectedly replayed");
         };
         (generation_uuid, staged)
-    }
-
-    #[test]
-    fn crash_oracle_before_and_after_ack_matches_frozen_contract() {
-        let seed = 752u64;
-        let ids = PublicationIds::from_seed(seed);
-        for phase in [
-            PublicationPhase::BeforeCurrentReplace,
-            PublicationPhase::AfterCurrentReplace,
-            PublicationPhase::AfterRootFsync,
-        ] {
-            let ops = publication_ops(ids, phase);
-            let durable = default_durable_ids(&ops, phase);
-            let report = simulate_crash(seed, phase, &durable).unwrap();
-            assert_eq!(report.expected, expected_authority(phase));
-            assert_eq!(report.actual, report.expected);
-            match phase {
-                PublicationPhase::BeforeCurrentReplace => {
-                    assert_eq!(report.expected, AuthorityClass::PriorGeneration);
-                }
-                PublicationPhase::AfterCurrentReplace | PublicationPhase::AfterRootFsync => {
-                    assert_eq!(report.expected, AuthorityClass::NewGeneration);
-                }
-                _ => unreachable!(),
-            }
-        }
     }
 
     #[test]

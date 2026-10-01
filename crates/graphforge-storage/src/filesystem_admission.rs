@@ -202,10 +202,13 @@ impl ProjectLifecycleAdmission {
         {
             return Err(unsupported("REMOVE", "project_identity_changed"));
         }
-        std::fs::remove_dir_all(&root)
-            .map_err(|_| unsupported("REMOVE", "project_remove_failed"))?;
-        complete_namespace_barrier(parent.path())
-            .map_err(|_| unsupported("REMOVE", "parent_namespace_barrier_failed"))?;
+        crate::durable_commit::retire_owned_tree(
+            &parent.directory,
+            root.file_name()
+                .ok_or_else(|| unsupported("REMOVE", "project_identity_unavailable"))?,
+            project_identity,
+        )
+        .map_err(|_| unsupported("REMOVE", "project_remove_failed"))?;
         parent.revalidate("REMOVE", "parent_identity_changed")?;
         if let Some(lock) = &lifecycle_lock {
             lock.revalidate()?;
@@ -345,7 +348,7 @@ fn admit_project_lifecycle_inner(
                 &parent,
                 &target_name,
                 || create_private_child_directory(&parent, &target_name, &root),
-                || complete_namespace_barrier_handle(&parent),
+                || crate::durable_commit::acknowledge_directory(&parent.directory),
             )?;
         }
         Err(_) => return Err(unsupported("IDENTITY", "target_metadata_unavailable")),
@@ -555,10 +558,13 @@ impl LifecycleLock {
         let path = parent.path().join(&name);
         let file = open_lifecycle_lock_file(parent, &name)
             .map_err(|_| unsupported("LOCK", "lifecycle_lock_open_failed"))?;
-        file.observed_sync_all()
-            .map_err(|_| unsupported("LOCK", "lifecycle_lock_flush_failed"))?;
-        complete_namespace_barrier(parent.path())
-            .map_err(|_| unsupported("LOCK", "parent_namespace_barrier_failed"))?;
+        crate::durable_commit::acknowledge_created(
+            &parent.directory,
+            std::ffi::OsStr::new(&name),
+            &file,
+            || Ok(()),
+        )
+        .map_err(|_| unsupported("LOCK", "lifecycle_lock_flush_failed"))?;
         crate::file_lock::lock_exclusive(&file)
             .map_err(|_| unsupported("LOCK", "lifecycle_lock_failed"))?;
         let identity = graphforge_filesystem::file_identity(&file)

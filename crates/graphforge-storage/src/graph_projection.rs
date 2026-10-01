@@ -4,7 +4,6 @@
 //! never enumerates or copies project-generation participants, provenance,
 //! knowledge, epistemic, valid-time, search, or derived-index directories.
 
-use graphforge_filesystem::ObservedSync as _;
 use graphforge_value::{EntityTypeId, PrimaryEntityTypeId, RuntimeEntityId};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, File};
@@ -107,7 +106,7 @@ pub(crate) fn install_transform_table(
         .open(root.join(crate::route_component::TABLE_FILE))
         .map_err(storage)?;
     file.write_all(&bytes).map_err(storage)?;
-    file.observed_sync_all().map_err(storage)
+    crate::durable_commit::seal_file(&file).map_err(storage)
 }
 
 type GraphUuid = [u8; 16];

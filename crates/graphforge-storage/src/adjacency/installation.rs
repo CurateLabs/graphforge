@@ -42,13 +42,30 @@ pub(super) fn persist_temp_observed(
     if let Some(allocation) = allocation {
         allocation.replace_file_at(&temporary, tmp.as_file())?;
     }
-    let file = tmp
-        .persist(path)
-        .map_err(|error| storage_err(error.error))?;
-    if let Some(allocation) = allocation {
-        allocation.remove_file_at(path)?;
-        allocation.remove_file_at(&temporary)?;
-        allocation.replace_file_at(path, &file)?;
-    }
+    let parent = graphforge_filesystem::StableDirectory::open(
+        path.parent()
+            .ok_or_else(|| storage_err("CSR path has no parent"))?,
+    )
+    .map_err(storage_err)?;
+    let identity = graphforge_filesystem::file_identity(tmp.as_file()).map_err(storage_err)?;
+    let name = temporary
+        .file_name()
+        .ok_or_else(|| storage_err("CSR temporary has no name"))?
+        .to_owned();
+    let (file, retained_path) = tmp.keep().map_err(|error| storage_err(error.error))?;
+    debug_assert_eq!(retained_path, temporary);
+    crate::durable_commit::SealedArtifact::seal_existing(
+        &parent, &name, file, identity, allocation,
+    )
+    .map_err(storage_err)?
+    .make_visible(
+        path.file_name()
+            .ok_or_else(|| storage_err("CSR target has no name"))?,
+        crate::durable_commit::PublishMode::Replace,
+        || Ok(()),
+    )
+    .map_err(storage_err)?
+    .acknowledge(allocation)
+    .map_err(storage_err)?;
     Ok(())
 }

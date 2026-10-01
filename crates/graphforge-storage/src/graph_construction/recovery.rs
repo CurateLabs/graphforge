@@ -562,7 +562,7 @@ fn cleanup_incomplete_shape_capabilities(
         drop(file);
         root.unlink_child_if_identity(OsStr::new(name), identity)
             .map_err(storage)?;
-        root.sync().map_err(storage)?;
+        root.acknowledge().map_err(storage)?;
     }
     Ok(work)
 }
@@ -688,7 +688,7 @@ pub(super) fn unlink_writer_capability(
     drop(file);
     root.unlink_child_if_identity(OsStr::new(&capability_name), identity)
         .map_err(storage)?;
-    root.sync().map_err(storage)
+    root.acknowledge().map_err(storage)
 }
 
 pub(super) fn unlink_shape_artifact(
@@ -861,11 +861,8 @@ pub(super) fn cleanup_failed_shape_output(
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<(), GfError> {
     let flushed = writer.flush().map_err(storage);
-    let synchronized = writer
-        .get_mut()
-        .inner
-        .sync_all_and_release()
-        .map_err(storage);
+    let synchronized =
+        crate::durable_commit::seal_cache_writer(&mut writer.get_mut().inner).map_err(storage);
     let cache_release = writer.get_ref().inner.evidence();
     account_cache_release(cache_release, evidence)?;
     let finalized =
@@ -1202,7 +1199,7 @@ pub(super) fn cleanup_authenticated_control_temps(
             drop(file);
             root.unlink_child_if_identity(&name, identity)
                 .map_err(storage)?;
-            root.sync().map_err(storage)?;
+            root.acknowledge().map_err(storage)?;
         }
     }
     Ok(())
@@ -1233,7 +1230,7 @@ pub(super) fn cleanup_owned_artifact_temps(root: &StableDirectory) -> Result<(),
         drop(file);
         root.unlink_child_if_identity(&name, identity)
             .map_err(storage)?;
-        root.sync().map_err(storage)?;
+        root.acknowledge().map_err(storage)?;
     }
     Ok(())
 }
@@ -1287,7 +1284,7 @@ pub(super) fn unlink_named(root: &StableDirectory, name: &str) -> Result<(), GfE
     drop(file);
     root.unlink_child_if_identity(OsStr::new(name), identity)
         .map_err(storage)?;
-    root.sync().map_err(storage)
+    root.acknowledge().map_err(storage)
 }
 
 fn unlink_artifact(root: &StableDirectory, receipt: &ArtifactReceipt) -> Result<(), GfError> {
@@ -1302,7 +1299,7 @@ fn unlink_artifact(root: &StableDirectory, receipt: &ArtifactReceipt) -> Result<
     drop(file);
     root.unlink_child_if_identity(OsStr::new(&receipt.name), identity)
         .map_err(storage)?;
-    root.sync().map_err(storage)
+    root.acknowledge().map_err(storage)
 }
 
 fn remove_unrecorded_artifact(
@@ -1377,7 +1374,7 @@ fn remove_unrecorded_artifact(
     unlink_writer_capability(root, name, None)?;
     root.unlink_child_if_identity(OsStr::new(name), identity)
         .map_err(storage)?;
-    root.sync().map_err(storage)
+    root.acknowledge().map_err(storage)
 }
 
 #[cfg(test)]

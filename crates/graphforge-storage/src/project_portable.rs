@@ -5,12 +5,10 @@
 //! participant inventory, and participant bytes. Locks, journals, attempts,
 //! trash, caches, leases, manifests, and `CURRENT` are never enumerated.
 
-use graphforge_filesystem::ObservedSync as _;
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use atomicwrites::{AtomicFile, DisallowOverwrite};
 use graphforge_core::hash_observation::PortableSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
@@ -220,11 +218,28 @@ pub fn export_portable_project(
     let destination = destination.as_ref();
     reject_export_destination(destination)?;
     let (bytes, receipt) = encode_portable_project(generation, limits)?;
-    AtomicFile::new(destination, DisallowOverwrite)
-        .write(|file| {
-            file.write_all(&bytes)?;
-            file.observed_sync_all()
-        })
+    let parent = destination
+        .parent()
+        .ok_or_else(|| GfError::Storage("portable export has no parent".to_owned()))?;
+    let directory = graphforge_filesystem::StableDirectory::open(parent)
+        .map_err(|error| GfError::Storage(error.to_string()))?;
+    let temporary = format!("portable-{}.tmp", Uuid::new_v4());
+    let sealed = crate::durable_commit::stage_writer(
+        &directory,
+        std::ffi::OsStr::new(&temporary),
+        |file| file.write_all(&bytes),
+        None,
+    )
+    .map_err(|error| GfError::Storage(format!("failed to write portable export: {error}")))?;
+    sealed
+        .make_visible(
+            destination
+                .file_name()
+                .ok_or_else(|| GfError::Storage("portable export has no name".to_owned()))?,
+            crate::durable_commit::PublishMode::CreateOnly,
+            || Ok(()),
+        )
+        .and_then(|pending| pending.acknowledge(None))
         .map_err(|error| GfError::Storage(format!("failed to write portable export: {error}")))?;
     Ok(receipt)
 }

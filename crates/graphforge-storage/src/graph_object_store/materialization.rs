@@ -350,7 +350,6 @@ fn copy_single_link_materialized_object(
                     error,
                 )
             })?;
-    let mut installed = false;
     let result = (|| -> Result<MaterializeIoEvidence, GfError> {
         let copied = copy_and_authenticate_materialized_object(
             &mut input,
@@ -377,29 +376,45 @@ fn copy_single_link_materialized_object(
                 ));
             }
         };
-        output.sync_all_and_release().map_err(|error| {
-            storage(
-                "sync private materialization file",
-                &cas.diagnostic_root,
-                error,
-            )
-        })?;
-        io.fsync_calls = output.evidence().sync_operations;
-        io.file_fsync_calls = io.fsync_calls;
-        drop(output.into_file());
-        parent
-            .replace_child(&temporary_name, output_identity, name)
-            .map_err(|error| {
+        let seal =
+            crate::durable_commit::seal_cache_writer_witness(&mut output).map_err(|error| {
                 storage(
-                    "install private materialization file",
+                    "sync private materialization file",
                     &cas.diagnostic_root,
                     error,
                 )
             })?;
-        installed = true;
-        parent.sync().map_err(|error| {
+        io.fsync_calls = output.evidence().sync_operations;
+        io.file_fsync_calls = io.fsync_calls;
+        // Release the writer before admitting the exact sealed source. Windows
+        // publication must not retain a conflicting writable handle.
+        drop(output.into_file());
+        let file = parent.open_child_file(&temporary_name).map_err(|error| {
             storage(
-                "sync private materialization directory",
+                "reopen private materialization file",
+                &cas.diagnostic_root,
+                error,
+            )
+        })?;
+        crate::durable_commit::SealedArtifact::adopt_sealed(
+            parent,
+            &temporary_name,
+            file,
+            seal,
+            cas.allocation.as_ref(),
+        )
+        .map_err(|error| {
+            storage(
+                "adopt private materialization file",
+                &cas.diagnostic_root,
+                error,
+            )
+        })?
+        .make_visible(name, crate::durable_commit::PublishMode::Replace, || Ok(()))
+        .and_then(|pending| pending.acknowledge(cas.allocation.as_ref()))
+        .map_err(|error| {
+            storage(
+                "commit private materialization file",
                 &cas.diagnostic_root,
                 error,
             )
@@ -437,9 +452,12 @@ fn copy_single_link_materialized_object(
         Ok(io)
     })();
     if result.is_err() {
-        let cleanup_name = if installed { name } else { &temporary_name };
-        let _ = parent.unlink_child_if_identity(cleanup_name, output_identity);
-        let _ = parent.sync();
+        // A failed namespace operation may already have installed the target.
+        // Only the exact preparation name remains safe for local cleanup.
+        let _ = crate::durable_commit::retire_files(
+            parent,
+            [(temporary_name.as_os_str(), output_identity)],
+        );
     }
     result
 }

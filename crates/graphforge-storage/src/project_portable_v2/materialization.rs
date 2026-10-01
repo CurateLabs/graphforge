@@ -4,7 +4,6 @@ use super::{
     PortableV2Limits, PortableV2Mode, PortableV2Report, Read, VerifiedMaterialization,
     check_cancel, fs, hex, preflight, scan,
 };
-use graphforge_filesystem::ObservedSync as _;
 use std::io::Write;
 mod derived;
 pub(crate) use derived::capture_import_adjacency;
@@ -329,7 +328,7 @@ impl CopySink<'_> {
         digest: [u8; 32],
         checksum: u64,
     ) -> Result<(), PortableV2Error> {
-        let result = file.observed_sync_all().map_err(|_| {
+        let result = crate::durable_commit::seal_file(&file).map_err(|_| {
             PortableV2Error::at(PortableV2ErrorCode::Io, relative, "cannot sync entry")
         });
         let refreshed = (self.observed)(&self.destination.join(relative), Some(&file));

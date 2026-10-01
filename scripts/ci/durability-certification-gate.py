@@ -401,9 +401,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             "-p",
             "graphforge-storage",
             "--lib",
-            "graph_delta_compaction::tests::crash_oracle_before_and_after_ack_matches_frozen_contract",
+            "project_fault_oracle::primitive::",
             "--",
-            "--exact",
             "--nocapture",
         ],
     ]

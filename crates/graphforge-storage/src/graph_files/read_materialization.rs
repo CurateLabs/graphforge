@@ -1,7 +1,6 @@
 //! Retained checksum admission for private graph read copies.
 
 use graphforge_core::GfError;
-use graphforge_filesystem::ObservedSync as _;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, Write};
 use std::path::Path;
@@ -73,8 +72,7 @@ pub(super) fn copy_read_inventory_file(
     {
         return Err(corrupt("retained graph copy source changed"));
     }
-    output
-        .observed_sync_all()
+    crate::durable_commit::seal_file(&output)
         .map_err(|error| storage("sync private graph copy", destination, error))?;
     let mut reopened = File::open(destination)
         .map_err(|error| storage("open private graph copy", destination, error))?;

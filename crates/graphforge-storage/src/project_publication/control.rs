@@ -1,12 +1,10 @@
 //! Control for atomic project publication.
 
 use super::{
-    Arc, Deserialize, Digest, File, GfError, HashMap, MAX_JOURNAL_BYTES, Mutex, OnceLock,
-    OpenOptions, Path, PathBuf, ProjectErrorCode, ProjectGenerationRequest, Read,
-    RevertJournalExtension, Serialize, Sha256, StagedParticipant, Uuid, Write, project_error,
-    project_failpoint, publication_io,
+    Deserialize, File, GfError, MAX_JOURNAL_BYTES, OpenOptions, Path, ProjectErrorCode,
+    ProjectGenerationRequest, Read, RevertJournalExtension, Serialize, StagedParticipant, Uuid,
+    project_error, project_failpoint, publication_io,
 };
-use graphforge_filesystem::ObservedSync as _;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -98,23 +96,6 @@ pub(super) struct CapabilityRecord {
     pub(super) capability_version: u32,
 }
 
-pub(super) fn write_new(
-    path: &Path,
-    bytes: &[u8],
-    allocation: Option<&crate::StorageAllocationOperation>,
-) -> Result<File, GfError> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(publication_io)?;
-    let written = file.write_all(bytes).map_err(publication_io);
-    let observed = allocation.map_or(Ok(()), |allocation| allocation.replace_file_at(path, &file));
-    written?;
-    observed?;
-    Ok(file)
-}
-
 pub(super) fn failpoint_as_io(
     name: &str,
     transaction_uuid: Uuid,
@@ -158,11 +139,7 @@ pub(crate) fn write_journal_with_allocation(
 ) -> Result<(), GfError> {
     let bytes = canonical_line(journal)?;
     publish_atomic_bytes_with_allocation(path, &bytes, || Ok(()), || Ok(()), || Ok(()), allocation)
-        .map_err(publication_io)?;
-    sync_directory(
-        path.parent()
-            .expect("transaction journal always has a parent"),
-    )
+        .map_err(publication_io)
 }
 
 #[derive(Debug)]
@@ -226,121 +203,21 @@ pub(crate) fn publish_atomic_bytes_with_allocation(
     before_replace: impl FnOnce() -> std::io::Result<()>,
     allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), AtomicPublishError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("atomic publication target has no parent"))?;
-    let target_name = path
-        .file_name()
-        .ok_or_else(|| std::io::Error::other("atomic publication target has no file name"))?;
-    let target_text = target_name
-        .to_str()
-        .ok_or_else(|| std::io::Error::other("atomic publication target is not UTF-8"))?;
-    // Hash the target name plus a per-attempt identity. Hashing only the
-    // target made concurrent CURRENT publishers share one temp, so one
-    // writer's `create_new` prep deleted the other's in-flight file and
-    // `replace_file` failed with ENOENT ("file was not replaced").
-    let temp_name = unique_atomic_temp_name(target_text);
-    let temp_path = parent.join(&temp_name);
-
-    let publish = || -> Result<(), AtomicPublishError> {
-        let mut temp = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)?;
-        // Recovery may run in a separately loaded native addon while an
-        // optimistic writer is still staging its journal.  A Rust static is
-        // not an authority across those environments, so the temporary file
-        // itself carries a kernel-visible lease until replacement completes.
-        crate::file_lock::lock_exclusive(&temp)?;
-        let written = temp.write_all(bytes);
-        let observed = allocation.map_or(Ok(()), |allocation| {
-            allocation.replace_file_at(&temp_path, &temp)
-        });
-        written?;
-        observed.map_err(std::io::Error::other)?;
-        after_write()?;
-        temp.observed_sync_all()?;
-        if let Some(allocation) = allocation {
-            allocation
-                .replace_file_at(&temp_path, &temp)
-                .map_err(std::io::Error::other)?;
-        }
-        after_sync()?;
-        before_replace()?;
-
-        // Concurrent same-process replace of one target must not overlap
-        // `replace_file`: the loser's post-rename identity check sees the
-        // winner's inode and returns StateUnknown. Unique temps already
-        // prevent the shared-name ENOENT; this lock serializes the rename.
-        let namespace_lock = lock_atomic_publish_target(path);
-        let _namespace_guard = namespace_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let directory = crate::filesystem_admission::open_directory_handle(parent)?;
-        // Existence is one snapshot; `replace_file` / `install_new_file` verify
-        // regular single-link identity on the open handles.
-        let result = match std::fs::symlink_metadata(path) {
-            Ok(_) => graphforge_filesystem::replace_file(
-                &directory,
-                std::ffi::OsStr::new(&temp_name),
-                target_name,
-            )
-            .map_err(AtomicPublishError::Replacement),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                graphforge_filesystem::install_new_file(
-                    &directory,
-                    std::ffi::OsStr::new(&temp_name),
-                    target_name,
-                )
-                .map_err(AtomicPublishError::Io)
-            }
-            Err(error) => Err(AtomicPublishError::Io(error)),
-        };
-        if result.is_ok() {
-            record_atomic_replacement(allocation, path, &temp_path, &temp)?;
-        }
-        let unlock = crate::file_lock::unlock(&temp);
-        drop(temp);
-        result.and_then(|()| unlock.map_err(AtomicPublishError::Io))
-    };
-    let result = publish();
-    if result.is_err()
-        && std::fs::remove_file(&temp_path).is_ok()
-        && let Some(allocation) = allocation
-    {
-        // Preserve the original publication error, especially StateUnknown.
-        // This path cannot turn a failed publication into accepted evidence.
-        let _ = allocation.remove_file_at(&temp_path);
-    }
-    result
+    crate::durable_commit::publish_atomic(
+        path,
+        bytes,
+        crate::durable_commit::AtomicHooks {
+            after_write,
+            after_seal: after_sync,
+            before_visible: before_replace,
+        },
+        allocation,
+    )
+    .map_err(|error| AtomicPublishError::from(error.cause))
 }
 
-fn record_atomic_replacement(
-    allocation: Option<&crate::StorageAllocationOperation>,
-    destination: &Path,
-    temporary_path: &Path,
-    file: &File,
-) -> Result<(), AtomicPublishError> {
-    let Some(allocation) = allocation else {
-        return Ok(());
-    };
-    let recorded = (|| {
-        allocation.remove_file_at(destination)?;
-        allocation.replace_file_at(destination, file)?;
-        allocation.remove_file_at(temporary_path)
-    })();
-    // Namespace replacement has already occurred. An evidence failure must
-    // preserve the publisher's post-replacement reconciliation semantics.
-    recorded.map_err(|error| {
-        AtomicPublishError::Replacement(graphforge_filesystem::ReplaceFileError::StateUnknown(
-            std::io::Error::other(error),
-        ))
-    })
-}
-
-#[allow(clippy::too_many_arguments)] // Existing atomic interface plus optional diagnostic context.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)] // Existing compatibility hooks preserve project failpoint order.
 pub(super) fn publish_atomic_bytes_in(
     directory: &graphforge_filesystem::StableDirectory,
     diagnostic_path: &Path,
@@ -351,72 +228,35 @@ pub(super) fn publish_atomic_bytes_in(
     before_replace: impl FnOnce() -> std::io::Result<()>,
     allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), AtomicPublishError> {
-    let target_text = target_name
-        .to_str()
-        .ok_or_else(|| std::io::Error::other("atomic publication target is not UTF-8"))?;
-    let temp_name = std::ffi::OsString::from(unique_atomic_temp_name(target_text));
-    let mut temp = directory.create_replaceable_child_file(&temp_name)?;
-    let temp_path = diagnostic_path.with_file_name(&temp_name);
-    let temp_identity = graphforge_filesystem::file_identity(&temp)?;
-    let publish = || -> Result<(), AtomicPublishError> {
-        crate::file_lock::lock_exclusive(&temp)?;
-        let written = temp.write_all(bytes);
-        let observed = allocation.map_or(Ok(()), |allocation| {
-            allocation.replace_file_at(&temp_path, &temp)
-        });
-        written?;
-        observed.map_err(std::io::Error::other)?;
-        after_write()?;
-        temp.observed_sync_all()?;
-        if let Some(allocation) = allocation {
-            allocation
-                .replace_file_at(&temp_path, &temp)
-                .map_err(std::io::Error::other)?;
-        }
-        after_sync()?;
-        before_replace()?;
-        let namespace_lock = lock_atomic_publish_target(diagnostic_path);
-        let _namespace_guard = namespace_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        directory.replace_child(&temp_name, temp_identity, target_name)?;
-        record_atomic_replacement(allocation, diagnostic_path, &temp_path, &temp)?;
-        crate::file_lock::unlock(&temp)?;
-        Ok(())
-    };
-    let result = publish();
-    if result.is_err()
-        && directory
-            .unlink_child_if_identity(&temp_name, temp_identity)
-            .is_ok()
-        && let Some(allocation) = allocation
+    directory.revalidate_named()?;
+    let retained = graphforge_filesystem::StableDirectory::open(directory.path())?;
+    if retained.identity() != directory.identity()
+        || diagnostic_path.parent() != Some(directory.path())
     {
-        let _ = allocation.remove_file_at(&temp_path);
+        return Err(std::io::Error::other("atomic publication directory authority changed").into());
     }
-    result
+    crate::durable_commit::publish_atomic_in(
+        retained,
+        target_name,
+        bytes,
+        crate::durable_commit::AtomicHooks {
+            after_write,
+            after_seal: after_sync,
+            before_visible: before_replace,
+        },
+        allocation,
+    )
+    .and_then(|pending| pending.acknowledge(allocation))
+    .map_err(|error| AtomicPublishError::from(error.cause))
 }
 
-fn unique_atomic_temp_name(target_text: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(target_text.as_bytes());
-    hasher.update(Uuid::now_v7().as_bytes());
-    format!(
-        ".graphforge-atomic-{}.tmp",
-        hex_digest(hasher.finalize().into())
-    )
-}
-
-fn lock_atomic_publish_target(path: &Path) -> Arc<Mutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
-    let mut locks = LOCKS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    Arc::clone(
-        locks
-            .entry(path.to_path_buf())
-            .or_insert_with(|| Arc::new(Mutex::new(()))),
-    )
+impl From<crate::durable_commit::CommitCause> for AtomicPublishError {
+    fn from(cause: crate::durable_commit::CommitCause) -> Self {
+        match cause {
+            crate::durable_commit::CommitCause::Io(error) => Self::from(error),
+            crate::durable_commit::CommitCause::Replacement(error) => Self::Replacement(error),
+        }
+    }
 }
 
 pub(crate) fn read_journal(path: &Path) -> Result<JournalRecord, GfError> {
@@ -471,43 +311,7 @@ pub(crate) fn cleanup_atomicwrite_temp_with_allocation(
         && digest.len() == 64
         && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
-        let path_metadata = std::fs::symlink_metadata(path).map_err(publication_io)?;
-        if !path_metadata.is_file() || path_metadata.file_type().is_symlink() {
-            return Ok(false);
-        }
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .map_err(publication_io)?;
-        if !crate::file_lock::try_lock_exclusive(&file).map_err(publication_io)? {
-            // A live publisher owns this exact temporary inode.  Recognize it
-            // as protocol state, but never delete another environment's work.
-            return Ok(true);
-        }
-        let metadata = file.metadata().map_err(publication_io)?;
-        if !metadata.is_file()
-            || graphforge_filesystem::file_link_count(&file).map_err(publication_io)? != 1
-            || graphforge_filesystem::path_identity(path).map_err(publication_io)?
-                != graphforge_filesystem::file_identity(&file).map_err(publication_io)?
-        {
-            let _ = crate::file_lock::unlock(&file);
-            return Ok(false);
-        }
-        if let Some(allocation) = allocation {
-            allocation.replace_file_at(path, &file)?;
-        }
-        std::fs::remove_file(path).map_err(publication_io)?;
-        if let Some(allocation) = allocation {
-            allocation.remove_file_at(path)?;
-        }
-        crate::file_lock::unlock(&file).map_err(publication_io)?;
-        drop(file);
-        sync_directory(
-            path.parent()
-                .expect("atomic-write temporary directory always has a parent"),
-        )?;
-        return Ok(true);
+        return cleanup_locked_atomic_temporary(path, allocation);
     }
     let Some(suffix) = name.strip_prefix(".atomicwrite") else {
         return Ok(false);
@@ -546,16 +350,86 @@ pub(crate) fn cleanup_atomicwrite_temp_with_allocation(
                 .map_err(publication_io)?;
             allocation.replace_file_at(&entry.path(), &file)?;
         }
-        std::fs::remove_file(entry.path()).map_err(publication_io)?;
+        let child = graphforge_filesystem::StableDirectory::open(path).map_err(publication_io)?;
+        let mut retirement =
+            crate::durable_commit::RetirementBatch::new(&child).map_err(publication_io)?;
+        retirement
+            .unlink(
+                &entry.file_name(),
+                graphforge_filesystem::path_identity(&entry.path()).map_err(publication_io)?,
+            )
+            .map_err(publication_io)?;
+        // This private child directory is removed below; its parent is the
+        // durable retirement boundary, so do not add an intermediate fence.
+        drop(retirement);
+        drop(child);
         if let Some(allocation) = allocation {
             allocation.remove_file_at(&entry.path())?;
         }
     }
-    std::fs::remove_dir(path).map_err(publication_io)?;
-    sync_directory(
+    let parent = graphforge_filesystem::StableDirectory::open(
         path.parent()
-            .expect("atomic-write temporary directory always has a parent"),
-    )?;
+            .expect("atomic-write temporary directory has a parent"),
+    )
+    .map_err(publication_io)?;
+    crate::durable_commit::retire_directory(
+        &parent,
+        path.file_name()
+            .expect("atomic-write temporary directory has a name"),
+        graphforge_filesystem::path_identity(path).map_err(publication_io)?,
+    )
+    .map_err(publication_io)?;
+    Ok(true)
+}
+
+fn cleanup_locked_atomic_temporary(
+    path: &Path,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<bool, GfError> {
+    let path_metadata = std::fs::symlink_metadata(path).map_err(publication_io)?;
+    if !path_metadata.is_file() || path_metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(publication_io)?;
+    if !crate::file_lock::try_lock_exclusive(&file).map_err(publication_io)? {
+        // A live publisher owns this exact temporary inode.  Recognize it
+        // as protocol state, but never delete another environment's work.
+        return Ok(true);
+    }
+    let metadata = file.metadata().map_err(publication_io)?;
+    if !metadata.is_file()
+        || graphforge_filesystem::file_link_count(&file).map_err(publication_io)? != 1
+        || graphforge_filesystem::path_identity(path).map_err(publication_io)?
+            != graphforge_filesystem::file_identity(&file).map_err(publication_io)?
+    {
+        let _ = crate::file_lock::unlock(&file);
+        return Ok(false);
+    }
+    if let Some(allocation) = allocation {
+        allocation.replace_file_at(path, &file)?;
+    }
+    let parent = graphforge_filesystem::StableDirectory::open(
+        path.parent().expect("atomic temporary has a parent"),
+    )
+    .map_err(publication_io)?;
+    let mut retirement =
+        crate::durable_commit::RetirementBatch::new(&parent).map_err(publication_io)?;
+    retirement
+        .unlink(
+            path.file_name().expect("atomic temporary has a name"),
+            graphforge_filesystem::file_identity(&file).map_err(publication_io)?,
+        )
+        .map_err(publication_io)?;
+    if let Some(allocation) = allocation {
+        allocation.remove_file_at(path)?;
+    }
+    crate::file_lock::unlock(&file).map_err(publication_io)?;
+    drop(file);
+    retirement.acknowledge().map_err(publication_io)?;
     Ok(true)
 }
 
@@ -566,38 +440,8 @@ pub(super) fn canonical_line<T: Serialize>(value: &T) -> Result<Vec<u8>, GfError
     Ok(bytes)
 }
 
-#[cfg(unix)]
 pub(crate) fn sync_directory(path: &Path) -> Result<(), GfError> {
-    let _wait = crate::concurrency_attribution::RegionScope::named("fsync");
-    File::open(path)
-        .and_then(|directory| directory.observed_sync_all())
-        .map_err(publication_io)
-}
-
-#[cfg(windows)]
-pub(crate) fn sync_directory(path: &Path) -> Result<(), GfError> {
-    let _wait = crate::concurrency_attribution::RegionScope::named("fsync");
-    use std::os::windows::fs::OpenOptionsExt;
-
-    // FILE_FLAG_BACKUP_SEMANTICS permits opening a directory handle. The
-    // resulting safe std::fs::File can then be flushed with FlushFileBuffers.
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    OpenOptions::new()
-        // `File::sync_all` calls `FlushFileBuffers`, which requires a
-        // write-capable directory handle on Windows.
-        .write(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)
-        .and_then(|directory| directory.observed_sync_all())
-        .map_err(publication_io)
-}
-
-#[cfg(all(not(unix), not(windows)))]
-pub(crate) fn sync_directory(_path: &Path) -> Result<(), GfError> {
-    Err(project_error(
-        ProjectErrorCode::UnsupportedFilesystem,
-        "directory durability is unsupported on this platform",
-    ))
+    crate::durable_commit::sync_directory(path).map_err(publication_io)
 }
 
 pub(super) fn hex_digest(bytes: [u8; 32]) -> String {

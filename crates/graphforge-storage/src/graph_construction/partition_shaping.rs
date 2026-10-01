@@ -267,10 +267,7 @@ impl SpillWriter {
         batch: &mut SealDirectoryBatch,
     ) -> Result<ArtifactReceipt, GfError> {
         self.writer.flush().map_err(super::storage)?;
-        self.writer
-            .get_mut()
-            .inner
-            .sync_all_and_release()
+        root.seal_cache_writer(&mut self.writer.get_mut().inner)
             .map_err(super::storage)?;
         let cache_release = self.writer.get_ref().inner.evidence();
         account_cache_release(cache_release, evidence)?;
@@ -405,7 +402,7 @@ impl FixedSpillWriter {
         } = self;
         drop(writer);
         let _ = root.unlink_child_if_identity(temporary.as_os_str(), identity);
-        let _ = root.sync();
+        let _ = root.acknowledge();
     }
 
     fn seal(
@@ -430,9 +427,7 @@ impl FixedSpillWriter {
     ) -> Result<SealedSpill, GfError> {
         self.flush_buffer()?;
         self.writer.flush().map_err(super::storage)?;
-        self.writer
-            .inner
-            .sync_all_and_release()
+        root.seal_cache_writer(&mut self.writer.inner)
             .map_err(super::storage)?;
         let cache_release = self.writer.inner.evidence();
         let receipt = ArtifactReceipt {
@@ -994,10 +989,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             }
         };
         let finalized = writer.flush().map_err(super::storage).and_then(|()| {
-            writer
-                .get_mut()
-                .inner
-                .sync_all_and_release()
+            root.seal_cache_writer(&mut writer.get_mut().inner)
                 .map_err(super::storage)
         });
         if let Err(primary) = finalized {
@@ -1075,15 +1067,13 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             } else {
                 None
             };
-            publication
-                .install_child(OsStr::new(output))
+            root.install_guarded(&mut publication, OsStr::new(output))
                 .map_err(super::storage)?;
             if let Some(file) = &allocation_file {
                 root.record_replacement(temporary.as_os_str(), OsStr::new(output), file)
                     .map_err(super::storage)?;
             }
             drop(allocation_file);
-            publication.sync_parent().map_err(super::storage)?;
             shape_publication_failure("directory_sync")?;
             shape_publication_failure("post_publication_metric_overflow")?;
             shape_publication_failure("manifest_update")?;
@@ -1560,7 +1550,7 @@ impl Drop for RowRangePartitioner<'_> {
                 let _ = self
                     .root
                     .unlink_child_if_identity(temporary.as_os_str(), identity);
-                let _ = self.root.sync();
+                let _ = self.root.acknowledge();
             }
         }
     }
@@ -1912,16 +1902,14 @@ impl<'a> RowRangePartitioner<'a> {
                 drop(writer);
                 // Leave no owned temporary behind on a failed or cancelled pass.
                 let _ = root.unlink_child_if_identity(temporary.as_os_str(), identity);
-                let _ = root.sync();
+                let _ = root.acknowledge();
                 return Err(primary);
             }
         };
         writer.finish().map_err(super::storage)?;
         writer.sync().map_err(super::storage)?;
         let hashing = writer.inner_mut().get_mut();
-        hashing
-            .inner
-            .sync_all_and_release()
+        root.seal_cache_writer(&mut hashing.inner)
             .map_err(super::storage)?;
         let cache_release = hashing.inner.evidence();
         account_cache_release(cache_release, evidence)?;
@@ -1943,7 +1931,7 @@ impl<'a> RowRangePartitioner<'a> {
         drop(writer);
         root.install_child(temporary.as_os_str(), identity, OsStr::new(output))
             .map_err(super::storage)?;
-        root.sync().map_err(super::storage)?;
+        root.acknowledge().map_err(super::storage)?;
         construction_failpoint("shape.row_partition.after_install");
         persist_shape_receipt(root, &receipt)?;
         record_shape_artifact_install(evidence, &receipt)?;

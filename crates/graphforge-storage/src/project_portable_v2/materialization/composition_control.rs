@@ -2,7 +2,6 @@
 use super::{MaterializedCapture, Path, PortableV2Error, PortableV2ErrorCode, fs};
 use crate::project_publication::{ProjectFileParticipant, ProjectParticipant};
 use graphforge_core::hash_observation::ControlSha256;
-use graphforge_filesystem::ObservedSync as _;
 use sha2::Digest;
 use std::io::Write as _;
 
@@ -75,7 +74,7 @@ fn write_control(
         .map_err(|_| failed("cannot identify composition control writer"))?;
     let written = output
         .write_all(&bytes)
-        .and_then(|()| output.observed_sync_all())
+        .and_then(|()| crate::durable_commit::seal_file(&output))
         .map_err(|_| failed("cannot write or sync composition control"));
     // Account a partial write even when it fails. Preserve the write error as
     // primary; only a fully completed writer can produce a private capture.

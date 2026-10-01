@@ -38,7 +38,6 @@ use crate::construction_record_layout::BASE_IDENTITY_WIDTH as CONSTRUCTION_IDENT
 use crate::construction_record_layout::IDENTITY_SURROGATE_OFFSET;
 use graphforge_core::GfError;
 use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
-use graphforge_filesystem::ObservedSync as _;
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
@@ -469,11 +468,9 @@ fn encode_construction_index_inner(
     }
     identity_writer.flush().map_err(storage_err)?;
     surrogate_writer.flush().map_err(storage_err)?;
-    identity_writer
-        .sync_all_and_release()
+    let identity_seal = crate::durable_commit::seal_cache_writer_witness(&mut identity_writer)
         .map_err(storage_err)?;
-    surrogate_writer
-        .sync_all_and_release()
+    let surrogate_seal = crate::durable_commit::seal_cache_writer_witness(&mut surrogate_writer)
         .map_err(storage_err)?;
     index
         .observe_file(std::ffi::OsStr::new(&identity_temp), identity_writer.file())
@@ -506,6 +503,7 @@ fn encode_construction_index_inner(
         &index,
         &identity_temp,
         identity_identity,
+        identity_seal,
         "identities-v5",
         generation,
         IDENTITY_RECORD_WIDTH,
@@ -516,6 +514,7 @@ fn encode_construction_index_inner(
         &index,
         &surrogate_temp,
         surrogate_identity,
+        surrogate_seal,
         "node-surrogates-v5",
         generation,
         NODE_LOOKUP_RECORD_WIDTH,
@@ -668,10 +667,10 @@ fn encode_construction_index_inner(
         .unlink_child_if_identity(std::ffi::OsStr::new(CONSTRUCTION_INTENT), intent_identity)
         .map_err(storage_err)?;
     crate::graph_construction::construction_failpoint("uuid_encode.after_intent_removal");
-    index.sync().map_err(storage_err)?;
-    topology.sync().map_err(storage_err)?;
-    graph.sync().map_err(storage_err)?;
-    encoded.sync().map_err(storage_err)?;
+    index.acknowledge().map_err(storage_err)?;
+    topology.acknowledge().map_err(storage_err)?;
+    graph.acknowledge().map_err(storage_err)?;
+    encoded.acknowledge().map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(4);
     commit_v4_publications(
         vec![(MANIFEST.to_owned(), manifest_publication)],
@@ -780,10 +779,10 @@ fn cleanup_private_construction_index_with_allocation(
             .unlink_child_if_identity(&name, identity)
             .map_err(storage_err)?;
     }
-    index.sync().map_err(storage_err)?;
-    topology.sync().map_err(storage_err)?;
-    graph.sync().map_err(storage_err)?;
-    encoded.sync().map_err(storage_err)
+    index.acknowledge().map_err(storage_err)?;
+    topology.acknowledge().map_err(storage_err)?;
+    graph.acknowledge().map_err(storage_err)?;
+    encoded.acknowledge().map_err(storage_err)
 }
 
 fn authenticate_private_v4_residue(
@@ -1153,7 +1152,6 @@ fn write_construction_intent(
     let mut file = index
         .create_replaceable_child_file(std::ffi::OsStr::new(&temporary))
         .map_err(storage_err)?;
-    let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
     let written = file.write_all(&body).map_err(storage_err);
     let observed = index
         .observe_file(std::ffi::OsStr::new(&temporary), &file)
@@ -1162,20 +1160,39 @@ fn write_construction_intent(
     observed?;
     work.write_bytes = work.write_bytes.saturating_add(body.len() as u64);
     work.write_operations = work.write_operations.saturating_add(1);
-    file.observed_sync_all().map_err(storage_err)?;
+    let seal = crate::durable_commit::seal_file_witness(&file).map_err(storage_err)?;
     index
         .observe_file(std::ffi::OsStr::new(&temporary), &file)
         .map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
-    drop(file);
-    index
-        .replace_child(
-            std::ffi::OsStr::new(&temporary),
-            identity,
+    let sealed = crate::durable_commit::SealedArtifact::adopt_sealed(
+        index.physical(),
+        std::ffi::OsStr::new(&temporary),
+        file,
+        seal,
+        index.allocation(),
+    )
+    .map_err(storage_err)?;
+    let pending = sealed
+        .make_visible(
             std::ffi::OsStr::new(CONSTRUCTION_INTENT),
+            crate::durable_commit::PublishMode::Replace,
+            || Ok(()),
         )
         .map_err(storage_err)?;
-    index.sync().map_err(storage_err)?;
+    let installed = index
+        .open_child_file(std::ffi::OsStr::new(CONSTRUCTION_INTENT))
+        .map_err(storage_err)?;
+    index
+        .record_replacement(
+            std::ffi::OsStr::new(&temporary),
+            std::ffi::OsStr::new(CONSTRUCTION_INTENT),
+            &installed,
+        )
+        .map_err(storage_err)?;
+    pending
+        .acknowledge(index.allocation())
+        .map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
     Ok(())
 }
@@ -1407,7 +1424,8 @@ fn merge_construction_records(
         .map_err(storage_err);
     let merged = combine_v4_cleanup(merged, observed, "construction merge allocation");
     merged?;
-    writer.sync_all_and_release().map_err(storage_err)?;
+    let seal =
+        crate::durable_commit::seal_cache_writer_witness(&mut writer).map_err(storage_err)?;
     output
         .observe_file(std::ffi::OsStr::new(&temporary), writer.file())
         .map_err(storage_err)?;
@@ -1428,7 +1446,7 @@ fn merge_construction_records(
     merge_cache_release_evidence(&mut work.cache_release, right_reader.cache_release);
     drop(writer.into_file());
     describe_and_install_construction_run(
-        output, &temporary, identity, prefix, generation, width, artifacts, work,
+        output, &temporary, identity, seal, prefix, generation, width, artifacts, work,
     )
 }
 
@@ -1643,11 +1661,11 @@ fn install_empty_construction_run(
         .create_replaceable_child_file(std::ffi::OsStr::new(&temporary))
         .map_err(storage_err)?;
     let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
-    file.observed_sync_all().map_err(storage_err)?;
+    let seal = crate::durable_commit::seal_file_witness(&file).map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
     drop(file);
     describe_and_install_construction_run(
-        output, &temporary, identity, prefix, generation, width, artifacts, work,
+        output, &temporary, identity, seal, prefix, generation, width, artifacts, work,
     )
 }
 
@@ -1656,6 +1674,7 @@ fn describe_and_install_construction_run(
     output: &crate::construction_directory::ConstructionDirectory,
     temporary: &str,
     identity: graphforge_filesystem::FileIdentity,
+    seal: crate::durable_commit::FileSeal,
     prefix: &str,
     generation: u64,
     width: usize,
@@ -1685,14 +1704,42 @@ fn describe_and_install_construction_run(
     };
     merge_cache_release_evidence(&mut work.cache_release, read_cache_release);
     let name = format!("{prefix}-{generation}-{}.uuidx", &sha256[..16]);
-    output
-        .replace_child(
-            std::ffi::OsStr::new(temporary),
-            identity,
+    let file = output
+        .open_child_file(std::ffi::OsStr::new(temporary))
+        .map_err(storage_err)?;
+    if graphforge_filesystem::file_identity(&file).map_err(storage_err)? != identity {
+        return Err(storage_err(
+            "construction run identity changed before publication",
+        ));
+    }
+    let sealed = crate::durable_commit::SealedArtifact::adopt_sealed(
+        output.physical(),
+        std::ffi::OsStr::new(temporary),
+        file,
+        seal,
+        output.allocation(),
+    )
+    .map_err(storage_err)?;
+    let pending = sealed
+        .make_visible(
             std::ffi::OsStr::new(&name),
+            crate::durable_commit::PublishMode::Replace,
+            || Ok(()),
         )
         .map_err(storage_err)?;
-    output.sync().map_err(storage_err)?;
+    let installed = output
+        .open_child_file(std::ffi::OsStr::new(&name))
+        .map_err(storage_err)?;
+    output
+        .record_replacement(
+            std::ffi::OsStr::new(temporary),
+            std::ffi::OsStr::new(&name),
+            &installed,
+        )
+        .map_err(storage_err)?;
+    pending
+        .acknowledge(output.allocation())
+        .map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
     artifacts.push(ConstructionIndexOutput {
         name: name.clone(),
@@ -1729,7 +1776,8 @@ pub(super) fn install_construction_bytes(
     work.peak_temporary_bytes = work
         .peak_temporary_bytes
         .max(u64::try_from(bytes.len()).map_err(storage_err)?);
-    file.observed_sync_all().map_err(storage_err)?;
+    let seal = crate::durable_commit::seal_file_witness(&file).map_err(storage_err)?;
+    publication.record_seal(seal);
     publication.observe(&file).map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
     let failpoint = match name {
@@ -1744,8 +1792,7 @@ pub(super) fn install_construction_bytes(
     drop(file);
     let installed = publication
         .install_child(std::ffi::OsStr::new(name))
-        .map_err(storage_err)
-        .and_then(|()| publication.sync_parent().map_err(storage_err));
+        .map_err(storage_err);
     if let Err(primary) = installed {
         let cleanup = cleanup_v4_publication(&mut publication);
         return combine_v4_cleanup(Err(primary), cleanup, "v4 construction control cleanup");

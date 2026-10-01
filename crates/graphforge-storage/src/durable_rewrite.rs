@@ -5,7 +5,6 @@
 //! final authority switch.  Journal paths are bounded, canonical relative
 //! paths and every recovery input is authenticated before it is used.
 
-use graphforge_filesystem::ObservedSync as _;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{Read, Seek, Write};
@@ -417,10 +416,9 @@ fn acquire(root: &Path) -> Result<RewriteGuard, GfError> {
     let lock = directory
         .open_or_create_child_file(std::ffi::OsStr::new(LOCK))
         .map_err(|error| storage(format!("rewrite lock open failed: {error}")))?;
-    lock.observed_sync_all()
+    crate::durable_commit::seal_file(&lock)
         .map_err(|error| storage(format!("rewrite lock sync failed: {error}")))?;
-    directory
-        .sync()
+    crate::durable_commit::acknowledge_directory(&directory)
         .map_err(|error| storage(format!("rewrite root sync failed: {error}")))?;
     crate::file_lock::lock_exclusive(&lock)
         .map_err(|error| storage(format!("rewrite lock acquisition failed: {error}")))?;
@@ -503,17 +501,24 @@ fn publish_journal(root: &StableDirectory, intent: &Intent) -> Result<(), GfErro
     let mut temp = root
         .create_replaceable_child_file(std::ffi::OsStr::new(&name))
         .map_err(storage)?;
-    temp.write_all(&bytes)
-        .and_then(|()| temp.observed_sync_all())
-        .map_err(storage)?;
+    temp.write_all(&bytes).map_err(storage)?;
     let expected = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
-    root.replace_child(
+    crate::durable_commit::SealedArtifact::seal_existing(
+        root,
         std::ffi::OsStr::new(&name),
+        temp,
         expected,
-        std::ffi::OsStr::new(JOURNAL),
+        None,
     )
-    .map_err(|error| storage(format!("rewrite journal publication: {error}")))?;
-    root.sync().map_err(storage)
+    .map_err(storage)?
+    .make_visible(
+        std::ffi::OsStr::new(JOURNAL),
+        crate::durable_commit::PublishMode::Replace,
+        || Ok(()),
+    )
+    .map_err(|error| storage(format!("rewrite journal publication: {error}")))?
+    .acknowledge(None)
+    .map_err(storage)
 }
 
 fn install(root_path: &Path, root: &StableDirectory, entry: &Entry) -> Result<(), GfError> {
@@ -539,7 +544,10 @@ fn install(root_path: &Path, root: &StableDirectory, entry: &Entry) -> Result<()
                 rewrite_file_domain(&entry.destination),
             )?;
             let expected = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
-            drop(temp);
+            let sealed = crate::durable_commit::SealedArtifact::seal_recoverable_existing(
+                &parent, &temporary, temp, expected, None,
+            )
+            .map_err(storage)?;
             let authority = if entry.destination == crate::route_component::TABLE_FILE {
                 "semantic routes"
             } else if entry.class == EntryClass::GenerationAuthority {
@@ -549,14 +557,15 @@ fn install(root_path: &Path, root: &StableDirectory, entry: &Entry) -> Result<()
             } else {
                 "graph data"
             };
-            match prior {
-                Some(prior) => {
-                    parent.replace_authenticated_child(&temporary, expected, &target, prior)
-                }
-                None => parent.install_child(&temporary, expected, &target),
-            }
-            .map_err(|error| storage(format!("rewrite {authority} install: {error}")))?;
-            parent.sync().map_err(storage)?;
+            let mode = prior.map_or(
+                crate::durable_commit::PublishMode::CreateOnly,
+                crate::durable_commit::PublishMode::ReplaceAuthenticated,
+            );
+            sealed
+                .make_visible(&target, mode, || Ok(()))
+                .map_err(|error| storage(format!("rewrite {authority} install: {error}")))?
+                .acknowledge(None)
+                .map_err(storage)?;
             authenticate_installed_destination(&parent, &target, entry)?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -663,9 +672,8 @@ fn remove_journal(root: &StableDirectory) -> Result<(), GfError> {
         .map_err(storage)?;
     let id = graphforge_filesystem::file_identity(&file).map_err(storage)?;
     drop(file);
-    root.unlink_child_if_identity(std::ffi::OsStr::new(JOURNAL), id)
-        .map_err(storage)?;
-    root.sync().map_err(storage)
+    crate::durable_commit::retire_files(root, [(std::ffi::OsStr::new(JOURNAL), id)])
+        .map_err(storage)
 }
 
 fn read_journal(root: &StableDirectory) -> Result<Option<(Vec<u8>, FileIdentity)>, GfError> {
@@ -836,8 +844,8 @@ fn initialize_ordinal_writer_lock(root: &StableDirectory) -> Result<(), GfError>
         return Err(storage("ordinal writer lock has invalid link count"));
     }
     let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
-    file.observed_sync_all().map_err(storage)?;
-    directory.sync().map_err(storage)?;
+    crate::durable_commit::seal_file(&file).map_err(storage)?;
+    crate::durable_commit::acknowledge_directory(&directory).map_err(storage)?;
     let named = directory
         .open_child_file(std::ffi::OsStr::new("ordinal-v4.lock"))
         .map_err(storage)?;
@@ -873,10 +881,8 @@ fn cleanup_preparing_input(
         return Err(storage("preparing rewrite temporary identity changed"));
     }
     drop(file);
-    parent
-        .unlink_child_if_identity(&temporary, identity)
-        .map_err(storage)?;
-    parent.sync().map_err(storage)
+    crate::durable_commit::retire_files(&parent, [(temporary.as_os_str(), identity)])
+        .map_err(storage)
 }
 
 fn verify_generation_authority(
@@ -1288,7 +1294,11 @@ fn commit_locked(
     let transaction = Uuid::now_v7().simple().to_string();
     let root_identity = guard.directory.identity();
     let mut entries = Vec::new();
-    let (mut staged, mut moves) = batch.into_staged();
+    let crate::staging::StagedRewrite {
+        mut staged,
+        mut moves,
+        mut seals,
+    } = batch.into_staged();
     let generation_path = root.join("topology/generation.json");
     std::fs::create_dir_all(generation_path.parent().expect("generation has parent"))
         .map_err(storage)?;
@@ -1297,10 +1307,7 @@ fn commit_locked(
         .suffix(".tmp")
         .tempfile_in(generation_path.parent().unwrap())
         .map_err(storage)?;
-    generation
-        .write_all(&generation_bytes)
-        .and_then(|()| generation.as_file().observed_sync_all())
-        .map_err(storage)?;
+    generation.write_all(&generation_bytes).map_err(storage)?;
     staged.push((generation, generation_path));
     if staged.len() > MAX_ENTRIES {
         return Err(storage("rewrite batch exceeds entry bound"));
@@ -1310,7 +1317,10 @@ fn commit_locked(
         let relative = canonical_relative(root, destination)?;
         let (parent, target) = retained_parent_at(root, &guard.directory, &relative)?;
         let parent_identity = parent.identity();
-        temp.as_file().observed_sync_all().map_err(storage)?;
+        let seal = match seals.remove(temp.path()) {
+            Some(seal) => seal,
+            None => crate::durable_commit::seal_file_witness(temp.as_file()).map_err(storage)?,
+        };
         let original = graphforge_filesystem::file_identity(temp.as_file()).map_err(storage)?;
         let durable = temp.path().to_path_buf();
         let temp_relative = canonical_relative(root, &durable)?;
@@ -1322,7 +1332,17 @@ fn commit_locked(
         if graphforge_filesystem::file_identity(&named_temp).map_err(storage)? != original {
             return Err(storage("rewrite temporary identity changed before intent"));
         }
-        parent.sync().map_err(storage)?;
+        // NamedTempFile owns cleanup until the durable intent takes over.
+        let _sealed = crate::durable_commit::SealedArtifact::adopt_sealed(
+            &parent,
+            &temp_name,
+            temp.as_file().try_clone().map_err(storage)?,
+            seal,
+            None,
+        )
+        .map_err(storage)?
+        .retain_for_recovery();
+        crate::durable_commit::acknowledge_directory(&parent).map_err(storage)?;
         // The rewritten file's published identity is captured once with its
         // generation inventory. The intent records only the exact length and
         // XXH64 that replay needs to refuse a missing or corrupt input.

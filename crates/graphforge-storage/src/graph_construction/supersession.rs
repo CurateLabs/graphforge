@@ -416,7 +416,7 @@ pub(super) fn retire_staged_payload(
     // Even a previously missing name must cross the directory durability
     // barrier before a retry releases its still-persisted allocation.
     supersession_boundary("supersession.before_sync")?;
-    root.sync().map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     evidence.recovery_checkpoint_fsync_operations = evidence
         .recovery_checkpoint_fsync_operations
         .checked_add(1)

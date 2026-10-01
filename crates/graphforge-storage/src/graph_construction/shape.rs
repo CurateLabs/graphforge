@@ -2103,10 +2103,7 @@ fn assign_surrogates(
     }
     account_fixed_read_operations(&reader_counter, evidence)?;
     writer.flush().map_err(storage)?;
-    writer
-        .get_mut()
-        .inner
-        .sync_all_and_release()
+    root.seal_cache_writer(&mut writer.get_mut().inner)
         .map_err(storage)?;
     let cache_release = writer.get_ref().inner.evidence();
     account_cache_release(cache_release, evidence)?;
@@ -2128,7 +2125,7 @@ fn assign_surrogates(
     drop(writer);
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
         .map_err(storage)?;
-    root.sync().map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     persist_shape_receipt(root, &output_receipt)?;
     record_shape_artifact_install(evidence, &output_receipt)?;
     account_fixed_write_operations(&output_receipt, evidence)?;

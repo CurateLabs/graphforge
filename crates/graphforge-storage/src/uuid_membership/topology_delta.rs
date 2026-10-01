@@ -76,7 +76,6 @@ use super::record_length;
 use super::reject_retained_identity_collisions;
 use super::reject_retained_surrogate_collisions;
 use super::storage_err;
-use super::sync_uuid_file;
 use super::uuid_membership_index_present;
 use super::v4_publication_failure;
 use super::validate_block_records;
@@ -85,7 +84,6 @@ use super::validate_run_contents;
 use super::validate_run_descriptors;
 use graphforge_core::GfError;
 use graphforge_core::hash_observation::ControlSha256 as Sha256;
-use graphforge_filesystem::ObservedSync as _;
 use sha2::Digest;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -701,10 +699,8 @@ pub(super) fn plan_uuid_membership_delta(
     if current == 0 && manifest.runs.is_empty() {
         let empty_identity_path = scratch.join("identities-base.run");
         let empty_surrogate_path = scratch.join("surrogates-base.run");
-        let empty_identity = create_uuid_file(&empty_identity_path)?;
-        sync_uuid_file(&empty_identity)?;
-        let empty_surrogate = create_uuid_file(&empty_surrogate_path)?;
-        sync_uuid_file(&empty_surrogate)?;
+        create_uuid_file(&empty_identity_path)?;
+        create_uuid_file(&empty_surrogate_path)?;
         let base_identities = describe_run(
             &empty_identity_path,
             "identities-v5-base",
@@ -1052,7 +1048,7 @@ fn merge_identity_handles(
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    sync_uuid_file(&out)?;
+    out.flush().map_err(storage_err)?;
     for reader in readers {
         metrics.validation_scan_bytes = metrics
             .validation_scan_bytes
@@ -1109,7 +1105,7 @@ fn merge_surrogate_handles(
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    sync_uuid_file(&out)?;
+    out.flush().map_err(storage_err)?;
     for reader in readers {
         metrics.validation_scan_bytes = metrics
             .validation_scan_bytes
@@ -1216,9 +1212,7 @@ pub(super) fn append_uuid_membership_delta_with_tombstones(
                 .tempdir_in(staging)
                 .map_err(storage_err)?;
             let empty = scratch.path().join("empty.run");
-            File::create(&empty)
-                .and_then(|file| file.observed_sync_all())
-                .map_err(storage_err)?;
+            File::create(&empty).map_err(storage_err)?;
             let identities = publish_data(
                 &empty,
                 &root,
@@ -1502,7 +1496,7 @@ pub(super) fn write_identity_records(
         file.write_all(&bytes).map_err(storage_err)?;
         blocks += 1;
     }
-    sync_uuid_file(&file)?;
+    file.flush().map_err(storage_err)?;
     Ok(blocks)
 }
 
@@ -1523,7 +1517,7 @@ fn write_surrogate_records(path: &Path, records: &[(u64, Uuid)]) -> Result<u64, 
         file.write_all(&bytes).map_err(storage_err)?;
         blocks += 1;
     }
-    sync_uuid_file(&file)?;
+    file.flush().map_err(storage_err)?;
     Ok(blocks)
 }
 
@@ -1539,11 +1533,11 @@ fn publish_manifest(root: &Path, staging: &Path, manifest: &Manifest) -> Result<
     let result = (|| -> Result<(), GfError> {
         serde_json::to_writer(&mut temp, manifest).map_err(storage_err)?;
         temp.flush().map_err(storage_err)?;
-        temp.observed_sync_all().map_err(storage_err)?;
+        crate::durable_commit::seal_file(&temp).map_err(storage_err)?;
         directory
             .replace_child(&temp_name, identity, std::ffi::OsStr::new(MANIFEST))
             .map_err(storage_err)?;
-        directory.sync().map_err(storage_err)
+        crate::durable_commit::acknowledge_directory(&directory).map_err(storage_err)
     })();
     if result.is_err() {
         let _ = directory.unlink_child_if_identity(&temp_name, identity);
@@ -1691,8 +1685,7 @@ fn merge_identity_v3(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    out.flush().map_err(storage_err)?;
-    out.observed_sync_all().map_err(storage_err)
+    out.flush().map_err(storage_err)
 }
 
 /// Stage one incremental v4 node-ordinal delta beside the canonical topology
@@ -2019,7 +2012,7 @@ fn open_v4_plan_root(
     let name = std::ffi::OsStr::new(V4_PLAN_ROOT);
     let root = match index.create_child_directory(name) {
         Ok(root) => {
-            index.sync().map_err(storage_err)?;
+            crate::durable_commit::acknowledge_directory(&index).map_err(storage_err)?;
             root
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -2074,7 +2067,7 @@ fn cleanup_abandoned_v4_plan_directories(
             "V4_PLAN_CLEANUP_AFTER_UNLINK",
             false,
         )?;
-        plan_root.sync().map_err(storage_err)?;
+        crate::durable_commit::acknowledge_directory(plan_root).map_err(storage_err)?;
     }
     plan_root.revalidate_named().map_err(storage_err)?;
     Ok(())
@@ -2100,7 +2093,7 @@ fn cleanup_v4_plan_directory(
             cleanup_v4_plan_file(directory, &name, &mut bytes)?;
         }
     }
-    directory.sync().map_err(storage_err)
+    crate::durable_commit::acknowledge_directory(directory).map_err(storage_err)
 }
 
 fn cleanup_v4_plan_files(
@@ -2113,7 +2106,7 @@ fn cleanup_v4_plan_files(
     for name in names {
         cleanup_v4_plan_file(directory, &name, bytes)?;
     }
-    directory.sync().map_err(storage_err)
+    crate::durable_commit::acknowledge_directory(directory).map_err(storage_err)
 }
 
 fn cleanup_v4_plan_file(
@@ -2198,9 +2191,7 @@ fn external_sort_v4_nodes(
     }
     if runs.is_empty() {
         let path = scratch.join("v4-delta-empty.run");
-        File::create(&path)
-            .and_then(|file| file.observed_sync_all())
-            .map_err(storage_err)?;
+        File::create(&path).map_err(storage_err)?;
         runs.push(path);
     }
     merge_node_surrogate_runs(runs, scratch, limits.merge_fan_in, metrics)

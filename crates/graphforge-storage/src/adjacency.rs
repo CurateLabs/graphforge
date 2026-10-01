@@ -35,7 +35,6 @@
 //! Indexes. [`ShardedCsrIndex`] resolves only the shard(s) containing a requested
 //! row. Only the current versioned shard representation is supported.
 
-use graphforge_filesystem::ObservedSync as _;
 mod builder;
 mod codec;
 mod installation;
@@ -599,7 +598,13 @@ impl ShardedCsrWriter {
             if stable_root.exists() {
                 self.remove_scratch_tree(&stable_root)?;
             }
-            std::fs::rename(&self.root, &stable_root).map_err(storage_err)?;
+            crate::durable_commit::promote_no_replace(
+                &self.root,
+                &stable_root,
+                || Ok(()),
+                || Ok(()),
+            )
+            .map_err(storage_err)?;
             if let Some(allocation) = &self.allocation {
                 for record in &self.records {
                     let source = self.root.join(&record.file);
@@ -629,8 +634,7 @@ impl ShardedCsrWriter {
             .tempfile_in(parent)
             .map_err(storage_err)?;
         temp.write_all(&bytes).map_err(storage_err)?;
-        // #1449: the per-CSR manifest and its barrier belong to the same phase
-        // as the shards it names; unscoped, a rebuild reported `fsync_calls: 0`.
+        // The CSR manifest barrier is attributed to its shard phase (#1449).
         crate::lifecycle_io::record_write(
             crate::StorageIoPhase::ReadPathScan,
             bytes.len() as u64,
@@ -639,7 +643,6 @@ impl ShardedCsrWriter {
         if let Some(allocation) = &self.allocation {
             allocation.replace_file_at(temp.path(), temp.as_file())?;
         }
-        temp.as_file().observed_sync_all().map_err(storage_err)?;
         crate::lifecycle_io::record_fsync(crate::StorageIoPhase::ReadPathScan, 1);
         persist_temp_observed(
             temp,

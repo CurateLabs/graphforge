@@ -204,6 +204,14 @@ impl UnpublishedArtifactGuard {
         Ok(observed)
     }
 
+    /// Borrow the private original candidate name for durability-owner validation.
+    pub fn temporary_name(&self) -> io::Result<&OsStr> {
+        self.candidate_names
+            .first()
+            .map(OsString::as_os_str)
+            .ok_or_else(|| io::Error::other("unpublished artifact has no temporary name"))
+    }
+
     /// Open one sibling through the retained no-follow parent capability.
     ///
     /// # Errors
@@ -229,6 +237,45 @@ impl UnpublishedArtifactGuard {
         self.file
             .take()
             .ok_or_else(|| io::Error::other("unpublished artifact file already transferred"))
+    }
+
+    /// Transfer exclusive unpublished cleanup to a new owner of this same file.
+    /// A published guard cannot relinquish its semantic commit obligations.
+    pub fn transfer_unpublished_owner(
+        self,
+        file: &File,
+    ) -> io::Result<(StableDirectory, OsString, FileIdentity)> {
+        let directory = self.directory.try_clone()?;
+        self.transfer_unpublished_owner_in(directory, file)
+    }
+
+    /// Transfer an already-owned retained parent without duplicating its handle.
+    pub fn transfer_unpublished_owner_in(
+        mut self,
+        directory: StableDirectory,
+        file: &File,
+    ) -> io::Result<(StableDirectory, OsString, FileIdentity)> {
+        if self.published || self.file.is_some() || self.candidate_names.len() != 1 {
+            return Err(io::Error::other(
+                "unpublished owner transfer invariants are incomplete",
+            ));
+        }
+        let expected = self.identity()?;
+        self.directory.revalidate_named()?;
+        directory.revalidate_named()?;
+        let name = self.candidate_names[0].clone();
+        let named = directory.open_child_file(&name)?;
+        if directory.identity() != self.directory.identity()
+            || file_identity(file)? != expected
+            || file_identity(&named)? != expected
+            || file_link_count(file)? != 1
+        {
+            return Err(io::Error::other(
+                "unpublished owner transfer identity changed",
+            ));
+        }
+        self.armed = false;
+        Ok((directory, name, expected))
     }
 
     /// Atomically install `target` while retaining cleanup ownership.
@@ -257,7 +304,15 @@ impl UnpublishedArtifactGuard {
     /// # Errors
     /// Returns an error when the directory durability barrier fails.
     pub fn sync_parent(&mut self) -> io::Result<()> {
-        self.directory.sync()?;
+        self.sync_parent_with(StableDirectory::sync)
+    }
+
+    /// Acknowledge through the caller's durability owner, then mark this guard.
+    pub fn sync_parent_with(
+        &mut self,
+        acknowledge: impl FnOnce(&StableDirectory) -> io::Result<()>,
+    ) -> io::Result<()> {
+        acknowledge(&self.directory)?;
         self.parent_synced = true;
         Ok(())
     }
@@ -848,41 +903,60 @@ impl StableDirectory {
         expected_temporary: FileIdentity,
         target: &OsStr,
     ) -> io::Result<()> {
-        validate_child_name(temporary)?;
-        validate_child_name(target)?;
-        self.revalidate_named()?;
-        let temporary_file = self.open_child_file(temporary)?;
-        if file_identity(&temporary_file)? != expected_temporary
-            || file_link_count(&temporary_file)? != 1
-        {
-            return Err(io::Error::other(
-                "atomic temporary child identity or link count changed",
-            ));
-        }
-        drop(temporary_file);
-        let target_exists = match self.open_child_file(target) {
-            Ok(target_file) => {
-                drop(target_file);
-                true
+        self.replace_child_typed(temporary, expected_temporary, target)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    /// Replace one child while retaining native visibility uncertainty.
+    pub fn replace_child_typed(
+        &self,
+        temporary: &OsStr,
+        expected_temporary: FileIdentity,
+        target: &OsStr,
+    ) -> Result<(), ReplaceFileError> {
+        let prepare = || -> io::Result<bool> {
+            validate_child_name(temporary)?;
+            validate_child_name(target)?;
+            self.revalidate_named()?;
+            let temporary_file = self.open_child_file(temporary)?;
+            if file_identity(&temporary_file)? != expected_temporary
+                || file_link_count(&temporary_file)? != 1
+            {
+                return Err(io::Error::other(
+                    "atomic temporary child identity or link count changed",
+                ));
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-            Err(error) => return Err(error),
+            match self.open_child_file(target) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error),
+            }
         };
-        let result = if target_exists {
+        if prepare().map_err(ReplaceFileError::NotReplaced)? {
             replace_file_platform(
                 &self.file,
                 temporary,
                 target,
                 Some(expected_temporary),
                 None,
-            )
-            .map_err(|error| io::Error::other(error.to_string()))
+            )?;
         } else {
             install_new_file_platform(&self.file, temporary, target, Some(expected_temporary))
-        };
-        result?;
+                .map_err(ReplaceFileError::StateUnknown)?;
+        }
+        self.validate_replaced_child(target, expected_temporary)
+            .map_err(ReplaceFileError::StateUnknown)
+    }
+
+    fn validate_replaced_child(&self, target: &OsStr, expected: FileIdentity) -> io::Result<()> {
         self.revalidate_named()?;
-        self.open_child_file(target).map(|_| ())
+        let installed = self.open_child_file(target)?;
+        if file_identity(&installed)? != expected || file_link_count(&installed)? != 1 {
+            return Err(io::Error::other(
+                "replacement target identity or link count changed",
+            ));
+        }
+        Ok(())
     }
 
     /// Atomically replace an authenticated prior child, which may share its inode
@@ -896,25 +970,36 @@ impl StableDirectory {
         target: &OsStr,
         expected_target: FileIdentity,
     ) -> io::Result<()> {
-        validate_child_name(temporary)?;
-        validate_child_name(target)?;
-        self.revalidate_named()?;
+        self.replace_authenticated_child_typed(
+            temporary,
+            expected_temporary,
+            target,
+            expected_target,
+        )
+        .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    /// Replace an authenticated prior child without losing native error state.
+    pub fn replace_authenticated_child_typed(
+        &self,
+        temporary: &OsStr,
+        expected_temporary: FileIdentity,
+        target: &OsStr,
+        expected_target: FileIdentity,
+    ) -> Result<(), ReplaceFileError> {
+        validate_child_name(temporary).map_err(ReplaceFileError::NotReplaced)?;
+        validate_child_name(target).map_err(ReplaceFileError::NotReplaced)?;
+        self.revalidate_named()
+            .map_err(ReplaceFileError::NotReplaced)?;
         replace_file_platform(
             &self.file,
             temporary,
             target,
             Some(expected_temporary),
             Some(expected_target),
-        )
-        .map_err(|error| io::Error::other(error.to_string()))?;
-        self.revalidate_named()?;
-        let installed = self.open_child_file(target)?;
-        if file_identity(&installed)? != expected_temporary || file_link_count(&installed)? != 1 {
-            return Err(io::Error::other(
-                "authenticated replacement identity changed",
-            ));
-        }
-        Ok(())
+        )?;
+        self.validate_replaced_child(target, expected_temporary)
+            .map_err(ReplaceFileError::StateUnknown)
     }
 
     /// Atomically install a retained temporary child without replacing an
@@ -946,6 +1031,39 @@ impl StableDirectory {
         install_new_file_platform(&self.file, temporary, target, Some(expected_temporary))?;
         self.revalidate_named()?;
         self.open_child_file(target).map(|_| ())
+    }
+
+    /// Preserve whether create-only publication definitely did not install or
+    /// reached a native visibility boundary whose result needs reconciliation.
+    pub fn install_child_typed(
+        &self,
+        temporary: &OsStr,
+        expected_temporary: FileIdentity,
+        target: &OsStr,
+    ) -> Result<(), ReplaceFileError> {
+        let prepare = || -> io::Result<()> {
+            validate_child_name(temporary)?;
+            validate_child_name(target)?;
+            self.revalidate_named()?;
+            let file = self.open_child_file(temporary)?;
+            if file_identity(&file)? != expected_temporary || file_link_count(&file)? != 1 {
+                return Err(io::Error::other(
+                    "atomic temporary child identity or link count changed",
+                ));
+            }
+            Ok(())
+        };
+        prepare().map_err(ReplaceFileError::NotReplaced)?;
+        install_new_file_platform(&self.file, temporary, target, Some(expected_temporary))
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    ReplaceFileError::NotReplaced(error)
+                } else {
+                    ReplaceFileError::StateUnknown(error)
+                }
+            })?;
+        self.validate_replaced_child(target, expected_temporary)
+            .map_err(ReplaceFileError::StateUnknown)
     }
 
     /// Flush this retained directory capability.
