@@ -1997,6 +1997,7 @@ fn parse_digest(value: &str) -> Result<[u8; 32], PortableV2Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod no_copy_verification;
     mod returned_errors;
 
     const HELPER: &str = "project_portable_v2_import::tests::subprocess_crash_import";
@@ -2535,35 +2536,6 @@ mod tests {
             crate::verify_graph_object(target.path(), &entry.content_sha256, entry.byte_length)
                 .unwrap();
         }
-    }
-
-    /// Full verification reads composition metadata from the package itself
-    /// and never materializes its payload (#1405).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn full_verification_of_a_composition_package_copies_no_payload() {
-        let (_package_parent, package) = composition_package();
-        let written = || {
-            std::fs::read_to_string("/proc/thread-self/io")
-                .unwrap()
-                .lines()
-                .find_map(|line| line.strip_prefix("wchar:"))
-                .unwrap()
-                .trim()
-                .parse::<u64>()
-                .unwrap()
-        };
-        let before = written();
-        let report = crate::verify_portable_v2(
-            &package,
-            crate::PortableV2Mode::Full,
-            crate::PortableV2Limits::default(),
-            None,
-        )
-        .unwrap();
-        assert!(report.ontology_composition.is_some());
-        assert!(!report.ontology_composition_entries.is_empty());
-        assert_eq!(written() - before, 0, "verification wrote payload bytes");
     }
 
     fn composition_package() -> (tempfile::TempDir, PathBuf) {
