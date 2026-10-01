@@ -150,6 +150,7 @@ pub fn capture_graph_read_inventory(root: &Path) -> Result<GraphReadInventory, G
 /// Capture read authority for a private tree while a rewrite retains staged
 /// temporaries in it. Each excluded path must keep its exact file identity
 /// for the whole capture; any other unregistered file is refused as usual.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn capture_graph_read_inventory_excluding(
     root: &Path,
     excluded: &Exclusions,

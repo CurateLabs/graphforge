@@ -4,15 +4,15 @@ use super::{
     ArtifactReceipt, BASE_IDENTITY_WIDTH, BLOCK_BYTES, BufReader, BufWriter,
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, Checkpoint, ChunkIntent,
     ConstructionChunkKind, ConstructionChunkReceipt, ConstructionPublicationIntent,
-    ConstructionPublicationReceipt, CountingChunkReader, DetailCodec, DetailValidator, Digest,
+    ConstructionPublicationReceipt, CountingChunkReader, DetailCodec, DetailValidator,
     EDGE_DETAIL_WIDTH, ENDPOINT_WIDTH, FileIdentity, GfError, GraphConstructionEvidence,
     GraphConstructionSession, HashingWriter, IDENTITY_SURROGATE_OFFSET, IDENTITY_WIDTH, INTENT,
     IoCounter, LoadedShapeProgress, MAX_SHAPE_CONTROL_BYTES, NODE_DETAIL_WIDTH, OsStr,
-    ParquetRecordBatchReaderBuilder, Read, ReceiptPointer, SHAPE_INTENT, Sha256, ShapeIntent,
+    ParquetRecordBatchReaderBuilder, Read, ReceiptPointer, SHAPE_INTENT, ShapeIntent,
     StableDirectory, Uuid, Write, account_cache_release, artifact_stem, authenticate_shaped_output,
     authenticate_shaped_output_identity, checked_category_remove, combine_cache_cleanup,
     combine_secondary_cleanup, construction_failpoint, copy_post_shape_io, decode_bounded,
-    decode_shape_intent, file_identity, file_link_count, hex, install_control, is_canonical_sha256,
+    decode_shape_intent, file_identity, file_link_count, install_control, is_canonical_sha256,
     is_shape_artifact_name, load_shape_progress_chain, merge_cache_release_evidence,
     read_bounded_limit, receipt_from_intent, receipt_name, record_active_identity_remove,
     replace_checkpoint_control, scan_shape_segments, sha256, shape_authority_sha256,
@@ -507,10 +507,10 @@ fn cleanup_incomplete_shape_capabilities(
         if !is_shape_artifact_name(&receipt.name) {
             continue;
         }
-        if is_canonical_sha256(&receipt.sha256) && keep.contains(&receipt.name) {
+        if !receipt.xxh64.is_empty() && keep.contains(&receipt.name) {
             continue;
         }
-        if !is_canonical_sha256(&receipt.sha256) {
+        if receipt.xxh64.is_empty() {
             return Err(storage("shaped writer capability digest changed"));
         }
         match root.open_child_file(OsStr::new(&receipt.name)) {
@@ -609,7 +609,6 @@ pub(super) fn receipt_for_existing_with_work(
     }
     let identity = file_identity(&file).map_err(storage)?;
     let mut file = graphforge_filesystem::FileCacheReleasingReader::new(file).map_err(storage)?;
-    let mut digest = Sha256::new();
     let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut bytes = 0_u64;
     let mut operations = 0_u64;
@@ -620,7 +619,6 @@ pub(super) fn receipt_for_existing_with_work(
             if count == 0 {
                 break;
             }
-            digest.update(&block[..count]);
             checksum.update(&block[..count]);
             bytes = bytes
                 .checked_add(count as u64)
@@ -636,7 +634,6 @@ pub(super) fn receipt_for_existing_with_work(
                 allocated_bytes: graphforge_filesystem::file_space_usage(file.file())
                     .map_err(storage)?
                     .allocated_bytes,
-                sha256: hex(&digest.finalize()),
                 xxh64: crate::corruption_checksum::hex(checksum.finish()),
                 identity: identity.into(),
                 write_operations: 0,
@@ -991,7 +988,6 @@ pub(super) fn authenticate_row_spill(
         || std::path::Path::new(&receipt.name).extension() != Some(OsStr::new("arrow"))
         || receipt.name.contains('/')
         || receipt.name.contains('\\')
-        || !is_canonical_sha256(&receipt.sha256)
     {
         return Err(storage("invalid row partition spill receipt"));
     }
@@ -1026,7 +1022,7 @@ fn authenticate_artifact_contents(
     let mut reader = BufReader::with_capacity(BLOCK_BYTES, releasing);
     let result = (|| -> Result<(u64, u64, u64), GfError> {
         let mut block = vec![0_u8; BLOCK_BYTES];
-        let mut digest = Sha256::new();
+        let mut checksum = crate::corruption_checksum::Checksum::new();
         let mut bytes = 0_u64;
         let mut operations = 0_u64;
         let width = if receipt.name.ends_with(".identities.run") {
@@ -1052,7 +1048,7 @@ fn authenticate_artifact_contents(
             if count == 0 {
                 break;
             }
-            digest.update(&block[..count]);
+            checksum.update(&block[..count]);
             bytes = bytes
                 .checked_add(count as u64)
                 .ok_or_else(|| storage("bytes overflows"))?;
@@ -1110,7 +1106,9 @@ fn authenticate_artifact_contents(
         if !pending.is_empty() {
             return Err(storage("fixed construction run has a truncated tail"));
         }
-        if bytes != receipt.bytes || hex(&digest.finalize()) != receipt.sha256 {
+        if bytes != receipt.bytes
+            || crate::corruption_checksum::hex(checksum.finish()) != receipt.xxh64
+        {
             return Err(storage("artifact digest or size changed"));
         }
         let records = detail

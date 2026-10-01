@@ -36,7 +36,7 @@ use super::validate_run_descriptors;
 use crate::construction_record_layout::BASE_IDENTITY_WIDTH as CONSTRUCTION_IDENTITY_WIDTH;
 use crate::construction_record_layout::IDENTITY_SURROGATE_OFFSET;
 use graphforge_core::GfError;
-use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_filesystem::ObservedSync as _;
 use serde::Deserialize;
 use serde::Serialize;
@@ -88,7 +88,7 @@ struct ConstructionRecoveryIntent {
     source_volume: u64,
     source_file_id: String,
     source_bytes: u64,
-    source_sha256: String,
+    source_xxh64: String,
     authority_sha256: String,
 }
 
@@ -125,7 +125,7 @@ impl ConstructionRecoveryIntent {
             self.source_volume,
             &self.source_file_id,
             self.source_bytes,
-            &self.source_sha256,
+            &self.source_xxh64,
         );
         if self.format_version != FORMAT_VERSION || self.authority_sha256 != expected {
             return Err(storage_err(
@@ -145,10 +145,10 @@ fn construction_intent_digest(
     source_volume: u64,
     source_file_id: &str,
     source_bytes: u64,
-    source_sha256: &str,
+    source_xxh64: &str,
 ) -> String {
     let mut digest = graphforge_core::hash_observation::ControlSha256::new();
-    digest.update(b"graphforge.uuid-membership.construction-intent.v2\0");
+    digest.update(b"graphforge.uuid-membership.construction-intent.v3\0");
     digest.update(format_version.to_be_bytes());
     digest.update(generation.to_be_bytes());
     digest.update(parent_generation.to_be_bytes());
@@ -157,7 +157,7 @@ fn construction_intent_digest(
     digest.update(source_volume.to_be_bytes());
     digest.update(source_file_id.as_bytes());
     digest.update(source_bytes.to_be_bytes());
-    digest.update(source_sha256.as_bytes());
+    digest.update(source_xxh64.as_bytes());
     hex_bytes(&digest.finalize())
 }
 
@@ -168,7 +168,7 @@ fn construction_intent_digest(
 pub(crate) fn encode_construction_index(
     source: &graphforge_filesystem::StableDirectory,
     identities_name: &str,
-    identities_sha256: &str,
+    identities_xxh64: &str,
     encoded: &graphforge_filesystem::StableDirectory,
     generation: u64,
     parent_generation: u64,
@@ -187,7 +187,7 @@ pub(crate) fn encode_construction_index(
     let result = encode_construction_index_inner(
         source,
         identities_name,
-        identities_sha256,
+        identities_xxh64,
         encoded,
         generation,
         parent_generation,
@@ -215,7 +215,7 @@ pub(crate) fn encode_construction_index(
 fn encode_construction_index_inner(
     source: &graphforge_filesystem::StableDirectory,
     identities_name: &str,
-    identities_sha256: &str,
+    identities_xxh64: &str,
     encoded: &graphforge_filesystem::StableDirectory,
     generation: u64,
     parent_generation: u64,
@@ -285,7 +285,7 @@ fn encode_construction_index_inner(
         source_volume: source_identity.volume_serial,
         source_file_id: source_file_id.clone(),
         source_bytes: input_len,
-        source_sha256: identities_sha256.to_owned(),
+        source_xxh64: identities_xxh64.to_owned(),
         authority_sha256: String::new(),
     };
     intent.authority_sha256 = construction_intent_digest(
@@ -296,7 +296,7 @@ fn encode_construction_index_inner(
         intent.source_volume,
         &intent.source_file_id,
         intent.source_bytes,
-        &intent.source_sha256,
+        &intent.source_xxh64,
     );
     write_construction_intent(&index, &intent, &mut work)?;
     crate::graph_construction::construction_failpoint("uuid_encode.after_intent");
@@ -341,6 +341,7 @@ fn encode_construction_index_inner(
     let mut node_count = 0_u64;
     let mut edge_count = 0_u64;
     let mut source_digest = Sha256::new();
+    let mut source_checksum = crate::corruption_checksum::Checksum::new();
     let mut remaining = input_len;
     let streamed = (|| -> Result<(), GfError> {
         while remaining != 0 {
@@ -353,6 +354,7 @@ fn encode_construction_index_inner(
                 .read_exact(&mut input_block[..count])
                 .map_err(storage_err)?;
             source_digest.update(&input_block[..count]);
+            source_checksum.update(&input_block[..count]);
             work.read_bytes = work.read_bytes.saturating_add(count as u64);
             work.read_operations = work.read_operations.saturating_add(1);
             let mut packed_len = 0;
@@ -416,7 +418,7 @@ fn encode_construction_index_inner(
             work.write_operations = work.write_operations.saturating_add(1);
             remaining -= count as u64;
         }
-        if hex_bytes(&source_digest.finalize()) != identities_sha256 {
+        if crate::corruption_checksum::hex(source_checksum.finish()) != identities_xxh64 {
             return Err(storage_err("construction identity source digest changed"));
         }
         Ok(())
@@ -687,6 +689,7 @@ fn encode_construction_index_inner(
         peak_buffer_bytes: work.peak_buffer_bytes,
         peak_temporary_bytes: work.peak_temporary_bytes,
         cache_release: work.cache_release,
+        source_sha256: hex_bytes(&source_digest.finalize()),
     })
 }
 

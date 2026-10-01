@@ -29,7 +29,7 @@ use super::{
     IoCounter, ReadWork, SealDirectoryBatch, account_cache_release, account_fixed_write_operations,
     account_merge_read_bytes, account_merge_write_bytes, account_sequential_write, artifact_temp,
     cleanup_failed_shape_output, cleanup_shape_publication, combine_cache_cleanup,
-    combine_secondary_cleanup, construction_failpoint, hex, injected_input_release_failure,
+    combine_secondary_cleanup, construction_failpoint, injected_input_release_failure,
     merge_cache_release_evidence, open_fixed_reader, persist_shape_receipt,
     persist_shape_receipt_in_batch, read_run_record, record_shape_artifact_install,
     reject_cancelled, run_record_bytes, sha256, shape_publication_failure,
@@ -49,7 +49,6 @@ use graphforge_core::GfError;
 use graphforge_filesystem::{FileIdentity, file_identity};
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use sha2::Digest;
 use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::io::{BufWriter, Write};
@@ -284,7 +283,6 @@ impl SpillWriter {
             )
             .map_err(super::storage)?
             .allocated_bytes,
-            sha256: hex(&self.writer.get_ref().digest.clone().finalize()),
             xxh64: crate::corruption_checksum::hex(self.writer.get_ref().checksum.finish()),
             identity: self.identity.into(),
             write_operations: self.writer.get_ref().operations,
@@ -443,7 +441,6 @@ impl FixedSpillWriter {
             allocated_bytes: graphforge_filesystem::file_space_usage(self.writer.inner.file())
                 .map_err(super::storage)?
                 .allocated_bytes,
-            sha256: hex(&self.writer.digest.clone().finalize()),
             xxh64: crate::corruption_checksum::hex(self.writer.checksum.finish()),
             identity: self.identity.into(),
             write_operations: self.writer.operations,
@@ -1030,7 +1027,6 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                 name: output.to_owned(),
                 bytes: writer.get_ref().bytes,
                 allocated_bytes,
-                sha256: hex(&writer.get_ref().digest.clone().finalize()),
                 xxh64: crate::corruption_checksum::hex(writer.get_ref().checksum.finish()),
                 identity: identity.into(),
                 write_operations: writer.get_ref().operations,
@@ -1936,7 +1932,6 @@ impl<'a> RowRangePartitioner<'a> {
             allocated_bytes: graphforge_filesystem::file_space_usage(hashing.inner.file())
                 .map_err(super::storage)?
                 .allocated_bytes,
-            sha256: hex(&hashing.digest.clone().finalize()),
             xxh64: crate::corruption_checksum::hex(hashing.checksum.finish()),
             identity: identity.into(),
             write_operations: hashing.operations,

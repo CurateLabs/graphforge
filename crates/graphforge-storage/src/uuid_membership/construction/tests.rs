@@ -80,7 +80,7 @@ fn packed_construction_index_preserves_full_width_surrogates_and_refuses_invalid
         let result = encode_construction_index(
             &source,
             "identities.run",
-            &hex_sha256(&bytes),
+            &crate::corruption_checksum::hex(crate::corruption_checksum::checksum(&bytes)),
             &encoded,
             1,
             0,
@@ -147,12 +147,13 @@ fn construction_encoder_io_geometry_is_block_bounded() {
         drop(input);
         let source = graphforge_filesystem::StableDirectory::open(source_dir.path()).unwrap();
         let encoded = graphforge_filesystem::StableDirectory::open(encoded_dir.path()).unwrap();
-        let source_sha256 =
-            hex_sha256(&fs::read(source_dir.path().join("identities.run")).unwrap());
+        let source_bytes = fs::read(source_dir.path().join("identities.run")).unwrap();
+        let source_xxh64 =
+            crate::corruption_checksum::hex(crate::corruption_checksum::checksum(&source_bytes));
         let result = encode_construction_index(
             &source,
             "identities.run",
-            &source_sha256,
+            &source_xxh64,
             &encoded,
             1,
             0,

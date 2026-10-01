@@ -43,7 +43,7 @@ fn shaped_writer_capability_resume_adopts_only_the_exact_receipt() {
     persist_shape_receipt(&root, &receipt).unwrap();
 
     let mut mismatched = receipt;
-    mismatched.sha256 = "0".repeat(64);
+    mismatched.xxh64 = "0".repeat(16);
     let error = persist_shape_receipt(&root, &mismatched)
         .unwrap_err()
         .to_string();
@@ -257,4 +257,75 @@ fn symlink_substitution_is_rejected_on_independent_seal() {
     std::fs::rename(&artifact, &displaced).unwrap();
     symlink(&displaced, &artifact).unwrap();
     assert!(session.seal().is_err());
+}
+
+#[test]
+fn truncated_staged_artifact_is_refused_by_checksum() {
+    let root = TempDir::new().unwrap();
+    let mut session = open(&root, 9_100);
+    let chunk = session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 4))
+        .unwrap();
+    let receipt = &chunk.identities;
+    let path = session.root.path().join(&receipt.name);
+    let mut bytes = std::fs::read(&path).unwrap();
+    assert!(!bytes.is_empty(), "staged artifact must be non-empty");
+    bytes.pop();
+    std::fs::write(&path, &bytes).unwrap();
+    let error = authenticate_artifact(&session.root, receipt, DetailCodec::Compact)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("truncated") || error.contains("artifact digest or size changed"),
+        "{error}"
+    );
+}
+
+#[test]
+fn same_length_flipped_staged_artifact_is_refused_by_checksum() {
+    let root = TempDir::new().unwrap();
+    let mut session = open(&root, 9_101);
+    let chunk = session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 4))
+        .unwrap();
+    let receipt = &chunk.identities;
+    let path = session.root.path().join(&receipt.name);
+    let mut bytes = std::fs::read(&path).unwrap();
+    assert!(
+        bytes.len() >= 2,
+        "staged artifact must have at least two bytes"
+    );
+    bytes[0] ^= 0xff;
+    std::fs::write(&path, &bytes).unwrap();
+    let error = authenticate_artifact(&session.root, receipt, DetailCodec::Compact)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("not strictly sorted") || error.contains("artifact digest or size changed"),
+        "{error}"
+    );
+}
+
+#[test]
+fn checkpoint_with_previous_format_version_fails_closed_with_restart_error() {
+    let root = TempDir::new().unwrap();
+    let operation = Uuid::from_u128(9_200);
+    let mut session = open(&root, 9_200);
+    session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+        .unwrap();
+    session.checkpoint.format_version = FORMAT_VERSION - 1;
+    replace_checkpoint_control(&session.root, &session.checkpoint).unwrap();
+    drop(session);
+    let result = GraphConstructionSession::open(
+        root.path(),
+        operation,
+        0,
+        GraphConstructionBudgets::default(),
+    );
+    let error = match result {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("expected a checkpoint format error"),
+    };
+    assert!(error.contains("restart"), "{error}");
 }

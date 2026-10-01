@@ -9,10 +9,10 @@ use super::{
     CountingWriter, EncodingTempGuard, IoCounter, account_cache_release, add_evidence_counter,
     directory_for, hex,
 };
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use crate::graph_construction::cpu_admission::{ConstructionCpuAdmission, ConstructionCpuLease};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
+use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use graphforge_filesystem::file_identity;
 use parquet::arrow::ArrowWriter;
 use sha2::Digest;
