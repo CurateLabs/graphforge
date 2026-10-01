@@ -370,6 +370,66 @@ pub(crate) fn install_captured_encoded_artifact_with_lease(
     source: &crate::graph_construction::CapturedEncodedArtifact<'_>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphObjectInstallEvidence, GfError> {
+    install_captured_source_with_lease(lease, &CapturedSource::Encoded(source), cancelled)
+}
+
+pub(crate) fn install_captured_portable_source_with_lease(
+    lease: &GraphObjectPublicationLease,
+    source: &crate::project_portable_v2::CapturedPortableSource<'_>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<GraphObjectInstallEvidence, GfError> {
+    install_captured_source_with_lease(lease, &CapturedSource::Portable(source), cancelled)
+}
+
+/// A closed set of concrete, privately minted source capabilities.
+enum CapturedSource<'a, 'b> {
+    Encoded(&'a crate::graph_construction::CapturedEncodedArtifact<'b>),
+    Portable(&'a crate::project_portable_v2::CapturedPortableSource<'b>),
+}
+impl CapturedSource<'_, '_> {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Encoded(_) => "encoded",
+            Self::Portable(_) => "portable",
+        }
+    }
+    fn content_sha256(&self) -> &str {
+        match self {
+            Self::Encoded(s) => s.content_sha256(),
+            Self::Portable(s) => s.content_sha256(),
+        }
+    }
+    fn bytes(&self) -> u64 {
+        match self {
+            Self::Encoded(s) => s.bytes(),
+            Self::Portable(s) => s.bytes(),
+        }
+    }
+    fn checksum(&self) -> u64 {
+        match self {
+            Self::Encoded(s) => s.checksum(),
+            Self::Portable(s) => s.checksum(),
+        }
+    }
+    fn source(&self) -> &File {
+        match self {
+            Self::Encoded(s) => s.source(),
+            Self::Portable(s) => s.source(),
+        }
+    }
+    fn revalidate(&self) -> Result<(), GfError> {
+        match self {
+            Self::Encoded(s) => s.revalidate(),
+            Self::Portable(s) => s.revalidate(),
+        }
+    }
+}
+
+fn install_captured_source_with_lease(
+    lease: &GraphObjectPublicationLease,
+    source: &CapturedSource<'_, '_>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<GraphObjectInstallEvidence, GfError> {
     source.revalidate()?;
     crate::graph_construction::reject_cancelled(cancelled)?;
     let reads = std::cell::Cell::new(0_u64);
@@ -393,7 +453,7 @@ pub(crate) fn install_captured_encoded_artifact_with_lease(
             identity: captured_identity,
         },
         true,
-        |output| copy_captured_encoded_source(source, output, cancelled, &reads, &writes, &syncs),
+        |output| copy_captured_source(source, output, cancelled, &reads, &writes, &syncs),
     )?;
     source.revalidate()?;
     let InstalledObject {
@@ -424,8 +484,8 @@ pub(crate) fn install_captured_encoded_artifact_with_lease(
     Ok(evidence)
 }
 
-fn copy_captured_encoded_source(
-    source: &crate::graph_construction::CapturedEncodedArtifact<'_>,
+fn copy_captured_source(
+    source: &CapturedSource<'_, '_>,
     output: &mut CasTemporaryWriter,
     cancelled: &mut impl FnMut() -> bool,
     reads: &std::cell::Cell<u64>,
@@ -472,7 +532,10 @@ fn copy_captured_encoded_source(
                 .checked_add(count as u64)
                 .ok_or_else(|| validation("captured source length overflow"))?;
             if total > source.bytes() {
-                return Err(validation("captured encoded source grew during copy"));
+                return Err(validation(format!(
+                    "captured {} source grew during copy",
+                    source.kind()
+                )));
             }
             reads.set(
                 reads
@@ -498,9 +561,10 @@ fn copy_captured_encoded_source(
         }
         source.revalidate()?;
         if total != source.bytes() || checksum.finish() != source.checksum() {
-            return Err(validation(
-                "captured encoded source checksum or length changed during copy",
-            ));
+            return Err(validation(format!(
+                "captured {} source checksum or length changed during copy",
+                source.kind()
+            )));
         }
         Ok(total)
     })();

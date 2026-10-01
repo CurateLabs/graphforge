@@ -1969,7 +1969,6 @@ use installation::install_graph_manifest_node_with_lease;
 )]
 pub use installation::install_graph_object_bytes;
 
-pub(crate) use installation::install_captured_encoded_artifact_with_lease;
 #[allow(
     unused_imports,
     reason = "preserve the existing staged CAS root API across feature and test configurations"
@@ -1978,13 +1977,19 @@ pub use installation::install_graph_object_file;
 pub(crate) use installation::install_graph_object_file_with_lease;
 #[cfg(test)]
 pub(crate) use installation::set_captured_copy_hook;
+pub(crate) use installation::{
+    install_captured_encoded_artifact_with_lease, install_captured_portable_source_with_lease,
+};
 pub use manifest_tree::GraphManifestState;
 #[allow(
     unused_imports,
     reason = "preserve the existing staged CAS root API across feature and test configurations"
 )]
+#[cfg(test)]
 pub(crate) use manifest_tree::append_authenticated_graph_files_v2;
 pub(crate) use manifest_tree::append_captured_mapped_graph_files;
+pub(crate) use manifest_tree::append_captured_portable_graph_files;
+#[cfg(any(test, feature = "test-support"))]
 pub use manifest_tree::append_graph_files_v2;
 pub(crate) use manifest_tree::append_mapped_import_graph_files;
 pub(crate) use manifest_tree::append_replayed_graph_files;

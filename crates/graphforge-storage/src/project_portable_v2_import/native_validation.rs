@@ -26,13 +26,26 @@ pub fn validate_research_package(
 ) -> Result<graphforge_core::portable::PortableV2Report, PortableV2Error> {
     let owner = tempfile::tempdir().map_err(|_| invalid())?;
     let stage = owner.path().join("verified");
-    let report = crate::project_portable_v2::materialize_verified_portable_v2(
-        source, &stage, limits, cancelled,
+    let materialized = crate::project_portable_v2::materialize_verified_portable_v2_observed(
+        source,
+        &stage,
+        limits,
+        cancelled,
+        |_, _| Ok(()),
+        false,
     )?;
+    let report = materialized.report;
     if let Some((registry, objects)) =
         crate::project_portable_v2::research::validate_stage(&stage, &report, limits, cancelled)?
     {
-        validate(&stage, &registry, &objects, cancelled, Some(validator))?;
+        validate(
+            &stage,
+            &registry,
+            &objects,
+            &materialized.captures,
+            cancelled,
+            Some(validator),
+        )?;
     }
     Ok(report)
 }
@@ -41,14 +54,17 @@ pub(super) fn validate(
     stage: &Path,
     registry: &ResearchRegistry,
     objects: &BTreeMap<String, u64>,
+    captures: &BTreeMap<String, crate::project_portable_v2::MaterializedCapture>,
     cancelled: Option<&AtomicBool>,
     validator: Option<&mut NativeResearchValidator<'_>>,
 ) -> Result<(), PortableV2Error> {
     let validator = validator.ok_or_else(invalid)?;
     let source = tempfile::tempdir().map_err(|_| invalid())?;
     crate::open_or_initialize_ephemeral_project(source.path()).map_err(|_| invalid())?;
-    let _lease = crate::begin_graph_object_publication(source.path()).map_err(|_| invalid())?;
-    crate::project_portable_v2::research::install(stage, source.path(), objects)?;
+    let lease = crate::begin_graph_object_publication(source.path()).map_err(|_| invalid())?;
+    crate::project_portable_v2::research::install_captured_with_lease(
+        stage, &lease, objects, captures, cancelled,
+    )?;
     for version in registry.versions.values() {
         check_cancel(cancelled)?;
         let target = tempfile::tempdir().map_err(|_| invalid())?;
@@ -90,6 +106,7 @@ mod tests {
         let error = validate(
             absent,
             &ResearchRegistry::default(),
+            &BTreeMap::new(),
             &BTreeMap::new(),
             None,
             None,

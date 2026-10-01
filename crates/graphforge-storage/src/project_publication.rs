@@ -32,7 +32,7 @@ pub(crate) use control::write_journal;
 #[cfg(test)]
 use participants::request_metadata;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -142,7 +142,12 @@ pub(crate) struct ProjectFileParticipant {
 #[derive(Clone, Copy)]
 enum ParticipantPayloads<'a> {
     Memory(Option<&'a ParticipantIdentities>),
-    Files(&'a [ProjectFileParticipant], Option<&'a AtomicBool>, usize),
+    Files(
+        &'a [ProjectFileParticipant],
+        Option<&'a AtomicBool>,
+        usize,
+        Option<&'a BTreeMap<PathBuf, &'a crate::project_portable_v2::MaterializedCapture>>,
+    ),
 }
 
 /// Exact-byte identity of one in-memory participant.
@@ -653,6 +658,7 @@ pub(crate) fn stage_project_generation_from_files_admitted(
     copy_buffer_bytes: usize,
     allocation: Option<&crate::StorageAllocationOperation>,
     installed_objects: Option<&crate::GraphObjectPublicationLease>,
+    captures: Option<&BTreeMap<PathBuf, &crate::project_portable_v2::MaterializedCapture>>,
 ) -> Result<ProjectStageOutcome, GfError> {
     let result = (|| {
         validate_request(request)?;
@@ -689,7 +695,7 @@ pub(crate) fn stage_project_generation_from_files_admitted(
             None,
             None,
             graph_tree,
-            ParticipantPayloads::Files(files, cancelled, copy_buffer_bytes),
+            ParticipantPayloads::Files(files, cancelled, copy_buffer_bytes, captures),
             allocation,
             installed_objects,
         )

@@ -28,30 +28,30 @@ const IMPORT_ADJACENCY_SPILL_ROOT: &str = ".adjacency-spill";
 /// at staging, so derived files cannot be added there; that path keeps the
 /// lazy rebuild.
 ///
-/// Returns the number of files added to the stage.
-pub(super) fn persist_import_adjacency(
+/// Returns the number of added files and captures from the actual CSR writer.
+pub(crate) fn persist_import_adjacency_with_captures(
     stage: &Path,
     graph_tree: &Path,
     participants: &[ProjectFileParticipant],
     cancelled: Option<&AtomicBool>,
     allocation: Option<&crate::StorageAllocationOperation>,
-) -> Result<usize, PortableV2Error> {
+) -> Result<(usize, Vec<crate::adjacency::CapturedAdjacencyArtifact>), PortableV2Error> {
     let Some(participant) = participants.iter().find(|participant| {
         participant.participant.capability_id == crate::GRAPH_CAPABILITY_ID
             && participant.participant.record_family_id == crate::GRAPH_FILES_FAMILY
     }) else {
-        return Ok(0);
+        return Ok((0, Vec::new()));
     };
     if !matches!(
         participant.participant.record_version,
         crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
             | crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
     ) {
-        return Ok(0);
+        return Ok((0, Vec::new()));
     }
     let adjacency = crate::adjacency::adjacency_dir(graph_tree);
     if adjacency.exists() {
-        return Ok(0);
+        return Ok((0, Vec::new()));
     }
     let generation =
         crate::generation::read_topology_generation(graph_tree).map_err(|error| storage(&error))?;
@@ -89,7 +89,7 @@ pub(super) fn persist_import_adjacency(
     );
     drop(phase_scope);
     let _ = fs::remove_dir_all(&spill_root);
-    outcome.map_err(|error| storage_or_cancel(&error, cancelled))?;
+    let (_, metrics) = outcome.map_err(|error| storage_or_cancel(&error, cancelled))?;
     let mut added = 0_usize;
     let mut pending = vec![adjacency];
     while let Some(directory) = pending.pop() {
@@ -106,7 +106,19 @@ pub(super) fn persist_import_adjacency(
             }
         }
     }
-    Ok(added)
+    Ok((added, metrics.captured_artifacts))
+}
+
+#[cfg(test)]
+fn persist_import_adjacency(
+    stage: &Path,
+    graph_tree: &Path,
+    participants: &[ProjectFileParticipant],
+    cancelled: Option<&AtomicBool>,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<usize, PortableV2Error> {
+    persist_import_adjacency_with_captures(stage, graph_tree, participants, cancelled, allocation)
+        .map(|(count, _)| count)
 }
 
 /// The `(relation, path)` edge tables of a verified package graph tree,
@@ -375,9 +387,51 @@ mod tests {
         }];
         let allocation =
             crate::StorageAllocationOperation::from_paths(&[stage.path().to_path_buf()]).unwrap();
-        let added =
-            persist_import_adjacency(stage.path(), &tree, &participants, None, Some(&allocation))
-                .unwrap();
+        let observation = graphforge_core::hash_observation::operation::Capture::start();
+        let (added, captures) = crate::project_portable_v2::capture_import_adjacency(
+            stage.path(),
+            &tree,
+            &participants,
+            None,
+            Some(&allocation),
+            PortableV2Limits::default().max_entry_bytes,
+        )
+        .unwrap();
+        let naming = observation.snapshot();
+        drop(observation);
+        let derived_bytes: u64 = captures
+            .iter()
+            .map(|(path, capture)| {
+                // Get the expected length through the sealed source, rather than
+                // parsing the just-written CSR metadata into authority.
+                capture.open_source(path).unwrap().bytes()
+            })
+            .sum();
+        assert_eq!(captures.len(), added);
+        assert!(naming.artifact_payload_sha256_bytes > 0);
+        assert!(naming.artifact_payload_sha256_bytes <= derived_bytes);
+        assert_eq!(naming.unclassified_sha256_bytes, 0);
+        let target = tempfile::tempdir().unwrap();
+        crate::open_or_initialize_project(target.path()).unwrap();
+        let lease = crate::begin_graph_object_publication(target.path()).unwrap();
+        let observation = graphforge_core::hash_observation::operation::Capture::start();
+        for (path, capture) in &captures {
+            let source = capture.open_source(path).unwrap();
+            crate::graph_object_store::install_captured_portable_source_with_lease(
+                &lease,
+                &source,
+                &mut || false,
+            )
+            .unwrap();
+        }
+        let installation = observation.snapshot();
+        drop(observation);
+        assert_eq!(
+            installation.artifact_payload_sha256_bytes, 0,
+            "reconstructed files must not be named again during CAS installation"
+        );
+        assert_eq!(installation.unclassified_sha256_bytes, 0);
+        assert!(installation.checksum_bytes >= derived_bytes);
         let expected =
             crate::StorageAllocationOperation::from_paths(&[stage.path().to_path_buf()]).unwrap();
         let actual = serde_json::to_value(allocation.snapshot().unwrap()).unwrap();

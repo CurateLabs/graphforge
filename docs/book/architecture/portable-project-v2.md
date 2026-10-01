@@ -234,8 +234,22 @@ The copy buffer, entry count, per-entry bytes, and total declared bytes are
 finite caller-visible limits. Progress contains aggregate entry and byte counts
 only. Cancellation is observed before entries and copy-buffer operations.
 Sources are opened as regular files and compared with their planned identity,
-length, modification state, and digest after streaming; links, special files,
-mutation, short reads, and digest changes fail closed.
+length and modification state after streaming. Manifest-admitted participants
+and graph files carry their existing SHA-256 identity and mandatory XXH64 into
+the writer; checksums over the actual copied bytes refuse mutation. Unknown
+research objects and other untrusted sources retain genuine SHA-256 admission.
+Links, special files, replacement, short reads and content changes fail closed.
+
+Before publication, the writer checks its staged package with the canonical
+parser against a private capture of the bytes it wrote. This retains one output
+checksum readback: it catches corruption of a successful write, including a
+same-inode, same-length change after writing and before the no-replace rename.
+Checking the input alone cannot catch that failure. The parser still validates
+headers, PAX records, padding, end blocks, tag inventories, bounded composition
+controls and semantic/transport receipt agreement. This private evidence cannot
+be supplied by a public caller. Public portable verification continues to hash
+every untrusted entry and the complete bundle with SHA-256. The wire format and
+portable digest values remain unchanged; writer checksums are private metadata.
 
 Every complete export also carries one canonical, authenticated compatibility
 control component. It maps portable participant IDs back to runtime capability
@@ -246,11 +260,26 @@ JSON members, unknown fields, non-canonical bytes, unsupported encodings, and
 references that are not authenticated by the semantic manifest.
 
 `materialize_verified_portable_v2` exposes the verified component entries to
-the importer through a new private directory. It fully verifies before writing,
-streams with the configured copy buffer, verifies the source again before
-returning, and removes the directory on cancellation, mutation, or failure.
+the importer through a new private directory. Bounded control admission happens
+before allocation. One scanner authenticates the exact bytes copied into that
+directory, with the configured buffer, and admits the complete package before
+returning it. Semantic validation reads only authenticated bounded controls;
+it never copies the graph payload into a second temporary directory. Research
+closure derivation reads settings, graph inventories and manifest nodes, while
+opaque Arrow/Parquet participant identities come from the authenticated outer
+entries. Native source identity and entry-set checks remain in place. A checksum
+readback refuses corruption of staged output. Cancellation, mutation or failure
+removes the private directory and its tracked allocation routes.
 Expanded and bundle forms therefore yield the same component tree without
 making unverified bytes available to project publication.
+
+Graph and research installation retain private capabilities from that actual
+copy, binding SHA and XXH64 to native identity, length, allocation and a single
+link. CAS installation verifies the checksum of its consumed buffers and reuses
+only identities installed under the same live publication lease; unknown CAS
+objects and concurrent winners retain genuine SHA authentication. Import's
+missing-CSR builder supplies its own writer captures, while uncaptured derived
+outputs receive one bounded naming pass before following the same private path.
 
 Expanded output is built in a unique sibling directory, synced bottom-up, and
 published with a no-replace atomic rename. Bundles use a unique sibling file,

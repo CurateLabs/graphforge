@@ -204,6 +204,11 @@ required-features = ["search"]
 name = "source_artifact_write"
 required-features = ["research", "search"]
 
+# Measures real portable export/import through the Rust facade.
+[[test]]
+name = "portable_payload_identity"
+required-features = ["portable"]
+
 # Includes knowledge/capability publication on a compact imported graph.
 [[test]]
 name = "publication_payload_identity"

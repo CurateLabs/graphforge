@@ -186,16 +186,19 @@ python3 scripts/development/digest-census.py --repo . --output /tmp/gf-digest-ce
 
 The method and reviewed classification inputs are pinned by SHA-256:
 `digest-census.py` is
-`640e8221d88c8065f9e60aa0e9182545c3e43b52bbb9618c885717d5d3b2f1ba`;
+`3a02f98553b682c7a8cb7b3ca0e92ad62cd68ab52241c3e33c795eacb96c44c9`;
 `digest-census-overrides.json` is
-`1cfcb38fb58af43dc7f78920c722c8ff723f429d47e43c395015e51c1bd94e18`.
+`95e4a70e1ff49b2315a240b10c1780cee56656fc01e530e02ca87529c7524e51`.
 The parser fixture `test-digest-census.py` is
-`77224ebc214e8c8793baced7d105bdc576cd0015feb436a0af701260998a48f1`.
+`234118a30c9231d3e860ad22ecbd113f815116688c7d390acc1a28a0c0cb2276`.
 Run the parser and stale-review regression fixtures with
 `python3 scripts/development/test-digest-census.py`. Reviewed function bodies
 are pinned individually; changed inputs, added producers in the same function,
 missing review pins, and unknown digest algorithms make a strict run fail.
 Refresh a classification only after reviewing its actual inputs and consumers.
+The reviewed application source inventory SHA-256 is
+`c241f70c0fd13f6582866078827b014ba5bd43703b7c2fac4f9be27027f3b754`; the method computes this over its ordered Rust path/file-digest map.
+Static sites are distinct from measured update bytes and runtime passes.
 
 Compact publication reuses a payload identity only from the authenticated
 published parent or from a successful installation captured privately by its
@@ -290,6 +293,76 @@ SHA input from inclusive process-wide cryptographic totals. Worker jobs capture 
 attach the current operation context. Nested operations and unrelated parallel
 tests retain separate collectors; there is no process-wide reset. Production
 context wrappers are zero-sized when test support is disabled.
+
+Portable pass counts are reproduced with the focused storage tests below. They
+exercise actual producer update calls and real package files in both expanded
+and canonical bundle representations; their collectors remain isolated from
+parallel tests. `materialization_reports_actual_bounded_payload_reads` records
+one component copy and one untrusted authentication pass, while
+`captured_export_has_one_transport_hash_and_refuses_written_corruption` separates
+private writer checksums from full public portable SHA authentication. The
+member-copy regression preserves the historical two-SHA baseline in its Git
+history and checks that the source identity is now hashed once. Corruption and
+mutate/read/restore cases run alongside those counters. Keep raw test output on
+the producing issue or PR, outside this documentation tree. Large two-size
+portable measurements are optional follow-up work under the maintainer waiver.
+
+```bash
+cargo nextest run -p graphforge-storage -E 'test(project_portable_v2::materialization::tests::) | test(project_portable_v2_export::transport::tests::portable_member_copy_counts_crypto_and_refuses_same_identity_content_mutation) | test(captured_export_has_one_transport_hash_and_refuses_written_corruption)' --nocapture
+```
+
+The bounded input is the existing ontology-only fixture at
+`tests/fixtures/portable-v2/ontology-only.manifest.json`, with a two-byte `{}`
+ontology member. Its SHA-256 is
+`ef18ecc2ee374ca4c29ee3870c2a78ad8d91f854bcfe521827c0eac84328d4ae`.
+The export fixture builds a real retained generation with
+ontology composition. These tests assert exact actual SHA input counts rather
+than estimated file sizes as a substitute for producer observations. Total
+checksum work and required control/contract work remain separate from portable
+SHA input, and remain part of inclusive process-level work.
+
+The [portable facade fixture](../../crates/graphforge-api/tests/portable_payload_identity.rs)
+constructs 2,000 nodes and 1,999 directed edges, exports a complete bundle,
+imports it into a new project and checks node and edge counts after a fresh
+facade reopen. Its separate integration-test process measures actual scoped
+SHA/checksum update bytes and inclusive `/proc/self/io` read/write syscall
+bytes for export and import. A separate fresh-reopen/count scope asserts zero
+artifact SHA on default reads; reporting occurs after all measurement windows.
+The test preserves checksum output readback and requires zero duplicate
+artifact-payload SHA for its already-authenticated graph files.
+The fixture source SHA-256 is
+`3d44272b1bb2a8324f8d2ae0a40cb7bd7b6ab1dc1d6303a0b728614b365bd99b`.
+It records numeric values in `GITHUB_STEP_SUMMARY` when CI supplies that path,
+only after all assertions pass; otherwise use successful-test output:
+
+```bash
+cargo nextest run -p graphforge-api --locked --test portable_payload_identity --success-output immediate
+```
+
+These are observed fixture counts, not S22 timing results or a claim that all
+portable consumers can bypass untrusted authentication. Keep execution results
+on the producing issue or PR. Prior measurements from another candidate remain
+attributed to that candidate rather than being reused as current results.
+
+Import forwards sealed capabilities from the actual scanner/copier into graph
+and research installation under the same publication lease. Each capability
+binds the copied SHA and XXH64 to a retained native file identity, exact length,
+single link and allocation. Installation checks the CRC of actual consumed copy
+buffers; a source modified during reading and restored before metadata checks
+is refused. Unknown CAS entries and concurrent winners still receive genuine
+SHA authentication. The focused materialization tests cover research reuse,
+unknown-CAS adoption and source mutation with these real update counters.
+
+Missing adjacency takes the same path. A private factory invokes the actual CSR
+builder and consumes its successful writer captures; outputs without those
+captures get one bounded SHA/XXH64 naming pass. Production requires a private
+capture for every archive and reconstructed graph file. The existing small
+reconstruction fixture checks naming bytes against the total derived byte length
+and exactly zero artifact SHA during subsequent CAS installation:
+
+```bash
+cargo nextest run -p graphforge-storage -E 'test(import_builds_the_index_a_package_lacks_and_never_twice)' --success-output immediate
+```
 
 The same capture records successful whole composite-request fingerprints,
 excluding participant subfingerprints that share the `CompositeRequest` domain. Count them around the real composite publish call, including
