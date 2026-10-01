@@ -97,8 +97,7 @@ pub(super) fn prepare(
         &replacements,
         cancel.flag(),
     )?;
-    let mut view = crate::branches::private_view::open(owner, &prepared)?;
-    view.read_only = false;
+    let view = crate::branches::private_view::open_writable(owner, &prepared)?;
     let keys = selected
         .iter()
         .filter(|(_, resolution)| {

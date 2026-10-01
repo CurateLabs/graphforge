@@ -29,6 +29,8 @@ impl<'a> FacadeMutationLifecycle<'a> {
                 "GF_WRITE_RESOURCE_READ_ONLY: session does not authorize writes".into(),
             ));
         }
+        // The executor writes into the workspace before publication runs.
+        graph.require_private_workspace()?;
         let parent = graphforge_storage::resolve_project_generation(
             graph.resolved_generation.container_root(),
         )?;

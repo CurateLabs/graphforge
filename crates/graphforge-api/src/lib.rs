@@ -149,6 +149,8 @@ mod mutation_transaction;
 mod mutation_transaction_fault_tests;
 #[cfg(test)]
 mod permanent_parquet_test_support;
+#[cfg(test)]
+mod pinned_workspace_tests;
 #[cfg(feature = "research")]
 pub use multi_ontology::{
     ActivationProfileChangeRequest, BridgeAdoptionRequest, BridgeCandidate, BridgeDeleteRequest,
@@ -281,7 +283,7 @@ mod workspace_hydration;
 use workspace_hydration::read_runtime_catalog;
 pub(crate) use workspace_hydration::rematerialize_graph_workspace;
 use workspace_hydration::{
-    GenerationPropertyAuthority, GraphWorkspace, PreparedGenerationReadAuthority,
+    GenerationPropertyAuthority, GraphWorkspace, PreparedGenerationReadAuthority, WorkspaceAccess,
     adjacency_provider_for_graph, decode_runtime_catalog, hydrate_graph_workspace,
     load_composition_binding, load_runtime_catalog, load_workspace_ontology,
     ordinal_identity_handle, ordinal_identity_resolver,
@@ -893,7 +895,7 @@ impl GraphForge {
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
             workspace_guard: Arc::new(RwLock::new(GraphWorkspace {
                 dir,
-                _owner: workspace,
+                owner: workspace,
             })),
             graph_open_evidence,
             open_io_attribution: graphforge_storage::lifecycle_io::snapshot_since(
@@ -1006,7 +1008,9 @@ impl GraphForge {
         Ok(graph)
     }
 
-    #[allow(clippy::too_many_lines)] // open authenticates every coupled generation participant
+    /// Open read-only over the published tree itself, or writable over a
+    /// private copy. A facade that must write opens writable: it never flips a
+    /// pinned alias, whose tree is the generation's own published bytes.
     fn open_resolved_with_options(
         container_dir: PathBuf,
         resolved_generation: ResolvedProjectGeneration,
@@ -1015,12 +1019,37 @@ impl GraphForge {
         resource_policy: resource_policy::NormalizedResourcePolicy,
         project_open_recovery: graphforge_storage::ProjectOpenRecoveryEvidence,
     ) -> Result<Self, GfError> {
+        let access = if read_only {
+            WorkspaceAccess::PinnedReadOnly
+        } else {
+            WorkspaceAccess::Writable
+        };
+        Self::open_resolved_with_access(
+            container_dir,
+            resolved_generation,
+            access,
+            write_options,
+            resource_policy,
+            project_open_recovery,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)] // open authenticates every coupled generation participant
+    fn open_resolved_with_access(
+        container_dir: PathBuf,
+        resolved_generation: ResolvedProjectGeneration,
+        access: WorkspaceAccess,
+        write_options: GraphForgeOptions,
+        resource_policy: resource_policy::NormalizedResourcePolicy,
+        project_open_recovery: graphforge_storage::ProjectOpenRecoveryEvidence,
+    ) -> Result<Self, GfError> {
+        let read_only = access.read_only();
         let generation_uuid = resolved_generation.generation_uuid();
         let open_io_before = graphforge_storage::lifecycle_io_snapshot();
         let (ontology_mode, ontology, ontology_document) =
             load_workspace_ontology(&resolved_generation)?;
         let (dir, workspace, graph_open_evidence) =
-            hydrate_graph_workspace(&resolved_generation, read_only)?;
+            hydrate_graph_workspace(&resolved_generation, access.pins_published_tree())?;
         let (property_inventory, hydrated_inventory) =
             property_and_graph_inventory_for_hydrated_generation(&resolved_generation, &dir)?;
         let ordinal_identities = ordinal_identity_resolver(&resolved_generation, &dir)?;
@@ -1137,7 +1166,7 @@ impl GraphForge {
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
             workspace_guard: Arc::new(RwLock::new(GraphWorkspace {
                 dir,
-                _owner: workspace,
+                owner: workspace,
             })),
             graph_open_evidence,
             open_io_attribution: graphforge_storage::lifecycle_io::snapshot_since(

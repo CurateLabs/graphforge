@@ -69,8 +69,7 @@ pub(crate) fn prepare(
         .get(head)
         .cloned()
         .ok_or_else(unavailable)?;
-    let mut graph = crate::research_versions::materialize_version(owner, &version)?;
-    graph.read_only = false;
+    let mut graph = crate::research_versions::materialize_version_writable(owner, &version)?;
     graph.resource_policy.memory_budget_bytes = 64 * 1024 * 1024;
     graph.resource_policy.spill_enabled = false;
     Ok((graph, version))
