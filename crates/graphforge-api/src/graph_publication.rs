@@ -11,6 +11,25 @@ pub(super) type BoundGenerationStorage = (
     Vec<(std::path::PathBuf, std::path::PathBuf)>,
 );
 
+/// Capture the private workspace over `parent` and prepare its compact root.
+///
+/// Every mutating commit publishes a compact graph root: only files that changed
+/// since the parent install, and the generation owns no graph tree. Keep the
+/// returned lease through `CURRENT` and publish with it.
+pub(crate) fn compact_graph_participant(
+    workspace: &std::path::Path,
+    parent: &graphforge_storage::ResolvedProjectGeneration,
+) -> Result<
+    (
+        graphforge_storage::ProjectParticipant,
+        graphforge_storage::GraphObjectPublicationLease,
+    ),
+    GfError,
+> {
+    let (inventory, _) = graphforge_storage::capture_graph_files_over_parent(workspace, parent)?;
+    graphforge_storage::prepare_graph_files_replacement(parent, workspace, &inventory)
+}
+
 impl GraphForge {
     /// Take the graph object lease a publication holds from before staging
     /// through `CURRENT`, so a generation that carries a compact graph root
@@ -145,7 +164,7 @@ impl GraphForge {
                 graphforge_storage::UuidIndexBuildLimits::default(),
             )?;
         }
-        let graph = graphforge_storage::capture_graph_files_over_parent(&self.dir(), &parent)?.1;
+        let (graph, graph_objects) = compact_graph_participant(&self.dir(), &parent)?;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let installed_bindings = self
             .semantic_storage_bindings
@@ -182,7 +201,7 @@ impl GraphForge {
         let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
             root,
             &request,
-            Some(self.dir().path()),
+            None,
             self.lifecycle_mode,
         )? {
             ProjectStageOutcome::AlreadyPublished(receipt) => Ok(receipt),
@@ -198,7 +217,7 @@ impl GraphForge {
                         Ok(())
                     },
                 )?
-                .publish(),
+                .publish_with_graph_objects(&graph_objects),
         };
         let published = match publication {
             Ok(receipt) => receipt,
@@ -248,7 +267,7 @@ impl GraphForge {
                 graphforge_storage::UuidIndexBuildLimits::default(),
             )?;
         }
-        let graph = graphforge_storage::capture_graph_files_over_parent(&self.dir(), &parent)?.1;
+        let (graph, graph_objects) = compact_graph_participant(&self.dir(), &parent)?;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let participants = graph_publication_participants(
             &parent,
@@ -280,7 +299,7 @@ impl GraphForge {
         let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
             root,
             &request,
-            Some(self.dir().path()),
+            None,
             self.lifecycle_mode,
         )? {
             ProjectStageOutcome::AlreadyPublished(receipt) => Ok(receipt),
@@ -296,7 +315,7 @@ impl GraphForge {
                         Ok(())
                     },
                 )?
-                .publish(),
+                .publish_with_graph_objects(&graph_objects),
         };
         let published = match publication {
             Ok(receipt) => receipt,

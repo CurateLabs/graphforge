@@ -183,9 +183,15 @@ pub fn append_graph_files_v2(
     )
 }
 
-/// Prepare an authenticated canonical candidate while preserving its parent ownership.
-/// CAS parents reuse unchanged objects; generation-owned parents retain their
-/// existing graph-tree publication path. Keep the returned lease through CURRENT.
+/// Prepare a compact (V2) root for a private candidate over any parent.
+///
+/// Every parent shape publishes a compact root, so a mutating commit never
+/// leaves an expanded inventory behind: a compact parent reuses its unchanged
+/// objects and installs only changed files and tombstones; an expanded or
+/// absent parent (the first commit on an empty project, or a pre-existing
+/// expanded generation converting on its next commit) installs the candidate
+/// once into an empty state. Keep the returned lease through CURRENT and stage
+/// without a graph tree.
 ///
 /// # Errors
 /// Rejects invalid inventories, route authority, or object publication failures.
@@ -196,31 +202,30 @@ pub fn prepare_graph_files_replacement(
 ) -> Result<
     (
         crate::ProjectParticipant,
-        Option<crate::GraphObjectPublicationLease>,
+        crate::GraphObjectPublicationLease,
     ),
     GfError,
 > {
-    let mut files_participant = crate::graph_files::inventory_participant(
-        crate::graph_files::encode_inventory(inventory)?,
-        inventory.file_count,
-    )?;
-    let publication_lease = match parent.declared_graph_files_participant()? {
+    // Validate the complete expanded contract before installing one object.
+    crate::graph_files::encode_inventory(inventory)?;
+    let lease = crate::begin_graph_object_publication(parent.container_root())?;
+    let mut state = match parent.declared_graph_files_participant()? {
         Some(crate::GraphFilesParticipant::V2(root)) => {
-            let lease = crate::begin_graph_object_publication(parent.container_root())?;
-            let (mut state, _) = crate::graph_object_store::GraphManifestState::open(
+            crate::graph_object_store::GraphManifestState::open(
                 &lease,
                 root,
                 crate::GraphManifestLimits::default(),
-            )?;
-            let (root, _) = crate::graph_object_store::replace_replayed_graph_files(
-                &lease, workspace, &mut state, inventory,
-            )?;
-            files_participant = crate::graph_files::graph_files_root_participant(&root)?;
-            Some(lease)
+            )?
+            .0
         }
-        _ => None,
+        Some(crate::GraphFilesParticipant::V1(_)) | None => {
+            crate::graph_object_store::GraphManifestState::empty()
+        }
     };
-    Ok((files_participant, publication_lease))
+    let (root, _) = crate::graph_object_store::replace_replayed_graph_files(
+        &lease, workspace, &mut state, inventory,
+    )?;
+    Ok((crate::graph_files::graph_files_root_participant(&root)?, lease))
 }
 
 /// Publish a private replay candidate using its authenticated route contract.
