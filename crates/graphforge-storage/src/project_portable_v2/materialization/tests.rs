@@ -1,5 +1,6 @@
 use super::super::tests::{package, tar_entry};
 use super::*;
+use crate::project_portable_v2::walk;
 use std::sync::atomic::Ordering;
 
 #[test]
