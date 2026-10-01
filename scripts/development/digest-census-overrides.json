@@ -2215,10 +2215,10 @@
     {
       "path": "crates/graphforge-storage/src/uuid_membership/construction.rs",
       "function": "encode_construction_index_inner",
-      "role": "durable_artifact",
-      "input_contract": "Construction source identity artifact byte stream authenticates required construction input.",
+      "role": "contract_identity",
+      "input_contract": "The construction identity source byte stream, read once while encoding, defines the published topology receipt's topology_delta_sha256 contract identity; resume admits the same source by exact length and XXH64.",
       "function_bodies_sha256": [
-        "fd68e246ad5ab322a2341102c8bfe28b778f346c8c807675f9482adbe1f74ade"
+        "d688cc9397ca13d0005e6988bf0e25ad2c94fd4ba03faca5a74e1b117c2a15fe"
       ]
     },
     {
