@@ -12,13 +12,13 @@ use super::{
     StableDirectory, Uuid, Write, account_cache_release, artifact_stem, authenticate_shaped_output,
     authenticate_shaped_output_identity, checked_category_remove, combine_cache_cleanup,
     combine_secondary_cleanup, construction_failpoint, copy_post_shape_io, decode_bounded,
-    decode_shape_intent, file_identity, file_link_count, install_control, is_canonical_sha256,
-    is_shape_artifact_name, load_shape_progress_chain, merge_cache_release_evidence,
-    read_bounded_limit, receipt_from_intent, receipt_name, record_active_identity_remove,
-    replace_checkpoint_control, scan_shape_segments, sha256, shape_authority_sha256,
-    shape_receipt_name, storage, supersession, validate_artifact_name, validate_intent,
-    validate_receipt_artifacts, validate_receipt_semantics, validate_shape_binding,
-    validate_sorted_run,
+    decode_shape_intent, file_identity, file_link_count, install_control, is_canonical_lower_hex,
+    is_canonical_sha256, is_shape_artifact_name, load_shape_progress_chain,
+    merge_cache_release_evidence, read_bounded_limit, receipt_from_intent, receipt_name,
+    record_active_identity_remove, replace_checkpoint_control, scan_shape_segments, sha256,
+    shape_authority_sha256, shape_receipt_name, storage, supersession, validate_artifact_name,
+    validate_intent, validate_receipt_artifacts, validate_receipt_semantics,
+    validate_shape_binding, validate_sorted_run,
 };
 use std::collections::BTreeSet;
 
@@ -507,11 +507,11 @@ fn cleanup_incomplete_shape_capabilities(
         if !is_shape_artifact_name(&receipt.name) {
             continue;
         }
-        if !receipt.xxh64.is_empty() && keep.contains(&receipt.name) {
-            continue;
-        }
-        if receipt.xxh64.is_empty() {
+        if !is_canonical_lower_hex(&receipt.xxh64, 16) {
             return Err(storage("shaped writer capability digest changed"));
+        }
+        if keep.contains(&receipt.name) {
+            continue;
         }
         match root.open_child_file(OsStr::new(&receipt.name)) {
             Ok(artifact) => {

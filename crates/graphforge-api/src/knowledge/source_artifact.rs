@@ -789,7 +789,6 @@ fn publish_source_artifact(
                 Ok(())
             };
             if local_bytes.is_some() {
-                let lease = graphforge_storage::begin_graph_object_publication(root)?;
                 staged
                     .validate(
                         |_| Ok(()),
@@ -802,7 +801,7 @@ fn publish_source_artifact(
                             Ok(())
                         },
                     )?
-                    .publish_with_reader_preparation(Some(&lease), &mut prepare)?
+                    .publish_with_reader_preparation(Some(&graph_objects), &mut prepare)?
             } else {
                 staged
                     .validate(
