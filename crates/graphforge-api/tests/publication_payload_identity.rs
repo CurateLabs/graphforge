@@ -296,6 +296,9 @@ fn knowledge_publication_on_a_bulk_imported_project_hashes_only_new_payload() {
     // carries it forward must publish under its CAS lease (#1691).
     bulk_load(&graph, NODES, 1);
     for capability_id in [CapabilityId::Provenance, CapabilityId::Knowledge] {
+        let parent = graphforge_storage::resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid();
         let before = inodes(root.path());
         let capture = PayloadDigestCapture::start();
         graph
@@ -315,7 +318,13 @@ fn knowledge_publication_on_a_bulk_imported_project_hashes_only_new_payload() {
             work,
             newly_published_bytes(root.path(), &before),
         );
+        let committed = graphforge_storage::resolve_project_generation(root.path()).unwrap();
+        assert_ne!(committed.generation_uuid(), parent);
+        assert_eq!(committed.parent_generation_uuid(), Some(parent));
     }
+    let parent = graphforge_storage::resolve_project_generation(root.path())
+        .unwrap()
+        .generation_uuid();
     let before = inodes(root.path());
     let capture = PayloadDigestCapture::start();
     graph
@@ -341,6 +350,10 @@ fn knowledge_publication_on_a_bulk_imported_project_hashes_only_new_payload() {
         work,
         newly_published_bytes(root.path(), &before),
     );
+    let committed = graphforge_storage::resolve_project_generation(root.path()).unwrap();
+    assert_ne!(committed.generation_uuid(), parent);
+    assert_eq!(committed.parent_generation_uuid(), Some(parent));
+    drop(committed);
     drop(graph);
     let reopened = GraphForge::new(path).unwrap();
     assert_eq!(

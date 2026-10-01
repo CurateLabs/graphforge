@@ -1705,6 +1705,22 @@ fn verify_file_counted(
     expected_length: u64,
     diagnostic: &Path,
 ) -> Result<ReadIoEvidence, GfError> {
+    verify_file_counted_in_domain(
+        file,
+        digest,
+        expected_length,
+        diagnostic,
+        graphforge_core::hash_observation::HashDomain::ArtifactPayload,
+    )
+}
+
+fn verify_file_counted_in_domain(
+    file: File,
+    digest: &str,
+    expected_length: u64,
+    diagnostic: &Path,
+    domain: graphforge_core::hash_observation::HashDomain,
+) -> Result<ReadIoEvidence, GfError> {
     let metadata = file
         .metadata()
         .map_err(|error| storage("inspect graph object handle", diagnostic, error))?;
@@ -1715,7 +1731,7 @@ fn verify_file_counted(
     }
     let mut file = graphforge_filesystem::FileCacheReleasingReader::new(file)
         .map_err(|error| storage("open bounded graph object handle", diagnostic, error))?;
-    let mut hasher = crate::payload_digest::PayloadSha256::new();
+    let mut hasher = crate::payload_digest::PayloadSha256::for_domain(domain);
     let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut io = ReadIoEvidence::default();
     let mut buffer = vec![0_u8; BUFFER_BYTES];
@@ -1789,7 +1805,23 @@ fn verify_stream_counted(
     expected_length: u64,
     diagnostic: &Path,
 ) -> Result<ReadIoEvidence, GfError> {
-    let mut hasher = crate::payload_digest::PayloadSha256::new();
+    verify_stream_counted_in_domain(
+        file,
+        digest,
+        expected_length,
+        diagnostic,
+        graphforge_core::hash_observation::HashDomain::ArtifactPayload,
+    )
+}
+
+fn verify_stream_counted_in_domain(
+    file: &mut impl Read,
+    digest: &str,
+    expected_length: u64,
+    diagnostic: &Path,
+    domain: graphforge_core::hash_observation::HashDomain,
+) -> Result<ReadIoEvidence, GfError> {
+    let mut hasher = crate::payload_digest::PayloadSha256::for_domain(domain);
     let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut total = 0_u64;
     let mut calls = 0_u64;
@@ -1918,12 +1950,13 @@ pub(crate) use gc::gc_graph_objects_with_evidence_guarded;
 pub(crate) use gc::{
     capture_retained_graph_object_identities, capture_retained_graph_object_identities_observed,
 };
+use installation::install_graph_manifest_node_with_lease;
 #[allow(
     unused_imports,
     reason = "preserve the existing staged CAS root API across feature and test configurations"
 )]
 pub use installation::install_graph_object_bytes;
-use installation::install_graph_object_bytes_with_lease;
+
 #[allow(
     unused_imports,
     reason = "preserve the existing staged CAS root API across feature and test configurations"

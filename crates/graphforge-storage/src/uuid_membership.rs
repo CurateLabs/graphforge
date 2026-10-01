@@ -66,7 +66,7 @@ pub(crate) use topology_delta::prepare_v4_ordinal_delta;
 
 mod identity_codec;
 
-const FORMAT_VERSION: u32 = 7;
+const FORMAT_VERSION: u32 = 6;
 const NODE_LOOKUP_RECORD_BYTES: u64 = 24;
 const IDENTITY_RECORD_BYTES: u64 = 25;
 const NODE_LOOKUP_RECORD_WIDTH: usize = 24;

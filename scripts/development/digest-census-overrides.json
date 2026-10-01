@@ -1061,9 +1061,9 @@
       "path": "crates/graphforge-storage/src/graph_construction.rs",
       "function": "shape_authority_sha256",
       "role": "control_authentication",
-      "input_contract": "Ordinal manifest, canonical shape-authority envelope or canonical receipt body authenticate construction control chain.",
+      "input_contract": "Domain-separated canonical shape and sorted receipt metadata (names, identities, lengths and expected XXH64) authenticate the checkpoint-bound construction control envelope; no payload bytes are SHA inputs.",
       "function_bodies_sha256": [
-        "657f6c1f04b64bccd5d5bcac5ddb9ad26950d62e9858f7e015f38086ecb1e35a"
+        "4d243dccbebe8384e901551b6b9924289b18d5a37b7d755147a194c9f733e3e2"
       ]
     },
     {
@@ -1103,76 +1103,21 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/graph_construction/io_evidence.rs",
-      "function": "with_cache_window",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "HashingWriter hashes staged artifact bytes inline with required artifact publication.",
-      "function_bodies_sha256": [
-        "a223bf65619dc62d85b26f34ed85c71df826b942d67df1e04b305cd17c3bc5b2",
-        "002412ded660a5ffcc2c27b548b3f634fd844623db5d9684a1c0627958036b20"
-      ]
-    },
-    {
       "path": "crates/graphforge-storage/src/graph_construction/progress.rs",
       "function": "sha256_of_body",
       "role": "control_authentication",
-      "input_contract": "Canonical construction progress JSON body is authenticated against envelope digest.",
+      "input_contract": "Already bounded canonical shape-progress JSON body is hashed to authenticate the prior-boundary control chain; artifact bytes are not SHA inputs.",
       "function_bodies_sha256": [
-        "ccb77c3978c53612165314885853d3663c9de3e396a9f11f976254993f240104"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_construction/recovery.rs",
-      "function": "authenticate_artifact_contents",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Construction-owned run/Parquet artifact bytes are authenticated against durable receipt during recovery.",
-      "function_bodies_sha256": [
-        "95196fd59570511437ed509df69086fdb86a4e66c63fe6babeb2e37ee390fde4"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_construction/recovery.rs",
-      "function": "receipt_for_existing_with_work",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Construction-owned run/Parquet artifact bytes are authenticated against durable receipt during recovery.",
-      "function_bodies_sha256": [
-        "d3205a02ac5720323e2d81b80c1a5ce8b05fa198661b03aac506291d266f5736"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_construction/shape.rs",
-      "function": "route_fixed_run",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Construction route input run bytes are authenticated against sealed run digest while rewriting.",
-      "function_bodies_sha256": [
-        "e2e0af6a6db3e8ed5962d2995f0345356851db212c0d88c62c5bf73d0012170d"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_construction/shape.rs",
-      "function": "route_identity_run",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Construction route input run bytes are authenticated against sealed run digest while rewriting.",
-      "function_bodies_sha256": [
-        "8397ece939740c3a2a3fe3fcc4d964723512ca924b0956b04a6ac23d1c198d0e"
+        "32ba1388f5290cd8dc1ae26c6bb78f0214ac2efe8f8837859c160a129eb29e21"
       ]
     },
     {
       "path": "crates/graphforge-storage/src/graph_construction/shape.rs",
       "function": "shape_canonical_inner",
-      "role": "contract_identity",
-      "input_contract": "Canonical catalog logical contents form semantic construction authority.",
+      "role": "control_authentication",
+      "input_contract": "Per sealed chunk, kind byte, schema SHA text and admitted Parquet XXH64 text authenticate the exact normalized inputs bound into shape/encoding control replay; no row or artifact payload enters this SHA producer.",
       "function_bodies_sha256": [
-        "821964139860a93b7bf388b23bb8044e5340dd91316d206f91a2cc1fb27f35d5"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_construction/supersession.rs",
-      "function": "authenticate_payload",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Construction supersession payload bytes authenticate owned artifact before replacement.",
-      "function_bodies_sha256": [
-        "d1fcacc060727753e48d69225e7e6734e8a39db8b8923baf2e799fc37cfd627f"
+        "ace041bb4b4d35ee4f5555269923600bce5a664c13b73f5343b874e33ac47eb6"
       ]
     },
     {
@@ -1182,15 +1127,6 @@
       "input_contract": "Construction source/run/artifact byte stream authenticates input or computes output publication receipt.",
       "function_bodies_sha256": [
         "02912866a93b15533a4ddcd88943d1f52d63d0701cd48e5d0f3df3af4065acc2"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_construction_encoding.rs",
-      "function": "authenticated_source_spool",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Construction source/run/artifact byte stream authenticates input or computes output publication receipt.",
-      "function_bodies_sha256": [
-        "d42ad31aad8f935dd2e726c9140d2c2c2a25c5b13a54a3c7a0a717a28b37ca1d"
       ]
     },
     {
@@ -1206,18 +1142,9 @@
       "path": "crates/graphforge-storage/src/graph_construction_encoding.rs",
       "function": "inventory_authority_sha256",
       "role": "control_authentication",
-      "input_contract": "Canonical inventory JSON defines pinned construction inventory authority.",
+      "input_contract": "Domain-separated canonical encoding inventory JSON (artifact descriptors and generation/shape bindings) authenticates checkpoint control authority; artifact payloads are not SHA inputs.",
       "function_bodies_sha256": [
-        "e5a634ec8d8dbfb5cf10e570df685aa62fc3dd3c7162f1c395d1e0009b28ce04"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_construction_encoding.rs",
-      "function": "open_with_codec",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Construction source/run/artifact byte stream authenticates input or computes output publication receipt.",
-      "function_bodies_sha256": [
-        "c559d0400f67a3a029dea4a963e79d7981e224cf7d157fdf8c9590321095cdb6"
+        "a8e878bc309fb23fc88a5d648db10c4fff2ee8811b4eea48c0feff0b2563bb31"
       ]
     },
     {
@@ -1341,36 +1268,36 @@
       "path": "crates/graphforge-storage/src/graph_object_store.rs",
       "function": "verify_file_counted",
       "role": "durable_artifact",
-      "input_contract": "Complete graph object file bytes authenticate declared CAS address at write/trust boundary.",
+      "input_contract": "Generic artifact file-verification wrapper selects ArtifactPayload and delegates unchanged full SHA/address, length and checksum verification to verify_file_counted_in_domain; the wrapper creates no separate SHA producer.",
       "function_bodies_sha256": [
-        "29937fd1fba1afa6a4384f80848c8e3383e87d486162014c33446daa154f7c78"
+        "9f77c0097a8f89ad6a65075818ed2839dcf4e52b87014571c7e100c60037d3b5"
       ]
     },
     {
       "path": "crates/graphforge-storage/src/graph_object_store.rs",
       "function": "verify_stream_counted",
       "role": "durable_artifact",
-      "input_contract": "Complete graph object stream bytes authenticate declared CAS address at write/trust boundary.",
+      "input_contract": "Generic artifact stream-verification wrapper selects ArtifactPayload and delegates unchanged full SHA/address, length and checksum verification to verify_stream_counted_in_domain; the wrapper creates no separate SHA producer.",
       "function_bodies_sha256": [
-        "db61230e665cbb6482aba32a2a462795ccfc683940ddc0dd665b5676f753f6ba"
+        "d8c6abdd74ab6b33c648c445616375b0b201b58629f082643bce22740f8033a0"
       ]
     },
     {
       "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
       "function": "install_graph_object_bytes_with_lease",
       "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Resident artifact bytes define the CAS object address during installation; successful installation records private final-inode, length and checksum authority on its lease. Public staging without a matching private capture or authenticated parent tuple still authenticates unknown payload SHA addresses.",
+      "input_contract": "Generic resident-byte installation wrapper selects ArtifactPayload and delegates first SHA naming and durable installation to install_graph_object_bytes_in_domain; it creates no additional SHA pass. Arbitrary resident payload cannot select the typed manifest Control path.",
       "function_bodies_sha256": [
-        "185212ccc6d60348f99a6129eaf57c8642490821b79a6f5998c66d35dcd5557e"
+        "33553a7ed32f67862ef0bc4770da7b2fcef90ed84634600bedb2b2569d9f802e"
       ]
     },
     {
       "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
       "function": "install_graph_object_file_with_lease",
       "role": "durable_artifact",
-      "input_contract": "Copied graph artifact bytes authenticate the expected CAS address and checksum in one pass; successful installation records private final-inode, length and checksum authority on its lease. Public staging without a matching private capture or authenticated parent tuple still authenticates unknown payload SHA addresses.",
+      "input_contract": "Copied graph artifact bytes undergo unchanged genuine SHA/address and checksum authentication in one streamed pass; installation explicitly keeps ArtifactPayload for initial copy, reuse, concurrent winners and platform sealing. Successful installation captures private final-inode, length and checksum authority.",
       "function_bodies_sha256": [
-        "4878b76c848e6017ad3140a0d305928588ffdbb6685322897a21d77480bb55ac"
+        "6601ff8c239b31e2417f49792c8446ae2e26e63da35ce23ff53fc833af3f8fdf"
       ]
     },
     {
@@ -2281,27 +2208,27 @@
       "path": "crates/graphforge-storage/src/uuid_membership/construction.rs",
       "function": "construction_intent_digest",
       "role": "control_authentication",
-      "input_contract": "Construction intent version/generation/names/digests authenticate control intent metadata.",
+      "input_contract": "Domain-v3 intent version, generation/parent, name, retained native source identity, length and expected XXH64 text authenticate private construction intent metadata; no source payload is hashed here.",
       "function_bodies_sha256": [
-        "8683ff9c23459c8b35cf349e1c6db442b2daebd938f9c05410bdc502c78dfc01"
+        "f88d7b2f45f4dce58c4779264935586667490f7eea1a40310127f8355a68b985"
       ]
     },
     {
       "path": "crates/graphforge-storage/src/uuid_membership/construction.rs",
       "function": "encode_construction_index_inner",
       "role": "durable_artifact",
-      "input_contract": "Construction source identity artifact byte stream authenticates required construction input.",
+      "input_contract": "Full raw 26-byte identity-run records are SHA-hashed while encoding, independently of their expected XXH64 check; the actual source SHA is forwarded to the existing topology receipt binding. This whole-file work remains Artifact rather than control.",
       "function_bodies_sha256": [
-        "eaa0454e9d0783a693093d4e36d3506a5856cbf0c47ddfea7e7fa0c9643d3a87"
+        "5eaf11894a5f226ae2d41d194922f71014a05f99d6eda1670e411ef9ef472cac"
       ]
     },
     {
       "path": "crates/graphforge-storage/src/uuid_membership/construction.rs",
       "function": "install_construction_bytes",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "This SHA invocation hashes newly written non-JSON ordinal artifact bytes; JSON uses separate control helper.",
+      "role": "control_authentication",
+      "input_contract": "The direct SHA invocation hashes only the empty ordinal-v4.lock control marker at its sole fallback caller; manifest and receipt JSON use the separate control helper. Payload writers retain their own Artifact producers.",
       "function_bodies_sha256": [
-        "fccd5f29112911af02d29166891d48b0683d2de8655d3b4036b51bd88b806482"
+        "d1b2bce616ed049bb06cad12d9078dc6122f6217f22d77a32084797f1de6401b"
       ]
     },
     {
@@ -2410,6 +2337,69 @@
       "input_contract": "Workspace/family/version schema contract literal defines required schema fingerprint.",
       "function_bodies_sha256": [
         "0789a5b926476eae6d19e0a0b1335bc39c842fd7c7df3fad2ac2648c4fd9f067"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store.rs",
+      "function": "verify_file_counted_in_domain",
+      "role": "caller_selected",
+      "input_contract": "Complete opened CAS object bytes undergo genuine SHA/address verification and XXH64. Private installation selects ControlAuthentication only for validated bounded radix manifest nodes; generic file/byte installation and artifact trust wrappers select ArtifactPayload. Domain propagation changes observation, never bytes or refusal.",
+      "function_bodies_sha256": [
+        "1557ad2756ced24c4dd5cb816e07f55d95a6366650911398787d0383e14d837b"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store.rs",
+      "function": "verify_stream_counted_in_domain",
+      "role": "caller_selected",
+      "input_contract": "Complete temporary or Windows adoption stream bytes undergo genuine SHA/address, exact-length and XXH64 verification. Private installation propagates ControlAuthentication only from validated bounded radix manifest nodes; generic artifact callers remain ArtifactPayload, including reuse and concurrent installation winners.",
+      "function_bodies_sha256": [
+        "a5fec22ec4260a2ab80e936c851bfbeddd13ba6c129106add10242f81f68892a"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
+      "function": "install_graph_object_bytes_in_domain",
+      "role": "caller_selected",
+      "input_contract": "Exact resident bytes receive the genuine SHA-256 CAS name. Generic byte installation selects ArtifactPayload; only the private typed GraphManifestNode installer validates and bounds canonical radix control JSON then selects ControlAuthentication. The selected domain propagates to every existing-object, concurrent-winner and platform sealing SHA check; all crypto bytes remain counted inclusively.",
+      "function_bodies_sha256": [
+        "dc0632e822de52dbf4f0c935ee91a5fbdc3c32c4de81f06114d5146a59f99ab6"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
+      "function": "install_graph_manifest_node_with_lease",
+      "role": "control_authentication",
+      "input_contract": "Typed GraphManifestNode is structurally validated, canonically encoded and bounded to 256 KiB before its private ControlAuthentication installation call. Only paths, lengths, payload SHA/XXH64/role descriptors or child-digest references occur in these control bytes; this wrapper delegates one genuine SHA producer and adds no crypto pass.",
+      "function_bodies_sha256": [
+        "8c65f0b85e5abcb045a9ad5c3bd8495478d31eb06c971e5e1aaa57efe0da763c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/manifest_tree.rs",
+      "function": "install_manifest_node",
+      "role": "control_authentication",
+      "input_contract": "Radix manifest publication passes the typed GraphManifestNode to its validated bounded ControlAuthentication installer and records manifest I/O; this delegate creates no extra SHA producer or payload fast path.",
+      "function_bodies_sha256": [
+        "e565a15b929a48690def17a73bf3757114004add168cfba037df461f2a795eb3"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
+      "function": "install_object",
+      "role": "caller_selected",
+      "input_contract": "Installation orchestrator forwards its already selected caller domain unchanged through existing-object SHA authentication, optional temporary stream authentication and final sealing. Only its private validated typed manifest caller selects Control; generic payload callers select Artifact. This delegate creates no SHA state or extra pass. Its temporary path is the same diagnostic_root.join(GRAPH_OBJECTS_DIR).join(TEMP_DIR).join(name) expression as before extraction.",
+      "function_bodies_sha256": [
+        "64f02d47fa8c8436a4058dd91c0803bad41892fb2d8158e1733ee2cb01da572a"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
+      "function": "finalize_temporary_object",
+      "role": "caller_selected",
+      "input_contract": "Finalization orchestrator forwards the selected caller domain unchanged through Windows sealing and genuine SHA authentication of a concurrent installation winner. It preserves identity, allocation, durability and cleanup order. This delegate creates no SHA state or extra pass; temporary path extraction preserves the exact diagnostic_root.join(GRAPH_OBJECTS_DIR).join(TEMP_DIR).join(name) expression.",
+      "function_bodies_sha256": [
+        "736f2cb6b34dfa21f051eda5171573a53a2fa13c12140945f43018f3c9d3c4d7"
       ]
     }
   ],

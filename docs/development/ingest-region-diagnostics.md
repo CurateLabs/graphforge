@@ -188,7 +188,7 @@ The method and reviewed classification inputs are pinned by SHA-256:
 `digest-census.py` is
 `640e8221d88c8065f9e60aa0e9182545c3e43b52bbb9618c885717d5d3b2f1ba`;
 `digest-census-overrides.json` is
-`d7ff3e64737d68fd4d20e46f9ee045f96e6efc6bd4cdfcfcabea0476a10524a6`.
+`bdde8cff097b818265a49ebcfa1876e8b7f48a67306b218a1b2b1016a24533bc`.
 The parser fixture `test-digest-census.py` is
 `77224ebc214e8c8793baced7d105bdc576cd0015feb436a0af701260998a48f1`.
 Run the parser and stale-review regression fixtures with
@@ -205,6 +205,23 @@ install captures bind the actual final inode, length and checksum, including a
 concurrent installation winner. Their bounded scalar registry keeps no per-file
 handles. Publication still checks payload corruption under the lease before
 changing `CURRENT`; the registry grants no authority after a failed install.
+
+Radix manifest installation selects control authentication only through a
+private typed `GraphManifestNode` helper, after structural validation, canonical
+encoding and the existing node byte limit. Generic byte and file installers
+retain artifact accounting. The selected domain follows genuine SHA verification
+through existing-object reuse, concurrent installation and platform sealing;
+CAS names and refusal checks remain identical. Shared producers are classified
+by their callers, and typed wrappers add no extra hash pass.
+
+Private construction checkpoint wire 11 binds intermediate spill receipts by
+exact length and mandatory seed-zero XXH64. Spill writers and resume admission
+count checksum work separately and perform no SHA pass at those boundaries.
+Published UUID wire 6 and ordinal descriptor wire 5 remain unchanged here.
+Encoding still counts the full raw identity-run SHA as artifact work and forwards
+its genuine digest to the existing topology receipt. Control SHA covers the
+private intent, shape, progress and encoding-inventory metadata, including their
+expected checksums.
 
 The method records the source revision, source-file SHA-256 digests, the working
 diff digest when present, and digests of the method and semantic override inputs.

@@ -869,6 +869,7 @@ pub(super) fn validate_artifact_name(receipt: &ArtifactReceipt) -> Result<(), Gf
         || receipt.name.contains('/')
         || receipt.name.contains('\\')
         || !is_canonical_lower_hex(&receipt.identity.file_id, 32)
+        || !is_canonical_lower_hex(&receipt.xxh64, 16)
         || receipt.bytes == 0
         || receipt.write_operations == 0
         || receipt.fsync_operations == 0

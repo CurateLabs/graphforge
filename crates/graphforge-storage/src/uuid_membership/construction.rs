@@ -36,7 +36,7 @@ use super::validate_run_descriptors;
 use crate::construction_record_layout::BASE_IDENTITY_WIDTH as CONSTRUCTION_IDENTITY_WIDTH;
 use crate::construction_record_layout::IDENTITY_SURROGATE_OFFSET;
 use graphforge_core::GfError;
-use graphforge_core::hash_observation::ControlSha256 as Sha256;
+use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use graphforge_filesystem::ObservedSync as _;
 use serde::Deserialize;
 use serde::Serialize;
@@ -127,7 +127,10 @@ impl ConstructionRecoveryIntent {
             self.source_bytes,
             &self.source_xxh64,
         );
-        if self.format_version != FORMAT_VERSION || self.authority_sha256 != expected {
+        if self.format_version != FORMAT_VERSION
+            || !canonical_lower_hex(&self.source_xxh64, 16)
+            || self.authority_sha256 != expected
+        {
             return Err(storage_err(
                 "construction recovery intent authentication failed",
             ));
@@ -1721,7 +1724,9 @@ pub(super) fn install_construction_bytes(
             sha256: if matches!(name, MANIFEST | V4_ORDINAL_RECEIPT | V4_ORDINAL_MANIFEST) {
                 hex_sha256(bytes)
             } else {
-                hex_bytes(&Sha256::digest(bytes))
+                hex_bytes(&graphforge_core::hash_observation::ControlSha256::digest(
+                    bytes,
+                ))
             },
         },
         publication,

@@ -23,7 +23,7 @@ use super::ReadIoEvidence;
 use super::fs;
 use super::hash_regular_file;
 use super::hex_digest;
-use super::install_graph_object_bytes_with_lease;
+use super::install_graph_manifest_node_with_lease;
 use super::install_graph_object_file_with_lease;
 use super::read_graph_object_by_digest_file_counted_in_domain;
 use super::returned_error_boundary;
@@ -703,8 +703,7 @@ fn install_manifest_node(
     node: &GraphManifestNode,
     publication_io: &mut GraphPublicationIo,
 ) -> Result<String, GfError> {
-    let bytes = crate::encode_graph_manifest_node(node)?;
-    let (digest, evidence) = install_graph_object_bytes_with_lease(lease, &bytes)?;
+    let (digest, evidence) = install_graph_manifest_node_with_lease(lease, node)?;
     publication_io.manifest.add_install(&evidence)?;
     Ok(digest)
 }

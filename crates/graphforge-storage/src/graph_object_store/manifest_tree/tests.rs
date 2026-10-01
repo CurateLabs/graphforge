@@ -16,6 +16,132 @@ use crate::graph_object_store::read_graph_object_by_digest;
 use crate::graph_object_store::verify_graph_object;
 
 #[test]
+fn typed_manifest_install_and_reuse_keep_control_hashing_in_inclusive_totals() {
+    use graphforge_core::hash_observation::operation::{Capture, Snapshot};
+    use graphforge_core::hash_observation::{HashObservation, totals};
+
+    let root = tempfile::tempdir().unwrap();
+    let payload_root = tempfile::tempdir().unwrap();
+    let lease = begin_graph_object_publication(root.path()).unwrap();
+    let node = empty_branch(0);
+    let bytes = crate::encode_graph_manifest_node(&node).unwrap();
+    let length = bytes.len() as u64;
+    assert!(length > 0 && length <= crate::GRAPH_MANIFEST_NODE_MAX_BYTES);
+    let expected_digest = crate::graph_manifest::object_digest(&bytes);
+    let first_inputs = length * if cfg!(windows) { 2 } else { 1 };
+    let _process_observation = HashObservation::start();
+    let before = totals().0;
+
+    let fresh = Capture::start();
+    let mut publication_io = GraphPublicationIo::default();
+    let digest = install_manifest_node(&lease, &node, &mut publication_io).unwrap();
+    assert_eq!(digest, expected_digest);
+    assert_eq!(
+        fresh.snapshot(),
+        Snapshot {
+            control_authentication_sha256_bytes: first_inputs,
+            checksum_bytes: first_inputs,
+            ..Snapshot::default()
+        }
+    );
+    drop(fresh);
+
+    // Reuse computes the requested address and authenticates the already
+    // installed object's exact bytes, both in the owning control domain.
+    let reuse = Capture::start();
+    assert_eq!(
+        install_manifest_node(&lease, &node, &mut publication_io).unwrap(),
+        digest
+    );
+    assert_eq!(
+        reuse.snapshot(),
+        Snapshot {
+            control_authentication_sha256_bytes: 2 * length,
+            checksum_bytes: 2 * length,
+            ..Snapshot::default()
+        }
+    );
+    drop(reuse);
+
+    // Even identical JSON bytes remain artifact payload when passed through
+    // the public generic installer; classification comes from typed ownership.
+    let payload = Capture::start();
+    let (payload_digest, _) =
+        crate::install_graph_object_bytes(payload_root.path(), &bytes).unwrap();
+    assert_eq!(payload_digest, digest);
+    assert_eq!(
+        payload.snapshot(),
+        Snapshot {
+            artifact_payload_sha256_bytes: first_inputs,
+            checksum_bytes: first_inputs,
+            ..Snapshot::default()
+        }
+    );
+    drop(payload);
+    // Process-wide observation includes every domain. Other concurrently
+    // observed operations may add bytes, whereas the captures above are exact.
+    assert!(totals().0 - before >= 2 * first_inputs + 2 * length);
+}
+
+#[test]
+fn typed_manifest_reuse_refuses_same_inode_valid_json_corruption() {
+    use graphforge_core::hash_observation::operation::{Capture, Snapshot};
+
+    let root = tempfile::tempdir().unwrap();
+    let lease = begin_graph_object_publication(root.path()).unwrap();
+    let mut node = empty_branch(0);
+    node.kind = GraphManifestNodeKind::Branch {
+        children: BTreeMap::from([
+            ("0".to_owned(), "a".repeat(64)),
+            ("1".to_owned(), "c".repeat(64)),
+        ]),
+    };
+    let bytes = crate::encode_graph_manifest_node(&node).unwrap();
+    let mut publication_io = GraphPublicationIo::default();
+    let digest = install_manifest_node(&lease, &node, &mut publication_io).unwrap();
+    let path = graph_object_path(root.path(), &digest).unwrap();
+    let identity = graphforge_filesystem::path_identity(&path).unwrap();
+    let permissions = fs::metadata(&path).unwrap().permissions();
+    let mut changed_node = node.clone();
+    changed_node.kind = GraphManifestNodeKind::Branch {
+        children: BTreeMap::from([
+            ("0".to_owned(), "b".repeat(64)),
+            ("1".to_owned(), "c".repeat(64)),
+        ]),
+    };
+    let changed = crate::encode_graph_manifest_node(&changed_node).unwrap();
+    assert_eq!(changed.len(), bytes.len());
+    crate::decode_graph_manifest_node(&changed).unwrap();
+    crate::graph_object_store::corrupt_sealed_graph_object_for_test(&path, &changed);
+    fs::set_permissions(&path, permissions).unwrap();
+    assert_eq!(
+        graphforge_filesystem::path_identity(&path).unwrap(),
+        identity
+    );
+    assert_eq!(fs::metadata(&path).unwrap().len(), bytes.len() as u64);
+    let prior_io = publication_io.clone();
+
+    let capture = Capture::start();
+    let error = install_manifest_node(&lease, &node, &mut publication_io)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("graph object digest does not match its address"),
+        "{error}"
+    );
+    assert_eq!(
+        capture.snapshot(),
+        Snapshot {
+            control_authentication_sha256_bytes: 2 * bytes.len() as u64,
+            checksum_bytes: bytes.len() as u64,
+            ..Snapshot::default()
+        }
+    );
+    assert_eq!(publication_io, prior_io);
+    assert_eq!(fs::read(path).unwrap(), changed);
+}
+
+#[test]
 fn legacy_compact_roots_are_refused_without_publication_upgrade() {
     let container = tempfile::tempdir().unwrap();
     let lease = begin_graph_object_publication(container.path()).unwrap();

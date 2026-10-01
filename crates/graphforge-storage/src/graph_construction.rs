@@ -784,7 +784,7 @@ pub struct ConstructionChunkReceipt {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[allow(clippy::struct_excessive_bools)] // Independent persisted facts; retirement flags preserve v6–8 wire compatibility.
+#[allow(clippy::struct_excessive_bools)] // Independent persisted facts describe the current construction retirement state.
 struct Checkpoint {
     format_version: u32,
     operation_uuid: Uuid,
