@@ -572,6 +572,12 @@ fn copy_and_authenticate_materialized_object(
             .checked_add(read as u64)
             .ok_or_else(|| validation("private materialization length overflows"))?;
     }
+    // The copy's source read is application I/O of the opening phase.
+    crate::lifecycle_io::record_read(
+        crate::StorageIoPhase::HydrationVerification,
+        length,
+        read_calls,
+    );
     if length != entry.byte_length || digest.finish() != entry.content_xxh64 {
         return Err(validation(
             "private materialization bytes do not match inventory",
@@ -662,7 +668,15 @@ fn checksum_materialized_file(
         .finish()
         .map_err(|error| storage("release private verification cache", diagnostic_root, error));
     match (checked, released) {
-        (Ok(io), Ok(_)) => Ok(io),
+        (Ok(io), Ok(_)) => {
+            // The verification re-read of the installed private copy.
+            crate::lifecycle_io::record_read(
+                crate::StorageIoPhase::HydrationVerification,
+                io.bytes,
+                io.calls,
+            );
+            Ok(io)
+        }
         (Err(primary), Ok(_)) | (Ok(_), Err(primary)) => Err(primary),
         (Err(primary), Err(cleanup)) => Err(validation(format!("{primary}; {cleanup}"))),
     }

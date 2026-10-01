@@ -531,16 +531,29 @@ fn open_reads_control_bytes_not_payload_bytes() {
         large.payload_bytes
     );
 
-    // 1. Open reads far less than the payload it declares. The small project
-    //    is the harsher ratio because its controls are the same size.
+    // 1. Open reads controls, not payload: each copied identity control is read
+    //    twice (to copy it, then to verify the private copy; both are
+    //    attributed since #1388), plus the manifest, route table and sidecars.
+    //    The bound comes from the declared copied bytes, so it holds whatever
+    //    the node/edge mix of the fixture; it is far below the payload only
+    //    where the payload is edge-heavy.
     for (label, cost) in [("small", &small), ("large", &large)] {
+        let bound = 2 * cost.open_evidence.bytes_copied + 64 * 1024;
         assert!(
-            total_read_bytes(&cost.open) * 8 < cost.payload_bytes,
-            "{label}: open read {} bytes against {} declared payload bytes",
+            total_read_bytes(&cost.open) <= bound,
+            "{label}: open read {} bytes against {} copied control bytes (bound {bound}) \
+             and {} declared payload bytes",
             total_read_bytes(&cost.open),
+            cost.open_evidence.bytes_copied,
             cost.payload_bytes
         );
     }
+    assert!(
+        total_read_bytes(&large.open) * 8 < large.payload_bytes,
+        "large: open read {} bytes against {} declared payload bytes",
+        total_read_bytes(&large.open),
+        large.payload_bytes
+    );
     // 2. Open does not grow with the edge payload. What does grow is O(files):
     //    more edge files mean more manifest and route-table entries.
     assert!(
