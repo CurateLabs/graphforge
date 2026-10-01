@@ -14,12 +14,12 @@ provenance IDs, and structured errors ([`../releases/roadmap.md`](../releases/ro
 | Outcome / requirement | Signal | Source | Expected range | Owner |
 | --- | --- | --- | --- | --- |
 | FR-1 / NFR-1 Cypher correctness | TCK runnable pass count | CI BDD / release gates | Full corpus green on release lineage | Maintainers |
-| FR-2 / NFR-7 Surface completeness | Non-Cypher inventory + evidence digests | Contract gate artifacts | No unclassified public methods | Maintainers |
-| FR-3 Project durability | Reopen / recovery tests | Lifecycle & checkpoint gates | Pass on changed surface | Maintainers |
-| FR-6 Binding parity | Arrow/IPC equality, structured codes | Binding RC / concurrency suites | Parity within published surface | Maintainers |
+| FR-2 / NFR-7 Surface completeness | Non-Cypher inventory + evidence digests | Surface inventory script | No unclassified public methods | Maintainers |
+| FR-3 Project durability | Reopen / recovery tests | Lifecycle & checkpoint tests | Pass on changed surface | Maintainers |
+| FR-6 Binding parity | Arrow/IPC equality, structured codes | Binding parity / concurrency suites | Parity within published surface | Maintainers |
 | FR-8 Agent DX | Structured error codes vs prose-only failures | Facade + skills adapter tests | Stable codes on known failure classes | Maintainers |
 | Query diagnosability | `explain` / query ID availability | Architecture observability surfaces | Present on supported paths | Maintainers |
-| Clean-install success | Quickstart smokes after publish | Manual/release verification | Pass from public registries | Release operator |
+| Clean-install success | Quickstart smokes after publish | `verify-published` job in `publish.yaml` | Pass from public registries | Release operator |
 | Docs usability | Docs build; link integrity | `docs.yml` / Starlight (`docs-site/`) | Green build | Docs owners |
 | Scale honesty | Fixed-hop LIMIT materialization ratios | Scale-limit CI gate | ≤3× rows on 10× edges for LIMIT 1000 shape | Maintainers |
 | Rust CI correctness | Workspace nextest, custom-harness targets, doctests | `Rust Tests` under `CI Gate` | Green on Rust-classified PRs | Maintainers |
@@ -29,7 +29,7 @@ provenance IDs, and structured errors ([`../releases/roadmap.md`](../releases/ro
 | Service / journey | Indicator | Objective | Window |
 | ----------------- | --------- | --------- | ------ |
 | CI on `main` | Required workflows at merge SHA | Green after merge | Per merge |
-| Release candidate | Aggregate gate artifacts for the release | All applicable gates green on one SHA | Per release |
+| Release | `publish.yaml` run for the tag, including `verify-published` | Every job green on the tagged commit | Per release |
 | Local embedded use | Structured API errors vs crashes | Fail closed with codes; no silent corruption | Per user session |
 | Agent skills loop | Offline smoke + compatibility JSON | Deterministic pack hash; fail-closed versions | Per skills change / RC |
 | Docs site | Starlight build/deploy success | Site serves current allowlisted `docs/` | Per docs change |
@@ -59,10 +59,10 @@ aggregate CI signals.
 | Signal | Trigger | Severity | Owner | Response |
 | --- | --- | --- | --- | --- |
 | Required CI red on `main` | Workflow failure at merge SHA | High | Maintainers | Fix forward or revert; never ignore |
-| TCK / contract gate regression | Fail on PR or release dispatch | High | Surface owners | Root-cause; add regression coverage |
-| Binding / skills RC failure | Parity or offline smoke red | High | Binding/skills owners | Root-cause; no wrapper-test substitution |
+| TCK / contract gate regression | Fail on PR | High | Surface owners | Root-cause; add regression coverage |
+| Binding / skills build failure | Parity or smoke red in CI or `publish.yaml` | High | Binding/skills owners | Root-cause; no wrapper-test substitution |
 | Docs build failure | `docs.yml` / Starlight build red | Medium | Docs owners | Fix content or site config |
-| Publish dry-run failure | Registry reject | High | Release operator | Stop publication; recover per plan |
+| Publish dry-run or tag-run failure | `publish.yaml` red | High | Release operator | Fix the cause; re-run the failed run (published versions are skipped) |
 | Scale-limit shape regression | Materialization ratio gate fail | Medium | Execution owners | Investigate adjacency/fetch path; update docs if limits change |
 
 There is no hosted ops dashboard product; CI and release artifacts are the shared “dashboard.”

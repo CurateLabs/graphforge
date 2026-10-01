@@ -3,8 +3,7 @@
 //! Cucumber scenario timings are shared diagnostics (#1654): distributions and
 //! slowest-scenario lists only. Performance thresholds belong to the
 //! provenance-gated `make tck-perf` consumer, which reads BenchExec and Divan
-//! evidence. `scripts/ci/benchmark-measurement-policy.py` rejects threshold
-//! consumers in this directory.
+//! evidence; do not add threshold consumers in this directory.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;

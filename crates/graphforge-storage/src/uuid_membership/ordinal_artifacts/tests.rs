@@ -207,7 +207,6 @@ fn shared_v4_builder_rejects_sparse_manifest_above_reader_bound() {
             blocks: vec![crate::V4OrdinalBlock {
                 offset: 0,
                 count: 1,
-                sha256: "11".repeat(32),
                 xxh64: 0,
             }],
         })
@@ -370,4 +369,44 @@ fn v4_stream_builder_packs_sparse_ids_without_sparse_max_allocation() {
     assert_eq!(metrics.artifact_bytes, 3 * 24 + 3 * 16);
     assert_eq!(metrics.peak_temporary_bytes, metrics.artifact_bytes);
     assert_eq!(metrics.fsync_operations, 4);
+}
+
+#[test]
+fn ordinal_final_writers_capture_whole_identities_once_without_block_sha() {
+    let root = tempfile::tempdir().unwrap();
+    let index = graphforge_filesystem::StableDirectory::open(root.path()).unwrap();
+    let records = (1..=16_u64).map(|id| (Uuid::from_u128(u128::from(id)), id));
+    let capture = graphforge_core::hash_observation::operation::Capture::start();
+    let (manifest, _) = stage_v4_ordinal_artifacts(records, 1, &index, || false).unwrap();
+    let observed = capture.snapshot();
+    drop(capture);
+    let artifacts = manifest
+        .forward_identities
+        .iter()
+        .chain(manifest.ordinal_ranges.iter().map(|range| &range.artifact))
+        .chain(
+            manifest
+                .tombstones
+                .iter()
+                .map(|tombstones| &tombstones.artifact),
+        );
+    let mut payload_bytes = 0;
+    for artifact in artifacts {
+        let bytes = fs::read(root.path().join(&artifact.name)).unwrap();
+        assert_eq!(bytes.len() as u64, artifact.bytes);
+        assert_eq!(hex_sha256(&bytes), artifact.sha256);
+        assert_eq!(crate::corruption_checksum::checksum(&bytes), artifact.xxh64);
+        payload_bytes += artifact.bytes;
+    }
+    assert_eq!(payload_bytes, 16 * 40);
+    assert_eq!(observed.artifact_payload_sha256_bytes, payload_bytes);
+    assert_eq!(observed.unclassified_sha256_bytes, 0);
+    assert!(observed.checksum_bytes >= payload_bytes);
+    let json = serde_json::to_value(&manifest).unwrap();
+    for range in json["ordinal_ranges"].as_array().unwrap() {
+        for block in range["blocks"].as_array().unwrap() {
+            assert!(block.get("sha256").is_none());
+            assert_eq!(block["xxh64"].as_str().unwrap().len(), 16);
+        }
+    }
 }

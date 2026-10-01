@@ -175,13 +175,9 @@ def validate_registry(value: dict[str, Any], root: Path = ROOT) -> None:
     ):
         raise RegistryError("durability/concurrency variants must share matrix-gate")
 
-    release_owners = {
-        item["owner"]
-        for item in workflows
-        if item["id"] in {"clean-environment", "publish-track", "publish"}
-    }
+    release_owners = {item["owner"] for item in workflows if item["id"] == "publish"}
     if release_owners != {"release"}:
-        raise RegistryError("publication verification must have one release owner")
+        raise RegistryError("publication must have one release owner")
     referenced_commands = {item["command"] for item in records}
     if referenced_commands != set(commands):
         raise RegistryError("command definitions must be referenced exactly by gate records")

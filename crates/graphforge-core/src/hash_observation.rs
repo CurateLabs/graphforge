@@ -196,6 +196,13 @@ pub fn record_topology_projection() {
     operation::record_topology_projection();
 }
 
+/// Account an actual composite request fingerprint producer in test support only.
+#[inline]
+pub fn record_composite_request_fingerprint() {
+    #[cfg(any(test, feature = "test-support"))]
+    operation::record_composite_request_fingerprint();
+}
+
 /// Isolated operation accounting used by Rust facade tests. Captures neither reset nor
 /// sample process-wide counters; worker handles attach only to their own operation.
 #[cfg(any(test, feature = "test-support"))]
@@ -210,6 +217,7 @@ pub mod operation {
         hash: [AtomicU64; 6],
         checksum: AtomicU64,
         topology_projections: AtomicU64,
+        composite_request_fingerprints: AtomicU64,
     }
     thread_local! {
         static CURRENT: RefCell<Option<Arc<Counters>>> = const { RefCell::new(None) };
@@ -233,6 +241,8 @@ pub mod operation {
         pub checksum_bytes: u64,
         /// Actual admitted label topology projections started by this operation.
         pub topology_projections: u64,
+        /// Successful whole composite request fingerprints, excluding participant subfingerprints.
+        pub composite_request_fingerprints: u64,
     }
     /// Captured operation context, transferable to synchronous worker threads.
     #[derive(Clone, Default)]
@@ -299,6 +309,10 @@ pub mod operation {
                 unclassified_sha256_bytes: load(5),
                 checksum_bytes: self.counters.checksum.load(Ordering::Relaxed),
                 topology_projections: self.counters.topology_projections.load(Ordering::Relaxed),
+                composite_request_fingerprints: self
+                    .counters
+                    .composite_request_fingerprints
+                    .load(Ordering::Relaxed),
             }
         }
     }
@@ -334,6 +348,16 @@ pub mod operation {
             }
         });
     }
+
+    pub(super) fn record_composite_request_fingerprint() {
+        CURRENT.with(|current| {
+            if let Some(counters) = current.borrow().as_ref() {
+                counters
+                    .composite_request_fingerprints
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        });
+    }
 }
 
 #[cfg(test)]
@@ -342,6 +366,7 @@ mod tests {
         HashDomain, ObservedSha256, OperationContext, PortableSha256,
         operation::{Capture, Snapshot},
     };
+    use crate::canonical::{CanonicalDomain, fingerprint};
     use sha2::Digest;
 
     #[test]
@@ -370,6 +395,7 @@ mod tests {
                 unclassified_sha256_bytes: 13,
                 checksum_bytes: 0,
                 topology_projections: 0,
+                composite_request_fingerprints: 0,
             }
         );
     }
@@ -459,6 +485,8 @@ mod tests {
                 let mut hash = ObservedSha256::for_domain(HashDomain::ArtifactPayload);
                 hash.update([0_u8; 29]);
                 hash.finalize();
+                fingerprint(CanonicalDomain::CompositeRequest, 1, b"second worker").unwrap();
+                super::record_composite_request_fingerprint();
             })
             .join()
             .unwrap();
@@ -469,12 +497,24 @@ mod tests {
             let mut hash = ObservedSha256::for_domain(HashDomain::ArtifactPayload);
             hash.update([0_u8; 17]);
             hash.finalize();
+            fingerprint(CanonicalDomain::CompositeRequest, 1, b"first worker").unwrap();
+            super::record_composite_request_fingerprint();
             {
                 let nested = Capture::start();
                 let mut hash = ObservedSha256::for_domain(HashDomain::ControlAuthentication);
                 hash.update([0_u8; 11]);
                 hash.finalize();
+                fingerprint(CanonicalDomain::CompositeRequest, 1, b"nested").unwrap();
+                assert_eq!(nested.snapshot().composite_request_fingerprints, 0);
+                super::record_composite_request_fingerprint();
+                fingerprint(
+                    CanonicalDomain::CompositeGraphMutationContent,
+                    1,
+                    b"another domain",
+                )
+                .unwrap();
                 assert_eq!(nested.snapshot().control_authentication_sha256_bytes, 11);
+                assert_eq!(nested.snapshot().composite_request_fingerprints, 1);
             }
             super::operation::record_checksum(7);
         })
@@ -483,6 +523,9 @@ mod tests {
         assert_eq!(outer.snapshot().artifact_payload_sha256_bytes, 17);
         assert_eq!(outer.snapshot().control_authentication_sha256_bytes, 0);
         assert_eq!(outer.snapshot().checksum_bytes, 7);
-        assert_eq!(second.join().unwrap().artifact_payload_sha256_bytes, 29);
+        assert_eq!(outer.snapshot().composite_request_fingerprints, 1);
+        let second = second.join().unwrap();
+        assert_eq!(second.artifact_payload_sha256_bytes, 29);
+        assert_eq!(second.composite_request_fingerprints, 1);
     }
 }

@@ -112,11 +112,7 @@ assert commands[-1].startswith("cargo publish -p graphforge-cli ")
 # --- Release inventories must not diverge from the publish plan (#1373) -------
 # Every hand-maintained crates.io inventory is compared against the plan here so
 # that adding a crate cannot silently leave a release gate behind.
-INVENTORIES = (
-    (ROOT / "scripts" / "ci" / "release_candidate_manifest.py", "CRATES"),
-    (ROOT / "scripts" / "ci" / "clean-env-verify.py", "DEFAULT_CRATES"),
-    (ROOT / "scripts" / "verify_package_licenses.py", "CARGO_PUBLISH_CRATES"),
-)
+INVENTORIES = ((ROOT / "scripts" / "verify_package_licenses.py", "CARGO_PUBLISH_CRATES"),)
 
 for script, attribute in INVENTORIES:
     inventory_module = load_named_module(script)

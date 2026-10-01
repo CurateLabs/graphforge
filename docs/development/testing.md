@@ -21,8 +21,8 @@ The testing principles are the same for both:
 3. **Hermetic tests** — no shared state between tests
 4. **Deterministic behavior** — tests pass or fail consistently
 
-Coverage floors are enforced locally by `make pre-push`, not uploaded from CI;
-see [codecov-integration.md](codecov-integration.md).
+Coverage floors are enforced by the Coverage workflow on pushes to `main`, not
+uploaded from CI; see [codecov-integration.md](codecov-integration.md).
 The rules for classifying behavior tests and binding smoke checks are in the
 [test coverage classification](test-coverage-classification.md).
 
@@ -84,14 +84,9 @@ cargo test -p graphforge-api \
   --test search_public_surface
 ```
 
-The `Rust Non-Cypher Surface Gate` workflow runs the inventory validator,
-`graphforge-api` unit contracts, and these persisted integration tests from one exact
-source SHA when assembling release-certification evidence. Its downloadable
-report records the inventory digest and test binary digests. Ordinary
-implementation and construction issues close on acceptance-criteria outcomes
-and the relevant PR/`main` checks for the changed surface; they do not require
-this manual SHA-bound dispatch (see `AGENTS.md` § Issue close). A green TCK run
-cannot substitute for the surface inventory itself.
+No workflow dispatches the inventory gate on its own; the Python binding test
+`crates/graphforge-bindings-py/tests/non_cypher_release.py` imports it. A green
+TCK run cannot substitute for the surface inventory itself.
 
 ### Rust test example
 
@@ -175,8 +170,8 @@ PYO3_PYTHON="$python_test_exe" \
 ```
 
 `scripts/ci/python-build-mode-check.py` inspects the actual default and packaging
-Cargo feature graphs. It runs in the fast local gate and the required Rust
-Quality job before Clippy. Test builds, a real native import, and inspection of
+Cargo feature graphs. It runs in `make check` (via `scripts/ci/repo-checks.sh`) and the CI Lint job
+before Clippy. Test builds, a real native import, and inspection of
 the distribution artifact's dynamic dependencies remain required evidence when
 changing linkage; a successful cdylib build alone does not prove the Rust-test
 executable links.
@@ -274,56 +269,6 @@ make coverage-diff       # changed Python wrapper files only
 pytest tests/ -n auto
 ```
 
-## Resumable full validation
-
-`make pre-push` is the full local gate. It begins with a prerequisite and disk
-preflight, then records content-addressed
-evidence for policy checks, Rust tests and coverage, the instrumented native
-Python and Node builds consumed by acceptance, wrapper coverage, Rust engine
-Rust API/TCK BDD and one native smoke suite per binding, and coverage thresholds.
-`make pre-push-fast` (also invoked from the
-policy-static stage) runs the Python lock, build-mode, and inventory policies
-before format/lint/security. The CI Gate Rust lane's nextest commands are in
-[agent-environment.md](agent-environment.md#rust-test-gate).
-It never skips a gate: a compatible passed stage is reused only when its exact
-inputs, command contract, toolchain, dependency evidence, and required native
-artifact identity still match.
-
-The human-readable stage lines and machine-readable summary report elapsed time,
-evidence hit or miss, identity digest, invalidation reason, and disk budget.
-They are stored locally at `.graphforge/validation/v1/summary.json`; standalone
-preflight writes `preflight-summary.json` so it cannot replace the full-run
-outcome. These paths are ignored by Git and the evidence contains no command
-output or secrets. The instrumented Rust coverage run executes the full Rust
-corpus once and builds each native artifact once; later acceptance stages reuse
-those exact artifact identities.
-Cargo targets live beneath the common Git metadata directory
-(`graphforge-validation-cache/cargo`, one target directory per canonical
-worktree, manifest, toolchain, and heavy-profile identity). Ordinary source
-edits reuse that worktree's target; distinct worktrees never share first-party
-artifacts because Cargo timestamp fingerprints can accept stale metadata from
-another root. The root identity is hashed internally, and absolute paths are
-not recorded in evidence. A versioned heavy-stage cache contract invalidates
-receipts produced under the earlier cross-worktree policy. Evidence and native
-binding artifacts also stay scoped to their individual worktree. Each heavy stage
-records its use and, while holding the shared heavy-build lock, evicts the
-least-recently-used target directories so at most six remain
-(`GF_PRE_PUSH_CACHE_KEEP_ENTRIES` overrides the six). The directories the
-current run needs are always kept. Preflight prunes the same way before it
-checks free disk, unless another worktree is compiling.
-
-Run `make pre-push-preflight` to check those prerequisites and disk budget
-without starting any heavy compilation.
-
-Use `make pre-push-clean` to discard only this local validation evidence and
-force every stage to rerun. If the preflight reports insufficient space, it does
-not start compilation. Review its reported safe options first: `make
-clean-builds` removes stale Rust artifacts under `target/` when possible,
-while `make clean-builds-all` removes all of them and forces future
-recompilation. Neither command is run automatically, and neither touches the
-shared pre-push cache; lower `GF_PRE_PUSH_CACHE_KEEP_ENTRIES` to bound it more
-tightly.
-
 ### Core Fixtures (`tests/conftest.py`)
 
 ```python
@@ -411,34 +356,13 @@ pass end-to-end before marking `"status": "supported"`.
 
 ## CI/CD
 
-GitHub Actions runs the full suite on every PR:
-
-```yaml
-jobs:
-  rust:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo clippy --workspace -- -D warnings
-      - run: cargo test --workspace
-
-  python:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      - run: pip install uv && uv sync --all-extras
-      - run: maturin develop --release
-      - run: make pre-push
-```
+GitHub Actions (`.github/workflows/test.yml`) runs the applicable jobs on every
+PR. Key jobs: `Lint` (Cargo fmt/Clippy + Python quality + policy checks),
+`Rust Tests` (nextest over the workspace), `Rust Harness, Doc, and Feature
+Tests`, `Python and Node Bindings` (full binding suites on Linux), `Windows
+Storage`, `macOS Storage`, and the required `CI Gate`
+aggregate. See [`.github/workflows/README.md`](../../.github/workflows/README.md)
+for the full job list and local equivalents.
 
 ### Build-lane measurement method (ADR 0048)
 
@@ -508,7 +432,7 @@ pass/fail results.
 
 ### pytest-xdist + pytest-cov deadlock on macOS / Python 3.13
 
-**Symptom:** `make pre-push` hangs at the end of the test run — progress reaches
+**Symptom:** `make coverage` hangs at the end of the test run — progress reaches
 ~100% then freezes. CPU drops to 0%. Only `kill` escapes it.
 
 **Root cause:** `pytest-cov` collects coverage data from xdist workers via IPC

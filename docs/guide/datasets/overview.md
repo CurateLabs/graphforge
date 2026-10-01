@@ -197,7 +197,7 @@ To add a new dataset source or specific dataset:
 3. Add tests in `tests/integration/test_datasets.py`
 4. Update documentation
 
-See the [development guide](../../development/workflow.md) for details.
+See the [development guide](../../development/contributing.md) for details.
 
 ## Troubleshooting
 

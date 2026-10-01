@@ -1461,12 +1461,12 @@ fn valid_uuid_receipt(receipt: &AuxiliaryReceipt) -> bool {
             receipt.path.as_str()
         ),
         (
-            "uuid-membership/v6",
-            6,
+            "uuid-membership/v7",
+            7,
             "topology/uuid-membership/topology-receipt.json"
         ) | (
-            "uuid-membership/ordinal-v5",
-            5,
+            "uuid-membership/ordinal-v6",
+            6,
             "topology/uuid-membership/ordinal-v4-receipt.json"
         )
     )
@@ -1480,8 +1480,8 @@ fn is_v4_ordinal_receipt(receipt: &AuxiliaryReceipt) -> bool {
             receipt.path.as_str()
         ),
         (
-            "uuid-membership/ordinal-v5",
-            5,
+            "uuid-membership/ordinal-v6",
+            6,
             "topology/uuid-membership/ordinal-v4-receipt.json"
         )
     )
@@ -1626,8 +1626,8 @@ mod tests {
     fn auxiliary_receipt_must_name_and_digest_an_exact_staged_entry() {
         let mut valid = intent();
         valid.auxiliary = Some(AuxiliaryReceipt {
-            kind: "uuid-membership/v6".to_owned(),
-            schema_version: 6,
+            kind: "uuid-membership/v7".to_owned(),
+            schema_version: 7,
             path: valid.entries[0].destination.clone(),
             digest: valid.entries[0].sha256.clone(),
             bytes: valid.entries[0].bytes,
@@ -1640,9 +1640,62 @@ mod tests {
         cross_paired.digest = valid.entries[0].sha256.clone();
         cross_paired.path = "topology/uuid-membership/ordinal-v4-receipt.json".to_owned();
         assert!(!valid_uuid_receipt(&cross_paired));
-        cross_paired.kind = "uuid-membership/ordinal-v5".to_owned();
-        cross_paired.schema_version = 5;
+        cross_paired.kind = "uuid-membership/ordinal-v6".to_owned();
+        cross_paired.schema_version = 6;
         assert!(valid_uuid_receipt(&cross_paired));
+    }
+
+    #[test]
+    fn uuid_receipt_versions_require_current_exact_typed_pairs() {
+        for (kind, version, path, ordinal) in [
+            (
+                "uuid-membership/v7",
+                7,
+                "topology/uuid-membership/topology-receipt.json",
+                false,
+            ),
+            (
+                "uuid-membership/ordinal-v6",
+                6,
+                "topology/uuid-membership/ordinal-v4-receipt.json",
+                true,
+            ),
+        ] {
+            let receipt = AuxiliaryReceipt {
+                kind: kind.to_owned(),
+                schema_version: version,
+                path: path.to_owned(),
+                digest: "aa".repeat(32),
+                bytes: 1,
+            };
+            assert!(valid_uuid_receipt(&receipt));
+            assert_eq!(is_v4_ordinal_receipt(&receipt), ordinal);
+            for rejected_version in [version - 1, version + 1] {
+                let mut changed = receipt.clone();
+                changed.schema_version = rejected_version;
+                assert!(!valid_uuid_receipt(&changed));
+                assert!(!is_v4_ordinal_receipt(&changed));
+            }
+            let mut changed = receipt.clone();
+            changed.kind = if ordinal {
+                "uuid-membership/ordinal-v5"
+            } else {
+                "uuid-membership/v6"
+            }
+            .to_owned();
+            changed.schema_version = version - 1;
+            assert!(!valid_uuid_receipt(&changed));
+            assert!(!is_v4_ordinal_receipt(&changed));
+            changed = receipt;
+            changed.path = if ordinal {
+                "topology/uuid-membership/topology-receipt.json"
+            } else {
+                "topology/uuid-membership/ordinal-v4-receipt.json"
+            }
+            .to_owned();
+            assert!(!valid_uuid_receipt(&changed));
+            assert!(!is_v4_ordinal_receipt(&changed));
+        }
     }
 
     #[test]
@@ -1659,8 +1712,8 @@ mod tests {
 
         let mut legacy = intent();
         legacy.auxiliary = Some(AuxiliaryReceipt {
-            kind: "uuid-membership/v6".to_owned(),
-            schema_version: 6,
+            kind: "uuid-membership/v7".to_owned(),
+            schema_version: 7,
             path: legacy.entries[0].destination.clone(),
             digest: legacy.entries[0].sha256.clone(),
             bytes: legacy.entries[0].bytes,
@@ -1896,14 +1949,14 @@ mod tests {
         let index = root.path().join("topology/uuid-membership");
         std::fs::create_dir_all(&index).unwrap();
         assert!(!index.join("ordinal-v4.lock").exists());
-        let receipt = br#"{"schema_version":5}"#;
+        let receipt = br#"{"schema_version":6}"#;
         let receipt_digest = hex(&Sha256::digest(receipt));
         let participant: RewriteParticipantPreparer<'_> = Box::new(move |context, batch| {
             batch.stage_bytes(
                 &context
                     .project_root
                     .join("topology/uuid-membership/ordinal-v4-manifest.json"),
-                br#"{"schema_version":5}"#,
+                br#"{"schema_version":6}"#,
             )?;
             batch.stage_bytes(
                 &context
@@ -1912,8 +1965,8 @@ mod tests {
                 receipt,
             )?;
             Ok(Some(AuxiliaryReceipt {
-                kind: "uuid-membership/ordinal-v5".to_owned(),
-                schema_version: 5,
+                kind: "uuid-membership/ordinal-v6".to_owned(),
+                schema_version: 6,
                 path: "topology/uuid-membership/ordinal-v4-receipt.json".to_owned(),
                 digest: receipt_digest,
                 bytes: receipt.len() as u64,

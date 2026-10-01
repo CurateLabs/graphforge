@@ -1,19 +1,6 @@
 {
   "schema": "graphforge-gate-registry/1",
   "commands": {
-    "binding-release-candidate": [
-      "python3",
-      "scripts/ci/validate-binding-release-candidate.py"
-    ],
-    "checkpoint-recovery": [
-      "python3",
-      "scripts/ci/checkpoint-recovery-gate.py"
-    ],
-    "clean-environment": [
-      "python3",
-      "scripts/ci/clean-env-verify.py",
-      "run"
-    ],
     "codspeed": [
       "cargo",
       "codspeed",
@@ -27,11 +14,6 @@
       "pnpm",
       "docs:build"
     ],
-    "epistemic-contract": [
-      "python3",
-      "scripts/ci/epistemic-contract-gate.py",
-      "report"
-    ],
     "fuzz": [
       "cargo",
       "fuzz",
@@ -41,11 +23,6 @@
       "python3",
       "scripts/ci/gate-registry.py",
       "validate"
-    ],
-    "knowledge-contract": [
-      "python3",
-      "scripts/ci/knowledge-contract-gate.py",
-      "report"
     ],
     "matrix-gate": [
       "python3",
@@ -58,10 +35,6 @@
       "benchmarks",
       "local-admission"
     ],
-    "non-cypher-surface": [
-      "python3",
-      "scripts/ci/non-cypher-surface-gate.py"
-    ],
     "operator": [
       "python3",
       "-m",
@@ -70,19 +43,12 @@
     ],
     "publication": [
       "python3",
-      "scripts/ci/release-publish-preflight.py"
-    ],
-    "release-certification": [
-      "python3",
-      "scripts/ci/release-certification.py",
-      "aggregate"
-    ],
-    "release-credential-preflight": [
-      "python3",
-      "scripts/ci/test-publish-cli-contract.py"
+      "scripts/publish_crates.py",
+      "--dry-run"
     ],
     "repository-policy": [
-      "scripts/ci/require-gates.sh"
+      "make",
+      "check"
     ],
     "visualization-stress": [
       "python3",
@@ -94,39 +60,6 @@
     "durability/certification": "scripts/ci/durability-certification-gate.py"
   },
   "workflows": [
-    {
-      "id": "binding-release-candidate",
-      "path": ".github/workflows/binding-release-candidate.yml",
-      "class": "release_certification",
-      "owner": "release",
-      "command": "binding-release-candidate",
-      "args": [],
-      "evidence_contract": "graphforge-release-candidate-v2",
-      "freshness": "30d",
-      "sha_rule": "exact_commit"
-    },
-    {
-      "id": "checkpoint-recovery",
-      "path": ".github/workflows/checkpoint-recovery-gate.yml",
-      "class": "release_certification",
-      "owner": "release",
-      "command": "checkpoint-recovery",
-      "args": [],
-      "evidence_contract": "graphforge-checkpoint-recovery/1",
-      "freshness": "30d",
-      "sha_rule": "exact_commit"
-    },
-    {
-      "id": "clean-environment",
-      "path": ".github/workflows/clean-env-verify.yml",
-      "class": "release_certification",
-      "owner": "release",
-      "command": "clean-environment",
-      "args": [],
-      "evidence_contract": "graphforge-clean-env-evidence-v1",
-      "freshness": "release_version",
-      "sha_rule": "version_identity"
-    },
     {
       "id": "codspeed",
       "path": ".github/workflows/codspeed.yml",
@@ -193,17 +126,6 @@
       "sha_rule": "exact_main"
     },
     {
-      "id": "epistemic-contract",
-      "path": ".github/workflows/epistemic-contract-gate.yml",
-      "class": "release_certification",
-      "owner": "release",
-      "command": "epistemic-contract",
-      "args": [],
-      "evidence_contract": "graphforge-epistemic-contract/1",
-      "freshness": "30d",
-      "sha_rule": "exact_commit"
-    },
-    {
       "id": "fuzz",
       "path": ".github/workflows/fuzz.yml",
       "class": "scheduled_health_stress",
@@ -213,28 +135,6 @@
       "evidence_contract": "cargo-fuzz-artifacts",
       "freshness": "1d",
       "sha_rule": "exact_main"
-    },
-    {
-      "id": "knowledge-contract",
-      "path": ".github/workflows/knowledge-contract-gate.yml",
-      "class": "release_certification",
-      "owner": "release",
-      "command": "knowledge-contract",
-      "args": [],
-      "evidence_contract": "graphforge-knowledge-contract/1",
-      "freshness": "30d",
-      "sha_rule": "exact_commit"
-    },
-    {
-      "id": "non-cypher-surface",
-      "path": ".github/workflows/non-cypher-surface-gate.yml",
-      "class": "release_certification",
-      "owner": "release",
-      "command": "non-cypher-surface",
-      "args": [],
-      "evidence_contract": "graphforge-rust-non-cypher/1",
-      "freshness": "30d",
-      "sha_rule": "exact_commit"
     },
     {
       "id": "pr-labeler",
@@ -248,59 +148,15 @@
       "sha_rule": "event_sha"
     },
     {
-      "id": "publish-track",
-      "path": ".github/workflows/publish-track.yml",
-      "class": "release_certification",
-      "owner": "release",
-      "command": "publication",
-      "args": [],
-      "evidence_contract": "graphforge-release-candidate-v2",
-      "freshness": "30d",
-      "sha_rule": "exact_main"
-    },
-    {
       "id": "publish",
       "path": ".github/workflows/publish.yaml",
       "class": "release_certification",
       "owner": "release",
       "command": "publication",
       "args": [],
-      "evidence_contract": "graphforge-release-reconciliation/1",
-      "freshness": "30d",
+      "evidence_contract": "registry versions for the tagged commit",
+      "freshness": "tag",
       "sha_rule": "exact_commit"
-    },
-    {
-      "id": "release-certification",
-      "path": ".github/workflows/release-certification.yml",
-      "class": "release_certification",
-      "owner": "release",
-      "command": "release-certification",
-      "args": [],
-      "evidence_contract": "graphforge-release-certification/1",
-      "freshness": "30d",
-      "sha_rule": "exact_main"
-    },
-    {
-      "id": "release-credential-preflight",
-      "path": ".github/workflows/release-credential-preflight.yml",
-      "class": "release_certification",
-      "owner": "release",
-      "command": "release-credential-preflight",
-      "args": [],
-      "evidence_contract": "graphforge-release-credential-preflight/1",
-      "freshness": "same_publication",
-      "sha_rule": "exact_commit"
-    },
-    {
-      "id": "release-labels",
-      "path": ".github/workflows/release-tracking.yml",
-      "role": "supporting_automation",
-      "owner": "repository",
-      "command": "github-automation",
-      "args": [],
-      "evidence_contract": "labels",
-      "freshness": "current_run",
-      "sha_rule": "event_sha"
     },
     {
       "id": "test-suite",

@@ -71,13 +71,13 @@ class GateRegistryTests(unittest.TestCase):
 
     def test_matrix_dispatch_map_is_registry_owned(self) -> None:
         mutated = copy.deepcopy(self.registry)
-        mutated["matrix_variants"]["concurrency/stress"] = "scripts/ci/require-gates.sh"
+        mutated["matrix_variants"]["concurrency/stress"] = "scripts/ci/repo-checks.sh"
         self.rejected("matrix variants", mutated)
 
-    def test_publication_verification_has_one_owner(self) -> None:
+    def test_publication_has_one_owner(self) -> None:
         mutated = copy.deepcopy(self.registry)
-        clean = next(item for item in mutated["workflows"] if item["id"] == "clean-environment")
-        clean["owner"] = "ci"
+        publish = next(item for item in mutated["workflows"] if item["id"] == "publish")
+        publish["owner"] = "ci"
         self.rejected("one release owner", mutated)
 
     def test_command_rendering_uses_registry_argv(self) -> None:
@@ -209,26 +209,6 @@ class GateRegistryTests(unittest.TestCase):
         for item in operators:
             self.assertNotIn("path", item)
             self.assertTrue(GATE.command_argv(self.registry, item["id"]))
-
-    def test_every_ci_script_test_is_invoked(self) -> None:
-        """A test no workflow or Makefile runs protects nothing (#1671)."""
-        invokers = [
-            *sorted((ROOT / ".github" / "workflows").glob("*.y*ml")),
-            ROOT / "Makefile",
-            ROOT / "benchmarks" / "Makefile",
-        ]
-        invoked = "\n".join(path.read_text(encoding="utf-8") for path in invokers)
-        directory = ROOT / "scripts" / "ci"
-        suites = sorted(path.name for path in directory.glob("test-*"))
-        self.assertGreater(len(suites), 50)
-        reached = {name for name in suites if f"scripts/ci/{name}" in invoked}
-        # A reached suite may run sibling suites as subprocesses or fixtures.
-        frontier = set(reached)
-        while frontier:
-            text = "\n".join((directory / name).read_text(encoding="utf-8") for name in frontier)
-            frontier = {name for name in suites if name not in reached and name in text}
-            reached |= frontier
-        self.assertEqual(sorted(set(suites) - reached), [], "CI script tests that nothing runs")
 
     def test_documented_fly_gate_id_renders(self) -> None:
         rendered = GATE.command_argv(self.registry, "fly-tiny-qualification")

@@ -12,8 +12,8 @@ engine and binding work.
 
 **Next steps for contributors:** set up the environment below → run the validation
 suite → open a focused PR against `main`. For release operators, start at
-[Publishing](../engineering/PUBLISHING.md) and
-[release process](release-process.md).
+[Publishing](../engineering/PUBLISHING.md) and `RELEASING.md` at the
+repository root.
 
 ---
 
@@ -46,7 +46,7 @@ maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml
 # Verify
 cargo test --workspace
 python -c "import graphforge; print(graphforge.__version__)"
-make pre-push-fast
+make check
 ```
 
 See [Installation](../guide/installation.md) for the published-package path.
@@ -57,19 +57,17 @@ See [Installation](../guide/installation.md) for the published-package path.
 
 ### Before Pushing Code
 
-**Always run the full validation suite before pushing:**
+**Run the targeted tests for the changed surface, then `make check` before pushing:**
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace -- -D warnings
-cargo test --workspace
-make pre-push-fast   # policy/inventory checks, then ruff format/lint/security/…
-make pre-push
+make check   # Python format/lint/type-check/security, workflow lint, repo-checks
 ```
 
-`make pre-push` mirrors the CI gate for the changed surface. The CI Gate Rust
-lane's own commands (nextest over the workspace, then the custom-harness
-targets and doctests) are in
+`make check` mirrors the CI Lint job. For Rust: run `make test-rust` (or narrow
+with `make test-rust ARGS="-p <crate>"`). For Python/Node bindings: `make test-python`
+/ `make test-node`. The CI Gate Rust lane's exact nextest commands are in
 [agent-environment.md](agent-environment.md#rust-test-gate).
 
 ### Running Tests
@@ -290,7 +288,7 @@ GraphForge follows [Semantic Versioning](https://semver.org/). The current
 coordinated public release is **v0.5.1** (see
 [installation](../guide/installation.md)).
 
-See [release-process.md](release-process.md) for the full release procedure and
+See `RELEASING.md` at the repository root for the release procedure and
 [roadmap.md](../releases/roadmap.md) for delivery sequencing.
 
 ---

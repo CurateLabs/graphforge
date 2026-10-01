@@ -41,7 +41,6 @@ resource-limit parity across those cells under
 ### Short CI (required)
 
 ```bash
-make m4-entry-matrix-check
 cargo test -p graphforge-api --test m4_entry_baseline -- --nocapture
 ```
 

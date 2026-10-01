@@ -146,6 +146,8 @@ pub fn append_graph_files_v2(
         None,
         tombstones,
         None,
+        None,
+        &mut || false,
     )
 }
 
@@ -244,6 +246,8 @@ pub(crate) fn append_replayed_graph_files(
         None,
         tombstones,
         routes.as_ref(),
+        None,
+        &mut || false,
     )
 }
 
@@ -262,6 +266,8 @@ pub(crate) fn append_mapped_import_graph_files(
         None,
         &[],
         Some(routes),
+        None,
+        &mut || false,
     )
 }
 
@@ -286,15 +292,20 @@ pub(crate) fn append_authenticated_graph_files_v2(
         Some(sealed_files),
         tombstones,
         None,
+        None,
+        &mut || false,
     )
 }
 
-/// Append a checkpoint-authorized mapped encoding, retaining legacy payload objects by digest.
-pub(crate) fn append_authenticated_mapped_graph_files(
+/// Append only sources admitted by the owning checkpoint publication boundary.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn append_captured_mapped_graph_files(
     lease: &GraphObjectPublicationLease,
     workspace: &Path,
     state: &mut GraphManifestState,
-    sealed_files: &[AuthenticatedGraphFile],
+    artifacts: &[crate::graph_construction_encoding::ConstructionEncodedArtifact],
+    captured: &crate::graph_construction::CapturedEncodedInventory<'_>,
+    cancelled: &mut impl FnMut() -> bool,
     tombstones: &[String],
     routes: &crate::route_component::RouteTable,
 ) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
@@ -356,18 +367,20 @@ pub(crate) fn append_authenticated_mapped_graph_files(
         root.root_node_sha256 = digest;
         root.format_version = crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION;
     }
-    let paths = sealed_files
+    let paths = artifacts
         .iter()
-        .map(|file| file.relative_path.clone())
+        .map(|file| PathBuf::from(&file.path))
         .collect::<Vec<_>>();
     let (root, mut evidence) = append_graph_files_v2_inner(
         lease,
         workspace,
         &mut staged,
         &paths,
-        Some(sealed_files),
+        None,
         tombstones,
         Some(routes),
+        Some(captured),
+        cancelled,
     )?;
     evidence.publication_io.checked_add_assign(&migration_io)?;
     let totals = evidence.publication_io.totals()?;
@@ -387,7 +400,7 @@ pub(crate) fn append_authenticated_mapped_graph_files(
     Ok((root, evidence))
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn append_graph_files_v2_inner(
     lease: &GraphObjectPublicationLease,
     workspace: &Path,
@@ -396,6 +409,8 @@ fn append_graph_files_v2_inner(
     authenticated: Option<&[AuthenticatedGraphFile]>,
     tombstones: &[String],
     mapped_routes: Option<&crate::route_component::RouteTable>,
+    captured: Option<&crate::graph_construction::CapturedEncodedInventory<'_>>,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
     validate_publication_identity(lease)?;
     if state
@@ -434,7 +449,14 @@ fn append_graph_files_v2_inner(
         .map_or(0, |root| root.logical_byte_length);
     for (index, relative) in sealed_paths.iter().enumerate() {
         let source = workspace.join(relative);
-        let (digest, expected_length, prehash_io) = if let Some(files) = authenticated {
+        let (digest, expected_length, prehash_io) = if let Some(captured) = captured {
+            let source = captured.open(relative)?;
+            (
+                source.content_sha256().to_owned(),
+                source.bytes(),
+                ReadIoEvidence::default(),
+            )
+        } else if let Some(files) = authenticated {
             let expected = files
                 .get(index)
                 .ok_or_else(|| validation("authenticated graph inventory is incomplete"))?;
@@ -456,8 +478,17 @@ fn append_graph_files_v2_inner(
             let (digest, io) = hash_regular_file(&source)?;
             (hex_digest(digest), metadata.len(), io)
         };
-        let installed =
-            install_graph_object_file_with_lease(lease, &source, &digest, expected_length)?;
+        let installed = if let Some(captured) = captured {
+            let source = captured.open(relative)?;
+            super::install_captured_encoded_artifact_with_lease(lease, &source, cancelled)?
+        } else {
+            install_graph_object_file_with_lease(lease, &source, &digest, expected_length)?
+        };
+        evidence.payload_bytes_hashed = evidence
+            .payload_bytes_hashed
+            .checked_add(installed.bytes_hashed)
+            .and_then(|bytes| bytes.checked_add(prehash_io.bytes))
+            .ok_or_else(|| validation("graph payload SHA bytes overflow"))?;
         evidence.publication_io.payload.add_install(&installed)?;
         evidence.publication_io.payload.add_read(prehash_io)?;
         let relative_path = relative
@@ -587,7 +618,6 @@ fn append_graph_files_v2_inner(
         logical_byte_length,
     };
     let totals = evidence.publication_io.totals()?;
-    evidence.payload_bytes_hashed = evidence.publication_io.payload.read_bytes;
     evidence.bytes_installed = totals.installed_bytes;
     evidence.read_calls = totals.read_calls;
     evidence.write_calls = totals.write_calls;

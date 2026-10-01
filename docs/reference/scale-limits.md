@@ -114,7 +114,6 @@ a queryable graph; checked-in evidence:
 That is not a universal size ceiling and does not download 8M/128M data in CI.
 
 ```bash
-make m4-entry-matrix-check
 cargo test -p graphforge-api --test m4_entry_baseline
 cargo test -p graphforge-api --test file_backed_graph_generation
 make bench-m4-entry
@@ -274,47 +273,11 @@ ceilings.
 
 ---
 
-## Release load matrix coverage
-
-The [standardized release load matrix](../development/release-load-matrix.md)
-exercises public Rust, Python, and Node surfaces across synthetic size and
-density classes. It proves **correctness and operational envelope** inside the
-small-to-medium posture above — load, lifecycle ops, cleanup, and reopen — not
-the fixed-hop LIMIT wall-clock numbers in this document.
-
-Authoritative size, density, and topology IDs live in
-`tests/contracts/load-dataset-taxonomy.json`. Summary mapping:
-
-| Scale-limits claim | What the matrix proves | Scenario classes |
-|---|---|---|
-| Small-to-medium notebook graphs | Facades load complete fixtures and finish inside per-size resource bounds (RSS, persisted/temporary bytes, hang timeout) | XS–XL (all datasets) |
-| Edge count matters more than node count | At similar node counts, dense fixtures raise live-edge cardinality; sparse fixtures keep edges low while topologies vary | Sparse vs dense pairs at each size |
-| Neighborhood / adjacency-shaped work | Hub-heavy and path-heavy sparse graphs stress uneven degree and path structure without claiming LIMIT latency | `*-sparse-hub`, `*-sparse-path` |
-| Edge-heavy / denser workloads | Dense clustered and cyclic graphs maximize edges for the size class (ops correctness, not aggregation SLOs) | `*-dense-clustered`, `*-dense-cyclic` |
-| Project sharing via reopen | Every case closes and reopens the project with fail-closed reopen equivalence | All 144 cases |
-| Fixed-hop `LIMIT` shape and benches | **Out of scope** for this matrix — use the LIMIT contract and benches above | Separate release benches |
-
-| Size | Node band (taxonomy) | Sparse datasets | Dense datasets |
-|------|----------------------|-----------------|----------------|
-| XS | 16–31 | disconnected, path-heavy | clustered, cyclic |
-| S | 64–127 | hub-heavy, path-heavy | clustered, cyclic |
-| M | 256–511 | disconnected, hub-heavy | clustered, cyclic |
-| L | 1024–2047 | clustered | cyclic |
-| XL | 4096–8191 | hub-heavy | clustered |
-
-Accepted same-SHA case results land on
-[Release Load Matrix Results](load-matrix-results.md) once CI produces the
-artifact. Until then that page stays an explicit pending placeholder.
-
----
-
 ## Further Reading
 
 - [Graph Scale Index (GSI)](graph-scale-index.md) — size axis (node band + density)
 - [Scale Evaluation](scale-evaluation.md) — Official Graph500 + Derived density matrix; harness contract
 - [LDBC full suite](../guide/datasets/ldbc.md) — SNB / Graphalytics / FinBench / SPB (spec; execution external)
 - [Install footprint](../guide/installation.md#install-footprint) — download and on-disk package sizes for Python/Node (not query scale)
-- [Release Load Matrix Results](load-matrix-results.md) — evidence landing for accepted matrix runs
-- [Standardized Release Load Matrix](../development/release-load-matrix.md) — contracts, executor, reproduce
 - [GitHub Releases](https://github.com/CurateLabs/graphforge/releases) — release notes
 - [Architecture Overview](../book/architecture/overview.md) — Rust core design and DataFusion execution model

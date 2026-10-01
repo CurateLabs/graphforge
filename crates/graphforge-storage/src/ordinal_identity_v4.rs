@@ -18,7 +18,7 @@ use sha2::Digest;
 use uuid::Uuid;
 
 /// Checksum-bearing wire version of the ordinal mapping authority.
-pub const ORDINAL_IDENTITY_V4: u32 = 5;
+pub const ORDINAL_IDENTITY_V4: u32 = 6;
 /// Canonical location below a graph project.
 pub const ORDINAL_IDENTITY_MANIFEST: &str = "topology/uuid-membership/ordinal-v4-manifest.json";
 const INDEX_DIR: &str = "topology/uuid-membership";
@@ -130,8 +130,6 @@ pub struct V4OrdinalBlock {
     pub offset: u64,
     /// Number of UUID records in this block.
     pub count: u64,
-    /// Lowercase SHA-256 of the exact block bytes.
-    pub sha256: String,
     /// Required corruption checksum of this exact block.
     #[serde(with = "crate::corruption_checksum::wire_hex")]
     pub xxh64: u64,
@@ -161,8 +159,6 @@ pub struct V4OrdinalTombstoneBlock {
     pub first: u64,
     /// Last ID in the block.
     pub last: u64,
-    /// Lowercase SHA-256 of the exact block bytes.
-    pub sha256: String,
     /// Required corruption checksum of this exact block.
     #[serde(with = "crate::corruption_checksum::wire_hex")]
     pub xxh64: u64,
@@ -1115,28 +1111,29 @@ fn parse_manifest(
     body: &[u8],
     expected_generation: u64,
 ) -> Result<Option<V4OrdinalIdentityManifest>, V4OrdinalIdentityError> {
+    let _ = expected_generation;
+    decode_ordinal_manifest(body).map(Some)
+}
+
+pub(crate) fn decode_ordinal_manifest(
+    body: &[u8],
+) -> Result<V4OrdinalIdentityManifest, V4OrdinalIdentityError> {
+    if body.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(V4OrdinalIdentityError::InvalidDescriptor(
+            "ordinal manifest exceeds bound",
+        ));
+    }
     let value: serde_json::Value = serde_json::from_slice(body).map_err(io_error)?;
-    let version = value
+    if value
         .get("format_version")
         .and_then(serde_json::Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or(V4OrdinalIdentityError::InvalidDescriptor(
-            "format version is absent",
-        ))?;
-    if version == 3 {
-        if crate::uuid_membership::canonical_v3_manifest_marker(body, expected_generation) {
-            return Ok(None);
-        }
+        != Some(u64::from(ORDINAL_IDENTITY_V4))
+    {
         return Err(V4OrdinalIdentityError::InvalidDescriptor(
-            "v3 rebuild marker is noncanonical",
+            "format version is unsupported; recreate the ordinal index",
         ));
     }
-    if version != ORDINAL_IDENTITY_V4 {
-        return Err(V4OrdinalIdentityError::InvalidDescriptor(
-            "format version is unsupported",
-        ));
-    }
-    serde_json::from_value(value).map(Some).map_err(io_error)
+    serde_json::from_value(value).map_err(io_error)
 }
 
 fn validate_manifest(
@@ -1210,15 +1207,6 @@ fn validate_manifest(
                 "ordinal artifact length is not packed",
             ));
         }
-        if range
-            .blocks
-            .iter()
-            .any(|block| !canonical_sha256(&block.sha256))
-        {
-            return Err(V4OrdinalIdentityError::InvalidDescriptor(
-                "ordinal block identity is noncanonical",
-            ));
-        }
         prior_end = end;
     }
     validate_tombstone_descriptors(manifest)
@@ -1241,15 +1229,6 @@ fn validate_tombstone_descriptors(
         {
             return Err(V4OrdinalIdentityError::InvalidDescriptor(
                 "tombstone runs are noncanonical",
-            ));
-        }
-        if run
-            .blocks
-            .iter()
-            .any(|block| !canonical_sha256(&block.sha256))
-        {
-            return Err(V4OrdinalIdentityError::InvalidDescriptor(
-                "tombstone block identity is noncanonical",
             ));
         }
         prior_generation = run.generation;
@@ -1284,13 +1263,6 @@ fn require_kind(
         ));
     }
     Ok(())
-}
-
-fn canonical_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2082,12 +2054,6 @@ mod tests {
                 count: chunk.len() as u64,
                 first: chunk[0],
                 last: chunk[chunk.len() - 1],
-                sha256: hex(&Sha256::digest(
-                    &chunk
-                        .iter()
-                        .flat_map(|id| id.to_be_bytes())
-                        .collect::<Vec<_>>(),
-                )),
                 xxh64: crate::corruption_checksum::checksum(
                     &chunk
                         .iter()
@@ -2102,10 +2068,37 @@ mod tests {
     fn checksum_ordinal_manifest_refuses_legacy_missing_and_malformed_metadata() {
         let fixture = Fixture::new(&[2], &[]);
         let original = serde_json::to_value(&fixture.manifest).unwrap();
-        for mode in 0..4 {
+        for mode in 0..9 {
             let mut changed = original.clone();
             match mode {
-                0 => changed["format_version"] = serde_json::json!(4),
+                0 => {
+                    changed["format_version"] = serde_json::json!(5);
+                    changed["ordinal_ranges"][0]["artifact"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("xxh64");
+                }
+                4 => {
+                    changed["format_version"] = serde_json::json!(7);
+                    changed["ordinal_ranges"][0]["artifact"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("xxh64");
+                }
+                5 => {
+                    changed.as_object_mut().unwrap().remove("format_version");
+                }
+                6 => {
+                    changed["ordinal_ranges"][0]["blocks"][0]["sha256"] =
+                        serde_json::json!("a".repeat(64))
+                }
+                7 => {
+                    changed["tombstones"][0]["blocks"] = serde_json::json!([{ "offset":0,"count":1,"first":1,"last":1,"xxh64":"0000000000000000","sha256":"a".repeat(64) }])
+                }
+                8 => {
+                    changed["ordinal_ranges"][0]["artifact"]["xxh64"] =
+                        serde_json::json!("00000000000000000")
+                }
                 1 => {
                     changed["ordinal_ranges"][0]["artifact"]
                         .as_object_mut()
@@ -2149,7 +2142,6 @@ mod tests {
             .map(|(index, block)| V4OrdinalBlock {
                 offset: index as u64 * ORDINAL_BLOCK_BYTES,
                 count: block.len() as u64 / UUID_WIDTH,
-                sha256: hex(&Sha256::digest(block)),
                 xxh64: crate::corruption_checksum::checksum(block),
             })
             .collect()

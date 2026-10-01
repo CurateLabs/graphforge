@@ -66,7 +66,7 @@ pub(crate) use topology_delta::prepare_v4_ordinal_delta;
 
 mod identity_codec;
 
-const FORMAT_VERSION: u32 = 6;
+const FORMAT_VERSION: u32 = 7;
 // Private recovery intents evolve independently of the published UUID format.
 const CONSTRUCTION_INTENT_FORMAT_VERSION: u32 = 3;
 const NODE_LOOKUP_RECORD_BYTES: u64 = 24;
@@ -361,20 +361,23 @@ pub struct UuidProbeMetrics {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct FileRecord {
     name: String,
     count: u64,
     sha256: String,
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    xxh64: u64,
     blocks: Vec<BlockRecord>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct BlockRecord {
     offset: u64,
     len: u32,
     first_key: String,
     last_key: String,
-    sha256: String,
     #[serde(with = "crate::corruption_checksum::wire_hex")]
     xxh64: u64,
 }
@@ -692,6 +695,7 @@ pub(crate) struct ConstructionIndexOutput {
     pub name: String,
     pub bytes: u64,
     pub sha256: String,
+    pub xxh64: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -705,6 +709,8 @@ pub(crate) struct ConstructionIndexReference {
     pub target_path: String,
     pub bytes: u64,
     pub sha256: String,
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    pub xxh64: u64,
     pub parent_manifest_sha256: String,
 }
 
@@ -770,6 +776,7 @@ pub(crate) struct ConstructionReferenceAuthentication<'a> {
     pub(crate) target_path: &'a str,
     pub(crate) bytes: u64,
     pub(crate) sha256: &'a str,
+    pub(crate) xxh64: u64,
     pub(crate) parent_manifest_sha256: &'a str,
 }
 
@@ -851,16 +858,17 @@ fn validate_manifest_version(version: u32) -> Result<(), GfError> {
 
 /// Refuse retired or future schemas before decoding current checksum fields.
 fn decode_manifest(bytes: &[u8]) -> Result<Manifest, GfError> {
-    #[derive(Deserialize)]
-    struct Header {
-        format_version: u32,
-    }
     if bytes.len() as u64 > MAX_MANIFEST_BYTES {
         return Err(storage_err("UUID membership manifest exceeds size limit"));
     }
-    let header: Header = serde_json::from_slice(bytes).map_err(storage_err)?;
-    validate_manifest_version(header.format_version)?;
-    serde_json::from_slice(bytes).map_err(storage_err)
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(storage_err)?;
+    let version = value
+        .get("format_version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .unwrap_or(0);
+    validate_manifest_version(version)?;
+    serde_json::from_value(value).map_err(storage_err)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -994,11 +1002,13 @@ fn authenticate_file_blocks(
 ) -> Result<(), GfError> {
     validate_block_records(record, record_bytes)?;
     let mut count = 0_u64;
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     for block in &record.blocks {
         file.seek(SeekFrom::Start(block.offset))
             .map_err(storage_err)?;
         let mut bytes = vec![0_u8; block.len as usize];
         file.read_exact(&mut bytes).map_err(storage_err)?;
+        checksum.update(&bytes);
         let width = usize::try_from(record_bytes)
             .map_err(|_| storage_err("record width does not fit address space"))?;
         if !block_matches(&bytes, block, width) {
@@ -1016,6 +1026,7 @@ fn authenticate_file_blocks(
     }
     if file.metadata().map_err(storage_err)?.len() != record_length(record, record_bytes)?
         || count != record.count
+        || checksum.finish() != record.xxh64
     {
         return Err(storage_err("UUID run authentication failed"));
     }
@@ -1044,11 +1055,6 @@ fn validate_block_records(record: &FileRecord, record_bytes: u64) -> Result<(), 
             || block.first_key.len() != key_hex_len
             || block.last_key.len() != key_hex_len
             || block.first_key > block.last_key
-            || block.sha256.len() != 64
-            || !block
-                .sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
             return Err(storage_err("UUID run block table is not canonical"));
         }
@@ -1078,11 +1084,12 @@ fn describe_run(
     if width != IDENTITY_RECORD_BYTES && length % width != 0 {
         return Err(storage_err("internal run has a partial index record"));
     }
-    let (sha256, blocks, count) = describe_blocks(&mut open_uuid_file(path)?, width)?;
+    let (sha256, xxh64, blocks, count) = describe_blocks(&mut open_uuid_file(path)?, width)?;
     Ok(FileRecord {
         name: format!("{kind}-{generation}-{}.uuidx", &sha256[..16]),
         count,
         sha256,
+        xxh64,
         blocks,
     })
 }
@@ -1090,7 +1097,7 @@ fn describe_run(
 fn describe_blocks(
     file: &mut File,
     width: u64,
-) -> Result<(String, Vec<BlockRecord>, u64), GfError> {
+) -> Result<(String, u64, Vec<BlockRecord>, u64), GfError> {
     describe_stream(
         file,
         usize::try_from(width).map_err(storage_err)?,
@@ -1104,7 +1111,7 @@ fn describe_stream(
     file: &mut impl Read,
     width: usize,
     reads: &mut (u64, u64),
-) -> Result<(String, Vec<BlockRecord>, u64), GfError> {
+) -> Result<(String, u64, Vec<BlockRecord>, u64), GfError> {
     if !matches!(width, IDENTITY_RECORD_WIDTH | NODE_LOOKUP_RECORD_WIDTH) {
         return Err(storage_err("unsupported UUID run record width"));
     }
@@ -1113,6 +1120,7 @@ fn describe_stream(
     let mut offset = 0_u64;
     let mut count = 0_u64;
     let mut whole = crate::payload_digest::PayloadSha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut blocks = Vec::new();
     loop {
         let mut filled = carried;
@@ -1153,12 +1161,12 @@ fn describe_stream(
         let bytes = &buffer[..valid];
         let (records, first, last) = block_layout(bytes, width)?;
         whole.update(bytes);
+        checksum.update(bytes);
         blocks.push(BlockRecord {
             offset,
             len: u32::try_from(valid).map_err(storage_err)?,
             first_key: hex_sha256_key(first),
             last_key: hex_sha256_key(last),
-            sha256: hex_bytes(&crate::payload_digest::PayloadSha256::digest(bytes)),
             xxh64: crate::corruption_checksum::checksum(bytes),
         });
         offset = offset
@@ -1173,7 +1181,12 @@ fn describe_stream(
             break;
         }
     }
-    Ok((hex_bytes(&whole.finalize()), blocks, count))
+    Ok((
+        hex_bytes(&whole.finalize()),
+        checksum.finish(),
+        blocks,
+        count,
+    ))
 }
 
 fn hex_sha256_key(bytes: &[u8]) -> String {
@@ -1455,48 +1468,6 @@ fn v4_compaction_post_write_failure(point: &str) -> Result<(), GfError> {
     Ok(())
 }
 
-pub(crate) fn canonical_v3_manifest_marker(bytes: &[u8], expected_generation: u64) -> bool {
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return false;
-    };
-    let Ok(manifest) = serde_json::from_value::<Manifest>(value.clone()) else {
-        return false;
-    };
-    // Serialize the typed v3 schema and require the supplied tree to be a
-    // recursive structural subset. This rejects unknown fields in Manifest,
-    // RunRecord, FileRecord, and BlockRecord without duplicating descriptor
-    // semantics here. Missing serde-default fields remain valid v3.
-    let Ok(canonical_shape) = serde_json::to_value(&manifest) else {
-        return false;
-    };
-    if !json_shape_is_subset(&value, &canonical_shape) {
-        return false;
-    }
-    manifest.format_version == FORMAT_VERSION
-        && manifest.current_generation == expected_generation
-        && validate_run_descriptors(&manifest).is_ok()
-}
-
-fn json_shape_is_subset(candidate: &serde_json::Value, canonical: &serde_json::Value) -> bool {
-    match (candidate, canonical) {
-        (serde_json::Value::Object(candidate), serde_json::Value::Object(canonical)) => {
-            candidate.iter().all(|(key, value)| {
-                canonical
-                    .get(key)
-                    .is_some_and(|known| json_shape_is_subset(value, known))
-            })
-        }
-        (serde_json::Value::Array(candidate), serde_json::Value::Array(canonical)) => {
-            candidate.len() == canonical.len()
-                && candidate
-                    .iter()
-                    .zip(canonical)
-                    .all(|(value, known)| json_shape_is_subset(value, known))
-        }
-        _ => true,
-    }
-}
-
 fn describe_staged_data(
     source: &Path,
     kind: &str,
@@ -1508,11 +1479,12 @@ fn describe_staged_data(
         return Err(storage_err("internal run has a partial index record"));
     }
     let mut input = File::open(source).map_err(storage_err)?;
-    let (sha256, blocks, count) = describe_blocks(&mut input, record_bytes)?;
+    let (sha256, xxh64, blocks, count) = describe_blocks(&mut input, record_bytes)?;
     Ok(FileRecord {
         name: format!("{kind}-{generation}-{}.uuidx", &sha256[..16]),
         count,
         sha256,
+        xxh64,
         blocks,
     })
 }

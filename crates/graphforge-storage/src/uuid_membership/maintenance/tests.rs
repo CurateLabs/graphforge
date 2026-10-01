@@ -160,7 +160,7 @@ fn orphan_collection_refuses_unsupported_manifest_before_deleting_any_file() {
     let mut manifest: Manifest = serde_json::from_slice(&original).unwrap();
     let orphan = root.join("identities-v5-orphan-0000000000000001.uuidx");
     fs::write(&orphan, b"must survive unsupported metadata").unwrap();
-    manifest.format_version = 7;
+    manifest.format_version = super::super::FORMAT_VERSION + 1;
     let bytes = serde_json::to_vec(&manifest).unwrap();
     fs::write(&path, &bytes).unwrap();
     let authority = super::AuthenticatedV3MembershipAuthority {
@@ -176,7 +176,7 @@ fn orphan_collection_refuses_unsupported_manifest_before_deleting_any_file() {
     .unwrap_err()
     .to_string();
     assert!(
-        error.contains("unsupported UUID membership format version 7"),
+        error.contains("unsupported UUID membership format version 8"),
         "{error}"
     );
     assert!(error.contains("recreate the index"), "{error}");
@@ -189,7 +189,7 @@ fn orphan_collection_refuses_unsupported_manifest_before_deleting_any_file() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("unsupported UUID membership format version 7"),
+        error.contains("unsupported UUID membership format version 8"),
         "{error}"
     );
     fs::write(&path, original).unwrap();

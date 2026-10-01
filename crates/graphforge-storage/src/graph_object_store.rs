@@ -658,6 +658,8 @@ pub struct GraphObjectInstallEvidence {
     pub content_xxh64: Option<u64>,
     /// Source payload bytes read and hashed.
     pub bytes_hashed: u64,
+    /// Actual checksum-only reads under private admitted producer authority.
+    pub(crate) checksum_read_bytes: u64,
     /// Logical payload bytes newly installed into the object store.
     pub bytes_installed: u64,
     /// Whether an already installed exact object satisfied the request.
@@ -716,7 +718,10 @@ impl GraphObjectIoTotals {
             ));
         }
         self.checked_add_assign(&Self {
-            read_bytes: evidence.bytes_hashed,
+            read_bytes: evidence
+                .bytes_hashed
+                .checked_add(evidence.checksum_read_bytes)
+                .ok_or_else(|| validation("CAS authentication read bytes overflow"))?,
             read_calls: evidence.read_calls,
             write_bytes: evidence.write_bytes,
             write_calls: evidence.write_calls,
@@ -1671,6 +1676,10 @@ fn checked_read_io_sum(
     right: ReadIoEvidence,
 ) -> Result<ReadIoEvidence, GfError> {
     Ok(ReadIoEvidence {
+        sha_bytes: left
+            .sha_bytes
+            .checked_add(right.sha_bytes)
+            .ok_or_else(|| validation("CAS SHA read bytes overflow"))?,
         content_xxh64: right.content_xxh64.or(left.content_xxh64),
         bytes: left
             .bytes
@@ -1695,6 +1704,7 @@ fn verify_file(
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ReadIoEvidence {
     bytes: u64,
+    sha_bytes: u64,
     calls: u64,
     content_xxh64: Option<u64>,
 }
@@ -1761,6 +1771,7 @@ fn verify_file_counted_in_domain(
             return Err(validation("graph object digest does not match its address"));
         }
         io.content_xxh64 = Some(checksum.finish());
+        io.sha_bytes = io.bytes;
         Ok(())
     })();
     let released = file.finish().map_err(|error| {
@@ -1852,6 +1863,7 @@ fn verify_stream_counted_in_domain(
     crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
     Ok(ReadIoEvidence {
         bytes: total,
+        sha_bytes: total,
         calls,
         content_xxh64: Some(checksum.finish()),
     })
@@ -1957,19 +1969,22 @@ use installation::install_graph_manifest_node_with_lease;
 )]
 pub use installation::install_graph_object_bytes;
 
+pub(crate) use installation::install_captured_encoded_artifact_with_lease;
 #[allow(
     unused_imports,
     reason = "preserve the existing staged CAS root API across feature and test configurations"
 )]
 pub use installation::install_graph_object_file;
 pub(crate) use installation::install_graph_object_file_with_lease;
+#[cfg(test)]
+pub(crate) use installation::set_captured_copy_hook;
 pub use manifest_tree::GraphManifestState;
 #[allow(
     unused_imports,
     reason = "preserve the existing staged CAS root API across feature and test configurations"
 )]
 pub(crate) use manifest_tree::append_authenticated_graph_files_v2;
-pub(crate) use manifest_tree::append_authenticated_mapped_graph_files;
+pub(crate) use manifest_tree::append_captured_mapped_graph_files;
 pub use manifest_tree::append_graph_files_v2;
 pub(crate) use manifest_tree::append_mapped_import_graph_files;
 pub(crate) use manifest_tree::append_replayed_graph_files;

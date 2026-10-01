@@ -893,7 +893,6 @@ impl V4OrdinalRangeWriter {
         self.blocks.push(crate::V4OrdinalBlock {
             offset,
             count: u64::try_from(self.block.len() / 16).map_err(storage_err)?,
-            sha256: artifact_sha256(&self.block),
             xxh64: crate::corruption_checksum::checksum(&self.block),
         });
         self.block.clear();
@@ -1236,6 +1235,7 @@ fn publish_v4_construction_artifacts_inner(
             name: artifact.name.clone(),
             bytes: artifact.bytes,
             sha256: artifact.sha256.clone(),
+            xxh64: artifact.xxh64,
         })
         .collect::<Vec<_>>();
     crate::graph_construction::construction_failpoint("v4_publish.after_artifacts");
@@ -1461,7 +1461,6 @@ fn finish_v4_tombstone_block(
         count: u64::try_from(bytes.len() / 8).map_err(storage_err)?,
         first,
         last,
-        sha256: artifact_sha256(bytes),
         xxh64: crate::corruption_checksum::checksum(bytes),
     });
     writer.push(bytes)?;
@@ -1486,7 +1485,3 @@ pub(super) fn v4_manifest_artifact_names(
 
 #[cfg(test)]
 mod tests;
-
-fn artifact_sha256(bytes: &[u8]) -> String {
-    hex_bytes(&Sha256::digest(bytes))
-}

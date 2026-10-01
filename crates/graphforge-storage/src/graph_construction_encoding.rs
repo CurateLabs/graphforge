@@ -53,12 +53,17 @@ use crate::uuid_membership::{
 use crate::{SemanticRouteKind, SemanticStorageBindings};
 
 mod adjacency;
+mod inventory;
 mod lanes;
+#[cfg(test)]
+pub(crate) use inventory::authenticate_inventory_payloads;
+pub(crate) use inventory::{authenticate_inventory, authenticate_inventory_control};
 #[cfg(any(test, feature = "test-support"))]
 mod seam_spike;
 
 const ENCODED_ROOT: &str = "encoded-v1";
 const INVENTORY: &str = "inventory.json";
+const ENCODING_FORMAT_VERSION: u32 = 2;
 const ENCODING_INTENT: &str = "encoding-intent.json";
 const MAX_INVENTORY_BYTES: u64 = 16 << 20;
 use crate::construction_record_layout::{
@@ -104,6 +109,7 @@ struct CountingWriter {
     inner: graphforge_filesystem::DurableFileCacheWriter,
     counter: IoCounter,
     digest: Sha256,
+    checksum: crate::corruption_checksum::Checksum,
 }
 
 struct CountingInput<R> {
@@ -276,6 +282,7 @@ impl Write for CountingWriter {
         let written = self.inner.write(buffer)?;
         self.counter.account(written);
         self.digest.update(&buffer[..written]);
+        self.checksum.update(&buffer[..written]);
         Ok(written)
     }
 
@@ -314,6 +321,7 @@ fn storage(error: impl std::fmt::Display) -> GfError {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 /// One private canonical artifact authenticated by the completed inventory.
 pub struct ConstructionEncodedArtifact {
     /// Normalized graph-root-relative path.
@@ -322,9 +330,13 @@ pub struct ConstructionEncodedArtifact {
     pub bytes: u64,
     /// Lowercase SHA-256 of the file.
     pub sha256: String,
+    /// Required seed-zero checksum of the exact artifact bytes.
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    pub xxh64: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 /// Exact authenticated parent object that a publisher must structurally retain.
 pub struct ConstructionRetainedArtifact {
     /// Stable authenticated parent directory supplied to the publisher.
@@ -345,6 +357,9 @@ pub struct ConstructionRetainedArtifact {
     pub bytes: u64,
     /// Exact retained object digest.
     pub sha256: String,
+    /// Required seed-zero checksum of the exact artifact bytes.
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    pub xxh64: u64,
     /// Authenticated parent index manifest that authorized this reference.
     pub parent_manifest_sha256: String,
 }
@@ -460,6 +475,8 @@ pub struct GraphConstructionEncodingEvidence {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 /// Completed private canonical artifact inventory.
 pub struct GraphConstructionEncoding {
+    /// Version of the checksum-bearing inventory wire format.
+    pub format_version: u32,
     /// Directory below the private operation root containing this inventory.
     pub root: String,
     /// Generation the eventual publisher must bind.
@@ -510,7 +527,7 @@ pub(crate) fn inventory_authority_sha256(
     inventory: &GraphConstructionEncoding,
 ) -> Result<String, GfError> {
     let mut digest = graphforge_core::hash_observation::ControlSha256::default();
-    digest.update(b"graphforge-construction-encoding-inventory/v1\0");
+    digest.update(b"graphforge-construction-encoding-inventory/v2\0");
     digest.update(serde_json::to_vec(inventory).map_err(storage)?);
     Ok(hex(&digest.finalize()))
 }
@@ -562,7 +579,6 @@ pub(crate) fn encode(
         .map_err(storage)?;
     cleanup_encoding_temps(&output, budgets)?;
     if let Some(mut existing) = read_inventory(&output)? {
-        let authentication = authenticate_inventory(&output, &existing, parent_index)?;
         if !existing
             .artifacts
             .iter()
@@ -578,6 +594,7 @@ pub(crate) fn encode(
         let actual_authority = inventory_authority_sha256(&existing)?;
         match expected_inventory_sha256 {
             Some(expected) if expected == actual_authority => {
+                let authentication = authenticate_inventory(&output, &existing, parent_index)?;
                 remove_encoding_intent(&output)?;
                 existing.invocation = GraphConstructionEncodingInvocationEvidence {
                     performed: false,
@@ -872,6 +889,7 @@ pub(crate) fn encode(
         return Err(storage("canonical encoding contains duplicate paths"));
     }
     let mut completed = GraphConstructionEncoding {
+        format_version: ENCODING_FORMAT_VERSION,
         root: ENCODED_ROOT.to_owned(),
         generation,
         ontology_mode: shape.ontology_mode,
@@ -983,6 +1001,7 @@ fn retained_artifact(value: ConstructionIndexReference) -> ConstructionRetainedA
         target_path: value.target_path,
         bytes: value.bytes,
         sha256: value.sha256,
+        xxh64: value.xxh64,
         parent_manifest_sha256: value.parent_manifest_sha256,
     }
 }
@@ -992,6 +1011,7 @@ fn index_artifact(value: ConstructionIndexOutput) -> ConstructionEncodedArtifact
         path: format!("topology/uuid-membership/{}", value.name),
         bytes: value.bytes,
         sha256: value.sha256,
+        xxh64: value.xxh64,
     }
 }
 
@@ -2232,6 +2252,7 @@ fn copy_artifact<R: Read + Seek>(
             .map_err(storage)?,
             counter: write_counter.clone(),
             digest: Sha256::new(),
+            checksum: crate::corruption_checksum::Checksum::new(),
         },
     );
     let bytes = std::io::copy(&mut input, &mut writer).map_err(storage)?;
@@ -2252,6 +2273,7 @@ fn copy_artifact<R: Read + Seek>(
         path: relative.to_owned(),
         bytes: write_bytes,
         sha256: hex(&writer.digest.finalize()),
+        xxh64: writer.checksum.finish(),
     };
     if artifact.bytes != bytes {
         return Err(storage("copied canonical artifact length changed"));
@@ -2407,6 +2429,7 @@ fn authenticate_file_cancellable(
 > {
     let mut file = graphforge_filesystem::FileCacheReleasingReader::new(file).map_err(storage)?;
     let mut digest = Sha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut bytes = 0_u64;
     let mut operations = 0_u64;
     let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
@@ -2419,6 +2442,7 @@ fn authenticate_file_cancellable(
                 break;
             }
             digest.update(&buffer[..read]);
+            checksum.update(&buffer[..read]);
             add_evidence_counter(&mut bytes, read as u64, "read bytes")?;
             add_evidence_counter(&mut operations, 1, "read operations")?;
         }
@@ -2426,6 +2450,7 @@ fn authenticate_file_cancellable(
             path: path.to_owned(),
             bytes,
             sha256: hex(&digest.finalize()),
+            xxh64: checksum.finish(),
         })
     })();
     let released = file.finish().map_err(storage);
@@ -2450,9 +2475,34 @@ pub(crate) fn read_inventory(
     if file.metadata().map_err(storage)?.len() > MAX_INVENTORY_BYTES {
         return Err(storage("canonical inventory exceeds bound"));
     }
-    serde_json::from_reader(BufReader::with_capacity(COPY_BUFFER_BYTES, file))
-        .map(Some)
-        .map_err(storage)
+    decode_encoding_inventory(
+        BufReader::with_capacity(COPY_BUFFER_BYTES, file).take(MAX_INVENTORY_BYTES + 1),
+    )
+    .map(Some)
+}
+
+pub(crate) fn decode_encoding_inventory(
+    reader: impl Read,
+) -> Result<GraphConstructionEncoding, GfError> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_INVENTORY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(storage)?;
+    if bytes.len() as u64 > MAX_INVENTORY_BYTES {
+        return Err(storage("canonical inventory exceeds bound"));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(storage)?;
+    if value
+        .get("format_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(u64::from(ENCODING_FORMAT_VERSION))
+    {
+        return Err(storage(
+            "unsupported encoded inventory format; recreate the project",
+        ));
+    }
+    serde_json::from_value(value).map_err(storage)
 }
 
 fn read_encoding_intent(root: &StableDirectory) -> Result<Option<EncodingIntent>, GfError> {
@@ -2559,142 +2609,6 @@ fn is_encoding_temp(name: &str) -> bool {
     })
 }
 
-pub(crate) fn authenticate_inventory(
-    root: &StableDirectory,
-    inventory: &GraphConstructionEncoding,
-    parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
-) -> Result<GraphConstructionEncodingEvidence, GfError> {
-    let _diagnostic_scope =
-        crate::graph_construction::diagnostics::Scope::start("inventory_authentication");
-    let evidence = authenticate_inventory_payloads(root, inventory, &mut || false)?;
-    authenticate_inventory_references(inventory, parent_index)?;
-    Ok(evidence)
-}
-
-/// The control half of [`authenticate_inventory`]: the inventory's structural
-/// invariants and its retained-parent references, without reading a payload
-/// byte. The encoder runs this after installing the inventory it just wrote.
-///
-/// The payloads are not re-read here. Every artifact digest in the inventory
-/// was computed by the single pass that wrote the bytes, and the boundary that
-/// consumes those bytes — the CAS install at publication — copies and hashes
-/// each artifact against this inventory and refuses a mismatch on its own
-/// (`install_graph_object_file_with_lease`). Re-reading bytes this process
-/// wrote a moment ago, from its own page cache, names no failure that the
-/// consuming copy does not already refuse (#1384; the reasoning #1392 applied
-/// to shape outputs).
-pub(crate) fn authenticate_inventory_control(
-    inventory: &GraphConstructionEncoding,
-    parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
-) -> Result<(), GfError> {
-    validate_inventory_invariants(inventory)?;
-    authenticate_inventory_references(inventory, parent_index)
-}
-
-fn authenticate_inventory_references(
-    inventory: &GraphConstructionEncoding,
-    parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
-) -> Result<(), GfError> {
-    if inventory.retained_artifacts.is_empty() {
-        if inventory.evidence.retained_index_runs != 0 {
-            return Err(storage("retained-index evidence lacks references"));
-        }
-        return Ok(());
-    }
-    let parent = parent_index
-        .ok_or_else(|| storage("retained artifacts lack authenticated parent snapshot"))?;
-    let mut previous = None;
-    let mut references = Vec::with_capacity(inventory.retained_artifacts.len());
-    for retained in &inventory.retained_artifacts {
-        if previous.is_some_and(|value: &str| value >= retained.target_path.as_str()) {
-            return Err(storage(
-                "retained artifact targets are not unique and sorted",
-            ));
-        }
-        references.push(
-            crate::uuid_membership::ConstructionReferenceAuthentication {
-                source_root: &retained.source_root,
-                source_root_volume: retained.source_root_volume,
-                source_root_file_id: &retained.source_root_file_id,
-                source_path: &retained.source_path,
-                source_volume: retained.source_volume,
-                source_file_id: &retained.source_file_id,
-                target_path: &retained.target_path,
-                bytes: retained.bytes,
-                sha256: &retained.sha256,
-                parent_manifest_sha256: &retained.parent_manifest_sha256,
-            },
-        );
-        previous = Some(retained.target_path.as_str());
-    }
-    parent.authenticate_construction_references(&references)?;
-    Ok(())
-}
-
-fn validate_inventory_invariants(inventory: &GraphConstructionEncoding) -> Result<(), GfError> {
-    if inventory.root != ENCODED_ROOT
-        || inventory.shape_inputs_sha256.len() != 64
-        || inventory.shape_authority_sha256.len() != 64
-        || inventory
-            .semantic_authority_sha256
-            .as_ref()
-            .is_some_and(|digest| {
-                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-        || !inventory
-            .shape_inputs_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-        || !inventory
-            .shape_authority_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-        || inventory
-            .artifacts
-            .windows(2)
-            .any(|pair| pair[0].path >= pair[1].path)
-        || inventory.evidence.prior_topology_rows_decoded != 0
-        || inventory.evidence.retained_topology_bytes_copied != 0
-    {
-        return Err(storage("canonical inventory invariants are invalid"));
-    }
-    Ok(())
-}
-
-pub(crate) fn authenticate_inventory_payloads(
-    root: &StableDirectory,
-    inventory: &GraphConstructionEncoding,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<GraphConstructionEncodingEvidence, GfError> {
-    let _diagnostic_scope =
-        crate::graph_construction::diagnostics::Scope::start("inventory_payload_authentication");
-    validate_inventory_invariants(inventory)?;
-    let mut evidence = GraphConstructionEncodingEvidence::default();
-    for expected in &inventory.artifacts {
-        let (directory, name) = directory_for(root, &expected.path)?;
-        let file = directory
-            .open_child_file(OsStr::new(&name))
-            .map_err(storage)?;
-        let (actual, released, operations) =
-            authenticate_file_cancellable(&expected.path, file, cancelled)?;
-        if &actual != expected {
-            return Err(storage("canonical artifact differs from inventory"));
-        }
-        add_evidence_counter(
-            &mut evidence.input_read_bytes,
-            actual.bytes,
-            "input read bytes",
-        )?;
-        add_evidence_counter(
-            &mut evidence.input_read_operations,
-            operations,
-            "input read operations",
-        )?;
-        account_cache_release(released, &mut evidence)?;
-    }
-    Ok(evidence)
-}
-
 /// Bind publication to the durable encoding control record without rereading
 /// payload bytes. Payloads are authenticated by the subsequent CAS install.
 pub(crate) fn authenticate_inventory_control_for_publication(
@@ -2711,14 +2625,13 @@ pub(crate) fn authenticate_inventory_control_for_publication(
         return Err(storage("canonical inventory exceeds bound"));
     }
     let counter = IoCounter::default();
-    let recorded: GraphConstructionEncoding = serde_json::from_reader(BufReader::with_capacity(
+    let recorded = decode_encoding_inventory(BufReader::with_capacity(
         COPY_BUFFER_BYTES,
         CountingInput {
             inner: file,
             counter: counter.clone(),
         },
-    ))
-    .map_err(storage)?;
+    ))?;
     if inventory_authority_sha256(&recorded)? != inventory_authority_sha256(inventory)? {
         return Err(storage(
             "publication inventory differs from durable encoding",

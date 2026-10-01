@@ -8,8 +8,7 @@
 ## How to read this page
 
 This roadmap describes **product surfaces and versions**, not internal delivery
-milestones. Where a GitHub milestone name appears elsewhere in operator docs
-(for example **release-certification** for the coordinated v0.5.x publication), it is paired with
+milestones. Where a GitHub milestone name appears elsewhere in the docs, it is paired with
 plain-language purpose there; this page stays version- and outcome-oriented.
 
 ---
@@ -33,7 +32,7 @@ Mobile bindings (Swift/Kotlin/UniFFI) are **not** part of the current core
 package set.
 
 See [Publishing](../engineering/PUBLISHING.md) for artifact destinations and
-[release process](../development/release-process.md) for operator sequence.
+`RELEASING.md` at the repository root for the release steps.
 
 ### Prior coordinated line
 

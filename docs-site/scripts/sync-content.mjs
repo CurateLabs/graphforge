@@ -111,17 +111,10 @@ const PAGES = [
   'reference/scale-limits.md',
   'reference/graph-scale-index.md',
   'reference/scale-evaluation.md',
-  'reference/load-matrix-results.md',
   'reference/column-naming-behavior.md',
   'development/contributing.md',
-  'development/workflow.md',
   'development/testing.md',
   'development/g500-certification.md',
-  'development/release-load-matrix.md',
-  'development/release-process.md',
-  'development/publication-order.md',
-  'development/clean-environment-verification.md',
-  'development/release-workflows.md',
   // Active ADRs; docs/adr/README.md is the index. Superseded records stay
   // under docs/adr/superseded/ and are not published.
   'adr/README.md',

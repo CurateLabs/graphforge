@@ -177,10 +177,6 @@ export default defineConfig({
               label: 'Scale Evaluation',
               slug: 'reference/scale-evaluation',
             },
-            {
-              label: 'Load Matrix Results',
-              slug: 'reference/load-matrix-results',
-            },
             { label: 'Column Naming', slug: 'reference/column-naming-behavior' },
             {
               // Catalog loaders are backlog — not a v0.5.0 core/product surface.
@@ -203,19 +199,10 @@ export default defineConfig({
           items: [
             { label: 'Documentation map', slug: 'documentation' },
             { label: 'Contributing', slug: 'development/contributing' },
-            { label: 'Workflow', slug: 'development/workflow' },
             { label: 'Testing Strategy', slug: 'development/testing' },
             { label: 'Billion-edge certification', slug: 'development/g500-certification' },
             { label: 'Product roadmap', slug: 'releases/roadmap' },
             { label: 'Publishing', slug: 'engineering/publishing' },
-            { label: 'Release Process', slug: 'development/release-process' },
-            { label: 'Publication Order', slug: 'development/publication-order' },
-            { label: 'Release Workflows', slug: 'development/release-workflows' },
-            { label: 'Release Load Matrix', slug: 'development/release-load-matrix' },
-            {
-              label: 'Clean-environment verification',
-              slug: 'development/clean-environment-verification',
-            },
           ],
         },
         {

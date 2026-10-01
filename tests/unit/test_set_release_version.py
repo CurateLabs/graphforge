@@ -288,7 +288,7 @@ def test_path_version_pins_match_root() -> None:
 def test_check_aligned_rejects_stale_path_pin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Stale path+version pins must fail --check before Binding RC rehearsal."""
+    """Stale path+version pins must fail --check before a release."""
     current = set_release_version.read_current()
     root = current["cargo"]
     assert root  # must be the live workspace root version
