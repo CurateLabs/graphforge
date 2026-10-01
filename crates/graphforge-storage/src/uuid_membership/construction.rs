@@ -3,9 +3,9 @@
 use super::AuthenticatedUuidIndexSnapshot;
 use super::BULK_IO_BYTES;
 use super::CONSTRUCTION_INTENT;
+use super::CONSTRUCTION_INTENT_FORMAT_VERSION;
 use super::ConstructionIndexEncoding;
 use super::ConstructionIndexOutput;
-use super::CONSTRUCTION_INTENT_FORMAT_VERSION;
 use super::FORMAT_VERSION;
 use super::FileRecord;
 use super::IDENTITY_RECORD_BYTES;
