@@ -512,9 +512,12 @@ fn checksum_uuid_manifest_refuses_legacy_missing_and_malformed_metadata() {
         .to_string();
         assert_eq!(
             error.contains("unsupported UUID membership format version"),
-            mode < 2,
+            mode < 2 || mode == 4,
             "compact mode={mode}: {error}"
         );
+        if mode < 2 || mode == 4 {
+            assert!(error.contains("recreate the index"), "{error}");
+        }
     }
     fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
     UuidMembershipIndex::open(dir.path()).unwrap();
