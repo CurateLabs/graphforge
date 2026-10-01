@@ -8,6 +8,8 @@
 //! every read of the whole process, so a second test running on another thread
 //! would be charged to this one.
 
+#![cfg(target_os = "linux")]
+
 use std::path::{Path, PathBuf};
 
 use graphforge_api::{GraphForge, LifecycleIoCapture, lifecycle_io_snapshot};
