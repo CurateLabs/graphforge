@@ -172,12 +172,6 @@ fn first_three() -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// A block lying entirely inside `[start, end)`, if any.
-fn block_inside(start: u64, end: u64) -> Option<u64> {
-    let block = start.div_ceil(BLOCK);
-    ((block + 1) * BLOCK <= end).then_some(block)
-}
-
 /// What a real query touches. The generic scan `MATCH (n) ... LIMIT 3` reads
 /// every block of the first node object: the published Parquet objects hold
 /// one row group, and the reader consumes the whole column chunk before the
@@ -202,9 +196,7 @@ fn a_limited_generic_scan_touches_every_block_of_the_object_it_opens() {
     );
     // A flip in the last data page, which LIMIT 3 never decodes, is still
     // read by the column-chunk reader and refused.
-    let untouched = block_inside(fixture.last_page.0, fixture.last_page.1)
-        .expect("the last data page holds at least one whole block");
-    let offset = untouched * BLOCK + 7;
+    let offset = fixture.last_page.0 + 5;
     fixture.flip(offset);
     let error = fixture.scan().0.unwrap_err();
     assert!(error.contains("block checksum"), "{error}");
