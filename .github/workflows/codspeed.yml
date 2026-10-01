@@ -7,7 +7,7 @@ name: CodSpeed
 # Tests lane remains the authoritative compile/test surface (ADR 0048).
 #
 # CodSpeed compares each run against the previous one, which catches a step
-# regression and nothing else. The ingest floor gate in `m6-walltime` is the
+# regression and nothing else. The ingest floor gate in `storage-walltime` is the
 # other half: it fails when a measurement crosses its banked constant in
 # either direction — worse is a regression, better by more than the metric's
 # margin is an unbanked gain whose failure prints the constant to write
@@ -97,10 +97,10 @@ jobs:
       - name: Build benchmark targets
         run: |
           cargo codspeed build -m simulation -p graphforge-core -p graphforge-cypher
-          cargo codspeed build -m simulation -p graphforge-storage --bench m6_storage
+          cargo codspeed build -m simulation -p graphforge-storage --bench storage_kernels
 
-      - name: Verify fail-closed M6 benchmark inventory
-        run: python3 scripts/ci/check-m6-benchmarks.py
+      - name: Verify fail-closed storage benchmark inventory
+        run: python3 scripts/ci/check-storage-benchmarks.py
 
       - name: Run benchmarks
         uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
@@ -108,8 +108,8 @@ jobs:
           mode: simulation
           run: cargo codspeed run
 
-  m6-walltime:
-    name: M6 Durable Walltime (CodSpeed Macro ARM64)
+  storage-walltime:
+    name: Durable Storage Walltime (CodSpeed Macro ARM64)
     needs: nightly
     if: needs.nightly.outputs.should-run == 'true'
     # Walltime comparisons require CodSpeed's isolated bare-metal runner.
@@ -141,7 +141,7 @@ jobs:
           GF_INGEST_FLOOR_GATE: "1"
           GF_INGEST_GATE_BANKED_HOST: codspeed-macro
           GF_INGEST_FLOOR_GATE_JSON: ${{ github.workspace }}/ingest-floor-gate.json
-        run: cargo bench -p graphforge-storage --bench m6_storage_io
+        run: cargo bench -p graphforge-storage --bench storage_io
       # One-day transfer retention, matching the storage policy for a nightly
       # measurement: this is neither a publication nor a certification artifact.
       # The durable record of the numbers is the CodSpeed walltime series and
@@ -160,15 +160,15 @@ jobs:
       # series with no data point at all (#1672).
       - name: Build durable filesystem benchmarks only
         if: ${{ !cancelled() }}
-        run: cargo codspeed build -m walltime -p graphforge-storage --bench m6_storage_io
+        run: cargo codspeed build -m walltime -p graphforge-storage --bench storage_io
       - uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
         if: ${{ !cancelled() }}
         with:
           mode: walltime
           run: cargo codspeed run
 
-  m6-memory-fallback:
-    name: M6 Scheduled Peak Memory Artifact
+  storage-memory:
+    name: Scheduled Storage Peak Memory Artifact
     needs: nightly
     if: github.event_name == 'workflow_dispatch' && needs.nightly.outputs.should-run == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -180,15 +180,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
-      - name: Compile M6 storage benchmarks
-        run: cargo bench -p graphforge-storage --bench m6_storage --bench m6_storage_io --no-run
+      - name: Compile storage benchmarks
+        run: cargo bench -p graphforge-storage --bench storage_kernels --bench storage_io --no-run
       - name: Record replay peak resident memory
-        run: /usr/bin/time -v cargo bench -p graphforge-storage --bench m6_storage replay_merge_fingerprint -- --sample-count 10 2> replay-memory.txt
+        run: /usr/bin/time -v cargo bench -p graphforge-storage --bench storage_kernels replay_merge_fingerprint -- --sample-count 10 2> replay-memory.txt
       - name: Record compaction peak resident memory
-        run: /usr/bin/time -v cargo bench -p graphforge-storage --bench m6_storage_io spill_compaction -- --sample-count 10 2> compaction-memory.txt
+        run: /usr/bin/time -v cargo bench -p graphforge-storage --bench storage_io spill_compaction -- --sample-count 10 2> compaction-memory.txt
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: m6-memory-${{ github.sha }}-blacksmith-4vcpu-ubuntu-2404
+          name: storage-memory-${{ github.sha }}-blacksmith-4vcpu-ubuntu-2404
           path: |
             replay-memory.txt
             compaction-memory.txt

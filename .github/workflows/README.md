@@ -147,7 +147,7 @@ running the suite. Its Cargo
 build is a diagnostic path, not part of CI Gate.
 Comparable-run and measurement-floor triage is documented in
 [`docs/development/benchmarking.md`](../../docs/development/benchmarking.md).
-M6 pure kernels use simulation on the ordinary pinned CI runner; durable
+Pure storage kernels use simulation on the ordinary pinned CI runner; durable
 open/recovery/commit/GC/compaction use CodSpeed's isolated bare-metal
 `codspeed-macro` ARM64 runner. Manual runs also retain exact-SHA replay and
 compaction peak-RSS artifacts while CodSpeed memory mode is unavailable for

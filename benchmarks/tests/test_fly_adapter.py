@@ -64,7 +64,11 @@ def attempt(**changes: object) -> FlyAttempt:
         "machine_class": "performance-4x",
         "image": "registry.fly.io/gf-fixture@sha256:" + "c" * 64,
         "maximum_authorized_scale": 18,
-        "prerequisites": {955: "merged", 956: "merged", 957: "merged"},
+        "prerequisites": {
+            "certification-runner": "merged",
+            "qualification-ladder": "merged",
+            "benchexec-limits": "merged",
+        },
         "lifecycle": lifecycle,
     }
     values.update(changes)
@@ -185,7 +189,15 @@ class FlyAdapterTests(unittest.TestCase):
 
     def test_refuses_unmerged_prerequisite_and_unauthorized_scale(self) -> None:
         with self.assertRaisesRegex(AdapterError, "prerequisite"):
-            validate_attempt(attempt(prerequisites={955: "merged", 956: "open", 957: "merged"}))
+            validate_attempt(
+                attempt(
+                    prerequisites={
+                        "certification-runner": "merged",
+                        "qualification-ladder": "open",
+                        "benchexec-limits": "merged",
+                    }
+                )
+            )
         changed = attempt().lifecycle.__class__(
             **{
                 **attempt().lifecycle.__dict__,

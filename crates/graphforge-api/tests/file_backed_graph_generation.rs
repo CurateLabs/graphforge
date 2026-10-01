@@ -288,7 +288,7 @@ fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
 
 #[test]
 fn sharded_append_io_evidence_is_process_isolated() {
-    const CHILD: &str = "GRAPHFORGE_931_SHARDED_APPEND_IO_CHILD";
+    const CHILD: &str = "GRAPHFORGE_SHARDED_APPEND_IO_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let status = Command::new(std::env::current_exe().unwrap())
             .arg("--exact")

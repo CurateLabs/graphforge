@@ -7,7 +7,7 @@ license.workspace = true
 license-file.workspace = true
 repository.workspace = true
 # `benches/ingest_gate.rs` is a shared module (the two-sided ingest gate's
-# judgment, #1476) included by the `m6_storage_io` bench and by
+# judgment, #1476) included by the `storage_io` bench and by
 # `tests/ingest_gate_verdict.rs`, not a bench binary, so bench autodiscovery
 # is off; the two benches are declared explicitly below.
 autobenches = false
@@ -60,11 +60,11 @@ divan = { workspace = true }
 wait-timeout = "0.2"
 
 [[bench]]
-name = "m6_storage"
+name = "storage_kernels"
 harness = false
 
 [[bench]]
-name = "m6_storage_io"
+name = "storage_io"
 harness = false
 
 [lints]

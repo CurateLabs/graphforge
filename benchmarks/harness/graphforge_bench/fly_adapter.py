@@ -70,6 +70,8 @@ PROVIDER_BUILD_CAUSES = frozenset(
     }
 )
 BUILD_AUTHORITIES = frozenset({"provider", "hosted-docker"})
+# Work the attempt depends on, each of which the operator attests is merged.
+PREREQUISITES = frozenset({"certification-runner", "qualification-ladder", "benchexec-limits"})
 
 
 @dataclass(frozen=True)
@@ -92,7 +94,7 @@ class FlyAttempt:
     machine_class: str
     image: str
     maximum_authorized_scale: int
-    prerequisites: Mapping[int, str]
+    prerequisites: Mapping[str, str]
     lifecycle: LifecycleInvocation
 
 
@@ -209,7 +211,7 @@ def validate_ledger(ledger: ResourceLedger) -> None:
 
 def validate_attempt(attempt: FlyAttempt) -> None:
     lifecycle = attempt.lifecycle
-    _refuse(set(attempt.prerequisites) != {955, 956, 957}, "prerequisite ledger is incomplete")
+    _refuse(set(attempt.prerequisites) != PREREQUISITES, "prerequisite ledger is incomplete")
     _refuse(
         any(state != "merged" for state in attempt.prerequisites.values()),
         "prerequisite is not merged",

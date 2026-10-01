@@ -9,7 +9,7 @@
 //! 3. `GraphForge::new` → `index_adjacency` → node_count + one-hop LIMIT.
 //!
 //! ```bash
-//! CARGO_TARGET_DIR=/tmp/cargo-336-adj \
+//! CARGO_TARGET_DIR=/tmp/cargo-adjacency-evidence \
 //! GF_ADJACENCY_SCALE_EVIDENCE_OUT=docs/development/adjacency-200m-evidence.json \
 //! GF_ADJACENCY_SCALE_WORK=build/adjacency-200m-work \
 //!   make bench-adjacency-200m

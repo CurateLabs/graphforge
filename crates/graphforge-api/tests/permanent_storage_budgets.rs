@@ -53,7 +53,7 @@ struct Fixture {
 
 fn id(domain: u8, row: usize, random: bool) -> Uuid {
     if random {
-        let digest = Sha256::digest(format!("graphforge-1196/{domain}/{row}"));
+        let digest = Sha256::digest(format!("graphforge-storage-budgets/{domain}/{row}"));
         Uuid::from_slice(&digest[..16]).unwrap()
     } else {
         Uuid::from_u128((u128::from(domain) << 120) | (row as u128 + 1))

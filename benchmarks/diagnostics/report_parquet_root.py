@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 import time
 
-from report_ingestion_1282 import digest, summarize
+from report_ingestion import digest, summarize
 
 HISTORICAL_RANGE = {"s16": 0.122031175, "s17": 0.406388363, "s18": 0.621841171}
 COMPARABLE = (

@@ -1,7 +1,7 @@
 # M4 Entry Baseline (#334)
 
-**Contract:** [`tests/contracts/m4-entry-matrix.json`](../tests/contracts/m4-entry-matrix.json)  
-**Harness:** `cargo test -p graphforge-api --test m4_entry_baseline`  
+**Contract:** [`tests/contracts/embedded-performance-matrix.json`](../tests/contracts/embedded-performance-matrix.json)  
+**Harness:** `cargo test -p graphforge-api --test embedded_performance_baseline`  
 **Owner issues:** entry #334 · resource-policy parity #337 · public persistence #338 · exit #345 · epic #335  
 **Resource policy:** [Embedded Execution Resource Policy](execution-resource-policy.md)
 
@@ -41,7 +41,7 @@ resource-limit parity across those cells under
 ### Short CI (required)
 
 ```bash
-cargo test -p graphforge-api --test m4_entry_baseline -- --nocapture
+cargo test -p graphforge-api --test embedded_performance_baseline -- --nocapture
 ```
 
 Pass/fail uses structural gates, determinism, and thread-parity fingerprints.
@@ -51,9 +51,9 @@ thresholds, sleeps, retries, and ignored correctness assertions are forbidden.
 ### Large manual / scheduled
 
 ```bash
-make bench-m4-entry
+make bench-embedded-performance
 # optional evidence file:
-GF_M4_ENTRY_EVIDENCE_OUT=build/m4-entry-evidence.json make bench-m4-entry
+GF_EMBEDDED_PERFORMANCE_EVIDENCE_OUT=build/embedded-performance-evidence.json make bench-embedded-performance
 ```
 
 Reuses documented 1M/10M-edge and LiveJournal paths from the fixed-hop benches;
@@ -116,10 +116,10 @@ product ceiling.
 
 Before/after evidence source:
 
-- Contract: `tests/contracts/m4-entry-matrix.json` (`graphforge-m4-entry-matrix/1`)
+- Contract: `tests/contracts/embedded-performance-matrix.json` (`graphforge-embedded-performance-matrix/1`)
 - Docs: this page, [`execution-resource-policy.md`](execution-resource-policy.md),
-  and [`benchmarks/m4_entry_baseline.md`](../benchmarks/m4_entry_baseline.md)
-- Harness: `crates/graphforge-api/tests/m4_entry_baseline.rs`
+  and [`benchmarks/embedded_performance_baseline.md`](../benchmarks/embedded_performance_baseline.md)
+- Harness: `crates/graphforge-api/tests/embedded_performance_baseline.rs`
 
 Every M4 child (#336–#344) compared against this gate’s structural contract.
 #345 reruns it as exit evidence on the final tree

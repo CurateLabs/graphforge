@@ -1,4 +1,4 @@
-//! Deterministic M6 storage kernels for CodSpeed CPU simulation (#782).
+//! Deterministic storage kernels for CodSpeed CPU simulation (#782).
 
 use divan::Bencher;
 use graphforge_storage::{

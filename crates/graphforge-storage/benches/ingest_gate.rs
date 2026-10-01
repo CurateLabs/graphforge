@@ -1,6 +1,6 @@
 //! Two-sided verdict engine for the bulk-ingest gate (#1476).
 //!
-//! Measurement lives in the `m6_storage_io` bench; this module owns only the
+//! Measurement lives in the `storage_io` bench; this module owns only the
 //! judgment:
 //! given [`IngestObservation`] rows and the banked [`GateLimits`], decide which
 //! limits were breached in *either* direction and, on the ratchet side, print
@@ -211,8 +211,8 @@ pub const INGEST_RATCHET_MARGIN_READ_DEGRADATION_RATIO: f64 = 0.10;
 
 /// The banked constants and per-metric ratchet policies the gate enforces.
 ///
-/// Filled in from the `INGEST_*` constants in `m6_storage_io.rs`, which stay
-/// there so `scripts/ci/check-m6-benchmarks.py` can freeze them.
+/// Filled in from the `INGEST_*` constants in `storage_io.rs`, which stay
+/// there so `scripts/ci/check-storage-benchmarks.py` can freeze them.
 #[derive(Debug, Clone, Copy)]
 pub struct GateLimits {
     /// Throughput floor in edges per second, enforced at every swept size.

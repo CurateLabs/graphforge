@@ -3,7 +3,7 @@
 //! # Why
 //! #1387 budgets a *serialized fraction* of the ingest path, and nothing on that
 //! path computes one (#1462). `effective_cores` existed only in
-//! `benches/m6_storage_io.rs`, so no receipt, ladder rung or test could report
+//! `benches/storage_io.rs`, so no receipt, ladder rung or test could report
 //! it, and every "the ingest path is ~68-80% serial" figure in the plan is
 //! inferred from phase totals rather than measured.
 //!

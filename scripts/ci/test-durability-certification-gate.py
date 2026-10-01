@@ -26,7 +26,9 @@ class DurabilityCertificationGateTests(unittest.TestCase):
             contract["production_observation"]["driver"],
             "graphforge_api::GraphForge",
         )
-        self.assertEqual(contract["versions"]["m6_benchmark_inventory"], "m6-storage-v1")
+        self.assertEqual(
+            contract["versions"]["storage_benchmark_inventory"], "storage-benchmarks-v1"
+        )
 
     def test_seed_and_budget_mutations_fail_closed(self) -> None:
         with self.assertRaises(GATE.GateError):

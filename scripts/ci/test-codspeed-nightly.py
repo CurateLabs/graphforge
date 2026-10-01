@@ -35,14 +35,14 @@ assert "steps.main.outputs.sha" in decision
 assert "should_run=true" in decision
 assert "should_run=false" in decision
 
-for job_name in ("benchmarks", "m6-walltime"):
+for job_name in ("benchmarks", "storage-walltime"):
     job = jobs[job_name]
     assert job["needs"] == "nightly"
     assert job["if"] == "needs.nightly.outputs.should-run == 'true'"
     checkout = next(step for step in job["steps"] if "actions/checkout@" in step.get("uses", ""))
     assert checkout["with"]["ref"] == "${{ needs.nightly.outputs.sha }}"
 
-memory = jobs["m6-memory-fallback"]
+memory = jobs["storage-memory"]
 assert memory["needs"] == "nightly"
 assert memory["if"] == (
     "github.event_name == 'workflow_dispatch' && needs.nightly.outputs.should-run == 'true'"

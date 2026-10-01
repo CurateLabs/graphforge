@@ -23,7 +23,7 @@ fn selected_count(name: &str) -> usize {
 #[test]
 fn ingestion_family_boundaries_preserve_facade_results() {
     let temporary = tempfile::TempDir::new().unwrap();
-    let project = std::env::var("GF_1282_PROJECT").unwrap_or_else(|_| {
+    let project = std::env::var("GF_INGESTION_ATTRIBUTION_PROJECT").unwrap_or_else(|_| {
         temporary
             .path()
             .join("project")
@@ -32,8 +32,8 @@ fn ingestion_family_boundaries_preserve_facade_results() {
             .to_owned()
     });
     assert!(!std::path::Path::new(&project).exists());
-    let nodes = selected_count("GF_1282_NODES");
-    let edges = selected_count("GF_1282_EDGES");
+    let nodes = selected_count("GF_INGESTION_ATTRIBUTION_NODES");
+    let edges = selected_count("GF_INGESTION_ATTRIBUTION_EDGES");
     let graph = GraphForge::new(Some(&project)).unwrap();
     let budgets = GraphConstructionBudgets {
         max_batch_rows: 1,

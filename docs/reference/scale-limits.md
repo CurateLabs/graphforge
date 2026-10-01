@@ -88,7 +88,7 @@ for the fixed-hop and variable-length benchmark methodology.
 ## M4 Embedded Performance Entry Gate
 
 M4 before/after performance work uses the versioned entry contract in
-[`tests/contracts/m4-entry-matrix.json`](../../tests/contracts/m4-entry-matrix.json)
+[`tests/contracts/embedded-performance-matrix.json`](../../tests/contracts/embedded-performance-matrix.json)
 and the public-facade harness documented in
 [M4 Entry Baseline](../development/m4-entry-baseline.md). The short CI matrix
 gates on structural correctness under the default Explicit two-worker resource
@@ -114,9 +114,9 @@ a queryable graph; checked-in evidence:
 That is not a universal size ceiling and does not download 8M/128M data in CI.
 
 ```bash
-cargo test -p graphforge-api --test m4_entry_baseline
+cargo test -p graphforge-api --test embedded_performance_baseline
 cargo test -p graphforge-api --test file_backed_graph_generation
-make bench-m4-entry
+make bench-embedded-performance
 # Optional large-class persistence proof (ignored; local only):
 GF_FILE_BACKED_OVERSIZE_EVIDENCE_OUT=build/file-backed-oversize-evidence.json \
   cargo test -p graphforge-api --test file_backed_graph_generation \
@@ -156,14 +156,14 @@ Arrow boundary as a GraphForge maximum graph size.
 Manual/scheduled >200M public adjacency evidence (not CI):
 
 ```bash
-CARGO_TARGET_DIR=/tmp/cargo-336-adj \
+CARGO_TARGET_DIR=/tmp/cargo-adjacency-evidence \
   make bench-adjacency-200m
 ```
 
 Manual/scheduled densified 8M/128M public reopen (not CI):
 
 ```bash
-CARGO_TARGET_DIR=/tmp/cargo-338-fb \
+CARGO_TARGET_DIR=/tmp/cargo-file-backed-evidence \
   make bench-file-backed-128m
 ```
 
