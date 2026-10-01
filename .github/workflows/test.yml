@@ -41,7 +41,9 @@ jobs:
           fetch-depth: 0
 
       # Prose-only changes skip the build lanes; a workflow change runs every
-      # lane. Everything else is a plain path match.
+      # lane. Everything else is a plain path match. Prose means documentation
+      # pages and top-level Markdown: Markdown under crates/, project-skills/,
+      # packages/, or tests/ ships in a package or is read by a test.
       - name: Classify changed paths
         id: filter
         shell: bash
@@ -59,7 +61,8 @@ jobs:
             echo "$1=$value" >> "$GITHUB_OUTPUT"
           }
           code=false
-          if [[ "$all" == true ]] || grep -Evq '(\.mdx?$|^docs-site/|^\.github/ISSUE_TEMPLATE/)' <<<"$files"; then
+          prose='^(docs/.*\.mdx?|[^/]+\.md|\.github/[^/]+\.md|\.github/ISSUE_TEMPLATE/.*|docs-site/.*)$'
+          if [[ "$all" == true ]] || grep -Evq "$prose" <<<"$files"; then
             code=true
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
