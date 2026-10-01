@@ -884,6 +884,58 @@ fn generation_ordered_forward_runs_may_have_interleaved_uuid_keys() {
     let _handle = fixture.open(V4OrdinalIdentityLimits::default());
 }
 
+/// Two ranges (ordinals 1..=2 and 6..=7), one tombstone, carrying `uuids` in
+/// ordinal order, with a forward run that agrees with them.
+fn fixture_with_ordinal_uuids(uuids: [u128; 4]) -> Fixture {
+    let mut fixture = Fixture::new(&[2, 2], &[2]);
+    let index = fixture.root.path().join(INDEX_DIR);
+    let mut mappings = Vec::new();
+    for (range, values) in fixture
+        .manifest
+        .ordinal_ranges
+        .iter_mut()
+        .zip(uuids.chunks_exact(2))
+    {
+        let bytes = values
+            .iter()
+            .flat_map(|value| Uuid::from_u128(*value).into_bytes())
+            .collect::<Vec<_>>();
+        fs::write(index.join(&range.artifact.name), &bytes).unwrap();
+        range.artifact = artifact(
+            range.artifact.name.clone(),
+            V4OrdinalArtifactKind::OrdinalUuids,
+            7,
+            &bytes,
+        );
+        range.blocks = ordinal_blocks(&bytes);
+        mappings.extend(
+            values
+                .iter()
+                .enumerate()
+                .map(|(offset, uuid)| (*uuid, range.first_node_id + offset as u64)),
+        );
+    }
+    mappings.sort_unstable();
+    let bytes = mappings
+        .iter()
+        .flat_map(|(uuid, id)| {
+            Uuid::from_u128(*uuid)
+                .into_bytes()
+                .into_iter()
+                .chain(id.to_be_bytes())
+        })
+        .collect::<Vec<_>>();
+    fs::write(index.join("forward.uuidx"), &bytes).unwrap();
+    fixture.manifest.forward_identities = vec![artifact(
+        "forward.uuidx".into(),
+        V4OrdinalArtifactKind::ForwardIdentities,
+        7,
+        &bytes,
+    )];
+    fixture.publish();
+    fixture
+}
+
 #[test]
 fn admitted_uuid_order_proof_spans_sparse_ranges_and_tombstones() {
     for (uuids, expected) in [
@@ -891,52 +943,7 @@ fn admitted_uuid_order_proof_spans_sparse_ranges_and_tombstones() {
         ([1, 2, 4, 3], false),
         ([3, 4, 1, 2], false),
     ] {
-        let mut fixture = Fixture::new(&[2, 2], &[2]);
-        let index = fixture.root.path().join(INDEX_DIR);
-        let mut mappings = Vec::new();
-        for (range, values) in fixture
-            .manifest
-            .ordinal_ranges
-            .iter_mut()
-            .zip(uuids.chunks_exact(2))
-        {
-            let bytes = values
-                .iter()
-                .flat_map(|value| Uuid::from_u128(*value).into_bytes())
-                .collect::<Vec<_>>();
-            fs::write(index.join(&range.artifact.name), &bytes).unwrap();
-            range.artifact = artifact(
-                range.artifact.name.clone(),
-                V4OrdinalArtifactKind::OrdinalUuids,
-                7,
-                &bytes,
-            );
-            range.blocks = ordinal_blocks(&bytes);
-            mappings.extend(
-                values
-                    .iter()
-                    .enumerate()
-                    .map(|(offset, uuid)| (*uuid, range.first_node_id + offset as u64)),
-            );
-        }
-        mappings.sort_unstable();
-        let bytes = mappings
-            .iter()
-            .flat_map(|(uuid, id)| {
-                Uuid::from_u128(*uuid)
-                    .into_bytes()
-                    .into_iter()
-                    .chain(id.to_be_bytes())
-            })
-            .collect::<Vec<_>>();
-        fs::write(index.join("forward.uuidx"), &bytes).unwrap();
-        fixture.manifest.forward_identities = vec![artifact(
-            "forward.uuidx".into(),
-            V4OrdinalArtifactKind::ForwardIdentities,
-            7,
-            &bytes,
-        )];
-        fixture.publish();
+        let fixture = fixture_with_ordinal_uuids(uuids);
         let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
         assert_eq!(handle.uuid_order_matches_ordinals(), Ok(expected));
         // The lazy block scan and the complete admission prove one fact.
@@ -950,6 +957,76 @@ fn admitted_uuid_order_proof_spans_sparse_ranges_and_tombstones() {
         );
         assert_eq!(lookup.values[0], Some(Uuid::from_u128(uuids[0])));
     }
+}
+
+#[test]
+fn recorded_uuid_order_answers_without_reading_and_a_lie_is_refused() {
+    for (uuids, ordered) in [([1_u128, 2, 3, 4], true), ([1, 2, 4, 3], false)] {
+        // A truthful record answers in O(1): no ordinal byte is read, and the
+        // complete admission agrees with it.
+        for recorded in [Some(ordered), None] {
+            let mut fixture = fixture_with_ordinal_uuids(uuids);
+            fixture.manifest.uuid_order_matches_ordinals = recorded;
+            fixture.publish();
+            let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
+            let _capture = crate::lifecycle_io::CaptureScope::install();
+            let before = crate::lifecycle_io::snapshot().unwrap();
+            assert_eq!(handle.uuid_order_matches_ordinals(), Ok(ordered));
+            let read = crate::lifecycle_io::snapshot()
+                .unwrap()
+                .since(&before)
+                .unwrap()
+                .totals
+                .read_bytes;
+            assert_eq!(read == 0, recorded.is_some(), "{uuids:?} {recorded:?}");
+            fixture
+                .open(V4OrdinalIdentityLimits::default())
+                .admit_complete()
+                .unwrap();
+        }
+
+        // A lie is refused. Complete admission compares it to the ordinals...
+        let mut fixture = fixture_with_ordinal_uuids(uuids);
+        fixture.manifest.uuid_order_matches_ordinals = Some(!ordered);
+        fixture.publish();
+        fixture.assert_complete_admission_refuses(&V4OrdinalIdentityError::InvalidDescriptor(
+            "recorded ordinal UUID order disagrees with the ordinals",
+        ));
+        // ...and a handle that relies on a recorded `true` refuses the block
+        // that contradicts it before returning a value from it.
+        let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
+        assert_eq!(handle.uuid_order_matches_ordinals(), Ok(!ordered));
+        if !ordered {
+            // Ordinals 6 and 7 hold UUIDs 4 and 3: an inversion inside one block.
+            assert_eq!(
+                handle.lookup_node_uuids(&[6, 7]).unwrap_err(),
+                V4OrdinalIdentityError::InvalidDescriptor(
+                    "ordinal UUIDs contradict the recorded UUID order"
+                )
+            );
+            // Blocks that do ascend keep answering.
+            assert!(handle.lookup_node_uuids(&[1, 2]).unwrap().values[0].is_some());
+        }
+    }
+}
+
+#[test]
+fn recorded_false_is_not_a_claim_a_reader_relies_on() {
+    // `false` only disables the ordered fast path; it can never produce a
+    // wrong order, so lookups do no extra checking.
+    let mut fixture = fixture_with_ordinal_uuids([1, 2, 3, 4]);
+    fixture.manifest.uuid_order_matches_ordinals = Some(false);
+    fixture.publish();
+    let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
+    assert_eq!(handle.uuid_order_matches_ordinals(), Ok(false));
+    assert!(
+        handle
+            .lookup_node_uuids(&[1, 6])
+            .unwrap()
+            .values
+            .iter()
+            .all(Option::is_some)
+    );
 }
 
 #[test]
