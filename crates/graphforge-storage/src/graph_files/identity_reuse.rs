@@ -172,7 +172,10 @@ pub(crate) struct WorkspaceCapture {
     pub(crate) captured: BTreeMap<String, CapturedWorkspaceFile>,
     /// Payload read calls the capture made: none for a file that is its parent's
     /// own object, one pass for every other.
-    #[cfg_attr(not(test), allow(dead_code, reason = "observed by the capture's tests"))]
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "observed by the capture's tests")
+    )]
     pub(crate) read_calls: u64,
 }
 
