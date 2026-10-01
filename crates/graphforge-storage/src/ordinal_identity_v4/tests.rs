@@ -511,16 +511,18 @@ fn cross_process_mutation_with_restored_mtime_fails_block_authentication() {
 /// Flip one byte in place: same inode, same length. The mtime is restored
 /// so no stamp can notice; only the content checksum can.
 fn flip_byte_in_place(path: &Path, offset: u64) {
-    use std::os::unix::fs::FileExt;
-    let file = fs::OpenOptions::new()
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut file = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)
         .unwrap();
     let modified = file.metadata().unwrap().modified().unwrap();
     let mut byte = [0_u8; 1];
-    file.read_exact_at(&mut byte, offset).unwrap();
-    file.write_all_at(&[byte[0] ^ 0xff], offset).unwrap();
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.write_all(&[byte[0] ^ 0xff]).unwrap();
     file.set_modified(modified).unwrap();
 }
 
@@ -647,18 +649,38 @@ fn the_ordinal_block_cache_never_exceeds_its_budget_and_evicts_oldest_first() {
     );
 }
 
-#[test]
-fn a_cached_block_still_answers_to_the_recorded_order() {
-    // The inversion is inside the cached block: serving it from memory must
-    // refuse exactly as reading it would, once a caller relies on the record.
-    let mut fixture = fixture_with_ordinal_uuids([1, 2, 4, 3]);
+/// One range of three full blocks holding `uuids`, with a record that says
+/// UUIDs ascend.
+fn three_block_fixture(uuids: Vec<u128>) -> Fixture {
+    let mut fixture = Fixture::new(&[3 * RECORDS_PER_ORDINAL_BLOCK], &[]);
+    let bytes = uuids
+        .iter()
+        .flat_map(|uuid| Uuid::from_u128(*uuid).into_bytes())
+        .collect::<Vec<_>>();
+    let name = fixture.manifest.ordinal_ranges[0].artifact.name.clone();
+    fs::write(fixture.root.path().join(INDEX_DIR).join(&name), &bytes).unwrap();
+    fixture.manifest.ordinal_ranges[0].artifact =
+        artifact(name, V4OrdinalArtifactKind::OrdinalUuids, 7, &bytes);
+    fixture.manifest.ordinal_ranges[0].blocks = ordinal_blocks(&bytes);
     fixture.manifest.uuid_order_matches_ordinals = Some(true);
     fixture.publish();
+    fixture
+}
+
+#[test]
+fn a_cached_block_still_answers_to_the_recorded_order() {
+    // The middle block holds an inversion; the range ends are fine. It is read
+    // (and held) before anything relies on the record. Serving it from memory
+    // must then refuse exactly as reading it would.
+    let records = RECORDS_PER_ORDINAL_BLOCK;
+    let mut uuids = (1..=3 * u128::from(records)).collect::<Vec<_>>();
+    uuids.swap(records as usize + 5, records as usize + 6);
+    let fixture = three_block_fixture(uuids);
     let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
-    assert!(handle.lookup_node_uuids(&[6, 7]).unwrap().values[0].is_some());
+    assert!(handle.lookup_node_uuids(&[records + 1]).unwrap().values[0].is_some());
     assert_eq!(handle.uuid_order_matches_ordinals(), Ok(true));
     assert_eq!(
-        handle.lookup_node_uuids(&[6, 7]).unwrap_err(),
+        handle.lookup_node_uuids(&[records + 1]).unwrap_err(),
         V4OrdinalIdentityError::InvalidDescriptor(
             "ordinal UUIDs contradict the recorded UUID order"
         )
@@ -1055,8 +1077,9 @@ fn admitted_uuid_order_proof_spans_sparse_ranges_and_tombstones() {
 #[test]
 fn recorded_uuid_order_answers_without_reading_and_a_lie_is_refused() {
     for (uuids, ordered) in [([1_u128, 2, 3, 4], true), ([1, 2, 4, 3], false)] {
-        // A truthful record answers in O(1): no ordinal byte is read, and the
-        // complete admission agrees with it.
+        // A truthful `false` costs no read. A truthful `true` costs the two end
+        // blocks of each range, O(ranges) and never per node. Unknown costs the
+        // scan. Complete admission agrees with every truthful record.
         for recorded in [Some(ordered), None] {
             let mut fixture = fixture_with_ordinal_uuids(uuids);
             fixture.manifest.uuid_order_matches_ordinals = recorded;
@@ -1071,7 +1094,11 @@ fn recorded_uuid_order_answers_without_reading_and_a_lie_is_refused() {
                 .unwrap()
                 .totals
                 .read_bytes;
-            assert_eq!(read == 0, recorded.is_some(), "{uuids:?} {recorded:?}");
+            match recorded {
+                Some(false) => assert_eq!(read, 0, "{uuids:?}"),
+                Some(true) => assert!(read <= 4 * ORDINAL_BLOCK_BYTES, "{uuids:?}: {read}"),
+                None => assert!(read > 0, "{uuids:?}"),
+            }
             fixture
                 .open(V4OrdinalIdentityLimits::default())
                 .admit_complete()
@@ -1085,22 +1112,69 @@ fn recorded_uuid_order_answers_without_reading_and_a_lie_is_refused() {
         fixture.assert_complete_admission_refuses(&V4OrdinalIdentityError::InvalidDescriptor(
             "recorded ordinal UUID order disagrees with the ordinals",
         ));
-        // ...and a handle that relies on a recorded `true` refuses the block
-        // that contradicts it before returning a value from it.
+        // ...and a handle that is asked to rely on a recorded `true` refuses it
+        // when a range end it must read contradicts it (ordinals 6 and 7 hold
+        // UUIDs 4 and 3, an inversion inside one block).
         let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
-        assert_eq!(handle.uuid_order_matches_ordinals(), Ok(!ordered));
-        if !ordered {
-            // Ordinals 6 and 7 hold UUIDs 4 and 3: an inversion inside one block.
+        if ordered {
+            assert_eq!(handle.uuid_order_matches_ordinals(), Ok(false));
+        } else {
             assert_eq!(
-                handle.lookup_node_uuids(&[6, 7]).unwrap_err(),
-                V4OrdinalIdentityError::InvalidDescriptor(
+                handle.uuid_order_matches_ordinals(),
+                Err(V4OrdinalIdentityError::InvalidDescriptor(
                     "ordinal UUIDs contradict the recorded UUID order"
-                )
+                ))
             );
             // Blocks that do ascend keep answering.
             assert!(handle.lookup_node_uuids(&[1, 2]).unwrap().values[0].is_some());
         }
     }
+}
+
+#[test]
+fn a_recorded_order_is_refused_when_ranges_meet_out_of_order() {
+    // Each range ascends on its own; the seam between them does not. No block
+    // contradicts the record, so only the boundary check can see it.
+    let mut fixture = fixture_with_ordinal_uuids([3, 4, 1, 2]);
+    fixture.manifest.uuid_order_matches_ordinals = Some(true);
+    fixture.publish();
+    let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
+    let refused = || {
+        V4OrdinalIdentityError::InvalidDescriptor(
+            "ordinal UUIDs contradict the recorded UUID order",
+        )
+    };
+    assert_eq!(handle.uuid_order_matches_ordinals(), Err(refused()));
+    // Not memoized as success: the fast path never proceeds on this handle.
+    assert_eq!(handle.uuid_order_matches_ordinals(), Err(refused()));
+    // Complete admission refuses the same lie.
+    fixture.assert_complete_admission_refuses(&V4OrdinalIdentityError::InvalidDescriptor(
+        "recorded ordinal UUID order disagrees with the ordinals",
+    ));
+}
+
+#[test]
+fn a_recorded_order_is_refused_when_adjacent_held_blocks_meet_out_of_order() {
+    // Three blocks, each ascending, with the seam between the middle and last
+    // inverted. The range ends are fine, so the record survives the boundary
+    // check; the middle block is then read and meets its held neighbour.
+    let records = u128::from(RECORDS_PER_ORDINAL_BLOCK);
+    let uuids = (0..records)
+        .map(|n| n + 1)
+        .chain((0..records).map(|n| n + 90_000))
+        .chain((0..records).map(|n| n + 50_000))
+        .collect::<Vec<_>>();
+    let fixture = three_block_fixture(uuids);
+    let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
+    assert_eq!(handle.uuid_order_matches_ordinals(), Ok(true));
+    assert_eq!(
+        handle
+            .lookup_node_uuids(&[RECORDS_PER_ORDINAL_BLOCK + 1])
+            .unwrap_err(),
+        V4OrdinalIdentityError::InvalidDescriptor(
+            "ordinal UUIDs contradict the recorded UUID order"
+        )
+    );
 }
 
 #[test]

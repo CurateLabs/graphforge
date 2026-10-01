@@ -5,7 +5,7 @@
 //! same-inode byte flip is visible through the workspace without any rename.
 //! Open reads none of them; the lookup that reads a block checks it.
 
-use std::os::unix::fs::{FileExt, PermissionsExt};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use arrow::array::{Array, FixedSizeBinaryArray};
@@ -66,17 +66,19 @@ fn identity_run(path: &Path, prefix: &str) -> PathBuf {
 fn flip_in_place(object: &Path, offset: u64) {
     let original = std::fs::metadata(object).unwrap().permissions();
     let mut writable = original.clone();
-    writable.set_mode(0o644);
+    writable.set_readonly(false);
     std::fs::set_permissions(object, writable).unwrap();
-    let file = std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .write(true)
         .read(true)
         .open(object)
         .unwrap();
     let modified = file.metadata().unwrap().modified().unwrap();
     let mut byte = [0_u8; 1];
-    file.read_exact_at(&mut byte, offset).unwrap();
-    file.write_all_at(&[byte[0] ^ 0xff], offset).unwrap();
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.write_all(&[byte[0] ^ 0xff]).unwrap();
     file.set_modified(modified).unwrap();
     drop(file);
     std::fs::set_permissions(object, original).unwrap();

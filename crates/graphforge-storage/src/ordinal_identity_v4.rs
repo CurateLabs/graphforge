@@ -729,6 +729,8 @@ pub struct V4OrdinalIdentityHandle {
     uuid_order_matches_ordinals: Option<bool>,
     /// The publisher's claim, from the authenticated manifest.
     recorded_order: Option<bool>,
+    /// The seams between ordinal ranges were checked against the record.
+    seams_checked: bool,
 }
 
 impl V4OrdinalIdentityHandle {
@@ -936,6 +938,7 @@ impl V4OrdinalIdentityHandle {
             complete: false,
             uuid_order_matches_ordinals: None,
             recorded_order: manifest.uuid_order_matches_ordinals,
+            seams_checked: false,
         })))
     }
 
@@ -1042,6 +1045,9 @@ impl V4OrdinalIdentityHandle {
                 for range in &mut self.ranges {
                     range.verify_order = true;
                 }
+                // A block is checked inside itself, so the seams between ranges
+                // are checked once here: O(ranges), never per node.
+                self.check_range_seams()?;
                 return Ok(true);
             }
             None => {}
@@ -1049,6 +1055,45 @@ impl V4OrdinalIdentityHandle {
         let ordered = scan_uuid_order(&mut self.ranges, &mut self.admission)?;
         self.uuid_order_matches_ordinals = Some(ordered);
         Ok(ordered)
+    }
+
+    /// The last UUID of every range must sort below the first UUID of the next,
+    /// read through the authenticated block path. Done once per handle.
+    fn check_range_seams(&mut self) -> Result<(), V4OrdinalIdentityError> {
+        if self.seams_checked {
+            return Ok(());
+        }
+        let mut prior_last: Option<Uuid> = None;
+        for range_index in 0..self.ranges.len() {
+            let descriptor = &self.ranges[range_index].descriptor;
+            let first_id = descriptor.first_node_id;
+            let last_id = first_id + descriptor.count - 1;
+            let ids = [first_id, last_id];
+            let mut resolved = BTreeMap::new();
+            read_range_coalesced(
+                &mut self.ranges[range_index],
+                &ids,
+                RangeRead {
+                    range_index,
+                    cache: &mut self.ordinal_cache,
+                    max_cache_bytes: self.limits.max_ordinal_cache_bytes,
+                    gap_bytes: self.limits.coalesce_gap_bytes,
+                    maximum_read_bytes: self.limits.max_coalesced_read_bytes,
+                    retained_buffer_bytes: 0,
+                },
+                &mut resolved,
+                &mut V4OrdinalLookupMetrics::default(),
+            )?;
+            let (first, last) = (resolved[&first_id], resolved[&last_id]);
+            if prior_last.is_some_and(|prior| prior.as_bytes() >= first.as_bytes()) {
+                return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                    "ordinal UUIDs contradict the recorded UUID order",
+                ));
+            }
+            prior_last = Some(last);
+        }
+        self.seams_checked = true;
+        Ok(())
     }
 
     /// Maximum request entries accepted by this admitted handle per lookup.
@@ -2106,6 +2151,37 @@ fn authenticate_run(
     Ok(())
 }
 
+/// With a recorded order relied on, adjacent blocks this handle holds must
+/// meet in ascending order: a block is only checked internally when read, so
+/// the seam between two held blocks is checked here, from memory.
+fn check_cached_seams(
+    range: &OpenRange,
+    range_index: usize,
+    cache: &OrdinalBlockCache,
+    touched: &[usize],
+) -> Result<(), V4OrdinalIdentityError> {
+    if !range.verify_order {
+        return Ok(());
+    }
+    let seam_inverted = |lower: usize, upper: usize| match (
+        cache.entries.get(&(range_index, lower)),
+        cache.entries.get(&(range_index, upper)),
+    ) {
+        (Some(lower), Some(upper)) => {
+            lower.bytes[lower.bytes.len() - UUID_WIDTH_USIZE..] >= upper.bytes[..UUID_WIDTH_USIZE]
+        }
+        _ => false,
+    };
+    for &index in touched {
+        if (index > 0 && seam_inverted(index - 1, index)) || seam_inverted(index, index + 1) {
+            return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "ordinal UUIDs contradict the recorded UUID order",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Answer from memory every selected block this handle already authenticated,
 /// and return the ones that still need reading. A held block that contradicts
 /// a relied-on recorded order is refused exactly as a fresh read would be.
@@ -2164,6 +2240,7 @@ fn read_range_coalesced(
             .then_some(index)
         })
         .collect::<Vec<_>>();
+    let touched = selected.clone();
     let selected = serve_cached_blocks(range, selected, ids, read_cache, resolved)?;
     let mut selected_at = 0;
     while selected_at < selected.len() {
@@ -2232,7 +2309,7 @@ fn read_range_coalesced(
         selected_at = next;
     }
     metrics.retained_cache_bytes = metrics.retained_cache_bytes.max(cache.charged_bytes as u64);
-    Ok(())
+    check_cached_seams(range, range_index, cache, &touched)
 }
 
 /// Resolve the requested IDs that fall in `block` from `buffer`, which holds
