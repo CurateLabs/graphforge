@@ -178,6 +178,28 @@ pub struct OrderedOneHopExec {
 }
 
 impl OrderedOneHopExec {
+    /// Build from parts chosen from the Graph IR (#1688 candidate C).
+    #[cfg(feature = "read-path-experiment")]
+    pub(crate) fn from_parts(
+        schema: SchemaRef,
+        props: Arc<PlanProperties>,
+        fetch: usize,
+        rel_type_name: String,
+        direction: Direction,
+        provider: Arc<dyn AdjacencyProvider>,
+        ordinal_identities: Arc<crate::V4OrdinalIdentitySession>,
+    ) -> Self {
+        Self::new(OrderedOneHopSpec {
+            schema,
+            props,
+            fetch,
+            rel_type_name,
+            direction,
+            provider,
+            ordinal_identities,
+        })
+    }
+
     fn new(spec: OrderedOneHopSpec) -> Self {
         Self {
             schema: spec.schema,

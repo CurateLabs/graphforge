@@ -194,6 +194,28 @@ pub struct OrderedTwoHopPathCountExec {
 }
 
 impl OrderedTwoHopPathCountExec {
+    /// Build from parts chosen from the Graph IR (#1688 candidate C).
+    #[cfg(feature = "read-path-experiment")]
+    pub(crate) fn from_parts(
+        schema: SchemaRef,
+        props: Arc<PlanProperties>,
+        fetch: usize,
+        rel_type_name: String,
+        provider: Arc<dyn AdjacencyProvider>,
+        ordinal_identities: Arc<crate::V4OrdinalIdentitySession>,
+        require_edge_disjoint: bool,
+    ) -> Self {
+        Self::new(OrderedTwoHopSpec {
+            schema,
+            props,
+            fetch,
+            rel_type_name,
+            provider,
+            ordinal_identities,
+            require_edge_disjoint,
+        })
+    }
+
     fn new(spec: OrderedTwoHopSpec) -> Self {
         Self {
             schema: spec.schema,

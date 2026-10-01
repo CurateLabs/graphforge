@@ -17,6 +17,9 @@ provenance = ["dep:graphforge-provenance"]
 portable = ["dep:graphforge-portable-oci"]
 discovery = ["dep:graphforge-discovery"]
 research = ["knowledge", "portable"]
+# #1688 experiment: GF_READ_PATH_CANDIDATE selects the #1619 read-path
+# candidate. Never a default.
+read-path-experiment = ["graphforge-exec/read-path-experiment"]
 
 [dependencies]
 graphforge-discovery = { version = "0.5.2", path = "../graphforge-discovery", optional = true }
