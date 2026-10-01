@@ -415,6 +415,19 @@ pub enum V4OrdinalIdentityError {
     },
 }
 
+/// A refusal reports the same public class as every other first-touch refusal
+/// of committed data (`graph_admission`): corrupted or contradicting bytes are
+/// a validation failure, not an execution one. Only a filesystem fault is a
+/// storage error.
+impl From<V4OrdinalIdentityError> for graphforge_core::GfError {
+    fn from(error: V4OrdinalIdentityError) -> Self {
+        match error {
+            V4OrdinalIdentityError::Io => Self::Storage(error.to_string()),
+            _ => Self::Validation(error.to_string()),
+        }
+    }
+}
+
 /// Sanitized failure classification for admission and lookup evidence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum V4OrdinalFailureKind {

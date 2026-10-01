@@ -88,14 +88,15 @@ fn rows(forge: &GraphForge, query: &str) -> Result<usize, String> {
     forge
         .execute(query)
         .map(|result| result.batches.iter().map(|b| b.num_rows()).sum())
-        .map_err(|error| error.to_string())
+        .map_err(|error| format!("{} {error}", error.code()))
 }
 
 #[test]
 fn flipped_ordinal_block_opens_but_is_refused_by_the_lookup_that_reads_it() {
     let (_root, path) = project(NODES);
-    // The last block: ordinals 12_289..=16_384.
-    flip_in_place(&identity_run(&path, "ordinal-v4-"), 3 * BLOCK_BYTES + 5);
+    // The second block (ordinals 4_097..=8_192): neither a range end nor a block
+    // the small queries below resolve.
+    flip_in_place(&identity_run(&path, "ordinal-v4-"), BLOCK_BYTES + 5);
 
     // Open reads no identity byte, so it cannot notice.
     let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
@@ -103,14 +104,25 @@ fn flipped_ordinal_block_opens_but_is_refused_by_the_lookup_that_reads_it() {
     assert_eq!(rows(&forge, HEALTHY), Ok(3));
     // A lookup that reads the corrupted block is refused, with no rows.
     let refused = rows(&forge, WHOLE).unwrap_err();
-
+    // The same public class as every other first-touch refusal of committed
+    // data (`graph_admission`), not an execution error.
     assert!(
-        refused.contains("authentication") || refused.contains("ordinal identity"),
+        refused.starts_with("GF_VALIDATION ")
+            && refused.contains("v4 ordinal identity artifact authentication failed"),
         "{refused}"
     );
     // The publisher recorded that UUIDs ascend with ordinals, so the ordered
     // fast path asks nothing of the corrupted block until a lookup reads it.
     assert_eq!(rows(&forge, ORDERED), Ok(3));
+
+    // The first and last block of a range are read to check the record, so the
+    // ordered fast path refuses a flip there.
+    let (_last_root, last) = project(NODES);
+    flip_in_place(&identity_run(&last, "ordinal-v4-"), 3 * BLOCK_BYTES + 5);
+    let forge = GraphForge::new(Some(last.to_str().unwrap())).unwrap();
+    assert_eq!(rows(&forge, HEALTHY), Ok(3));
+    let refused = rows(&forge, ORDERED).unwrap_err();
+    assert!(refused.starts_with("GF_VALIDATION "), "{refused}");
 }
 
 #[test]
