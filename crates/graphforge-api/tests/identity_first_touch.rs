@@ -8,6 +8,7 @@
 use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use arrow::array::{Array, FixedSizeBinaryArray};
 use graphforge_api::GraphForge;
 use sha2::{Digest, Sha256};
 
@@ -105,13 +106,9 @@ fn flipped_ordinal_block_opens_but_is_refused_by_the_lookup_that_reads_it() {
         refused.contains("authentication") || refused.contains("ordinal identity"),
         "{refused}"
     );
-    // The ordered fast path must prove UUID order over every block, so it
-    // refuses too: a corrupted block is never reported as "unordered".
-    let refused = rows(&forge, ORDERED).unwrap_err();
-    assert!(
-        refused.contains("v4 ordinal identity artifact authentication failed"),
-        "{refused}"
-    );
+    // The publisher recorded that UUIDs ascend with ordinals, so the ordered
+    // fast path asks nothing of the corrupted block until a lookup reads it.
+    assert_eq!(rows(&forge, ORDERED), Ok(3));
 }
 
 #[test]
@@ -170,4 +167,94 @@ fn mutating_commit_never_writes_through_a_shared_identity_run() {
     assert_eq!(rows(&reopened, "MATCH (n) RETURN n"), Ok(2_048 + 3 - 5));
     assert!(rows(&reopened, HEALTHY).is_ok());
     assert!(rows(&reopened, ORDERED).is_ok());
+}
+
+/// The order fact the publisher recorded in the project's ordinal manifest.
+fn recorded_order(path: &Path) -> Option<bool> {
+    const MANIFEST: &str = "topology/uuid-membership/ordinal-v4-manifest.json";
+    let generation = graphforge_storage::resolve_project_generation(path).unwrap();
+    // An expanded (mutated) generation keeps its tree; a compact one is
+    // addressed through the content store.
+    let tree = generation.graph_tree_root().join(MANIFEST);
+    let bytes = match std::fs::read(&tree) {
+        Ok(bytes) => bytes,
+        Err(_) => std::fs::read(
+            objects(path)
+                .into_iter()
+                .find(|(relative, ..)| relative == MANIFEST)
+                .expect("ordinal manifest")
+                .1,
+        )
+        .unwrap(),
+    };
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    value
+        .get("uuid_order_matches_ordinals")
+        .map(|flag| flag.as_bool().expect("boolean"))
+}
+
+fn ids(forge: &GraphForge, query: &str) -> Vec<[u8; 16]> {
+    let result = forge.execute(query).unwrap();
+    let mut ids = Vec::new();
+    for batch in &result.batches {
+        let column = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .unwrap();
+        ids.extend((0..column.len()).map(|row| <[u8; 16]>::try_from(column.value(row)).unwrap()));
+    }
+    ids
+}
+
+/// The ordered one-hop answer, and the same answer derived without it: every
+/// destination, sorted here.
+fn ordered_and_oracle(forge: &GraphForge, limit: usize) -> (Vec<[u8; 16]>, Vec<[u8; 16]>) {
+    let ordered = ids(
+        forge,
+        &format!("MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT {limit}"),
+    );
+    let mut all = ids(forge, "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id");
+    all.sort_unstable();
+    all.truncate(limit);
+    (ordered, all)
+}
+
+#[test]
+fn publication_records_the_uuid_order_it_streamed() {
+    let (_root, path) = project(4_096);
+    assert_eq!(recorded_order(&path), Some(true));
+
+    // A node whose UUID sorts below every existing one (the fixture's UUIDs
+    // are above any version-7 timestamp) breaks the order, and the commit that
+    // publishes it must say so.
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    forge
+        .execute("MATCH (a:Entity) WITH a LIMIT 1 CREATE (a)-[:LINK]->(:Entity)")
+        .unwrap();
+    drop(forge);
+    assert_eq!(recorded_order(&path), Some(false));
+}
+
+#[test]
+fn ordered_queries_stay_correct_when_a_mutation_breaks_uuid_order() {
+    const LIMIT: usize = 20;
+    let (_root, path) = project(4_096);
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let (ordered, oracle) = ordered_and_oracle(&forge, LIMIT);
+    assert_eq!(ordered, oracle);
+    forge
+        .execute("MATCH (a:Entity) WITH a LIMIT 1 CREATE (a)-[:LINK]->(:Entity)")
+        .unwrap();
+    drop(forge);
+
+    // Ordinal order no longer follows UUID order: the fast path must refuse,
+    // and the generic plan must still answer in UUID order, newest node first.
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let (ordered, oracle) = ordered_and_oracle(&forge, LIMIT);
+    assert_eq!(ordered, oracle);
+    assert!(
+        ordered[0] < *bulk_fixture::fixture_node_uuid(0).as_bytes(),
+        "the new node's UUID sorts first"
+    );
 }
