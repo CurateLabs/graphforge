@@ -279,6 +279,28 @@ than estimated file sizes as a substitute for producer observations. Total
 checksum work and required control/contract work remain separate from portable
 SHA input, and remain part of inclusive process-level work.
 
+The [portable facade fixture](../../crates/graphforge-api/tests/portable_payload_identity.rs)
+constructs 2,000 nodes and 1,999 directed edges, exports a complete bundle,
+imports it into a new project and checks node and edge counts after a fresh
+facade reopen. Its separate integration-test process measures actual scoped
+SHA/checksum update bytes and inclusive `/proc/self/io` read/write syscall
+bytes for export and import. Querying and reporting occur outside those
+measurement windows. The test preserves checksum output readback and requires
+zero duplicate artifact-payload SHA for its already-authenticated graph files.
+The fixture source SHA-256 is
+`62791453ece7376100e95f6debf210d08570c0860b1259aa30f229cb624edab0`.
+It records numeric values in `GITHUB_STEP_SUMMARY` when CI supplies that path,
+only after all assertions pass; otherwise use successful-test output:
+
+```bash
+cargo nextest run -p graphforge-api --locked --test portable_payload_identity --success-output immediate
+```
+
+These are observed fixture counts, not S22 timing results or a claim that all
+portable consumers can bypass untrusted authentication. Keep execution results
+on the producing issue or PR. Prior measurements from another candidate remain
+attributed to that candidate rather than being reused as current results.
+
 The actual facade regressions are in
 `crates/graphforge-api/tests/facade_checksum_admission.rs`, identified by SHA-256
 `0a9ac8fa6785ad0702e3de0be34f6d461ad122e6e32331ee4617377a9f4ddc56`.

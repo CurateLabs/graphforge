@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_filesystem::FileIdentity;
 use serde::{Deserialize, Serialize};
@@ -543,7 +542,10 @@ fn participant(family: &str, bytes: Vec<u8>) -> ProjectParticipant {
         record_family_id: family.into(),
         record_version: WORKSPACE_RESEARCH_METADATA_VERSION,
         encoding: ProjectParticipantEncoding::Json,
-        schema_fingerprint: Sha256::digest(format!("workspace/{family}@1")).into(),
+        schema_fingerprint: graphforge_core::hash_observation::ContractSha256::digest(format!(
+            "workspace/{family}@1"
+        ))
+        .into(),
         row_count: 1,
         bytes,
     }

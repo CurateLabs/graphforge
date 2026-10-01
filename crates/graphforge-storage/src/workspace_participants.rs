@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+#[cfg(test)]
 use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::{GfError, OntologyMode, ProjectErrorCode};
 use graphforge_ontology::{
@@ -627,7 +628,10 @@ fn participant(family: &str, bytes: Vec<u8>) -> ProjectParticipant {
         record_family_id: family.into(),
         record_version: 1,
         encoding: ProjectParticipantEncoding::Json,
-        schema_fingerprint: Sha256::digest(format!("workspace/{family}@1")).into(),
+        schema_fingerprint: graphforge_core::hash_observation::ContractSha256::digest(format!(
+            "workspace/{family}@1"
+        ))
+        .into(),
         row_count: 1,
         bytes,
     }
