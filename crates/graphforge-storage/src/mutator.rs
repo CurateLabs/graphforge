@@ -355,7 +355,10 @@ pub(crate) fn edge_parquet_files(
     Ok(out)
 }
 
-fn canonical_topology_shard_range(path: &Path, kind: &str) -> Result<(u64, u64), GfError> {
+pub(crate) fn canonical_topology_shard_range(
+    path: &Path,
+    kind: &str,
+) -> Result<(u64, u64), GfError> {
     let stem = path
         .file_stem()
         .and_then(|value| value.to_str())
