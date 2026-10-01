@@ -1,4 +1,4 @@
-//! Durable M6 filesystem paths for CodSpeed walltime (#782), plus the
+//! Durable filesystem paths for CodSpeed walltime (#782), plus the
 //! continuous bulk-ingest throughput benchmark and its floor gate (#1387).
 //!
 //! Fixture construction happens through `with_inputs`, outside the measured
@@ -635,7 +635,7 @@ const INGEST_GATE_JSON_ENV: &str = "GF_INGEST_FLOOR_GATE_JSON";
 const INGEST_BANKED_HOST_ENV: &str = "GF_INGEST_GATE_BANKED_HOST";
 
 /// The host the two host-bound constants were banked on: the runner label of
-/// the nightly walltime job. `scripts/ci/check-m6-benchmarks.py` fails when
+/// the nightly walltime job. `scripts/ci/check-storage-benchmarks.py` fails when
 /// that job stops declaring it, so the nightly cannot silently run report-only.
 const INGEST_BANKED_HOST: &str = "codspeed-macro";
 
@@ -774,7 +774,7 @@ fn ingest_floor_gate() {
 
 /// The banked constants of this bench, wired to their per-metric ratchet
 /// policies. The constants stay in this file (frozen there by
-/// `scripts/ci/check-m6-benchmarks.py`); the judgment is shared and tested.
+/// `scripts/ci/check-storage-benchmarks.py`); the judgment is shared and tested.
 fn gate_limits() -> GateLimits {
     GateLimits {
         floor_edges_per_second: INGEST_FLOOR_EDGES_PER_SECOND,

@@ -14,7 +14,7 @@
   "amending_adrs": [
     "docs/adr/0020-ntfs-write-through-namespace-durability.md"
   ],
-  "m5_consumer_issues": [
+  "consumer_issues": [
     738,
     742,
     745

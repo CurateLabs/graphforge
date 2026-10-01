@@ -1916,12 +1916,12 @@ mod tests {
     #[test]
     fn versioned_m9_interchange_ledger_covers_required_matrix() {
         let ledger: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/portable-v2/m9-interchange-cases.json"
+            "../../../tests/fixtures/portable-v2/multi-ontology-interchange-cases.json"
         ))
         .unwrap();
         assert_eq!(
             ledger["contract"],
-            "graphforge-portable-v2-m9-interchange-cases/1"
+            "graphforge-portable-v2-multi-ontology-interchange-cases/1"
         );
         assert_eq!(
             ledger["representations"],

@@ -9,7 +9,7 @@ import shutil
 import subprocess
 
 from graphforge_bench.ingestion_attribution import cpu_summary
-from report_ingestion_1282 import digest, summarize
+from report_ingestion import digest, summarize
 
 
 def main():

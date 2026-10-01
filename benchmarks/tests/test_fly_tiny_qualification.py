@@ -35,7 +35,11 @@ def invocation(**changes: object) -> TinyQualificationInvocation:
         "region": "dfw",
         "volume_name": "gf_q958_test",
         "machine_name": "gf-q958-machine",
-        "prerequisites": {955: "merged", 956: "merged", 957: "merged"},
+        "prerequisites": {
+            "certification-runner": "merged",
+            "qualification-ladder": "merged",
+            "benchexec-limits": "merged",
+        },
         "machine_class": "performance-1x",
         "volume_gib": 10,
     }
@@ -229,7 +233,13 @@ class FlyTinyQualificationTests(unittest.TestCase):
             validate_invocation(invocation(machine_class="performance-2x"))
         with self.assertRaisesRegex(AdapterError, "prerequisite"):
             validate_invocation(
-                invocation(prerequisites={955: "merged", 956: "open", 957: "merged"})
+                invocation(
+                    prerequisites={
+                        "certification-runner": "merged",
+                        "qualification-ladder": "open",
+                        "benchexec-limits": "merged",
+                    }
+                )
             )
         self.assertFalse(hasattr(invocation(), "rung"))
 
@@ -340,11 +350,11 @@ class FlyTinyQualificationTests(unittest.TestCase):
                 "gf_q958_test",
                 "--machine-name",
                 "gf-q958-machine",
-                "--prerequisite-955",
+                "--prerequisite-certification-runner",
                 "merged",
-                "--prerequisite-956",
+                "--prerequisite-qualification-ladder",
                 "merged",
-                "--prerequisite-957",
+                "--prerequisite-benchexec-limits",
                 "merged",
                 "--ledger",
                 str(root / "ledger.json"),

@@ -285,7 +285,7 @@ PYTHONPATH=benchmarks/harness uv run --project benchmarks python -m \
   --expected-sha "$(git rev-parse HEAD)" \
   --org personal --app gf-q958-UNIQUE --region dfw \
   --volume-name gf_q958_unique --machine-name gf-q958-machine \
-  --prerequisite-955 merged --prerequisite-956 merged --prerequisite-957 merged \
+  --prerequisite-certification-runner merged --prerequisite-qualification-ladder merged --prerequisite-benchexec-limits merged \
   --ledger /tmp/gf-q958-ledger.json \
   --evidence-out /tmp/fly-qualification-evidence.json \
   --result-out /tmp/fly-qualification-result.json

@@ -1,4 +1,4 @@
-# M4 Entry Baseline Methodology
+# Embedded Performance Baseline Methodology
 
 Companion to [docs/development/m4-entry-baseline.md](../docs/development/m4-entry-baseline.md)
 and GitHub issue **#334**.
@@ -7,10 +7,10 @@ and GitHub issue **#334**.
 
 ```bash
 # Required short CI matrix (structural gates; prints timing observations)
-cargo test -p graphforge-api --test m4_entry_baseline -- --nocapture
+cargo test -p graphforge-api --test embedded_performance_baseline -- --nocapture
 
 # Manual large evidence emitter (ignored test)
-make bench-m4-entry
+make bench-embedded-performance
 ```
 
 ## Accepted entry posture

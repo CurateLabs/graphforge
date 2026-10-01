@@ -118,8 +118,8 @@ class LifecycleGrowthTests(unittest.TestCase):
             GROWTH.positive_slopes("counterexample", peaks, work)
         GROWTH.validate_growth(self.with_peaks(peaks))
 
-    def test_real_lower_peaks_from_failed_1271_run(self):
-        path = Path(__file__).parent / "fixtures/lifecycle-peak-crossover-1272.json"
+    def test_real_lower_peaks_from_a_failed_run(self):
+        path = Path(__file__).parent / "fixtures/lifecycle-peak-crossover.json"
         recorded = json.loads(path.read_text())["observations"]
         self.assertEqual(
             [o["receipt"]["transient_peak_storage_bytes"] for o in recorded],

@@ -1,5 +1,5 @@
 {
-  "schema": "graphforge-m4-entry-matrix/1",
+  "schema": "graphforge-embedded-performance-matrix/1",
   "issue": 334,
   "epic_issue": 335,
   "parity_owner_issue": 337,
@@ -435,7 +435,7 @@
     }
   ],
   "evidence_artifact": {
-    "schema": "graphforge-m4-entry-evidence/1",
+    "schema": "graphforge-embedded-performance-evidence/1",
     "required_fields": [
       "schema",
       "contract_schema",

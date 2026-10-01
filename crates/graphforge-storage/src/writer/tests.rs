@@ -819,7 +819,7 @@ fn property_budget_preadmits_dynamic_values_and_releases_on_cancel() {
 // describe one production write sequence.
 #[allow(clippy::too_many_lines)]
 fn cumulative_topology_and_index_work_doubles_with_bounded_windows() {
-    const CHILD: &str = "GRAPHFORGE_931_SCALING_EVIDENCE_CHILD";
+    const CHILD: &str = "GRAPHFORGE_SCALING_EVIDENCE_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")

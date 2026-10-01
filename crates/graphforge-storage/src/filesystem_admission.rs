@@ -1794,14 +1794,14 @@ mod tests {
         assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 1);
     }
 
-    const LIFECYCLE_TEST_COOKIE: &str = "graphforge-780-lifecycle-test";
+    const LIFECYCLE_TEST_COOKIE: &str = "graphforge-lifecycle-test";
 
     #[test]
     fn subprocess_lifecycle_admission() {
-        if std::env::var("GF_780_LIFECYCLE_COOKIE").as_deref() != Ok(LIFECYCLE_TEST_COOKIE) {
+        if std::env::var("GF_LIFECYCLE_LIFECYCLE_COOKIE").as_deref() != Ok(LIFECYCLE_TEST_COOKIE) {
             return;
         }
-        let root = PathBuf::from(std::env::var_os("GF_780_PROJECT_ROOT").unwrap());
+        let root = PathBuf::from(std::env::var_os("GF_LIFECYCLE_PROJECT_ROOT").unwrap());
         let admission = admit_project_lifecycle(
             root,
             ProjectLifecycleMode::Durable,
@@ -1830,8 +1830,8 @@ mod tests {
                     "filesystem_admission::tests::subprocess_lifecycle_admission",
                     "--nocapture",
                 ])
-                .env("GF_780_LIFECYCLE_COOKIE", LIFECYCLE_TEST_COOKIE)
-                .env("GF_780_PROJECT_ROOT", &root)
+                .env("GF_LIFECYCLE_LIFECYCLE_COOKIE", LIFECYCLE_TEST_COOKIE)
+                .env("GF_LIFECYCLE_PROJECT_ROOT", &root)
                 .env(
                     "GRAPHFORGE_PROJECT_FAILPOINTS",
                     "graphforge-internal-subprocess-v1",
@@ -1856,8 +1856,8 @@ mod tests {
                     "filesystem_admission::tests::subprocess_lifecycle_admission",
                     "--nocapture",
                 ])
-                .env("GF_780_LIFECYCLE_COOKIE", LIFECYCLE_TEST_COOKIE)
-                .env("GF_780_PROJECT_ROOT", &root)
+                .env("GF_LIFECYCLE_LIFECYCLE_COOKIE", LIFECYCLE_TEST_COOKIE)
+                .env("GF_LIFECYCLE_PROJECT_ROOT", &root)
                 .status()
                 .unwrap();
             assert!(retry.success(), "retry after {phase} failed: {retry}");
@@ -2036,14 +2036,14 @@ mod tests {
         }
     }
 
-    const LOCK_TEST_COOKIE: &str = "graphforge-779-native-lock-test";
+    const LOCK_TEST_COOKIE: &str = "graphforge-native-lock-test";
 
     #[test]
     fn subprocess_lock_contender() {
-        if std::env::var("GF_779_LOCK_COOKIE").as_deref() != Ok(LOCK_TEST_COOKIE) {
+        if std::env::var("GF_NATIVE_LOCK_LOCK_COOKIE").as_deref() != Ok(LOCK_TEST_COOKIE) {
             return;
         }
-        let path = PathBuf::from(std::env::var_os("GF_779_LOCK_PATH").unwrap());
+        let path = PathBuf::from(std::env::var_os("GF_NATIVE_LOCK_LOCK_PATH").unwrap());
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -2054,11 +2054,11 @@ mod tests {
 
     #[test]
     fn subprocess_crash_lock_holder() {
-        if std::env::var("GF_779_CRASH_COOKIE").as_deref() != Ok(LOCK_TEST_COOKIE) {
+        if std::env::var("GF_NATIVE_LOCK_CRASH_COOKIE").as_deref() != Ok(LOCK_TEST_COOKIE) {
             return;
         }
-        let path = PathBuf::from(std::env::var_os("GF_779_LOCK_PATH").unwrap());
-        let ready = PathBuf::from(std::env::var_os("GF_779_READY_PATH").unwrap());
+        let path = PathBuf::from(std::env::var_os("GF_NATIVE_LOCK_LOCK_PATH").unwrap());
+        let ready = PathBuf::from(std::env::var_os("GF_NATIVE_LOCK_READY_PATH").unwrap());
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -2083,8 +2083,8 @@ mod tests {
                 "filesystem_admission::tests::subprocess_lock_contender",
                 "--nocapture",
             ])
-            .env("GF_779_LOCK_COOKIE", LOCK_TEST_COOKIE)
-            .env("GF_779_LOCK_PATH", &path)
+            .env("GF_NATIVE_LOCK_LOCK_COOKIE", LOCK_TEST_COOKIE)
+            .env("GF_NATIVE_LOCK_LOCK_PATH", &path)
             .status()
             .unwrap();
         assert!(status.success());
@@ -2105,9 +2105,9 @@ mod tests {
                 "filesystem_admission::tests::subprocess_crash_lock_holder",
                 "--nocapture",
             ])
-            .env("GF_779_CRASH_COOKIE", LOCK_TEST_COOKIE)
-            .env("GF_779_LOCK_PATH", &path)
-            .env("GF_779_READY_PATH", &ready)
+            .env("GF_NATIVE_LOCK_CRASH_COOKIE", LOCK_TEST_COOKIE)
+            .env("GF_NATIVE_LOCK_LOCK_PATH", &path)
+            .env("GF_NATIVE_LOCK_READY_PATH", &ready)
             .spawn()
             .unwrap();
         let status = child
