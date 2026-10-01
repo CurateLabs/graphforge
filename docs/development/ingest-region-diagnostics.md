@@ -252,11 +252,15 @@ are read; checksum refusal and unchanged `CURRENT` are asserted independently.
 
 Current capture-method inputs are pinned by SHA-256:
 
-- `crates/graphforge-storage/src/graph_construction_encoding.rs`: `fb026a30d02114eb618288ff57d02ad0feba1ff885fa1dc4c180e0acb7a8340e`.
-- `crates/graphforge-storage/src/graph_construction/encoding_publication/tests.rs`: `4bc7bfa9b934465242a6b24f68b27ea9de4b9e5e0c4a1410cc637153ff05582e`.
-- `crates/graphforge-storage/src/uuid_membership/construction/tests.rs`: `28ac946e67ee609f9df3935d17aea85a6dbda52af0c51d763951f8844e40defb`.
+- `crates/graphforge-storage/src/graph_construction_encoding.rs`: `f481da842fab59e498f107c4cba1cdc350fd868d6db4037d065ce3c0c0175360`.
+- `crates/graphforge-storage/src/graph_construction/encoding_publication/tests.rs`: `b01a23cbeb1c2d32a757c4624d0e3be5567d1a07deb017b44826c91d2b038a8c`.
+- `crates/graphforge-storage/src/uuid_membership/construction/tests.rs`: `8e19f543465d06b837a8d63736c91e08f3cc0ccd5b54a972933a656b161d8262`.
 - `crates/graphforge-storage/src/uuid_membership/ordinal_artifacts/tests.rs`: `553018c2b4b91aa53cfc8a7a047db14040ab8e6c08282a4a2e10bdd74e1acf0f`.
-- `crates/graphforge-storage/src/adjacency.rs`: `f79d07767953ef711d340c8b3c8b43e4f49dc61754530b2864ac7504d468a9c9`.
+- `crates/graphforge-storage/src/adjacency.rs`: `91fb91b26c0aa8a29a0591e73457b630449dfae1534be6d2c961334a01f676a3`.
+
+- `crates/graphforge-storage/src/graph_construction_encoding/inventory.rs`: `9507eb594b4f9585aa47a2579ab463f54b1bc6ad5a5f6167b1943b9a9a16cf92`.
+- `crates/graphforge-storage/src/graph_construction/encoding_publication/tests/captures.rs`: `eb4c8e133a71ffec2a379144bdd73b74e00ef6871341a3e18be84f472dbd30da`.
+- `crates/graphforge-storage/src/adjacency/capture_tests.rs`: `1c4e0011ae633b531eabd8f3aad8fcf42422bc9282f35837de2855cd97f4ba22`.
 
 The method records the source revision, source-file SHA-256 digests, the working
 diff digest when present, and digests of the method and semantic override inputs.

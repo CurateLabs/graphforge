@@ -246,6 +246,8 @@ pub(crate) fn append_replayed_graph_files(
         None,
         tombstones,
         routes.as_ref(),
+        None,
+        &mut || false,
     )
 }
 

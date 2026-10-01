@@ -371,9 +371,7 @@ pub(crate) fn install_captured_encoded_artifact_with_lease(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphObjectInstallEvidence, GfError> {
     source.revalidate()?;
-    if cancelled() {
-        return Err(validation("captured encoded install cancelled"));
-    }
+    crate::graph_construction::reject_cancelled(cancelled)?;
     let reads = std::cell::Cell::new(0_u64);
     let writes = std::cell::Cell::new(0_u64);
     let syncs = std::cell::Cell::new(0_u64);
@@ -449,7 +447,7 @@ fn copy_captured_encoded_source(
         .rewind()
         .map_err(|error| validation(error.to_string()))?;
     #[cfg(unix)]
-    let mut writer = graphforge_filesystem::DurableFileCacheWriter::with_window_bytes(
+    let mut output_stream = graphforge_filesystem::DurableFileCacheWriter::with_window_bytes(
         output
             .try_clone()
             .map_err(|error| validation(error.to_string()))?,
@@ -461,9 +459,7 @@ fn copy_captured_encoded_source(
     let mut buffer = vec![0; BUFFER_BYTES];
     let copied = (|| {
         loop {
-            if cancelled() {
-                return Err(validation("captured encoded install cancelled"));
-            }
+            crate::graph_construction::reject_cancelled(cancelled)?;
             captured_copy_boundary("before_read");
             let count = input
                 .read(&mut buffer)
@@ -485,7 +481,7 @@ fn copy_captured_encoded_source(
                     .ok_or_else(|| validation("captured read calls overflow"))?,
             );
             #[cfg(unix)]
-            writer
+            output_stream
                 .write_all(&buffer[..count])
                 .map_err(|error| validation(error.to_string()))?;
             #[cfg(windows)]
@@ -514,10 +510,10 @@ fn copy_captured_encoded_source(
     let total = finish_captured_source_copy(copied, cleanup)?;
     #[cfg(unix)]
     {
-        writer
+        output_stream
             .sync_all_and_release()
             .map_err(|error| validation(error.to_string()))?;
-        syncs.set(writer.evidence().sync_operations);
+        syncs.set(output_stream.evidence().sync_operations);
     }
     #[cfg(windows)]
     {
