@@ -1,7 +1,7 @@
 use super::*;
 use crate::import_session::{
     ImportSessionLimits,
-    tests::{edges, fixture, nodes},
+    test_fixtures::{edges, fixture, nodes},
 };
 use crate::{BulkInputKind, OperationId};
 

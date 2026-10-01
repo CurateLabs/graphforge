@@ -1636,14 +1636,11 @@ fn cancelled() -> GfError {
     }
 }
 
-#[cfg(all(test, feature = "portable"))]
-mod tests {
-    use std::collections::HashMap;
+#[cfg(test)]
+mod test_fixtures {
     use std::sync::Arc;
 
     use arrow::array::{FixedSizeBinaryArray, StringArray};
-    use arrow::datatypes::DataType;
-    use parquet::arrow::ArrowWriter;
 
     use super::*;
     use crate::{bulk_edge_input_schema, bulk_node_input_schema};
@@ -1688,6 +1685,18 @@ mod tests {
         let graph = GraphForge::new(project.to_str()).unwrap();
         (directory, project, graph)
     }
+}
+
+#[cfg(all(test, feature = "portable"))]
+mod tests {
+    use std::collections::HashMap;
+
+    use arrow::datatypes::DataType;
+    use parquet::arrow::ArrowWriter;
+
+    use super::test_fixtures::{edges, fixture, nodes};
+    use super::*;
+    use crate::{bulk_edge_input_schema, bulk_node_input_schema};
 
     fn construction_root(graph: &GraphForge, session_uuid: Uuid) -> PathBuf {
         graph
