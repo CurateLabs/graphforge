@@ -186,9 +186,11 @@ python3 scripts/development/digest-census.py --repo . --output /tmp/gf-digest-ce
 
 The method and reviewed classification inputs are pinned by SHA-256:
 `digest-census.py` is
-`4407bd9648ddcd03c08d901adaf0cf3e485cf1c720a7f766e7fb26f31956bd4b`;
+`640e8221d88c8065f9e60aa0e9182545c3e43b52bbb9618c885717d5d3b2f1ba`;
 `digest-census-overrides.json` is
-`3bb35d7cf28960a7a83e74314e33c223504830fa41dd06a5e01f7645b3dd49ea`.
+`d7ff3e64737d68fd4d20e46f9ee045f96e6efc6bd4cdfcfcabea0476a10524a6`.
+The parser fixture `test-digest-census.py` is
+`77224ebc214e8c8793baced7d105bdc576cd0015feb436a0af701260998a48f1`.
 Run the parser and stale-review regression fixtures with
 `python3 scripts/development/test-digest-census.py`. Reviewed function bodies
 are pinned individually; changed inputs, added producers in the same function,
@@ -214,17 +216,21 @@ Production producer sites exclude test-only items and descendants. A constructor
 or static digest invocation is a producer site; calls into a digest-owning helper
 form a separate delegate population. Do not add wrapper levels to infer runtime
 passes. The semantic input and consumer, rather than an alias name, determine
-classification: durable artifact/trust-boundary work, contract identity, or
-optional evidence. Required control authentication is recorded separately within
-the trust-boundary category. Mixed helpers list their input-specific callers.
+classification: durable artifact identity, contract identity, optional evidence,
+control authentication, or portable authentication. Complete portable archive and
+member cryptographic inputs have their own class; bounded control documents and
+canonical selection tuples retain their actual control or contract classes.
+Mixed helpers list their input-specific callers.
 The method refuses unresolved or stale classifications by default and records
 its lexical limitations. Resolve remaining candidates against current source;
 a text match alone is neither a runtime hash pass nor proof of exhaustiveness.
 
 `graphforge_core::hash_observation::operation::Capture` is test-only scoped
 accounting. It counts actual SHA update input bytes by artifact payload,
-contract identity, control authentication, optional evidence, and unclassified
-producer; actual XXH64 input is counted separately. Worker jobs capture and
+contract identity, control authentication, portable authentication, optional
+evidence, and unclassified producer; actual XXH64 input is counted separately.
+Portable counters identify archive/member trust work; they do not remove its
+SHA input from inclusive process-wide cryptographic totals. Worker jobs capture and
 attach the current operation context. Nested operations and unrelated parallel
 tests retain separate collectors; there is no process-wide reset. Production
 context wrappers are zero-sized when test support is disabled.

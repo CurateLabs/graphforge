@@ -12,8 +12,8 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::GfError;
+use graphforge_core::hash_observation::{ArtifactSha256 as Sha256, PortableSha256};
 use graphforge_ontology::{
     ActivationMode, ActivationRecord, ActivationScope, AuthoredModule, BridgeSetId,
     CompositionLimits, InventoryCompileRequest, OntologyModuleId, compile_inventory,
@@ -1951,7 +1951,7 @@ fn hash_file(
     let mut file = fs::File::open(path)
         .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "participant unavailable"))?;
     let mut buffer = vec![0; buffer_size];
-    let mut hash = Sha256::new();
+    let mut hash = PortableSha256::new();
     loop {
         if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
             return Err(PortableV2Error::new(

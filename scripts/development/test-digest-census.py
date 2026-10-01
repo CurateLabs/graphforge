@@ -29,6 +29,7 @@ with tempfile.TemporaryDirectory(prefix="gf-census-method-fixture-") as tmp:
     p = root / "crates/demo/src/lib.rs"
     p.parent.mkdir(parents=True)
     p.write_text("""use sha2::Sha256 as Crypto;
+use graphforge_core::hash_observation::PortableSha256 as Transport;
 fn fingerprint() {
  let literal = r###"Sha256::new(); /* not code */"###;
  /* nested /* Sha256::new(); */ Sha256::new(); */
@@ -43,6 +44,8 @@ fn alternative() { Crypto::new(); }
 fn callback() { let state = true.then(Crypto::new); }
 fn shard_set_identity() { Crypto::digest(b"descriptors"); }
 fn wrapper() { shard_set_identity(); }
+fn portable_boundary() { Transport::digest(b"archive bytes"); }
+fn portable_domain() { ObservedSha256::for_domain(HashDomain::PortableAuthentication); }
 #[cfg(test)] mod tests { fn helper() { Sha256::new(); } }
 """)
     source = p.read_text()
@@ -62,6 +65,20 @@ fn wrapper() { shard_set_identity(); }
         json.dumps(
             {
                 "function_overrides": [
+                    {
+                        "path": "crates/demo/src/lib.rs",
+                        "function": "portable_boundary",
+                        "function_bodies_sha256": body_sha("portable_boundary"),
+                        "role": "portable_authentication",
+                        "input_contract": "Fixture actual portable archive bytes.",
+                    },
+                    {
+                        "path": "crates/demo/src/lib.rs",
+                        "function": "portable_domain",
+                        "function_bodies_sha256": body_sha("portable_domain"),
+                        "role": "portable_authentication",
+                        "input_contract": "Fixture actual portable member authentication.",
+                    },
                     {
                         "path": "crates/demo/src/lib.rs",
                         "function": "shard_set_identity",
@@ -135,9 +152,18 @@ fn wrapper() { shard_set_identity(); }
         run.stderr,
         json.loads((out / "review-gaps.json").read_text())["gaps"],
     )
-    assert summary["application_producer_sites"] == 4, summary
+    assert summary["application_producer_sites"] == 6, summary
     assert summary["excluded_test_constructors"] == 3, summary
-    assert summary["producer_classes"] == {"b": 4}, summary
+    assert summary["producer_classes"] == {"b": 4, "portable_authentication": 2}, summary
+    producers = json.loads((out / "producers.json").read_text())["producers"]
+    portable = [row for row in producers if row["function"].startswith("portable_")]
+    assert len(portable) == 2, portable
+    assert all(
+        row["role_by_explicit_type"] == "portable_authentication"
+        and row["semantic_role"] == "portable_authentication"
+        and row["class"] == "portable_authentication"
+        for row in portable
+    ), portable
     delegates = json.loads((out / "delegates.json").read_text())["edges"]
     assert any(
         edge["delegate"] == "shard_set_identity"
@@ -188,6 +214,79 @@ fn wrapper() { shard_set_identity(); }
         g["kind"] == "reviewed_input_changed" and g["function"] == "fingerprint" for g in gaps
     ), gaps
     assert not any(g["kind"] == "stale_override" for g in gaps), gaps
+    p.write_text(source)
+    # A known portable alias does not bypass semantic review or its input pin.
+    p.write_text(source.replace('b"archive bytes"', 'b"changed archive bytes"'))
+    run = subprocess.run(
+        [
+            "python3",
+            method,
+            "--repo",
+            str(root),
+            "--output",
+            str(out),
+            "--overrides",
+            str(overrides),
+        ],
+        text=True,
+        env=git_env,
+        capture_output=True,
+        check=False,
+    )
+    assert run.returncode == 1, (run.stdout, run.stderr)
+    gaps = json.loads((out / "review-gaps.json").read_text())["gaps"]
+    assert any(
+        g["kind"] == "reviewed_input_changed" and g["function"] == "portable_boundary" for g in gaps
+    ), gaps
+    p.write_text(source)
+    p.write_text(source + "\nfn unreviewed_portable() { Transport::new(); }\n")
+    run = subprocess.run(
+        [
+            "python3",
+            method,
+            "--repo",
+            str(root),
+            "--output",
+            str(out),
+            "--overrides",
+            str(overrides),
+        ],
+        text=True,
+        env=git_env,
+        capture_output=True,
+        check=False,
+    )
+    assert run.returncode == 1, (run.stdout, run.stderr)
+    gaps = json.loads((out / "review-gaps.json").read_text())["gaps"]
+    assert any(
+        g["kind"] == "unclassified_producer" and g["function"] == "unreviewed_portable"
+        for g in gaps
+    ), gaps
+    p.write_text(source)
+    p.write_text(
+        source.replace('fn portable_boundary() { Transport::digest(b"archive bytes"); }\n', "")
+    )
+    run = subprocess.run(
+        [
+            "python3",
+            method,
+            "--repo",
+            str(root),
+            "--output",
+            str(out),
+            "--overrides",
+            str(overrides),
+        ],
+        text=True,
+        env=git_env,
+        capture_output=True,
+        check=False,
+    )
+    assert run.returncode == 1, (run.stdout, run.stderr)
+    gaps = json.loads((out / "review-gaps.json").read_text())["gaps"]
+    assert any(
+        g["kind"] == "stale_override" and g["function"] == "portable_boundary" for g in gaps
+    ), gaps
     p.write_text(source)
     # Adding a second producer inside the reviewed function also requires review.
     p.write_text(
@@ -250,7 +349,8 @@ fn wrapper() { shard_set_identity(); }
     gaps = json.loads((out / "review-gaps.json").read_text())["gaps"]
     assert any(g["kind"] == "unreviewed_crypto_algorithm" for g in gaps), gaps
     print(
-        "PASS: alias, constructor callback, nested comments, raw/byte literals, "
+        "PASS: alias, typed portable authentication and changed portable input refusal, "
+        "constructor callback, nested comments, raw/byte literals, "
         "test impl/block/module exclusion, "
         "mixed cfg feature retention, output refusal, changed-input/new-producer/unpinned refusal, "
         "unknown crypto fail-closed"

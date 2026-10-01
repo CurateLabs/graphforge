@@ -1271,7 +1271,27 @@ impl GraphObjectReadLease {
         digest: &str,
         expected_length: u64,
     ) -> Result<AuthenticatedGraphObject, GfError> {
-        open_graph_object_with_read_lease(self, digest, expected_length)
+        open_graph_object_with_read_lease(
+            self,
+            digest,
+            expected_length,
+            graphforge_core::hash_observation::HashDomain::ArtifactPayload,
+        )
+    }
+
+    /// Authenticate a portable source with the same full SHA and descriptor
+    /// checks as generic CAS admission, attributing the actual transport work.
+    pub(crate) fn open_for_portable(
+        &self,
+        digest: &str,
+        expected_length: u64,
+    ) -> Result<AuthenticatedGraphObject, GfError> {
+        open_graph_object_with_read_lease(
+            self,
+            digest,
+            expected_length,
+            graphforge_core::hash_observation::HashDomain::PortableAuthentication,
+        )
     }
 
     /// Open one immutable CAS object for identity and space attribution only.
@@ -1440,6 +1460,7 @@ fn open_graph_object_with_read_lease(
     lease: &GraphObjectReadLease,
     digest: &str,
     expected_length: u64,
+    domain: graphforge_core::hash_observation::HashDomain,
 ) -> Result<AuthenticatedGraphObject, GfError> {
     let mut file = lease.cas.open_digest(digest)?;
     let metadata = file.metadata().map_err(|error| {
@@ -1459,7 +1480,7 @@ fn open_graph_object_with_read_lease(
     {
         return Err(validation("graph object authority changed"));
     }
-    let mut hasher = Sha256::new();
+    let mut hasher = graphforge_core::hash_observation::ObservedSha256::for_domain(domain);
     let mut block = vec![0_u8; 1 << 20];
     let mut authenticated = ReadIoEvidence::default();
     loop {
