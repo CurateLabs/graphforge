@@ -114,8 +114,10 @@ Cargo, from the dispatch harness (test step only):
    `cargo-bazel-lock.json`, `.bazelrc`, `.bazelversion`, `tools/bazel/`, the
    drift, parity, ledger, and cache-perf tooling, the `bazel-bootstrap` and
    `bazel-diagnostics` jobs, and the Bazel native builder in Binding RC.
-   Binding RC builds the Linux wheel with maturin and the Linux Node addon with
-   napi, as it already does on macOS and Windows.
+   Binding RC built the Linux wheel with maturin and the Linux Node addon with
+   napi, as it already did on macOS and Windows. Binding RC has since been
+   replaced by `.github/workflows/publish.yaml`, which builds every native the
+   same way.
 5. **The gate does not change.** `CI Gate` remains the sole required status.
 
 ## Options considered

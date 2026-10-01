@@ -135,7 +135,7 @@ def cmd_check(_: argparse.Namespace) -> int:
         for error in errors:
             print(f"  - {error}", file=sys.stderr)
         print(
-            "See docs/development/publication-order.md (crates.io publication plan).",
+            "See RELEASING.md (crates.io publication plan).",
             file=sys.stderr,
         )
         return 1

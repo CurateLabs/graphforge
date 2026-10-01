@@ -12,8 +12,8 @@ engine and binding work.
 
 **Next steps for contributors:** set up the environment below → run the validation
 suite → open a focused PR against `main`. For release operators, start at
-[Publishing](../engineering/PUBLISHING.md) and
-[release process](release-process.md).
+[Publishing](../engineering/PUBLISHING.md) and `RELEASING.md` at the
+repository root.
 
 ---
 
@@ -288,7 +288,7 @@ GraphForge follows [Semantic Versioning](https://semver.org/). The current
 coordinated public release is **v0.5.1** (see
 [installation](../guide/installation.md)).
 
-See [release-process.md](release-process.md) for the full release procedure and
+See `RELEASING.md` at the repository root for the release procedure and
 [roadmap.md](../releases/roadmap.md) for delivery sequencing.
 
 ---

@@ -74,10 +74,10 @@ class GateRegistryTests(unittest.TestCase):
         mutated["matrix_variants"]["concurrency/stress"] = "scripts/ci/repo-checks.sh"
         self.rejected("matrix variants", mutated)
 
-    def test_publication_verification_has_one_owner(self) -> None:
+    def test_publication_has_one_owner(self) -> None:
         mutated = copy.deepcopy(self.registry)
-        clean = next(item for item in mutated["workflows"] if item["id"] == "clean-environment")
-        clean["owner"] = "ci"
+        publish = next(item for item in mutated["workflows"] if item["id"] == "publish")
+        publish["owner"] = "ci"
         self.rejected("one release owner", mutated)
 
     def test_command_rendering_uses_registry_argv(self) -> None:

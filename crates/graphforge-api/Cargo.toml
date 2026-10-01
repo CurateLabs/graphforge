@@ -65,10 +65,6 @@ path = "src/bin/graphforge-fly-filesystem-smoke.rs"
 required-features = ["portable"]
 
 [[example]]
-name = "release_load_probe"
-required-features = ["search"]
-
-[[example]]
 name = "atomic_recovery_workflow"
 required-features = ["knowledge", "provenance", "search"]
 
