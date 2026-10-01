@@ -11,6 +11,7 @@ use super::super::V4_ORDINAL_MANIFEST;
 use super::super::maintenance::manifest_file_names;
 use super::super::maintenance::standalone_v4_pinned_update;
 use super::super::ordinal_artifacts::stage_v4_ordinal_artifacts;
+use super::super::ordinal_artifacts::stage_v4_ordinal_artifacts_unordered;
 use super::super::rebuild::rebuild_uuid_membership_indexes;
 use super::super::rebuild::rebuild_v4_ordinal_identity;
 use super::super::tests::fixture;
@@ -126,6 +127,86 @@ fn v4_delta_append_delete_binary_carry_reopens_without_resurrection() {
             Some(Uuid::from_u128(5)),
         ]
     );
+}
+
+/// Publish one append and return the manifest it planned.
+fn append_v4_generation(
+    root: &std::path::Path,
+    prior: crate::V4OrdinalIdentityManifest,
+    nodes: &[(Uuid, u64)],
+    tombstones: &[u64],
+) -> crate::V4OrdinalIdentityManifest {
+    let generation = prior.topology_generation + 1;
+    let pinned = pinned_v4_update(root, prior);
+    let mut batch = crate::staging::RewriteBatch::new();
+    let planned = prepare_v4_ordinal_delta(
+        root,
+        generation - 1,
+        generation,
+        &pinned,
+        &mut batch,
+        nodes,
+        tombstones,
+        &"44".repeat(32),
+    )
+    .unwrap();
+    install_v4_plan(&batch);
+    planned.manifest
+}
+
+#[test]
+fn v4_delta_publishes_the_uuid_order_it_derived_never_one_it_assumed() {
+    let new_project = |records: &[(u128, u64)]| {
+        let root = tempfile::tempdir().unwrap();
+        let index_path = root.path().join(INDEX_DIR);
+        fs::create_dir_all(&index_path).unwrap();
+        let index = graphforge_filesystem::StableDirectory::open(&index_path).unwrap();
+        let base = stage_v4_ordinal_artifacts_unordered(
+            records
+                .iter()
+                .map(|(uuid, id)| (Uuid::from_u128(*uuid), *id))
+                .collect(),
+            1,
+            &index,
+        )
+        .unwrap();
+        (root, base)
+    };
+    let u = Uuid::from_u128;
+
+    // Construction records what it streamed: ascending, then not.
+    let (ordered_root, ordered) = new_project(&[(10, 1), (20, 2), (30, 3)]);
+    assert_eq!(ordered.uuid_order_matches_ordinals, Some(true));
+    let (_, shuffled) = new_project(&[(30, 1), (10, 2), (20, 3)]);
+    assert_eq!(shuffled.uuid_order_matches_ordinals, Some(false));
+
+    // An append whose UUIDs ascend past the parent's last keeps the order...
+    let next = append_v4_generation(ordered_root.path(), ordered.clone(), &[(u(40), 4)], &[]);
+    assert_eq!(next.uuid_order_matches_ordinals, Some(true));
+    // ...and one that sorts below it, only at the boundary, breaks it. The
+    // tombstone changes nothing: a deleted identity still holds its place.
+    let (root, base) = new_project(&[(10, 1), (20, 2), (30, 3)]);
+    let broken = append_v4_generation(root.path(), base.clone(), &[(u(25), 4)], &[3]);
+    assert_eq!(broken.uuid_order_matches_ordinals, Some(false));
+    // A recorded inversion is permanent: later ascending appends cannot undo it.
+    let after = append_v4_generation(root.path(), broken, &[(u(99), 5)], &[]);
+    assert_eq!(after.uuid_order_matches_ordinals, Some(false));
+
+    // A delta that is itself unordered breaks an ordered parent.
+    let (root, base) = new_project(&[(10, 1), (20, 2)]);
+    let unordered_delta = append_v4_generation(root.path(), base, &[(u(50), 3), (u(40), 4)], &[]);
+    assert_eq!(unordered_delta.uuid_order_matches_ordinals, Some(false));
+
+    // An unknown parent stays unknown: it is never promoted to a claim.
+    let (root, mut unknown) = new_project(&[(10, 1), (20, 2)]);
+    unknown.uuid_order_matches_ordinals = None;
+    let still_unknown = append_v4_generation(root.path(), unknown, &[(u(30), 3)], &[]);
+    assert_eq!(still_unknown.uuid_order_matches_ordinals, None);
+
+    // A tombstone-only generation adds no ordinals and keeps the claim.
+    let (root, base) = new_project(&[(10, 1), (20, 2)]);
+    let deleted = append_v4_generation(root.path(), base, &[], &[2]);
+    assert_eq!(deleted.uuid_order_matches_ordinals, Some(true));
 }
 
 #[test]

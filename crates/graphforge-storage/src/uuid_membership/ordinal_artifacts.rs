@@ -291,6 +291,31 @@ where
     Ok((manifest, metrics))
 }
 
+/// Like [`stage_v4_ordinal_artifacts`] for pairs in any order: the forward run
+/// is fed in UUID order and the ordinals in node order, so the two projections
+/// can disagree about which comes first, as real construction streams do.
+#[cfg(test)]
+pub(crate) fn stage_v4_ordinal_artifacts_unordered(
+    mut records: Vec<(Uuid, u64)>,
+    generation: u64,
+    index: &graphforge_filesystem::StableDirectory,
+) -> Result<crate::V4OrdinalIdentityManifest, GfError> {
+    let mut cancelled = || false;
+    let mut writer = V4OrdinalConstructionWriter::start(generation, index)?;
+    records.sort_unstable_by_key(|(uuid, _)| *uuid.as_bytes());
+    for (uuid, node_id) in &records {
+        writer.push_forward(*uuid, *node_id, &mut cancelled)?;
+    }
+    records.sort_unstable_by_key(|(_, node_id)| *node_id);
+    for (uuid, node_id) in &records {
+        writer.push_ordinal(*node_id, *uuid, &mut cancelled)?;
+    }
+    let bundle = writer.finish()?;
+    crate::durable_commit::acknowledge_directory(&index).map_err(storage_err)?;
+    commit_v4_publications(bundle.publications, V4AuthorityTransactionProof)?;
+    Ok(bundle.manifest)
+}
+
 #[cfg(test)]
 pub(super) fn stage_v4_ordinal_bundle<I, F>(
     records: I,
