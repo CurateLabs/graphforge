@@ -27,22 +27,52 @@ use std::sync::Arc;
 /// [`TableProvider`] for the logical legacy-plus-canonical node shard union.
 #[derive(Debug, Clone)]
 pub struct TopologyNodeTable {
-    paths: Vec<PathBuf>,
+    /// Physical path and, when the authenticated inventory declared it, the
+    /// inventory-relative path the row-count hint is taken from.
+    fragments: Vec<(PathBuf, Option<String>)>,
 }
 
 impl TopologyNodeTable {
     /// Create a table backed by one legacy or canonical Parquet fragment.
     #[must_use]
     pub fn new(path: PathBuf) -> Self {
-        Self { paths: vec![path] }
+        Self {
+            fragments: vec![(path, None)],
+        }
     }
 
-    /// Open every canonical node topology fragment in deterministic order.
+    /// Open every canonical node topology fragment in deterministic order,
+    /// listed from the directory. For a hydrated compact workspace prefer
+    /// [`Self::open_with_inventory`]: a directory listing would also read a
+    /// file nothing registered for admission.
     pub fn open_project(dir: &Path) -> Result<Self, DataFusionError> {
         Ok(Self {
-            paths: crate::mutator::node_parquet_files(dir)
-                .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+            fragments: crate::mutator::node_parquet_files(dir)
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?
+                .into_iter()
+                .map(|path| (path, None))
+                .collect(),
         })
+    }
+
+    /// Open the node fragments the authenticated inventory declares, so a
+    /// file in `topology/nodes/` that the manifest does not name is never
+    /// read (#1388). An inventory without topology authority (route-scoped)
+    /// or none at all falls back to the directory listing, whose files an
+    /// expanded generation verified at open.
+    pub fn open_with_inventory(
+        dir: &Path,
+        inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    ) -> Result<Self, DataFusionError> {
+        match inventory.and_then(crate::AuthenticatedPropertyInventory::node_fragments) {
+            Some(declared) => Ok(Self {
+                fragments: declared
+                    .into_iter()
+                    .map(|(path, relative)| (path, Some(relative)))
+                    .collect(),
+            }),
+            None => Self::open_project(dir),
+        }
     }
 }
 
@@ -65,10 +95,12 @@ impl TableProvider for TopologyNodeTable {
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
         // Existence only — no Parquet decode during planning (#339).
         let fragments = self
-            .paths
+            .fragments
             .iter()
-            .cloned()
-            .map(|path| ParquetFragment::for_path(path, true))
+            .map(|(path, relative)| match relative {
+                Some(relative) => ParquetFragment::for_declared(path.clone(), relative, true),
+                None => ParquetFragment::for_path(path.clone(), true),
+            })
             .collect();
         scan_fragments(
             TOPOLOGY_NODES_SCHEMA.clone(),
@@ -141,15 +173,18 @@ impl TableProvider for TypedEdgeTable {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let paths = match &self.inventory {
-            Some(inventory) => inventory.edge_files(Some(&self.rel_type_name)),
+        let fragments = match &self.inventory {
+            Some(inventory) => inventory
+                .edge_fragments(Some(&self.rel_type_name))
+                .into_iter()
+                .map(|(_, path, relative)| ParquetFragment::for_declared(path, &relative, false))
+                .collect(),
             None => crate::mutator::edge_parquet_files(&self.dir, Some(&self.rel_type_name))
-                .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?
+                .into_iter()
+                .map(|(_, path)| ParquetFragment::for_path(path, false))
+                .collect(),
         };
-        let fragments = paths
-            .into_iter()
-            .map(|(_, path)| ParquetFragment::for_path(path, false))
-            .collect();
         scan_fragments(
             self.schema.clone(),
             fragments,
@@ -204,15 +239,20 @@ impl TableProvider for UnionEdgeTable {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let paths = match &self.inventory {
-            Some(inventory) => inventory.edge_files(None),
+        let fragments: Vec<ParquetFragment> = match &self.inventory {
+            Some(inventory) => inventory
+                .edge_fragments(None)
+                .into_iter()
+                .map(|(stem, path, relative)| {
+                    ParquetFragment::for_declared_union_edge(path, stem, &relative)
+                })
+                .collect(),
             None => crate::mutator::edge_parquet_files(&self.dir, None)
-                .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?
+                .into_iter()
+                .map(|(stem, path)| ParquetFragment::for_union_edge(path, stem))
+                .collect(),
         };
-        let fragments: Vec<ParquetFragment> = paths
-            .into_iter()
-            .map(|(stem, path)| ParquetFragment::for_union_edge(path, stem))
-            .collect();
         scan_fragments(
             EXPLORATORY_EDGE_SCHEMA.clone(),
             fragments,

@@ -3,22 +3,26 @@
 //! Planning used to open every node and edge object of a table for a footer
 //! row count, and that open admitted each object whole (exact length and
 //! XXH64 on first touch, #1716), so every query paid for the whole node table
-//! before reading a row. Construction shards are named by their contiguous
-//! surrogate range, so the count now comes from the authenticated inventory
-//! name and planning opens nothing (`ParquetFragment::for_path`).
+//! before reading a row. Construction shards are named by the surrogate range
+//! they were encoded over, which is an upper bound on their rows (a delete
+//! restages fewer rows under the same name; a per-route edge shard holds a
+//! fraction of a window's range), so planning now takes that bound from the
+//! authenticated inventory path as an inexact statistic and opens nothing
+//! (`ParquetFragment::for_declared`). The node table reads only the files the
+//! inventory declares, never a directory listing of the hydrated workspace.
 //!
 //! Five shapes run against compact (V2) projects as construction published
-//! them, at 16,384 and 131,072 nodes (8x) with fan-out 16, so the larger
-//! fixture spans two CSR shards (2,097,152 edges over a 1,048,576-edge shard
-//! cap). Each shape either meets the structural bound or is recorded here as
-//! unbounded by design:
+//! them, at 16,384 and 65,536 nodes (4x) with fan-out 17, so the larger
+//! fixture spans two CSR shards per index (1,114,112 edges over a
+//! 1,048,576-edge shard cap). Each shape either meets the structural bound or
+//! is recorded here as unbounded:
 //!
 //! | shape | bound (from the manifest) | status |
 //! | --- | --- | --- |
 //! | ordered one-hop `LIMIT 1000` | 1 CSR shard + residual | bounded |
 //! | ordered two-hop `LIMIT 1000` | 2 CSR shards + residual | bounded |
 //! | ordered one-hop `LIMIT 10` | 1 CSR shard + residual | bounded |
-//! | lookup by `node_uuid` | every node object | **unbounded by design**: its reads grow with the node table (measured 18,165 B at 16,384 nodes, 125,887 B at 131,072), bounded here at the declared node bytes so a regression to edge bytes still fails |
+//! | lookup by `node_uuid` | every node object | **unbounded pending an index probe**: `TopologyNodeTable::scan` ignores its filters, so the lookup scans the `node_uuid` column of every node object and its reads grow with the node table; a later #1388 slice prunes through `uuid_membership` / `read_nodes_filtered`. Bounded here at the declared node bytes so a regression to edge bytes still fails |
 //! | one-hop with a property projection | 1 CSR shard + every node object + property fragments | **unbounded by design**: the projection leaves the ordered fast path for the generic expand, which reads the node table and the property fragments; bounded here at node + property + one shard bytes |
 //!
 //! What a query reads is the lifecycle attribution (application read bytes),
@@ -30,12 +34,19 @@
 //!
 //! Criterion 4 (same-inode, same-length flip refused) for the path this change
 //! touches: a flipped node object is refused by the generic scan on first
-//! touch, and `count(n)` over it is refused too: the name-derived row count
-//! is never substituted for an answer. It is reported as an inexact statistic
-//! so no optimizer may ever do so; today none does (the pipeline does not run
-//! DataFusion's statistics-based aggregate rewrite), so reporting it exact
-//! does not change this test's outcome. The inexact precision is defense in
-//! depth, pinned by `parquet_scan::tests::name_derived_counts_are_reported_as_inexact_statistics`.
+//! touch, and `count(n)` over it is refused too, so the name-derived bound is
+//! never substituted for an answer. DataFusion's `AggregateStatistics` rule
+//! is registered (`with_default_features` in the exec session); it does not
+//! fire for these counts only because of plan shape (the overlay join sits
+//! between the aggregate and the scan, null counts are unknown, and
+//! `count(*)` goes through `cypher_row_marker`), so reporting the bound exact
+//! does not change this test's outcome today. `Inexact` is required because
+//! the name is only an upper bound, and it is the guard if the plan shape
+//! ever changes; `parquet_scan::tests::name_derived_counts_are_reported_as_inexact_statistics`
+//! pins it. `a_shard_name_is_an_upper_bound_on_its_rows_after_a_delete` shows
+//! the bound exceeding the footer, and
+//! `an_unregistered_file_in_the_hydrated_node_directory_is_never_read` shows
+//! the node table ignoring a file the inventory does not declare.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -54,8 +65,8 @@ use graphforge_core::uuid::Uuid;
 use graphforge_storage::{GraphFilesInventory, graph_object_path, resolve_project_generation};
 
 const SMALL_NODES: usize = 1 << 14;
-const LARGE_NODES: usize = 1 << 17;
-const FAN_OUT: usize = 16;
+const LARGE_NODES: usize = 1 << 16;
+const FAN_OUT: usize = 17;
 const LIMIT: usize = 1_000;
 const WRITE_WINDOW: usize = 32 * 1024;
 const CSR_SHARD_EDGES: usize = 1_048_576;
@@ -293,6 +304,7 @@ const SHAPES: [Shape; 5] = [
     Shape {
         name: "lookup by node_uuid",
         text: "MATCH (n) WHERE n.node_uuid = $uuid RETURN n.node_uuid AS id",
+        // Unbounded pending an index probe: the scan ignores its filters.
         bound: |layout| (layout.node_bytes + EXECUTION_RESIDUAL_BYTES, false),
         rows: |_| 1,
     },
@@ -356,7 +368,13 @@ fn run_size(nodes: usize) -> Size {
                 shape.name,
                 measured.open_read,
                 measured.execution_read,
-                if bounded { "bounded" } else { "unbounded by design" },
+                if bounded {
+                    "bounded"
+                } else if shape.name.starts_with("lookup") {
+                    "unbounded pending an index probe"
+                } else {
+                    "unbounded by design"
+                },
                 measured.rows,
                 measured.open_wall.as_secs_f64() * 1e3,
                 measured.execution_wall.as_secs_f64() * 1e3,
@@ -372,10 +390,10 @@ fn run_size(nodes: usize) -> Size {
 }
 
 #[test]
-fn query_shapes_cost_their_result_not_their_graph_across_an_8x_node_range() {
+fn query_shapes_cost_their_result_not_their_graph_across_a_4x_node_range() {
     let small = run_size(SMALL_NODES);
     let large = run_size(LARGE_NODES);
-    assert_eq!(LARGE_NODES, 8 * SMALL_NODES);
+    assert_eq!(LARGE_NODES, 4 * SMALL_NODES);
     assert!(
         LARGE_NODES * FAN_OUT > CSR_SHARD_EDGES,
         "the larger fixture must span more than one CSR shard"
@@ -437,8 +455,8 @@ fn query_shapes_cost_their_result_not_their_graph_across_an_8x_node_range() {
         }
     }
 
-    // Across sizes the per-size bounds above are the statement: 8x nodes and
-    // 2x the edges one shard holds leave the bounded shapes at `hops` shards
+    // Across sizes the per-size bounds above are the statement: 4x nodes and
+    // more edges than one shard holds leave the bounded shapes at `hops` shards
     // (the two-hop pays one shard when both hops fall in it, two otherwise)
     // and nothing proportional to the node table.
 }
@@ -493,7 +511,7 @@ fn a_flipped_node_object_is_refused_by_the_scan_that_touches_it_and_by_count() {
         .expect_err("a scan over a corrupted node object must be refused");
     assert!(error.to_string().contains("XXH64"), "{error}");
 
-    // The row count planning takes from the shard name is a hint, never an
+    // The bound planning takes from the shard name is a hint, never an
     // answer: counting the nodes reads the object and refuses it.
     let error = forge
         .execute("MATCH (n) RETURN count(n) AS total")
@@ -501,6 +519,178 @@ fn a_flipped_node_object_is_refused_by_the_scan_that_touches_it_and_by_count() {
     assert!(error.to_string().contains("XXH64"), "{error}");
 
     // The ordered one-hop never touches node objects, so it still answers.
+    let result = forge.execute(SHAPES[2].text).unwrap();
+    assert_eq!(
+        result
+            .batches
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum::<usize>(),
+        10
+    );
+}
+
+/// Footer row count of a Parquet file, read test-side with plain parquet.
+fn footer_rows(path: &Path) -> i64 {
+    parquet::file::reader::FileReader::metadata(
+        &parquet::file::reader::SerializedFileReader::new(std::fs::File::open(path).unwrap())
+            .unwrap(),
+    )
+    .file_metadata()
+    .num_rows()
+}
+
+/// Every canonical `topology/<kind>/.../<range>.parquet` beneath `root`.
+fn canonical_shards(root: &Path, kind: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "parquet")
+                && path
+                    .ancestors()
+                    .skip(1)
+                    .filter_map(Path::file_name)
+                    .take(3)
+                    .any(|name| name == kind)
+                && path
+                    .ancestors()
+                    .skip(1)
+                    .filter_map(Path::file_name)
+                    .any(|name| name == "topology")
+            {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// A shard's name is the surrogate range it was encoded over, which is an
+/// upper bound on its rows: `DETACH DELETE` restages the filtered batch
+/// under the original name. The hint must stay at or above the footer and
+/// be inexact.
+#[test]
+fn a_shard_name_is_an_upper_bound_on_its_rows_after_a_delete() {
+    use graphforge_storage::ParquetFragment;
+
+    let project = tempfile::tempdir().expect("project directory");
+    let path = project.path().join("state");
+    build(&path, 512, 4);
+    {
+        let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+        let params = HashMap::from([(
+            "uuid".to_owned(),
+            IrLiteral::Uuid(*node_uuid(100).as_bytes()),
+        )]);
+        forge
+            .execute_with_params(
+                "MATCH (n) WHERE n.node_uuid = $uuid DETACH DELETE n",
+                &params,
+            )
+            .unwrap();
+    }
+    // The mutating commit published an expanded generation whose tree keeps
+    // the shard names; no workspace is open, so these are the retained files.
+    let generation = resolve_project_generation(&path).unwrap();
+    let tree = generation.graph_tree_root();
+    let nodes = canonical_shards(&tree, "nodes");
+    let edges = canonical_shards(&tree, "edges");
+    assert_eq!(nodes.len(), 1, "{nodes:?}");
+    assert_eq!(edges.len(), 1, "{edges:?}");
+
+    let node_rows = footer_rows(&nodes[0]);
+    let edge_rows = footer_rows(&edges[0]);
+    eprintln!(
+        "{} holds {node_rows} rows; {} holds {edge_rows} rows",
+        nodes[0].display(),
+        edges[0].display()
+    );
+    assert_eq!(node_rows, 511, "one node deleted");
+    assert_eq!(edge_rows, 2_040, "its four out- and four in-edges deleted");
+
+    for (shard, rows) in [(&nodes[0], node_rows), (&edges[0], edge_rows)] {
+        let relative = shard
+            .strip_prefix(&tree)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        for fragment in [
+            ParquetFragment::for_path(shard.clone(), true),
+            ParquetFragment::for_declared(shard.clone(), &relative, true),
+        ] {
+            let hint = fragment.exact_rows.expect("a canonical shard has a hint");
+            assert!(
+                hint as i64 >= rows,
+                "{relative}: hint {hint} below the footer's {rows} rows"
+            );
+            assert!(
+                hint as i64 > rows,
+                "{relative}: the fixture must show the name exceeding the rows"
+            );
+            assert!(
+                !fragment.rows_exact,
+                "{relative}: an upper bound is not exact"
+            );
+        }
+    }
+}
+
+/// The node table reads the files the authenticated inventory declares. A
+/// valid-looking shard dropped into the hydrated `topology/nodes/` is not in
+/// the manifest, has no admission ticket (`admit_file` passes an inode
+/// nothing registered), and must never reach a result. With the directory
+/// listing (`TopologyNodeTable::open_project`) it doubles the count.
+#[test]
+fn an_unregistered_file_in_the_hydrated_node_directory_is_never_read() {
+    let project = tempfile::tempdir().expect("project directory");
+    let path = project.path().join("state");
+    build(&path, 1 << 12, 4);
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let generation = resolve_project_generation(&path).unwrap();
+    // The open hydrated a workspace beneath the container root.
+    let workspace = std::fs::read_dir(generation.container_root())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|candidate| {
+            candidate.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .starts_with("graphforge-graph-workspace-")
+            })
+        })
+        .expect("hydrated workspace");
+    let node_directory = workspace.join("topology").join("nodes");
+    let shards = canonical_shards(&node_directory, "nodes");
+    assert_eq!(shards.len(), 1, "{shards:?}");
+    let declared = &shards[0];
+    let planted = node_directory.join(format!("{:020}-{:020}.parquet", 4_097, 8_192));
+    std::fs::copy(declared, &planted).unwrap();
+    assert_eq!(footer_rows(&planted), 4_096);
+
+    let count = forge.execute("MATCH (n) RETURN count(n) AS total").unwrap();
+    let total = count.batches[0]
+        .column_by_name("total")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!(
+        total, 4_096,
+        "a file the inventory does not declare was counted"
+    );
+
     let result = forge.execute(SHAPES[2].text).unwrap();
     assert_eq!(
         result

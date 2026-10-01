@@ -35,6 +35,36 @@ impl AuthenticatedPropertyInventory {
             .collect()
     }
 
+    /// Every admitted edge payload with its inventory-relative path, from
+    /// which planning takes a row-count hint without opening the file (#1388).
+    #[must_use]
+    pub fn edge_fragments(&self, relation: Option<&str>) -> Vec<(String, PathBuf, String)> {
+        self.edge_routes
+            .iter()
+            .filter(|(route, _)| relation.is_none_or(|expected| expected == route.as_str()))
+            .flat_map(|(route, paths)| {
+                paths
+                    .iter()
+                    .map(|path| (route.clone(), path.path.clone(), path.relative_path.clone()))
+            })
+            .collect()
+    }
+
+    /// The node topology payloads this inventory declares, in canonical order
+    /// (the legacy flat file first, then range shards), with their
+    /// inventory-relative paths. `None` when the inventory is route-scoped and
+    /// carries no topology authority.
+    #[must_use]
+    pub fn node_fragments(&self) -> Option<Vec<(PathBuf, String)>> {
+        let files = self.node_files.as_ref()?;
+        let mut fragments: Vec<_> = files
+            .iter()
+            .map(|file| (file.path.clone(), file.relative_path.clone()))
+            .collect();
+        fragments.sort_by(|a, b| a.1.cmp(&b.1));
+        Some(fragments)
+    }
+
     pub(crate) fn has_edge_route(&self, route: &str) -> bool {
         self.edge_routes.contains_key(route)
     }
@@ -356,6 +386,7 @@ impl AuthenticatedPropertyInventory {
         let retained_root = graphforge_filesystem::StableDirectory::open(root).map_err(io_error)?;
         let mut entries = Vec::new();
         let mut edge_routes = BTreeMap::<String, Vec<AdmittedEdgeFile>>::new();
+        let mut declared_nodes = Vec::new();
         for entry in inventory.files {
             crate::graph_files::wire_relative_path(&entry.relative_path)?;
             let semantic = match table.as_ref() {
@@ -382,11 +413,22 @@ impl AuthenticatedPropertyInventory {
                         relative_path: entry.relative_path.clone(),
                     });
             }
+            if requested_route.is_none() && is_node_topology_path(&entry.relative_path) {
+                if entry.role != crate::GraphFileRole::Topology {
+                    return Err(corrupt("node topology entry has the wrong role"));
+                }
+                declared_nodes.push(AdmittedEdgeFile {
+                    path: root.join(&relative),
+                    relative_path: entry.relative_path.clone(),
+                });
+            }
             entries.push((entry, relative));
         }
+        let node_files = requested_route.is_none().then_some(declared_nodes);
         let mut admitted =
             Self::admit_read_entries(root, entries, requested_route, table.as_ref())?;
         admitted.edge_routes = edge_routes;
+        admitted.node_files = node_files;
         Ok(admitted)
     }
 
@@ -412,11 +454,13 @@ impl AuthenticatedPropertyInventory {
                 Ok(bytes)
             },
         )?;
-        let edge_routes = if requested_route.is_none() {
-            admit_edge_route_paths(root, &inventory.files, table.as_ref(), false)?
-        } else {
-            BTreeMap::new()
-        };
+        let topology = topology_authority(
+            root,
+            &inventory.files,
+            table.as_ref(),
+            false,
+            requested_route,
+        )?;
         let entries = resolve_versioned_property_entries_for_route(
             root,
             inventory.files,
@@ -424,7 +468,8 @@ impl AuthenticatedPropertyInventory {
             table.as_ref(),
         )?;
         let mut admitted = Self::admit_entries(root, entries, requested_route, table.as_ref())?;
-        admitted.edge_routes = edge_routes;
+        admitted.edge_routes = topology.edge_routes;
+        admitted.node_files = topology.node_files;
         Ok(admitted)
     }
 
@@ -438,6 +483,10 @@ impl AuthenticatedPropertyInventory {
         Self::from_resolved_generation_route(generation, Some((kind, route)))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one constructor per participant version, each binding its own root and route authority"
+    )]
     pub(super) fn from_resolved_generation_route(
         generation: &crate::ResolvedProjectGeneration,
         requested_route: Option<(PropertyRouteKind, &str)>,
@@ -449,6 +498,7 @@ impl AuthenticatedPropertyInventory {
                 generation_lease: Some(generation.clone()),
                 routes: BTreeMap::new(),
                 edge_routes: BTreeMap::new(),
+                node_files: None,
                 schemas: BTreeMap::new(),
                 authority_bytes: 0,
                 authority_block_equivalents: 0,
@@ -487,11 +537,13 @@ impl AuthenticatedPropertyInventory {
                         Ok(bytes)
                     },
                 )?;
-                let edge_routes = if requested_route.is_none() {
-                    admit_edge_route_paths(&root, &inventory.files, route_table.as_ref(), false)?
-                } else {
-                    BTreeMap::new()
-                };
+                let topology = topology_authority(
+                    &root,
+                    &inventory.files,
+                    route_table.as_ref(),
+                    false,
+                    requested_route,
+                )?;
                 let entries = resolve_versioned_property_entries_for_route(
                     &root,
                     inventory.files,
@@ -500,7 +552,8 @@ impl AuthenticatedPropertyInventory {
                 )?;
                 let mut admitted =
                     Self::admit_entries(&root, entries, requested_route, route_table.as_ref())?;
-                admitted.edge_routes = edge_routes;
+                admitted.edge_routes = topology.edge_routes;
+                admitted.node_files = topology.node_files;
                 Ok::<Self, GfError>(admitted)
             }
             crate::graph_files::GraphFilesParticipant::V2(_) => {
@@ -516,11 +569,13 @@ impl AuthenticatedPropertyInventory {
                         )
                     },
                 )?;
-                let edge_routes = if requested_route.is_none() {
-                    admit_edge_route_paths(root, &inventory.files, route_table.as_ref(), true)?
-                } else {
-                    BTreeMap::new()
-                };
+                let topology = topology_authority(
+                    root,
+                    &inventory.files,
+                    route_table.as_ref(),
+                    true,
+                    requested_route,
+                )?;
                 let entries = inventory
                     .files
                     .into_iter()
@@ -534,7 +589,8 @@ impl AuthenticatedPropertyInventory {
                     .collect::<Result<Vec<_>, GfError>>()?;
                 let mut admitted =
                     Self::admit_entries(root, entries, requested_route, route_table.as_ref())?;
-                admitted.edge_routes = edge_routes;
+                admitted.edge_routes = topology.edge_routes;
+                admitted.node_files = topology.node_files;
                 Ok::<Self, GfError>(admitted)
             }
         }?;
@@ -669,29 +725,14 @@ impl AuthenticatedPropertyInventory {
                 merge_route_schema(&mut schemas, *kind, route, fragment.schema.as_ref())?;
             }
         }
-        let schemas = schemas
-            .into_iter()
-            .map(|(key, mut schema): (_, RouteSchemaBuilder)| {
-                if let Some(latest) = routes.get(&key).and_then(|fragments| fragments.last()) {
-                    apply_authenticated_live_schema(&mut schema, latest.schema.as_ref())?;
-                }
-                let mut fields = vec![schema.uuid];
-                fields.extend(schema.fields.into_values());
-                Ok((
-                    key,
-                    Arc::new(arrow::datatypes::Schema::new_with_metadata(
-                        fields,
-                        schema.metadata,
-                    )),
-                ))
-            })
-            .collect::<Result<_, GfError>>()?;
+        let schemas = finalize_route_schemas(schemas, &routes)?;
         Ok(Self {
             generation_lease: None,
             root: Some(root),
             root_path: Some(root_path.to_path_buf()),
             routes,
             edge_routes: BTreeMap::new(),
+            node_files: None,
             schemas,
             authority_bytes: 0,
             authority_block_equivalents: 0,
@@ -1037,6 +1078,89 @@ fn inventory_entry_reaches_route(
         return Err(corrupt("properties role names a non-property path"));
     };
     Ok(requested_route.is_none_or(|requested| (kind, route.as_str()) == requested))
+}
+
+/// Apply each route's latest authenticated live schema and freeze the result.
+fn finalize_route_schemas(
+    schemas: BTreeMap<(PropertyRouteKind, String), RouteSchemaBuilder>,
+    routes: &BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>>,
+) -> Result<BTreeMap<(PropertyRouteKind, String), arrow::datatypes::SchemaRef>, GfError> {
+    schemas
+        .into_iter()
+        .map(|(key, mut schema)| {
+            if let Some(latest) = routes.get(&key).and_then(|fragments| fragments.last()) {
+                apply_authenticated_live_schema(&mut schema, latest.schema.as_ref())?;
+            }
+            let mut fields = vec![schema.uuid];
+            fields.extend(schema.fields.into_values());
+            Ok((
+                key,
+                Arc::new(arrow::datatypes::Schema::new_with_metadata(
+                    fields,
+                    schema.metadata,
+                )),
+            ))
+        })
+        .collect()
+}
+
+/// The topology files an inventory declares: edge routes and node files.
+struct TopologyAuthority {
+    edge_routes: BTreeMap<String, Vec<AdmittedEdgeFile>>,
+    node_files: Option<Vec<AdmittedEdgeFile>>,
+}
+
+/// Edge routes and declared node files of an inventory, or none of either for
+/// a route-scoped request, which carries no topology authority.
+fn topology_authority(
+    root: &Path,
+    entries: &[crate::GraphFileEntry],
+    table: Option<&crate::route_component::RouteTable>,
+    cas: bool,
+    requested_route: Option<(PropertyRouteKind, &str)>,
+) -> Result<TopologyAuthority, GfError> {
+    if requested_route.is_some() {
+        return Ok(TopologyAuthority {
+            edge_routes: BTreeMap::new(),
+            node_files: None,
+        });
+    }
+    Ok(TopologyAuthority {
+        edge_routes: admit_edge_route_paths(root, entries, table, cas)?,
+        node_files: Some(admit_node_paths(root, entries, cas)?),
+    })
+}
+
+fn is_node_topology_path(relative: &str) -> bool {
+    relative == "topology/nodes.parquet" || relative.starts_with("topology/nodes/")
+}
+
+/// The node topology files an inventory declares, resolved like edge routes:
+/// the CAS object for a compact root, the tree file for an expanded one.
+fn admit_node_paths(
+    root: &Path,
+    entries: &[crate::GraphFileEntry],
+    cas: bool,
+) -> Result<Vec<AdmittedEdgeFile>, GfError> {
+    let mut files = Vec::new();
+    for entry in entries {
+        if !is_node_topology_path(&entry.relative_path) {
+            continue;
+        }
+        if entry.role != crate::GraphFileRole::Topology {
+            return Err(corrupt("node topology entry has the wrong role"));
+        }
+        let path = if cas {
+            crate::graph_object_path(root, &entry.content_sha256)?
+        } else {
+            crate::graph_files::resolve_v1_inventory_entry(root, entry)?
+        };
+        files.push(AdmittedEdgeFile {
+            path,
+            relative_path: entry.relative_path.clone(),
+        });
+    }
+    Ok(files)
 }
 
 fn admit_edge_route_paths(

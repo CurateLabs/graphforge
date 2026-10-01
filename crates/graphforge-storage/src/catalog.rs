@@ -1290,7 +1290,10 @@ impl GraphCatalog {
         // ---- topology nodes ----
         schema.register(
             "topology_nodes",
-            Arc::new(TopologyNodeTable::open_project(dir)?),
+            Arc::new(TopologyNodeTable::open_with_inventory(
+                dir,
+                inventory.as_deref(),
+            )?),
         );
 
         // ---- typed edge tables ----
@@ -1485,6 +1488,15 @@ impl GraphCatalog {
     #[must_use]
     pub fn admitted_inventory(&self) -> Option<Arc<crate::AuthenticatedPropertyInventory>> {
         self.lowering_property_inventory()
+    }
+
+    /// Node provider over the files this catalog's admitted inventory
+    /// declares (#1388); a catalog without that authority lists the directory.
+    ///
+    /// # Errors
+    /// Returns the directory listing failure when no inventory is retained.
+    pub fn node_table(&self, dir: &Path) -> Result<TopologyNodeTable, DataFusionError> {
+        TopologyNodeTable::open_with_inventory(dir, self.lowering_property_inventory().as_deref())
     }
 
     /// Relation provider pinned to this catalog's admitted route authority.
