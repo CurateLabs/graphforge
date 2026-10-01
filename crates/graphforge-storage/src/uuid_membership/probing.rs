@@ -43,7 +43,9 @@ use super::validate_run_contents;
 use super::validate_run_descriptors;
 use super::validate_surrogate_pairs;
 use graphforge_core::GfError;
+#[cfg(test)]
 use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
+#[cfg(test)]
 use sha2::Digest;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -493,6 +495,7 @@ impl AuthenticatedUuidIndexSnapshot {
                 },
             )?,
             sha256: record.sha256.clone(),
+            xxh64: record.xxh64,
             parent_manifest_sha256: self.manifest_sha256.clone(),
         })
     }
@@ -589,7 +592,7 @@ impl AuthenticatedUuidIndexSnapshot {
             },
         )?;
         file.seek(SeekFrom::Start(0)).map_err(storage_err)?;
-        let mut digest = Sha256::new();
+        let mut checksum = crate::corruption_checksum::Checksum::new();
         let mut actual_bytes = 0_u64;
         let mut block = vec![0_u8; BULK_IO_BYTES];
         loop {
@@ -597,7 +600,7 @@ impl AuthenticatedUuidIndexSnapshot {
             if count == 0 {
                 break;
             }
-            digest.update(&block[..count]);
+            checksum.update(&block[..count]);
             actual_bytes = actual_bytes.saturating_add(count as u64);
         }
         if identity.volume_serial != reference.source_volume
@@ -605,7 +608,8 @@ impl AuthenticatedUuidIndexSnapshot {
             || reference.bytes != expected_bytes
             || actual_bytes != expected_bytes
             || reference.sha256 != record.sha256
-            || hex_bytes(&digest.finalize()) != record.sha256
+            || reference.xxh64 != record.xxh64
+            || checksum.finish() != record.xxh64
         {
             return Err(storage_err(format!(
                 "retained construction reference changed: volume={} expected_volume={} file_id={} expected_file_id={} bytes={} expected_bytes={} reference_sha={} manifest_sha={}",

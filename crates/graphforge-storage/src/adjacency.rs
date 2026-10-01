@@ -85,7 +85,15 @@ pub const DEFAULT_CSR_SHARD_EDGES: usize = 1_048_576;
 /// Default maximum local CSR rows (offset entries minus one) per shard.
 pub const DEFAULT_CSR_SHARD_NODES: usize = 1_048_576;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CapturedAdjacencyArtifact {
+    pub(crate) path: PathBuf,
+    pub(crate) bytes: u64,
+    pub(crate) sha256: String,
+    pub(crate) xxh64: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct CsrShardRecord {
     first_node: u64,
@@ -565,7 +573,10 @@ impl ShardedCsrWriter {
         Ok(())
     }
 
-    fn finish(mut self, node_count: u64) -> Result<(u64, u64, u64), GfError> {
+    fn finish(
+        mut self,
+        node_count: u64,
+    ) -> Result<(u64, u64, u64, Vec<CapturedAdjacencyArtifact>), GfError> {
         use std::io::Write as _;
 
         self.flush()?;
@@ -640,6 +651,16 @@ impl ShardedCsrWriter {
             manifest.shards.len() as u64,
             self.peak_shard_edges,
             self.peak_shard_nodes,
+            manifest
+                .shards
+                .iter()
+                .map(|record| CapturedAdjacencyArtifact {
+                    path: self.root.join(&record.file),
+                    bytes: record.encoded_bytes,
+                    sha256: record.sha256.clone(),
+                    xxh64: record.xxh64,
+                })
+                .collect(),
         ))
     }
 
@@ -1991,6 +2012,42 @@ mod tests {
     }
 
     #[test]
+    fn csr_final_writer_returns_single_pass_shard_identity_captures() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        let expected = sample_csr();
+        let capture = graphforge_core::hash_observation::operation::Capture::start();
+        let mut writer = ShardedCsrWriter::create(&path, 2, DEFAULT_CSR_SHARD_NODES).unwrap();
+        for node in 0..expected.node_count() {
+            for (edge, neighbor) in expected.row(node).iter() {
+                writer.emit((node, edge, neighbor)).unwrap();
+            }
+        }
+        let (shards, _, _, captures) = writer.finish(expected.node_count()).unwrap();
+        let observed = capture.snapshot();
+        drop(capture);
+        assert_eq!(shards as usize, captures.len());
+        let mut bytes = 0;
+        for artifact in captures {
+            let actual = std::fs::read(&artifact.path).unwrap();
+            assert_eq!(actual.len() as u64, artifact.bytes);
+            assert_eq!(sha256_hex(&actual), artifact.sha256);
+            assert_eq!(
+                crate::corruption_checksum::checksum(&actual),
+                artifact.xxh64
+            );
+            bytes += artifact.bytes;
+        }
+        assert_eq!(observed.artifact_payload_sha256_bytes, bytes);
+        assert_eq!(observed.unclassified_sha256_bytes, 0);
+        assert_eq!(observed.checksum_bytes, bytes);
+        assert_eq!(
+            ShardedCsrIndex::open(&path).unwrap().edge_count(),
+            expected.edge_count()
+        );
+    }
+
+    #[test]
     fn sharded_csr_crosses_boundaries_and_rejects_missing_or_corrupt_shards() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("KNOWS.out.csr");
@@ -2448,7 +2505,7 @@ mod tests {
         let mut writer = ShardedCsrWriter::create(&path, 8, 2).unwrap();
         writer.emit((0, 1, 100)).unwrap();
         writer.emit((1_000_000, 2, 0)).unwrap();
-        let (shards, _, peak_nodes) = writer.finish(1_000_001).unwrap();
+        let (shards, _, peak_nodes, _) = writer.finish(1_000_001).unwrap();
         assert_eq!(shards, 2);
         assert!(peak_nodes <= 2);
         let reader = ShardedCsrIndex::open(&path).unwrap();

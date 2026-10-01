@@ -3,8 +3,10 @@ use super::super::IDENTITY_RECORD_BYTES;
 use super::super::IDENTITY_RECORD_WIDTH;
 use super::super::INDEX_DIR;
 use super::super::NODE_LOOKUP_RECORD_BYTES;
+use super::super::NODE_LOOKUP_RECORD_WIDTH;
 use super::super::UuidMembershipIndex;
 use super::super::append_uuid_membership_delta;
+use super::super::hex_bytes;
 use super::super::identity_codec;
 use super::super::ordinal_artifacts::publish_v4_construction_artifacts;
 use super::super::ordinal_artifacts::stage_v4_ordinal_bundle;
@@ -15,6 +17,7 @@ use super::super::topology_delta::plan_uuid_membership_delta;
 use super::super::topology_delta::write_identity_records;
 use super::cleanup_private_construction_index;
 use super::encode_construction_index;
+use sha2::Digest;
 use std::fs;
 use std::fs::File;
 use std::io::BufWriter;
@@ -265,4 +268,35 @@ fn construction_intent_rejects_published_format_as_private_version() {
             version == super::CONSTRUCTION_INTENT_FORMAT_VERSION
         );
     }
+}
+
+#[test]
+fn uuid_final_capture_hashes_whole_payload_once_and_retires_block_sha() {
+    let mut bytes = Vec::new();
+    for node_id in 1_u64..=4096 {
+        bytes.extend_from_slice(&node_id.to_be_bytes());
+        bytes.extend_from_slice(Uuid::from_u128(u128::from(node_id)).as_bytes());
+    }
+    let expected = hex_bytes(&crate::payload_digest::PayloadSha256::digest(&bytes));
+    let expected_checksum = crate::corruption_checksum::checksum(&bytes);
+    let capture = graphforge_core::hash_observation::operation::Capture::start();
+    let (sha, checksum, blocks, count) = super::super::describe_stream(
+        &mut std::io::Cursor::new(&bytes),
+        NODE_LOOKUP_RECORD_WIDTH,
+        &mut (0, 0),
+    )
+    .unwrap();
+    let observed = capture.snapshot();
+    assert_eq!(observed.artifact_payload_sha256_bytes, bytes.len() as u64);
+    assert_eq!(observed.checksum_bytes, 2 * bytes.len() as u64);
+    assert_eq!(observed.unclassified_sha256_bytes, 0);
+    assert_eq!((sha, checksum, count), (expected, expected_checksum, 4096));
+    assert!(
+        serde_json::to_value(&blocks)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|block| block.get("sha256").is_none() && block.get("xxh64").is_some())
+    );
 }

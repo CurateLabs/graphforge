@@ -299,12 +299,19 @@ fn compact_retained_reference_authentication_is_batched_and_linear() {
             target_path: &reference.target_path,
             bytes: reference.bytes,
             sha256: &reference.sha256,
+            xxh64: reference.xxh64,
             parent_manifest_sha256: &reference.parent_manifest_sha256,
         })
         .collect::<Vec<_>>();
+    let capture = graphforge_core::hash_observation::operation::Capture::start();
     let work = snapshot
         .authenticate_construction_references(&references)
         .unwrap();
+    let observed = capture.snapshot();
+    drop(capture);
+    assert_eq!(observed.artifact_payload_sha256_bytes, 0);
+    assert_eq!(observed.unclassified_sha256_bytes, 0);
+    assert!(observed.checksum_bytes >= work.referenced_payload_bytes);
     assert_eq!(
         work.global_revalidation_bytes,
         snapshot.snapshot_authentication_bytes() * 2
@@ -386,9 +393,11 @@ fn lookup_lazily_rejects_authenticated_pair_inconsistency() {
     bytes[8..24].copy_from_slice(Uuid::from_u128(999).as_bytes());
     fs::write(&path, &bytes).unwrap();
     let mut file = File::open(&path).unwrap();
-    let (sha256, blocks, count) = describe_blocks(&mut file, NODE_LOOKUP_RECORD_BYTES).unwrap();
+    let (sha256, xxh64, blocks, count) =
+        describe_blocks(&mut file, NODE_LOOKUP_RECORD_BYTES).unwrap();
     assert_eq!(count, run.node_surrogates.count);
     run.node_surrogates.sha256 = sha256;
+    run.node_surrogates.xxh64 = xxh64;
     run.node_surrogates.blocks = blocks;
     fs::write(root.join(MANIFEST), serde_json::to_vec(&manifest).unwrap()).unwrap();
 
@@ -410,11 +419,11 @@ fn checksum_uuid_manifest_refuses_legacy_missing_and_malformed_metadata() {
     rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
     let path = dir.path().join(INDEX_DIR).join(MANIFEST);
     let original: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    for mode in 0..4 {
+    for mode in 0..8 {
         let mut changed = original.clone();
         match mode {
             0 => {
-                changed["format_version"] = serde_json::json!(5);
+                changed["format_version"] = serde_json::json!(6);
                 for run in changed["runs"].as_array_mut().unwrap() {
                     for file in ["identities", "node_surrogates"] {
                         for block in run[file]["blocks"].as_array_mut().unwrap() {
@@ -423,7 +432,21 @@ fn checksum_uuid_manifest_refuses_legacy_missing_and_malformed_metadata() {
                     }
                 }
             }
-            1 => changed["format_version"] = serde_json::json!(7),
+            1 => changed["format_version"] = serde_json::json!(8),
+            4 => {
+                changed.as_object_mut().unwrap().remove("format_version");
+            }
+            5 => {
+                changed["runs"][0]["identities"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("xxh64");
+            }
+            6 => changed["runs"][0]["identities"]["xxh64"] = serde_json::json!("bad"),
+            7 => {
+                changed["runs"][0]["identities"]["blocks"][0]["sha256"] =
+                    serde_json::json!("a".repeat(64))
+            }
             2 => {
                 changed["runs"][0]["identities"]["blocks"][0]
                     .as_object_mut()
@@ -455,10 +478,10 @@ fn checksum_uuid_manifest_refuses_legacy_missing_and_malformed_metadata() {
         for error in errors {
             assert_eq!(
                 error.contains("unsupported UUID membership format version"),
-                mode < 2,
+                mode < 2 || mode == 4,
                 "mode={mode}: {error}"
             );
-            if mode < 2 {
+            if mode < 2 || mode == 4 {
                 assert!(error.contains("recreate the index"), "{error}");
             }
         }

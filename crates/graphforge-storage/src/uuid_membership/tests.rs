@@ -424,7 +424,6 @@ pub(super) fn install_test_v4_facet(
             blocks: vec![crate::V4OrdinalBlock {
                 offset: 0,
                 count: nodes.len() as u64,
-                sha256: hex_sha256(&ordinal_bytes),
                 xxh64: crate::corruption_checksum::checksum(&ordinal_bytes),
             }],
         }],
@@ -443,7 +442,6 @@ pub(super) fn install_test_v4_facet(
                 count: 1,
                 first: nodes.len() as u64,
                 last: nodes.len() as u64,
-                sha256: tombstone_digest,
                 xxh64: crate::corruption_checksum::checksum(&tombstone_bytes),
             }],
         }],

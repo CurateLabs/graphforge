@@ -980,6 +980,7 @@ mod tests {
                             path: path.into(),
                             bytes,
                             sha256: entry.content_sha256.clone(),
+                            xxh64: entry.content_xxh64,
                         };
                     let entry_bytes = serde_json::to_vec(&entry).unwrap().len() as u64;
                     let artifact_bytes = serde_json::to_vec(&artifact).unwrap().len() as u64;

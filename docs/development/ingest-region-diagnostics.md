@@ -188,7 +188,7 @@ The method and reviewed classification inputs are pinned by SHA-256:
 `digest-census.py` is
 `640e8221d88c8065f9e60aa0e9182545c3e43b52bbb9618c885717d5d3b2f1ba`;
 `digest-census-overrides.json` is
-`bdde8cff097b818265a49ebcfa1876e8b7f48a67306b218a1b2b1016a24533bc`.
+`24ab0d1f06db5665c097cbc7f4d8c9d2245ce40bacc58e0c3d473b30b70ccf51`.
 The parser fixture `test-digest-census.py` is
 `77224ebc214e8c8793baced7d105bdc576cd0015feb436a0af701260998a48f1`.
 Run the parser and stale-review regression fixtures with
@@ -217,11 +217,46 @@ by their callers, and typed wrappers add no extra hash pass.
 Private construction checkpoint wire 11 binds intermediate spill receipts by
 exact length and mandatory seed-zero XXH64. Spill writers and resume admission
 count checksum work separately and perform no SHA pass at those boundaries.
-Published UUID wire 6 and ordinal descriptor wire 5 remain unchanged here.
+Published UUID wire 7 and ordinal descriptor wire 6 retain whole-artifact SHA
+names and required whole/block XXH64, and refuse retired per-block SHA fields.
+Private encoded inventory wire 2 requires whole-artifact checksums for both new
+and retained entries. Checkpoint/inventory, generation, shape and current-parent
+controls admit those expected values before replay or copying. Final writers
+forward genuine SHA/XXH64/length captures, including existing CSR shard records.
+A private retained-source capability checks native identity, path, link, length
+and active allocation while one source is copied at a time. The copying boundary
+checksums actual accepted bytes, detecting same-inode mutate/read/restore.
+An existing CAS object still requires genuine SHA unless the same installation
+lease binds its exact native identity. Unknown objects, concurrent winners,
+public untrusted input and orphan deletion authority retain SHA authentication.
+Encoder replay and retained-parent admission use authenticated checksums. Reclaim
+continues to read zero encoded payload; this change removes no reclaim sweep.
 Encoding still counts the full raw identity-run SHA as artifact work and forwards
 its genuine digest to the existing topology receipt. Control SHA covers the
 private intent, shape, progress and encoding-inventory metadata, including their
 expected checksums.
+
+Reproduce the encoded capture and refusal tests with the real storage runner:
+
+```bash
+python3 scripts/test_environment.py -- cargo nextest run --locked -p graphforge-storage --lib -E 'test(graph_construction_encoding::) or test(graph_construction::encoding_publication::) or test(uuid_membership::) or test(ordinal_identity_v4::) or test(adjacency::)'
+```
+
+Direct operation counters assert whole-artifact capture bytes once, no additional
+artifact SHA for admitted replay/copy and known native CAS reuse, and genuine SHA
+for unknown CAS. SHA names and mapping commitments are compared with independently
+computed payload identities and existing canonical goldens. Strict metadata tests
+cover current missing/malformed checksums and header-first unsupported versions.
+The copied-byte mutation fixture restores valid same-length bytes after they
+are read; checksum refusal and unchanged `CURRENT` are asserted independently.
+
+Current capture-method inputs are pinned by SHA-256:
+
+- `crates/graphforge-storage/src/graph_construction_encoding.rs`: `fb026a30d02114eb618288ff57d02ad0feba1ff885fa1dc4c180e0acb7a8340e`.
+- `crates/graphforge-storage/src/graph_construction/encoding_publication/tests.rs`: `4bc7bfa9b934465242a6b24f68b27ea9de4b9e5e0c4a1410cc637153ff05582e`.
+- `crates/graphforge-storage/src/uuid_membership/construction/tests.rs`: `28ac946e67ee609f9df3935d17aea85a6dbda52af0c51d763951f8844e40defb`.
+- `crates/graphforge-storage/src/uuid_membership/ordinal_artifacts/tests.rs`: `553018c2b4b91aa53cfc8a7a047db14040ab8e6c08282a4a2e10bdd74e1acf0f`.
+- `crates/graphforge-storage/src/adjacency.rs`: `f79d07767953ef711d340c8b3c8b43e4f49dc61754530b2864ac7504d468a9c9`.
 
 The method records the source revision, source-file SHA-256 digests, the working
 diff digest when present, and digests of the method and semantic override inputs.

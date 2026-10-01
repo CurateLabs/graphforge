@@ -843,8 +843,8 @@ fn authenticate_private_v4_residue(
                 "private v4 construction manifest does not match its receipt",
             ));
         }
-        let manifest: crate::V4OrdinalIdentityManifest =
-            serde_json::from_slice(&manifest_body).map_err(storage_err)?;
+        let manifest = crate::ordinal_identity_v4::decode_ordinal_manifest(&manifest_body)
+            .map_err(storage_err)?;
         if manifest.topology_generation != receipt.expected_generation {
             return Err(storage_err(
                 "private v4 construction generation does not match its receipt",
@@ -930,8 +930,8 @@ fn authenticate_private_v4_control_temp(
                 name,
                 crate::ordinal_identity_v4::MAX_MANIFEST_BYTES,
             )?;
-            let manifest: crate::V4OrdinalIdentityManifest =
-                serde_json::from_slice(&body).map_err(storage_err)?;
+            let manifest =
+                crate::ordinal_identity_v4::decode_ordinal_manifest(&body).map_err(storage_err)?;
             if hex_sha256(&body) != receipt.manifest_sha256
                 || manifest.topology_generation != receipt.expected_generation
             {
@@ -1025,7 +1025,7 @@ pub(super) fn authenticate_private_v4_artifact_file(
 ) -> Result<(), GfError> {
     if graphforge_filesystem::file_link_count(&file).map_err(storage_err)? != 1
         || file.metadata().map_err(storage_err)?.len() != artifact.bytes
-        || sha256_reader_streaming(file)? != artifact.sha256
+        || checksum_reader_streaming(file)? != (artifact.xxh64, artifact.bytes)
     {
         return Err(storage_err("private v4 artifact authentication failed"));
     }
@@ -1071,6 +1071,49 @@ fn canonical_lower_hex(value: &str, length: usize) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn checksum_reader_streaming(file: File) -> Result<(u64, u64), GfError> {
+    let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
+    let expected_bytes = file.metadata().map_err(storage_err)?.len();
+    let mut reader =
+        graphforge_filesystem::FileCacheReleasingReader::new(file).map_err(storage_err)?;
+    let checked = (|| {
+        let mut checksum = crate::corruption_checksum::Checksum::new();
+        let mut bytes = 0_u64;
+        let mut buffer = vec![0; BULK_IO_BYTES];
+        loop {
+            let count = reader.read(&mut buffer).map_err(storage_err)?;
+            if count == 0 {
+                break;
+            }
+            bytes = bytes
+                .checked_add(count as u64)
+                .ok_or_else(|| storage_err("private ordinal length overflow"))?;
+            if bytes > expected_bytes {
+                return Err(storage_err("private ordinal artifact grew"));
+            }
+            checksum.update(&buffer[..count]);
+        }
+        if bytes != expected_bytes
+            || graphforge_filesystem::file_identity(reader.file()).map_err(storage_err)? != identity
+            || graphforge_filesystem::file_link_count(reader.file()).map_err(storage_err)? != 1
+            || reader.file().metadata().map_err(storage_err)?.len() != expected_bytes
+        {
+            return Err(storage_err(
+                "private ordinal artifact identity or length changed",
+            ));
+        }
+        Ok((checksum.finish(), bytes))
+    })();
+    let cleanup = reader.finish().map_err(storage_err);
+    match (checked, cleanup) {
+        (Ok(value), Ok(_)) => Ok(value),
+        (Err(primary), Ok(_)) | (Ok(_), Err(primary)) => Err(primary),
+        (Err(primary), Err(cleanup)) => Err(storage_err(format!(
+            "{primary}; private ordinal cache cleanup also failed: {cleanup}"
+        ))),
+    }
 }
 
 fn sha256_reader_streaming(file: File) -> Result<String, GfError> {
@@ -1397,7 +1440,7 @@ struct ConstructionBlockCursor {
     block_index: usize,
     within: usize,
     records: u64,
-    digest: Sha256,
+    checksum: crate::corruption_checksum::Checksum,
     finished: bool,
     read_bytes: u64,
     read_operations: u64,
@@ -1425,7 +1468,7 @@ impl ConstructionBlockCursor {
             block_index: 0,
             within: 0,
             records: 0,
-            digest: Sha256::new(),
+            checksum: crate::corruption_checksum::Checksum::new(),
             finished: false,
             read_bytes: 0,
             read_operations: 0,
@@ -1471,7 +1514,7 @@ impl ConstructionBlockCursor {
         if self.block_index == self.descriptor.blocks.len() {
             self.finished = true;
             let authenticated = if self.records != self.descriptor.count
-                || hex_bytes(&self.digest.clone().finalize()) != self.descriptor.sha256
+                || self.checksum.clone().finish() != self.descriptor.xxh64
             {
                 Err(storage_err(
                     "construction merge source authentication failed",
@@ -1499,7 +1542,7 @@ impl ConstructionBlockCursor {
         if !block_matches(&self.block, expected, self.width) {
             return Err(storage_err("construction merge source block changed"));
         }
-        self.digest.update(&self.block);
+        self.checksum.update(&self.block);
         self.block_index += 1;
         self.within = 0;
         Ok(())
@@ -1630,7 +1673,7 @@ fn describe_and_install_construction_run(
     work.read_bytes = work.read_bytes.saturating_add(reads.0);
     work.read_operations = work.read_operations.saturating_add(reads.1);
     let released = file.finish().map_err(storage_err);
-    let ((sha256, blocks, count), read_cache_release) = match (described, released) {
+    let ((sha256, xxh64, blocks, count), read_cache_release) = match (described, released) {
         (Ok(described), Ok(released)) => (described, released),
         (Ok(_), Err(release)) => return Err(release),
         (Err(primary), Ok(_)) => return Err(primary),
@@ -1655,11 +1698,13 @@ fn describe_and_install_construction_run(
         name: name.clone(),
         bytes,
         sha256: sha256.clone(),
+        xxh64,
     });
     Ok(FileRecord {
         name,
         count,
         sha256,
+        xxh64,
         blocks,
     })
 }
@@ -1722,6 +1767,7 @@ pub(super) fn install_construction_bytes(
         ConstructionIndexOutput {
             name: name.to_owned(),
             bytes: bytes.len() as u64,
+            xxh64: crate::corruption_checksum::checksum(bytes),
             sha256: if matches!(name, MANIFEST | V4_ORDINAL_RECEIPT | V4_ORDINAL_MANIFEST) {
                 hex_sha256(bytes)
             } else {

@@ -12,6 +12,108 @@ use super::{
     replace_checkpoint_control, shape_authority_sha256, storage, supersession, validate_sha256,
 };
 
+/// Inventory authority admitted by this session's checkpoint and current parent.
+/// Records retain no per-artifact descriptors; each source is opened and released
+/// sequentially by the consuming publication loop.
+pub(crate) struct CapturedEncodedInventory<'a> {
+    root: &'a StableDirectory,
+    artifacts: &'a [crate::graph_construction_encoding::ConstructionEncodedArtifact],
+    active_identities: &'a std::collections::BTreeMap<String, u64>,
+}
+
+/// One non-forgeable, retained source from the admitted inventory.
+pub(crate) struct CapturedEncodedArtifact<'a> {
+    root: &'a StableDirectory,
+    parent: StableDirectory,
+    name: std::ffi::OsString,
+    file: std::fs::File,
+    identity: graphforge_filesystem::FileIdentity,
+    allocated_bytes: u64,
+    artifact: &'a crate::graph_construction_encoding::ConstructionEncodedArtifact,
+}
+
+impl CapturedEncodedInventory<'_> {
+    pub(crate) fn open(&self, relative: &Path) -> Result<CapturedEncodedArtifact<'_>, GfError> {
+        self.root.revalidate_named().map_err(storage)?;
+        let text = relative
+            .to_str()
+            .ok_or_else(|| storage("encoded path is not UTF-8"))?;
+        let index = self
+            .artifacts
+            .binary_search_by(|entry| entry.path.as_str().cmp(text))
+            .map_err(|_| storage("encoded source is absent from admitted inventory"))?;
+        let artifact = &self.artifacts[index];
+        let mut components = relative.components().collect::<Vec<_>>();
+        let name = match components.pop() {
+            Some(std::path::Component::Normal(name)) => name.to_os_string(),
+            _ => return Err(storage("encoded source name is not normalized")),
+        };
+        let mut parent = self.root.try_clone().map_err(storage)?;
+        for component in components {
+            let std::path::Component::Normal(name) = component else {
+                return Err(storage("encoded source path is not normalized"));
+            };
+            parent = parent.open_child_directory(name).map_err(storage)?;
+        }
+        let file = parent.open_child_file(&name).map_err(storage)?;
+        let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
+        let usage = graphforge_filesystem::file_space_usage(&file).map_err(storage)?;
+        let identity_key = format!("{:016x}:{}", identity.volume_serial, hex(&identity.file_id));
+        if self.active_identities.get(&identity_key) != Some(&usage.allocated_bytes) {
+            return Err(storage(
+                "captured encoded source allocation identity changed",
+            ));
+        }
+        let source = CapturedEncodedArtifact {
+            root: self.root,
+            parent,
+            name,
+            file,
+            identity,
+            allocated_bytes: usage.allocated_bytes,
+            artifact,
+        };
+        source.revalidate()?;
+        Ok(source)
+    }
+}
+
+impl CapturedEncodedArtifact<'_> {
+    pub(crate) fn content_sha256(&self) -> &str {
+        &self.artifact.sha256
+    }
+    pub(crate) fn bytes(&self) -> u64 {
+        self.artifact.bytes
+    }
+    pub(crate) fn checksum(&self) -> u64 {
+        self.artifact.xxh64
+    }
+    pub(crate) fn source(&self) -> &std::fs::File {
+        &self.file
+    }
+    pub(crate) fn revalidate(&self) -> Result<(), GfError> {
+        self.root.revalidate_named().map_err(storage)?;
+        self.parent.revalidate_named().map_err(storage)?;
+        let named = self.parent.open_child_file(&self.name).map_err(storage)?;
+        let metadata = self.file.metadata().map_err(storage)?;
+        if !metadata.is_file()
+            || metadata.len() != self.bytes()
+            || graphforge_filesystem::file_identity(&self.file).map_err(storage)? != self.identity
+            || graphforge_filesystem::file_identity(&named).map_err(storage)? != self.identity
+            || graphforge_filesystem::file_link_count(&self.file).map_err(storage)? != 1
+            || graphforge_filesystem::file_space_usage(&self.file)
+                .map_err(storage)?
+                .allocated_bytes
+                != self.allocated_bytes
+        {
+            return Err(storage(
+                "captured encoded source identity or length changed",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl GraphConstructionSession {
     /// Authenticate an already committed publication without preparing private
     /// encoding, using its exact immutable generation after `CURRENT` advances.
@@ -441,7 +543,10 @@ impl GraphConstructionSession {
                 .entries()
                 .find(|entry| entry.relative_path == retained.target_path)
                 .ok_or_else(|| storage("retained construction object is absent from parent"))?;
-            if entry.byte_length != retained.bytes || entry.content_sha256 != retained.sha256 {
+            if entry.byte_length != retained.bytes
+                || entry.content_sha256 != retained.sha256
+                || entry.content_xxh64 != retained.xxh64
+            {
                 return Err(storage("retained construction object authority changed"));
             }
         }
@@ -463,17 +568,14 @@ impl GraphConstructionSession {
         if workspace_identity != encoded_directory.identity() {
             return Err(storage("encoded workspace path identity changed"));
         }
-        let sealed_files = encoding
-            .artifacts
-            .iter()
-            .map(
-                |artifact| crate::graph_object_store::AuthenticatedGraphFile {
-                    relative_path: PathBuf::from(&artifact.path),
-                    byte_length: artifact.bytes,
-                    content_sha256: artifact.sha256.clone(),
-                },
-            )
-            .collect::<Vec<_>>();
+        let captured_inventory = CapturedEncodedInventory {
+            root: &encoded_directory,
+            artifacts: &encoding.artifacts,
+            active_identities: &self
+                .checkpoint
+                .evidence
+                .storage_active_identity_allocated_bytes,
+        };
         let (ordinal_tombstones, ordinal_io) =
             ordinal_publication_tombstones(&parent, &manifest_state, &encoded_directory, encoding)?;
         self.checkpoint.evidence.publication_application_read_bytes = self
@@ -521,11 +623,13 @@ impl GraphConstructionSession {
                     .publication_application_read_operations,
                 &[calls],
             )?;
-            crate::graph_object_store::append_authenticated_mapped_graph_files(
+            crate::graph_object_store::append_captured_mapped_graph_files(
                 &lease,
                 &workspace,
                 &mut manifest_state,
-                &sealed_files,
+                &encoding.artifacts,
+                &captured_inventory,
+                &mut cancelled,
                 &ordinal_tombstones,
                 &routes,
             )?

@@ -1368,7 +1368,7 @@ pub(super) fn publish_data(
         return Err(storage_err("internal run has a partial index record"));
     }
     let mut input = File::open(source).map_err(storage_err)?;
-    let (sha256, blocks, count) = describe_blocks(&mut input, record_bytes)?;
+    let (sha256, xxh64, blocks, count) = describe_blocks(&mut input, record_bytes)?;
     let name = format!("{kind}-{generation}-{}.uuidx", &sha256[..16]);
     let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
     let target = std::ffi::OsStr::new(&name);
@@ -1412,6 +1412,7 @@ pub(super) fn publish_data(
         name,
         count,
         sha256,
+        xxh64,
         blocks,
     })
 }

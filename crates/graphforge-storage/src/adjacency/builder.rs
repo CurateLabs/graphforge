@@ -15,6 +15,7 @@ mod tests;
 /// Aggregate bounded-resource evidence for one adjacency build.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AdjacencyBuildMetrics {
+    pub(crate) captured_artifacts: Vec<super::CapturedAdjacencyArtifact>,
     /// Projected source rows consumed from Parquet.
     pub source_rows: u64,
     /// Sorted spill runs written across relation and union accumulators.
@@ -663,18 +664,21 @@ impl EntryGroup {
         }
         let node_count = max_key.map_or(0, |key| key.saturating_add(1));
         let edge_count = writer.edge_count;
-        let (shards, peak_shard_edges, peak_shard_nodes) = writer.finish(node_count)?;
+        let (shards, peak_shard_edges, peak_shard_nodes, captured_artifacts) =
+            writer.finish(node_count)?;
         Ok(ShardedWriteOutcome {
             node_count,
             edge_count,
             shards,
             peak_shard_edges,
             peak_shard_nodes,
+            captured_artifacts,
         })
     }
 }
 
 struct ShardedWriteOutcome {
+    captured_artifacts: Vec<super::CapturedAdjacencyArtifact>,
     node_count: u64,
     edge_count: u64,
     shards: u64,
@@ -1016,6 +1020,9 @@ fn finish_groups(
     }
     let mut manifest = Vec::with_capacity(outcomes.len());
     for (index, outcome) in outcomes.into_iter().enumerate() {
+        metrics
+            .captured_artifacts
+            .extend(outcome.captured_artifacts);
         metrics.csr_shards = metrics.csr_shards.saturating_add(outcome.shards);
         metrics.peak_shard_edges = metrics.peak_shard_edges.max(outcome.peak_shard_edges);
         metrics.peak_shard_nodes = metrics.peak_shard_nodes.max(outcome.peak_shard_nodes);
