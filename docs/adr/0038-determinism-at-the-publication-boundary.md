@@ -30,6 +30,33 @@ this update does not broaden the published-byte boundary below. See
 
 The context below records the defect as it stood when this ADR was accepted.
 
+## Implementation update: the published UUID order fact (#1388)
+
+The ordinal-v4 manifest gains one optional field,
+`uuid_order_matches_ordinals`, inside the SHA-256-authenticated manifest. It
+records whether UUIDs ascend strictly across every ordinal, tombstoned or not,
+so the ordered fast path decides in O(1) instead of reading every ordinal
+block on its first query. This is an additive change to published bytes, made
+under this ADR's rule: the value is a deterministic function of the logical
+data, computed by the publisher from the records it streamed, never assumed.
+
+- Absent means unknown (every manifest published before this field). Readers
+  then prove the fact by reading the ordinals, so existing projects open and
+  answer unchanged. Omitting it is always safe; a writer that cannot derive it
+  must omit it, and an unknown parent stays unknown.
+- Fresh construction and rebuild set it from the streamed ordinals. A mutation
+  commit combines the parent's recorded fact, the parent's last UUID read from
+  its authenticated final range, and the delta's first UUID and order: an
+  inversion on either side is permanent, a boundary inversion breaks it, and
+  compaction re-packs the same sequence and keeps it. A construction delta
+  merged onto a parent keeps a known inversion and otherwise omits it.
+- A lie cannot be proven away at open without the scan it exists to avoid, so
+  it is contained: a reader that relies on a recorded `true` refuses any block
+  it reads whose UUIDs do not ascend, and complete admission, which every
+  writer runs before building on the artifacts, refuses a recorded fact that
+  disagrees with the ordinals. A lie that spans blocks a query never reads is
+  caught by the next writer, not by the query.
+
 ## Context
 
 The construction path's determinism contract was written as: *within a fixed set

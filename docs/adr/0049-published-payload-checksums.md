@@ -66,7 +66,9 @@ as it copies. The node-linear forward and ordinal identity runs are hard-linked
 read-only and opened without reading a byte: each lookup checks the required
 XXH64 of every ordinal or tombstone block it returns a value from, forward runs
 (read only by writers) are authenticated whole before a writer builds on them,
-and the proof that UUID order matches ordinal order reads every ordinal block
+and the fact that UUID order matches ordinal order is recorded by the publisher in
+the authenticated manifest ([ADR 0038](0038-determinism-at-the-publication-boundary.md));
+a manifest published before the field is proven by reading every ordinal block
 once, on the first ordered fast-path query. Bulk payloads (nodes, edges, property fragments and search segments)
 are checked for XXH64 on the first read of each object, memoized for that
 hydration, so a project that never reads an object never pays for it. A
