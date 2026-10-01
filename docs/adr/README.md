@@ -55,6 +55,7 @@ Roadmap-only ADRs are not retained in this tree.
 | 0047 | [Over-budget construction partitions succeed; one CPU budget per instance](0047-over-budget-partitions-and-instance-cpu-budget.md) | `0047-over-budget-partitions-and-instance-cpu-budget.md` |
 | 0048 | [Cargo with nextest is the CI build authority; Bazel is removed](0048-cargo-is-the-ci-build-authority.md) | `0048-cargo-is-the-ci-build-authority.md` |
 | 0049 | [Versioned checksums for published graph payload admission](0049-published-payload-checksums.md) | `0049-published-payload-checksums.md` |
+| 0050 | [The read path keeps its adjacency operators and chooses fast paths in the lowerer](0050-read-path-fast-path-selection.md) | `0050-read-path-fast-path-selection.md` |
 
 ## Superseded records
 
