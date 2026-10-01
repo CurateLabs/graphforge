@@ -2,6 +2,7 @@
 mod assertions;
 mod history;
 mod ontology;
+mod pinned_workspace;
 mod recovery;
 mod repeated;
 use super::*;
