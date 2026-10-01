@@ -15,12 +15,53 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub(super) struct GraphWorkspace {
     pub(super) dir: PathBuf,
-    pub(super) _owner: Arc<tempfile::TempDir>,
+    pub(super) owner: Arc<tempfile::TempDir>,
 }
 
 impl GraphWorkspace {
     pub(super) fn path(&self) -> &Path {
         &self.dir
+    }
+
+    /// Whether this workspace is a read-only alias of a published generation's
+    /// own `graph/` tree rather than a private copy. A private workspace always
+    /// lives inside its owner; a pinned alias reads a path outside it, so the
+    /// answer cannot drift from the paths the workspace actually holds.
+    pub(super) fn is_pinned_alias(&self) -> bool {
+        !self.dir.starts_with(self.owner.path())
+    }
+}
+
+/// How a facade's graph workspace relates to its generation's published tree.
+/// A pinned alias is never copied and so can never be written; the write-capable
+/// state is only constructible over a private copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WorkspaceAccess {
+    /// Read-only; the workspace is the published tree itself.
+    PinnedReadOnly,
+    /// Read-only semantics (no reconciliation) over a private copy, for a
+    /// facade that becomes writable once its generation is selected.
+    PrivateReadOnly,
+    /// Writable over a private copy.
+    Writable,
+}
+
+impl WorkspaceAccess {
+    pub(super) fn read_only(self) -> bool {
+        !matches!(self, Self::Writable)
+    }
+
+    pub(super) fn pins_published_tree(self) -> bool {
+        matches!(self, Self::PinnedReadOnly)
+    }
+}
+
+fn pinned_write_refused() -> GfError {
+    GfError::Project {
+        code: graphforge_core::ProjectErrorCode::ReadOnlyView,
+        message: "graph workspace is a pinned alias of a published generation tree; \
+                  a write would modify that generation in place"
+            .into(),
     }
 }
 
@@ -58,6 +99,23 @@ impl GraphForge {
                 self.resolved_generation.container_root(),
             )
         }
+    }
+
+    /// Fail closed when the workspace is a pinned alias of a published tree.
+    /// Every write and publication path calls this before touching the tree.
+    pub(super) fn require_private_workspace(&self) -> Result<(), GfError> {
+        if self.workspace_for_session().is_pinned_alias() {
+            return Err(pinned_write_refused());
+        }
+        Ok(())
+    }
+
+    /// The only transition out of read-only: refused while the workspace is a
+    /// pinned alias, so a writable facade can never sit on a published tree.
+    pub(super) fn enable_writes(&mut self) -> Result<(), GfError> {
+        self.require_private_workspace()?;
+        self.read_only = false;
+        Ok(())
     }
 
     pub(super) fn workspace_for_session(&self) -> GraphWorkspace {
@@ -370,7 +428,7 @@ fn create_graph_workspace(
 
 pub(super) fn hydrate_graph_workspace(
     generation: &ResolvedProjectGeneration,
-    read_only: bool,
+    pin_published_tree: bool,
 ) -> Result<
     (
         PathBuf,
@@ -415,7 +473,7 @@ pub(super) fn hydrate_graph_workspace(
             )?;
             return Ok((workspace.path().to_path_buf(), workspace, evidence));
         }
-        if read_only {
+        if pin_published_tree {
             let guard = Arc::new(
                 tempfile::Builder::new()
                     .prefix("graphforge-graph-pinned-")

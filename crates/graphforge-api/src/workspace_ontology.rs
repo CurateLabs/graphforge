@@ -319,7 +319,7 @@ impl GraphForge {
             }
             self.replace_workspace_owner(crate::GraphWorkspace {
                 dir,
-                _owner: workspace,
+                owner: workspace,
             });
             self.graph_open_evidence = evidence;
             *self

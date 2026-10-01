@@ -2,6 +2,8 @@
 
 mod diff;
 use diff::logical_records;
+#[cfg(test)]
+mod revert_write_tests;
 mod view;
 
 pub use view::CheckpointView;
@@ -272,10 +274,14 @@ impl GraphForge {
             move || select_clock(),
             |generation| {
                 validate_revert_source(generation, lifecycle_mode)?;
-                prepared.replace(Some(GraphForge::open_resolved_with_options(
+                // One hydration serves both validation and the live facade:
+                // read-only semantics (no reconciliation under the revert
+                // locks) over a private copy, so the facade can become writable
+                // without ever writing the checkpoint's published tree.
+                prepared.replace(Some(GraphForge::open_resolved_with_access(
                     container_root.clone(),
                     generation.clone(),
-                    true,
+                    crate::workspace_hydration::WorkspaceAccess::PrivateReadOnly,
                     write_options.clone(),
                     resource_policy.clone(),
                     graphforge_storage::ProjectOpenRecoveryEvidence::checkpoint_view(
@@ -298,7 +304,7 @@ impl GraphForge {
             .lock()
             .expect("generation UUID lock poisoned") =
             reopened.resolved_generation.generation_uuid();
-        reopened.read_only = false;
+        reopened.enable_writes()?;
         reopened.project_open_recovery =
             graphforge_storage::ProjectOpenRecoveryEvidence::clean_open(
                 reopened.resolved_generation.generation_uuid(),

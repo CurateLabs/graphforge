@@ -89,8 +89,7 @@ pub(super) fn apply(
         .map(|participant| participant.key.clone())
         .collect();
     replace_prepared_branch_domains(&command.root, &mut prepared, &keep, &domains, cancel.flag())?;
-    let mut graph = crate::branches::private_view::open(owner, &prepared)?;
-    graph.read_only = false;
+    let graph = crate::branches::private_view::open_writable(owner, &prepared)?;
     super::preferences::apply(&graph, &source, request, selected, cancel)?;
     let actual = fields::read(&graph, cancel)?;
     for (key, resolution) in selected {

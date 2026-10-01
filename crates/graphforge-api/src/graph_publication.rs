@@ -123,6 +123,9 @@ impl GraphForge {
     ) -> Result<(), GfError> {
         use graphforge_storage::{ProjectCapability, ProjectStageOutcome};
 
+        // Publication rebuilds indexes and stages from `self.dir()` in place; a
+        // pinned alias of a published tree must never reach that point.
+        self.require_private_workspace()?;
         let root = self.resolved_generation.container_root();
         let parent = graphforge_storage::resolve_project_generation(root)?;
         parent.validate_complete_participant_inventory()?;
@@ -230,6 +233,7 @@ impl GraphForge {
             ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
         };
 
+        self.require_private_workspace()?;
         let root = self.resolved_generation.container_root();
         let parent = graphforge_storage::resolve_project_generation(root)?;
         parent.validate_complete_participant_inventory()?;

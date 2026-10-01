@@ -176,7 +176,7 @@ impl GraphForge {
             let bindings = graphforge_storage::semantic_storage_bindings(&current)?;
             let old_workspace = self.replace_workspace_owner(crate::GraphWorkspace {
                 dir,
-                _owner: workspace,
+                owner: workspace,
             });
             self.graph_open_evidence = evidence;
             self.install_prepared_generation_read_authority(current.generation_uuid(), prepared);

@@ -2,6 +2,7 @@
 mod view;
 pub use view::ResearchVersionView;
 pub(crate) use view::materialize as materialize_version;
+pub(crate) use view::materialize_writable as materialize_version_writable;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -200,7 +201,7 @@ impl GraphForge {
                             "Project restore requires complete research".into(),
                         ));
                     }
-                    Some(view::materialize(self, &source)?)
+                    Some(view::materialize_writable(self, &source)?)
                 }
                 _ => None,
             }
@@ -287,7 +288,6 @@ impl GraphForge {
         )?;
         prepared.lifecycle_mode = self.lifecycle_mode;
         prepared.resolved_generation = resolved;
-        prepared.read_only = false;
         prepared.path.clone_from(&self.path);
         prepared.tempdir.clone_from(&self.tempdir);
         prepared.clock =

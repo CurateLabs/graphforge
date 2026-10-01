@@ -536,7 +536,7 @@ impl GraphForge {
             if migration.is_some() {
                 let (dir, owner, evidence) =
                     crate::hydrate_graph_workspace(&self.resolved_generation, false)?;
-                self.replace_workspace_owner(crate::GraphWorkspace { dir, _owner: owner });
+                self.replace_workspace_owner(crate::GraphWorkspace { dir, owner });
                 self.graph_open_evidence = evidence;
                 *self
                     .uuid_membership_index
