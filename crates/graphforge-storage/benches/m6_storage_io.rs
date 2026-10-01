@@ -132,7 +132,7 @@ fn durable_commit(bencher: Bencher) {
         .bench_local_refs(|(root, workspace, request)| {
             let ProjectStageOutcome::Staged(staged) = stage_project_generation_with_graph_tree(
                 root.path(),
-                request,
+                &*request,
                 Some(workspace.path()),
             )
             .unwrap() else {
