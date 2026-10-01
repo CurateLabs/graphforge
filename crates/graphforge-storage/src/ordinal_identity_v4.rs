@@ -69,8 +69,11 @@ pub struct V4OrdinalIdentityLimits {
     pub max_tombstone_cache_bytes: usize,
     /// Bytes of already-authenticated ordinal blocks the handle retains so a
     /// block is read from disk once per handle, not once per lookup. Zero
-    /// disables the cache.
-    pub max_ordinal_cache_bytes: usize,
+    /// disables the cache. A handle keeps serving blocks it already
+    /// authenticated after a later same-inode flip of the artifact; a fresh
+    /// handle refuses the flipped block. Nothing that was wrong when it was
+    /// read is ever returned. Crate-private: no caller outside storage tunes it.
+    pub(crate) max_ordinal_cache_bytes: usize,
     /// Maximum conservatively charged retained manifest/descriptor metadata.
     pub max_descriptor_metadata_bytes: usize,
 }
@@ -779,7 +782,10 @@ impl V4OrdinalIdentityHandle {
                     blocks: run.blocks.clone(),
                 })
                 .collect(),
-            uuid_order_matches_ordinals: self.recorded_order,
+            // What complete admission derived from the authenticated data, not
+            // the record: a legacy manifest that never recorded the fact is
+            // promoted by the first generation built on it.
+            uuid_order_matches_ordinals: self.uuid_order_matches_ordinals,
         };
         let artifacts = self
             .forward
@@ -1167,8 +1173,12 @@ impl V4OrdinalIdentityHandle {
         }
         let mut metrics = V4OrdinalLookupMetrics {
             requested: requested.len() as u64,
-            peak_buffer_bytes: (requested.len() as u64).saturating_mul(REQUEST_ENTRY_CHARGE),
-            retained_cache_bytes: self.tombstone_cache.charged_bytes as u64,
+            // The request, plus the ordinal blocks the handle already holds.
+            peak_buffer_bytes: (requested.len() as u64)
+                .saturating_mul(REQUEST_ENTRY_CHARGE)
+                .saturating_add(self.ordinal_cache.charged_bytes as u64),
+            retained_cache_bytes: (self.tombstone_cache.charged_bytes
+                + self.ordinal_cache.charged_bytes) as u64,
             ..Default::default()
         };
         let request_buffer_bytes = metrics.peak_buffer_bytes;
@@ -1206,6 +1216,9 @@ impl V4OrdinalIdentityHandle {
                 &mut metrics,
             )?;
         }
+        metrics.retained_cache_bytes = metrics
+            .retained_cache_bytes
+            .max((self.tombstone_cache.charged_bytes + self.ordinal_cache.charged_bytes) as u64);
         metrics.found = resolved.len() as u64;
         metrics.tombstoned = deleted.len() as u64;
         Ok(V4OrdinalLookup {
@@ -2298,9 +2311,13 @@ fn read_range_coalesced(
         crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, bytes, 1);
         metrics.sequential_read_calls = metrics.sequential_read_calls.saturating_add(1);
         metrics.bytes_read = metrics.bytes_read.saturating_add(bytes);
-        metrics.peak_buffer_bytes = metrics
-            .peak_buffer_bytes
-            .max(retained_buffer_bytes.saturating_add(bytes));
+        // The read buffer and, while it is split into held blocks, their copies.
+        let copies = if max_cache_bytes == 0 { 0 } else { bytes };
+        metrics.peak_buffer_bytes = metrics.peak_buffer_bytes.max(
+            retained_buffer_bytes
+                .saturating_add(bytes)
+                .saturating_add(copies),
+        );
         authenticate_run(range, first_index..=last_index, &buffer)?;
         for (offset, block) in range.descriptor.blocks[first_index..=last_index]
             .iter()
@@ -2321,7 +2338,6 @@ fn read_range_coalesced(
         }
         selected_at = next;
     }
-    metrics.retained_cache_bytes = metrics.retained_cache_bytes.max(cache.charged_bytes as u64);
     check_cached_seams(range, range_index, cache, &touched)
 }
 

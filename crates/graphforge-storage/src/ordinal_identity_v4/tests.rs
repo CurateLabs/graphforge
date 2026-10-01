@@ -1395,10 +1395,23 @@ fn authenticated_block_read_has_no_per_record_seeks() {
     assert_eq!(result.metrics.sequential_read_calls, 1);
     assert_eq!(result.metrics.bytes_read, 16 * UUID_WIDTH);
     assert_eq!(result.metrics.per_record_seeks, 0);
-    assert!(
-        result.metrics.peak_buffer_bytes
-            <= 16 * REQUEST_ENTRY_CHARGE + TOMBSTONE_CACHE_FIXED_CHARGE as u64 + 16 * UUID_WIDTH
+    // The request, the tombstone cache, the read buffer, and the copy held for
+    // later lookups (charged to the lookup while both exist).
+    let read_buffer = 16 * UUID_WIDTH;
+    let peak_bound =
+        16 * REQUEST_ENTRY_CHARGE + TOMBSTONE_CACHE_FIXED_CHARGE as u64 + read_buffer + read_buffer;
+    assert!(result.metrics.peak_buffer_bytes <= peak_bound);
+    // And what the handle now retains is the held block, in both counters.
+    assert_eq!(
+        result.metrics.retained_cache_bytes,
+        TOMBSTONE_CACHE_FIXED_CHARGE as u64 + read_buffer
     );
+    // A repeat lookup is charged for the block it does not read.
+    let again = handle
+        .lookup_node_uuids(&(1..=16).collect::<Vec<_>>())
+        .unwrap();
+    assert_eq!(again.metrics.bytes_read, 0);
+    assert!(again.metrics.peak_buffer_bytes >= 16 * REQUEST_ENTRY_CHARGE + read_buffer);
 }
 
 #[test]

@@ -154,6 +154,50 @@ fn append_v4_generation(
     planned.manifest
 }
 
+/// Like [`append_v4_generation`], but the pinned inputs come from an opened,
+/// completely admitted handle, as a real writer obtains them.
+fn append_v4_generation_through_handle(
+    root: &std::path::Path,
+    prior: crate::V4OrdinalIdentityManifest,
+    nodes: &[(Uuid, u64)],
+    tombstones: &[u64],
+) -> crate::V4OrdinalIdentityManifest {
+    let index = root.join(INDEX_DIR);
+    let body = serde_json::to_vec(&prior).unwrap();
+    fs::write(index.join(V4_ORDINAL_MANIFEST), &body).unwrap();
+    fs::write(index.join("ordinal-v4.lock"), []).unwrap();
+    let authority = crate::ordinal_identity_v4::V4OrdinalIdentityAuthority {
+        topology_generation: prior.topology_generation,
+        manifest_sha256: hex_sha256(&body),
+    };
+    let crate::V4OrdinalIdentityOpen::Ready(mut handle) =
+        crate::ordinal_identity_v4::V4OrdinalIdentityHandle::open(
+            root,
+            &authority,
+            crate::V4OrdinalIdentityLimits::default(),
+        )
+        .unwrap()
+    else {
+        panic!("v4 expected");
+    };
+    let pinned = handle.pinned_update_inputs().unwrap();
+    let generation = prior.topology_generation + 1;
+    let mut batch = crate::staging::RewriteBatch::new();
+    let planned = prepare_v4_ordinal_delta(
+        root,
+        generation - 1,
+        generation,
+        &pinned,
+        &mut batch,
+        nodes,
+        tombstones,
+        &"44".repeat(32),
+    )
+    .unwrap();
+    install_v4_plan(&batch);
+    planned.manifest
+}
+
 #[test]
 fn v4_delta_publishes_the_uuid_order_it_derived_never_one_it_assumed() {
     let new_project = |records: &[(u128, u64)]| {
@@ -197,11 +241,27 @@ fn v4_delta_publishes_the_uuid_order_it_derived_never_one_it_assumed() {
     let unordered_delta = append_v4_generation(root.path(), base, &[(u(50), 3), (u(40), 4)], &[]);
     assert_eq!(unordered_delta.uuid_order_matches_ordinals, Some(false));
 
-    // An unknown parent stays unknown: it is never promoted to a claim.
+    // An unknown parent is promoted by the first generation built on it,
+    // because the writer derives the fact from the authenticated parent when it
+    // opens it: true for ordered data, false for unordered data.
+    for (records, expected) in [
+        (&[(10_u128, 1_u64), (20, 2)][..], Some(true)),
+        (&[(20, 1), (10, 2)][..], Some(false)),
+    ] {
+        let (root, mut unknown) = new_project(records);
+        unknown.uuid_order_matches_ordinals = None;
+        let promoted =
+            append_v4_generation_through_handle(root.path(), unknown, &[(u(30), 3)], &[]);
+        assert_eq!(
+            promoted.uuid_order_matches_ordinals, expected,
+            "{records:?}"
+        );
+    }
+    // Inputs that bypassed admission are never promoted: unknown stays unknown.
     let (root, mut unknown) = new_project(&[(10, 1), (20, 2)]);
     unknown.uuid_order_matches_ordinals = None;
-    let still_unknown = append_v4_generation(root.path(), unknown, &[(u(30), 3)], &[]);
-    assert_eq!(still_unknown.uuid_order_matches_ordinals, None);
+    let bypassed = append_v4_generation(root.path(), unknown, &[(u(30), 3)], &[]);
+    assert_eq!(bypassed.uuid_order_matches_ordinals, None);
 
     // A tombstone-only generation adds no ordinals and keeps the claim.
     let (root, base) = new_project(&[(10, 1), (20, 2)]);
