@@ -1173,7 +1173,7 @@ fn import_materialized(
         )
         .map_err(|error| storage(&error))?,
     };
-    let participant_captures = captures
+    let mut participant_captures = captures
         .iter()
         .map(|(relative, capture)| (stage.join(relative), capture))
         .chain(
@@ -1182,7 +1182,7 @@ fn import_materialized(
                 .map(|(path, capture)| (path.clone(), capture)),
         )
         .collect();
-    let graph_object_lease = prepare_compact_import_graph_with_allocation(
+    let prepared_graph = prepare_compact_import_graph_with_allocation(
         admission.root(),
         package_graph_tree.as_deref(),
         &mut participants,
@@ -1190,6 +1190,18 @@ fn import_materialized(
         allocation,
         Some(&participant_captures),
     )?;
+    let (graph_object_lease, compact_root_capture) =
+        prepared_graph.map_or((None, None), |prepared| {
+            (
+                Some(prepared.lease),
+                Some((prepared.root_path, prepared.root_capture)),
+            )
+        });
+    if let Some((path, capture)) = &compact_root_capture {
+        // Compact installation rewrote this source. Carry the new writer's
+        // exact-byte authority, replacing the archive's old inode capture.
+        participant_captures.insert(path.clone(), capture);
+    }
     let _research_lease = if let Some((_, objects)) = &research {
         if let Some(lease) = &graph_object_lease {
             crate::project_portable_v2::research::install_captured_with_lease(
@@ -1452,6 +1464,7 @@ fn prepare_compact_import_graph(
         None,
         None,
     )
+    .map(|prepared| prepared.map(|prepared| prepared.lease))
 }
 
 fn collect_portable_graph_paths(

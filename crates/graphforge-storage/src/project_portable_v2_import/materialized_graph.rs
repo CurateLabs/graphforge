@@ -75,6 +75,12 @@ fn capture_graph_sources(
     Ok(authenticated)
 }
 
+pub(super) struct PreparedCompactImport {
+    pub(super) lease: crate::GraphObjectPublicationLease,
+    pub(super) root_path: PathBuf,
+    pub(super) root_capture: crate::project_portable_v2::MaterializedCapture,
+}
+
 pub(super) fn prepare_compact_import_graph_with_allocation(
     target: &Path,
     package_graph_tree: Option<&Path>,
@@ -84,7 +90,7 @@ pub(super) fn prepare_compact_import_graph_with_allocation(
     captures: Option<
         &std::collections::BTreeMap<PathBuf, &crate::project_portable_v2::MaterializedCapture>,
     >,
-) -> Result<Option<crate::GraphObjectPublicationLease>, PortableV2Error> {
+) -> Result<Option<PreparedCompactImport>, PortableV2Error> {
     let Some(graph_tree) = package_graph_tree else {
         return Ok(None);
     };
@@ -144,42 +150,11 @@ pub(super) fn prepare_compact_import_graph_with_allocation(
         captures.unwrap_or(&empty_captures),
     )
     .map_err(|error| storage(&error))?;
-    let published =
-        crate::graph_files::graph_files_root_participant(&root).map_err(|error| storage(&error))?;
-    let bytes = &published.bytes;
-    crate::project_publication::publish_atomic_bytes_with_allocation(
-        &participant.source,
-        bytes,
-        || Ok(()),
-        || Ok(()),
-        || Ok(()),
-        allocation,
-    )
-    .map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "cannot publish imported compact graph root",
-        )
-    })?;
-    #[cfg(not(windows))]
-    let file = fs::File::open(&participant.source);
-    #[cfg(windows)]
-    let file = OpenOptions::new().write(true).open(&participant.source);
-    let file = file.map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "cannot reopen imported compact graph root",
-        )
-    })?;
-    participant.byte_length = bytes.len() as u64;
-    participant.content_sha256 =
-        graphforge_core::hash_observation::ControlSha256::digest(bytes).into();
-    participant.participant = published;
-    file.observed_sync_all().map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "cannot sync imported compact graph root",
-        )
-    })?;
-    Ok(Some(lease))
+    let root_capture =
+        crate::project_portable_v2::publish_compact_import_root(participant, &root, allocation)?;
+    Ok(Some(PreparedCompactImport {
+        lease,
+        root_path: participant.source.clone(),
+        root_capture,
+    }))
 }

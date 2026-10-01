@@ -1724,7 +1724,7 @@
       "role": "portable_authentication",
       "input_contract": "Existing portable regular member bytes are fully authenticated for package verification/import, separate from subsequent durable participant naming.",
       "function_bodies_sha256": [
-        "5c5b4ac9b90e1727915619ac8b5b53b19f19196be330b35610f2515e94896487"
+        "7e34534f9f5a2dc60aea7df75e6f083b505ceb4578413c903d0d39ea91576d72"
       ]
     },
     {
@@ -1733,7 +1733,7 @@
       "role": "portable_authentication",
       "input_contract": "Each complete archive member is cryptographically authenticated against its portable manifest identity; the enclosing archive producer separately counts all physical transport bytes.",
       "function_bodies_sha256": [
-        "781ff5eca8598c6dc93d9e434646b79c9ef2e1b902a090e73a7344aef26c8b82"
+        "aa1e1ade47150506cb9310b71fd1cd769fb761f59bdba95edbc093b46d1fc690"
       ]
     },
     {
@@ -1779,6 +1779,15 @@
       "input_contract": "Bounded semantic control bytes are reauthenticated against the previously admitted member digest and native source identity.",
       "function_bodies_sha256": [
         "5774890e087f266b4c23d4ef29b17515cef9d45effa985394042a67450fefef2"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2/materialization/compact_root.rs",
+      "function": "publish_compact_import_root",
+      "role": "control_authentication",
+      "input_contract": "The factory encodes bounded canonical GraphFilesRootV2 JSON itself, names that control with SHA once, publishes its own bytes and checks actual output checksum/native identity before minting private capture. It receives no caller-provided payload digest tuple and never hashes Arrow/Parquet rows.",
+      "function_bodies_sha256": [
+        "2f6204dae120f2643619bfa76e1cd56f03f1e369f98364aa8ea65ad9f1cb0bdf"
       ]
     },
     {
@@ -1967,7 +1976,7 @@
       "role": "control_authentication",
       "input_contract": "Bounded canonical graph root participant JSON authenticates the radix graph manifest authority; opaque payloads use their private consumed-byte captures.",
       "function_bodies_sha256": [
-        "52affc2a18e6c607f8aa46e9b4eaec47f27ff8d331994677a77db233d176942d"
+        "4b9a51b76e1cffebbd09d9e598d1ca9789fd4b76b5a60d6d47c0a2c4027cd6da"
       ]
     },
     {
@@ -2044,20 +2053,20 @@
     },
     {
       "path": "crates/graphforge-storage/src/project_publication/participants.rs",
-      "function": "request_metadata_with_payloads",
-      "role": "contract_identity",
-      "input_contract": "Canonical publication fingerprint request metadata defines idempotent publication identity; in-memory participant identities are reused from PreparedGenerationRequest after exact length and XXH64 binding, otherwise the participant bytes are hashed once here.",
-      "function_bodies_sha256": [
-        "a991acb816d370624a71e635517aa0ee45f2a8fc24085615e3b5930e911bfa9b"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/project_publication/participants.rs",
       "function": "copy_file_participant",
       "role": "durable_artifact_or_trust_boundary",
       "input_contract": "Generic untrusted participant Files copies genuinely authenticate consumed bytes; privately captured copier identity selects checksum-only staging. Partial destination allocation is observed by the enclosing staging owner even on failure.",
       "function_bodies_sha256": [
         "f8ac2385dcc0adfccb6057519eb9f3be70858bd26b7d442d8f1a3eed7aff7cb7"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_publication/participants.rs",
+      "function": "request_metadata_with_payloads",
+      "role": "contract_identity",
+      "input_contract": "Canonical publication fingerprint request metadata defines idempotent publication identity; in-memory participant identities are reused from PreparedGenerationRequest after exact length and XXH64 binding, otherwise the participant bytes are hashed once here.",
+      "function_bodies_sha256": [
+        "d8cdaeb5ba4c50937b759929dd1f7b17f7cd864c30356b25ae9b2fdebf90ccc6"
       ]
     },
     {

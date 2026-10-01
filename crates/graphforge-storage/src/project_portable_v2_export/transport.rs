@@ -503,8 +503,8 @@ pub(super) fn open_planned_source(
 
 fn revalidate_source(planned: &PlannedFile, input: &File) -> Result<(), ExportError> {
     let (named, _) = open_planned_source(planned)?;
-    if identity(&input.metadata().map_err(storage)?)?
-        != identity(&named.metadata().map_err(storage)?)?
+    if graphforge_filesystem::file_identity(input).map_err(storage)?
+        != graphforge_filesystem::file_identity(&named).map_err(storage)?
     {
         return Err(err("GF_SOURCE_CHANGED", "source replaced during export"));
     }

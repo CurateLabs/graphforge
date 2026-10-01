@@ -8,7 +8,7 @@ mod materialization;
 pub use materialization::materialize_verified_portable_v2;
 pub(crate) use materialization::{
     CapturedPortableSource, MaterializedCapture, capture_import_adjacency,
-    materialize_verified_portable_v2_observed,
+    materialize_verified_portable_v2_observed, publish_compact_import_root,
 };
 mod authenticated_entries;
 use authenticated_entries::StreamHash;
@@ -1398,7 +1398,9 @@ fn hash_file(
         .map(|sink| sink.open(entry))
         .transpose()?
         .flatten();
-    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut checksum = output
+        .as_ref()
+        .map(|_| crate::corruption_checksum::Checksum::new());
     let mut left = length;
     let mut b = vec![0u8; buffer];
     while left > 0 {
@@ -1416,7 +1418,9 @@ fn hash_file(
             ));
         }
         h.update(&b[..n]);
-        checksum.update(&b[..n]);
+        if let Some(checksum) = &mut checksum {
+            checksum.update(&b[..n]);
+        }
         if let (Some(sink), Some(output)) = (sink.as_deref_mut(), output.as_mut()) {
             sink.write(entry, output, &b[..n])?;
         }
@@ -1443,8 +1447,16 @@ fn hash_file(
         ));
     }
     let digest = h.finish()?;
-    if let (Some(sink), Some(output)) = (sink, output.as_ref()) {
-        sink.finish(entry, output, length, digest, checksum.finish())?;
+    if let (Some(sink), Some(output)) = (sink, output) {
+        sink.finish(
+            entry,
+            output,
+            length,
+            digest,
+            checksum
+                .expect("materialized output has a checksum capture")
+                .finish(),
+        )?;
     }
     Ok((digest, kept))
 }
@@ -1660,7 +1672,9 @@ fn hash_payload(
         .map(|sink| sink.open(entry))
         .transpose()?
         .flatten();
-    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut checksum = output
+        .as_ref()
+        .map(|_| crate::corruption_checksum::Checksum::new());
     let mut left = size;
     let mut copy_buffer = vec![0; buffer];
     while left > 0 {
@@ -1673,7 +1687,9 @@ fn hash_payload(
             "truncated payload",
         )?;
         payload_hash.update(&copy_buffer[..chunk_len]);
-        checksum.update(&copy_buffer[..chunk_len]);
+        if let Some(checksum) = &mut checksum {
+            checksum.update(&copy_buffer[..chunk_len]);
+        }
         if let (Some(sink), Some(output)) = (sink.as_deref_mut(), output.as_mut()) {
             sink.write(entry, output, &copy_buffer[..chunk_len])?;
         }
@@ -1684,8 +1700,16 @@ fn hash_payload(
     }
     read_padding(reader, size, transport_hash)?;
     let digest = payload_hash.finish()?;
-    if let (Some(sink), Some(output)) = (sink, output.as_ref()) {
-        sink.finish(entry, output, size, digest, checksum.finish())?;
+    if let (Some(sink), Some(output)) = (sink, output) {
+        sink.finish(
+            entry,
+            output,
+            size,
+            digest,
+            checksum
+                .expect("materialized output has a checksum capture")
+                .finish(),
+        )?;
     }
     Ok((digest, kept))
 }

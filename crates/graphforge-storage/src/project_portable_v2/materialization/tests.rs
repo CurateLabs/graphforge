@@ -452,18 +452,40 @@ fn research_captured_cas_counts_real_bytes_reuses_authority_and_refuses_corrupti
     crate::open_or_initialize_project(target.path()).unwrap();
     let lease = crate::begin_graph_object_publication(target.path()).unwrap();
     let observed = graphforge_core::hash_observation::operation::Capture::start();
-    for _ in 0..2 {
+    for attempt in 0..2 {
+        let before = observed.snapshot();
         super::super::research::install_captured_with_lease(
             &stage, &lease, &objects, &captures, None,
         )
         .unwrap();
+        let after = observed.snapshot();
+        let checksum_bytes = after.checksum_bytes - before.checksum_bytes;
+        if attempt == 0 {
+            #[cfg(unix)]
+            assert_eq!(
+                checksum_bytes, 2,
+                "authenticate the actual copied bytes once"
+            );
+            // Windows must close the writable temporary and authenticate its
+            // exact-identity sealed reader before publishing the CAS name.
+            #[cfg(windows)]
+            assert_eq!(checksum_bytes, 4, "copy and sealed-reader authentication");
+        } else {
+            assert_eq!(
+                checksum_bytes, 2,
+                "same-lease reuse checks the retained inode"
+            );
+        }
     }
     let work = observed.snapshot();
     drop(observed);
     assert_eq!(work.artifact_payload_sha256_bytes, 0);
     assert_eq!(work.portable_authentication_sha256_bytes, 0);
     assert_eq!(work.unclassified_sha256_bytes, 0);
-    assert!(work.checksum_bytes >= 6);
+    #[cfg(unix)]
+    assert_eq!(work.checksum_bytes, 4);
+    #[cfg(windows)]
+    assert_eq!(work.checksum_bytes, 6);
     eprintln!("research actual captured install/reuse bytes: {work:?}");
     assert_eq!(
         crate::read_graph_object_by_digest(target.path(), &digest, 2).unwrap(),

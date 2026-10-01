@@ -188,7 +188,7 @@ The method and reviewed classification inputs are pinned by SHA-256:
 `digest-census.py` is
 `3a02f98553b682c7a8cb7b3ca0e92ad62cd68ab52241c3e33c795eacb96c44c9`;
 `digest-census-overrides.json` is
-`9cae41ba754430a6df2f220ddeddf811b69fdb04fd32cb31e631cfa5231a6454`.
+`1c77dcc16f457fc639e78e346bf83d59bddfe03f9c5b6d8837c1e01378466804`.
 The parser fixture `test-digest-census.py` is
 `234118a30c9231d3e860ad22ecbd113f815116688c7d390acc1a28a0c0cb2276`.
 Run the parser and stale-review regression fixtures with
@@ -197,7 +197,7 @@ are pinned individually; changed inputs, added producers in the same function,
 missing review pins, and unknown digest algorithms make a strict run fail.
 Refresh a classification only after reviewing its actual inputs and consumers.
 The reviewed application source inventory SHA-256 is
-`b7add56cfcbcaa338ab54b220d7be992b6adff201a27edf12b35cec2eca4f3ee`; the method computes this over its ordered Rust path/file-digest map.
+`4799a1b7bf7d51e7f73b908acf97557c3708e4b8364b31c70684d045ac8c4548`; the method computes this over its ordered Rust path/file-digest map.
 Static sites are distinct from measured update bytes and runtime passes.
 
 Compact publication reuses a payload identity only from the authenticated

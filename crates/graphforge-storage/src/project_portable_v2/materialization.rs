@@ -8,6 +8,8 @@ use graphforge_filesystem::ObservedSync as _;
 use std::io::Write;
 mod derived;
 pub(crate) use derived::capture_import_adjacency;
+mod compact_root;
+pub(crate) use compact_root::publish_compact_import_root;
 
 /// A private exact-byte capture from the authenticated import copy.
 /// Only the authenticated copier or actual derived writer can mint it.
@@ -318,7 +320,7 @@ impl CopySink<'_> {
     pub(super) fn finish(
         &mut self,
         relative: &str,
-        file: &File,
+        file: File,
         length: u64,
         digest: [u8; 32],
         checksum: u64,
@@ -326,16 +328,69 @@ impl CopySink<'_> {
         let result = file.observed_sync_all().map_err(|_| {
             PortableV2Error::at(PortableV2ErrorCode::Io, relative, "cannot sync entry")
         });
-        let refreshed = (self.observed)(&self.destination.join(relative), Some(file));
+        let refreshed = (self.observed)(&self.destination.join(relative), Some(&file));
         result?;
         refreshed?;
-        let identity = graphforge_filesystem::file_identity(file).map_err(|_| {
+        let identity = graphforge_filesystem::file_identity(&file).map_err(|_| {
             PortableV2Error::at(
                 PortableV2ErrorCode::Io,
                 relative,
                 "cannot capture materialized identity",
             )
         })?;
+        // Closing the last writer can release speculative filesystem allocation.
+        // Bind the reopened reader to the actual written inode before recording it.
+        drop(file);
+        let path = self.destination.join(relative);
+        let directory =
+            graphforge_filesystem::StableDirectory::open(path.parent().expect("component parent"))
+                .map_err(|_| {
+                    PortableV2Error::at(
+                        PortableV2ErrorCode::ConcurrentMutation,
+                        relative,
+                        "materialized directory changed",
+                    )
+                })?;
+        let file = directory
+            .open_child_file(path.file_name().expect("component name"))
+            .map_err(|_| {
+                PortableV2Error::at(
+                    PortableV2ErrorCode::ConcurrentMutation,
+                    relative,
+                    "materialized file changed after writer close",
+                )
+            })?;
+        directory.revalidate_named().map_err(|_| {
+            PortableV2Error::at(
+                PortableV2ErrorCode::ConcurrentMutation,
+                relative,
+                "materialized directory changed",
+            )
+        })?;
+        let metadata = file.metadata().map_err(|_| {
+            PortableV2Error::at(PortableV2ErrorCode::Io, relative, "materialized metadata")
+        })?;
+        if !metadata.is_file()
+            || metadata.len() != length
+            || graphforge_filesystem::file_identity(&file).ok() != Some(identity)
+            || graphforge_filesystem::file_link_count(&file).ok() != Some(1)
+        {
+            return Err(PortableV2Error::at(
+                PortableV2ErrorCode::ConcurrentMutation,
+                relative,
+                "materialized file changed after writer close",
+            ));
+        }
+        (self.observed)(&path, Some(&file))?;
+        let allocated_bytes = graphforge_filesystem::file_space_usage(&file)
+            .map_err(|_| {
+                PortableV2Error::at(
+                    PortableV2ErrorCode::Io,
+                    relative,
+                    "cannot capture materialized allocation",
+                )
+            })?
+            .allocated_bytes;
         self.captures.insert(
             relative.into(),
             MaterializedCapture {
@@ -343,15 +398,7 @@ impl CopySink<'_> {
                 length,
                 digest,
                 checksum,
-                allocated_bytes: graphforge_filesystem::file_space_usage(file)
-                    .map_err(|_| {
-                        PortableV2Error::at(
-                            PortableV2ErrorCode::Io,
-                            relative,
-                            "cannot capture materialized allocation",
-                        )
-                    })?
-                    .allocated_bytes,
+                allocated_bytes,
             },
         );
         Ok(())

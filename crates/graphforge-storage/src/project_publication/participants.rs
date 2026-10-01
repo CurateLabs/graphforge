@@ -574,7 +574,7 @@ pub(super) fn request_metadata_with_payloads(
                 };
                 (byte_length, content_sha256, content_xxh64)
             }
-            ParticipantPayloads::Files(files, cancelled, _, _) => {
+            ParticipantPayloads::Files(files, cancelled, _, captures) => {
                 let file = files.get(index).ok_or_else(|| {
                     project_error(
                         ProjectErrorCode::PublicationFailed,
@@ -589,11 +589,21 @@ pub(super) fn request_metadata_with_payloads(
                         "participant file identity mismatch",
                     ));
                 }
-                (
-                    file.byte_length,
-                    file.content_sha256,
-                    checksum_participant_source(&file.source, file.byte_length, cancelled)?,
-                )
+                // A compact graph root can be freshly rewritten after archive
+                // materialization. Its old capture grants no authority to the
+                // new inode/bytes; retain ordinary checksum and copy-SHA checks.
+                let sealed_source = captures
+                    .and_then(|captures| captures.get(&file.source))
+                    .and_then(|capture| capture.open_source(&file.source).ok())
+                    .filter(|source| {
+                        source.bytes() == file.byte_length
+                            && source.content_sha256() == hex_digest(file.content_sha256)
+                    });
+                let checksum = match sealed_source {
+                    Some(source) => source.checksum(),
+                    None => checksum_participant_source(&file.source, file.byte_length, cancelled)?,
+                };
+                (file.byte_length, file.content_sha256, checksum)
             }
         };
         participants.push(StagedParticipant {
