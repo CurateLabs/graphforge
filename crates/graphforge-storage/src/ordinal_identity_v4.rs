@@ -1759,6 +1759,7 @@ fn read_tombstone_block(
     if crate::corruption_checksum::checksum(&bytes) != block.xxh64 {
         return Err(V4OrdinalIdentityError::Authentication);
     }
+    crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, bytes_len as u64, 1);
     metrics.sequential_read_calls = metrics.sequential_read_calls.saturating_add(1);
     metrics.bytes_read = metrics.bytes_read.saturating_add(bytes_len as u64);
     let ids = bytes
@@ -1961,6 +1962,7 @@ fn read_range_coalesced(
             .file
             .read_exact(&mut buffer)
             .map_err(io_error)?;
+        crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, bytes, 1);
         metrics.sequential_read_calls = metrics.sequential_read_calls.saturating_add(1);
         metrics.bytes_read = metrics.bytes_read.saturating_add(bytes);
         metrics.peak_buffer_bytes = metrics
@@ -2161,6 +2163,23 @@ mod tests {
                 V4OrdinalIdentityOpen::Ready(handle) => *handle,
                 V4OrdinalIdentityOpen::RebuildRequired { .. } => panic!("fixture is v4"),
             }
+        }
+
+        /// Open lazily, then prove every artifact byte and cross-artifact
+        /// invariant, as a writer does before building on the artifacts.
+        fn open_complete(&self, limits: V4OrdinalIdentityLimits) -> V4OrdinalIdentityHandle {
+            let mut handle = self.open(limits);
+            handle.admit_complete().unwrap();
+            handle
+        }
+
+        /// The lazy open must succeed (it reads no artifact byte), and complete
+        /// admission must refuse with `expected`.
+        fn assert_complete_admission_refuses(&self, expected: V4OrdinalIdentityError) {
+            let mut handle = self.open(V4OrdinalIdentityLimits::default());
+            assert_eq!(handle.admit_complete().unwrap_err(), expected);
+            // A refusal is not memoized as success.
+            assert_eq!(handle.admit_complete().unwrap_err(), expected);
         }
 
         fn authority(&self, topology_generation: u64) -> V4OrdinalIdentityAuthority {
@@ -2529,6 +2548,146 @@ mod tests {
         );
     }
 
+    /// Flip one byte in place: same inode, same length. The mtime is restored
+    /// so no stamp can notice; only the content checksum can.
+    fn flip_byte_in_place(path: &Path, offset: u64) {
+        use std::os::unix::fs::FileExt;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let modified = file.metadata().unwrap().modified().unwrap();
+        let mut byte = [0_u8; 1];
+        file.read_exact_at(&mut byte, offset).unwrap();
+        file.write_all_at(&[byte[0] ^ 0xff], offset).unwrap();
+        file.set_modified(modified).unwrap();
+    }
+
+    const RECORDS_PER_ORDINAL_BLOCK: u64 = ORDINAL_BLOCK_BYTES / UUID_WIDTH;
+
+    #[test]
+    fn opening_reads_no_artifact_byte_at_any_node_count() {
+        // 1x, 8x and 64x nodes: open is O(descriptors), never O(nodes).
+        for blocks in [1, 8, 64] {
+            let fixture = Fixture::new(&[blocks * RECORDS_PER_ORDINAL_BLOCK], &[]);
+            let _capture = crate::lifecycle_io::CaptureScope::install();
+            let before = crate::lifecycle_io::snapshot().unwrap();
+            let handle = fixture.open(V4OrdinalIdentityLimits::default());
+            let opened = crate::lifecycle_io::snapshot()
+                .unwrap()
+                .since(&before)
+                .unwrap();
+            assert_eq!(opened.totals.read_bytes, 0, "{blocks} blocks");
+            let metrics = handle.admission_metrics();
+            assert_eq!(
+                (metrics.artifacts, metrics.authenticated_bytes),
+                (0, 0),
+                "{blocks} blocks"
+            );
+        }
+    }
+
+    #[test]
+    fn flipped_ordinal_block_is_refused_by_the_first_lookup_touching_it() {
+        let fixture = Fixture::new(&[3 * RECORDS_PER_ORDINAL_BLOCK], &[]);
+        let artifact = fixture.root.path().join(INDEX_DIR).join("ordinal-0.uuidx");
+        // One byte inside the middle block (second of three).
+        flip_byte_in_place(&artifact, ORDINAL_BLOCK_BYTES + 5);
+        // Open reads nothing, so it cannot notice.
+        let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
+        let (first, middle, last) = (1, RECORDS_PER_ORDINAL_BLOCK + 1, 2 * RECORDS_PER_ORDINAL_BLOCK + 1);
+        // Untouched blocks keep answering, exactly.
+        let ok = handle.lookup_node_uuids(&[first, last]).unwrap();
+        assert_eq!(
+            ok.values,
+            vec![
+                Some(Uuid::from_u128(u128::from(first))),
+                Some(Uuid::from_u128(u128::from(last)))
+            ]
+        );
+        // The corrupted block is refused before any value is returned, even
+        // when the same request also names healthy blocks.
+        for request in [vec![middle], vec![first, middle, last]] {
+            assert_eq!(
+                handle.lookup_node_uuids(&request).unwrap_err(),
+                V4OrdinalIdentityError::Authentication,
+                "{request:?}"
+            );
+        }
+        // The ordering proof reads every block, so it refuses too, and does not
+        // report corruption as "unordered".
+        assert_eq!(
+            handle.uuid_order_matches_ordinals().unwrap_err(),
+            V4OrdinalIdentityError::Authentication
+        );
+        // Complete admission refuses as well.
+        assert!(handle.admit_complete().is_err());
+    }
+
+    #[test]
+    fn flipped_tombstone_block_is_refused_by_the_first_lookup_touching_it() {
+        let per_block = TOMBSTONE_BLOCK_BYTES / TOMBSTONE_WIDTH;
+        let tombstones = (1..=3 * per_block).collect::<Vec<_>>();
+        // Ordinals past the last tombstone stay live and read no tombstone block.
+        let fixture = Fixture::new(&[3 * per_block + 10], &tombstones);
+        flip_byte_in_place(
+            &fixture.root.path().join(INDEX_DIR).join("tombstones.uuidx"),
+            TOMBSTONE_BLOCK_BYTES + 3,
+        );
+        let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
+        let live = 3 * per_block + 5;
+        let healthy = handle.lookup_node_uuids(&[1, live]).unwrap();
+        assert_eq!(healthy.values[0], None);
+        assert_eq!(healthy.values[1], Some(Uuid::from_u128(u128::from(live))));
+        assert_eq!(handle.lookup_node_uuids(&[3 * per_block]).unwrap().values, [None]);
+        for request in [vec![per_block + 1], vec![1, per_block + 1, live]] {
+            assert_eq!(
+                handle.lookup_node_uuids(&request).unwrap_err(),
+                V4OrdinalIdentityError::Authentication,
+                "{request:?}"
+            );
+        }
+        assert!(handle.admit_complete().is_err());
+    }
+
+    #[test]
+    fn flipped_forward_run_is_refused_when_a_writer_first_builds_on_it() {
+        let fixture = Fixture::new(&[RECORDS_PER_ORDINAL_BLOCK], &[]);
+        // The top bit of the last UUID keeps the run sorted and the record
+        // well formed, so only the whole-artifact checksum can notice.
+        flip_byte_in_place(
+            &fixture.root.path().join(INDEX_DIR).join("forward.uuidx"),
+            (RECORDS_PER_ORDINAL_BLOCK - 1) * FORWARD_RECORD_WIDTH,
+        );
+        let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
+        // Forward runs have only a whole-artifact checksum and no query reads
+        // them: node->UUID lookups are unaffected...
+        assert!(handle.lookup_node_uuids(&[1]).unwrap().values[0].is_some());
+        // ...and the first consumer, a writer planning the next generation,
+        // refuses before it is handed a single byte.
+        assert_eq!(
+            handle.pinned_update_inputs().unwrap_err(),
+            V4OrdinalIdentityError::Authentication
+        );
+    }
+
+    #[test]
+    fn lookups_attribute_every_identity_control_read() {
+        let fixture = Fixture::new(&[2 * RECORDS_PER_ORDINAL_BLOCK], &[1]);
+        let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
+        let _capture = crate::lifecycle_io::CaptureScope::install();
+        let before = crate::lifecycle_io::snapshot().unwrap();
+        let lookup = handle.lookup_node_uuids(&[1, 2, RECORDS_PER_ORDINAL_BLOCK + 2]).unwrap();
+        let recorded = crate::lifecycle_io::snapshot()
+            .unwrap()
+            .since(&before)
+            .unwrap();
+        assert!(lookup.metrics.bytes_read >= 2 * ORDINAL_BLOCK_BYTES);
+        assert_eq!(recorded.totals.read_bytes, lookup.metrics.bytes_read);
+        assert_eq!(recorded.totals.read_calls, lookup.metrics.sequential_read_calls);
+    }
+
     #[test]
     fn many_tombstone_runs_share_one_cache_budget_and_peak_charge() {
         let mut fixture = Fixture::new(&[32], &[]);
@@ -2655,12 +2814,15 @@ mod tests {
         ] {
             let mut fixture = Fixture::new(&[3], &[]);
             publish_forward(&mut fixture, &records);
+            // Forward runs are read only by writers; the disagreement is
+            // proven by complete admission, which a writer must pass first.
+            let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
             assert!(matches!(
-                V4OrdinalIdentityHandle::open(
-                    fixture.root.path(),
-                    &fixture.authority(7),
-                    V4OrdinalIdentityLimits::default()
-                ),
+                handle.admit_complete(),
+                Err(V4OrdinalIdentityError::InvalidDescriptor(_))
+            ));
+            assert!(matches!(
+                handle.pinned_update_inputs(),
                 Err(V4OrdinalIdentityError::InvalidDescriptor(_))
             ));
         }
@@ -2806,15 +2968,8 @@ mod tests {
             ),
         ];
         fixture.publish();
-        assert!(matches!(
-            V4OrdinalIdentityHandle::open(
-                fixture.root.path(),
-                &fixture.authority(7),
-                V4OrdinalIdentityLimits::default()
-            ),
-            Err(V4OrdinalIdentityError::InvalidDescriptor(
-                "forward identity UUID is repeated across generations"
-            ))
+        fixture.assert_complete_admission_refuses(V4OrdinalIdentityError::InvalidDescriptor(
+            "forward identity UUID is repeated across generations",
         ));
 
         fixture.manifest.forward_identities.swap(0, 1);
@@ -2941,13 +3096,8 @@ mod tests {
         );
         fixture.manifest.tombstones[0].blocks = tombstone_blocks(&[99]);
         fixture.publish();
-        assert!(matches!(
-            V4OrdinalIdentityHandle::open(
-                fixture.root.path(),
-                &fixture.authority(7),
-                V4OrdinalIdentityLimits::default()
-            ),
-            Err(V4OrdinalIdentityError::InvalidDescriptor(_))
+        fixture.assert_complete_admission_refuses(V4OrdinalIdentityError::InvalidDescriptor(
+            "tombstone IDs are noncanonical",
         ));
     }
 
@@ -3039,7 +3189,13 @@ mod tests {
         let mut prior_metadata = 0;
         for (count, expected_calls) in [(4_096_u64, 3_u64), (8_192, 4), (16_384, 6)] {
             let fixture = Fixture::new(&[count], &[]);
-            let handle = fixture.open(V4OrdinalIdentityLimits::default());
+            // Opening reads no artifact byte at any size: the node-count axis.
+            let lazy = fixture.open(V4OrdinalIdentityLimits::default()).admission_metrics();
+            assert_eq!(
+                (lazy.artifacts, lazy.authenticated_bytes, lazy.sequential_read_calls),
+                (0, 0, 0)
+            );
+            let handle = fixture.open_complete(V4OrdinalIdentityLimits::default());
             let metrics = handle.admission_metrics();
             assert_eq!(metrics.artifacts, 3);
             assert_eq!(
