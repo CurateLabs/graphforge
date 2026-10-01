@@ -1,4 +1,4 @@
-//! Lowerer-chosen fast-path node for the #1619 read-path candidate C (#1688).
+//! Lowerer-chosen fast-path node (ADR 0050).
 //!
 //! The lowerer emits this node when the Graph IR of a whole statement has one
 //! of the shapes the adjacency fast paths answer. The generic lowering is kept

@@ -104,8 +104,8 @@ Cargo, from the dispatch harness (test step only):
    `graphforge-observability` `disabled_allocations`) and the doctests run
    under `cargo test --workspace --locked`, which keeps workspace feature
    unification.
-2. **The lane runs only when Rust inputs change**, as classified by
-   `scripts/ci/classify-changes.sh`. Changes that touch no Rust skip it.
+2. **The lane runs only when Rust inputs change**, as classified by the
+   `Classify Changes` job in `test.yml`. Changes that touch no Rust skip it.
 3. **Correctness settings carry over.** Bazel's `--config=correctness` forced
    debug assertions and overflow checks on in an optimized build. The Cargo
    dev and test profiles have both on by default. Optimization level is not a

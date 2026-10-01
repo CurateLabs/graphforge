@@ -6,9 +6,6 @@ and GitHub issue **#334**.
 ## Reproduction
 
 ```bash
-# Contract + evidence-schema unit tests
-make m4-entry-matrix-check
-
 # Required short CI matrix (structural gates; prints timing observations)
 cargo test -p graphforge-api --test m4_entry_baseline -- --nocapture
 

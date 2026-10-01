@@ -78,10 +78,8 @@ applicable ADR. It fails on exceeded bounds, malformed or duplicate configuratio
 invalid exact paths or finite bounds, missing or untracked sources, missing or
 unaccepted ADR references, and obsolete exemptions.
 
-The checker and its regression tests run in the existing Repository Policy CI
-job and `make pre-push-fast`. The full pre-push policy cache includes source
-contents, tracked membership, policy, and ADR inputs so a cached result cannot
-hide a newly tracked file or changed exemption. The sole required PR status
+The checker and its regression tests run in `make check` (via
+`scripts/ci/repo-checks.sh`) and the CI Lint job. The sole required PR status
 remains `github-status/CI Gate`, evaluated at the exact PR head.
 
 Strict enforcement lands after the extraction sequence, without temporary

@@ -291,6 +291,14 @@ attach the current operation context. Nested operations and unrelated parallel
 tests retain separate collectors; there is no process-wide reset. Production
 context wrappers are zero-sized when test support is disabled.
 
+The same capture records successful whole composite-request fingerprints,
+excluding participant subfingerprints that share the `CompositeRequest` domain. Count them around the real composite publish call, including
+its retries and rebases; one immutable prepared request owns its fingerprint,
+generation identity and lazily built Arrow receipt. Parent-dependent authorization
+still runs on every attempt. Fingerprint encoding and receipt values remain the
+frozen contract; the observer has no production state. The direct producer and
+publication regressions live in the core hash observer and API composite tests.
+
 The actual facade regressions are in
 `crates/graphforge-api/tests/facade_checksum_admission.rs`, identified by SHA-256
 `0a9ac8fa6785ad0702e3de0be34f6d461ad122e6e32331ee4617377a9f4ddc56`.

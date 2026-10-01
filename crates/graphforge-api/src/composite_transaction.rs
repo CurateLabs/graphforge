@@ -1,8 +1,10 @@
 use crate::WriteContext;
+#[cfg(test)]
+use graphforge_core::ProjectErrorCode;
 use graphforge_core::canonical::{
     CANONICAL_CONTRACT_VERSION, CanonicalDomain, CanonicalWriter, fingerprint,
 };
-use graphforge_core::{GfError, ProjectErrorCode, PropValue};
+use graphforge_core::{GfError, PropValue};
 use graphforge_knowledge::{
     Assertion, AssertionGraphRef, AssertionGraphRole, AssertionLedger, AssertionStatusEvent,
     AssertionStatusLedger, AssertionSupersession, AssertionSupersessionLedger,
@@ -16,6 +18,9 @@ use graphforge_provenance::{
 };
 use std::collections::{HashMap, HashSet};
 use uuid::{Uuid, Version};
+
+mod prepared;
+pub(crate) use prepared::PreparedCompositeOperation;
 
 /// Version of the composite request vocabulary and counting contract.
 pub const COMPOSITE_TRANSACTION_CONTRACT_VERSION: u32 = 1;
@@ -197,6 +202,13 @@ impl CompositeTransactionRequest {
 
     /// Validate the request envelope and frozen domain contracts before identity lookup.
     pub(crate) fn validate_request_shape(&self) -> Result<(), GfError> {
+        self.validate_request_envelope()?;
+        self.canonical_fingerprint()?;
+        Ok(())
+    }
+
+    /// Validate mutable-parent-independent shape without repeating frozen ledger identities.
+    pub(crate) fn validate_request_envelope(&self) -> Result<(), GfError> {
         if self.contract_version != COMPOSITE_TRANSACTION_CONTRACT_VERSION {
             return Err(validation(
                 "composite request has an unsupported contract version",
@@ -213,9 +225,6 @@ impl CompositeTransactionRequest {
             validate_graph_mutation_shape(mutation)?;
         }
 
-        // Fingerprinting constructs each frozen knowledge/epistemic ledger, thereby
-        // reusing its domain validation and independent resource limits.
-        self.canonical_fingerprint()?;
         Ok(())
     }
 
@@ -233,18 +242,21 @@ impl CompositeTransactionRequest {
             canonical_graph_mutation_content_fingerprint(&self.graph_mutations)?;
         writer.raw(&graph_fingerprint).map_err(canonical_error)?;
         encode_knowledge(&mut writer, &self.knowledge)?;
-        fingerprint(
+        let fingerprint = fingerprint(
             CanonicalDomain::CompositeRequest,
             CANONICAL_CONTRACT_VERSION,
             &writer.finish(),
         )
-        .map_err(canonical_error)
+        .map_err(canonical_error)?;
+        graphforge_core::hash_observation::record_composite_request_fingerprint();
+        Ok(fingerprint)
     }
 
     /// Resolve one pre-staging retry decision using a prior result found by request identity.
     ///
     /// `None` means first submission. An identical fingerprint returns an exact clone of the
     /// prior result; changed content fails with `GF_IDEMPOTENCY_CONFLICT` before any staging.
+    #[cfg(test)]
     pub(crate) fn retry_decision<T: Clone>(
         &self,
         prior: Option<([u8; 32], &T)>,
@@ -1575,6 +1587,12 @@ pub(crate) mod tests {
         let mut reversed = request(130, 131);
         reverse_participant_rows(&mut reversed.knowledge);
         assert_eq!(reversed.canonical_fingerprint().unwrap(), canonical);
+        assert_eq!(
+            PreparedCompositeOperation::new(&reversed)
+                .unwrap()
+                .fingerprint(),
+            canonical
+        );
 
         let mutations: [(&str, fn(&mut CompositeKnowledgeParticipants)); 14] = [
             ("provenance_events", |value| {
@@ -1646,11 +1664,16 @@ pub(crate) mod tests {
         for (name, mutate) in mutations {
             let mut changed = request(130, 131);
             mutate(&mut changed.knowledge);
-            assert_ne!(
-                changed.canonical_fingerprint().unwrap(),
-                canonical,
-                "{name} was omitted"
+            let before = changed.canonical_fingerprint().unwrap();
+            let capture = graphforge_core::hash_observation::operation::Capture::start();
+            let prepared = PreparedCompositeOperation::new(&changed).unwrap();
+            assert_eq!(prepared.fingerprint(), before, "{name} changed encoding");
+            assert_eq!(
+                capture.snapshot().composite_request_fingerprints,
+                1,
+                "{name}"
             );
+            assert_ne!(prepared.fingerprint(), canonical, "{name} was omitted");
         }
     }
 
@@ -1722,10 +1745,57 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn external_participant_subfingerprints_retain_sha_work_without_counting_whole_requests() {
+        let mut request = request(130, 131);
+        let graph_ref = AssertionGraphRef::new(
+            uuid7(200),
+            uuid7(30),
+            GraphObjectKind::Node,
+            AssertionGraphRole::Subject,
+            1,
+        )
+        .unwrap();
+        let confidence_input = ConfidenceInput::new(uuid7(201), uuid7(40), None, 1).unwrap();
+        request
+            .knowledge
+            .assertion_graph_refs
+            .push(graph_ref.clone());
+        request
+            .knowledge
+            .confidence_inputs
+            .push(confidence_input.clone());
+
+        let sub_capture = graphforge_core::hash_observation::operation::Capture::start();
+        external_graph_ref_fingerprint(&graph_ref).unwrap();
+        let graph_bytes = sub_capture.snapshot().contract_identity_sha256_bytes;
+        assert!(graph_bytes > 0);
+        external_confidence_input_fingerprint(&confidence_input).unwrap();
+        let sub_bytes = sub_capture.snapshot().contract_identity_sha256_bytes;
+        assert!(sub_bytes > graph_bytes);
+        assert_eq!(sub_capture.snapshot().composite_request_fingerprints, 0);
+        drop(sub_capture);
+
+        let expected = request.canonical_fingerprint().unwrap();
+        let capture = graphforge_core::hash_observation::operation::Capture::start();
+        let prepared = PreparedCompositeOperation::new(&request).unwrap();
+        assert_eq!(prepared.fingerprint(), expected);
+        assert_eq!(capture.snapshot().composite_request_fingerprints, 1);
+        assert!(capture.snapshot().contract_identity_sha256_bytes > sub_bytes);
+        assert_eq!(prepared.receipt().unwrap(), prepared.receipt().unwrap());
+        assert_eq!(capture.snapshot().composite_request_fingerprints, 1);
+    }
+
+    #[test]
     fn request_fingerprint_is_frozen_and_restart_stable() {
         let first = request(130, 131).canonical_fingerprint().unwrap();
         let reconstructed = request(130, 131).canonical_fingerprint().unwrap();
         assert_eq!(first, reconstructed);
+        assert_eq!(
+            PreparedCompositeOperation::new(&request(130, 131))
+                .unwrap()
+                .fingerprint(),
+            first
+        );
         assert_eq!(
             first,
             [

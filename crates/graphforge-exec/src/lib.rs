@@ -149,7 +149,6 @@ pub(crate) mod algorithm_weighted_undirected;
 #[doc(hidden)]
 pub mod demand;
 mod edge_count;
-#[cfg(feature = "read-path-experiment")]
 pub mod fast_path;
 mod ordered_one_hop;
 mod ordered_two_hop;

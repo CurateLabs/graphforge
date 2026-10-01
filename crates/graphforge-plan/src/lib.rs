@@ -55,7 +55,6 @@ macro_rules! impl_partial_ord {
     };
 }
 
-#[cfg(feature = "read-path-experiment")]
 pub mod fast_path;
 
 // ---------------------------------------------------------------------------

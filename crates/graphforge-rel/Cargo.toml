@@ -10,9 +10,6 @@ repository.workspace = true
 [features]
 # Explicit opt-in for the independent fixed-hop differential oracle.
 differential-testing = []
-# #1688 experiment: read-path candidates B (relational fixed hops) and C
-# (lowerer-chosen fast paths) for the #1619 comparison. Never a default.
-read-path-experiment = ["differential-testing", "graphforge-plan/read-path-experiment"]
 
 [dependencies]
 graphforge-value = { version = "0.5.2", path = "../graphforge-value" }

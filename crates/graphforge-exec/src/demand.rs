@@ -856,42 +856,10 @@ impl graphforge_storage::io_stats::FilteredReadObserver for HopReadObserver {
     }
 }
 
-/// Final physical optimizer rule for bounded fixed-hop pipelines.
+/// Final physical optimizer rule for bounded fixed-hop pipelines. The fast
+/// operators are chosen by the lowerer (ADR 0050), not by this rule.
 #[derive(Debug, Default)]
-pub(crate) struct FixedHopDemandRule {
-    /// #1688 candidates B and C keep the physical fast-path rewrites off.
-    #[cfg(feature = "read-path-experiment")]
-    skip_fast_path_rewrites: bool,
-    /// #1688 fallback test: first place a transport operator between stacked
-    /// expands, as a plan-shape change the rewrites do not pass through.
-    #[cfg(feature = "read-path-experiment")]
-    inject_transport: bool,
-}
-
-impl FixedHopDemandRule {
-    /// The rule for a #1688 read-path candidate.
-    #[cfg(feature = "read-path-experiment")]
-    pub(crate) fn for_candidate(
-        candidate: crate::fast_path::ReadPathCandidate,
-        inject_transport: bool,
-    ) -> Self {
-        Self {
-            skip_fast_path_rewrites: !candidate.rewrites_physical_fast_paths(),
-            inject_transport,
-        }
-    }
-
-    #[cfg(feature = "read-path-experiment")]
-    fn rewrites_fast_paths(&self) -> bool {
-        !self.skip_fast_path_rewrites
-    }
-
-    #[cfg(not(feature = "read-path-experiment"))]
-    #[allow(clippy::unused_self, reason = "the experiment build reads a field")]
-    fn rewrites_fast_paths(&self) -> bool {
-        true
-    }
-}
+pub(crate) struct FixedHopDemandRule;
 
 #[derive(Clone, Copy)]
 struct TerminalDemand {
@@ -905,22 +873,9 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
         plan: Arc<dyn ExecutionPlan>,
         config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        #[cfg(feature = "read-path-experiment")]
-        let plan = if self.inject_transport {
-            crate::fast_path::TransportBetweenExpands.optimize(plan, config)?
-        } else {
-            plan
-        };
         let plan = if contains_materializable_expand(&plan) {
             let required = (0..plan.schema().fields().len()).collect::<BTreeSet<_>>();
             rewrite_materialization(plan, &required)?
-        } else {
-            plan
-        };
-        let plan = if self.rewrites_fast_paths() {
-            let plan = crate::ordered_two_hop::try_rewrite_ordered_two_hop(plan)?;
-            let plan = crate::ordered_one_hop::try_rewrite_ordered_one_hop(plan)?;
-            crate::edge_count::try_rewrite_edge_count(plan)?
         } else {
             plan
         };
@@ -1381,6 +1336,7 @@ fn is_fetch_transparent(plan: &dyn ExecutionPlan) -> bool {
         || plan.is::<ProjectionExec>()
         || plan.is::<RepartitionExec>()
         || plan.is::<ExpandExec>()
+        || plan.is::<crate::fast_path::FastPathFallbackExec>()
 }
 
 /// Whether a fixed hop is reachable without crossing a semantic boundary.
@@ -2178,7 +2134,7 @@ mod tests {
         let schema = Arc::new(Schema::empty());
         let empty: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(schema));
         let plan: Arc<dyn ExecutionPlan> = Arc::new(GlobalLimitExec::new(empty, 0, Some(10)));
-        let optimized = FixedHopDemandRule::default()
+        let optimized = FixedHopDemandRule
             .optimize(Arc::clone(&plan), &ConfigOptions::new())
             .unwrap();
         assert!(Arc::ptr_eq(&plan, &optimized));

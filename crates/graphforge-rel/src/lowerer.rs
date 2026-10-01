@@ -25,7 +25,6 @@
 //! Graph-native operators (#578) lower to `graphforge-plan` logical stub nodes wrapped
 //! as [`LogicalPlan::Extension`]; their physical execution is deferred to physical execution.
 
-#[cfg(feature = "read-path-experiment")]
 mod fast_path;
 mod nested_queries;
 mod primary_property_value;
@@ -129,9 +128,6 @@ pub struct GraphPlanLowerer {
     /// as an independent semantic oracle. Absent from ordinary builds.
     #[cfg(feature = "differential-testing")]
     relational_fixed_hop_reference: bool,
-    /// #1688 candidate C: wrap whole statements whose IR a fast path answers.
-    #[cfg(feature = "read-path-experiment")]
-    structural_fast_paths: bool,
 }
 
 impl GraphPlanLowerer {
@@ -216,19 +212,7 @@ impl GraphPlanLowerer {
             inference_rules: build_inference_rules(ontology)?,
             #[cfg(feature = "differential-testing")]
             relational_fixed_hop_reference: false,
-            #[cfg(feature = "read-path-experiment")]
-            structural_fast_paths: false,
         })
-    }
-
-    /// Choose the adjacency fast paths from the Graph IR (#1688 candidate C).
-    /// Available only with the non-default `read-path-experiment` feature.
-    #[cfg(feature = "read-path-experiment")]
-    #[doc(hidden)]
-    #[must_use]
-    pub fn with_structural_fast_paths(mut self) -> Self {
-        self.structural_fast_paths = true;
-        self
     }
 
     /// Select the legacy relational fixed-hop lowering as a differential-test
@@ -239,6 +223,18 @@ impl GraphPlanLowerer {
     pub fn with_relational_fixed_hop_reference(mut self) -> Self {
         self.relational_fixed_hop_reference = true;
         self
+    }
+
+    /// Whether fixed hops use the relational oracle lowering, which no fast path wraps.
+    #[cfg(feature = "differential-testing")]
+    fn relational_reference(&self) -> bool {
+        self.relational_fixed_hop_reference
+    }
+
+    #[cfg(not(feature = "differential-testing"))]
+    #[allow(clippy::unused_self, reason = "the differential build reads a field")]
+    fn relational_reference(&self) -> bool {
+        false
     }
 
     /// The dataset facts available to read operators. Execution binds providers. `None` for pure logical/explain
@@ -367,7 +363,6 @@ impl GraphPlanLowerer {
             self.build_node_shapes(&plan.ops);
         let mut var_map = VarMap::new();
         let lowered = self.lower_pipeline(&plan.ops, &plan.exprs, &mut var_map);
-        #[cfg(feature = "read-path-experiment")]
         let lowered = lowered.map(|lowered| self.wrap_structural_fast_path(plan, lowered));
         lowered
             .and_then(|plan| self.attach_graph_contract(plan))

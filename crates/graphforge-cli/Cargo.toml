@@ -11,11 +11,6 @@ repository.workspace = true
 name = "gf"
 path = "src/main.rs"
 
-[features]
-# #1688 experiment: GF_READ_PATH_CANDIDATE selects the #1619 read-path
-# candidate. Never a default.
-read-path-experiment = ["graphforge-api/read-path-experiment"]
-
 [dependencies]
 arrow = { workspace = true }
 graphforge-api = { version = "0.5.2", path = "../graphforge-api", default-features = false, features = ["knowledge", "search", "provenance", "portable", "discovery", "research"] }

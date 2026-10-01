@@ -45,10 +45,13 @@ Fixes #
 ### Test Commands Run
 
 ```bash
-# Example:
-pytest tests/unit/
-pytest tests/integration/
-pytest -m "not slow"
+# Static checks before pushing
+make check
+
+# Targeted tests for the changed surface
+make test-rust                     # Rust (narrow: make test-rust ARGS="-p <crate>")
+make test-python                   # Python binding
+make test-node                     # Node binding
 ```
 
 ## Checklist
@@ -70,8 +73,7 @@ pytest -m "not slow"
 - [ ] I have performed a self-review of my code
 - [ ] I have commented my code, particularly in hard-to-understand areas
 - [ ] My changes generate no new warnings
-- [ ] I have run `ruff format.` and `ruff check.`
-- [ ] I have run `mypy src/` (if type hints added/changed)
+- [ ] I have run `make check` (format, lint, type-check, policy)
 
 ### Testing
 

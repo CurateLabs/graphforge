@@ -324,8 +324,8 @@ pnpm docs:preview      # serve docs-site/dist/
 # Install with dev dependencies
 uv sync --dev
 
-# Run all checks (mirrors CI)
-make pre-push
+# Run all checks (mirrors CI Lint)
+make check
 
 # Targeted Rust gates while iterating
 cargo fmt --all -- --check

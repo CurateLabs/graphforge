@@ -20,8 +20,8 @@ genealogy v1 to v2 route deliberately renames both a retained entity label and
 a retained property so certification cannot pass through a version-only or
 empty-data shortcut.
 
-Validate deterministically from the repository root:
+Contract validation runs as part of the workspace test suite:
 
 ```bash
-python3 scripts/ci/multi-ontology-contract-check.py
+cargo test -p graphforge-cli --test multi_ontology
 ```
