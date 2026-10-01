@@ -76,7 +76,7 @@ fn measure(nodes: usize) -> Open {
     let before = lifecycle_io_snapshot().expect("requested observation");
     let started = rchar();
     let forge = GraphForge::new(Some(path.to_str().expect("utf-8 path"))).expect("project opens");
-    let rchar = rchar() - started;
+    let opened = rchar() - started;
     let attributed = lifecycle_io_snapshot()
         .expect("requested observation")
         .since(&before)
@@ -84,10 +84,25 @@ fn measure(nodes: usize) -> Open {
         .totals
         .read_bytes;
     let evidence = forge.graph_open_evidence();
+    // Not asserted: what the first queries cost after the open. A one-hop that
+    // resolves a few identities reads their blocks; the first *ordered*
+    // one-hop must also prove UUID order over every ordinal block (16 B/node).
+    for query in [
+        "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id LIMIT 3",
+        "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 3",
+        "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 3",
+    ] {
+        let started = rchar();
+        forge.execute(query).expect("query");
+        eprintln!(
+            "  nodes={nodes} first-touch query read {}: {query}",
+            rchar() - started
+        );
+    }
     let open = Open {
         nodes,
         declared_payload: evidence.bytes_validated,
-        rchar,
+        rchar: opened,
         attributed,
         checksummed: evidence.bytes_checksummed,
         copied: evidence.bytes_copied,

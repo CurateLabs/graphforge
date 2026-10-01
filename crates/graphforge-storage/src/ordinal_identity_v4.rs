@@ -1,5 +1,8 @@
 //! Read-only authenticated v4 `node_id -> node_uuid` authority.
 //!
+//! Opening reads no artifact byte; every ordinal and tombstone block is
+//! authenticated by the lookup that reads it (#1388).
+//!
 //! This module deliberately exposes no publication API. Version-three state is
 //! reported as rebuild-required and is never interpreted through this format.
 
@@ -343,7 +346,8 @@ impl crate::ResolvedProjectGeneration {
 /// Typed open disposition. V3 is never parsed as v4.
 #[derive(Debug)]
 pub enum V4OrdinalIdentityOpen {
-    /// Fully authenticated v4 handle.
+    /// Opened v4 handle. Descriptors are authenticated; artifact content is
+    /// authenticated block by block as lookups read it.
     Ready(Box<V4OrdinalIdentityHandle>),
     /// A valid version marker that requires an explicit rebuild.
     RebuildRequired {

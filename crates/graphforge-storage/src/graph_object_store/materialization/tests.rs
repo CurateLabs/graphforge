@@ -141,8 +141,8 @@ fn materialization_gives_mutable_uuid_controls_private_single_link_inodes() {
             &b"receipt"[..],
         ),
         (
-            "topology/uuid-membership/ordinal-v4-1-0123456789abcdef.uuidx",
-            &b"ordinal"[..],
+            "topology/uuid-membership/tombstones-v4-1-0123456789abcdef.uuidx",
+            &b"tombstones"[..],
         ),
     ];
     let mut entries = Vec::new();
@@ -191,6 +191,61 @@ fn materialization_gives_mutable_uuid_controls_private_single_link_inodes() {
             fs::read(target.join(&entry.relative_path)).unwrap().len() as u64,
             entry.byte_length
         );
+    }
+}
+
+/// The node-linear forward and ordinal runs are immutable and are shared with
+/// the content store; only the small mutable controls are private (#1388).
+#[test]
+fn materialization_hard_links_forward_and_ordinal_identity_runs() {
+    let root = tempfile::tempdir().unwrap();
+    let files = [
+        (
+            "topology/uuid-membership/forward-v4-1-0123456789abcdef.uuidx",
+            &b"forward"[..],
+        ),
+        (
+            "topology/uuid-membership/ordinal-v4-1-0123456789abcdef.uuidx",
+            &b"ordinal"[..],
+        ),
+        (
+            "topology/uuid-membership/ordinal-v4-manifest.json",
+            &b"manifest"[..],
+        ),
+    ];
+    let mut entries = Vec::new();
+    for (relative_path, payload) in files {
+        let (digest, _) = install_graph_object_bytes(root.path(), payload).unwrap();
+        entries.push(crate::GraphFileEntry {
+            content_xxh64: crate::corruption_checksum::checksum(payload),
+            relative_path: relative_path.to_owned(),
+            byte_length: payload.len() as u64,
+            content_sha256: digest,
+            role: crate::GraphFileRole::Topology,
+        });
+    }
+    entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let inventory = crate::graph_files::inventory_from_entries(entries).unwrap();
+    let owner = tempfile::tempdir().unwrap();
+    let target = owner.path().join("workspace");
+
+    let evidence = materialize_graph_objects(root.path(), &inventory, &target).unwrap();
+
+    // The manifest is a private copy; the runs are links.
+    assert_eq!(evidence.files_copied, 1);
+    assert_eq!(evidence.files_reused, 2);
+    for (name, links_at_least) in [
+        ("forward-v4-1-0123456789abcdef.uuidx", 2),
+        ("ordinal-v4-1-0123456789abcdef.uuidx", 2),
+        ("ordinal-v4-manifest.json", 1),
+    ] {
+        let file = File::open(target.join("topology/uuid-membership").join(name)).unwrap();
+        let links = graphforge_filesystem::file_link_count(&file).unwrap();
+        if links_at_least == 1 {
+            assert_eq!(links, 1, "{name} must stay a private copy");
+        } else {
+            assert!(links >= links_at_least, "{name} must be hard-linked");
+        }
     }
 }
 

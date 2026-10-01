@@ -591,9 +591,12 @@ fn open_reads_control_bytes_not_payload_bytes() {
         .open_evidence
         .bytes_checksummed
         .abs_diff(small.open_evidence.bytes_checksummed);
+    // What moves is descriptors (one manifest entry per edge file), a sliver of
+    // the payload growth; it is no longer a fraction of copied identity bytes.
+    let payload_growth = large.payload_bytes - small.payload_bytes;
     assert!(
-        growth * 20 < small.open_evidence.bytes_checksummed,
-        "checksummed bytes moved {growth} with a 16x edge payload: {} -> {}",
+        growth * 1024 < payload_growth,
+        "checksummed bytes moved {growth} with a {payload_growth}-byte payload growth: {} -> {}",
         small.open_evidence.bytes_checksummed,
         large.open_evidence.bytes_checksummed
     );
