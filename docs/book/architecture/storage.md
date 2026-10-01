@@ -327,10 +327,10 @@ chosen by path in `graphforge_storage::graph_admission`:
   carry their own authority; hydration neither reads nor registers them.
 - **Eager.** Every other payload is small metadata or a sidecar with many
   by-name readers (generation counters, label encoding, catalogs, adjacency
-  build records, CSR shard manifests, unclassified files). Hydration copies it
-  into a single-link private file, checking length and XXH64 as it copies (the
-  existing copy-and-verify protocol), so an unforeseen reader fails closed and
-  a mutable sidecar is never a shared inode.
+  build records, CSR shard manifests, unclassified files). Hydration
+  hard-links it from the object store and checks its length and XXH64 as it
+  links, so an unforeseen reader fails closed. Only the route table and the
+  UUID-membership controls are copied into single-link private files.
 
 `GraphFilesOpenEvidence.bytes_validated` is declared length validated, and
 `bytes_checksummed` is content actually read and checksummed while hydrating.

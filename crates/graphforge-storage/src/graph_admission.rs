@@ -331,7 +331,8 @@ impl std::io::Read for ReadAt<'_> {
 }
 
 /// Check one handle against its manifest entry by exact length and XXH64.
-/// Positioned reads leave the caller's file offset untouched.
+/// Positioned reads leave the caller's file offset untouched on Unix; on
+/// Windows `seek_read` moves it, and no caller depends on the offset.
 fn checksum_handle(
     file: &File,
     entry: &crate::GraphFileEntry,
@@ -497,6 +498,7 @@ mod tests {
         assert!(admit_path(&fixture.link).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn admission_does_not_move_the_callers_file_offset() {
         let fixture = Fixture::new(PAYLOAD);
