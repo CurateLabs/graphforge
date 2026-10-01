@@ -1,0 +1,25 @@
+[package]
+name = "graphforge-benchmark-gdc-scorecard"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "gdc_scorecard"
+path = "src/lib.rs"
+
+[[bin]]
+name = "graphforge-benchmark-gdc-scorecard"
+path = "src/main.rs"
+
+[dependencies]
+arrow.workspace = true
+parquet.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.11"
+
+[dev-dependencies]
+tempfile = "3"

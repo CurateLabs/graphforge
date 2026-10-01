@@ -1,0 +1,69 @@
+{
+  "schema": "graphforge-gdc-load-mapping/1",
+  "node_tables": [
+    {
+      "id": "vertex",
+      "format": "graphalytics-vertices",
+      "files": ["graph.v"],
+      "label": "Vertex",
+      "id_column": "id",
+      "properties": [{"column": "id", "name": "vertex_id", "type": "int64"}]
+    },
+    {
+      "id": "person",
+      "format": "ldbc-csv",
+      "files": ["person_0_0.csv"],
+      "label": "Person",
+      "id_column": "id",
+      "properties": [
+        {"column": "id", "type": "int64"},
+        {"column": "firstName", "name": "first_name", "type": "string"},
+        {"column": "age", "type": "int32"},
+        {"column": "score", "type": "float64"},
+        {"column": "active", "type": "boolean"}
+      ]
+    },
+    {
+      "id": "place",
+      "format": "ldbc-csv",
+      "files": ["place_0_0.csv"],
+      "label": "Place",
+      "id_column": "id",
+      "properties": [{"column": "name", "type": "string"}]
+    },
+    {
+      "id": "organisation",
+      "format": "ldbc-csv",
+      "files": ["organisation_0_0.csv"],
+      "label": "Organisation",
+      "id_column": "id",
+      "properties": [
+        {"column": "name", "type": "string"},
+        {"column": "kind", "type": "string"}
+      ]
+    }
+  ],
+  "edge_tables": [
+    {
+      "id": "link",
+      "format": "graphalytics-edges",
+      "files": ["graph.e"],
+      "rel_type": "LINK",
+      "source": {"label": "Vertex", "column": "source"},
+      "target": {"label": "Vertex", "column": "target"},
+      "properties": [{"column": "weight", "type": "float64"}]
+    },
+    {
+      "id": "knows",
+      "format": "ldbc-csv",
+      "files": ["person_knows_person_0_0.csv"],
+      "rel_type": "KNOWS",
+      "source": {"label": "Person", "column": "Person.id"},
+      "target": {"label": "Person", "column": "Person.id.1"},
+      "properties": [
+        {"column": "creationDate", "name": "creation_date", "type": "string"},
+        {"column": "strength", "type": "int64"}
+      ]
+    }
+  ]
+}
