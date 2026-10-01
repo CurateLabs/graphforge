@@ -354,11 +354,7 @@ fn is_mutable_artifact_control(relative_path: &str) -> bool {
         matches!(
             name,
             Some(
-                "catalog.json"
-                    | "active.json"
-                    | "current.json"
-                    | "mutations.json"
-                    | ".writer.lock"
+                "catalog.json" | "active.json" | "current.json" | "mutations.json" | ".writer.lock"
             )
         )
     } else {

@@ -33,7 +33,6 @@ use uuid::Uuid;
 type Node = (Uuid, String, Option<i64>);
 type Edge = (Uuid, Uuid, Uuid, String, Option<i64>, Option<String>);
 
-
 /// Authoritative property delta runs for the replay and compaction fixtures.
 ///
 /// No commit publishes delta runs any more (#1388): a delta-bearing generation
@@ -154,12 +153,13 @@ mod delta_runs {
                     .get(component)
                     .cloned()
                     .unwrap_or_else(|| component.to_owned());
-                let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-                    std::fs::File::open(object(entry)).unwrap(),
-                )
-                .unwrap()
-                .build()
-                .unwrap();
+                let reader =
+                    parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                        std::fs::File::open(object(entry)).unwrap(),
+                    )
+                    .unwrap()
+                    .build()
+                    .unwrap();
                 for batch in reader {
                     let batch = batch.unwrap();
                     let uuids = batch
@@ -178,7 +178,10 @@ mod delta_runs {
 
         /// The owner of `edge`, or its relation type for an edge with no data.
         pub(super) fn owner(&self, edge: Uuid, relation: &str) -> String {
-            self.0.get(&edge).cloned().unwrap_or_else(|| relation.to_owned())
+            self.0
+                .get(&edge)
+                .cloned()
+                .unwrap_or_else(|| relation.to_owned())
         }
     }
 
@@ -4512,7 +4515,12 @@ fn composite_constructed_edge_properties_preserve_authenticated_owner() {
         delta_runs::publish(
             &source,
             vec![
-                delta_runs::set_edge(ordinary, &owners.owner(ordinary, &edges[129].3), "weight", 23),
+                delta_runs::set_edge(
+                    ordinary,
+                    &owners.owner(ordinary, &edges[129].3),
+                    "weight",
+                    23,
+                ),
                 delta_runs::remove_edge(ordinary, &owners.owner(ordinary, &edges[129].3), "text"),
                 delta_runs::set_edge(empty, &owners.owner(empty, &edges[130].3), "weight", 29),
                 delta_runs::set_edge(
@@ -4521,11 +4529,7 @@ fn composite_constructed_edge_properties_preserve_authenticated_owner() {
                     "weight",
                     19,
                 ),
-                delta_runs::remove_edge(
-                    edges[1].0,
-                    &owners.owner(edges[1].0, &edges[1].3),
-                    "text",
-                ),
+                delta_runs::remove_edge(edges[1].0, &owners.owner(edges[1].0, &edges[1].3), "text"),
             ],
         );
         let mut graph = GraphForge::new(source.to_str()).unwrap();
@@ -5612,28 +5616,15 @@ fn exercise_publishing_contract(count: usize, typed: bool) {
     delta_runs::publish(
         &source,
         vec![
-            delta_runs::set_node(
-                nodes[0].0,
-                &default_node_owner(&nodes[0].1),
-                "score",
-                1221,
-            ),
-            delta_runs::remove_node(
-                nodes[1].0,
-                &default_node_owner(&nodes[1].1),
-                "score",
-            ),
+            delta_runs::set_node(nodes[0].0, &default_node_owner(&nodes[0].1), "score", 1221),
+            delta_runs::remove_node(nodes[1].0, &default_node_owner(&nodes[1].1), "score"),
             delta_runs::set_edge(
                 edges[0].0,
                 &owners.owner(edges[0].0, &edges[0].3),
                 "weight",
                 1221,
             ),
-            delta_runs::remove_edge(
-                edges[1].0,
-                &owners.owner(edges[1].0, &edges[1].3),
-                "text",
-            ),
+            delta_runs::remove_edge(edges[1].0, &owners.owner(edges[1].0, &edges[1].3), "text"),
         ],
     );
     let mut graph = GraphForge::new(source.to_str()).unwrap();
@@ -7735,4 +7726,3 @@ fn count_row_marker_avoids_property_values_through_public_lifecycle() {
         after_import_mutation
     );
 }
-

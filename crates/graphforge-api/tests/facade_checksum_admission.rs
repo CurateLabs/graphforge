@@ -224,9 +224,7 @@ fn current_facade_refuses_same_inode_same_length_payload_mutation() {
     let victim = inventory
         .files
         .iter()
-        .find(|entry| {
-            entry.relative_path.starts_with("topology/nodes") && entry.byte_length > 16
-        })
+        .find(|entry| entry.relative_path.starts_with("topology/nodes") && entry.byte_length > 16)
         .unwrap();
     flip_byte_in_place(
         &graphforge_storage::graph_object_path(root.path(), &victim.content_sha256).unwrap(),

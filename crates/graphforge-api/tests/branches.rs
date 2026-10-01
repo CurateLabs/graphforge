@@ -1138,7 +1138,12 @@ fn selected_branch_releases_large_parent_after_evolution_and_cleanup() {
         for entry in std::fs::read_dir(root.join("generations")).unwrap() {
             let uuid = Uuid::parse_str(entry.unwrap().file_name().to_str().unwrap()).unwrap();
             let generation = graphforge_storage::resolve_generation_by_uuid(&root, uuid).unwrap();
-            for file in generation.graph_files_inventory().unwrap().into_iter().flat_map(|inventory| inventory.files) {
+            for file in generation
+                .graph_files_inventory()
+                .unwrap()
+                .into_iter()
+                .flat_map(|inventory| inventory.files)
+            {
                 generation_objects.insert(file.content_sha256, file.byte_length);
             }
         }

@@ -1231,7 +1231,9 @@ mod tests {
         let victim = inventory
             .files
             .iter()
-            .find(|entry| entry.relative_path.starts_with("topology/nodes") && entry.byte_length > 16)
+            .find(|entry| {
+                entry.relative_path.starts_with("topology/nodes") && entry.byte_length > 16
+            })
             .unwrap();
         let object = graphforge_storage::graph_object_path(
             generation.container_root(),

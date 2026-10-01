@@ -172,6 +172,7 @@ pub(crate) struct WorkspaceCapture {
     pub(crate) captured: BTreeMap<String, CapturedWorkspaceFile>,
     /// Payload read calls the capture made: none for a file that is its parent's
     /// own object, one pass for every other.
+    #[cfg_attr(not(test), allow(dead_code, reason = "observed by the capture's tests"))]
     pub(crate) read_calls: u64,
 }
 
@@ -238,7 +239,10 @@ mod tests {
         let (digest, checksum, calls, hashed) =
             super::super::capture_payload_identity(&linked, Some(&known), ARTIFACT_IDENTITY)
                 .unwrap();
-        assert_eq!(digest, known.content_sha256, "the declared digest is reused");
+        assert_eq!(
+            digest, known.content_sha256,
+            "the declared digest is reused"
+        );
         assert_eq!(checksum, known.content_xxh64);
         assert_eq!(calls, 0, "no byte of the object is read");
         assert!(hashed.is_none(), "nothing is retained for installation");
@@ -246,13 +250,19 @@ mod tests {
         let (digest, checksum, calls, hashed) =
             super::super::capture_payload_identity(&copied, Some(&known), ARTIFACT_IDENTITY)
                 .unwrap();
-        assert_ne!(digest, known.content_sha256, "a copy is named by its own bytes");
+        assert_ne!(
+            digest, known.content_sha256,
+            "a copy is named by its own bytes"
+        );
         assert_eq!(
             checksum,
             crate::corruption_checksum::checksum(b"immutable payload")
         );
         assert!(calls > 0);
-        assert!(hashed.is_some(), "a freshly hashed file is retained to install");
+        assert!(
+            hashed.is_some(),
+            "a freshly hashed file is retained to install"
+        );
     }
     /// Publishing a workspace over a compact parent installs what changed and
     /// reads nothing else: hydrated files are the parent's own objects, so a
@@ -267,7 +277,11 @@ mod tests {
         crate::open_or_initialize_project(root.path()).unwrap();
         let workspace = tempfile::tempdir_in(root.path()).unwrap();
         std::fs::create_dir_all(workspace.path().join("topology")).unwrap();
-        std::fs::write(workspace.path().join("topology/nodes.parquet"), vec![7_u8; 8 * 64 * 1024]).unwrap();
+        std::fs::write(
+            workspace.path().join("topology/nodes.parquet"),
+            vec![7_u8; 8 * 64 * 1024],
+        )
+        .unwrap();
         std::fs::write(workspace.path().join("topology/generation.json"), b"{}\n").unwrap();
 
         let publish = |workspace: &Path| {
@@ -359,7 +373,11 @@ mod tests {
                 .any(|entry| entry.relative_path == "topology/added.bin")
         );
         for entry in payload(&inventory) {
-            assert!(after.files.contains(&entry), "{} is carried over", entry.relative_path);
+            assert!(
+                after.files.contains(&entry),
+                "{} is carried over",
+                entry.relative_path
+            );
         }
     }
 }

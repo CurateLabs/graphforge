@@ -354,7 +354,9 @@ fn compact_delta_project(project: &Path) {
     let node_uuid = uuid::Uuid::from_slice(ids.value(0)).unwrap().to_string();
     // No commit publishes delta runs any more, but generations published before
     // that carry them: build one over an expanded base, as the journal API does.
-    drop(crate::expanded_generation_test_support::into_expanded(graph));
+    drop(crate::expanded_generation_test_support::into_expanded(
+        graph,
+    ));
     graphforge_storage::publish_graph_delta(
         project,
         &GraphDeltaPublishRequest {

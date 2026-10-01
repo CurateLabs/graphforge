@@ -558,7 +558,12 @@ fn file_backed_multi_file_fixture_reopens_without_snapshot_envelope() {
     assert!(inventory.total_byte_length > 0);
     // A mutating commit publishes a compact root over the content store: the
     // generation owns no graph tree.
-    assert!(generation.declared_graph_files_inventory().unwrap().is_none());
+    assert!(
+        generation
+            .declared_graph_files_inventory()
+            .unwrap()
+            .is_none()
+    );
     assert!(!generation.graph_tree_root().exists());
 
     let reopened = GraphForge::new(Some(path)).unwrap();
@@ -571,7 +576,10 @@ fn file_backed_multi_file_fixture_reopens_without_snapshot_envelope() {
     assert_eq!(evidence.files_opened_in_place, 0);
     assert!(evidence.bytes_copied > 0);
     assert!(evidence.bytes_copied < evidence.bytes_validated);
-    assert_eq!(evidence.files_copied + evidence.files_reused, evidence.files_validated);
+    assert_eq!(
+        evidence.files_copied + evidence.files_reused,
+        evidence.files_validated
+    );
 
     let result = reopened
         .execute("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS from, b.name AS to")
@@ -602,7 +610,10 @@ fn checkpoint_read_only_open_hydrates_a_compact_generation_privately() {
     // private workspace: payloads are hard-linked from the content store and
     // only the small mutable controls are copied. Pinning a generation tree in
     // place applies to expanded generations only (see `pinned_workspace_tests`).
-    assert_eq!(evidence.strategy, GraphFilesOpenStrategy::PrivateMaterialize);
+    assert_eq!(
+        evidence.strategy,
+        GraphFilesOpenStrategy::PrivateMaterialize
+    );
     assert!(evidence.files_validated >= 2);
     assert_eq!(evidence.files_opened_in_place, 0);
     assert!(evidence.files_reused > 0);

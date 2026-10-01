@@ -214,7 +214,9 @@ fn open_and_query(path: &Path) -> Open {
     }
     Open {
         attributed: open.totals.read_bytes,
-        rchar: rchar_before.zip(rchar_after).map(|(before, after)| after - before),
+        rchar: rchar_before
+            .zip(rchar_after)
+            .map(|(before, after)| after - before),
         copied,
         checksummed,
         ids,
@@ -298,7 +300,10 @@ fn assert_open_bounded(measured: &Measured) {
     );
     // Delta runs are never published, and an open that replayed one would read
     // the whole graph.
-    assert_eq!(layout.delta_runs, 0, "{nodes} nodes: a delta run is published");
+    assert_eq!(
+        layout.delta_runs, 0,
+        "{nodes} nodes: a delta run is published"
+    );
     // Hydration copies the small controls and nothing else: the copied bytes are
     // identity controls, at most `COPIED_CONTROL_BYTES_PER_NODE` a node.
     assert!(
@@ -386,9 +391,15 @@ impl InPlaceFlip {
         let original = std::fs::read(&object).unwrap();
         let mut flipped = original.clone();
         flipped[offset] ^= 0xff;
-        std::fs::set_permissions(&object, std::fs::Permissions::from_mode(before.mode() | 0o200))
+        std::fs::set_permissions(
+            &object,
+            std::fs::Permissions::from_mode(before.mode() | 0o200),
+        )
+        .unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&object)
             .unwrap();
-        let mut file = std::fs::OpenOptions::new().write(true).open(&object).unwrap();
         std::io::Write::write_all(&mut file, &flipped).unwrap();
         file.sync_all().unwrap();
         let after = std::fs::metadata(&object).unwrap();
@@ -550,7 +561,9 @@ fn mutated_project_refuses_a_same_inode_flip_on_the_touching_query() {
         };
         let message = refused.to_string().to_lowercase();
         assert!(
-            message.contains("checksum") || message.contains("digest") || message.contains("corrupt"),
+            message.contains("checksum")
+                || message.contains("digest")
+                || message.contains("corrupt"),
             "{what} ({}): refused for the wrong reason: {refused}",
             entry.relative_path
         );
@@ -628,7 +641,14 @@ fn every_mutating_commit_publishes_a_compact_root() {
         for commit in COMMITS {
             let project = tempfile::tempdir().expect("project directory");
             let path = project_path(&project);
-            let label = format!("{commit:?} over {}", if constructed { "a constructed parent" } else { "an empty project" });
+            let label = format!(
+                "{commit:?} over {}",
+                if constructed {
+                    "a constructed parent"
+                } else {
+                    "an empty project"
+                }
+            );
             if constructed {
                 bulk_fixture::generate_bulk_graph_with_index(
                     &path,
@@ -637,7 +657,10 @@ fn every_mutating_commit_publishes_a_compact_root() {
                     false,
                 );
                 let parent = graph_record_version(&path);
-                assert!(is_compact_root(parent), "{label}: the constructed parent is version {parent}");
+                assert!(
+                    is_compact_root(parent),
+                    "{label}: the constructed parent is version {parent}"
+                );
             }
             let generation_before = resolve_project_generation(&path)
                 .ok()
@@ -662,7 +685,10 @@ fn every_mutating_commit_publishes_a_compact_root() {
                 "{label}: published graph record version {record_version}, not a compact root"
             );
             assert!(
-                published.declared_graph_files_inventory().unwrap().is_none(),
+                published
+                    .declared_graph_files_inventory()
+                    .unwrap()
+                    .is_none(),
                 "{label}: the generation owns an expanded inventory"
             );
             assert!(
@@ -681,7 +707,10 @@ fn every_mutating_commit_publishes_a_compact_root() {
             // The open reads controls, not payload: content waits for first touch.
             let reopened = GraphForge::new(path.to_str()).unwrap();
             let evidence = reopened.graph_open_evidence();
-            assert!(evidence.files_reused > 0, "{label}: nothing was hard-linked at open");
+            assert!(
+                evidence.files_reused > 0,
+                "{label}: nothing was hard-linked at open"
+            );
             assert!(
                 evidence.bytes_checksummed
                     <= HYDRATION_PASSES * evidence.bytes_copied + CONTROL_SLACK_BYTES,
@@ -752,7 +781,10 @@ fn expanded_parent_is_converted_on_next_commit() {
     assert_eq!(before.1, 1);
     assert_eq!(before.2, (PARENT_NODES * PARENT_FAN_OUT) as i64);
     // Expanded generations still verify and copy their whole tree at open.
-    assert_eq!(forge.graph_open_evidence().files_copied, forge.graph_open_evidence().files_validated);
+    assert_eq!(
+        forge.graph_open_evidence().files_copied,
+        forge.graph_open_evidence().files_validated
+    );
 
     forge.execute("CREATE (:Extra {name: 'after'})").unwrap();
     drop(forge);
