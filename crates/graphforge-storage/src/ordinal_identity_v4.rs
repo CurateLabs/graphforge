@@ -1083,6 +1083,10 @@ impl V4OrdinalIdentityHandle {
             return Ok(());
         }
         let mut prior_last: Option<Uuid> = None;
+        // The end blocks are read to check the record and dropped: holding them
+        // would turn the first query's own reads into cache hits and hide them
+        // from its evidence, and one more read per range end is the whole cost.
+        let mut scratch = OrdinalBlockCache::default();
         for range_index in 0..self.ranges.len() {
             let descriptor = &self.ranges[range_index].descriptor;
             let first_id = descriptor.first_node_id;
@@ -1094,8 +1098,8 @@ impl V4OrdinalIdentityHandle {
                 &ids,
                 RangeRead {
                     range_index,
-                    cache: &mut self.ordinal_cache,
-                    max_cache_bytes: self.limits.max_ordinal_cache_bytes,
+                    cache: &mut scratch,
+                    max_cache_bytes: 0,
                     gap_bytes: self.limits.coalesce_gap_bytes,
                     maximum_read_bytes: self.limits.max_coalesced_read_bytes,
                     retained_buffer_bytes: 0,

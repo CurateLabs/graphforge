@@ -1157,7 +1157,8 @@ fn a_recorded_order_is_refused_when_ranges_meet_out_of_order() {
 fn a_recorded_order_is_refused_when_adjacent_held_blocks_meet_out_of_order() {
     // Three blocks, each ascending, with the seam between the middle and last
     // inverted. The range ends are fine, so the record survives the boundary
-    // check; the middle block is then read and meets its held neighbour.
+    // check; the last block is read and held, then the middle block is read and
+    // meets its held neighbour.
     let records = u128::from(RECORDS_PER_ORDINAL_BLOCK);
     let uuids = (0..records)
         .map(|n| n + 1)
@@ -1167,6 +1168,13 @@ fn a_recorded_order_is_refused_when_adjacent_held_blocks_meet_out_of_order() {
     let fixture = three_block_fixture(uuids);
     let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
     assert_eq!(handle.uuid_order_matches_ordinals(), Ok(true));
+    assert!(
+        handle
+            .lookup_node_uuids(&[2 * RECORDS_PER_ORDINAL_BLOCK + 1])
+            .unwrap()
+            .values[0]
+            .is_some()
+    );
     assert_eq!(
         handle
             .lookup_node_uuids(&[RECORDS_PER_ORDINAL_BLOCK + 1])
