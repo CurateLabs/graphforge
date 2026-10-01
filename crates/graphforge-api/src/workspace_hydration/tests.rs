@@ -863,11 +863,12 @@ fn hardlinked_edge_route_corruption_is_refused_on_recount() {
     );
 }
 
-/// A mutating commit republishes the whole graph tree. It must refuse a
-/// corrupted payload it would otherwise re-read and re-hash, rather than
-/// launder the corrupted bytes into a new generation under a fresh digest.
-/// One statement leaves the corrupted edge file untouched (it is only
-/// re-hashed for publication); the other appends to it.
+/// A mutating commit captures every file of the workspace, and capture admits a
+/// hydrated payload (`capture_payload_identity`, before any digest is reused or
+/// minted) that nothing has read yet. A corrupted payload is therefore refused
+/// by the commit, whether the commit leaves it untouched (it would otherwise be
+/// referenced again) or appends to it, rather than being carried into a new
+/// generation.
 #[test]
 fn a_mutating_commit_does_not_launder_a_corrupted_payload() {
     for statement in [

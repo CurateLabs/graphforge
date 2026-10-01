@@ -156,8 +156,10 @@ fn facade_mutation_does_not_rehash_the_unchanged_graph() {
     // A mutating commit publishes a compact root, so the new bytes are only the
     // objects that changed (it once republished the whole tree, which made a
     // bound on every new inode loose). Each changed file is hashed once, while it
-    // is captured, and installed against that capture: the bound is the bytes of
-    // the objects installed. The UUID-membership rebuild also describes (hashes)
+    // is captured, and installed against that capture (up to
+    // `MAX_RETAINED_CAPTURES` = 128 changed files; beyond that the rest are hashed
+    // again as they install, which this one-node commit never reaches): the bound is
+    // the bytes of the objects installed. The UUID-membership rebuild also describes (hashes)
     // each of its runs once; that is a term of the rebuild, bounded here by the
     // declared bytes of the membership controls, and is the next term to remove.
     let membership_bytes: u64 = graphforge_storage::resolve_project_generation(root.path())

@@ -7,7 +7,6 @@
 
 mod identity_reuse;
 mod read_materialization;
-pub use identity_reuse::capture_graph_files_over_parent;
 pub(crate) use identity_reuse::{
     CapturedWorkspaceFile, KnownGraphFile, MAX_RETAINED_CAPTURES, capture_payload_identity,
     capture_workspace_over_parent,

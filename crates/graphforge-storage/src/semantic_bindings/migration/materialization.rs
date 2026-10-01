@@ -157,6 +157,8 @@ pub fn materialize_semantic_migration(
             if source.extension().and_then(|value| value.to_str()) != Some("parquet") {
                 std::fs::copy(&source, &target)
                     .map_err(|_| corrupt("migration source file cannot be copied"))?;
+                // A hydrated compact source is sealed read-only; the copy is not.
+                crate::graph_projection::make_private_copy_writable(&target)?;
                 files_materialized += 1;
                 continue;
             }

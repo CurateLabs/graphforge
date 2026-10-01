@@ -4115,7 +4115,35 @@ fn run_integrated_certification_config(
         .filter_map(|phase| phase["disk_peak_bytes"].as_u64())
         .max()
         .expect("completed lifecycle phase allocation peaks");
+    // The manifest the catalog category counts chunks of: how many files it
+    // declares, and how many catalog objects are not its chunks (the generation
+    // manifest, each participant and each catalog-class file).
+    let source_manifest = {
+        let generation = graphforge_storage::resolve_project_generation(&source)
+            .expect("resolve the final source generation");
+        let inventory = generation
+            .unadmitted_graph_files_inventory()
+            .expect("source manifest inventory")
+            .expect("source graph inventory");
+        let catalog_files = inventory
+            .files
+            .iter()
+            .filter(|entry| {
+                graphforge_storage::classify_graph_artifact(&entry.relative_path)
+                    == graphforge_storage::ArtifactCategory::CatalogAndManifests
+            })
+            .count();
+        let participants = generation
+            .participant_descriptors()
+            .expect("source participants")
+            .len();
+        json!({
+            "file_count": inventory.file_count,
+            "catalog_fixed_objects": 1 + participants + catalog_files,
+        })
+    };
     let evidence = json!({
+        "source_manifest": source_manifest,
         "source_export_generation_authenticated": source_generation == exported.generation_uuid,
         "import_receipt_reopen_authenticated": current_generation_uuid(&imported_graph) == imported_receipt.generation_uuid,
         "source_import_generations_distinct": exported.generation_uuid != imported_receipt.generation_uuid,
@@ -4405,6 +4433,10 @@ struct LifecycleLinearityObservation {
     encode_fsync_components: [u64; 4],
     hydration_files_copied: u64,
     hydration_uuid_control_bytes: u64,
+    /// Files the final source manifest declares, and the catalog objects that
+    /// are not manifest chunks.
+    manifest_files: u64,
+    catalog_fixed_objects: u64,
     hydration_file_fsync_operations: u64,
     hydration_directory_fsync_operations: u64,
     shape_read_component_calls: [u64; 6],
@@ -4726,6 +4758,12 @@ fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObserv
         hydration_uuid_control_bytes: evidence["storage"]["hydration_uuid_control_bytes"]
             .as_u64()
             .expect("authenticated UUID control bytes"),
+        manifest_files: evidence["source_manifest"]["file_count"]
+            .as_u64()
+            .expect("source manifest file count"),
+        catalog_fixed_objects: evidence["source_manifest"]["catalog_fixed_objects"]
+            .as_u64()
+            .expect("source catalog objects outside the manifest"),
         hydration_file_fsync_operations,
         hydration_directory_fsync_operations,
         shape_read_component_calls,
@@ -5933,18 +5971,83 @@ enum CategoryBehavior {
     StructurallyZero,
 }
 
-/// The catalog and manifest object count, and the filesystem allocation those
-/// objects take (a page each), must not follow the data. A compact manifest's
-/// chunks follow the radix shape of its path set, and many of those paths embed
-/// content-hash names, so a rung may gain or lose a few chunks (version-one
-/// inventories were one object, which is why this once demanded equality). A
-/// fourth of the smallest value is that allowance; growth in step with the data,
-/// which doubles and quadruples it, exceeds it.
-fn validate_stable_manifest_inventory(name: &str, values: [u64; 3]) -> Result<(), String> {
-    let smallest = values.into_iter().min().unwrap_or(0);
-    let largest = values.into_iter().max().unwrap_or(0);
-    if smallest == 0 || largest - smallest > smallest / 4 {
-        return Err(format!("{name} object inventory changed: {values:?}"));
+/// The catalog and manifest inventory, from structure rather than from what a
+/// run happened to produce.
+///
+/// A compact manifest is a radix tree over the declared file paths, in chunks of
+/// at most `GRAPH_MANIFEST_BUCKET_CAPACITY` entries, so for `N` declared files
+/// its chunk count `M` satisfies `ceil(N / capacity) <= M <= 2N - 1` whatever the
+/// path text (several of which embed content hashes). Catalog references are
+/// those `M` chunks plus a fixed set of objects the evidence names. A fixed
+/// inventory therefore holds only while `N` is the same in every rung, which is
+/// true while the shard and route counts are, and a rung that adds files is
+/// refused rather than tolerated. Physical objects are at most the references,
+/// and the pages an object takes follow its bytes, so allocation is bounded by
+/// the logical bytes it holds plus a page per object.
+fn validate_manifest_inventory(
+    name: &str,
+    field: usize,
+    values: [u64; 3],
+    observations: &[LifecycleLinearityObservation; 3],
+    category_metrics: impl Fn(usize) -> [u64; 6],
+) -> Result<(), String> {
+    let files = observations
+        .each_ref()
+        .map(|observation| observation.manifest_files);
+    if files[0] == 0 || files[0] != files[1] || files[0] != files[2] {
+        return Err(format!(
+            "{name} manifest file count changed across rungs: {files:?}; a fixed inventory \
+             holds only while the shard count is constant"
+        ));
+    }
+    let files = files[0];
+    let capacity = u64::try_from(graphforge_storage::GRAPH_MANIFEST_BUCKET_CAPACITY)
+        .map_err(|_| "manifest capacity exceeds u64".to_owned())?;
+    match field {
+        0 => {
+            for (rung, observation) in observations.iter().enumerate() {
+                let chunks = values[rung]
+                    .checked_sub(observation.catalog_fixed_objects)
+                    .ok_or_else(|| {
+                        format!("{name} object inventory changed: {values:?} omits fixed objects")
+                    })?;
+                if chunks < files.div_ceil(capacity) || chunks > 2 * files - 1 {
+                    return Err(format!(
+                        "{name} object inventory changed: {chunks} manifest chunks for \
+                         {files} files at rung {rung}"
+                    ));
+                }
+            }
+        }
+        2 => {
+            for rung in 0..3 {
+                let references = category_metrics(rung)[0];
+                if values[rung] == 0 || values[rung] > references {
+                    return Err(format!(
+                        "{name} object inventory changed: {} physical objects for \
+                         {references} references at rung {rung}",
+                        values[rung]
+                    ));
+                }
+            }
+        }
+        _ => {
+            for rung in 0..3 {
+                let metrics = category_metrics(rung);
+                let (objects, logical) = if field == 4 {
+                    (metrics[0], metrics[1])
+                } else {
+                    (metrics[2], metrics[3])
+                };
+                let ceiling = logical + 4096 * objects;
+                if values[rung] < logical || values[rung] > ceiling {
+                    return Err(format!(
+                        "{name} allocation {} is outside [{logical}, {ceiling}] at rung {rung}",
+                        values[rung]
+                    ));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -6022,7 +6125,9 @@ fn validate_category_taxonomy(
                         validate_positive_normalized_ceiling(&name, values, denominators)?;
                     }
                     (CategoryBehavior::FixedInventory, 0 | 2 | 4 | 5) => {
-                        validate_stable_manifest_inventory(&name, values)?;
+                        validate_manifest_inventory(&name, field, values, observations, |rung| {
+                            observations[rung].category_metrics[&key]
+                        })?;
                     }
                     (_, 0 | 2)
                         if values[0] > 0 && values[0] == values[1] && values[0] == values[2] => {}
@@ -6687,6 +6792,9 @@ fn validate_lifecycle_metric_policies(
     validate_lifecycle_metric_policies_for_axis(LinearityAxis::Nodes, observations)
 }
 
+/// A manifest of this many files fits in one radix chunk.
+const SYNTHETIC_MANIFEST_FILES: u64 = 8;
+
 fn synthetic_category_metrics(axis: LinearityAxis, factor: u64) -> BTreeMap<String, [u64; 6]> {
     let mut metrics = BTreeMap::new();
     for owner in ["source", "clean_import"] {
@@ -6901,6 +7009,8 @@ fn synthetic_linearity_observations_for_axis(
             encode_fsync_components: [10, 5, 8, 20],
             hydration_files_copied: 19,
             hydration_uuid_control_bytes: 100,
+            manifest_files: SYNTHETIC_MANIFEST_FILES,
+            catalog_fixed_objects: 0,
             hydration_file_fsync_operations: 19,
             hydration_directory_fsync_operations: 19,
             shape_read_component_calls: [factor, 0, 0, 0, 0, 0],
@@ -7115,6 +7225,7 @@ fn synthetic_retained_evidence() -> Value {
     let (source, _) = synthetic_attribution_owner("source");
     let (clean_import, _) = synthetic_attribution_owner("clean_import");
     json!({
+        "source_manifest": {"file_count": SYNTHETIC_MANIFEST_FILES, "catalog_fixed_objects": 0},
         "source_nodes": 100,
         "source_edges": 80,
         "storage": {
@@ -7308,79 +7419,79 @@ fn controlled_fixture_policies_reject_coherent_zero_and_excess_work() {
                 .unwrap_err()
                 .contains("retained encoding inventory changed")
         );
-        // Manifest chunks may shift a little with the radix shape of the path set,
-        // and may not scale with the data.
-        // A compact manifest has many chunks (the fixtures publish a single
-        // catalog object), so grow the catalog inventory in every rung first,
-        // then let one rung gain a chunk.
-        let mut tolerated = observations.clone();
-        for (rung, observation) in tolerated.iter_mut().enumerate() {
-            for owner in ["source", "clean_import"] {
-                let key = format!("{owner}.catalog_and_manifests");
-                let chunks = observation.category_metrics[&key][0];
-                let pages = observation.category_metrics[&key][4];
-                let extra_objects = 7 * chunks + u64::from(rung == 2);
-                let extra_pages = 7 * pages + 4096 * u64::from(rung == 2);
-                for metrics in [
-                    &mut observation.category_metrics,
-                    &mut observation.category_authority_metrics,
-                ] {
-                    let fields = metrics.get_mut(&key).unwrap();
-                    fields[0] += extra_objects;
-                    fields[2] += extra_objects;
-                    fields[4] += extra_pages;
-                    fields[5] += extra_pages;
-                }
-                for name in ["logical_references", "physical_objects"] {
+        // The catalog inventory is structural: for N declared files the manifest
+        // chunks lie in [ceil(N / capacity), 2N - 1], and N is the same in every
+        // rung. A rung may re-shape the radix tree within that range (path text
+        // embeds content hashes); a rung that adds files, or a manifest outside
+        // the range, is refused.
+        let with_manifest = |files: [u64; 3], chunks: [u64; 3]| {
+            let mut changed = observations.clone();
+            for (rung, observation) in changed.iter_mut().enumerate() {
+                observation.manifest_files = files[rung];
+                for owner in ["source", "clean_import"] {
+                    let key = format!("{owner}.catalog_and_manifests");
+                    let before = observation.category_metrics[&key];
+                    let pages = 4096 * chunks[rung];
+                    let (extra_objects, extra_pages) =
+                        (chunks[rung] - before[0], pages - before[4]);
+                    for metrics in [
+                        &mut observation.category_metrics,
+                        &mut observation.category_authority_metrics,
+                    ] {
+                        let fields = metrics.get_mut(&key).unwrap();
+                        fields[0] = chunks[rung];
+                        fields[2] = chunks[rung];
+                        fields[4] = pages;
+                        fields[5] = pages;
+                    }
+                    for name in ["logical_references", "physical_objects"] {
+                        *observation
+                            .retained
+                            .get_mut(&format!("{owner}.{name}"))
+                            .unwrap() += extra_objects;
+                    }
                     *observation
                         .retained
-                        .get_mut(&format!("{owner}.{name}"))
-                        .unwrap() += extra_objects;
+                        .get_mut(&format!("{owner}.allocated_bytes"))
+                        .unwrap() += extra_pages;
                 }
-                *observation
-                    .retained
-                    .get_mut(&format!("{owner}.allocated_bytes"))
-                    .unwrap() += extra_pages;
             }
+            changed
+        };
+        let capacity = u64::try_from(graphforge_storage::GRAPH_MANIFEST_BUCKET_CAPACITY).unwrap();
+        let files = 8 * capacity;
+        let (least, most) = (files.div_ceil(capacity), 2 * files - 1);
+        validate_lifecycle_metric_policies_for_axis(
+            axis,
+            &with_manifest([files; 3], [least + 1, least + 2, least + 1]),
+        )
+        .expect("the radix shape may differ between rungs within its structural range");
+        validate_lifecycle_metric_policies_for_axis(axis, &with_manifest([files; 3], [most; 3]))
+            .expect("the structural ceiling is inclusive");
+        for (label, changed, expected) in [
+            (
+                "a rung that declares more files",
+                with_manifest([files, files, files + capacity], [least + 1; 3]),
+                "manifest file count changed",
+            ),
+            (
+                "fewer chunks than the files need",
+                with_manifest([files; 3], [least - 1; 3]),
+                "object inventory changed",
+            ),
+            (
+                "more chunks than a radix tree over the files has",
+                with_manifest([files; 3], [most + 1; 3]),
+                "object inventory changed",
+            ),
+        ] {
+            let error =
+                validate_lifecycle_metric_policies_for_axis(axis, &changed).expect_err(label);
+            assert!(
+                error.contains("catalog_and_manifests") && error.contains(expected),
+                "{label}: {error}"
+            );
         }
-        validate_lifecycle_metric_policies_for_axis(axis, &tolerated)
-            .expect("a few manifest chunks may come and go with the path shape");
-        let mut scaled = observations.clone();
-        for (rung, observation) in scaled.iter_mut().enumerate() {
-            for owner in ["source", "clean_import"] {
-                let key = format!("{owner}.catalog_and_manifests");
-                let chunks = observation.category_metrics[&key][0];
-                let pages = observation.category_metrics[&key][4];
-                let extra_objects = ((1 << rung) - 1) * chunks;
-                let extra_pages = ((1 << rung) - 1) * pages;
-                for metrics in [
-                    &mut observation.category_metrics,
-                    &mut observation.category_authority_metrics,
-                ] {
-                    let fields = metrics.get_mut(&key).unwrap();
-                    fields[0] += extra_objects;
-                    fields[2] += extra_objects;
-                    fields[4] += extra_pages;
-                    fields[5] += extra_pages;
-                }
-                for name in ["logical_references", "physical_objects"] {
-                    *observation
-                        .retained
-                        .get_mut(&format!("{owner}.{name}"))
-                        .unwrap() += extra_objects;
-                }
-                *observation
-                    .retained
-                    .get_mut(&format!("{owner}.allocated_bytes"))
-                    .unwrap() += extra_pages;
-            }
-        }
-        assert!(
-            validate_lifecycle_metric_policies_for_axis(axis, &scaled)
-                .unwrap_err()
-                .contains("catalog_and_manifests"),
-            "manifest chunks that follow the data must be refused"
-        );
         for (category, field) in [
             ("catalog_and_manifests", 1),
             ("catalog_and_manifests", 3),

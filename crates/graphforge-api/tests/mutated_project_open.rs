@@ -431,23 +431,22 @@ impl Drop for InPlaceFlip {
 }
 
 /// A byte no decoder reads as data, so that only a checksum can refuse its
-/// change: one letter of the `created_by` string a Parquet footer carries, or
-/// the middle of an adjacency shard's payload (a shard has no structure that a
-/// flipped value byte breaks).
+/// change: one letter of the `created_by` string a Parquet footer carries.
 #[cfg(unix)]
 fn inert_offset(project: &Path, entry: &graphforge_storage::GraphFileEntry) -> usize {
     let object = graphforge_storage::graph_object_path(project, &entry.content_sha256).unwrap();
     let bytes = std::fs::read(object).unwrap();
-    if entry.relative_path.ends_with(".parquet") {
-        let marker = b"graphforge permanent parquet";
-        bytes
-            .windows(marker.len())
-            .position(|window| window == marker)
-            .expect("the writer stamps created_by into the footer")
-            + 3
-    } else {
-        bytes.len() / 2
-    }
+    assert!(
+        entry.relative_path.ends_with(".parquet"),
+        "{}",
+        entry.relative_path
+    );
+    let marker = b"graphforge permanent parquet";
+    bytes
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("the writer stamps created_by into the footer")
+        + 3
 }
 
 /// Criterion 4: a payload of a mutated (now compact) project that is corrupted
@@ -484,14 +483,12 @@ fn mutated_project_refuses_a_same_inode_flip_on_the_touching_query() {
     // authenticated in full by the property overlay when the project opens (not
     // yet first-touch, #1388 decision 3), so their refusal may come from the open;
     // the other bulk payloads must be accepted by the open and refused by the
-    // query. The adjacency index is derived: a shard that fails its own checksum
-    // is never served and the hop answers from the edge table instead, so its
-    // answer must stay exactly right.
+    // query. The adjacency index is not covered here: refusing a corrupt shard
+    // instead of falling back to the edge table is a separate #1388 slice.
     #[derive(Clone, Copy, PartialEq)]
     enum Expect {
         RefusedByQuery,
         RefusedByOpenOrQuery,
-        NeverServed,
     }
     let cases = [
         (
@@ -514,35 +511,10 @@ fn mutated_project_refuses_a_same_inode_flip_on_the_touching_query() {
             "MATCH (n:Entity) WHERE n.tag = 'set' RETURN n.tag AS tag",
             Expect::RefusedByOpenOrQuery,
         ),
-        (
-            "adjacency shard",
-            // The outgoing shard: a one-hop expand follows out-edges.
-            inventory
-                .files
-                .iter()
-                .find(|entry| {
-                    entry.relative_path.contains(".out.csr.shards-")
-                        && entry.relative_path.ends_with(".csr")
-                })
-                .expect("the mutated project ships an outgoing adjacency shard")
-                .clone(),
-            ONE_HOP,
-            Expect::NeverServed,
-        ),
     ];
     for (what, entry, query, expect) in cases {
         let _flip = InPlaceFlip::apply(&path, &entry, inert_offset(&path, &entry));
         let opened = GraphForge::new(Some(location));
-        if expect == Expect::NeverServed {
-            drop(opened.expect("the open reads no adjacency payload"));
-            assert_eq!(
-                open_and_query(&path).ids,
-                expected_ids(nodes),
-                "{what} ({}): a corrupted shard changed an answer",
-                entry.relative_path
-            );
-            continue;
-        }
         let refused = match opened {
             Err(error) => {
                 assert!(

@@ -93,9 +93,9 @@ pub use graph_files::{
     GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION, GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION,
     GRAPH_TREE_DIR, GraphFileEntry, GraphFileRole, GraphFilesInventory, GraphFilesOpenEvidence,
     GraphFilesOpenStrategy, GraphWorkspaceCheckpoint, GraphWorkspaceRestoration,
-    capture_graph_files, capture_graph_files_over_parent, decode_inventory, encode_inventory,
-    graph_tree_root, inventory_participant, materialize_graph_tree, pinned_open_evidence,
-    stage_graph_tree, verify_graph_tree,
+    capture_graph_files, decode_inventory, encode_inventory, graph_tree_root,
+    inventory_participant, materialize_graph_tree, pinned_open_evidence, stage_graph_tree,
+    verify_graph_tree,
 };
 pub(crate) use graph_files::{GraphFilesParticipant, decode_versioned_graph_files_participant};
 pub use graph_read_inventory::{
@@ -118,8 +118,8 @@ pub(crate) use graph_manifest::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use graph_manifest::{
-    GRAPH_MANIFEST_BRANCH_MAX_BYTES, GRAPH_MANIFEST_ENTRY_ENCODING_OVERHEAD_BYTES,
-    GRAPH_MANIFEST_NODE_MAX_BYTES,
+    GRAPH_MANIFEST_BRANCH_MAX_BYTES, GRAPH_MANIFEST_BUCKET_CAPACITY,
+    GRAPH_MANIFEST_ENTRY_ENCODING_OVERHEAD_BYTES, GRAPH_MANIFEST_NODE_MAX_BYTES,
 };
 
 #[allow(

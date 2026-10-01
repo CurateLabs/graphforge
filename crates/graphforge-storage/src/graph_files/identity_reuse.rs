@@ -6,12 +6,14 @@ use std::path::PathBuf;
 
 use super::{
     ARTIFACT_IDENTITY, GfError, GraphFileEntry, GraphFilesInventory, GraphFilesParticipant, Path,
-    ProjectParticipant, build_inventory_for_owned_layout, capture_graph_files_reusing_digests,
+    build_inventory_for_owned_layout,
 };
 
 /// How many freshly hashed files a capture keeps open at once. Beyond it a
-/// file is simply hashed again as it is installed, so a commit that rewrites
-/// thousands of files never holds thousands of descriptors.
+/// file is simply hashed again as it is installed (SHA-256 twice for that file),
+/// so a commit that rewrites thousands of files never holds thousands of
+/// descriptors. A commit changes a handful of files, so the bound is not met in
+/// ordinary use.
 pub(crate) const MAX_RETAINED_CAPTURES: usize = 128;
 
 /// An already-authenticated graph file identity that a later capture may reuse.
@@ -35,24 +37,6 @@ impl From<&GraphFileEntry> for KnownGraphFile {
             object_identity: None,
         }
     }
-}
-
-/// Capture a private workspace for publication over `parent`, reusing the
-/// parent's authenticated declared SHA-256 for every file whose path and exact
-/// length match the parent inventory and which either is the parent's own
-/// content-store object (same native identity, so unchanged and already
-/// admitted) or carries its freshly computed XXH64. Changed and new files are
-/// hashed once. Only newly written bytes pay for a new identity.
-///
-/// # Errors
-/// Rejects links, special files, unsafe relative paths, duplicates, and
-/// inventory size overflow, and propagates parent inventory admission errors.
-pub fn capture_graph_files_over_parent(
-    source_root: &Path,
-    parent: &crate::ResolvedProjectGeneration,
-) -> Result<(GraphFilesInventory, ProjectParticipant), GfError> {
-    let known = known_files(parent)?;
-    capture_graph_files_reusing_digests(source_root, &known, ARTIFACT_IDENTITY)
 }
 
 /// The parent's authenticated declared identities, keyed by path. Reuse needs
@@ -221,9 +205,14 @@ pub(crate) struct WorkspaceCapture {
     pub(crate) read_calls: u64,
 }
 
-/// Capture a private workspace for compact publication over `parent`: the
-/// parent's identities are reused exactly as in [`capture_graph_files_over_parent`],
-/// and every file that had to be hashed is retained for installation.
+/// Capture a private workspace for compact publication over `parent`, reusing
+/// the parent's authenticated declared SHA-256 for every file whose path and
+/// exact length match the parent inventory and which either is the parent's own
+/// content-store object (same native identity, so unchanged and already
+/// admitted) or carries its freshly computed XXH64. Changed and new files are
+/// hashed once, and each is retained for installation (at most
+/// [`MAX_RETAINED_CAPTURES`]; a commit that changes more files hashes the rest a
+/// second time as it installs them).
 ///
 /// # Errors
 /// Rejects links, special files, unsafe relative paths, duplicates, and
