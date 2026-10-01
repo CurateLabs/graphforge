@@ -333,9 +333,7 @@ cargo clippy --workspace -- -D warnings
 cargo test --workspace
 ```
 
-`Binding Release Candidate` is post-merge, `main`-only evidence. Dispatch it
-with the current 40-character `main` commit SHA; the workflow rejects branch
-heads and stale commits before any platform matrix build starts.
+Releases are cut by pushing a `v<version>` tag; see [`RELEASING.md`](RELEASING.md).
 
 ---
 

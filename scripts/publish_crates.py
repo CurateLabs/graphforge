@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
-"""Publish the complete GraphForge crates.io surface in dependency order.
+"""Publish every GraphForge crate to crates.io in dependency order.
 
-The command is resumable without permitting different bytes under an existing
-version. Before each registry write it packages the crate locally and computes
-the archive checksum. If that exact version already exists, publication only
-continues when crates.io reports the same checksum.
+Re-running is safe: a crate whose workspace version is already on crates.io is
+skipped. ``--dry-run`` packages every crate in the same order with the same
+flags and uploads nothing.
 
-Requires ``CARGO_REGISTRY_TOKEN`` in the environment. The maintained release
-workflow obtains a fresh short-lived value through crates.io Trusted Publishing
-for every ``cargo publish`` attempt.
+In the release workflow each ``cargo publish`` gets a fresh short-lived token
+through crates.io Trusted Publishing (``CRATES_IO_TRUSTED_PUBLISHING=true``).
+Trusted Publishing cannot create a crate, so a crate name that has never been
+published uses ``CARGO_REGISTRY_TOKEN_NEW_CRATES`` when it is set. Outside the
+workflow, set ``CARGO_REGISTRY_TOKEN``. Tokens are never logged.
 
-The token is normalized before ``cargo publish``: leading/trailing whitespace
-and CR/LF are stripped. The value is never logged.
-
-crates.io new-crate rate limits (HTTP 429) are handled durably: the publisher
-parses ``Retry-After`` / ``try again after …`` from cargo's error output, sleeps
-until that time (plus a small buffer), and retries the same crate publish.
-Total wait is capped so a full remaining surface (~10 new crates at ~10 minutes)
-can finish in one job without hiding non-429 failures.
+crates.io rate limits (HTTP 429; new crates are limited to one per ten minutes
+after a burst) are handled by sleeping until the time the registry names and
+retrying the same crate. The total wait is capped so a non-429 failure is
+never hidden.
 """
 
 from __future__ import annotations
@@ -26,7 +23,6 @@ import argparse
 from collections.abc import Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-import hashlib
 import importlib.util
 import json
 import os
@@ -200,23 +196,24 @@ def _emit_process_output(result: subprocess.CompletedProcess[str]) -> None:
 def cargo_publish(
     name: str,
     *,
+    trusted: bool | None = None,
     sleep: Callable[[float], None] = time.sleep,
     run_publish: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> None:
     """Run ``cargo publish`` for one crate, sleeping through bounded 429 waits.
 
-    Uses ``--no-verify`` to match certified Binding RC packaging. Some crates
-    (notably ``graphforge-cli``) embed workspace paths such as ``project-skills``
-    that are outside the packaged tarball; verify would fail while the certified
-    checksum gate still requires those exact bytes.
+    Uses ``--no-verify``: some crates (notably ``graphforge-cli``) embed
+    workspace paths such as ``project-skills`` that are outside the packaged
+    tarball, so a verify build from the tarball alone would fail.
     """
     command = ["cargo", "publish", "-p", name, "--locked", "--no-verify"]
     runner = run_publish or _default_cargo_publish_run
     clock = now or (lambda: datetime.now(timezone.utc))
     waited = 0.0
     while True:
-        trusted_token = request_trusted_publishing_token() if trusted_publishing_enabled() else None
+        use_trusted = trusted_publishing_enabled() if trusted is None else trusted
+        trusted_token = request_trusted_publishing_token() if use_trusted else None
         if trusted_token is not None:
             os.environ["CARGO_REGISTRY_TOKEN"] = trusted_token
         try:
@@ -289,144 +286,54 @@ def version_record(name: str) -> dict[str, Any] | None:
     return payload.get("version")
 
 
-def owner_logins(name: str) -> set[str]:
-    payload = registry_json(f"{name}/owners")
-    if payload is None:
-        return set()
-    return {owner["login"] for owner in payload.get("users", [])}
+def crate_exists(name: str) -> bool:
+    return registry_json(name) is not None
 
 
-def package_checksum(name: str, expected_checksum: str | None = None) -> str:
-    run(
-        [
-            "cargo",
-            "package",
-            "-p",
-            name,
-            "--locked",
-            "--no-verify",
-        ]
-    )
-    configured_target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
-    target_dir = configured_target if configured_target.is_absolute() else ROOT / configured_target
-    archive = target_dir / "package" / f"{name}-{VERSION}.crate"
-    if not archive.is_file():
-        raise RuntimeError(f"cargo package did not create {archive}")
-    checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
-    if expected_checksum is not None and checksum != expected_checksum:
-        raise RuntimeError(
-            f"{name} {VERSION} packaged checksum {checksum} differs from "
-            f"the certified release record {expected_checksum}"
-        )
-    return checksum
+def package(order: list[str]) -> None:
+    """Package every crate without uploading: the dry run of a release."""
+    command = ["cargo", "package", "--locked", "--no-verify", "--allow-dirty"]
+    for name in order:
+        command += ["-p", name]
+    run(command)
 
 
-def publish_one(
-    name: str,
-    *,
-    expected_checksum: str | None = None,
-) -> str:
-    checksum = package_checksum(name, expected_checksum)
-    existing = version_record(name)
-    if existing is not None:
-        registry_checksum = existing.get("checksum")
-        if registry_checksum != checksum:
-            raise RuntimeError(
-                f"refusing to resume {name} {VERSION}: existing checksum "
-                f"{registry_checksum} differs from local {checksum}"
-            )
-        owners = owner_logins(name)
-        if "DecisionNerd" not in owners:
-            raise RuntimeError(
-                f"{name} {VERSION} is indexed but DecisionNerd is not an owner: {sorted(owners)}"
-            )
-        outcome = "already published; checksum and owner match"
-    else:
-        cargo_publish(name)
-        outcome = "accepted; public checksum and owner verification required"
-
-    print(f"{name} {VERSION}: {outcome}")
-    return outcome
-
-
-def publish_authorized(name: str, expected_checksum: str) -> str:
-    """Execute one planner-authorized absent-node write without reclassification."""
-    package_checksum(name, expected_checksum)
-    cargo_publish(name)
-    outcome = "accepted; public checksum and owner verification required"
-    print(f"{name} {VERSION}: {outcome}")
-    return outcome
-
-
-def release_record_checksums(record_path: Path, artifacts_dir: Path) -> dict[str, str]:
-    try:
-        record = json.loads(record_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"cannot read release record {record_path}: {error}") from error
-    if record.get("schema") not in {
-        "graphforge-release-record-v1",
-        "graphforge-release-candidate-v2",
-    }:
-        raise RuntimeError("unexpected release record schema")
-    if record.get("version") != VERSION or record.get("tag") != f"v{VERSION}":
-        raise RuntimeError("release record version/tag does not match the Cargo version")
-    if (
-        record.get("commit_sha")
-        != subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        ).stdout.strip()
-    ):
-        raise RuntimeError("release record commit does not match the checked-out commit")
-
-    checksums: dict[str, str] = {}
-    artifacts_root = artifacts_dir.resolve()
-    for item in record.get("artifacts", []):
-        if item.get("surface") != "crates":
+def publish(order: list[str]) -> None:
+    new_crate_token = os.environ.get("CARGO_REGISTRY_TOKEN_NEW_CRATES", "").strip()
+    for name in order:
+        if version_record(name) is not None:
+            print(f"{name} {VERSION}: already published, skipping", flush=True)
             continue
-        name = item.get("name")
-        relative = item.get("path")
-        checksum = item.get("sha256")
-        if not all(isinstance(value, str) for value in (name, relative, checksum)):
-            raise RuntimeError("release record contains an invalid crates.io artifact")
-        if item.get("version") != VERSION:
-            raise RuntimeError(f"release record version mismatch for crate {name}")
-        if name in checksums:
-            raise RuntimeError(f"release record contains duplicate crate {name}")
-        archive = (artifacts_dir / relative).resolve()
-        if not archive.is_relative_to(artifacts_root):
-            raise RuntimeError(f"certified crate archive escapes artifact root: {relative}")
-        if not archive.is_file():
-            raise RuntimeError(f"certified crate archive is missing: {relative}")
-        actual = hashlib.sha256(archive.read_bytes()).hexdigest()
-        if actual != checksum:
-            raise RuntimeError(f"certified crate archive checksum mismatch: {relative}")
-        checksums[name] = checksum
-    return checksums
+        if trusted_publishing_enabled() and new_crate_token and not crate_exists(name):
+            # Trusted Publishing cannot create a crate; use the scoped token once.
+            os.environ["CARGO_REGISTRY_TOKEN"] = normalize_registry_token(new_crate_token)
+            try:
+                cargo_publish(name, trusted=False)
+            finally:
+                del os.environ["CARGO_REGISTRY_TOKEN"]
+        else:
+            cargo_publish(name)
+        print(f"{name} {VERSION}: published", flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--crate", required=True, help="One planner-authorized crate name")
     parser.add_argument(
-        "--release-record",
-        type=Path,
-        help="Certified release record or candidate-manifest JSON",
-    )
-    parser.add_argument(
-        "--artifacts-dir",
-        type=Path,
-        help="Root containing the certified artifact paths",
+        "--dry-run",
+        action="store_true",
+        help="Package every crate in publish order and upload nothing",
     )
     args = parser.parse_args(argv)
 
-    if (args.release_record is None) != (args.artifacts_dir is None):
-        print("--release-record and --artifacts-dir must be provided together", file=sys.stderr)
-        return 2
+    check = subprocess.run([sys.executable, str(PLAN_SCRIPT), "check"], cwd=ROOT, check=False)
+    if check.returncode != 0:
+        return check.returncode
+    plan = load_plan_module()
+    order = plan.topological_publish_order(plan.load_workspace())
+
+    if args.dry_run:
+        package(order)
+        return 0
 
     if not trusted_publishing_enabled():
         try:
@@ -436,40 +343,7 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as error:
             print(str(error), file=sys.stderr)
             return 2
-
-    plan = load_plan_module()
-    crates = plan.load_workspace()
-    order = plan.topological_publish_order(crates)
-    if len(order) != 15:
-        print(f"refusing unexpected publish-set size: {len(order)}", file=sys.stderr)
-        return 2
-
-    expected_checksums: dict[str, str] = {}
-    if args.release_record is not None and args.artifacts_dir is not None:
-        expected_checksums = release_record_checksums(args.release_record, args.artifacts_dir)
-        if set(expected_checksums) != set(order):
-            print(
-                "release record crates do not match the complete publication plan",
-                file=sys.stderr,
-            )
-            return 2
-
-    check = subprocess.run(
-        [sys.executable, str(PLAN_SCRIPT), "check"],
-        cwd=ROOT,
-        check=False,
-    )
-    if check.returncode != 0:
-        return check.returncode
-
-    if args.crate not in order:
-        print(f"requested crate is outside the publication plan: {args.crate}", file=sys.stderr)
-        return 2
-    expected = expected_checksums.get(args.crate)
-    if expected is None:
-        print(f"candidate checksum is missing for {args.crate}", file=sys.stderr)
-        return 2
-    publish_authorized(args.crate, expected)
+    publish(order)
     return 0
 
 

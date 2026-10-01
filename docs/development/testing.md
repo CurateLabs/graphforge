@@ -84,14 +84,9 @@ cargo test -p graphforge-api \
   --test search_public_surface
 ```
 
-The `Rust Non-Cypher Surface Gate` workflow runs the inventory validator,
-`graphforge-api` unit contracts, and these persisted integration tests from one exact
-source SHA when assembling release-certification evidence. Its downloadable
-report records the inventory digest and test binary digests. Ordinary
-implementation and construction issues close on acceptance-criteria outcomes
-and the relevant PR/`main` checks for the changed surface; they do not require
-this manual SHA-bound dispatch (see `AGENTS.md` § Issue close). A green TCK run
-cannot substitute for the surface inventory itself.
+No workflow dispatches the inventory gate on its own; the Python binding test
+`crates/graphforge-bindings-py/tests/non_cypher_release.py` imports it. A green
+TCK run cannot substitute for the surface inventory itself.
 
 ### Rust test example
 

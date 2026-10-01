@@ -176,6 +176,5 @@ knowledge, checkpoint, and compatibility contracts.
 | [Testing](engineering/TESTING.md) | See how GraphForge proves behavior |
 | [Roadmap](releases/roadmap.md) | Review current and planned product surfaces |
 | [Publishing](engineering/PUBLISHING.md) | Package destinations and release sequence |
-| [Release process](development/release-process.md) | Operator checklist for cutting a release |
 
 GraphForge is open source under the [Apache License 2.0](legal/licensing.md).

@@ -1,855 +1,571 @@
-name: Publish to PyPI, npm, and crates.io
+name: Publish
 
+# One workflow builds every artifact from one commit and publishes it.
+#
+# - Pushing a `v*` tag publishes to crates.io, PyPI, and npm, then creates the
+#   GitHub Release.
+# - A manual run, or a pull request that touches the release path, is a dry
+#   run: it builds, packs, and smoke-tests everything and uploads nothing.
+# - Re-running a tag run is safe: every registry step skips a version (on PyPI,
+#   a file) that is already published.
+#
+# The registries' trusted-publishing settings name this file (`publish.yaml`)
+# and the `release` environment. Renaming either breaks publishing until the
+# registry settings are changed to match.
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: Existing immutable v2 release tag to resume (no default; must match the tag)
-        required: true
-        type: string
-      recovery_reason:
-        description: Public maintainer reason for the recovery dispatch
-        required: true
-        type: string
-      recovery_overlay_sha:
-        description: Reviewed commit SHA whose publisher/recovery scripts may overlay the tag checkout
-        required: true
-        type: string
+  pull_request:
+    paths:
+      - .github/workflows/publish.yaml
+      - scripts/publish_crates.py
+      - scripts/publish_npm.py
+      - scripts/set_release_version.py
+      - scripts/ci/crate-publish-plan.py
+      - scripts/ci/prepare-napi-packages.py
+      - scripts/ci/validate-napi-artifacts.py
+      - scripts/ci/multi-ontology-packaged-smoke.mjs
 
 permissions:
   contents: read
 
-# One publish lane per tag; never cancel an in-flight registry write.
+# One publish lane per ref; never cancel an in-flight registry write.
 concurrency:
-  group: publish-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
-  cancel-in-progress: false
+  group: publish-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_INCREMENTAL: 0
 
 jobs:
-  candidate-preflight:
-    name: Validate immutable partitioned candidate
+  version:
+    name: Release version
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    permissions:
-      actions: read
-      contents: write
+    timeout-minutes: 10
     outputs:
-      candidate_run_id: ${{ steps.candidate.outputs.run_id }}
-      release_sha: ${{ steps.source.outputs.release_sha }}
-      release_version: ${{ steps.source.outputs.release_version }}
-      manifest_name: ${{ steps.source.outputs.manifest_name }}
-      release_tag: ${{ steps.source.outputs.release_tag }}
-      npm_dist_tag: ${{ steps.source.outputs.npm_dist_tag }}
+      version: ${{ steps.version.outputs.version }}
+      npm_dist_tag: ${{ steps.version.outputs.npm_dist_tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
-          fetch-depth: 0
-
-      - name: Require one immutable v2 release identity
-        id: source
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
-          EVENT_SHA: ${{ github.sha }}
-          RECOVERY_REASON: ${{ inputs.recovery_reason || '' }}
-          RECOVERY_OVERLAY_SHA: ${{ inputs.recovery_overlay_sha || '' }}
-        run: |
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          release_sha="$(git rev-parse "$RELEASE_TAG^{}")"
-          release_version="${RELEASE_TAG#v}"
-          test "$RELEASE_TAG" = "v$release_version"
-          test "$release_version" != 0.5.0
-          test "$(git rev-parse HEAD)" = "$release_sha"
-          test "$(git rev-parse "$RELEASE_TAG^{}")" = "$release_sha"
-          if test "$GITHUB_EVENT_NAME" = release; then
-            test "$EVENT_SHA" = "$release_sha"
-            test "$(git rev-parse refs/remotes/origin/main)" = "$release_sha"
-          else
-            test -n "$RECOVERY_REASON"
-            test -n "$RECOVERY_OVERLAY_SHA"
-            test "${#RECOVERY_OVERLAY_SHA}" -eq 40
-            gh release view "$RELEASE_TAG" >/dev/null
-            git merge-base --is-ancestor "$release_sha" refs/remotes/origin/main
-            git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
-            git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
-            git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
-            git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-recovery-overlay.sh" \
-              > "$RUNNER_TEMP/release-recovery-overlay.sh"
-            install -m 0755 "$RUNNER_TEMP/release-recovery-overlay.sh" \
-              scripts/ci/release-recovery-overlay.sh
-            bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"
-            printf 'Recovery reason: %s\n' "$RECOVERY_REASON"
-            printf 'Recovery overlay SHA: %s\n' "$RECOVERY_OVERLAY_SHA"
-          fi
-          python3 scripts/ci/release-publish-preflight.py \
-            --tag "$RELEASE_TAG" \
-            --expected-sha "$release_sha"
-          python3 scripts/set_release_version.py --check
-          npm_dist_tag="$(python3 scripts/publish_npm_artifacts.py \
-            --print-dist-tag --version "$release_version")"
-          test -n "$npm_dist_tag"
-          printf 'npm dist-tag for %s: %s\n' "$release_version" "$npm_dist_tag" \
-            >> "$GITHUB_STEP_SUMMARY"
-          printf 'npm_dist_tag=%s\n' "$npm_dist_tag" >> "$GITHUB_OUTPUT"
-          printf 'release_sha=%s\n' "$release_sha" >> "$GITHUB_OUTPUT"
-          printf 'release_version=%s\n' "$release_version" >> "$GITHUB_OUTPUT"
-          printf 'manifest_name=v%s-artifacts.json\n' "$release_version" >> "$GITHUB_OUTPUT"
-          printf 'release_tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve the complete retained candidate
-        id: candidate
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_SHA: ${{ steps.source.outputs.release_sha }}
-        run: |
-          run_id="$(gh api \
-            "repos/$GITHUB_REPOSITORY/actions/workflows/binding-release-candidate.yml/runs?event=workflow_dispatch&status=success&head_sha=$RELEASE_SHA&per_page=20" \
-            --jq '.workflow_runs | map(select(.head_sha == env.RELEASE_SHA)) | first | .id // empty')"
-          test -n "$run_id"
-          for group in manifest python npm crates evidence; do
-            artifact_name="Release-Candidate-$group-$RELEASE_SHA"
-            count="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" \
-              --jq "[.artifacts[] | select(.name == \"$artifact_name\" and .expired == false)] | length")"
-            test "$count" = 1
-          done
-          printf 'run_id=%s\n' "$run_id" >> "$GITHUB_OUTPUT"
-
-      - name: Download candidate manifest
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: Release-Candidate-manifest-${{ steps.source.outputs.release_sha }}
-          path: candidate
-          run-id: ${{ steps.candidate.outputs.run_id }}
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-
-      - name: Download Python partition
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: Release-Candidate-python-${{ steps.source.outputs.release_sha }}
-          path: candidate/release-artifacts/python
-          run-id: ${{ steps.candidate.outputs.run_id }}
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-
-      - name: Download npm partition
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: Release-Candidate-npm-${{ steps.source.outputs.release_sha }}
-          path: candidate/release-artifacts/npm
-          run-id: ${{ steps.candidate.outputs.run_id }}
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-
-      - name: Download crates partition
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: Release-Candidate-crates-${{ steps.source.outputs.release_sha }}
-          path: candidate/release-artifacts/crates
-          run-id: ${{ steps.candidate.outputs.run_id }}
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-
-      - name: Download evidence partition
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: Release-Candidate-evidence-${{ steps.source.outputs.release_sha }}
-          path: candidate/release-artifacts
-          run-id: ${{ steps.candidate.outputs.run_id }}
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-
-      - name: Revalidate completeness and offline rehearsal
-        env:
-          RELEASE_SHA: ${{ steps.source.outputs.release_sha }}
-          RELEASE_VERSION: ${{ steps.source.outputs.release_version }}
-          MANIFEST_NAME: ${{ steps.source.outputs.manifest_name }}
-        run: |
-          python3 scripts/ci/release-candidate.py validate \
-            --record "candidate/$MANIFEST_NAME" \
-            --artifacts-dir candidate/release-artifacts \
-            --expected-sha "$RELEASE_SHA" \
-            --version "$RELEASE_VERSION"
-          jq -e \
-            --arg sha "$RELEASE_SHA" \
-            --arg version "$RELEASE_VERSION" \
-            '.schema == "graphforge-release-artifact-rehearsal-v1" and
-             .candidate_sha == $sha and .version == $version and
-             .offline == true and .registry_writes == 0 and .status == "passed"' \
-            candidate/release-artifacts/evidence/offline-rehearsal.json
-
-      - name: Observe initial public registry truth
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MANIFEST_NAME: ${{ steps.source.outputs.manifest_name }}
-          RELEASE_TAG: ${{ steps.source.outputs.release_tag }}
-          RELEASE_VERSION: ${{ steps.source.outputs.release_version }}
-        run: |
-          bash scripts/ci/download-release-write-evidence.sh \
-            "$RELEASE_TAG" "$RELEASE_VERSION" write-evidence
-          observed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          python3 scripts/ci/release_registry.py observe-all \
-            --manifest "candidate/$MANIFEST_NAME" \
-            --attempts-dir write-evidence/attempts \
-            --receipts-dir write-evidence/receipts \
-            --observed-at "$observed_at" \
-            --out candidate/initial-observations.json
-          printf '{"python":true,"npm":true,"crates":true,"evidence":true}\n' \
-            > candidate/artifact-availability.json
-          python3 scripts/ci/release_registry.py plan \
-            --manifest "candidate/$MANIFEST_NAME" \
-            --observations candidate/initial-observations.json \
-            --availability candidate/artifact-availability.json \
-            --planned-at "$observed_at" \
-            --out candidate/initial-plan.json
-
-      - name: Attach candidate manifest without replacing different bytes
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
-          MANIFEST_NAME: ${{ steps.source.outputs.manifest_name }}
-        run: |
-          count="$(gh release view "$RELEASE_TAG" --json assets \
-            --jq "[.assets[] | select(.name == \"$MANIFEST_NAME\")] | length")"
-          if test "$count" = 0; then
-            gh release upload "$RELEASE_TAG" "candidate/$MANIFEST_NAME"
-          else
-            test "$count" = 1
-            mkdir -p existing-release-asset
-            gh release download "$RELEASE_TAG" --pattern "$MANIFEST_NAME" \
-              --dir existing-release-asset
-            cmp "candidate/$MANIFEST_NAME" "existing-release-asset/$MANIFEST_NAME"
-          fi
-
-  publish-pypi:
-    name: PyPI node
-    needs: candidate-preflight
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    environment: release
-    permissions:
-      actions: read
-      contents: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.candidate-preflight.outputs.release_sha }}
-      - name: Overlay reviewed recovery publish-path scripts
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        env:
-          RECOVERY_OVERLAY_SHA: ${{ inputs.recovery_overlay_sha }}
-        run: |
-          # Recovery checks out the immutable tag SHA for certified bytes and
-          # never rebuilds them. Overlay every publish-path script from an
-          # explicit reviewed SHA (not the floating origin/main tip), including
-          # the overlay runner itself, so the tag's own list cannot govern.
-          # Never print secrets.
-          test -n "$RECOVERY_OVERLAY_SHA"
-          test "${#RECOVERY_OVERLAY_SHA}" -eq 40
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
-          git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
-          git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
-          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-recovery-overlay.sh" \
-            > "$RUNNER_TEMP/release-recovery-overlay.sh"
-          install -m 0755 "$RUNNER_TEMP/release-recovery-overlay.sh" \
-            scripts/ci/release-recovery-overlay.sh
-          bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-      - name: Download manifest and Python partition
+      - name: Require one version across Cargo, Python, and Node
+        run: uv run --no-project --with packaging python scripts/set_release_version.py --check
+      - name: Derive the version and require the tag to match it
+        id: version
         env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ needs.candidate-preflight.outputs.candidate_run_id }}
-          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          gh run download "$RUN_ID" --name "Release-Candidate-manifest-$RELEASE_SHA" --dir candidate
-          gh run download "$RUN_ID" --name "Release-Candidate-python-$RELEASE_SHA" --dir candidate/release-artifacts/python
-      - name: Authorize from fresh PyPI truth
-        id: authorize
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
-          RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
-          MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
-          RELEASE_TAG: ${{ needs.candidate-preflight.outputs.release_tag }}
-        run: |
-          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          bash scripts/ci/download-release-write-evidence.sh "$RELEASE_TAG" "$RELEASE_VERSION" write-evidence
-          python3 scripts/ci/release_action.py validate-partition --manifest "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --group python --expected-sha "$RELEASE_SHA" --version "$RELEASE_VERSION" --checked-at "$now"
-          python3 scripts/ci/release_registry.py observe-all --manifest "candidate/$MANIFEST_NAME" --registry pypi --attempts-dir write-evidence/attempts --receipts-dir write-evidence/receipts --observed-at "$now" --out observations.json
-          printf '{"python":true,"npm":false,"crates":false,"evidence":false}\n' > availability.json
-          python3 scripts/ci/release_action.py authorize --manifest "candidate/$MANIFEST_NAME" --observations observations.json --availability availability.json --node pypi:graphforge --planned-at "$now" --out authorization.json
-          printf 'publish=%s\n' "$(jq -r .publish authorization.json)" >> "$GITHUB_OUTPUT"
-      - name: Persist PyPI write attempt before publication
-        if: steps.authorize.outputs.publish == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
-          RELEASE_TAG: ${{ needs.candidate-preflight.outputs.release_tag }}
-          RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
-        run: |
-          attempt="v$RELEASE_VERSION-attempt-pypi-graphforge.json"
-          python3 scripts/ci/release_action.py attempt --manifest "candidate/$MANIFEST_NAME" --node pypi:graphforge --started-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out "$attempt"
-          gh release upload "$RELEASE_TAG" "$attempt" --clobber
-      - name: Publish exact Python artifacts once
-        if: steps.authorize.outputs.publish == 'true'
-        run: uv publish candidate/release-artifacts/python/*
-      - name: Observe PyPI once after an accepted write
-        if: steps.authorize.outputs.publish == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
-          RELEASE_TAG: ${{ needs.candidate-preflight.outputs.release_tag }}
-          RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
-        run: |
-          accepted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          receipt="v$RELEASE_VERSION-accepted-pypi-graphforge.json"
-          python3 scripts/ci/release_action.py receipt --manifest "candidate/$MANIFEST_NAME" --node pypi:graphforge --accepted-at "$accepted_at" --out "$receipt"
-          gh release upload "$RELEASE_TAG" "$receipt" --clobber
-          python3 scripts/ci/release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node pypi:graphforge --live --accepted-receipt "$receipt" --observed-at "$accepted_at" --out post-write.json
-          jq '{node_id,state,reason}' post-write.json >> "$GITHUB_STEP_SUMMARY"
+          version="$(python3 scripts/publish_npm.py --print-version)"
+          if [[ "$REF_TYPE" == tag && "$REF_NAME" != "v$version" ]]; then
+            echo "tag $REF_NAME does not match workspace version $version" >&2
+            exit 1
+          fi
+          if [[ "$REF_TYPE" == tag && "$version" == *dev* ]]; then
+            echo "a development version ($version) is not released" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "npm_dist_tag=$(python3 scripts/publish_npm.py --print-dist-tag)" >> "$GITHUB_OUTPUT"
 
-  npm-native:
-    name: Native npm (${{ matrix.package }})
-    needs: candidate-preflight
+  wheels:
+    name: Wheel (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        package:
-          - graphforge-darwin-arm64
-          - graphforge-darwin-x64
-          - graphforge-linux-arm64-gnu
-          - graphforge-linux-x64-gnu
-          - graphforge-win32-x64-msvc
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    environment: release
-    permissions:
-      actions: read
-      contents: write
-      id-token: write
+        include:
+          # `manylinux: "2_17"` builds Linux inside maturin-action's manylinux2014
+          # (glibc 2.17) container and passes `--manylinux 2_17`, so maturin's
+          # own audit refuses the wheel rather than relabel it if any symbol
+          # needs a newer glibc (#1645).
+          - { os: blacksmith-4vcpu-ubuntu-2404, target: linux-x86_64, wheel_tag: cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64 }
+          - { os: blacksmith-12vcpu-macos-15, target: macos-arm64, wheel_tag: cp310-abi3-macosx_11_0_arm64 }
+          - { os: blacksmith-8vcpu-windows-2025, target: windows-amd64, wheel_tag: cp310-abi3-win_amd64 }
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          ref: ${{ needs.candidate-preflight.outputs.release_sha }}
-      - name: Overlay reviewed recovery publish-path scripts
-        if: github.event_name == 'workflow_dispatch'
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build native abi3 wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: build
+          args: --release --manifest-path crates/graphforge-bindings-py/Cargo.toml --out dist
+          # Linux only; macOS and Windows ignore it.
+          manylinux: "2_17"
+          sccache: "false"
+
+      - name: Require the declared wheel platform tag
         shell: bash
         env:
-          RECOVERY_OVERLAY_SHA: ${{ inputs.recovery_overlay_sha }}
+          WHEEL_TAG: ${{ matrix.wheel_tag }}
         run: |
-          # Recovery checks out the immutable tag SHA for certified bytes and
-          # never rebuilds them. Overlay every publish-path script from an
-          # explicit reviewed SHA (not the floating origin/main tip), including
-          # the overlay runner itself, so the tag's own list cannot govern.
-          # Never print secrets.
-          test -n "$RECOVERY_OVERLAY_SHA"
-          test "${#RECOVERY_OVERLAY_SHA}" -eq 40
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
-          git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
-          git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
-          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-recovery-overlay.sh" \
-            > "$RUNNER_TEMP/release-recovery-overlay.sh"
-          install -m 0755 "$RUNNER_TEMP/release-recovery-overlay.sh" \
-            scripts/ci/release-recovery-overlay.sh
-          bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"
+          wheels=(dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          case "${wheels[0]}" in
+            *"-${WHEEL_TAG}.whl") ;;
+            *) printf 'wheel %s does not carry tag %s\n' "${wheels[0]}" "$WHEEL_TAG" >&2; exit 1 ;;
+          esac
+
+      # The manylinux container writes target/ as root; reclaim it so the
+      # installed-wheel tests can launch Cargo on the host runner.
+      - name: Reclaim Cargo target ownership after manylinux maturin
+        if: runner.os == 'Linux'
+        run: sudo chown -R "$(id -u):$(id -g)" "$CARGO_TARGET_DIR"
+
+      - name: Install the wheel in a clean environment and run it
+        shell: bash
+        run: |
+          wheels=(dist/*.whl)
+          for test_file in \
+            crates/graphforge-bindings-py/tests/smoke.py \
+            crates/graphforge-bindings-py/tests/gil_release.py \
+            crates/graphforge-bindings-py/tests/multi_ontology.py; do
+            uv run --isolated --no-project --with "${wheels[0]}" python "$test_file"
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+  sdist:
+    name: Python source distribution
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Build the sdist
+        run: uvx --from 'maturin>=1.7,<2.0' maturin sdist --manifest-path crates/graphforge-bindings-py/Cargo.toml --out dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  addons:
+    name: Node addon (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout_minutes || 60 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: blacksmith-12vcpu-macos-15
+            target: x86_64-apple-darwin
+            node_arch: x64
+            run_addon: "true"
+          - os: blacksmith-12vcpu-macos-15
+            target: aarch64-apple-darwin
+            node_arch: arm64
+            run_addon: "true"
+          - os: blacksmith-4vcpu-ubuntu-2404
+            target: x86_64-unknown-linux-gnu
+            # The napi cross toolchain links against glibc 2.17, the floor the
+            # Linux wheel and the aarch64 addon already meet; a native build on
+            # this Ubuntu 24.04 runner required glibc 2.39 (#1670). Its
+            # toolchain unpacker needs Node 22 (see the aarch64 lane), so the
+            # lane builds on Node 22 and executes the addon on the Node 20
+            # `engines.node` floor.
+            cross_args: --use-napi-cross
+            node_arch: x64
+            node_version: "22"
+            runtime_node_version: "20"
+            glibc_floor: "2.17"
+            run_addon: "true"
+            # The npm packages job packs this lane's napi-generated index.js /
+            # index.d.ts, the loaders its smoke tests executed.
+            publishes_loaders: "true"
+          - os: blacksmith-4vcpu-ubuntu-2404
+            target: aarch64-unknown-linux-gnu
+            cross_args: --use-napi-cross
+            arm_cflags: -D__ARM_ARCH=8
+            node_arch: x64
+            glibc_floor: "2.17"
+            # The runner is x64 and the artifact is arm64, so this lane cannot
+            # execute the addon; it validates the packed layout instead.
+            # `--use-napi-cross` unpacks its gcc toolchain with `@napi-rs/lzma`,
+            # whose native binding needs Node 22; pnpm silently skips an
+            # optional dependency whose engine the running Node does not
+            # satisfy, so on Node 20 the toolchain setup dies with "Cannot
+            # find native binding".
+            node_version: "22"
+            run_addon: "false"
+          - os: blacksmith-8vcpu-windows-2025
+            target: x86_64-pc-windows-msvc
+            node_arch: x64
+            run_addon: "true"
+            timeout_minutes: 90
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Runs before actions/setup-node deliberately. pnpm/action-setup picks its
+      # bootstrap flavour from whichever `node` is on PATH: below Node 22.13 it
+      # forces the @pnpm/exe standalone bootstrap, whose 11.x release ships no
+      # Intel-macOS binary (pnpm/pnpm#11423, nodejs/node#62893). Ahead of
+      # setup-node the action sees the runner image's Node 22.x and installs
+      # the plain, architecture-independent pnpm package instead.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24"
-          registry-url: https://registry.npmjs.org
-      - name: Download manifest and npm partition
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ needs.candidate-preflight.outputs.candidate_run_id }}
-          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
-        run: |
-          gh run download "$RUN_ID" --name "Release-Candidate-manifest-$RELEASE_SHA" --dir candidate
-          gh run download "$RUN_ID" --name "Release-Candidate-npm-$RELEASE_SHA" --dir candidate/release-artifacts/npm
-      - name: Authorize native node from fresh npm truth
-        id: authorize
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
-          RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
-          MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
-          NODE_ID: npm:@curatelabs/${{ matrix.package }}
-          RELEASE_TAG: ${{ needs.candidate-preflight.outputs.release_tag }}
-        run: |
-          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          bash scripts/ci/download-release-write-evidence.sh "$RELEASE_TAG" "$RELEASE_VERSION" write-evidence
-          python3 scripts/ci/release_action.py validate-partition --manifest "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --group npm --expected-sha "$RELEASE_SHA" --version "$RELEASE_VERSION" --checked-at "$now"
-          python3 scripts/ci/release_registry.py observe-all --manifest "candidate/$MANIFEST_NAME" --registry npm --attempts-dir write-evidence/attempts --receipts-dir write-evidence/receipts --observed-at "$now" --out observations.json
-          printf '{"python":false,"npm":true,"crates":false,"evidence":false}\n' > availability.json
-          python3 scripts/ci/release_action.py authorize --manifest "candidate/$MANIFEST_NAME" --observations observations.json --availability availability.json --node "$NODE_ID" --planned-at "$now" --out authorization.json
-          printf 'publish=%s\n' "$(jq -r .publish authorization.json)" >> "$GITHUB_OUTPUT"
-      - name: Persist native npm write attempt before publication
-        if: steps.authorize.outputs.publish == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
-          RELEASE_TAG: ${{ needs.candidate-preflight.outputs.release_tag }}
-          RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
-          NODE_ID: npm:@curatelabs/${{ matrix.package }}
-        run: |
-          attempt="v$RELEASE_VERSION-attempt-npm-${{ matrix.package }}.json"
-          python3 scripts/ci/release_action.py attempt --manifest "candidate/$MANIFEST_NAME" --node "$NODE_ID" --started-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out "$attempt"
-          gh release upload "$RELEASE_TAG" "$attempt" --clobber
-      - name: Publish one exact native tarball
-        if: steps.authorize.outputs.publish == 'true'
-        env:
-          NPM_DIST_TAG: ${{ needs.candidate-preflight.outputs.npm_dist_tag }}
-          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
-          RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
-          MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
-        run: |
-          python3 scripts/publish_npm_artifacts.py --release-record "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --expected-sha "$RELEASE_SHA" --version "$RELEASE_VERSION" --dist-tag "$NPM_DIST_TAG" --package "@curatelabs/${{ matrix.package }}"
-      - name: Observe native npm once after an accepted write
-        if: steps.authorize.outputs.publish == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
-          NODE_ID: npm:@curatelabs/${{ matrix.package }}
-          RELEASE_TAG: ${{ needs.candidate-preflight.outputs.release_tag }}
-          RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
-        run: |
-          accepted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          receipt="v$RELEASE_VERSION-accepted-npm-${{ matrix.package }}.json"
-          python3 scripts/ci/release_action.py receipt --manifest "candidate/$MANIFEST_NAME" --node "$NODE_ID" --accepted-at "$accepted_at" --out "$receipt"
-          gh release upload "$RELEASE_TAG" "$receipt" --clobber
-          python3 scripts/ci/release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node "$NODE_ID" --live --accepted-receipt "$receipt" --observed-at "$accepted_at" --out post-write.json
-          jq '{node_id,state,reason}' post-write.json >> "$GITHUB_STEP_SUMMARY"
-
-  npm-main:
-    name: npm main fan-in
-    needs: [candidate-preflight, npm-native]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    environment: release
-    permissions:
-      actions: read
-      contents: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.candidate-preflight.outputs.release_sha }}
-      - name: Overlay reviewed recovery publish-path scripts
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        env:
-          RECOVERY_OVERLAY_SHA: ${{ inputs.recovery_overlay_sha }}
-        run: |
-          # Recovery checks out the immutable tag SHA for certified bytes and
-          # never rebuilds them. Overlay every publish-path script from an
-          # explicit reviewed SHA (not the floating origin/main tip), including
-          # the overlay runner itself, so the tag's own list cannot govern.
-          # Never print secrets.
-          test -n "$RECOVERY_OVERLAY_SHA"
-          test "${#RECOVERY_OVERLAY_SHA}" -eq 40
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
-          git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
-          git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
-          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-recovery-overlay.sh" \
-            > "$RUNNER_TEMP/release-recovery-overlay.sh"
-          install -m 0755 "$RUNNER_TEMP/release-recovery-overlay.sh" \
-            scripts/ci/release-recovery-overlay.sh
-          bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24"
-          registry-url: https://registry.npmjs.org
-      - name: Download manifest and npm partition
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ needs.candidate-preflight.outputs.candidate_run_id }}
-          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
-        run: |
-          gh run download "$RUN_ID" --name "Release-Candidate-manifest-$RELEASE_SHA" --dir candidate
-          gh run download "$RUN_ID" --name "Release-Candidate-npm-$RELEASE_SHA" --dir candidate/release-artifacts/npm
-      - name: Require verified native fan-in and authorize main
-        id: authorize
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
-          RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
-          MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
-          RELEASE_TAG: ${{ needs.candidate-preflight.outputs.release_tag }}
-        run: |
-          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          bash scripts/ci/download-release-write-evidence.sh "$RELEASE_TAG" "$RELEASE_VERSION" write-evidence
-          python3 scripts/ci/release_action.py validate-partition --manifest "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --group npm --expected-sha "$RELEASE_SHA" --version "$RELEASE_VERSION" --checked-at "$now"
-          python3 scripts/ci/release_registry.py observe-all --manifest "candidate/$MANIFEST_NAME" --registry npm --attempts-dir write-evidence/attempts --receipts-dir write-evidence/receipts --observed-at "$now" --out observations.json
-          printf '{"python":false,"npm":true,"crates":false,"evidence":false}\n' > availability.json
-          python3 scripts/ci/release_action.py authorize --manifest "candidate/$MANIFEST_NAME" --observations observations.json --availability availability.json --node npm:@curatelabs/graphforge --planned-at "$now" --out authorization.json
-          printf 'publish=%s\n' "$(jq -r .publish authorization.json)" >> "$GITHUB_OUTPUT"
-      - name: Persist npm main write attempt before publication
-        if: steps.authorize.outputs.publish == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
-          RELEASE_TAG: ${{ needs.candidate-preflight.outputs.release_tag }}
-          RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
-        run: |
-          attempt="v$RELEASE_VERSION-attempt-npm-graphforge.json"
-          python3 scripts/ci/release_action.py attempt --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge --started-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out "$attempt"
-          gh release upload "$RELEASE_TAG" "$attempt" --clobber
-      - name: Publish exact npm main tarball once
-        if: steps.authorize.outputs.publish == 'true'
-        env:
-          NPM_DIST_TAG: ${{ needs.candidate-preflight.outputs.npm_dist_tag }}
-          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
-          RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
-          MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
-        run: |
-          python3 scripts/publish_npm_artifacts.py --release-record "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --expected-sha "$RELEASE_SHA" --version "$RELEASE_VERSION" --dist-tag "$NPM_DIST_TAG" --package @curatelabs/graphforge
-      - name: Observe npm main once after an accepted write
-        if: steps.authorize.outputs.publish == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
-          RELEASE_TAG: ${{ needs.candidate-preflight.outputs.release_tag }}
-          RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
-        run: |
-          accepted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          receipt="v$RELEASE_VERSION-accepted-npm-graphforge.json"
-          python3 scripts/ci/release_action.py receipt --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge --accepted-at "$accepted_at" --out "$receipt"
-          gh release upload "$RELEASE_TAG" "$receipt" --clobber
-          python3 scripts/ci/release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge --live --accepted-receipt "$receipt" --observed-at "$accepted_at" --out post-write.json
-          jq '{node_id,state,reason}' post-write.json >> "$GITHUB_STEP_SUMMARY"
-
-  npm-cli:
-    name: npm CLI after verified main
-    needs: [candidate-preflight, npm-main]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    environment: release
-    permissions:
-      actions: read
-      contents: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.candidate-preflight.outputs.release_sha }}
-      - name: Overlay reviewed recovery publish-path scripts
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        env:
-          RECOVERY_OVERLAY_SHA: ${{ inputs.recovery_overlay_sha }}
-        run: |
-          # Recovery checks out the immutable tag SHA for certified bytes and
-          # never rebuilds them. Overlay every publish-path script from an
-          # explicit reviewed SHA (not the floating origin/main tip), including
-          # the overlay runner itself, so the tag's own list cannot govern.
-          # Never print secrets.
-          test -n "$RECOVERY_OVERLAY_SHA"
-          test "${#RECOVERY_OVERLAY_SHA}" -eq 40
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
-          git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
-          git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
-          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-recovery-overlay.sh" \
-            > "$RUNNER_TEMP/release-recovery-overlay.sh"
-          install -m 0755 "$RUNNER_TEMP/release-recovery-overlay.sh" \
-            scripts/ci/release-recovery-overlay.sh
-          bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24"
-          registry-url: https://registry.npmjs.org
-      - name: Download, authorize, and publish CLI if absent
-        env:
-          NPM_DIST_TAG: ${{ needs.candidate-preflight.outputs.npm_dist_tag }}
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ needs.candidate-preflight.outputs.candidate_run_id }}
-          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
-          RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
-          MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
-          RELEASE_TAG: ${{ needs.candidate-preflight.outputs.release_tag }}
-        run: |
-          gh run download "$RUN_ID" --name "Release-Candidate-manifest-$RELEASE_SHA" --dir candidate
-          gh run download "$RUN_ID" --name "Release-Candidate-npm-$RELEASE_SHA" --dir candidate/release-artifacts/npm
-          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          bash scripts/ci/download-release-write-evidence.sh "$RELEASE_TAG" "$RELEASE_VERSION" write-evidence
-          python3 scripts/ci/release_action.py validate-partition --manifest "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --group npm --expected-sha "$RELEASE_SHA" --version "$RELEASE_VERSION" --checked-at "$now"
-          python3 scripts/ci/release_registry.py observe-all --manifest "candidate/$MANIFEST_NAME" --registry npm --attempts-dir write-evidence/attempts --receipts-dir write-evidence/receipts --observed-at "$now" --out observations.json
-          printf '{"python":false,"npm":true,"crates":false,"evidence":false}\n' > availability.json
-          python3 scripts/ci/release_action.py authorize --manifest "candidate/$MANIFEST_NAME" --observations observations.json --availability availability.json --node npm:@curatelabs/graphforge-cli --planned-at "$now" --out authorization.json
-          if test "$(jq -r .publish authorization.json)" = true; then
-            attempt="v$RELEASE_VERSION-attempt-npm-graphforge-cli.json"
-            python3 scripts/ci/release_action.py attempt --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge-cli --started-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out "$attempt"
-            gh release upload "$RELEASE_TAG" "$attempt" --clobber
-            python3 scripts/publish_npm_artifacts.py --release-record "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --expected-sha "$RELEASE_SHA" --version "$RELEASE_VERSION" --dist-tag "$NPM_DIST_TAG" --package @curatelabs/graphforge-cli
-            accepted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            receipt="v$RELEASE_VERSION-accepted-npm-graphforge-cli.json"
-            python3 scripts/ci/release_action.py receipt --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge-cli --accepted-at "$accepted_at" --out "$receipt"
-            gh release upload "$RELEASE_TAG" "$receipt" --clobber
-            python3 scripts/ci/release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge-cli --live --accepted-receipt "$receipt" --observed-at "$accepted_at" --out post-write.json
-            jq '{node_id,state,reason}' post-write.json >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-  npm-skills:
-    name: npm agent skills after verified CLI
-    needs: [candidate-preflight, npm-cli]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    environment: release
-    permissions:
-      actions: read
-      contents: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.candidate-preflight.outputs.release_sha }}
-      - name: Overlay reviewed recovery publish-path scripts
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        env:
-          RECOVERY_OVERLAY_SHA: ${{ inputs.recovery_overlay_sha }}
-        run: |
-          # Recovery checks out the immutable tag SHA for certified bytes and
-          # never rebuilds them. Overlay every publish-path script from an
-          # explicit reviewed SHA (not the floating origin/main tip), including
-          # the overlay runner itself, so the tag's own list cannot govern.
-          # Never print secrets.
-          test -n "$RECOVERY_OVERLAY_SHA"
-          test "${#RECOVERY_OVERLAY_SHA}" -eq 40
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
-          git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
-          git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
-          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-recovery-overlay.sh" \
-            > "$RUNNER_TEMP/release-recovery-overlay.sh"
-          install -m 0755 "$RUNNER_TEMP/release-recovery-overlay.sh" \
-            scripts/ci/release-recovery-overlay.sh
-          bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24"
-          registry-url: https://registry.npmjs.org
-      - name: Download, authorize, and publish skills if absent
-        env:
-          NPM_DIST_TAG: ${{ needs.candidate-preflight.outputs.npm_dist_tag }}
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ needs.candidate-preflight.outputs.candidate_run_id }}
-          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
-          RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
-          MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
-          RELEASE_TAG: ${{ needs.candidate-preflight.outputs.release_tag }}
-        run: |
-          gh run download "$RUN_ID" --name "Release-Candidate-manifest-$RELEASE_SHA" --dir candidate
-          gh run download "$RUN_ID" --name "Release-Candidate-npm-$RELEASE_SHA" --dir candidate/release-artifacts/npm
-          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          bash scripts/ci/download-release-write-evidence.sh "$RELEASE_TAG" "$RELEASE_VERSION" write-evidence
-          python3 scripts/ci/release_action.py validate-partition --manifest "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --group npm --expected-sha "$RELEASE_SHA" --version "$RELEASE_VERSION" --checked-at "$now"
-          python3 scripts/ci/release_registry.py observe-all --manifest "candidate/$MANIFEST_NAME" --registry npm --attempts-dir write-evidence/attempts --receipts-dir write-evidence/receipts --observed-at "$now" --out observations.json
-          printf '{"python":false,"npm":true,"crates":false,"evidence":false}\n' > availability.json
-          python3 scripts/ci/release_action.py authorize --manifest "candidate/$MANIFEST_NAME" --observations observations.json --availability availability.json --node npm:@curatelabs/graphforge-agent-skills --planned-at "$now" --out authorization.json
-          if test "$(jq -r .publish authorization.json)" = true; then
-            attempt="v$RELEASE_VERSION-attempt-npm-graphforge-agent-skills.json"
-            python3 scripts/ci/release_action.py attempt --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge-agent-skills --started-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out "$attempt"
-            gh release upload "$RELEASE_TAG" "$attempt" --clobber
-            python3 scripts/publish_npm_artifacts.py --release-record "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --expected-sha "$RELEASE_SHA" --version "$RELEASE_VERSION" --dist-tag "$NPM_DIST_TAG" --package @curatelabs/graphforge-agent-skills
-            accepted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            receipt="v$RELEASE_VERSION-accepted-npm-graphforge-agent-skills.json"
-            python3 scripts/ci/release_action.py receipt --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge-agent-skills --accepted-at "$accepted_at" --out "$receipt"
-            gh release upload "$RELEASE_TAG" "$receipt" --clobber
-            python3 scripts/ci/release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge-agent-skills --live --accepted-receipt "$receipt" --observed-at "$accepted_at" --out post-write.json
-            jq '{node_id,state,reason}' post-write.json >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-  publish-crates:
-    name: Dependency-ordered crates lane
-    needs: candidate-preflight
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    environment: release
-    # New-crate rate limits are ~10 minutes each; remaining surface may need ~90+ minutes.
-    timeout-minutes: 180
-    permissions:
-      actions: read
-      contents: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.candidate-preflight.outputs.release_sha }}
-      - name: Overlay reviewed recovery publish-path scripts
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        env:
-          RECOVERY_OVERLAY_SHA: ${{ inputs.recovery_overlay_sha }}
-        run: |
-          # Recovery checks out the immutable tag SHA for certified bytes and
-          # never rebuilds them. Overlay every publish-path script from an
-          # explicit reviewed SHA (not the floating origin/main tip), including
-          # the overlay runner itself, so the tag's own list cannot govern.
-          # Never print secrets.
-          test -n "$RECOVERY_OVERLAY_SHA"
-          test "${#RECOVERY_OVERLAY_SHA}" -eq 40
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
-          git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
-          git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
-          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-recovery-overlay.sh" \
-            > "$RUNNER_TEMP/release-recovery-overlay.sh"
-          install -m 0755 "$RUNNER_TEMP/release-recovery-overlay.sh" \
-            scripts/ci/release-recovery-overlay.sh
-          bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"
+          node-version: ${{ matrix.node_version || '20' }}
+          architecture: ${{ matrix.node_arch }}
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
-      - name: Download manifest and crates partition
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ needs.candidate-preflight.outputs.candidate_run_id }}
-          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
-        run: |
-          gh run download "$RUN_ID" --name "Release-Candidate-manifest-$RELEASE_SHA" --dir candidate
-          gh run download "$RUN_ID" --name "Release-Candidate-crates-$RELEASE_SHA" --dir candidate/release-artifacts/crates
-      - name: Publish dependency-ready crates with one observation per accepted write
+          targets: ${{ matrix.target }}
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install workspace dependencies
+        run: pnpm install
+
+      - name: Build the addon
         shell: bash
         env:
-          CRATES_IO_TRUSTED_PUBLISHING: "true"
-          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
-          RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
-          MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.candidate-preflight.outputs.release_tag }}
-        run: |
-          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          bash scripts/ci/download-release-write-evidence.sh "$RELEASE_TAG" "$RELEASE_VERSION" write-evidence
-          python3 scripts/ci/release_action.py validate-partition --manifest "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --group crates --expected-sha "$RELEASE_SHA" --version "$RELEASE_VERSION" --checked-at "$now"
-          python3 scripts/ci/release_registry.py observe-all --manifest "candidate/$MANIFEST_NAME" --registry crates --attempts-dir write-evidence/attempts --receipts-dir write-evidence/receipts --observed-at "$now" --out observations.json
-          printf '{"python":false,"npm":false,"crates":true,"evidence":false}\n' > availability.json
-          while IFS= read -r crate; do
-            node="crates:$crate"
-            planned_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            # Durable crates.io Retry-After waits can exceed MAX_OBSERVATION_AGE
-            # (10m). Refresh this node and its crates dependencies before authorize
-            # so still-absent crates and verified deps do not hard-fail as
-            # observation_stale / blocked_registry_state / blocked_dependencies.
-            while IFS= read -r refresh_node; do
-              python3 scripts/ci/release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node "$refresh_node" --live --observed-at "$planned_at" --out node-observation.json
-              jq --arg node "$refresh_node" --slurpfile current node-observation.json '.observations = ([.observations[] | select(.node_id != $node)] + $current)' observations.json > observations.next.json
-              mv observations.next.json observations.json
-            done < <(python3 scripts/ci/crate-authorize-refresh-nodes.py --manifest "candidate/$MANIFEST_NAME" --node "$node")
-            python3 scripts/ci/release_action.py authorize --manifest "candidate/$MANIFEST_NAME" --observations observations.json --availability availability.json --node "$node" --planned-at "$planned_at" --out authorization.json
-            if test "$(jq -r .publish authorization.json)" = false; then
-              continue
-            fi
-            attempt="v$RELEASE_VERSION-attempt-crates-$crate.json"
-            python3 scripts/ci/release_action.py attempt --manifest "candidate/$MANIFEST_NAME" --node "$node" --started-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out "$attempt"
-            gh release upload "$RELEASE_TAG" "$attempt" --clobber
-            python3 scripts/publish_crates.py --release-record "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --crate "$crate"
-            accepted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            receipt="v$RELEASE_VERSION-accepted-crates-$crate.json"
-            python3 scripts/ci/release_action.py receipt --manifest "candidate/$MANIFEST_NAME" --node "$node" --accepted-at "$accepted_at" --out "$receipt"
-            gh release upload "$RELEASE_TAG" "$receipt" --clobber
-            python3 scripts/ci/release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node "$node" --live --accepted-receipt "$receipt" --observed-at "$accepted_at" --out post-write.json
-            jq --arg node "$node" --slurpfile current post-write.json '.observations = ([.observations[] | select(.node_id != $node)] + $current)' observations.json > observations.next.json
-            mv observations.next.json observations.json
-            if test "$(jq -r .state post-write.json)" != verified; then
-              break
-            fi
-          done < <(python3 scripts/ci/crate-publish-plan.py list)
+          CFLAGS_aarch64_unknown_linux_gnu: ${{ matrix.arm_cflags || '' }}
+        run: >-
+          pnpm --filter @curatelabs/graphforge exec napi build --platform --release
+          --target ${{ matrix.target }} ${{ matrix.cross_args }}
 
-  reconcile:
-    name: Always reconcile all 27 public nodes
-    if: always()
-    needs:
-      - candidate-preflight
-      - publish-pypi
-      - npm-native
-      - npm-main
-      - npm-cli
-      - npm-skills
-      - publish-crates
+      - name: Require the declared glibc floor
+        if: matrix.glibc_floor != ''
+        shell: bash
+        env:
+          GLIBC_FLOOR: ${{ matrix.glibc_floor }}
+        run: |
+          set -euo pipefail
+          addons=(crates/graphforge-bindings-node/*.node)
+          test "${#addons[@]}" -eq 1
+          # readelf reads the dynamic symbol table of any ELF architecture, so
+          # the cross-built aarch64 addon is checked on the x64 host too.
+          required=$(readelf --dyn-syms --wide "${addons[0]}" \
+            | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)*' | sed 's/^GLIBC_//' | sort -V | tail -n 1)
+          test -n "$required"
+          highest=$(printf '%s\n%s\n' "$required" "$GLIBC_FLOOR" | sort -V | tail -n 1)
+          if [[ "$highest" != "$GLIBC_FLOOR" ]]; then
+            printf '%s needs glibc %s, above the declared floor %s\n' \
+              "${addons[0]}" "$required" "$GLIBC_FLOOR" >&2
+            exit 1
+          fi
+
+      - name: Switch to the Node engines floor
+        if: matrix.runtime_node_version != ''
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.runtime_node_version }}
+          architecture: ${{ matrix.node_arch }}
+
+      - name: Load and run the addon
+        if: matrix.run_addon == 'true'
+        shell: bash
+        run: |
+          node -e 'import("./crates/graphforge-bindings-node/index.js").then(m => {
+            if (typeof m.version() !== "string") process.exit(1)
+          })'
+          pnpm --filter @curatelabs/graphforge test:smoke
+          pnpm --filter @curatelabs/graphforge exec node --test \
+            tests/non-cypher-release-parity.test.mjs \
+            tests/async-errors.test.mjs
+
+      - name: Validate the cross-built package layout
+        if: matrix.run_addon != 'true'
+        shell: bash
+        working-directory: crates/graphforge-bindings-node
+        env:
+          NODE_TARGET: ${{ matrix.target }}
+        run: |
+          addons=(*.node)
+          test "${#addons[@]}" -eq 1
+          mkdir -p artifacts
+          cp "${addons[0]}" artifacts/
+          pnpm exec napi create-npm-dirs
+          # `napi artifacts` refuses to run unless an addon exists for every
+          # target in the manifest, so point it at a config declaring only the
+          # one this lane built. The npm packages job runs it against the full
+          # manifest once all five addons are collected.
+          printf '{"targets":["%s"]}\n' "$NODE_TARGET" > "$RUNNER_TEMP/napi-lane-target.json"
+          pnpm exec napi artifacts --output-dir artifacts --npm-dir npm \
+            --config-path "$RUNNER_TEMP/napi-lane-target.json"
+          python3 "$GITHUB_WORKSPACE/scripts/ci/validate-napi-artifacts.py" \
+            --npm-dir npm --manifest package.json --target "$NODE_TARGET"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: addon-${{ matrix.target }}
+          path: crates/graphforge-bindings-node/*.node
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: matrix.publishes_loaders == 'true'
+        with:
+          name: node-loaders
+          path: |
+            crates/graphforge-bindings-node/index.js
+            crates/graphforge-bindings-node/index.d.ts
+          if-no-files-found: error
+          retention-days: 7
+
+  npm-packages:
+    name: npm packages
+    needs: [version, addons]
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    permissions:
-      actions: read
-      contents: read
+    timeout-minutes: 30
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          ref: ${{ needs.candidate-preflight.outputs.release_sha || github.sha }}
-      - name: Overlay reviewed recovery publish-path scripts
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        env:
-          RECOVERY_OVERLAY_SHA: ${{ inputs.recovery_overlay_sha }}
-        run: |
-          # Recovery checks out the immutable tag SHA for certified bytes and
-          # never rebuilds them. Overlay every publish-path script from an
-          # explicit reviewed SHA (not the floating origin/main tip), including
-          # the overlay runner itself, so the tag's own list cannot govern.
-          # Never print secrets.
-          test -n "$RECOVERY_OVERLAY_SHA"
-          test "${#RECOVERY_OVERLAY_SHA}" -eq 40
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
-          git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
-          git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
-          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-recovery-overlay.sh" \
-            > "$RUNNER_TEMP/release-recovery-overlay.sh"
-          install -m 0755 "$RUNNER_TEMP/release-recovery-overlay.sh" \
-            scripts/ci/release-recovery-overlay.sh
-          bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"
-      - name: Download retained manifest when available
-        if: needs.candidate-preflight.result == 'success'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ needs.candidate-preflight.outputs.candidate_run_id }}
-          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
-        run: gh run download "$RUN_ID" --name "Release-Candidate-manifest-$RELEASE_SHA" --dir candidate
-      - name: Reconcile from live registry truth and every job outcome
-        shell: bash
-        env:
-          PREFLIGHT_RESULT: ${{ needs.candidate-preflight.result }}
-          PYPI_RESULT: ${{ needs.publish-pypi.result }}
-          NATIVE_RESULT: ${{ needs.npm-native.result }}
-          MAIN_RESULT: ${{ needs.npm-main.result }}
-          CLI_RESULT: ${{ needs.npm-cli.result }}
-          SKILLS_RESULT: ${{ needs.npm-skills.result }}
-          CRATES_RESULT: ${{ needs.publish-crates.result }}
-          MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.candidate-preflight.outputs.release_tag }}
-          RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
-        run: |
-          mkdir -p reconciliation
-          if test "$PREFLIGHT_RESULT" = success && test -f "candidate/$MANIFEST_NAME"; then
-            bash scripts/ci/download-release-write-evidence.sh \
-              "$RELEASE_TAG" "$RELEASE_VERSION" write-evidence
-            now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            python3 scripts/ci/release_registry.py observe-all --manifest "candidate/$MANIFEST_NAME" --attempts-dir write-evidence/attempts --receipts-dir write-evidence/receipts --observed-at "$now" --out observations.json
-            printf '{"python":true,"npm":true,"crates":true,"evidence":true}\n' > availability.json
-            jq -n --arg pypi "$PYPI_RESULT" --arg native "$NATIVE_RESULT" --arg main "$MAIN_RESULT" --arg cli "$CLI_RESULT" --arg skills "$SKILLS_RESULT" --arg crates "$CRATES_RESULT" '{"pypi:graphforge":$pypi,"npm:@curatelabs/graphforge-darwin-arm64":$native,"npm:@curatelabs/graphforge-darwin-x64":$native,"npm:@curatelabs/graphforge-linux-arm64-gnu":$native,"npm:@curatelabs/graphforge-linux-x64-gnu":$native,"npm:@curatelabs/graphforge-win32-x64-msvc":$native,"npm:@curatelabs/graphforge":$main,"npm:@curatelabs/graphforge-cli":$cli,"npm:@curatelabs/graphforge-agent-skills":$skills}' > job-outcomes.json
-            for crate in $(python3 scripts/ci/crate-publish-plan.py list); do jq --arg node "crates:$crate" --arg result "$CRATES_RESULT" '. + {($node):$result}' job-outcomes.json > job-outcomes.next.json; mv job-outcomes.next.json job-outcomes.json; done
-            python3 scripts/ci/release_rehearsal.py reconcile --manifest "candidate/$MANIFEST_NAME" --observations observations.json --availability availability.json --job-outcomes job-outcomes.json --reconciled-at "$now" --out reconciliation/summary.json
-          else
-            python3 - <<'PY'
-          import json, os
-          from pathlib import Path
-          import sys
-          sys.path.insert(0, "scripts/ci")
-          from release_candidate_manifest import CRATES, NPM_PACKAGES
-          nodes = ["pypi:graphforge", *(f"npm:{name}" for name in NPM_PACKAGES), *(f"crates:{name}" for name in CRATES)]
-          result = {"schema":"graphforge-release-reconciliation-v1","candidate_available":False,"complete":False,"nodes":[{"node_id":node,"registry_state":"indeterminate","disposition":"blocked_candidate_unavailable","job_outcome":"not_scheduled"} for node in sorted(nodes)],"jobs":{"candidate-preflight":os.environ["PREFLIGHT_RESULT"],"publish-pypi":os.environ["PYPI_RESULT"],"npm-native":os.environ["NATIVE_RESULT"],"npm-main":os.environ["MAIN_RESULT"],"npm-cli":os.environ["CLI_RESULT"],"npm-skills":os.environ["SKILLS_RESULT"],"publish-crates":os.environ["CRATES_RESULT"]}}
-          Path("reconciliation/summary.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
-          PY
-          fi
-          jq '{complete, nodes: (.nodes | length), summary, jobs}' reconciliation/summary.json >> "$GITHUB_STEP_SUMMARY"
-      - name: Retain reconciliation summary
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          node-version: "22"
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: Release-Reconciliation-${{ github.run_id }}
-          path: reconciliation/summary.json
+          pattern: addon-*
+          path: crates/graphforge-bindings-node/artifacts
+          merge-multiple: true
+      # index.js / index.d.ts are gitignored napi outputs. Pack the ones the
+      # Linux x64 lane generated and ran its smoke tests against.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: node-loaders
+          path: crates/graphforge-bindings-node
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Assemble and pack every npm package
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$GITHUB_WORKSPACE/dist-npm"
+          mkdir -p "$out"
+          cd crates/graphforge-bindings-node
+          test -f index.js
+          test -f index.d.ts
+          pnpm exec napi create-npm-dirs
+          pnpm exec napi artifacts --output-dir artifacts --npm-dir npm
+          python3 "$GITHUB_WORKSPACE/scripts/ci/validate-napi-artifacts.py" \
+            --npm-dir npm --manifest package.json
+          pnpm exec napi pre-publish -t npm --skip-optional-publish --no-gh-release
+          python3 "$GITHUB_WORKSPACE/scripts/ci/prepare-napi-packages.py" \
+            --npm-dir npm --legal-dir .
+          for package_dir in npm/*; do
+            npm pack "./$package_dir" --ignore-scripts --pack-destination "$out"
+          done
+          npm pack . --ignore-scripts --pack-destination "$out"
+          pnpm --dir "$GITHUB_WORKSPACE/packages/cli" pack --pack-destination "$out"
+          pnpm --dir "$GITHUB_WORKSPACE/packages/agent-skills" pack --pack-destination "$out"
+          # Five native packages, the main package, the CLI, and agent-skills.
+          python3 "$GITHUB_WORKSPACE/scripts/publish_npm.py" --list "$out"
+          test "$(find "$out" -name '*.tgz' | wc -l)" -eq 8
+          # The main tarball must carry the loaders (named exactly, so a
+          # prerelease version such as 0.6.0-rc.1 resolves).
+          # Naming the members makes tar fail if either is absent.
+          tar -tzf "$out/curatelabs-graphforge-$RELEASE_VERSION.tgz" \
+            package/index.js package/index.d.ts > /dev/null
+
+      - name: Install the packed packages in a clean project and run them
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$GITHUB_WORKSPACE/dist-npm"
+          mkdir -p "$RUNNER_TEMP/packed-smoke"
+          cd "$RUNNER_TEMP/packed-smoke"
+          npm init --yes
+          npm install \
+            "$out/curatelabs-graphforge-$RELEASE_VERSION.tgz" \
+            "$out/curatelabs-graphforge-cli-$RELEASE_VERSION.tgz" \
+            "$out/curatelabs-graphforge-linux-x64-gnu-$RELEASE_VERSION.tgz"
+          node "$GITHUB_WORKSPACE/scripts/ci/multi-ontology-packaged-smoke.mjs"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-packages
+          path: dist-npm/*.tgz
           if-no-files-found: error
-          retention-days: 30
-      - name: Require complete public verification
-        run: jq -e '.complete == true and (.nodes | length) == 25' reconciliation/summary.json
+          retention-days: 7
+
+  crates:
+    name: Package crates
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
+        with:
+          toolchain: "1.96.0"
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+      # The package-license check packs the npm packages with pnpm.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      # The same order and flags the publish job uses, without the upload.
+      - name: Package every crate in publish order
+        run: python3 scripts/publish_crates.py --dry-run
+      - name: Require LICENSE and NOTICE inside every publishable package
+        run: |
+          pnpm install --frozen-lockfile
+          python3 scripts/verify_package_licenses.py
+
+  publish:
+    name: Publish to crates.io, PyPI, and npm
+    if: github.event_name == 'push'
+    needs: [version, wheels, sdist, npm-packages, crates]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 240
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
+        with:
+          toolchain: "1.96.0"
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      # npm trusted publishing needs npm 11.5.1 or newer, which Node 24 ships.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: wheel-*
+          path: dist-python
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sdist
+          path: dist-python
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-packages
+          path: dist-npm
+
+      # Each step skips what the registry already has, so a failed run is
+      # re-run as-is. crates.io goes first: it is the slowest (new crates are
+      # rate-limited to one per ten minutes) and the bindings do not depend on
+      # it.
+      - name: Publish crates in dependency order
+        env:
+          CRATES_IO_TRUSTED_PUBLISHING: "true"
+          # Trusted Publishing cannot create a crate; a never-published name
+          # is uploaded with this token instead.
+          CARGO_REGISTRY_TOKEN_NEW_CRATES: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: python3 scripts/publish_crates.py
+
+      # Skip by file name: after the build artifacts expire, a full re-run
+      # rebuilds wheels whose bytes differ from the ones PyPI already holds.
+      - name: Publish wheels and sdist to PyPI
+        run: |
+          set -euo pipefail
+          published="$(curl -fsS https://pypi.org/pypi/graphforge/json \
+            | python3 -c 'import json, sys; print("\n".join(f["filename"] for files in json.load(sys.stdin)["releases"].values() for f in files))')"
+          missing=()
+          for file in dist-python/*; do
+            if grep -qxF "$(basename "$file")" <<<"$published"; then
+              echo "$(basename "$file"): already published, skipping"
+            else
+              missing+=("$file")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            uv publish "${missing[@]}"
+          fi
+
+      - name: Publish npm packages
+        env:
+          NPM_DIST_TAG: ${{ needs.version.outputs.npm_dist_tag }}
+        run: python3 scripts/publish_npm.py --dist-tag "$NPM_DIST_TAG" dist-npm
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists"
+          else
+            prerelease=()
+            case "$RELEASE_VERSION" in *-*) prerelease=(--prerelease) ;; esac
+            gh release create "$TAG" --verify-tag --generate-notes "${prerelease[@]}"
+          fi
+
+  # What a user installs: the published packages from the public registries,
+  # in a clean environment. Registries can take a few minutes to serve a new
+  # version, hence the bounded wait.
+  verify-published:
+    name: Install from the registries and run
+    needs: [version, publish]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+      - name: Wait for PyPI and npm to serve the version
+        run: |
+          python_version="$(uv run --no-project --with packaging python -c \
+            'import sys; from packaging.version import Version; print(Version(sys.argv[1]))' "$RELEASE_VERSION")"
+          echo "PYTHON_VERSION=$python_version" >> "$GITHUB_ENV"
+          for attempt in $(seq 1 30); do
+            if curl -fsS "https://pypi.org/pypi/graphforge/$python_version/json" >/dev/null &&
+              npm view "@curatelabs/graphforge@$RELEASE_VERSION" version >/dev/null 2>&1 &&
+              npm view "@curatelabs/graphforge-linux-x64-gnu@$RELEASE_VERSION" version >/dev/null 2>&1 &&
+              npm view "@curatelabs/graphforge-cli@$RELEASE_VERSION" version >/dev/null 2>&1; then
+              exit 0
+            fi
+            echo "attempt $attempt: not served yet"
+            sleep 30
+          done
+          echo "registries did not serve $RELEASE_VERSION within 15 minutes" >&2
+          exit 1
+      - name: Run the PyPI wheel
+        run: >-
+          uv run --isolated --no-project --refresh --with "graphforge==$PYTHON_VERSION"
+          python crates/graphforge-bindings-py/tests/smoke.py
+      - name: Run the npm packages
+        run: |
+          mkdir -p "$RUNNER_TEMP/published-smoke"
+          cd "$RUNNER_TEMP/published-smoke"
+          npm init --yes
+          npm install "@curatelabs/graphforge@$RELEASE_VERSION" "@curatelabs/graphforge-cli@$RELEASE_VERSION"
+          node "$GITHUB_WORKSPACE/scripts/ci/multi-ontology-packaged-smoke.mjs"

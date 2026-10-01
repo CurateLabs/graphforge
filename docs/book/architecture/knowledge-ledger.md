@@ -166,31 +166,11 @@ The test compares generated and checked bytes exactly. A new record family,
 field, type, nullability, metadata entry, version, enum registry, sort key, or
 fingerprint therefore fails CI until its reviewed inventory is committed.
 
-## Deterministic knowledge-layer contract gate
+## Unsupported pre-v1 project roots
 
-`tests/contracts/knowledge-contract-matrix.json` is the finite acceptance ledger.
-Every row names its exact Rust, Python, or Node test IDs and the command group
-that executes them. The validator rejects missing rows, stale test symbols,
-ignored or skipped tests, binding omissions, an incomplete analyst-verb catalog
-partition, or schema-inventory drift:
-
-```bash
-python3 scripts/ci/knowledge-contract-gate.py validate
-python3 scripts/ci/test-knowledge-contract-gate.py
-```
-
-The **Knowledge Contract Gate** workflow is intentionally manual. It is used for
-contract closure or explicit revalidation, not as another full build on every
-small pull request. One dispatch runs the checked Rust, clean-wheel Python, and
-fresh-addon Node command groups from the same commit. The final
-`knowledge-Contract-Gate-<sha>` artifact contains the commit SHA, toolchain versions,
-matrix and schema digests, exact commands, logs, test IDs, row outcomes, and a
-SHA-256-bound report. Any missing fragment or failed command prevents report
-generation.
-
-Unsupported pre-v1 project roots have exactly one closure row per binding:
-return `GF_UNSUPPORTED_PROJECT_FORMAT` before mutation. There is no migration,
-import, or backward-compatibility path for unsupported layouts.
+Opening an unsupported pre-v1 project root returns `GF_UNSUPPORTED_PROJECT_FORMAT`
+before mutation, in every binding. There is no migration, import, or
+backward-compatibility path for unsupported layouts.
 
 ## Public API behavior
 

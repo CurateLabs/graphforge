@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""Deterministic tests for the checksum-safe crates.io publisher."""
+"""Deterministic tests for the crates.io publisher."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import subprocess
-import tempfile
 
 SCRIPT = Path(__file__).parents[1] / "publish_crates.py"
 
@@ -24,7 +22,7 @@ def load_module():
 
 
 mod = load_module()
-assert mod.VERSION == "0.5.2"
+assert mod.VERSION
 v = mod.VERSION
 
 assert mod.normalize_registry_token("  abc\n") == "abc"
@@ -210,97 +208,59 @@ finally:
     os.environ.clear()
     os.environ.update(original_environ)
 
-published: list[str] = []
-mod.package_checksum = lambda _name, expected=None: expected or "abc123"
-mod.owner_logins = lambda _name: {"DecisionNerd"}
-mod.cargo_publish = lambda name, **_kwargs: published.append(name)
+# A re-run skips versions the registry already has and publishes the rest in
+# plan order.
+calls: list[tuple[str, bool | None]] = []
+on_registry = {"graphforge-core"}
+existing_crates = {"graphforge-core", "graphforge-io"}
+mod.version_record = lambda name: {"num": v} if name in on_registry else None
+mod.crate_exists = lambda name: name in existing_crates
+mod.cargo_publish = lambda name, trusted=None, **_kwargs: calls.append((name, trusted))
+os.environ.pop("CARGO_REGISTRY_TOKEN_NEW_CRATES", None)
+mod.publish(["graphforge-core", "graphforge-io", "graphforge-value"])
+assert calls == [("graphforge-io", None), ("graphforge-value", None)], calls
 
-mod.version_record = lambda _name: {"checksum": "abc123"}
-assert (
-    mod.publish_one("graphforge-core", expected_checksum="abc123")
-    == "already published; checksum and owner match"
-)
-assert published == []
+# Trusted Publishing cannot create a crate: a never-published name uses the
+# scoped token once, and the token does not outlive that publish.
+calls.clear()
+seen_tokens: list[str | None] = []
 
-mod.version_record = lambda _name: None
-assert (
-    mod.publish_one("graphforge-core")
-    == "accepted; public checksum and owner verification required"
-)
-assert published == ["graphforge-core"]
 
-published.clear()
-assert (
-    mod.publish_authorized("graphforge-core", "abc123")
-    == "accepted; public checksum and owner verification required"
-)
-assert published == ["graphforge-core"]
+def record_publish(name, trusted=None, **_kwargs):
+    calls.append((name, trusted))
+    seen_tokens.append(os.environ.get("CARGO_REGISTRY_TOKEN"))
 
-mod.version_record = lambda _name: {"checksum": "different"}
+
+mod.cargo_publish = record_publish
+os.environ[mod.TRUSTED_PUBLISHING_ENV] = "true"
+os.environ["CARGO_REGISTRY_TOKEN_NEW_CRATES"] = " scoped-token\n"
+os.environ.pop("CARGO_REGISTRY_TOKEN", None)
 try:
-    mod.publish_one("graphforge-core")
-    raise AssertionError("expected an existing-version checksum mismatch")
-except RuntimeError as exc:
-    assert "refusing to resume" in str(exc)
+    mod.publish(["graphforge-core", "graphforge-io", "graphforge-value"])
+    assert calls == [("graphforge-io", None), ("graphforge-value", False)], calls
+    assert seen_tokens == [None, "scoped-token"], seen_tokens
+    assert "CARGO_REGISTRY_TOKEN" not in os.environ
+finally:
+    os.environ.clear()
+    os.environ.update(original_environ)
 
-mod.version_record = lambda _name: {"checksum": "abc123"}
-mod.owner_logins = lambda _name: {"someone-else"}
-try:
-    mod.publish_one("graphforge-core")
-    raise AssertionError("expected the owner assertion to fail")
-except RuntimeError as exc:
-    assert "DecisionNerd is not an owner" in str(exc)
-
-with tempfile.TemporaryDirectory() as temp:
-    root = Path(temp)
-    artifacts = root / "artifacts"
-    artifacts.mkdir()
-    archive = artifacts / f"graphforge-core-{v}.crate"
-    archive.write_bytes(b"certified crate")
-    sha = hashlib.sha256(archive.read_bytes()).hexdigest()
-    record = {
-        "schema": "graphforge-release-record-v1",
-        "version": v,
-        "tag": f"v{v}",
-        "commit_sha": "release-sha",
-        "artifacts": [
-            {
-                "surface": "crates",
-                "name": "graphforge-core",
-                "version": v,
-                "path": archive.name,
-                "sha256": sha,
-            }
-        ],
-    }
-    record_path = root / "record.json"
-    original_run = subprocess.run
-
-    def release_sha(*args, **_kwargs):
-        return subprocess.CompletedProcess(args[0], 0, stdout="release-sha\n")
-
-    mod.subprocess.run = release_sha
-    record_path.write_text(json.dumps(record), encoding="utf-8")
-    assert mod.release_record_checksums(record_path, artifacts) == {"graphforge-core": sha}
-
-    for escaped in ("../outside.crate", "nested/../../outside.crate", "/etc/passwd"):
-        record["artifacts"][0]["path"] = escaped
-        record_path.write_text(json.dumps(record), encoding="utf-8")
-        try:
-            mod.release_record_checksums(record_path, artifacts)
-            raise AssertionError("expected escaped artifact path to fail")
-        except RuntimeError as exc:
-            assert "escapes artifact root" in str(exc)
-
-    record["artifacts"][0]["path"] = archive.name
-    # Intentional mismatch: distinct wrong literal, not another copy of current.
-    record["artifacts"][0]["version"] = "0.0.0"
-    record_path.write_text(json.dumps(record), encoding="utf-8")
-    try:
-        mod.release_record_checksums(record_path, artifacts)
-        raise AssertionError("expected artifact version mismatch to fail")
-    except RuntimeError as exc:
-        assert "version mismatch" in str(exc)
-    mod.subprocess.run = original_run
+# The dry run packages every crate in order, in one cargo invocation, and
+# never publishes.
+commands: list[list[str]] = []
+mod.run = commands.append
+mod.package(["graphforge-core", "graphforge-io"])
+assert commands == [
+    [
+        "cargo",
+        "package",
+        "--locked",
+        "--no-verify",
+        "--allow-dirty",
+        "-p",
+        "graphforge-core",
+        "-p",
+        "graphforge-io",
+    ]
+], commands
 
 print("publish crates tests passed")

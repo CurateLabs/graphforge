@@ -1256,7 +1256,7 @@ superseded fixture attempts. No incomparable baseline improvement is claimed.
 | Portable current-format identity correctness | `valid_identity_package_keeps_absent_primary_and_runtime_catalog_bytes`, `invalid_delta_identity_package_preserves_pristine_target_authority`, and `absent_primary_round_trip_and_topology_replay_refusal_preserve_state` distinguish valid full-width identities from unsupported topology replay. |
 
 This ledger maps ordinary implementation criteria to their existing tests. It
-adds no release-certification requirement and does not claim final capacity
+adds no release-gate requirement and does not claim final capacity
 completion. The [integrated #1194 report](../../development/integrated-storage-1194.md)
 reconciles the merged repairs, admitted S20/S22 measurements, physical owners,
 resource tradeoffs and the separate final-capacity outcome.

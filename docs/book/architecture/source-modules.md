@@ -80,8 +80,8 @@ the default. No transitional exemptions apply.
   receipts, and shared durable filesystem helpers remain in the parent.
 - Checkpoint `view` owns the pinned read-only facade and `diff` owns logical-record
   comparison and Arrow rendering. Lifecycle, revert validation, and shared paging
-  remain in the parent. The recovery gate selects `checkpoints::` so direct child
-  tests and retained integration tests all execute.
+  remain in the parent. Direct child tests stay under `checkpoints::`, so a
+  `checkpoints::` test filter still selects them.
 - Multi-ontology `candidate` owns pure module/bridge transformations and
   `diagnostics` owns bounded diagnostic projection. Composite `property_routes`
   and `rebase` own routing and compatibility. Facade publication, locking,

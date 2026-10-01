@@ -1,4 +1,4 @@
-.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test test-rust test-python test-node test-scripts check clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-build-walltime codspeed-run bench-traversal bench-tck-scenarios tck-perf bench-fixed-hop-limit bench-fixed-hop-livejournal bench-m4-entry bench-adjacency-200m native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
+.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test test-rust test-python test-node test-scripts check clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-build-walltime codspeed-run bench-traversal bench-tck-scenarios tck-perf bench-fixed-hop-limit bench-fixed-hop-livejournal bench-m4-entry bench-adjacency-200m native-consumers bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build install build release-version-check package-license-verify publish-dry-run
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -35,20 +35,8 @@ release-version-check:  ## Verify Cargo/Python/Node/skills versions align
 package-license-verify:  ## Verify packaged Cargo/npm/Python artifacts include LICENSE+NOTICE
 	python3 scripts/verify_package_licenses.py
 
-publish-dry-run:  ## Local v0.5 publish dry-runs (npm/docs/python); never prod registries
-	python3 scripts/publish_dry_run.py --surface npm,docs,python --report target/publish-dry-run/evidence.json
-publish-dry-run-npm:  ## npm publish --dry-run for Node binding + agent-skills
-	python3 scripts/publish_dry_run.py --surface npm
-publish-dry-run-docs:  ## Docs preview build (pnpm docs:build)
-	python3 scripts/publish_dry_run.py --surface docs
-publish-dry-run-python:  ## Local maturin sdist packaging check (not TestPyPI upload)
-	python3 scripts/publish_dry_run.py --surface python
-publish-dry-run-cargo:  ## cargo package --list for all crates.io packages in plan order
-	python3 scripts/publish_dry_run.py --surface cargo-package
-
-record-release-artifacts:  ## Hash artifacts in DIST_DIR into a release record JSON
-	python3 scripts/record_release_artifacts.py --version $${VERSION:?set VERSION} --dist-dir $${DIST_DIR:?set DIST_DIR} --out $${OUT:-docs/releases/records/v$${VERSION}-artifacts.json}
-
+publish-dry-run:  ## Package every crate in publish order without uploading
+	python3 scripts/publish_crates.py --dry-run
 third-party-notices:  ## Regenerate third-party Rust license notices (requires cargo-about)
 	python3 scripts/generate_third_party_notices.py
 
@@ -329,34 +317,6 @@ bench-file-backed-128m:  ## 8M/128M densified public file-backed reopen evidence
 native-consumers:  ## Run audited algorithm/search consumers against the installed native wheel
 	python scripts/ci/run-native-consumers.py
 
-release-load-matrix-check:  ## Validate the versioned XS-XL release-load contracts
-	python3 scripts/ci/release-load-matrix.py validate
-	python3 scripts/ci/test-release-load-matrix.py
-	python3 scripts/ci/test-release-load-executor.py
-	python3 scripts/ci/test-release-load-probe-parity.py
-
-release-load-matrix:  ## Run the complete local/release-machine matrix against built native artifacts
-	@test -n "$$GF_LOAD_SHA" || (echo "GF_LOAD_SHA is required" && exit 2)
-	python3 scripts/ci/release-load-matrix.py run \
-		--sha "$$GF_LOAD_SHA" \
-		--work "$${GF_LOAD_WORK:-build/release-load}" \
-		--output "$${GF_LOAD_OUTPUT:-build/release-load-evidence.json}"
-
-clean-env-verify-check:  ## Unit-test the post-publication clean-env harness (#2795)
-	python3 scripts/ci/test-clean-env-verify.py
-
-clean-env-verify-preflight:  ## Probe public registries for VERSION (fails closed if unpublished)
-	@test -n "$(VERSION)" || (echo "VERSION is required (e.g. VERSION=0.5.0)" && exit 2)
-	python3 scripts/ci/clean-env-verify.py preflight --version "$(VERSION)" \
-		$(if $(OUTPUT),--output "$(OUTPUT)",)
-
-clean-env-verify:  ## Run clean-env lanes against public registries (post-§6 only)
-	@test -n "$(VERSION)" || (echo "VERSION is required (e.g. VERSION=0.5.0)" && exit 2)
-	python3 scripts/ci/clean-env-verify.py run --version "$(VERSION)" \
-		$(if $(RELEASE_RECORD),--release-record "$(RELEASE_RECORD)" --all,--default) \
-		$(if $(OUTPUT),--output "$(OUTPUT)",) \
-		$(if $(WORK),--work "$(WORK)",)
-
 bulk-construction-conformance-check:  ## Validate the opt-in bulk construction conformance contract
 	python3 scripts/ci/bulk-construction-conformance.py validate
 	python3 scripts/ci/test-bulk-construction-conformance.py
@@ -366,10 +326,6 @@ bulk-construction-conformance:  ## Run same-SHA Rust/Python/Node bulk constructi
 		--output "$${GF_BULK_OUTPUT:-build/bulk-construction-conformance}"
 
 .PHONY: bulk-construction-conformance-check bulk-construction-conformance
-
-.PHONY: release-certification-check
-release-certification-check:  ## Validate the final release certification aggregate gate
-	python3 scripts/ci/test-release-certification.py
 
 cargo-check:  ## Type-check all Rust workspace crates (fast)
 	cargo check --workspace

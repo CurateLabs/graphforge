@@ -8,8 +8,7 @@ retries-as-green, and weakened assertions do not satisfy gates (`AGENTS.md`,
 
 **Speed is a first-class engineering value alongside honesty.** Every surface
 has a wall-clock target, sheds work that is not required for its objective, and
-parallelizes the rest. Frequent publishing uses the **publish-track**, not a
-separately named “nightly” product. Full `llvm-cov` / `make coverage-rust` is a
+parallelizes the rest. Full `llvm-cov` / `make coverage-rust` is a
 local (or coverage-sensitive) honesty tool — **PR CI does not run full coverage**.
 The **Coverage** workflow runs the same ledger on every merge to `main` and fails
 on a breached floor, so drift surfaces within one merge rather than at release
@@ -26,24 +25,20 @@ in [`.github/workflows/README.md`](../../.github/workflows/README.md).
 Benchmark measurement authority (BenchExec vs Divan vs diagnostic-only phase
 timing) is defined in [`../development/benchmarking.md`](../development/benchmarking.md).
 
-## Dual-track objectives (PR / publish-track / human close)
+## Objectives by surface
 
 | Surface | Objective | Required when | Wall-clock target | Must keep | Shed / defer |
 | --- | --- | --- | --- | --- | --- |
 | `make check` | Policy/format | Local habit | ~30s | lint/license/workflow | Full coverage |
-| PR Test Suite + CI Gate | Changed-surface correctness | Every PR → `main` | ≤10m p50 / ≤12m p95 | Classifier, same-SHA Linux bindings, workspace tests, Gate | Multi-OS, load, llvm-cov, Binding RC |
+| PR Test Suite + CI Gate | Changed-surface correctness | Every PR → `main` | ≤10m p50 / ≤12m p95 | Classifier, same-SHA Linux bindings, workspace tests, Gate | Multi-OS, load, llvm-cov, release builds |
 | `make coverage-rust` | Honest floors | Coverage-sensitive changes / floor claims | ≤20m p50 local | Hash/runtime/ledger; real acceptance | HTML by default |
 | Coverage | Floor drift detection | Every merge → `main` | ≤180m ceiling | Every floor, and the recorded baseline | Running on pull requests |
-| Binding RC | Multi-OS publish bytes + offline rehearsal | publish-track and human close | ≤20m p50 warm / ≤35m cold | Retained multi-OS artifacts, same-SHA, offline rehearsal | Full PR suite re-run; cold builds when sticky hits |
-| **publish-track** | Registry-honest publish certification | Whenever we publish (scheduled or on-demand) | ≤35m p50 / ≤50m cold (RC + tag + publish) | Binding RC bytes + `publish.yaml` no-rebuild | release certification, checkpoint, knowledge/epistemic, full clean-env |
-| **Human release close** | Milestone / coordinated GA confidence | Human publication close | publish-track + optional gates | publish-track honesty **plus** release-certification / surface gates as documented | — |
-| Unchanged-SHA reuse | Skip redundant RC | Same `main` tip + unexpired candidate | RC ~0; publish-only ≤15m | Candidate completeness checks | Rebuilding identical bytes |
-| Fuzz / stress / viz | Diagnostic | Schedule/manual | N/A | Not merge or publish-track blockers | — |
+| Publish dry run | Release bytes build, pack, and smoke-test | Manual run or a PR touching the release path | N/A | Everything `publish.yaml` builds; nothing uploaded | Registry writes |
+| `publish.yaml` on a `v*` tag | Build, publish, and verify one release | Cutting a release | N/A | Build and smoke tests, then registry writes after `release` environment approval, then install from the registries | Full PR suite re-run |
+| Fuzz / stress / viz | Diagnostic | Schedule/manual | N/A | Not merge or publish blockers | — |
 
-**publish-track** is Binding RC → tag / release identity → `publish.yaml` on
-retained bytes. release-load, checkpoint recovery, and knowledge/epistemic surface aggregates remain
-**human-close / milestone** evidence — they are not registry-honesty inputs and
-must not block every publish.
+Publishing is one workflow, `publish.yaml`; `RELEASING.md` describes it and
+[`PUBLISHING.md`](PUBLISHING.md) maps artifacts to registries.
 
 ## Ownership
 
@@ -91,7 +86,7 @@ continues to use its separately documented advisory passing-set baseline.
 ## Layered gates
 
 Release readiness is a stack. Lower layers run on every applicable PR; higher
-layers are SHA-bound release certification.
+layers run when a release is cut.
 
 | Layer | When it runs | What green means |
 | --- | --- | --- |
@@ -99,15 +94,12 @@ layers are SHA-bound release certification.
 | Unit + workspace | Rust (or classified) changes | Crate logic and `cargo test --workspace` pass with Clippy `-D warnings` |
 | Binding acceptance (PR) | Binding / classified changes | One same-SHA Linux Python wheel and Node addon; native contracts; short concurrency matrix |
 | Language oracle | Workspace / TCK entrypoints | openCypher TCK runnable scenarios pass (currently **3897/3897**) |
-| Binding release candidate | publish-track and human close; exact `main` SHA | Clean-install multi-OS natives + offline rehearsal; fail-closed aggregate; retained publish bytes |
-| publish-track publication | Scheduled or on-demand publish | Binding RC retained bytes → tag → `publish.yaml` (no rebuild-on-write) |
-| Surface / recovery / load certification | Human release close (optional / milestone) | Non-Cypher inventory, checkpoint recovery, XS–XL load ledger — **not** publish-track blockers |
-| Human publication close | Coordinated GA / milestone | publish-track honesty **plus** documented human-close gates |
+| Release build and smoke tests | Manual run, PR touching the release path, or `v*` tag | Wheels (Linux, macOS, Windows), sdist, five Node addons, npm tarballs, and every crate package build; clean-install smoke tests pass |
+| Publication | `v*` tag, after `release` environment approval | `publish.yaml` uploads to crates.io, PyPI, and npm, then installs from the registries and runs a smoke test |
 
 Ordinary implementation issues close on acceptance-criteria outcomes and green
-checks for the **changed surface**. They do **not** require Binding RC,
-publish-track, or the human-close cascade. Exact SHA pairing and downloadable
-artifacts are publication evidence — see `AGENTS.md` § Issue close.
+checks for the **changed surface**. They do **not** require a release run; see
+`AGENTS.md` § Issue close.
 
 ### Pull-request contract (Test Suite + CI Gate)
 
@@ -125,35 +117,35 @@ artifacts are publication evidence — see `AGENTS.md` § Issue close.
   also retains the `graphforge-storage` project-root lock unit tests that Linux
   CI cannot execute. Both host-native jobs are aggregated by `CI Gate`.
 - Repository policy always validates workflow syntax, the classifier, domain
-  dependency directions, license compliance, and the ledgers that back later
-  release gates (without running those heavy matrices on every PR).
+  dependency directions, and license compliance.
 
-### Binding Release Candidate
+### Release build (`publish.yaml`)
 
-Maintainers dispatch Binding RC with an exact 40-character `main` SHA. It
-clean-installs Python wheels and executes native Node addons on Linux, macOS,
-and Windows, package-validates cross-built Node targets, and emits one
-fail-closed aggregate. Missing targets, mixed SHAs, fallback execution, and
-parity mismatches reject the candidate. It does not tag or publish.
+A manual run, or a pull request that touches the release path, builds the
+release artifacts without uploading them. The wheel lanes clean-install the
+wheel on Linux, macOS, and Windows and run the Python smoke, GIL-release, and
+multi-ontology tests; the Node lanes load and run the native addon where the
+runner can execute it and package-validate the cross-built aarch64 Linux
+target; the npm job installs the packed tarballs in a clean project; and the
+crates job packages every crate in publish order. Missing artifacts fail the
+run.
 
 **Windows posture:** the Windows Python lane proves user-facing use of the
-installed abi3 wheel (build → clean-install → native contracts). It is **not** a
+installed abi3 wheel (build → clean-install → smoke tests). It is **not** a
 second MSVC `cargo test` of the full Rust workspace. Windows project-root lock,
 filesystem admission/primitive, and publication-kill fault-oracle cross-checks
-are hosted by Test Suite `Windows Storage`, not Binding RC.
-Do not treat “wheel contracts green” as “every Rust unit test ran under MSVC.”
+are hosted by Test Suite `Windows Storage`.
+Do not treat “wheel smoke green” as “every Rust unit test ran under MSVC.”
 
-### Non-Cypher surface and other publication gates
+### Non-Cypher surface inventory
 
 The TCK cannot substitute for construction, lifecycle, checkpoints, analyst
 verbs, search, or knowledge/epistemic surfaces. The checked-in
 `tests/contracts/non-cypher-rust-surface.json` inventory classifies every public
 Rust receiver method (and related registry/mode rows) with linked evidence.
-Manual SHA-bound workflows (Rust non-Cypher surface gate, knowledge/epistemic
-contract gates, checkpoint recovery, final non-Cypher surface aggregate, load
-matrix) assemble immutable publication reports. Some GitHub workflow *filenames*
-and artifact names still carry historical tokens; document them by **role**, not
-as product milestones.
+`scripts/ci/non-cypher-surface-gate.py` validates it and can be run locally; the
+Python binding test `crates/graphforge-bindings-py/tests/non_cypher_release.py`
+imports it. No workflow dispatches it by itself.
 
 ### Documentation gate
 
@@ -561,10 +553,9 @@ above supply retention ownership and export-packaging evidence.
 | Persistence / reopen | Facade lifecycle + kill-reopen / recovery suites | “Wrote Parquet files” without reopen readback |
 | Binding parity | Same-SHA clean-install wheel/addon; Arrow/IPC and error-code equality | Import smoke or stubbed natives |
 | Concurrency contract | Frozen short matrix in PR CI; stress lane is diagnostic | Stress retries used as the merge gate |
-| publish-track publication | Exact SHA + same-SHA Binding RC retained bytes + `publish.yaml` no-rebuild | Green PR CI on an unrelated SHA; release-certification/checkpoint alone |
-| Human release close | publish-track honesty **plus** documented release-certification / surface gates when required | Treating every human-close gate as a publish-track blocker |
+| Publication | The tag's `Publish` run, including `verify-published`, and the versions it installed from the registries | Green PR CI on an unrelated SHA; a dry run, which uploads nothing |
 
-Failure handling for matrix or RC failures: let safe lanes finish, census
+Failure handling for matrix or publication failures: let safe lanes finish, census
 symptoms, group by root cause, fix with earlier regression coverage, freeze a
 new SHA, and rerun the full gate once — never hide flakes with skips or
 weakened assertions (`AGENTS.md`).
@@ -577,7 +568,7 @@ weakened assertions (`AGENTS.md`).
 | Integration / facade | Lifecycle, verbs, reopen, concurrency contracts | `graphforge-api` workspace tests |
 | Language compliance | openCypher semantics | `cargo test -p graphforge-api --test bdd` / `make test-tck` |
 | Binding / IPC | Native package loading, Arrow handoff, type/error mapping, lifecycle | Python and Node native smoke suites |
-| Contract gates | Non-Cypher public surface inventory + evidence | `scripts/ci/non-cypher-surface-gate.py`, surface-gate workflows |
+| Contract gates | Non-Cypher public surface inventory + evidence | `scripts/ci/non-cypher-surface-gate.py` |
 | Agent skills | Offline pack/install, compatibility, schema fail-closed | `pnpm test:agent-skills`, `pnpm smoke:agent-skills` |
 | Scale posture | Fixed-hop `LIMIT` materialization bounds | `make bench-fixed-hop-limit` (shape gate; see scale-limits) |
 | Policy / docs | Format, lint, license, docs build | `make check`, `.github/workflows/docs.yml` |
@@ -642,7 +633,7 @@ unfiltered because their functional runtime suites are the measured surface.
 | FR-3 Project reopen | Given a published project, when reopened, then reads see published state | `cargo test -p graphforge-api --test public_lifecycle_conformance`; composite recovery suites |
 | FR-4 Ontology modes | Given exploratory vs strict, when labels/violations occur, then accept or fail closed | Ontology round-trip / mode tests; agent bootstrap mode conflicts |
 | FR-5 Layer isolation | Given knowledge by UUID, when Cypher runs, then graph-only baseline holds | Layer/boundary regression coverage |
-| FR-6 Binding parity | Given the same op on Rust/Python/Node, when compared, then Arrow/IPC agrees | Binding RC / concurrency parity suites |
+| FR-6 Binding parity | Given the same op on Rust/Python/Node, when compared, then Arrow/IPC agrees | Binding parity and concurrency suites |
 | FR-7 Fail closed formats | Given unsupported container, when opened, then no mutation | Project format compatibility tests |
 | FR-8 Structured errors | Given writer-busy / capability gap, when called, then stable code | Facade + skills adapter error contracts |
 | NFR-1 TCK | Given the authoritative corpus, when BDD runs, then runnable scenarios pass | `make test-tck` (3897 scenarios) |
@@ -713,14 +704,12 @@ identifiers; they are not product milestone labels.
 | Workflow surface | Role |
 | --- | --- |
 | `.github/workflows/test.yml` (Test Suite + CI Gate) | Classified PR/`main` policy, Rust, bindings, concurrency short matrix (not full llvm-cov) |
-| `.github/workflows/binding-release-candidate.yml` | Multi-OS Binding RC for publish-track and human close (exact SHA) |
-| Non-Cypher / recovery / load gate workflows | Human-close / milestone publication evidence (not publish-track blockers) |
 | `.github/workflows/docs.yml` | Starlight `pnpm docs:build` |
-| `.github/workflows/publish.yaml` | publish-track and human publication path (retained Binding RC bytes; no rebuild) |
+| `.github/workflows/publish.yaml` | Release: builds every artifact from a `v*` tag, publishes, verifies; dry run on manual runs and release-path PRs |
 
 Merge requires green required checks and CI Gate at the exact head SHA.
-publish-track and human-close workflows certify registry publication; they are
-not close rituals for ordinary implementation issues. Details:
+`publish.yaml` publishes releases; it is not a close ritual for ordinary
+implementation issues. Details:
 [`.github/workflows/README.md`](../../.github/workflows/README.md).
 
 ### Mutation evidence
@@ -748,6 +737,6 @@ not a disposition.
 ## Test data & environments
 
 - Prefer hermetic temp project directories; no shared mutable fixtures across tests.
-- Release-load and scale fixtures are generated through approved bulk publication APIs.
+- Scale fixtures are generated through approved bulk publication APIs.
 - TCK corpus and contract JSON manifests are checked in; do not silently shrink denominators.
 - Skills smoke packs twice and requires identical SHA-256 hashes; offline `npm install` only.
