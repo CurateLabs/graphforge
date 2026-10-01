@@ -2218,7 +2218,7 @@
       "role": "durable_artifact",
       "input_contract": "Construction source identity artifact byte stream authenticates required construction input.",
       "function_bodies_sha256": [
-        "c63969f9a28852e4a0dd0008a255c5a6ebe2c3fd5a132660fd55bb4f2ad0c3d2"
+        "fd68e246ad5ab322a2341102c8bfe28b778f346c8c807675f9482adbe1f74ade"
       ]
     },
     {

@@ -343,7 +343,10 @@ fn encode_construction_index_inner(
     let mut previous_surrogate = 0_u64;
     let mut node_count = 0_u64;
     let mut edge_count = 0_u64;
-    let mut source_digest = Sha256::new();
+    // topology_delta_sha256 authenticates what construction input was used; it
+    // is not a CAS name for a published artifact, so ControlAuthentication is
+    // the honest domain.
+    let mut source_digest = graphforge_core::hash_observation::ControlSha256::new();
     let mut source_checksum = crate::corruption_checksum::Checksum::new();
     let mut remaining = input_len;
     let streamed = (|| -> Result<(), GfError> {
