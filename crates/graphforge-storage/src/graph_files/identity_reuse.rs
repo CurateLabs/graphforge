@@ -94,6 +94,48 @@ fn known_files(
     Ok(known)
 }
 
+/// The digest, checksum and read calls for one workspace file, plus the handle
+/// that was hashed when the file was not reused from the parent's identity.
+pub(crate) fn capture_payload_identity(
+    path: &Path,
+    reused: Option<&KnownGraphFile>,
+    domain: graphforge_core::hash_observation::HashDomain,
+) -> Result<(String, u64, u64, Option<File>), GfError> {
+    let mut file =
+        File::open(path).map_err(|error| super::storage("open graph file", path, error))?;
+    // A hydrated payload nothing has read yet is admitted before its bytes can
+    // name a new identity: a corrupted hard-linked object must be refused, not
+    // republished under a fresh digest (#1388).
+    crate::graph_admission::admit_file(&file)?;
+    let mut prior_calls = 0;
+    if let Some(known) = reused {
+        // The workspace file is the parent's own content-store object: nothing
+        // was written, so there are no new bytes to name and none to read. The
+        // reuse references the existing object by its existing digest, never a
+        // fresh one, so a corrupted object stays corrupted and is refused by
+        // its reader (admitted above where it is first-touch).
+        if let Some(object) = known.object_identity
+            && graphforge_filesystem::file_identity(&file).is_ok_and(|identity| identity == object)
+        {
+            return Ok((known.content_sha256.clone(), known.content_xxh64, 0, None));
+        }
+        // Reuse the authenticated identity only when these exact bytes still
+        // carry its checksum. A mismatch is a change, never a stale reuse.
+        let (checksum, calls) = super::checksum_reader(&mut file, path)?;
+        if checksum == known.content_xxh64 {
+            return Ok((known.content_sha256.clone(), checksum, calls, None));
+        }
+        prior_calls = calls;
+        file =
+            File::open(path).map_err(|error| super::storage("reopen graph file", path, error))?;
+    }
+    let (digest, checksum, calls) = super::hash_reader_with_checksum(&mut file, path, domain)?;
+    let calls = calls
+        .checked_add(prior_calls)
+        .ok_or_else(|| super::resource_limit("graph file authentication read calls overflow"))?;
+    Ok((super::hex_digest(digest), checksum, calls, Some(file)))
+}
+
 /// A workspace file hashed by a capture, kept open so that installing it into
 /// the content store checks the copied bytes against the checksum taken while
 /// hashing instead of hashing the same bytes with SHA-256 a second time.
@@ -240,8 +282,7 @@ mod tests {
         let known = known_for(&object, Some(identity));
 
         let (digest, checksum, calls, hashed) =
-            super::super::capture_payload_identity(&linked, Some(&known), ARTIFACT_IDENTITY)
-                .unwrap();
+            capture_payload_identity(&linked, Some(&known), ARTIFACT_IDENTITY).unwrap();
         assert_eq!(
             digest, known.content_sha256,
             "the declared digest is reused"
@@ -251,8 +292,7 @@ mod tests {
         assert!(hashed.is_none(), "nothing is retained for installation");
 
         let (digest, checksum, calls, hashed) =
-            super::super::capture_payload_identity(&copied, Some(&known), ARTIFACT_IDENTITY)
-                .unwrap();
+            capture_payload_identity(&copied, Some(&known), ARTIFACT_IDENTITY).unwrap();
         assert_ne!(
             digest, known.content_sha256,
             "a copy is named by its own bytes"

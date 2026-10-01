@@ -9,7 +9,8 @@ mod identity_reuse;
 mod read_materialization;
 pub use identity_reuse::capture_graph_files_over_parent;
 pub(crate) use identity_reuse::{
-    CapturedWorkspaceFile, KnownGraphFile, MAX_RETAINED_CAPTURES, capture_workspace_over_parent,
+    CapturedWorkspaceFile, KnownGraphFile, MAX_RETAINED_CAPTURES, capture_payload_identity,
+    capture_workspace_over_parent,
 };
 use read_materialization::copy_read_inventory_file;
 
@@ -916,46 +917,6 @@ fn build_inventory_for_owned_layout(
         authenticate_route_table(source_root, &inventory)?;
     }
     Ok((inventory, read_calls))
-}
-
-/// The digest, checksum and read calls for one workspace file, plus the handle
-/// that was hashed when the file was not reused from the parent's identity.
-fn capture_payload_identity(
-    path: &Path,
-    reused: Option<&KnownGraphFile>,
-    domain: graphforge_core::hash_observation::HashDomain,
-) -> Result<(String, u64, u64, Option<File>), GfError> {
-    let mut file = File::open(path).map_err(|error| storage("open graph file", path, error))?;
-    // A hydrated payload nothing has read yet is admitted before its bytes can
-    // name a new identity: a corrupted hard-linked object must be refused, not
-    // republished under a fresh digest (#1388).
-    crate::graph_admission::admit_file(&file)?;
-    let mut prior_calls = 0;
-    if let Some(known) = reused {
-        // The workspace file is the parent's own content-store object: nothing
-        // was written, so there are no new bytes to name and none to read. The
-        // reuse references the existing object by its existing digest, never a
-        // fresh one, so a corrupted object stays corrupted and is refused by
-        // its reader (admitted above where it is first-touch).
-        if let Some(object) = known.object_identity
-            && graphforge_filesystem::file_identity(&file).is_ok_and(|identity| identity == object)
-        {
-            return Ok((known.content_sha256.clone(), known.content_xxh64, 0, None));
-        }
-        // Reuse the authenticated identity only when these exact bytes still
-        // carry its checksum. A mismatch is a change, never a stale reuse.
-        let (checksum, calls) = checksum_reader(&mut file, path)?;
-        if checksum == known.content_xxh64 {
-            return Ok((known.content_sha256.clone(), checksum, calls, None));
-        }
-        prior_calls = calls;
-        file = File::open(path).map_err(|error| storage("reopen graph file", path, error))?;
-    }
-    let (digest, checksum, calls) = hash_reader_with_checksum(&mut file, path, domain)?;
-    let calls = calls
-        .checked_add(prior_calls)
-        .ok_or_else(|| resource_limit("graph file authentication read calls overflow"))?;
-    Ok((hex_digest(digest), checksum, calls, Some(file)))
 }
 
 pub(crate) fn owned_inventory_path_text(
