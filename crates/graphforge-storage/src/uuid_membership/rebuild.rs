@@ -624,7 +624,7 @@ fn scan_to_runs(
         if !path.exists() {
             continue;
         }
-        let file = File::open(path).map_err(storage_err)?;
+        let file = crate::graph_admission::open_admitted(path)?;
         let reader = ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(storage_err)?
             .with_batch_size(limits.scan_batch_rows)
@@ -940,7 +940,7 @@ fn scan_entity_surrogate_runs(
     let mut runs = Vec::new();
     for path in paths {
         let reader =
-            ParquetRecordBatchReaderBuilder::try_new(File::open(path).map_err(storage_err)?)
+            ParquetRecordBatchReaderBuilder::try_new(crate::graph_admission::open_admitted(path)?)
                 .map_err(storage_err)?
                 .with_batch_size(limits.scan_batch_rows)
                 .build()
@@ -1086,7 +1086,7 @@ fn scan_node_surrogate_validation_runs(
     let mut runs = Vec::new();
     for path in paths {
         let reader =
-            ParquetRecordBatchReaderBuilder::try_new(File::open(path).map_err(storage_err)?)
+            ParquetRecordBatchReaderBuilder::try_new(crate::graph_admission::open_admitted(path)?)
                 .map_err(storage_err)?
                 .with_batch_size(limits.scan_batch_rows)
                 .build()

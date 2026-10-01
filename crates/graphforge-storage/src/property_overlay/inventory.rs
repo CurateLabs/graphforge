@@ -461,9 +461,13 @@ impl AuthenticatedPropertyInventory {
                 mutation_barrier: Mutex::new(None),
             });
         };
-        let inventory = generation.graph_files_inventory()?.ok_or_else(|| {
-            corrupt("declared graph-files participant has no authenticated inventory")
-        })?;
+        // Payload content is admitted on first touch (or, for property
+        // fragments, when each fragment is admitted below).
+        let inventory = generation
+            .unadmitted_graph_files_inventory()?
+            .ok_or_else(|| {
+                corrupt("declared graph-files participant has no authenticated inventory")
+            })?;
         let mut admitted = match participant {
             crate::graph_files::GraphFilesParticipant::V1(_) => {
                 let root = generation.graph_tree_root();

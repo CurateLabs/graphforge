@@ -624,8 +624,10 @@ mod tests {
 
     /// A published construction ships its adjacency CSR (#1388): a fresh
     /// process finds it current in the hydrated workspace without rebuilding,
-    /// hop queries answer from it, and a corrupted published shard is refused
-    /// by the open-time digest sweep like every other graph object.
+    /// hop queries answer from it, and a corrupted published shard is never
+    /// served. Opening reads no shard, so the refusal is on the shard's first
+    /// touch: the shard reader refuses it by checksum and the provider answers
+    /// the hop from authenticated topology instead.
     #[test]
     fn published_construction_serves_its_adjacency_index_and_refuses_corruption() {
         use graphforge_storage::adjacency::AdjacencyFreshnessState;
@@ -657,6 +659,17 @@ mod tests {
         assert_eq!(inspection.artifact_source_generation, Some(1));
         drop(graph);
 
+        let hop_count = |graph: &GraphForge| {
+            graph
+                .execute("MATCH (a)-[r]->(b)-[s]->(c) RETURN count(*) AS n")
+                .unwrap()
+                .batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .unwrap()
+                .value(0)
+        };
         let reopened = GraphForge::new(Some(path)).unwrap();
         assert!(graphforge_storage::adjacency::manifest_path(&reopened.dir()).is_file());
         let inspection = reopened.inspect_adjacency().unwrap();
@@ -670,18 +683,7 @@ mod tests {
                 [node_ids[2], edge_ids[2], node_ids[3]],
             ],
         );
-        let hops = reopened
-            .execute("MATCH (a)-[r]->(b)-[s]->(c) RETURN count(*) AS n")
-            .unwrap();
-        assert_eq!(
-            hops.batches[0]
-                .column(0)
-                .as_any()
-                .downcast_ref::<arrow::array::Int64Array>()
-                .unwrap()
-                .value(0),
-            2
-        );
+        assert_eq!(hop_count(&reopened), 2);
         drop(reopened);
 
         let generation = graphforge_storage::resolve_project_generation(directory.path()).unwrap();
@@ -711,8 +713,37 @@ mod tests {
         let mut bytes = std::fs::read(&object).unwrap();
         bytes[0] ^= 1;
         std::fs::write(&object, bytes).unwrap();
-        let error = GraphForge::new(Some(path)).unwrap_err();
-        assert!(error.to_string().contains("XXH64 checksum"), "{error}");
+        // The full-admission API still names the corrupted object.
+        let fresh = graphforge_storage::resolve_project_generation(directory.path()).unwrap();
+        assert!(fresh.graph_files_inventory().is_err());
+        drop(fresh);
+
+        // Opening reads no shard payload, so it succeeds.
+        let corrupted = GraphForge::new(Some(path)).unwrap();
+        // The shard's own reader refuses it on first touch.
+        let mut refused = 0;
+        for manifest in inventory
+            .files
+            .iter()
+            .filter(|entry| entry.relative_path.ends_with(".csr.json"))
+        {
+            let logical = corrupted
+                .dir()
+                .join(manifest.relative_path.trim_end_matches(".json"));
+            let index = graphforge_storage::adjacency::ShardedCsrIndex::open(&logical).unwrap();
+            for node in 0..index.node_count() {
+                if let Err(error) = index.row(node) {
+                    assert!(error.to_string().contains("checksum mismatch"), "{error}");
+                    refused += 1;
+                    break;
+                }
+            }
+        }
+        // Identical shard bytes are one content-addressed object linked at
+        // several logical paths, so every path that names it is refused.
+        assert!(refused >= 1, "the corrupted shard must be refused");
+        // Hop queries stay correct: a refused shard is never served.
+        assert_eq!(hop_count(&corrupted), 2);
     }
 
     #[test]

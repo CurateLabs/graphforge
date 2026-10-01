@@ -1471,13 +1471,13 @@ pub(crate) fn generation_with_replaced_graph(
 }
 
 impl DeltaReplaySource {
-    /// Open a replay source for `parent`, authenticating against an inventory
-    /// the caller already fetched.
-    ///
-    /// Callers that have not already verified `parent`'s inventory should use
-    /// [`DeltaReplaySource::open`] instead. Passing an already-authenticated
-    /// inventory here avoids a second full content-addressed verification
-    /// sweep of the same base graph (#1401).
+    /// Open a replay source for `parent`, using an inventory the caller already
+    /// fetched with [`crate::ResolvedProjectGeneration::graph_files_inventory`],
+    /// which checks every payload's length and XXH64. Callers that have not
+    /// done so should use [`DeltaReplaySource::open`] instead. Passing the
+    /// checked inventory here avoids a second full verification of the same
+    /// base graph (#1401). An inventory from `unadmitted_graph_files_inventory`
+    /// is length-only and must not be passed here.
     pub(crate) fn open_with_inventory(
         parent: &crate::ResolvedProjectGeneration,
         parent_inventory: &GraphFilesInventory,
@@ -1497,10 +1497,11 @@ impl DeltaReplaySource {
                     parent_inventory,
                     workspace.path(),
                 )?;
-                // `materialize_graph_objects` already authenticated every byte
-                // it linked/copied against `parent_inventory`'s digests (#1384:
-                // digests name content-addressed objects, verified once at
-                // that boundary). For the mapped route layout, the file's
+                // The caller admitted every payload against `parent_inventory`
+                // (`graph_files_inventory`), and `materialize_graph_objects`
+                // linked or copied exactly those objects (#1384: digests name
+                // content-addressed objects, verified once at that boundary).
+                // For the mapped route layout, the file's
                 // relative path is carried through unchanged (only the raw
                 // legacy layout translates destinations), so the resulting
                 // workspace is byte-for-byte and path-for-path identical to
@@ -1587,10 +1588,9 @@ fn prepare_graph_delta_inner(
             ));
         }
     }
-    // Fetched once (#1401): the parent's content-addressed inventory names
-    // every base object by its verified SHA-256 digest, and that single
-    // authentication sweep is threaded into `DeltaReplaySource` below instead
-    // of being repeated.
+    // Fetched once (#1401): `graph_files_inventory` checks every base payload
+    // against its required XXH64 and exact length, and that single admission
+    // is threaded into `DeltaReplaySource` below instead of being repeated.
     let parent_inventory = parent
         .graph_files_inventory()?
         .ok_or_else(|| validation("parent generation lacks graph/files inventory"))?;
@@ -1631,10 +1631,9 @@ fn prepare_graph_delta_inner(
     // without replaying and re-hashing every prior run a second time (#1401).
     let new_run = decode_delta_run(&run_bytes, Some(next_sequence), request.limits)?;
     // Captured before `source` is consumed below. Every entry here was
-    // already authenticated exactly once (parent's `graph_files_inventory()`,
-    // or `materialize_graph_objects`'s own per-object digest check) — it does
-    // not need a second full-tree rehash just because we are about to write
-    // one more file next to it (#1401).
+    // already admitted exactly once (the parent's `graph_files_inventory()`)
+    // — it does not need a second full-tree rehash just because we are about
+    // to write one more file next to it (#1401).
     let base_format = source.inventory.format.clone();
     let base_format_version = source.inventory.format_version;
     let base_files = source.inventory.files.clone();

@@ -56,9 +56,17 @@ pub fn materialize_graph_objects(
     let _target_guard = open_empty_materialization_target(target)?;
     let target_directory = StableDirectory::open(target)
         .map_err(|error| storage("retain stable materialization target", target, error))?;
+    let admission_root = target
+        .canonicalize()
+        .map_err(|error| storage("resolve stable materialization target", target, error))?;
+    let admission = crate::graph_admission::AdmissionBatch::begin();
     let mut evidence = GraphFilesOpenEvidence {
         strategy: GraphFilesOpenStrategy::PrivateMaterialize,
         files_validated: inventory.file_count,
+        // Length-validated: hard-linked payloads are checksummed on first
+        // touch (`graph_admission`), not here. Control files that are copied
+        // below are checksummed as they are copied and counted in
+        // `bytes_checksummed`.
         bytes_validated: inventory.total_byte_length,
         application_read_bytes: route_io.read_bytes,
         application_read_calls: route_io.read_calls,
@@ -69,8 +77,18 @@ pub fn materialize_graph_objects(
         translated.relative_path.clone_from(destination);
         let copy_route =
             routes.legacy && crate::route_component::route_position(destination)?.is_some();
-        let materialized =
-            materialize_from_cas(&lease.cas, &target_directory, &translated, copy_route)?;
+        let materialized = materialize_from_cas(
+            &lease.cas,
+            &target_directory,
+            &translated,
+            copy_route,
+            admission,
+            &admission_root,
+        )?;
+        evidence.bytes_checksummed = evidence
+            .bytes_checksummed
+            .checked_add(materialized.checksummed_bytes)
+            .ok_or_else(|| validation("object hydration checksummed byte count overflows"))?;
         evidence.application_read_bytes = evidence
             .application_read_bytes
             .checked_add(materialized.read_bytes)
@@ -144,6 +162,8 @@ fn materialize_from_cas(
     target: &StableDirectory,
     entry: &crate::GraphFileEntry,
     copy_route: bool,
+    admission: crate::graph_admission::AdmissionBatch,
+    admission_root: &Path,
 ) -> Result<MaterializeIoEvidence, GfError> {
     validate_logical_path(Path::new(&entry.relative_path))?;
     let bucket = cas.digest_bucket(&entry.content_sha256, false)?;
@@ -191,7 +211,41 @@ fn materialize_from_cas(
             );
             match verified {
                 Ok(()) => {
-                    return Ok(MaterializeIoEvidence::default());
+                    use crate::graph_admission::PayloadClass;
+                    // The link is the content-store inode.
+                    let mut io = MaterializeIoEvidence::default();
+                    match crate::graph_admission::classify(&entry.relative_path) {
+                        // Bulk data registers a first-touch ticket; nothing
+                        // here reads it.
+                        PayloadClass::FirstTouch => admission.register(
+                            installed_identity,
+                            entry,
+                            super::graph_object_path(&cas.diagnostic_root, &entry.content_sha256)?,
+                            admission_root,
+                            admission_root.join(&entry.relative_path),
+                        ),
+                        PayloadClass::SelfAuthenticating => {}
+                        // Small sidecars have too many by-name readers to
+                        // enumerate, so they are checked now.
+                        PayloadClass::Eager => {
+                            match crate::graph_admission::admit_now(
+                                &installed,
+                                entry,
+                                &cas.diagnostic_root,
+                            ) {
+                                // Recorded by the check itself under
+                                // `read_path_scan`; `read_bytes` here would
+                                // report it again as hydration copy I/O.
+                                Ok(_) => io.checksummed_bytes = entry.byte_length,
+                                Err(error) => {
+                                    let _ =
+                                        parent.unlink_child_if_identity(name, installed_identity);
+                                    return Err(error);
+                                }
+                            }
+                        }
+                    }
+                    return Ok(io);
                 }
                 Err(error) => {
                     let _ = parent.unlink_child_if_identity(name, installed_identity);
@@ -211,13 +265,13 @@ fn materialize_from_cas(
 /// a file in place (same length, same inode) is invisible to it and to the
 /// checks below.
 ///
-/// Every real caller obtains its inventory from this generation's
-/// `graph_files_inventory` admission. That streams each current-format
-/// payload against its required XXH64 checksum and exact length.
-/// Inode identity alone cannot detect an
-/// in-place byte mutation. The topology and all-role mutation tests in
-/// `workspace_hydration/tests.rs` therefore remain required. SHA-256 still
-/// names the object and remains required at installation and trust boundaries.
+/// Opening a generation no longer checksums its payloads: its inventory is
+/// admitted by presence and exact length only, and each hard link registers a
+/// first-touch ticket or is checked in `materialize_from_cas` according to
+/// `graph_admission::classify`. Inode identity alone cannot detect an
+/// in-place byte mutation, so the topology and all-role mutation tests in
+/// `workspace_hydration/tests.rs` remain required. SHA-256 still names the
+/// object and remains required at installation and trust boundaries.
 /// This keeps the checks that stay meaningful after the hardlink: identity
 /// (defense in depth — cheap, `stat`-only, even though `link_child_into`
 /// already enforced it), declared length (mirrors `verify_file_counted`'s
@@ -259,6 +313,7 @@ fn verify_hardlinked_materialization(
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct MaterializeIoEvidence {
     copied: bool,
+    checksummed_bytes: u64,
     read_bytes: u64,
     read_calls: u64,
     write_bytes: u64,
@@ -450,6 +505,7 @@ fn copy_single_link_materialized_object(
         }
         let verified = checksum_materialized_file(installed, entry, &cas.diagnostic_root)?;
         add_materialization_verification(&mut io, verified)?;
+        io.checksummed_bytes = io.read_bytes;
         io.copied = true;
         Ok(io)
     })();
@@ -523,6 +579,7 @@ fn copy_and_authenticate_materialized_object(
     }
     Ok(MaterializeIoEvidence {
         copied: true,
+        checksummed_bytes: 0,
         read_bytes: length,
         read_calls,
         write_bytes: length,

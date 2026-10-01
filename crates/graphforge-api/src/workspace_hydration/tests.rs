@@ -93,35 +93,108 @@ fn publish_compact_graph_workspace(project: &Path, workspace: &Path) {
         .unwrap();
 }
 
-fn assert_same_inode_graph_object_corruption_is_refused(
+/// A same-inode, same-length byte mutation of one content-store object,
+/// reverted on drop so one project can exercise several payloads in turn.
+struct InPlaceCorruption {
+    object: PathBuf,
+    file: std::fs::File,
+    offset: u64,
+    original: u8,
+    permissions: std::fs::Permissions,
+}
+
+impl InPlaceCorruption {
+    /// XOR `mask` into the byte at `offset`.
+    fn apply_at(
+        project: &Path,
+        entry: &graphforge_storage::GraphFileEntry,
+        offset: u64,
+        mask: u8,
+    ) -> Self {
+        use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+
+        let object = graphforge_storage::graph_object_path(project, &entry.content_sha256).unwrap();
+        let permissions = std::fs::metadata(&object).unwrap().permissions();
+        let identity = graphforge_filesystem::path_identity(&object).unwrap();
+        let mut writable = permissions.clone();
+        writable.set_readonly(false);
+        std::fs::set_permissions(&object, writable).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&object)
+            .unwrap();
+        let mut byte = [0_u8; 1];
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        file.read_exact(&mut byte).unwrap();
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        file.write_all(&[byte[0] ^ mask]).unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(std::fs::metadata(&object).unwrap().len(), entry.byte_length);
+        assert_eq!(
+            graphforge_filesystem::path_identity(&object).unwrap(),
+            identity,
+            "the mutation must keep the inode"
+        );
+        Self {
+            object,
+            file,
+            offset,
+            original: byte[0],
+            permissions,
+        }
+    }
+
+    fn apply(project: &Path, entry: &graphforge_storage::GraphFileEntry) -> Self {
+        Self::apply_at(project, entry, 0, 0xff)
+    }
+}
+
+impl Drop for InPlaceCorruption {
+    fn drop(&mut self) {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+
+        self.file.seek(SeekFrom::Start(self.offset)).unwrap();
+        self.file.write_all(&[self.original]).unwrap();
+        self.file.sync_all().unwrap();
+        std::fs::set_permissions(&self.object, self.permissions.clone()).unwrap();
+    }
+}
+
+/// A read that touches one payload for the first time, reporting whether the
+/// corrupted bytes were refused rather than served.
+type FirstTouch<'a> = &'a dyn Fn(&GraphForge) -> bool;
+
+/// Corruption must be refused before any result is returned: by the open when
+/// something at open reads the payload, otherwise by the first read that
+/// touches it. Silently answering over corrupted data is the one outcome that
+/// is never acceptable (#1425), so a successful open must be followed by a
+/// refusing touch. Returns whether the open itself refused.
+fn assert_refused_by_open_or_first_touch(
     project: &Path,
     entry: &graphforge_storage::GraphFileEntry,
-    ordinary_open: bool,
+    touch: FirstTouch<'_>,
+) -> bool {
+    match GraphForge::new(Some(project.to_str().unwrap())) {
+        Err(_) => true,
+        Ok(reopened) => {
+            assert!(
+                touch(&reopened),
+                "{:?} object {} was accepted at open and then read after in-place corruption",
+                entry.role,
+                entry.relative_path
+            );
+            false
+        }
+    }
+}
+
+/// The full-admission API refuses the corrupted object, while the inventory an
+/// open uses decodes it by presence and exact length only (#1388).
+fn assert_open_inventory_defers_content_to_first_touch(
+    project: &Path,
+    entry: &graphforge_storage::GraphFileEntry,
 ) {
-    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
-
-    let object = graphforge_storage::graph_object_path(project, &entry.content_sha256).unwrap();
-    let original_metadata = std::fs::metadata(&object).unwrap();
-    let identity = graphforge_filesystem::path_identity(&object).unwrap();
-    let mut writable = original_metadata.permissions();
-    writable.set_readonly(false);
-    std::fs::set_permissions(&object, writable).unwrap();
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&object)
-        .unwrap();
-    let mut byte = [0_u8; 1];
-    file.read_exact(&mut byte).unwrap();
-    file.seek(SeekFrom::Start(0)).unwrap();
-    file.write_all(&[byte[0] ^ 0xff]).unwrap();
-    file.sync_all().unwrap();
-    assert_eq!(std::fs::metadata(&object).unwrap().len(), entry.byte_length);
-    assert_eq!(
-        graphforge_filesystem::path_identity(&object).unwrap(),
-        identity
-    );
-
     // Resolve afresh: a previous ResolvedProjectGeneration intentionally
     // memoizes its admitted inventory for one open.
     let fresh = graphforge_storage::resolve_project_generation(project).unwrap();
@@ -131,19 +204,14 @@ fn assert_same_inode_graph_object_corruption_is_refused(
         entry.role,
         entry.relative_path
     );
-    drop(fresh);
-    if ordinary_open {
-        assert!(
-            GraphForge::new(Some(project.to_str().unwrap())).is_err(),
-            "ordinary open accepted corrupted {}",
-            entry.relative_path
-        );
-    }
-    file.seek(SeekFrom::Start(0)).unwrap();
-    file.write_all(&byte).unwrap();
-    file.sync_all().unwrap();
-    drop(file);
-    std::fs::set_permissions(&object, original_metadata.permissions()).unwrap();
+    let fresh = graphforge_storage::resolve_project_generation(project).unwrap();
+    assert!(
+        fresh.unadmitted_graph_files_inventory().is_ok(),
+        "{:?} object {}: the open inventory must not read payload content",
+        entry.role,
+        entry.relative_path
+    );
+    assert!(fresh.admit_all_payloads().is_err());
 }
 
 #[test]
@@ -266,7 +334,8 @@ fn compact_graph_root_replays_authoritative_deltas_into_distinct_workspace() {
     exercise_compact_replay(project.path());
 }
 
-fn exercise_compact_replay(project: &Path) {
+/// A compact generation that carries an authoritative journal run over its base.
+fn compact_delta_project(project: &Path) {
     use graphforge_storage::{
         GraphDeltaJournalLimits, GraphDeltaOp, GraphDeltaOpKind, GraphDeltaPayload,
         GraphDeltaPublishRequest,
@@ -310,8 +379,10 @@ fn exercise_compact_replay(project: &Path) {
     let delta_generation = graphforge_storage::resolve_project_generation(project).unwrap();
     assert!(delta_generation.graph_tree_root().join("deltas").is_dir());
     publish_compact_graph_workspace(project, &delta_generation.graph_tree_root());
-    drop(delta_generation);
+}
 
+fn exercise_compact_replay(project: &Path) {
+    compact_delta_project(project);
     let reopened = GraphForge::new(Some(project.to_str().unwrap())).unwrap();
     let result = reopened
         .execute("MATCH (n) RETURN count(n) AS total")
@@ -348,6 +419,41 @@ fn exercise_compact_replay(project: &Path) {
     assert!(!reopened.dir().join("deltas").exists());
     assert!(reopened.graph_open_evidence().files_reused > 0);
     assert!(reopened.graph_open_evidence().files_copied > 0);
+}
+
+/// Replaying a journal reads the whole base into a private tree, so a
+/// delta-bearing generation verifies its base while it materializes (the replay
+/// preflight, the run loader, the tree copy and the path resolver each check it
+/// again) and does not depend on first-touch admission: corruption in the base
+/// fails the open. Those layers are independent, so no one removal isolates this
+/// test; it guards the property that dropping the open-time sweep did not open
+/// a path for them to be skipped.
+#[test]
+fn compact_delta_generation_refuses_base_corruption_at_open() {
+    let project = tempfile::tempdir().unwrap();
+    compact_delta_project(project.path());
+    drop(GraphForge::new(Some(project.path().to_str().unwrap())).unwrap());
+    let entry = compact_entry(
+        project.path(),
+        graphforge_storage::GraphFileRole::Topology,
+        "topology/nodes.parquet",
+        "",
+    );
+    // One letter of the footer's `created_by` string: no Parquet decoder reads
+    // it as data, so only a checksum can refuse it.
+    let object =
+        graphforge_storage::graph_object_path(project.path(), &entry.content_sha256).unwrap();
+    let marker = b"graphforge permanent parquet";
+    let offset = std::fs::read(&object)
+        .unwrap()
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("the writer stamps created_by into the footer");
+    let _corruption = InPlaceCorruption::apply_at(project.path(), &entry, offset as u64 + 3, 0x01);
+    assert!(
+        GraphForge::new(Some(project.path().to_str().unwrap())).is_err(),
+        "a delta-bearing generation was opened over a corrupted base payload"
+    );
 }
 
 #[test]
@@ -583,6 +689,99 @@ fn retained_generation_handles_outlive_reads_and_survive_reopen() {
     );
 }
 
+const COUNT_NODES: &str = "MATCH (n:Person) RETURN count(n) AS total";
+const COUNT_EDGES: &str = "MATCH ()-[r]->() RETURN count(*) AS total";
+
+/// The query is refused outright.
+fn touch(query: &'static str) -> impl Fn(&GraphForge) -> bool {
+    move |graph| graph.execute(query).is_err()
+}
+
+/// A compact (V2) project holding enough people and edges that every topology
+/// payload is nonempty and hard-linked into the workspace.
+fn compact_person_project(project: &Path) {
+    let graph = GraphForge::new(Some(project.to_str().unwrap())).unwrap();
+    graph
+        .execute(
+            "UNWIND range(1, 200) AS i \
+             CREATE (a:Person {name: 'p' + toString(i), rank: i}) \
+             CREATE (b:Person {name: 'q' + toString(i), rank: i}) \
+             CREATE (a)-[:KNOWS {since: i}]->(b)",
+        )
+        .expect("seed payload data");
+    publish_compact_graph_workspace(project, &graph.dir());
+}
+
+fn entry_at(project: &Path, prefix: &str, suffix: &str) -> graphforge_storage::GraphFileEntry {
+    let resolved = graphforge_storage::resolve_project_generation(project).unwrap();
+    resolved
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap()
+        .files
+        .into_iter()
+        .find(|entry| {
+            entry.relative_path.starts_with(prefix)
+                && entry.relative_path.ends_with(suffix)
+                && entry.byte_length > 0
+        })
+        .unwrap_or_else(|| panic!("compact fixture lacks a nonempty {prefix}*{suffix}"))
+}
+
+fn compact_entry(
+    project: &Path,
+    role: graphforge_storage::GraphFileRole,
+    prefix: &str,
+    suffix: &str,
+) -> graphforge_storage::GraphFileEntry {
+    let entry = entry_at(project, prefix, suffix);
+    assert_eq!(
+        entry.role, role,
+        "{} has an unexpected role",
+        entry.relative_path
+    );
+    entry
+}
+
+/// A compact project that ships both derived adjacency artifacts.
+fn compact_indexed_project(project: &Path) {
+    let graph = GraphForge::new(Some(project.to_str().unwrap())).unwrap();
+    graph
+        .execute(
+            "UNWIND range(1, 50) AS i \
+             CREATE (a:Person {name: 'p' + toString(i)})-[:KNOWS]->(b:Person {name: 'q' + toString(i)})",
+        )
+        .unwrap();
+    graph.index_adjacency().unwrap();
+    publish_compact_graph_workspace(project, &graph.dir());
+}
+
+/// A mutation the parser cannot notice: only a checksum can see it. JSON gets
+/// one whitespace byte swapped for another (or, in compact JSON, one digit
+/// changed to its neighbour); Parquet gets its leading magic flipped, which no
+/// reader decodes.
+fn semantically_inert_corruption(
+    project: &Path,
+    entry: &graphforge_storage::GraphFileEntry,
+) -> InPlaceCorruption {
+    let object = graphforge_storage::graph_object_path(project, &entry.content_sha256).unwrap();
+    if !entry.relative_path.ends_with(".json") {
+        return InPlaceCorruption::apply(project, entry);
+    }
+    let bytes = std::fs::read(&object).unwrap();
+    if let Some(offset) = bytes.iter().position(|byte| matches!(byte, b' ' | b'\n')) {
+        // space -> tab, newline -> carriage return: both JSON whitespace.
+        let mask = if bytes[offset] == b' ' { 0x29 } else { 0x07 };
+        return InPlaceCorruption::apply_at(project, entry, offset as u64, mask);
+    }
+    match bytes.iter().position(u8::is_ascii_digit) {
+        Some(offset) => InPlaceCorruption::apply_at(project, entry, offset as u64, 0x01),
+        // No inert byte exists (a pointer holding one name): the parser may
+        // refuse this too, so callers assert the refusal names the checksum.
+        None => InPlaceCorruption::apply(project, entry),
+    }
+}
+
 /// Regression proof for the #1425/#1388 open-path gap: a byte flipped in
 /// place (same inode, same declared length) inside a *hardlink-materialized*
 /// Topology-role payload object must still be refused, either at open or at
@@ -598,96 +797,167 @@ fn retained_generation_handles_outlive_reads_and_survive_reopen() {
 #[test]
 fn hardlinked_topology_payload_corruption_is_refused() {
     let project = tempfile::tempdir().unwrap();
-    let graph = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
     // Enough real edges that topology route files are nonempty and go
     // through the ordinary hardlink materialization path (not the
     // small-control-file copy path).
-    graph
-        .execute(
-            "UNWIND range(1, 200) AS i \
-             CREATE (a:Person {name: 'p' + toString(i), rank: i}) \
-             CREATE (b:Person {name: 'q' + toString(i), rank: i}) \
-             CREATE (a)-[:KNOWS {since: i}]->(b)",
-        )
-        .expect("seed payload data");
-    publish_compact_graph_workspace(project.path(), &graph.dir());
-    drop(graph);
-
-    let resolved = graphforge_storage::resolve_project_generation(project.path()).unwrap();
-    let inventory = resolved.graph_files_inventory().unwrap().unwrap();
-    let victim_entry = inventory
-        .files
-        .iter()
-        .find(|entry| entry.relative_path == "topology/nodes.parquet")
-        .expect("compact fixture contains topology/nodes.parquet");
-    assert_eq!(
-        victim_entry.role,
+    compact_person_project(project.path());
+    let entry = compact_entry(
+        project.path(),
         graphforge_storage::GraphFileRole::Topology,
-        "victim must exercise the hardlink path, not a control/property file"
+        "topology/nodes.parquet",
+        "",
     );
-    let victim =
-        graphforge_storage::graph_object_path(project.path(), &victim_entry.content_sha256)
-            .unwrap();
-    let before_meta = std::fs::metadata(&victim).unwrap();
-    #[cfg(unix)]
-    let before_ino = {
-        use std::os::unix::fs::MetadataExt;
-        before_meta.ino()
-    };
-    drop(resolved);
+    let _corruption = InPlaceCorruption::apply(project.path(), &entry);
+    assert_open_inventory_defers_content_to_first_touch(project.path(), &entry);
+    assert_refused_by_open_or_first_touch(project.path(), &entry, &touch(COUNT_NODES));
+}
 
-    // Flip exactly one byte in place: open read-write, no truncate, no
-    // rename -- same inode, same length, one bit different.
-    {
-        use std::io::{Seek, SeekFrom, Write};
-        let mut permissions = before_meta.permissions();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            permissions.set_mode(permissions.mode() | 0o200);
-        }
-        #[cfg(not(unix))]
-        permissions.set_readonly(false);
-        std::fs::set_permissions(&victim, permissions).unwrap();
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&victim)
-            .unwrap();
-        file.seek(SeekFrom::Start(0)).unwrap();
-        let mut byte = [0_u8; 1];
-        std::io::Read::read_exact(&mut std::fs::File::open(&victim).unwrap(), &mut byte).unwrap();
-        file.write_all(&[byte[0] ^ 0xFF]).unwrap();
-        file.sync_all().unwrap();
-    }
-    let after_meta = std::fs::metadata(&victim).unwrap();
-    assert_eq!(
-        after_meta.len(),
-        victim_entry.byte_length,
-        "mutation must preserve declared length"
+/// Edge topology is read by the lazy edge scan, not by anything at open, so the
+/// first recount is its first touch (#1388).
+#[test]
+fn hardlinked_edge_route_corruption_is_refused_on_recount() {
+    let project = tempfile::tempdir().unwrap();
+    compact_person_project(project.path());
+    let entry = compact_entry(
+        project.path(),
+        graphforge_storage::GraphFileRole::Topology,
+        "topology/edges/",
+        ".parquet",
     );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        assert_eq!(after_meta.ino(), before_ino, "mutation must preserve inode");
-    }
+    let _corruption = InPlaceCorruption::apply(project.path(), &entry);
+    assert_open_inventory_defers_content_to_first_touch(project.path(), &entry);
+    let open_refused =
+        assert_refused_by_open_or_first_touch(project.path(), &entry, &touch(COUNT_EDGES));
+    assert!(
+        !open_refused,
+        "edge topology is first touched by the recount, not at open"
+    );
+}
 
-    // Fresh open, exactly the ordinary API surface a session uses. Either
-    // the open itself refuses the corruption, or -- if it did not -- the
-    // first ordinary query that reads the corrupted object must. Silently
-    // returning a result computed over corrupted data is the one outcome
-    // that is never acceptable, regardless of which layer catches it.
-    match GraphForge::new(Some(project.path().to_str().unwrap())) {
-        Err(_) => {} // Refused at open: correct, nothing more to check.
-        Ok(reopened) => {
-            let query_result = reopened.execute("MATCH (n:Person) RETURN count(n) AS total");
+/// A mutating commit republishes the whole graph tree. It must refuse a
+/// corrupted payload it would otherwise re-read and re-hash, rather than
+/// launder the corrupted bytes into a new generation under a fresh digest.
+/// One statement leaves the corrupted edge file untouched (it is only
+/// re-hashed for publication); the other appends to it.
+#[test]
+fn a_mutating_commit_does_not_launder_a_corrupted_payload() {
+    for statement in [
+        "CREATE (:Person {name: 'late'})",
+        "MATCH (a:Person {name: 'p1'}), (b:Person {name: 'q1'}) CREATE (a)-[:KNOWS {since: 0}]->(b)",
+    ] {
+        let project = tempfile::tempdir().unwrap();
+        compact_person_project(project.path());
+        let entry = compact_entry(
+            project.path(),
+            graphforge_storage::GraphFileRole::Topology,
+            "topology/edges/",
+            ".parquet",
+        );
+        let _corruption = InPlaceCorruption::apply(project.path(), &entry);
+        let before = graphforge_storage::resolve_project_generation(project.path())
+            .unwrap()
+            .generation_uuid();
+        if let Ok(reopened) = GraphForge::new(Some(project.path().to_str().unwrap())) {
             assert!(
-                query_result.is_err(),
-                "corrupted hardlinked Topology payload object was accepted at open \
-                 AND an ordinary query over it succeeded (rows: {:?}) -- corruption \
-                 that determines a query answer was never caught",
-                query_result.map(|r| r.stats.rows_produced)
+                reopened.execute(statement).is_err(),
+                "{statement}: a commit over a corrupted edge payload was accepted"
             );
         }
+        assert_eq!(
+            graphforge_storage::resolve_project_generation(project.path())
+                .unwrap()
+                .generation_uuid(),
+            before,
+            "{statement}: the corrupted payload must not have been published into a new generation"
+        );
+    }
+}
+
+/// Small sidecars are read by name from many places, so hydration checks them
+/// while linking the workspace and reports corruption at open, rather than
+/// leaving it to be decoded later by whichever reader happens to touch it
+/// first. These are the files the old open-time sweep protected that nothing at
+/// open reads by content: the topology generation counters, the runtime entity
+/// label marker, the surrogate tails, the runtime catalog, the adjacency build
+/// record and every CSR shard manifest.
+#[test]
+fn corrupted_sidecars_are_refused_at_open() {
+    let project = tempfile::tempdir().unwrap();
+    compact_indexed_project(project.path());
+    let clean = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    drop(clean);
+    for (prefix, suffix) in [
+        ("topology/generation.json", ""),
+        ("topology/runtime_entity_label_encoding.json", ""),
+        ("topology/surrogate_tails.parquet", ""),
+        ("topology/runtime_catalog.parquet", ""),
+        ("indexes/adjacency/index_manifest.parquet", ""),
+        ("indexes/adjacency/", ".csr.json"),
+    ] {
+        let entry = entry_at(project.path(), prefix, suffix);
+        let _corruption = semantically_inert_corruption(project.path(), &entry);
+        assert_open_inventory_defers_content_to_first_touch(project.path(), &entry);
+        assert!(
+            GraphForge::new(Some(project.path().to_str().unwrap())).is_err(),
+            "{} was accepted at open after in-place corruption",
+            entry.relative_path
+        );
+    }
+}
+
+/// Every search reader begins at `current_search_artifact`, so the artifact's
+/// pointer, manifest and segments are checksummed there on first touch, before
+/// any of them is trusted or mapped.
+#[test]
+#[cfg(feature = "search")]
+fn corrupted_search_artifact_is_refused_on_first_touch() {
+    let project = tempfile::tempdir().unwrap();
+    let graph = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    graph
+        .execute("CREATE (:Person {name:'Ada'}), (:Person {name:'Bob'})")
+        .unwrap();
+    graph
+        .index_search(
+            "Person",
+            crate::SearchIndexOptions::Text {
+                properties: Some(vec!["name".into()]),
+                rebuild: false,
+            },
+        )
+        .unwrap();
+    publish_compact_graph_workspace(project.path(), &graph.dir());
+    drop(graph);
+    let key = graphforge_storage::SearchArtifactKey::text("Person", ["name"]).unwrap();
+    let read = |graph: &GraphForge| graphforge_storage::current_search_artifact(&graph.dir(), &key);
+    let clean = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    assert!(read(&clean).unwrap().is_some());
+    drop(clean);
+    let resolved = graphforge_storage::resolve_project_generation(project.path()).unwrap();
+    let segments = resolved
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap()
+        .files
+        .into_iter()
+        .filter(|entry| entry.relative_path.starts_with("indexes/search/") && entry.byte_length > 0)
+        .collect::<Vec<_>>();
+    drop(resolved);
+    assert!(
+        segments.len() >= 4,
+        "the published artifact owns a pointer, a manifest and segments"
+    );
+    for entry in &segments {
+        // Every payload under the artifact, including the pointer and manifest
+        // themselves, is refused before it is parsed.
+        let _corruption = semantically_inert_corruption(project.path(), entry);
+        let reopened = GraphForge::new(Some(project.path().to_str().unwrap()))
+            .expect("opening reads no search payload");
+        let error = read(&reopened).unwrap_err();
+        assert!(
+            error.to_string().contains("XXH64 checksum"),
+            "{}: {error}",
+            entry.relative_path
+        );
     }
 }
 
@@ -695,6 +965,11 @@ fn hardlinked_topology_payload_corruption_is_refused() {
 /// adjacency and search entries come from their real public build paths;
 /// Delta and Other use small opaque files to exercise the role classifier
 /// without requiring a journal replay or a consumer for an unknown file.
+///
+/// Each payload is refused before any result is returned. Bulk data (nodes,
+/// edges, search segments) is refused on its first touch; the route table is
+/// authenticated by SHA-256 with the manifest; everything else is checked while
+/// hydrating, so even a payload no reader opens (`Other`) fails the open.
 #[test]
 #[cfg(feature = "search")]
 fn compact_graph_root_refuses_same_inode_corruption_for_every_role() {
@@ -716,85 +991,79 @@ fn compact_graph_root_refuses_same_inode_corruption_for_every_role() {
         )
         .unwrap();
     let workspace = graph.dir();
+    let other = workspace.join("misc/role-proof.bin");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::write(other, b"other").unwrap();
     publish_compact_graph_workspace(project.path(), &workspace);
-    drop(graph);
 
-    // These are real, published index artifacts, and the ordinary API must
-    // refuse them at open. Keep the later opaque role fixtures out of this
-    // phase so they cannot cause an unrelated journal/consumer refusal.
     let clean_open = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
     drop(clean_open);
-    let real = graphforge_storage::resolve_project_generation(project.path()).unwrap();
-    let real_inventory = real.graph_files_inventory().unwrap().unwrap();
-    for path in [
-        "indexes/adjacency/index_manifest.parquet",
-        "indexes/search/",
-    ] {
-        let entry = real_inventory
-            .files
-            .iter()
-            .find(|entry| {
-                entry.role == GraphFileRole::Index
-                    && if path.ends_with('/') {
-                        entry.relative_path.starts_with(path)
-                    } else {
-                        entry.relative_path == path
-                    }
-                    && entry.byte_length > 0
-            })
-            .unwrap_or_else(|| panic!("real Index publication lacks {path}"));
-        assert_same_inode_graph_object_corruption_is_refused(project.path(), entry, true);
-    }
-
-    for (relative, bytes) in [
-        ("deltas/role-proof.bin", b"delta".as_slice()),
-        ("misc/role-proof.bin", b"other".as_slice()),
-    ] {
-        let path = workspace.join(relative);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, bytes).unwrap();
-    }
-    publish_compact_graph_workspace(project.path(), &workspace);
-    drop(workspace);
-
-    let resolved = graphforge_storage::resolve_project_generation(project.path()).unwrap();
-    let inventory = resolved.graph_files_inventory().unwrap().unwrap();
-    assert!(
-        inventory
-            .files
-            .iter()
-            .any(|entry| entry.relative_path.starts_with("indexes/search/")
-                && entry.role == GraphFileRole::Index),
-        "a real search index must reach the compact inventory"
-    );
-    let selected = [
-        (GraphFileRole::Topology, "topology/nodes.parquet"),
-        (GraphFileRole::Properties, "properties/"),
+    let key = graphforge_storage::SearchArtifactKey::text("Person", ["name"]).unwrap();
+    let find = |graph: &GraphForge| {
+        graphforge_storage::current_search_artifact(&graph.dir(), &key).is_err()
+    };
+    let selected: [(GraphFileRole, &str, Option<FirstTouch<'_>>); 7] = [
+        (
+            GraphFileRole::Topology,
+            "topology/nodes.parquet",
+            Some(&touch(COUNT_NODES)),
+        ),
+        (GraphFileRole::Properties, "properties/", None),
         (
             GraphFileRole::Index,
             "indexes/adjacency/index_manifest.parquet",
+            None,
         ),
-        (GraphFileRole::Index, "indexes/search/"),
-        (GraphFileRole::Delta, "deltas/role-proof.bin"),
-        (GraphFileRole::Catalog, "semantic-routes.json"),
-        (GraphFileRole::Other, "misc/role-proof.bin"),
+        (GraphFileRole::Index, "indexes/search/", Some(&find)),
+        (GraphFileRole::Catalog, "semantic-routes.json", None),
+        (GraphFileRole::Other, "misc/role-proof.bin", None),
+        (GraphFileRole::Topology, "topology/generation.json", None),
     ];
-    for (role, path) in selected {
-        let entry = inventory
-            .files
-            .iter()
-            .find(|entry| {
-                entry.role == role
-                    && if path.ends_with('/') {
-                        entry.relative_path.starts_with(path)
-                    } else {
-                        entry.relative_path == path
-                    }
-                    && entry.byte_length > 0
-            })
-            .unwrap_or_else(|| panic!("missing nonempty {role:?} entry at {path}"));
-        assert_same_inode_graph_object_corruption_is_refused(project.path(), entry, false);
+    for (role, path, first_touch) in selected {
+        let entry = compact_entry(project.path(), role, path, "");
+        let _corruption = semantically_inert_corruption(project.path(), &entry);
+        if path == "semantic-routes.json" {
+            // The route table is a control object: the open inventory
+            // authenticates it by SHA-256 before any path is trusted, so it is
+            // refused at open and never deferred.
+            let fresh = graphforge_storage::resolve_project_generation(project.path()).unwrap();
+            assert!(fresh.unadmitted_graph_files_inventory().is_err());
+            assert!(GraphForge::new(Some(project.path().to_str().unwrap())).is_err());
+            continue;
+        }
+        assert_open_inventory_defers_content_to_first_touch(project.path(), &entry);
+        match first_touch {
+            Some(first_touch) => {
+                assert_refused_by_open_or_first_touch(project.path(), &entry, first_touch);
+            }
+            // Checked while hydrating (small sidecars, derived adjacency
+            // records) or by the property inventory at open: the open refuses.
+            None => assert!(
+                GraphForge::new(Some(project.path().to_str().unwrap())).is_err(),
+                "{:?} object {} was accepted at open after in-place corruption",
+                entry.role,
+                entry.relative_path
+            ),
+        }
     }
     let fresh = graphforge_storage::resolve_project_generation(project.path()).unwrap();
-    assert_eq!(fresh.graph_files_inventory().unwrap().unwrap(), inventory);
+    assert!(fresh.graph_files_inventory().is_ok());
+    drop(fresh);
+
+    // A journal run is verified when it is replayed, so hydration does not read
+    // it. An opaque fixture is not a replayable run and would fail any open for
+    // an unrelated reason, so only the full-admission API is asserted here.
+    let delta = workspace.join("deltas/role-proof.bin");
+    std::fs::create_dir_all(delta.parent().unwrap()).unwrap();
+    std::fs::write(delta, b"delta").unwrap();
+    publish_compact_graph_workspace(project.path(), &workspace);
+    drop(graph);
+    let entry = compact_entry(
+        project.path(),
+        GraphFileRole::Delta,
+        "deltas/role-proof.bin",
+        "",
+    );
+    let _corruption = semantically_inert_corruption(project.path(), &entry);
+    assert_open_inventory_defers_content_to_first_touch(project.path(), &entry);
 }

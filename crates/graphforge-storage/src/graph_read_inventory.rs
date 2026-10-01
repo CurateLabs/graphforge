@@ -188,6 +188,10 @@ pub(crate) fn capture_graph_read_inventory_excluding(
         }
         let mut file = crate::graph_files::open_retained_relative_file(root, relative)
             .map_err(|error| io_error(&error))?;
+        // This capture names the current bytes as a rewrite's baseline, so a
+        // hydrated payload nothing has read yet is admitted first: corruption
+        // must be refused here, not blessed (#1388).
+        crate::graph_admission::admit_file(&file)?;
         let identity =
             graphforge_filesystem::file_identity(&file).map_err(|error| io_error(&error))?;
         let length = file.metadata().map_err(|error| io_error(&error))?.len();

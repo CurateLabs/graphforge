@@ -301,23 +301,56 @@ unchanged while a writable facade materializes a private workspace.
 
 The graph-files role is inferred from the relative path. It does not select a
 different integrity policy: current-format admission checks XXH64 and exact
-length of **every** selected payload without a payload SHA-256 pass. SHA-256
+length of **every** payload it admits, without a payload SHA-256 pass: bulk
+payloads on first touch, the rest at open (see below). SHA-256
 still names CAS objects and authenticates control metadata and existing
 trust boundaries. The standalone `graphforge verify` command and whole-store
 forensic scanner are retired. Portable package verification remains required.
 See [ADR 0049](../../adr/0049-published-payload-checksums.md) for the pre-v1
-format policy and trust assumptions. The same-inode, same-length corruption test in
-`graphforge-api/src/workspace_hydration/tests.rs` covers every role, including
+format policy and trust assumptions.
+
+Opening a compact generation is O(files), not O(payload bytes). The open
+authenticates the manifest and route table and checks each payload's presence
+and exact length, then hard-links the payloads into the private workspace. A
+payload's content is checked (exact length and XXH64) in one of three ways,
+chosen by path in `graphforge_storage::graph_admission`:
+
+- **First touch.** Nodes, edges, property fragments and search segments are
+  checked when the first reader opens each object, memoized for that hydration,
+  and a refusal is memoized too. Readers reach the check through
+  `ReadPathFile::admitted`, `open_admitted`, and `current_search_artifact`.
+  Anything that would bless a payload's current bytes (inventory capture for
+  publication, rewrite baselines, appends) admits it first, so corruption is
+  refused rather than republished under a fresh digest.
+- **Self-authenticating.** UUID-membership runs (block checksums in their
+  manifest), CSR shards (per-shard XXH64) and delta runs (verified at replay)
+  carry their own authority; hydration neither reads nor registers them.
+- **Eager.** Every other payload is small metadata or a sidecar with many
+  by-name readers (generation counters, label encoding, catalogs, adjacency
+  build records, CSR shard manifests, unclassified files). Hydration
+  hard-links it from the object store and checks its length and XXH64 as it
+  links, so an unforeseen reader fails closed. Only the route table and the
+  UUID-membership controls are copied into single-link private files.
+
+`GraphFilesOpenEvidence.bytes_validated` is declared length validated, and
+`bytes_checksummed` is content actually read and checksummed while hydrating.
+`ResolvedProjectGeneration::graph_files_inventory` still checks every payload
+(memoized); `unadmitted_graph_files_inventory` is the length-only form an open
+uses. Expanded (V1) generations, which every mutating commit publishes today,
+still verify the whole tree at open.
+
+The same-inode, same-length corruption tests in
+`graphforge-api/src/workspace_hydration/tests.rs` cover every role, including
 real adjacency and search index publications:
 
 | Role | Inventory source | Corruption coverage |
 | --- | --- | --- |
-| Topology | `topology/`, including the current `topology/runtime_catalog.parquet` | Real payload; also covered by the ordinary API reopen/query regression |
-| Properties | `properties/` and `edge_properties/` | Real property payload; the property overlay checks route lengths and XXH64 checksums |
-| Index | Published `indexes/adjacency/` CSR and `indexes/search/` artifacts | Both real build paths reach the compact inventory and refuse changed bytes |
-| Delta | `deltas/` journal runs | Role-level CAS admission test uses an opaque fixture; journal replay has separate validation |
-| Catalog | Top-level `semantic-routes.json` | Real control payload |
-| Other | Any admitted graph workspace file outside the named prefixes | Opaque fixture proves the default role receives the same CAS check |
+| Topology | `topology/`, including the current `topology/runtime_catalog.parquet` | Nodes and edges are refused on first touch (open or the first query/recount); sidecars (generation counters, label encoding, surrogate tails, runtime catalog) are refused at open; a mutating commit refuses a corrupted edge payload instead of republishing it |
+| Properties | `properties/` and `edge_properties/` | Real property payload; the property overlay checks route lengths and XXH64 checksums at open |
+| Index | Published `indexes/adjacency/` CSR and `indexes/search/` artifacts | Both real build paths reach the compact inventory; adjacency build records and shard manifests are refused at open, CSR shards by their own checksum on read, search artifacts on first touch |
+| Delta | `deltas/` journal runs | Role-level full-admission test uses an opaque fixture; journal replay has separate validation |
+| Catalog | Top-level `semantic-routes.json` | Real control payload, authenticated by SHA-256 with the manifest |
+| Other | Any admitted graph workspace file outside the named prefixes | Opaque fixture is copied and checked while hydrating, so it is refused at open |
 
 `runtime_catalog.parquet` at the graph root would be Catalog-role, but the
 current compact writer places it under `topology/`. The role classifier permits

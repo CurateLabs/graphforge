@@ -331,7 +331,8 @@ pub(super) fn property_and_graph_inventory_for_hydrated_generation(
     ),
     GfError,
 > {
-    let inventory = generation.graph_files_inventory()?;
+    // Payload content is admitted on first touch; opening reads none of it.
+    let inventory = generation.unadmitted_graph_files_inventory()?;
     let has_deltas = match inventory.as_ref() {
         Some(inventory) => !graphforge_storage::list_delta_runs(
             inventory,
@@ -451,7 +452,7 @@ pub(super) fn hydrate_graph_workspace(
                 | graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
         ) {
             let inventory = generation
-                .graph_files_inventory()?
+                .unadmitted_graph_files_inventory()?
                 .ok_or_else(|| GfError::Validation("compact graph root disappeared".into()))?;
             return hydrate_compact_graph_workspace(generation, &inventory);
         }
@@ -589,6 +590,10 @@ fn materialize_compact_graph_target(
             .bytes_validated
             .checked_add(copied.bytes_validated)
             .ok_or_else(|| GfError::Storage("hydration validated-byte count overflows".into()))?,
+        bytes_checksummed: reused
+            .bytes_checksummed
+            .checked_add(copied.bytes_checksummed)
+            .ok_or_else(|| GfError::Storage("hydration checksummed-byte count overflows".into()))?,
         files_copied: copied.files_copied,
         bytes_copied: copied.bytes_copied,
         files_opened_in_place: 0,
@@ -673,7 +678,7 @@ pub(crate) fn rematerialize_graph_workspace(
                 | graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
         ) {
             let inventory = generation
-                .graph_files_inventory()?
+                .unadmitted_graph_files_inventory()?
                 .ok_or_else(|| GfError::Validation("compact graph root disappeared".into()))?;
             materialize_compact_graph_target(generation, &inventory, target)?;
         } else {

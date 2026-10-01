@@ -82,6 +82,7 @@ pub use graph_construction::{
     GraphConstructionSession, GraphConstructionState,
 };
 
+pub mod graph_admission;
 pub mod graph_files;
 mod graph_read_inventory;
 #[cfg(test)]

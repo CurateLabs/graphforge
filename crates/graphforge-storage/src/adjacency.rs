@@ -1290,7 +1290,7 @@ pub fn read_manifest(project_dir: &Path) -> Result<Vec<AdjacencyManifestRow>, Gf
     }
     let file = std::fs::File::open(&path).map_err(storage_err)?;
     let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-        crate::lifecycle_io::ReadPathFile::new(file),
+        crate::lifecycle_io::ReadPathFile::admitted(file)?,
     )
     .map_err(storage_err)?
     .build()
@@ -1426,9 +1426,10 @@ pub(crate) fn stream_projected_parquet_batches(
         return Ok(0);
     }
     let file = std::fs::File::open(path).map_err(storage_err)?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
-            .map_err(storage_err)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(
+        crate::lifecycle_io::ReadPathFile::admitted(file)?,
+    )
+    .map_err(storage_err)?;
     let mask = ProjectionMask::columns(builder.parquet_schema(), column_names.iter().copied());
     let batch_size = batch_size.max(1);
     let reader = builder

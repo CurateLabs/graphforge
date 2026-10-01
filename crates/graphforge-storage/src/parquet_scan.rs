@@ -85,9 +85,12 @@ impl ParquetFragment {
 
 fn footer_num_rows(path: &Path) -> Option<usize> {
     let file = File::open(path).ok()?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
-            .ok()?;
+    // A hint only: a payload that fails admission reports no footer count, and
+    // the scan that follows refuses it with the corruption error.
+    let builder = ParquetRecordBatchReaderBuilder::try_new(
+        crate::lifecycle_io::ReadPathFile::admitted(file).ok()?,
+    )
+    .ok()?;
     usize::try_from(builder.metadata().file_metadata().num_rows()).ok()
 }
 
@@ -431,7 +434,7 @@ fn read_fragment_batches(
         }
     };
     let builder =
-        ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
+        ParquetRecordBatchReaderBuilder::try_new(crate::catalog::admitted_path_file(file)?)
             .map_err(|e| {
                 DataFusionError::External(format!("corrupt or unreadable parquet: {e}").into())
             })?;

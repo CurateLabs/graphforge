@@ -312,6 +312,14 @@ pub fn current_search_artifact(
 ) -> Result<Option<PublishedSearchArtifact>, SearchArtifactError> {
     let root = key.artifact_root(project_dir);
     let pointer = root.join(CURRENT_FILE);
+    // Every search reader starts here: a hydrated artifact is checksummed on
+    // first touch, before its pointer, manifest, or segments are trusted.
+    crate::graph_admission::admit_tree(&root).map_err(|error| {
+        SearchArtifactError::CorruptDerivedIndex {
+            path: root.clone(),
+            reason: error.to_string(),
+        }
+    })?;
     let bytes = match std::fs::read(&pointer) {
         Ok(bytes) => bytes,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),

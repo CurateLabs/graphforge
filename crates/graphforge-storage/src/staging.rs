@@ -461,7 +461,9 @@ impl RewriteBatch {
             ArrowWriter::try_new(tmp.as_file(), schema, Some(properties)).map_err(pq_err)?;
         let mut existing_rows = 0_u64;
         if read_path.exists() {
-            let input = std::fs::File::open(&read_path).map_err(|error| io_err(&error))?;
+            // Existing rows are carried into the rewritten file, so a hydrated
+            // payload is admitted before its corruption can be republished.
+            let input = crate::graph_admission::open_admitted(&read_path)?;
             let reader = ParquetRecordBatchReaderBuilder::try_new(input)
                 .map_err(pq_err)?
                 .with_batch_size(ROW_GROUP_SIZE)

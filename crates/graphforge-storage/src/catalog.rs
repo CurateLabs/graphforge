@@ -95,6 +95,15 @@ pub use providers::UnionEdgeTable;
 // Parquet I/O helpers
 // ---------------------------------------------------------------------------
 
+/// Admit a hydrated payload on first touch, keeping the corruption refusal
+/// (`GfError::Validation`) as the error source so callers still see why.
+pub(crate) fn admitted_path_file(
+    file: File,
+) -> Result<crate::lifecycle_io::ReadPathFile, DataFusionError> {
+    crate::lifecycle_io::ReadPathFile::admitted(file)
+        .map_err(|error| DataFusionError::External(Box::new(error)))
+}
+
 fn parquet_err(e: impl std::fmt::Display) -> DataFusionError {
     DataFusionError::External(e.to_string().into())
 }
@@ -377,11 +386,12 @@ fn count_edge_paths(
         let file = File::open(&path).map_err(|error| {
             crate::GfError::Storage(format!("open edge footer {}: {error}", path.display()))
         })?;
-        let builder =
-            ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
-                .map_err(|error| {
-                    crate::GfError::Storage(format!("read edge footer {}: {error}", path.display()))
-                })?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(
+            crate::lifecycle_io::ReadPathFile::admitted(file)?,
+        )
+        .map_err(|error| {
+            crate::GfError::Storage(format!("read edge footer {}: {error}", path.display()))
+        })?;
         if stem == "_exploratory" && rel_name != "*" {
             let relation_column = builder
                 .schema()
@@ -719,9 +729,8 @@ fn max_ordered_u64_tail(path: &Path, column: &str) -> Result<u64, DataFusionErro
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(error) => return Err(io_err(&error)),
     };
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(input))
-            .map_err(parquet_err)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(admitted_path_file(input)?)
+        .map_err(parquet_err)?;
     let row_groups = builder.metadata().num_row_groups();
     if row_groups == 0 {
         return Ok(0);
@@ -774,8 +783,7 @@ pub(crate) fn admitted_parquet(
     }
     preflight_parquet_handle(&mut file, metadata.len())?;
     let builder =
-        ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
-            .map_err(parquet_err)?;
+        ParquetRecordBatchReaderBuilder::try_new(admitted_path_file(file)?).map_err(parquet_err)?;
     admit_decoded_parquet(&builder)?;
     Ok(builder)
 }
@@ -884,9 +892,8 @@ where
             &mut file,
             metadata.len(),
         )?);
-        let builder =
-            ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
-                .map_err(parquet_err)?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(admitted_path_file(file)?)
+            .map_err(parquet_err)?;
         admit_decoded_parquet(&builder)?;
         for batch in builder
             .with_batch_size(batch_size.max(1))
@@ -1018,12 +1025,11 @@ where
     let mut any = false;
     for path in paths {
         let file = File::open(&path).map_err(|e| io_err(&e))?;
-        let reader =
-            ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
-                .map_err(parquet_err)?
-                .with_batch_size(batch_size.max(1))
-                .build()
-                .map_err(parquet_err)?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(admitted_path_file(file)?)
+            .map_err(parquet_err)?
+            .with_batch_size(batch_size.max(1))
+            .build()
+            .map_err(parquet_err)?;
         for batch in reader {
             any = true;
             let normalized = normalize_topology_nodes(vec![batch.map_err(parquet_err)?])?;
@@ -1091,9 +1097,11 @@ pub(crate) fn discover_parquet_schema(path: &Path) -> Option<SchemaRef> {
 /// error string for scale-host diagnostics.
 pub(crate) fn discover_parquet_schema_detailed(path: &Path) -> Result<SchemaRef, String> {
     let file = File::open(path).map_err(|error| format!("open failed: {error}"))?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
-            .map_err(|error| format!("parquet footer/schema failed: {error}"))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(
+        crate::lifecycle_io::ReadPathFile::admitted(file)
+            .map_err(|error| format!("graph payload admission failed: {error}"))?,
+    )
+    .map_err(|error| format!("parquet footer/schema failed: {error}"))?;
     Ok(builder.schema().clone())
 }
 
