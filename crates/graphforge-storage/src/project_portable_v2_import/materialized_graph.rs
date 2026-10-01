@@ -1,5 +1,7 @@
 //! Forward actual portable copy captures into graph installation.
 use super::*;
+use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
+use sha2::Digest;
 
 fn capture_graph_sources(
     graph_tree: &Path,
