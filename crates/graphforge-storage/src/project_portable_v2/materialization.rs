@@ -10,6 +10,10 @@ mod derived;
 pub(crate) use derived::capture_import_adjacency;
 mod compact_root;
 pub(crate) use compact_root::publish_compact_import_root;
+mod composition_control;
+pub(crate) use composition_control::{
+    CapturedCompositionControl, persist_composition_authority, persist_staged_composition,
+};
 
 /// A private exact-byte capture from the authenticated import copy.
 /// Only the authenticated copier or actual derived writer can mint it.

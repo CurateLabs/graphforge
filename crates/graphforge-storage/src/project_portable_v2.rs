@@ -7,8 +7,9 @@
 mod materialization;
 pub use materialization::materialize_verified_portable_v2;
 pub(crate) use materialization::{
-    CapturedPortableSource, MaterializedCapture, capture_import_adjacency,
-    materialize_verified_portable_v2_observed, publish_compact_import_root,
+    CapturedCompositionControl, CapturedPortableSource, MaterializedCapture,
+    capture_import_adjacency, materialize_verified_portable_v2_observed,
+    persist_composition_authority, persist_staged_composition, publish_compact_import_root,
 };
 mod authenticated_entries;
 use authenticated_entries::StreamHash;

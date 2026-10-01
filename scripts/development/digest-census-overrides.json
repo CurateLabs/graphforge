@@ -1791,6 +1791,15 @@
       ]
     },
     {
+      "path": "crates/graphforge-storage/src/project_portable_v2/materialization/composition_control.rs",
+      "function": "write_control",
+      "role": "control_authentication",
+      "input_contract": "Only typed ontology staging/composition canonical encoders reach this private writer. Enforced manifest byte bound precedes genuine ControlSHA naming; completed output CRC/native identity/length/link/allocation validation mints the exact-byte private capture.",
+      "function_bodies_sha256": [
+        "d134454f1e1c280985849d9ee182e4d741c34b0addff5840ca4c5735d6139ade"
+      ]
+    },
+    {
       "path": "crates/graphforge-storage/src/project_portable_v2/materialization/derived.rs",
       "function": "hash_uncaptured",
       "role": "durable_artifact",
@@ -1946,19 +1955,10 @@
     {
       "path": "crates/graphforge-storage/src/project_portable_v2_import.rs",
       "function": "build_staged_composition",
-      "role": "durable_artifact",
-      "input_contract": "Newly generated durable staging-composition participant bytes receive their first publication identity; retain ArtifactPayload.",
+      "role": "producer_delegate",
+      "input_contract": "Typed canonical staging composition delegates to the bounded actual control writer; no additional SHA byte pass.",
       "function_bodies_sha256": [
-        "44f0993e602344a9b1eaf567b0f6749b08064b93f969d4814d5531b1fade57f9"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/project_portable_v2_import.rs",
-      "function": "persist_composition_authority",
-      "role": "durable_artifact",
-      "input_contract": "Newly generated local composition-authority participant bytes receive their first durable publication identity; retain ArtifactPayload.",
-      "function_bodies_sha256": [
-        "b29b5b86ab102efb011f0c8e05f8054fce00b003ec322558451337b27a9be7d5"
+        "421c756be28c57d596eb1a036b2287ddb5aa6031dca8f7b520cd52bf8eb9445b"
       ]
     },
     {

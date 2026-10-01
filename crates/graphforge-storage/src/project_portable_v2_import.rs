@@ -13,18 +13,21 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use graphforge_core::GfError;
+#[cfg(test)]
 use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use graphforge_ontology::{
     ActivationMode, ActivationRecord, ActivationScope, AuthoredModule, BridgeSetId,
     CompositionLimits, InventoryCompileRequest, OntologyModuleId, compile_inventory,
 };
+#[cfg(test)]
 use sha2::Digest;
 use uuid::Uuid;
 
 use crate::project_portable::{prepare_import_target, semantically_pristine_generation};
 use crate::project_portable_v2::{
-    PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2PackageClass,
-    PortableV2Report, RUNTIME_MAP_PATH, decode_runtime_map, materialize_verified_portable_v2,
+    CapturedCompositionControl, PortableV2Error, PortableV2ErrorCode, PortableV2Limits,
+    PortableV2PackageClass, PortableV2Report, RUNTIME_MAP_PATH, decode_runtime_map,
+    materialize_verified_portable_v2, persist_composition_authority, persist_staged_composition,
 };
 pub(crate) mod adjacency;
 mod materialized_graph;
@@ -128,7 +131,7 @@ pub fn consume_selective_portable_v2<T>(
     let (ontology, staged_composition) = if report.ontology_composition.is_some() {
         let (candidate, receipt) = build_staged_composition(&stage, &report, limits, None)?;
         let bytes = read_bounded_payload(
-            &candidate.source,
+            &candidate.participant.source,
             limits.max_manifest_bytes,
             "selective staged composition",
         )?;
@@ -1053,8 +1056,11 @@ fn import_materialized(
             content_sha256,
         });
     }
+    let mut composition_captures = std::collections::BTreeMap::new();
     let staged_composition = if report.ontology_composition.is_some() {
-        let (candidate, receipt) = build_staged_composition(stage, report, limits, allocation)?;
+        let (written, receipt) = build_staged_composition(stage, report, limits, allocation)?;
+        let candidate = written.participant;
+        composition_captures.insert(candidate.source.clone(), written.capture);
         if let Some(expected) = semantic_composition_fingerprint.as_deref() {
             let staged_bytes = read_bounded_payload(
                 &candidate.source,
@@ -1070,11 +1076,14 @@ fn import_materialized(
                     "semantic bindings and portable composition fingerprints disagree",
                 ));
             }
-            participants.push(persist_composition_authority(
+            let written = persist_composition_authority(
                 stage,
                 &staged.composition,
+                limits.max_manifest_bytes,
                 allocation,
-            )?);
+            )?;
+            composition_captures.insert(written.participant.source.clone(), written.capture);
+            participants.push(written.participant);
         }
         participants.push(candidate);
         Some(receipt)
@@ -1178,6 +1187,11 @@ fn import_materialized(
         .map(|(relative, capture)| (stage.join(relative), capture))
         .chain(
             derived_captures
+                .iter()
+                .map(|(path, capture)| (path.clone(), capture)),
+        )
+        .chain(
+            composition_captures
                 .iter()
                 .map(|(path, capture)| (path.clone(), capture)),
         )
@@ -1515,7 +1529,13 @@ fn build_staged_composition(
     report: &PortableV2Report,
     limits: PortableV2Limits,
     allocation: Option<&crate::StorageAllocationOperation>,
-) -> Result<(ProjectFileParticipant, PortableV2StagedCompositionReceipt), PortableV2Error> {
+) -> Result<
+    (
+        CapturedCompositionControl,
+        PortableV2StagedCompositionReceipt,
+    ),
+    PortableV2Error,
+> {
     let control = report.ontology_composition.as_ref().ok_or_else(|| {
         PortableV2Error::new(
             PortableV2ErrorCode::Incompatible,
@@ -1586,24 +1606,14 @@ fn build_staged_composition(
         portable_composition_digest: control.composition_digest.clone(),
         composition,
     };
-    let (participant, source, bytes) = persist_staged_composition(stage, &staged, allocation)?;
+    let written =
+        persist_staged_composition(stage, &staged, limits.max_manifest_bytes, allocation)?;
     let receipt = PortableV2StagedCompositionReceipt {
         package_digest: report.package_digest.clone(),
         portable_composition_digest: control.composition_digest.clone(),
         workspace_composition_fingerprint: staged.composition.composition_fingerprint.clone(),
     };
-    Ok((
-        ProjectFileParticipant {
-            participant: ProjectParticipant {
-                bytes: Vec::new(),
-                ..participant
-            },
-            source,
-            byte_length: bytes.len() as u64,
-            content_sha256: Sha256::digest(&bytes).into(),
-        },
-        receipt,
-    ))
+    Ok((written, receipt))
 }
 
 fn load_staged_composition_entries(
@@ -1728,88 +1738,6 @@ fn resolve_staged_bridge_ids(
                 })
         })
         .collect()
-}
-
-fn persist_staged_composition(
-    stage: &Path,
-    staged: &crate::WorkspacePortableOntologyStaging,
-    allocation: Option<&crate::StorageAllocationOperation>,
-) -> Result<(ProjectParticipant, PathBuf, Vec<u8>), PortableV2Error> {
-    let participant = staged
-        .to_project_participant()
-        .map_err(|error| storage(&error))?;
-    let bytes = participant.bytes.clone();
-    let source = stage.join("portable-ontology-staging.json");
-    let mut output = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&source)
-        .map_err(|_| {
-            PortableV2Error::new(
-                PortableV2ErrorCode::Io,
-                "cannot stage composition candidate",
-            )
-        })?;
-    output.write_all(&bytes).map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "cannot write composition candidate",
-        )
-    })?;
-    output.observed_sync_all().map_err(|_| {
-        PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync composition candidate")
-    })?;
-    if let Some(allocation) = allocation {
-        allocation
-            .replace_file_at(&source, &output)
-            .map_err(|error| storage(&error))?;
-    }
-    Ok((participant, source, bytes))
-}
-
-fn persist_composition_authority(
-    stage: &Path,
-    composition: &crate::WorkspaceOntologyComposition,
-    allocation: Option<&crate::StorageAllocationOperation>,
-) -> Result<ProjectFileParticipant, PortableV2Error> {
-    let participant = composition
-        .to_project_participant()
-        .map_err(|error| storage(&error))?;
-    let bytes = participant.bytes.clone();
-    let source = stage.join("ontology-composition-authority.json");
-    let mut output = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&source)
-        .map_err(|_| {
-            PortableV2Error::new(
-                PortableV2ErrorCode::Io,
-                "cannot stage composition authority",
-            )
-        })?;
-    output.write_all(&bytes).map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "cannot write composition authority",
-        )
-    })?;
-    output.observed_sync_all().map_err(|_| {
-        PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync composition authority")
-    })?;
-    if let Some(allocation) = allocation {
-        allocation
-            .replace_file_at(&source, &output)
-            .map_err(|error| storage(&error))?;
-    }
-    Ok(ProjectFileParticipant {
-        participant: ProjectParticipant {
-            bytes: Vec::new(),
-            ..participant
-        },
-        source,
-        byte_length: bytes.len() as u64,
-        content_sha256: Sha256::digest(&bytes).into(),
-    })
 }
 
 fn read_bounded_payload(
