@@ -366,7 +366,7 @@ impl GraphConstructionSession<'_> {
                     prepared = Some(PreparedGenerationRefresh {
                         workspace: super::GraphWorkspace {
                             dir: prepared_dir,
-                            _owner: prepared_guard,
+                            owner: prepared_guard,
                         },
                         runtime_catalog,
                         read_authority: read_authority_prepared,
@@ -434,7 +434,7 @@ impl GraphConstructionSession<'_> {
                     Ok(PreparedGenerationRefresh {
                         workspace: super::GraphWorkspace {
                             dir: prepared_dir,
-                            _owner: prepared_guard,
+                            owner: prepared_guard,
                         },
                         runtime_catalog,
                         read_authority: read_authority_prepared,

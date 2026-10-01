@@ -9,6 +9,7 @@ mod mixed_authority_tests;
 mod nested;
 mod ontology_dependencies;
 mod partial_review;
+mod pinned_workspace;
 mod recovery;
 mod restore;
 mod results;
