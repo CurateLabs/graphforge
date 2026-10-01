@@ -17,6 +17,9 @@ provenance = ["dep:graphforge-provenance"]
 portable = ["dep:graphforge-portable-oci"]
 discovery = ["dep:graphforge-discovery"]
 research = ["knowledge", "portable"]
+# #1688 experiment: GF_READ_PATH_CANDIDATE selects the #1619 read-path
+# candidate. Never a default.
+read-path-experiment = ["graphforge-exec/read-path-experiment"]
 
 [dependencies]
 graphforge-discovery = { version = "0.5.2", path = "../graphforge-discovery", optional = true }
@@ -65,6 +68,10 @@ path = "src/bin/graphforge-fly-filesystem-smoke.rs"
 required-features = ["portable"]
 
 [[example]]
+name = "read_path_explain"
+required-features = ["read-path-experiment"]
+
+[[example]]
 name = "release_load_probe"
 required-features = ["search"]
 
@@ -103,6 +110,10 @@ required-features = ["knowledge", "provenance", "search", "research"]
 [[example]]
 name = "knowledge_evolution_workflow"
 required-features = ["knowledge", "provenance", "search", "research"]
+
+[[test]]
+name = "read_path_candidates"
+required-features = ["read-path-experiment"]
 
 [[test]]
 name = "discovery_portable_v2"

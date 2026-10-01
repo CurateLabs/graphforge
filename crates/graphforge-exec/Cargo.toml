@@ -16,6 +16,13 @@ algorithms-core = []
 algorithms-extended = ["algorithms-core"]
 # Explicit opt-in for the independent fixed-hop differential oracle.
 differential-testing = ["graphforge-rel/differential-testing"]
+# #1688 experiment: select the #1619 read-path candidate per session from
+# GF_READ_PATH_CANDIDATE. Never a default.
+read-path-experiment = [
+    "differential-testing",
+    "graphforge-rel/read-path-experiment",
+    "graphforge-plan/read-path-experiment",
+]
 
 [dependencies]
 graphforge-value = { version = "0.5.2", path = "../graphforge-value" }

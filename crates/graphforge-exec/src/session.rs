@@ -126,7 +126,7 @@ struct OwnedSessionAdjacency(RwLock<Arc<PersistentAdjacencyProvider>>);
 
 /// `SessionConfig` extension carrying the facade's exact generation-pinned
 /// ordinal identity authority.
-struct OrdinalIdentityResolverExt(pub Option<Arc<V4OrdinalIdentitySession>>);
+pub(crate) struct OrdinalIdentityResolverExt(pub Option<Arc<V4OrdinalIdentitySession>>);
 
 fn plan_expand_extension(
     expand: &graphforge_plan::ExpandNode,
@@ -173,10 +173,18 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
         &self,
         _planner: &dyn PhysicalPlanner,
         node: &dyn UserDefinedLogicalNode,
-        _logical_inputs: &[&LogicalPlan],
+        logical_inputs: &[&LogicalPlan],
         physical_inputs: &[Arc<dyn ExecutionPlan>],
         session_state: &SessionState,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
+        #[cfg(feature = "read-path-experiment")]
+        if let Some(planned) =
+            crate::fast_path::plan_extension(node, logical_inputs, physical_inputs, session_state)
+        {
+            return planned.map(Some);
+        }
+        #[cfg(not(feature = "read-path-experiment"))]
+        let _ = logical_inputs;
         if let Some(create) = node.as_any().downcast_ref::<GraphCreateNode>() {
             let input = physical_inputs.first().cloned().ok_or_else(|| {
                 DataFusionError::Internal("GraphCreate requires one physical input".into())
@@ -467,6 +475,9 @@ pub struct ExecutionSession {
     /// Differential-test strategy, absent from ordinary builds.
     #[cfg(feature = "differential-testing")]
     relational_fixed_hop_reference: bool,
+    /// #1688 read-path candidate, absent from ordinary builds.
+    #[cfg(feature = "read-path-experiment")]
+    read_path_candidate: crate::fast_path::ReadPathCandidate,
 }
 
 #[derive(Default)]
@@ -703,6 +714,11 @@ impl ExecutionSession {
 
         let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
         let runtime_env = session_runtime(resources)?;
+        #[cfg(feature = "read-path-experiment")]
+        let (read_path_candidate, fixed_hop_demand) =
+            crate::fast_path::configure_session(&mut config)?;
+        #[cfg(not(feature = "read-path-experiment"))]
+        let fixed_hop_demand = demand::FixedHopDemandRule::default();
 
         let state = SessionStateBuilder::new()
             .with_default_features()
@@ -712,7 +728,7 @@ impl ExecutionSession {
             .with_optimizer_rules(graphforge_rel::input_predicates::optimizer_rules())
             // Runs after DataFusion's default rules, when terminal fetches and
             // eager round-robin exchanges are visible (#1269).
-            .with_physical_optimizer_rule(Arc::new(demand::FixedHopDemandRule))
+            .with_physical_optimizer_rule(Arc::new(fixed_hop_demand))
             // Runs last, after the fast paths have replaced the sorts they own:
             // full sorts get input runs large enough to merge within the pool
             // they spill from (#1591).
@@ -737,6 +753,8 @@ impl ExecutionSession {
             owned_adjacency,
             #[cfg(feature = "differential-testing")]
             relational_fixed_hop_reference: false,
+            #[cfg(feature = "read-path-experiment")]
+            read_path_candidate,
         })
     }
 
@@ -1531,6 +1549,14 @@ impl ExecutionSession {
             lowerer.with_relational_fixed_hop_reference()
         } else {
             lowerer
+        };
+        #[cfg(feature = "read-path-experiment")]
+        let lowerer = match self.read_path_candidate {
+            crate::fast_path::ReadPathCandidate::Current => lowerer,
+            crate::fast_path::ReadPathCandidate::Stock => {
+                lowerer.with_relational_fixed_hop_reference()
+            }
+            crate::fast_path::ReadPathCandidate::Structural => lowerer.with_structural_fast_paths(),
         };
         let logical = lowerer.lower_plan(plan)?;
 
