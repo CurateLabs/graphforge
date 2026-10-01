@@ -512,6 +512,10 @@ fn open_reads_control_bytes_not_payload_bytes() {
     let large = measure_open_cost(NODES, 64);
 
     for (label, cost) in [("small", &small), ("large", &large)] {
+        for phase in StorageIoPhase::LIFECYCLE {
+            let totals = &cost.open.attribution.phases[&phase];
+            eprintln!("  open phase {label} {phase:?}: read {} bytes / {} calls", totals.read_bytes, totals.read_calls);
+        }
         eprintln!(
             "open cost {label}: payload={} open_read={} checksummed={} copied={} \
              first_query_read={} second_query_read={}",

@@ -1035,11 +1035,15 @@ impl V4OrdinalIdentitySession {
             .max_requested_ids()
     }
 
-    pub(crate) fn uuid_order_matches_ordinals(&self) -> bool {
+    /// Whether node-ordinal order is UUID order. The first call reads and
+    /// authenticates every ordinal block once; a corrupted block is an error,
+    /// never an "unordered" answer.
+    pub(crate) fn uuid_order_matches_ordinals(&self) -> Result<bool, GfError> {
         self.handle
             .lock()
             .expect("ordinal identity handle poisoned")
             .uuid_order_matches_ordinals()
+            .map_err(GfError::from_execution_error)
     }
 
     pub(crate) fn lookup_node_uuids(

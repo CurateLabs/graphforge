@@ -129,7 +129,7 @@ pub(crate) fn commit_uuid_topology_rewrite(
                 .open(project_dir, crate::V4OrdinalIdentityLimits::default())
                 .map_err(storage_err)?
             {
-                crate::V4OrdinalIdentityOpen::Ready(handle) => {
+                crate::V4OrdinalIdentityOpen::Ready(mut handle) => {
                     handle.pinned_update_inputs().map(Some).map_err(storage_err)
                 }
                 crate::V4OrdinalIdentityOpen::RebuildRequired { .. } => Err(storage_err(
