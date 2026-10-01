@@ -3,6 +3,7 @@
 use super::AuthenticatedUuidIndexSnapshot;
 use super::BULK_IO_BYTES;
 use super::CONSTRUCTION_INTENT;
+use super::CONSTRUCTION_INTENT_FORMAT_VERSION;
 use super::ConstructionIndexEncoding;
 use super::ConstructionIndexOutput;
 use super::FORMAT_VERSION;
@@ -127,7 +128,7 @@ impl ConstructionRecoveryIntent {
             self.source_bytes,
             &self.source_xxh64,
         );
-        if self.format_version != FORMAT_VERSION
+        if self.format_version != CONSTRUCTION_INTENT_FORMAT_VERSION
             || !canonical_lower_hex(&self.source_xxh64, 16)
             || self.authority_sha256 != expected
         {
@@ -281,7 +282,7 @@ fn encode_construction_index_inner(
     let source_identity = graphforge_filesystem::file_identity(&input).map_err(storage_err)?;
     let source_file_id = hex_bytes(&source_identity.file_id);
     let mut intent = ConstructionRecoveryIntent {
-        format_version: FORMAT_VERSION,
+        format_version: CONSTRUCTION_INTENT_FORMAT_VERSION,
         generation,
         parent_generation,
         identities_name: identities_name.to_owned(),

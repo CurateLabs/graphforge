@@ -1462,7 +1462,7 @@ fn valid_uuid_receipt(receipt: &AuxiliaryReceipt) -> bool {
         ),
         (
             "uuid-membership/v6",
-            6 | 7,
+            6,
             "topology/uuid-membership/topology-receipt.json"
         ) | (
             "uuid-membership/ordinal-v5",

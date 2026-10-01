@@ -231,3 +231,38 @@ fn unified_identity_merge_rejects_cross_kind_uuid() {
     }
     assert!(build_identity_run(&node, &edge, &scratch.path().join("out.run")).is_err());
 }
+
+#[test]
+fn construction_intent_rejects_published_format_as_private_version() {
+    let mut intent = super::ConstructionRecoveryIntent {
+        format_version: super::CONSTRUCTION_INTENT_FORMAT_VERSION,
+        generation: 1,
+        parent_generation: 0,
+        identities_name: "identities.bin".to_owned(),
+        source_volume: 1,
+        source_file_id: "00".repeat(16),
+        source_bytes: 25,
+        source_xxh64: "0123456789abcdef".to_owned(),
+        authority_sha256: String::new(),
+    };
+    for version in [
+        super::CONSTRUCTION_INTENT_FORMAT_VERSION,
+        super::FORMAT_VERSION,
+    ] {
+        intent.format_version = version;
+        intent.authority_sha256 = super::construction_intent_digest(
+            intent.format_version,
+            intent.generation,
+            intent.parent_generation,
+            &intent.identities_name,
+            intent.source_volume,
+            &intent.source_file_id,
+            intent.source_bytes,
+            &intent.source_xxh64,
+        );
+        assert_eq!(
+            intent.authenticate().is_ok(),
+            version == super::CONSTRUCTION_INTENT_FORMAT_VERSION
+        );
+    }
+}
