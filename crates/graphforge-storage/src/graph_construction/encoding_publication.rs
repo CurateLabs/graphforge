@@ -634,12 +634,14 @@ impl GraphConstructionSession {
             participants,
         };
         let publication =
-            match crate::project_publication::stage_project_generation_from_admitted_parent(
+            match crate::project_publication::stage_project_generation_from_installed_objects(
                 admission,
                 parent,
                 &request,
                 None,
                 self.root.allocation(),
+                None,
+                Some(&lease),
             )? {
                 crate::ProjectStageOutcome::Staged(staged) => {
                     let staged = staged.validate(|_| Ok(()), |_, _| Ok(()))?;

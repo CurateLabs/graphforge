@@ -68,6 +68,16 @@ pub struct GraphObjectPublicationLease {
     lease_name: std::ffi::OsString,
     lease_identity: graphforge_filesystem::FileIdentity,
     file: Option<File>,
+    installed_objects: std::sync::Mutex<BTreeMap<String, CapturedGraphObject>>,
+}
+
+// Minted only after the installer authenticates and durably installs the actual
+// final inode. Public install evidence and caller metadata cannot create one.
+#[derive(Clone, Copy)]
+struct CapturedGraphObject {
+    identity: graphforge_filesystem::FileIdentity,
+    byte_length: u64,
+    content_xxh64: u64,
 }
 
 struct HeldCasLocks<'a> {
@@ -490,6 +500,42 @@ impl GraphObjectPublicationLease {
         validate_publication_identity(self)
     }
 
+    /// Admit an object using the identity captured by this exact installation
+    /// lease. Keep only scalar identities, so a large import does not retain one
+    /// file descriptor per object. Reopening still checks inode and checksum.
+    pub(crate) fn admit_captured_object(
+        &self,
+        entry: &crate::GraphFileEntry,
+    ) -> Result<bool, GfError> {
+        let capture = self
+            .installed_objects
+            .lock()
+            .map_err(|_| validation("graph object installation authority poisoned"))?
+            .get(&entry.content_sha256)
+            .copied();
+        let Some(capture) = capture else {
+            return Ok(false);
+        };
+        if capture.byte_length != entry.byte_length || capture.content_xxh64 != entry.content_xxh64
+        {
+            return Ok(false);
+        }
+        self.cas.revalidate_named()?;
+        let file = self.cas.open_digest(&entry.content_sha256)?;
+        if graphforge_filesystem::file_identity(&file).map_err(|error| {
+            storage(
+                "identify captured graph object",
+                &self.cas.diagnostic_root,
+                error,
+            )
+        })? != capture.identity
+        {
+            return Err(validation("captured graph object identity changed"));
+        }
+        admit_checksum_file(file, entry, &self.cas.diagnostic_root)?;
+        Ok(true)
+    }
+
     pub(crate) fn revalidate_for_root(&self, root: &Path) -> Result<(), GfError> {
         let requested_root = crate::filesystem_admission::open_directory_handle(root)
             .map_err(|error| storage("open requested graph object root", root, error))?;
@@ -553,6 +599,7 @@ pub fn begin_graph_object_publication(root: &Path) -> Result<GraphObjectPublicat
         lease_name,
         lease_identity,
         file: Some(file),
+        installed_objects: std::sync::Mutex::new(BTreeMap::new()),
     })
 }
 
@@ -973,6 +1020,27 @@ fn read_exact_object_payload(
 pub fn verify_graph_object(root: &Path, digest: &str, expected_length: u64) -> Result<(), GfError> {
     let cas = ReadOnlyCasRoot::open(root)?;
     verify_file(cas.open_digest(digest)?, digest, expected_length, root)
+}
+
+/// Authenticate a newly supplied SHA address and its checksum in the same read.
+/// A checksum from a caller's new inventory cannot establish the SHA identity.
+pub(crate) fn authenticate_graph_object_entry(
+    root: &Path,
+    entry: &crate::GraphFileEntry,
+) -> Result<(), GfError> {
+    let cas = ReadOnlyCasRoot::open(root)?;
+    let io = verify_file_counted(
+        cas.open_digest(&entry.content_sha256)?,
+        &entry.content_sha256,
+        entry.byte_length,
+        root,
+    )?;
+    if io.content_xxh64 != Some(entry.content_xxh64) {
+        return Err(validation(
+            "graph payload XXH64 checksum does not match its inventory",
+        ));
+    }
+    Ok(())
 }
 
 /// Admit a payload under its required corruption checksum and exact length.

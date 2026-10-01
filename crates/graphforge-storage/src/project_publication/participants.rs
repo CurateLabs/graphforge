@@ -37,6 +37,7 @@ pub(super) fn stage_optional_graph_tree(
     generation_root: &Path,
     graph_tree: Option<&Path>,
     allocation: Option<&crate::StorageAllocationOperation>,
+    installed_objects: Option<&crate::GraphObjectPublicationLease>,
 ) -> Result<(), GfError> {
     let files_participant = participants.iter().find(|participant| {
         participant.capability_id == crate::GRAPH_CAPABILITY_ID
@@ -92,7 +93,7 @@ pub(super) fn stage_optional_graph_tree(
                     "graph/files v2 root must reference project objects, not a generation graph tree",
                 ));
             }
-            verify_compact_graph_root(parent.container_root(), &root)?;
+            verify_compact_graph_root(parent, &root, installed_objects)?;
             sync_directory(generation_root)?;
             return Ok(());
         }
@@ -173,9 +174,11 @@ pub(super) fn verify_optional_graph_tree_with_lease(
 }
 
 fn verify_compact_graph_root(
-    container_root: &Path,
+    parent: &ResolvedProjectGeneration,
     root: &crate::GraphFilesRootV2,
+    installed_objects: Option<&crate::GraphObjectPublicationLease>,
 ) -> Result<(), GfError> {
+    let container_root = parent.container_root();
     let (files, _) =
         crate::resolve_graph_manifest(root, crate::GraphManifestLimits::default(), |digest| {
             crate::graph_object_store::read_graph_control_object_by_digest(
@@ -191,10 +194,51 @@ fn verify_compact_graph_root(
             MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
         )
     })?;
-    // CAS names were authenticated when each object was installed. Staging
-    // admits every named payload by exact length and checksum, once.
+    // A caller's newly supplied checksum is not authority for a SHA address.
+    // Reuse only identities declared by the authenticated published parent;
+    // other objects cross the public input boundary and need SHA authentication.
+    let known = match parent.declared_graph_files_participant()? {
+        Some(crate::GraphFilesParticipant::V2(parent_root)) => {
+            crate::resolve_graph_manifest(
+                &parent_root,
+                crate::GraphManifestLimits::default(),
+                |digest| {
+                    crate::graph_object_store::read_graph_control_object_by_digest(
+                        container_root,
+                        digest,
+                        crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
+                    )
+                },
+            )?
+            .0
+        }
+        Some(crate::GraphFilesParticipant::V1(_)) | None => Vec::new(),
+    };
+    let known = known
+        .iter()
+        .map(|entry| {
+            (
+                entry.content_sha256.as_str(),
+                (entry.byte_length, entry.content_xxh64),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    if let Some(lease) = installed_objects {
+        lease.revalidate_for_root(container_root)?;
+    }
     for entry in &files {
-        crate::graph_object_store::admit_graph_object(container_root, entry)?;
+        if let Some(lease) = installed_objects
+            && lease.admit_captured_object(entry)?
+        {
+            continue;
+        }
+        if known.get(entry.content_sha256.as_str())
+            == Some(&(entry.byte_length, entry.content_xxh64))
+        {
+            crate::graph_object_store::admit_graph_object(container_root, entry)?;
+        } else {
+            crate::graph_object_store::authenticate_graph_object_entry(container_root, entry)?;
+        }
     }
     Ok(())
 }

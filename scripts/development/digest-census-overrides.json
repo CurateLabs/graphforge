@@ -1080,7 +1080,7 @@
       "role": "control_authentication",
       "input_contract": "Canonical route table bytes authenticate sealed route-authority receipt.",
       "function_bodies_sha256": [
-        "2156d97c0a6043c6c95ec2a1f8fef209fbdc6b26e21c628a34d9f883061c3722"
+        "73dd6f1c66cc25b73adb9bce06e61f7802f6534d766a8c25b20b2bfe6ba9b4c8"
       ]
     },
     {
@@ -1358,18 +1358,18 @@
       "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
       "function": "install_graph_object_bytes_with_lease",
       "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Resident artifact bytes define the CAS object address during installation; the writer authenticates the temporary from those bytes, so no pre-seal re-hash follows.",
+      "input_contract": "Resident artifact bytes define the CAS object address during installation; successful installation records private final-inode, length and checksum authority on its lease. Public staging without a matching private capture or authenticated parent tuple still authenticates unknown payload SHA addresses.",
       "function_bodies_sha256": [
-        "67cf7f51153c7d40235e37943460c23bbe1d317fb9f4448cfdcb97fbd9dbf5b1"
+        "185212ccc6d60348f99a6129eaf57c8642490821b79a6f5998c66d35dcd5557e"
       ]
     },
     {
       "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
       "function": "install_graph_object_file_with_lease",
       "role": "durable_artifact",
-      "input_contract": "New copied graph artifact payload produces mandatory CAS address and checksum.",
+      "input_contract": "Copied graph artifact bytes authenticate the expected CAS address and checksum in one pass; successful installation records private final-inode, length and checksum authority on its lease. Public staging without a matching private capture or authenticated parent tuple still authenticates unknown payload SHA addresses.",
       "function_bodies_sha256": [
-        "ca797452c999906ffe8e36fc83aea1c100a9f75b5b70c71c006364c83d444c8a"
+        "4878b76c848e6017ad3140a0d305928588ffdbb6685322897a21d77480bb55ac"
       ]
     },
     {

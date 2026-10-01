@@ -29,6 +29,11 @@ use super::validation;
 use super::verify_file_counted;
 use super::verify_stream_counted;
 
+struct InstalledObject {
+    evidence: GraphObjectInstallEvidence,
+    identity: graphforge_filesystem::FileIdentity,
+}
+
 struct TemporaryObject {
     name: std::ffi::OsString,
     #[cfg(unix)]
@@ -86,19 +91,31 @@ pub(super) fn install_graph_object_bytes_with_lease(
         // file verification below is an application-observed payload read.
         Ok(0)
     })
-    .and_then(|mut evidence| {
-        evidence.content_xxh64 = Some(crate::corruption_checksum::checksum(bytes));
-        if evidence.attempted_install {
-            evidence.write_bytes = expected_length;
-            evidence.write_calls = u64::from(!bytes.is_empty());
-            evidence.file_fsync_calls = 1;
-            evidence.fsync_calls = evidence
-                .fsync_calls
-                .checked_add(1)
-                .ok_or_else(|| validation("CAS fsync count overflows"))?;
-        }
-        Ok((digest, evidence))
-    })
+    .and_then(
+        |InstalledObject {
+             mut evidence,
+             identity,
+         }| {
+            evidence.content_xxh64 = Some(crate::corruption_checksum::checksum(bytes));
+            if evidence.attempted_install {
+                evidence.write_bytes = expected_length;
+                evidence.write_calls = u64::from(!bytes.is_empty());
+                evidence.file_fsync_calls = 1;
+                evidence.fsync_calls = evidence
+                    .fsync_calls
+                    .checked_add(1)
+                    .ok_or_else(|| validation("CAS fsync count overflows"))?;
+            }
+            capture_installed_object(
+                lease,
+                &digest,
+                expected_length,
+                identity,
+                evidence.content_xxh64,
+            )?;
+            Ok((digest, evidence))
+        },
+    )
 }
 
 /// Stream, hash, and install a new payload object from a regular source file.
@@ -269,37 +286,80 @@ pub(crate) fn install_graph_object_file_with_lease(
                 Ok(total)
             },
         );
-    result.and_then(|mut evidence| {
-        if evidence.attempted_install {
-            evidence.content_xxh64 = payload_checksum.get();
-            evidence.read_calls = evidence
-                .read_calls
-                .checked_add(read_calls.get())
-                .ok_or_else(|| validation("object install read calls overflow"))?;
-            evidence.write_calls = evidence
-                .write_calls
-                .checked_add(write_calls.get())
-                .ok_or_else(|| validation("object install write calls overflow"))?;
-            evidence.write_bytes = evidence
-                .write_bytes
-                .checked_add(expected_length)
-                .ok_or_else(|| validation("object install write bytes overflow"))?;
-            evidence.file_fsync_calls = file_sync_calls.get();
-            evidence.fsync_calls = evidence
-                .fsync_calls
-                .checked_add(file_sync_calls.get())
-                .ok_or_else(|| validation("CAS file synchronization count overflows"))?;
-        }
-        Ok(evidence)
-    })
+    result.and_then(
+        |InstalledObject {
+             mut evidence,
+             identity,
+         }| {
+            if evidence.attempted_install {
+                evidence.content_xxh64 = payload_checksum.get();
+                evidence.read_calls = evidence
+                    .read_calls
+                    .checked_add(read_calls.get())
+                    .ok_or_else(|| validation("object install read calls overflow"))?;
+                evidence.write_calls = evidence
+                    .write_calls
+                    .checked_add(write_calls.get())
+                    .ok_or_else(|| validation("object install write calls overflow"))?;
+                evidence.write_bytes = evidence
+                    .write_bytes
+                    .checked_add(expected_length)
+                    .ok_or_else(|| validation("object install write bytes overflow"))?;
+                evidence.file_fsync_calls = file_sync_calls.get();
+                evidence.fsync_calls = evidence
+                    .fsync_calls
+                    .checked_add(file_sync_calls.get())
+                    .ok_or_else(|| validation("CAS file synchronization count overflows"))?;
+            }
+            capture_installed_object(
+                lease,
+                expected_digest,
+                expected_length,
+                identity,
+                evidence.content_xxh64,
+            )?;
+            Ok(evidence)
+        },
+    )
 }
+
+fn capture_installed_object(
+    lease: &GraphObjectPublicationLease,
+    digest: &str,
+    byte_length: u64,
+    identity: graphforge_filesystem::FileIdentity,
+    content_xxh64: Option<u64>,
+) -> Result<(), GfError> {
+    let content_xxh64 = content_xxh64
+        .ok_or_else(|| validation("authenticated installation lacks its captured checksum"))?;
+    let mut captures = lease
+        .installed_objects
+        .lock()
+        .map_err(|_| validation("graph object installation authority poisoned"))?;
+    let limits = crate::GraphManifestLimits::default();
+    let maximum = limits.max_entries.saturating_add(limits.max_segments);
+    if captures.len() < maximum || captures.contains_key(digest) {
+        captures.insert(
+            digest.to_owned(),
+            super::CapturedGraphObject {
+                identity,
+                byte_length,
+                content_xxh64,
+            },
+        );
+    }
+    // A full optional capture budget grants no authority: staging falls back to
+    // first SHA authentication for uncaptured objects.
+    Ok(())
+}
+
 fn install_object<F>(
     cas: &CasRoot,
     digest: &str,
     expected_length: u64,
     writer_authenticated: bool,
     write_temporary: F,
-) -> Result<GraphObjectInstallEvidence, GfError>
+) -> Result<InstalledObject, GfError>
 where
     F: FnOnce(&mut CasTemporaryWriter) -> Result<u64, GfError>,
 {
@@ -364,7 +424,7 @@ where
     // Windows must close the writable handle and reopen an exact-identity,
     // protected read handle before publication. That transition authenticates
     // the complete payload below, so a second pre-seal read would be redundant.
-    let (installed, sealed_bytes_hashed, concurrent_io) = finalize_temporary_object(
+    let (installed, identity, sealed_bytes_hashed, concurrent_io) = finalize_temporary_object(
         cas,
         &bucket,
         TemporaryObject {
@@ -387,19 +447,22 @@ where
         .calls
         .checked_add(concurrent_io.calls)
         .ok_or_else(|| validation("graph object read call count overflows"))?;
-    Ok(GraphObjectInstallEvidence {
-        content_xxh64: preseal_io.content_xxh64.or(concurrent_io.content_xxh64),
-        bytes_hashed,
-        bytes_installed: if installed { expected_length } else { 0 },
-        reused_existing: !installed,
-        attempted_install: true,
-        read_calls,
-        // The source-copy/authentication submissions are added by the caller.
-        // Finalization synchronizes both namespaces even if a concurrent winner
-        // supplied the retained object. Early reuse returns before this path.
-        fsync_calls: 2,
-        directory_fsync_calls: 2,
-        ..GraphObjectInstallEvidence::default()
+    Ok(InstalledObject {
+        evidence: GraphObjectInstallEvidence {
+            content_xxh64: preseal_io.content_xxh64.or(concurrent_io.content_xxh64),
+            bytes_hashed,
+            bytes_installed: if installed { expected_length } else { 0 },
+            reused_existing: !installed,
+            attempted_install: true,
+            read_calls,
+            // The source-copy/authentication submissions are added by the caller.
+            // Finalization synchronizes both namespaces even if a concurrent winner
+            // supplied the retained object. Early reuse returns before this path.
+            fsync_calls: 2,
+            directory_fsync_calls: 2,
+            ..GraphObjectInstallEvidence::default()
+        },
+        identity,
     })
 }
 
@@ -421,7 +484,7 @@ fn try_reuse_existing_object(
     destination_name: &std::ffi::OsStr,
     digest: &str,
     expected_length: u64,
-) -> Result<Option<GraphObjectInstallEvidence>, GfError> {
+) -> Result<Option<InstalledObject>, GfError> {
     let file = match bucket.open_child_file(destination_name) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -443,7 +506,17 @@ fn try_reuse_existing_object(
     if let Some(allocation) = &cas.allocation {
         allocation.replace_file_at(&graph_object_path(&cas.diagnostic_root, digest)?, &file)?;
     }
-    Ok(Some(reused_object_evidence(expected_length, io)))
+    let identity = graphforge_filesystem::file_identity(&file).map_err(|error| {
+        storage(
+            "identify authenticated graph object",
+            &cas.diagnostic_root,
+            error,
+        )
+    })?;
+    Ok(Some(InstalledObject {
+        evidence: reused_object_evidence(expected_length, io),
+        identity,
+    }))
 }
 
 #[cfg(windows)]
@@ -453,7 +526,7 @@ fn try_reuse_existing_object(
     destination_name: &std::ffi::OsStr,
     digest: &str,
     expected_length: u64,
-) -> Result<Option<GraphObjectInstallEvidence>, GfError> {
+) -> Result<Option<InstalledObject>, GfError> {
     let mut adoption_io = ReadIoEvidence::default();
     let file = match bucket.open_cas_child_file(destination_name) {
         Ok(file) => file.into_file(),
@@ -505,7 +578,27 @@ fn try_reuse_existing_object(
     if let Some(allocation) = &cas.allocation {
         allocation.replace_file_at(&graph_object_path(&cas.diagnostic_root, digest)?, &file)?;
     }
-    Ok(Some(evidence))
+    let identity = graphforge_filesystem::file_identity(&file).map_err(|error| {
+        storage(
+            "identify authenticated graph object",
+            &cas.diagnostic_root,
+            error,
+        )
+    })?;
+    Ok(Some(InstalledObject { evidence, identity }))
+}
+
+fn authenticated_object_identity(
+    file: &File,
+    cas: &CasRoot,
+) -> Result<graphforge_filesystem::FileIdentity, GfError> {
+    graphforge_filesystem::file_identity(file).map_err(|error| {
+        storage(
+            "identify authenticated graph object",
+            &cas.diagnostic_root,
+            error,
+        )
+    })
 }
 
 fn finalize_temporary_object(
@@ -514,7 +607,15 @@ fn finalize_temporary_object(
     temporary: TemporaryObject,
     digest: &str,
     expected_length: u64,
-) -> Result<(bool, u64, ReadIoEvidence), GfError> {
+) -> Result<
+    (
+        bool,
+        graphforge_filesystem::FileIdentity,
+        u64,
+        ReadIoEvidence,
+    ),
+    GfError,
+> {
     let destination_name = std::ffi::OsStr::new(&digest[2..]);
     let temporary_path = cas
         .diagnostic_root
@@ -548,7 +649,7 @@ fn finalize_temporary_object(
     validate_sealed_temporary(&temporary, expected_length, &cas.diagnostic_root)?;
     returned_error_boundary("install:temp-sealed")?;
     let mut concurrent_io = ReadIoEvidence::default();
-    let installed = if let Ok((installed, _identity)) = cas.tmp.link_child_into(
+    let (installed, identity) = if let Ok((installed, identity)) = cas.tmp.link_child_into(
         &temporary.name,
         &temporary.file,
         temporary.identity,
@@ -561,7 +662,7 @@ fn finalize_temporary_object(
                 &installed,
             )?;
         }
-        true
+        (true, identity)
     } else {
         #[cfg(unix)]
         let existing = bucket.open_child_file(destination_name);
@@ -587,7 +688,8 @@ fn finalize_temporary_object(
             allocation
                 .replace_file_at(&graph_object_path(&cas.diagnostic_root, digest)?, &existing)?;
         }
-        false
+        let identity = authenticated_object_identity(&existing, cas)?;
+        (false, identity)
     };
     returned_error_boundary("install:final-linked")?;
     // The destination namespace must be durable before its temporary alias is
@@ -617,6 +719,7 @@ fn finalize_temporary_object(
     })?;
     Ok((
         installed,
+        identity,
         sealed_bytes_hashed,
         checked_read_io_sum(sealed_io, concurrent_io)?,
     ))

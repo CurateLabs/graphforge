@@ -188,12 +188,21 @@ The method and reviewed classification inputs are pinned by SHA-256:
 `digest-census.py` is
 `4407bd9648ddcd03c08d901adaf0cf3e485cf1c720a7f766e7fb26f31956bd4b`;
 `digest-census-overrides.json` is
-`4f470d6d691eabae7afc84383147c5410f9f6ae96f9fbfa9e89fd00bc0207b19`.
+`3bb35d7cf28960a7a83e74314e33c223504830fa41dd06a5e01f7645b3dd49ea`.
 Run the parser and stale-review regression fixtures with
 `python3 scripts/development/test-digest-census.py`. Reviewed function bodies
 are pinned individually; changed inputs, added producers in the same function,
 missing review pins, and unknown digest algorithms make a strict run fail.
 Refresh a classification only after reviewing its actual inputs and consumers.
+
+Compact publication reuses a payload identity only from the authenticated
+published parent or from a successful installation captured privately by its
+CAS lease. A caller's new checksum cannot authenticate an existing SHA address:
+unknown or mismatched entries receive a genuine SHA and checksum pass. Private
+install captures bind the actual final inode, length and checksum, including a
+concurrent installation winner. Their bounded scalar registry keeps no per-file
+handles. Publication still checks payload corruption under the lease before
+changing `CURRENT`; the registry grants no authority after a failed install.
 
 The method records the source revision, source-file SHA-256 digests, the working
 diff digest when present, and digests of the method and semantic override inputs.

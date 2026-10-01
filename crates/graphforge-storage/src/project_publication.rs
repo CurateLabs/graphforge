@@ -572,6 +572,26 @@ pub(crate) fn stage_project_generation_from_admitted_parent_with_fingerprint(
     allocation: Option<&crate::StorageAllocationOperation>,
     operation_fingerprint: Option<[u8; 32]>,
 ) -> Result<ProjectStageOutcome, GfError> {
+    stage_project_generation_from_installed_objects(
+        admission,
+        parent,
+        request,
+        graph_tree,
+        allocation,
+        operation_fingerprint,
+        None,
+    )
+}
+
+pub(crate) fn stage_project_generation_from_installed_objects(
+    admission: crate::filesystem_admission::ProjectLifecycleAdmission,
+    parent: ResolvedProjectGeneration,
+    request: &ProjectGenerationRequest,
+    graph_tree: Option<&Path>,
+    allocation: Option<&crate::StorageAllocationOperation>,
+    operation_fingerprint: Option<[u8; 32]>,
+    installed_objects: Option<&crate::GraphObjectPublicationLease>,
+) -> Result<ProjectStageOutcome, GfError> {
     let result = (|| {
         validate_request(request)?;
         admission.revalidate_identity()?;
@@ -616,6 +636,7 @@ pub(crate) fn stage_project_generation_from_admitted_parent_with_fingerprint(
             graph_tree,
             ParticipantPayloads::Memory(None),
             allocation,
+            installed_objects,
         )
     })();
     result.map_err(|error| map_stage_error(request, error))
@@ -631,6 +652,7 @@ pub(crate) fn stage_project_generation_from_files_admitted(
     cancelled: Option<&AtomicBool>,
     copy_buffer_bytes: usize,
     allocation: Option<&crate::StorageAllocationOperation>,
+    installed_objects: Option<&crate::GraphObjectPublicationLease>,
 ) -> Result<ProjectStageOutcome, GfError> {
     let result = (|| {
         validate_request(request)?;
@@ -669,6 +691,7 @@ pub(crate) fn stage_project_generation_from_files_admitted(
             graph_tree,
             ParticipantPayloads::Files(files, cancelled, copy_buffer_bytes),
             allocation,
+            installed_objects,
         )
     })();
     result.map_err(|error| map_stage_error(request, error))
@@ -719,6 +742,7 @@ fn stage_project_generation_inner(
         graph_tree,
         ParticipantPayloads::Memory(stage.identities),
         None,
+        None,
     )
 }
 
@@ -752,6 +776,7 @@ fn stage_project_generation_optimistic_inner(
         graph_tree,
         ParticipantPayloads::Memory(stage.identities),
         None,
+        None,
     )
 }
 
@@ -781,6 +806,7 @@ pub(crate) fn stage_project_generation_with_lock(
         graph_tree,
         ParticipantPayloads::Memory(None),
         None,
+        None,
     )
 }
 
@@ -809,6 +835,7 @@ fn stage_project_generation_inner_with_locks(
     graph_tree: Option<&Path>,
     payloads: ParticipantPayloads<'_>,
     allocation: Option<&crate::StorageAllocationOperation>,
+    installed_objects: Option<&crate::GraphObjectPublicationLease>,
 ) -> Result<ProjectStageOutcome, GfError> {
     validate_request(request)?;
     let (capabilities, participants, request_fingerprint) =
@@ -865,6 +892,7 @@ fn stage_project_generation_inner_with_locks(
         &generation_root,
         graph_tree,
         allocation,
+        installed_objects,
     )?;
     project_failpoint::hit(
         "project.after_participant_dir_fsync",

@@ -604,3 +604,78 @@ fn cas_copy_isolated_from_preexisting_writable_source_descriptor() {
     )
     .unwrap();
 }
+
+#[test]
+fn installation_capture_uses_the_final_inode_without_rehashing_or_accepting_new_checksums() {
+    use graphforge_core::hash_observation::operation::Capture as HashCapture;
+
+    for mode in ["new", "existing", "concurrent"] {
+        let root = tempfile::tempdir().unwrap();
+        let payload = b"captured immutable payload";
+        if mode == "existing" {
+            install_graph_object_bytes(root.path(), payload).unwrap();
+        } else if mode == "concurrent" {
+            let winner_root = root.path().to_path_buf();
+            BEFORE_OBJECT_LINK.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    install_graph_object_bytes(&winner_root, payload).unwrap();
+                }));
+            });
+        }
+        let lease = begin_graph_object_publication(root.path()).unwrap();
+        let (digest, installed) = install_graph_object_bytes_with_lease(&lease, payload).unwrap();
+        assert_eq!(installed.reused_existing, mode != "new");
+        assert_eq!(installed.attempted_install, mode != "existing");
+        let mut entry = crate::GraphFileEntry {
+            relative_path: "topology/nodes/Person.parquet".into(),
+            byte_length: payload.len() as u64,
+            content_sha256: digest.clone(),
+            content_xxh64: crate::corruption_checksum::checksum(payload),
+            role: crate::GraphFileRole::Topology,
+        };
+        let path = graph_object_path(root.path(), &digest).unwrap();
+        let original_identity =
+            graphforge_filesystem::file_identity(&File::open(&path).unwrap()).unwrap();
+        let capture = HashCapture::start();
+        assert!(lease.admit_captured_object(&entry).unwrap(), "{mode}");
+        let observed = capture.snapshot();
+        drop(capture);
+        assert_eq!(observed.artifact_payload_sha256_bytes, 0, "{mode}");
+        assert_eq!(observed.unclassified_sha256_bytes, 0, "{mode}");
+        assert_eq!(observed.checksum_bytes, payload.len() as u64, "{mode}");
+
+        let mut changed = payload.to_vec();
+        changed[0] ^= 1;
+        let permissions = fs::metadata(&path).unwrap().permissions();
+        corrupt_sealed_graph_object_for_test(&path, &changed);
+        fs::set_permissions(&path, permissions).unwrap();
+        assert_eq!(
+            graphforge_filesystem::file_identity(&File::open(&path).unwrap()).unwrap(),
+            original_identity,
+            "{mode}"
+        );
+        assert!(lease.admit_captured_object(&entry).is_err(), "{mode}");
+        entry.content_xxh64 = crate::corruption_checksum::checksum(&changed);
+        assert!(!lease.admit_captured_object(&entry).unwrap(), "{mode}");
+    }
+}
+
+#[test]
+fn unsuccessful_installation_does_not_mint_capture_authority() {
+    for boundary in [
+        "install:final-linked",
+        "install:bucket-synced",
+        "install:temp-unlinked",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let lease = begin_graph_object_publication(root.path()).unwrap();
+        inject_returned_error(Some(boundary));
+        let result = install_graph_object_bytes_with_lease(&lease, b"immutable payload");
+        inject_returned_error(None);
+        assert!(result.is_err(), "{boundary}");
+        assert!(
+            lease.installed_objects.lock().unwrap().is_empty(),
+            "{boundary}"
+        );
+    }
+}

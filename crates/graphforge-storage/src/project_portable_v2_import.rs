@@ -1180,6 +1180,7 @@ fn import_materialized(
         cancelled,
         limits.copy_buffer_bytes,
         allocation,
+        graph_object_lease.as_ref(),
     )
     .map_err(|error| storage_or_cancel(&error, cancelled))?
     {
