@@ -102,6 +102,7 @@ the Repository Policy job (#1390).
 | 0047 | Over-budget construction partitions succeed; one CPU budget per instance | Accepted | External partitions dominate ingest wall on a real workload, row partitions need the external path, or a second subsystem needs its own CPU admission | [`../../adr/0047-over-budget-partitions-and-instance-cpu-budget.md`](../../adr/0047-over-budget-partitions-and-instance-cpu-budget.md) |
 | 0048 | Cargo with nextest is the CI build authority; Bazel is removed | Accepted | Merge-queue Rust reruns dominate CI Gate latency, a Cargo lane measures more than 1.25x the replaced Bazel lane on Rust-changing PRs, or a hermetic release build becomes a publication requirement | [`../../adr/0048-cargo-is-the-ci-build-authority.md`](../../adr/0048-cargo-is-the-ci-build-authority.md) |
 | 0049 | Versioned checksums for published graph payload admission | Accepted | The same-identity adversary assumption changes, or published graph payloads move to a substrate with authoritative data checksums | [`../../adr/0049-published-payload-checksums.md`](../../adr/0049-published-payload-checksums.md) |
+| 0050 | The read path keeps its adjacency operators and chooses fast paths in the lowerer | Accepted | DataFusion gains a lookup join over a TableProvider index, a query shape that only the physical rewrites caught is found after migration, or a paired timing shows lowerer selection costs more than physical selection | [`../../adr/0050-read-path-fast-path-selection.md`](../../adr/0050-read-path-fast-path-selection.md) |
 
 ### Superseded
 
