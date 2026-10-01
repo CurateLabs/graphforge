@@ -101,3 +101,7 @@ def check_research_metadata_and_discovery() -> None:
 
 def main() -> None:
     check_research_metadata_and_discovery()
+
+
+if __name__ == "__main__":
+    main()

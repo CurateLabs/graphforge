@@ -68,9 +68,10 @@ ${{ github.repository }}-binding-rc-linux-rust-<toolchain>-${{ hashFiles('Cargo.
 ${{ github.repository }}-release_candidate-rust-<toolchain>-${{ hashFiles('Cargo.lock') }}-release-target-v1
 ```
 
-The Test Suite Rust Tests lane key is
-`${{ github.repository }}-rust-tests-rust-<toolchain>-target-v1`; no other Test
-Suite job mounts a sticky disk. macOS/Windows RC cells use
+Every Linux Test Suite job that compiles the workspace (Rust Tests, the
+harness/doc/feature job, the feature boundary, the bindings, and the benchmark
+harness) mounts its own sticky `target/` disk, keyed by job and toolchain. The
+Windows and macOS storage jobs do not. macOS/Windows RC cells use
 larger Blacksmith runners + colocated registry cache; use sticky disks there
 only when the platform supports them.
 
@@ -116,24 +117,24 @@ only when the platform supports them.
 
 ### `test.yml` — Test Suite
 
-Jobs: **Classify Changes**, **Lint** (Cargo fmt/Clippy + Python quality +
-policy checks), **Rust Tests** (nextest over the workspace, custom-harness
-targets, doctests), **API and Executor Feature Boundary**, **Python and Node
-Bindings** (full binding suites on Linux, same-SHA wheel and addon),
-**Windows graphforge-storage Locks**, **macOS graphforge-storage Durability**,
-**Benchmark Harness**, **Agent Skills**, **Pulumi Static Validation**,
-**Terraform Static Validation**, and **CI Gate**.
+Jobs: **Classify Changes**, **Lint** (`make check` and the script
+self-tests), **Rust Tests** (nextest over the workspace), **Rust Harness, Doc,
+and Feature Tests** (custom-harness targets, doctests, feature-gated tests),
+**API and Executor Feature Boundary**, **Python and Node Bindings** (full
+binding suites on Linux, same-SHA wheel and addon), **Windows Storage**,
+**macOS Storage**, **Benchmark Harness**, **Agent Skills**, **Pulumi Static
+Validation**, **Terraform Static Validation**, and **CI Gate**.
 
 Pull-request native binding acceptance is Linux-only and uses Cargo's `dev`
 profile for maturin/napi assembly; `Python and Node Bindings` builds, installs,
 and runs the full binding suites against the same-SHA wheel and addon. The Rust
 test lane is `Rust Tests` (Cargo with nextest, dev/test profile, so debug
-assertions and overflow checks stay on). It also runs the offline progressive
-provider tests and the tiny and ownership-growth lifecycle producer against a
-Cargo-built `gf`. When Rust surfaces change, `Windows graphforge-storage Locks`
+assertions and overflow checks stay on). `Benchmark Harness` runs the benchmark
+harness tests and the tiny and ownership-growth lifecycle producer against a
+Cargo-built `gf`. When any crate changes, `Windows Storage`
 runs the native project-root lock, exact filesystem primitive, NTFS admission,
 and real publication-kill/fault-oracle cross-checks on
-`blacksmith-4vcpu-windows-2025`. `macOS graphforge-storage Durability` runs the
+`blacksmith-4vcpu-windows-2025`. `macOS Storage` runs the
 corresponding native APFS primitive, admission, and publication-kill
 cross-checks. Linux executes the same storage unit suite through `Rust Tests`.
 These platform jobs record actual subprocess/handle observations; the simulator
@@ -264,7 +265,7 @@ The Windows Python lane proves user-facing use of the installed wheel: build the
 native abi3 wheel, clean-install it, and run native Python contracts. It does
 not run a second MSVC `graphforge-storage` release `cargo test` as Binding RC evidence.
 Windows `#[cfg(windows)]` project-root lock unit tests run in the Test Suite
-job `Windows graphforge-storage Locks` instead.
+job `Windows Storage` instead.
 
 ### Concurrency tests in `test.yml`
 

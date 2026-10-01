@@ -32,7 +32,6 @@ jobs:
       agent_skills: ${{ steps.filter.outputs.agent_skills }}
       pulumi: ${{ steps.filter.outputs.pulumi }}
       terraform: ${{ steps.filter.outputs.terraform }}
-      scripts: ${{ steps.filter.outputs.scripts }}
       licenses: ${{ steps.filter.outputs.licenses }}
     steps:
       - name: Checkout code
@@ -51,7 +50,7 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
-          files="$(git diff --name-only "$BASE...HEAD")"
+          files="$(git diff --name-only --no-renames "$BASE...HEAD")"
           changed() { grep -Eq "$1" <<<"$files"; }
           all=false
           if changed '^\.github/workflows/test\.yml$'; then all=true; fi
@@ -66,12 +65,11 @@ jobs:
             code=true
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
-          emit platform '^(crates/graphforge-(storage|filesystem|api)/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)'
+          emit platform '^(crates/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)'
           emit benchmarks '^(benchmarks/|crates/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)'
           emit agent_skills '^(packages/agent-skills/|project-skills/|package\.json$|pnpm-lock\.yaml$|pnpm-workspace\.yaml$)'
           emit pulumi '^(iac/pulumi/|docs/contracts/|crates/graphforge-cli/src/lib\.rs$|crates/graphforge-api/src/repository\.rs$)'
           emit terraform '^(iac/terraform/|docs/contracts/|crates/graphforge-cli/src/lib\.rs$|crates/graphforge-api/src/repository\.rs$)'
-          emit scripts '^(scripts/|tests/contracts/|tests/release_workflows/|config/|\.github/workflows/|Makefile$|benchmarks/)'
           emit licenses '^(Cargo\.lock|deny\.toml|about\.toml|scripts/generate_third_party_notices\.py|THIRD_PARTY_NOTICES\.md)$'
 
   # Always runs: the repository checks guard the docs tree and the ADR
@@ -117,17 +115,18 @@ jobs:
         run: scripts/ci/repo-checks.sh
 
       - name: Install pnpm for the script self-tests
-        if: needs.changes.outputs.scripts == 'true'
+        if: needs.changes.outputs.code == 'true'
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - name: Set up Node for the script self-tests
-        if: needs.changes.outputs.scripts == 'true'
+        if: needs.changes.outputs.code == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
+      # Several suites read crate sources, so they follow every code change.
       - name: Script self-tests
-        if: needs.changes.outputs.scripts == 'true'
+        if: needs.changes.outputs.code == 'true'
         run: |
           pnpm install --frozen-lockfile --filter @curatelabs/graphforge...
           make test-scripts
@@ -248,13 +247,6 @@ jobs:
           python3 scripts/test_environment.py --
           cargo nextest run --locked --no-fail-fast
           -p graphforge-exec --features differential-testing --test differential_traversal
-
-      - name: Rust feature-gated tests (read-path candidates, #1688)
-        if: ${{ !cancelled() }}
-        run: >-
-          python3 scripts/test_environment.py --
-          cargo nextest run --locked --no-fail-fast
-          -p graphforge-api --features read-path-experiment --test read_path_candidates
 
   # The lean feature sets are shipped configurations (no default features);
   # they compile different code, so they build and test on their own.
@@ -502,6 +494,9 @@ jobs:
           assert importlib.util.find_spec("igraph") is None
           PY
           timeout 60s /tmp/gf-native/bin/python crates/graphforge-bindings-py/tests/smoke.py
+          # The documented visualization example's GraphForge path, offline (#1675).
+          timeout 60s /tmp/gf-native/bin/python \
+            crates/graphforge-bindings-py/tests/visualization_example_projection.py
 
       - name: Python binding suites
         run: make test-python
@@ -620,6 +615,8 @@ jobs:
           python3 benchmarks/runners/graph500-generator/tests/reference/verify_vectors.py
           cargo test --locked --manifest-path benchmarks/Cargo.toml \
             -p graphforge-benchmark-graph500-generator
+          cargo test --locked --manifest-path benchmarks/Cargo.toml \
+            -p graphforge-benchmark-certify --lib
           cargo build --locked -p graphforge-cli --bin gf
           gf_bin="$GITHUB_WORKSPACE/target/debug/gf"
           test -x "$gf_bin"

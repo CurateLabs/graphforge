@@ -216,8 +216,8 @@ check:  ## Format, lint, and static checks for every surface (no test run)
 # Both binding targets need the native artifacts built from this tree first
 # (docs/development/agent-environment.md).
 test-python:  ## Run every Python binding suite against the installed wheel
-	python3 scripts/test_environment.py -- sh -c 'printf "%s\0" crates/graphforge-bindings-py/tests/*.py | xargs -0 -n 1 -P $${PYTHON_BINDING_WORKERS:-4} uv run --no-sync python'
-	python3 scripts/test_environment.py -- uv run --no-sync pytest tests/unit tests/integration -q -n $${PYTEST_WORKERS:-4}
+	python3 scripts/test_environment.py -- sh -c 'find crates/graphforge-bindings-py/tests -maxdepth 1 -name "*.py" ! -name "test_*.py" -print0 | sort -z | xargs -0 -n 1 -P $${PYTHON_BINDING_WORKERS:-4} uv run --no-sync python'
+	python3 scripts/test_environment.py -- uv run --no-sync pytest tests/unit tests/integration crates/graphforge-bindings-py/tests/test_*.py -q -n $${PYTEST_WORKERS:-4}
 
 test-node:  ## Run every Node binding and CLI suite against the built addon
 	python3 scripts/test_environment.py -- pnpm --filter @curatelabs/graphforge test

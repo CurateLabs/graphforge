@@ -10,6 +10,8 @@ cargo metadata --locked --manifest-path benchmarks/Cargo.toml --format-version 1
 python3 scripts/license_check.py
 python3 scripts/source_size_policy.py
 python3 scripts/ci/check-domain-dependencies.py
+python3 scripts/ci/test-uuid-derivation-policy.py
+python3 scripts/ci/test-text-checkout-policy.py
 python3 scripts/ci/python-build-mode-check.py
 python3 scripts/ci/docs-tree-policy.py check
 python3 scripts/ci/adr-index.py check

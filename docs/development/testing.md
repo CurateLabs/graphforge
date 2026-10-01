@@ -363,9 +363,9 @@ pass end-to-end before marking `"status": "supported"`.
 
 GitHub Actions (`.github/workflows/test.yml`) runs the applicable jobs on every
 PR. Key jobs: `Lint` (Cargo fmt/Clippy + Python quality + policy checks),
-`Rust Tests` (nextest over the workspace, custom-harness targets, and doctests),
-`Python and Node Bindings` (full binding suites on Linux), `Windows graphforge-storage
-Locks`, `macOS graphforge-storage Durability`, and the required `CI Gate`
+`Rust Tests` (nextest over the workspace), `Rust Harness, Doc, and Feature
+Tests`, `Python and Node Bindings` (full binding suites on Linux), `Windows
+Storage`, `macOS Storage`, and the required `CI Gate`
 aggregate. See [`.github/workflows/README.md`](../../.github/workflows/README.md)
 for the full job list and local equivalents.
 
