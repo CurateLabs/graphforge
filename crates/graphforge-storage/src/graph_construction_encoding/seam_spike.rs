@@ -295,7 +295,7 @@ mod tests {
                 )
                 .unwrap(),
                 counter: super::super::IoCounter::default(),
-                digest: crate::concurrency_attribution::ObservedSha256::new(),
+                digest: graphforge_core::hash_observation::ArtifactSha256::new(),
             },
             schema.clone(),
             None,

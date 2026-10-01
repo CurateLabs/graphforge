@@ -1,13 +1,13 @@
 //! Version-nine predecessor removal under existing durable successor authority.
 //! Receipts remain installed so interruption needs no second cleanup journal.
 use super::{
-    ArtifactReceipt, BLOCK_BYTES, Digest, GfError, GraphConstructionEncoding,
-    GraphConstructionEvidence, GraphConstructionSession, OsStr, Read, ReadWork, Sha256,
-    StableDirectory, account_cache_release, canonical_artifact_target, checked_category_remove,
-    compact_parent_inventory, construction_failpoint, control_sha256, decode_bounded,
-    file_identity, file_link_count, hex, is_shape_artifact_name, read_completed_shape,
-    read_completed_shape_outputs, record_active_identity_remove, replace_checkpoint_control,
-    shape_receipt_name, storage, unlink_shape_progress,
+    ArtifactReceipt, BLOCK_BYTES, GfError, GraphConstructionEncoding, GraphConstructionEvidence,
+    GraphConstructionSession, OsStr, Read, ReadWork, StableDirectory, account_cache_release,
+    canonical_artifact_target, checked_category_remove, compact_parent_inventory,
+    construction_failpoint, control_sha256, decode_bounded, file_identity, file_link_count, hex,
+    is_shape_artifact_name, read_completed_shape, read_completed_shape_outputs,
+    record_active_identity_remove, replace_checkpoint_control, shape_receipt_name, storage,
+    unlink_shape_progress,
 };
 
 impl GraphConstructionSession {
@@ -613,7 +613,7 @@ pub(super) fn authenticate_payload(
     }
     let mut reader = graphforge_filesystem::FileCacheReleasingReader::new(file).map_err(storage)?;
     let mut work = ReadWork::default();
-    let mut digest = Sha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut block = vec![0; BLOCK_BYTES];
     let result = (|| {
         loop {
@@ -622,14 +622,16 @@ pub(super) fn authenticate_payload(
             if count == 0 {
                 break;
             }
-            digest.update(&block[..count]);
+            checksum.update(&block[..count]);
             work.bytes = work
                 .bytes
                 .checked_add(count as u64)
                 .ok_or_else(|| storage("supersession payload size overflow"))?;
             work.operations += 1;
         }
-        if work.bytes != receipt.bytes || hex(&digest.finalize()) != receipt.sha256 {
+        if work.bytes != receipt.bytes
+            || crate::corruption_checksum::hex(checksum.finish()) != receipt.xxh64
+        {
             return Err(storage("supersession payload digest changed"));
         }
         Ok(())

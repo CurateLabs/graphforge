@@ -45,18 +45,18 @@ fn detail_partition_load<const N: usize>(family: PartitionFamily) {
     .unwrap();
     assert_eq!(counters.records, count);
     assert_eq!(records.len() as u64, count);
-    let mut digest = sha2::Sha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     for (index, actual) in records.iter().enumerate() {
         let expected = detail_record::<N>(index as u64 + 1);
         let wire = codec.bytes(&expected).unwrap();
         // Works for both the old padded Vec and compact wire storage, letting
         // this exact fixture run unchanged against the comparison baseline.
         assert_eq!(&actual[..wire.len()], wire);
-        digest.update(wire);
+        checksum.update(wire);
     }
     println!(
-        "detail_width={N} records={count} sha256={}",
-        hex(&digest.finalize())
+        "detail_width={N} records={count} xxh64={:016x}",
+        checksum.finish()
     );
 }
 
@@ -294,7 +294,7 @@ fn boundary_seal_on_lanes_matches_the_calling_thread() {
             batch.flush(&mut checkpoint.evidence).unwrap();
         }
         for receipt in partitioner.sealed_segments() {
-            receipts.push((receipt.name, receipt.bytes, receipt.sha256));
+            receipts.push((receipt.name, receipt.bytes, receipt.xxh64));
         }
         (
             admission.peak(),

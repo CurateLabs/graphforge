@@ -48,7 +48,10 @@ fn fixed_run_receipts_count_cache_rollovers_and_preserve_reopened_bytes() {
         file.read_to_end(&mut actual).unwrap();
         assert_eq!(u64::try_from(actual.len()).unwrap(), bytes);
         assert!(actual.iter().all(|byte| *byte == 0x5a));
-        assert_eq!(hex(&Sha256::digest(&actual)), receipt.sha256);
+        assert_eq!(
+            crate::corruption_checksum::hex(crate::corruption_checksum::checksum(&actual)),
+            receipt.xxh64
+        );
         assert!(tree_has_no_temps(temporary.path()));
     }
 }

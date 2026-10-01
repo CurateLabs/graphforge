@@ -66,7 +66,7 @@ pub(crate) use topology_delta::prepare_v4_ordinal_delta;
 
 mod identity_codec;
 
-const FORMAT_VERSION: u32 = 6;
+const FORMAT_VERSION: u32 = 7;
 const NODE_LOOKUP_RECORD_BYTES: u64 = 24;
 const IDENTITY_RECORD_BYTES: u64 = 25;
 const NODE_LOOKUP_RECORD_WIDTH: usize = 24;
@@ -723,6 +723,10 @@ pub(crate) struct ConstructionIndexEncoding {
     pub peak_buffer_bytes: u64,
     pub peak_temporary_bytes: u64,
     pub cache_release: graphforge_filesystem::FileCacheReleaseEvidence,
+    /// SHA-256 of the source identity file, computed during encoding using
+    /// `ArtifactSha256` (classified). Used as the `topology_delta_sha256`
+    /// binding in the published `TopologyIndexReceipt`.
+    pub source_sha256: String,
 }
 
 #[cfg(test)]

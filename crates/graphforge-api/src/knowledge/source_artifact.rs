@@ -739,7 +739,7 @@ fn resolve_payload(payload: &ArtifactPayloadRequest) -> Result<ResolvedArtifactP
     }
 }
 
-#[allow(clippy::too_many_arguments)] // publication bundles every coupled ledger participant
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // publication bundles every coupled ledger participant
 fn publish_source_artifact(
     graph: &GraphForge,
     context: &WriteContext,

@@ -8,9 +8,9 @@ use std::ffi::OsStr;
 use std::io::{Read, Seek};
 use std::path::Path;
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use arrow::array::{Array, StringArray};
 use graphforge_core::GfError;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_filesystem::{file_identity, file_link_count};
 use graphforge_ir::RuntimeCatalog;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;

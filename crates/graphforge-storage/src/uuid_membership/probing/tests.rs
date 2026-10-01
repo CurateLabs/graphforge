@@ -423,7 +423,7 @@ fn checksum_uuid_manifest_refuses_legacy_missing_and_malformed_metadata() {
                     }
                 }
             }
-            1 => changed["format_version"] = serde_json::json!(7),
+            1 => changed["format_version"] = serde_json::json!(8),
             2 => {
                 changed["runs"][0]["identities"]["blocks"][0]
                     .as_object_mut()

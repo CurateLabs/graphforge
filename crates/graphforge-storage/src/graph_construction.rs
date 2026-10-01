@@ -32,7 +32,7 @@ pub(crate) struct AuthenticatedShapeSource {
     pub(crate) file: File,
     pub(crate) identity: FileIdentity,
     pub(crate) bytes: u64,
-    pub(crate) sha256: String,
+    pub(crate) xxh64: String,
 }
 
 mod shape;
@@ -42,7 +42,7 @@ use shape::{
     read_completed_shape_outputs, read_fixed, run_record_bytes, shape_receipt_name,
     validate_shape_binding, validate_sorted_run,
 };
-pub(crate) use shape::{open_authenticated_shape_source, shaped_output_sha256};
+pub(crate) use shape::{open_authenticated_shape_source, shaped_output_xxh64};
 mod encoding_publication;
 use encoding_publication::recover_publication;
 mod recovery;
@@ -96,12 +96,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use crate::construction_directory::ConstructionDirectory as StableDirectory;
 use arrow::array::{Array, FixedSizeBinaryArray, RecordBatch, StringArray, UInt32Array};
 use arrow::compute::take;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use graphforge_core::GfError;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_filesystem::{FileIdentity, file_identity, file_link_count};
 use graphforge_ir::{CompositionBindingContext, CompositionBindingLimits, RuntimeCatalog};
 use graphforge_ontology::ActivationMode;
@@ -714,9 +714,7 @@ pub(crate) struct ArtifactReceipt {
     name: String,
     bytes: u64,
     allocated_bytes: u64,
-    /// The content-addressing digest. Cryptographic, and stays cryptographic.
-    sha256: String,
-    /// Inline corruption checksum over the same payload, produced by the pass
+    /// Inline corruption checksum over the payload, produced by the pass
     /// that wrote the bytes. Non-cryptographic by design; see
     /// [`crate::corruption_checksum`] for the two assumptions that permits.
     xxh64: String,
@@ -740,7 +738,7 @@ pub(crate) fn shape_authority_sha256(
     if ordered.windows(2).any(|pair| pair[0].name == pair[1].name) {
         return Err(storage("shape authority repeats an output receipt"));
     }
-    let mut digest = Sha256::new();
+    let mut digest = graphforge_core::hash_observation::ControlSha256::default();
     digest.update(b"graphforge-construction-shape-authority/v1\0");
     digest.update(
         serde_json::to_vec(&ShapeAuthorityEnvelope {
@@ -1386,9 +1384,15 @@ impl GraphConstructionSession {
             }
             _ => budgets,
         };
+        if let Some(checkpoint) = recovered_checkpoint.as_ref()
+            && DetailCodec::from_version(checkpoint.format_version).is_err()
+        {
+            return Err(storage(
+                "checkpoint format version changed; restart construction from scratch",
+            ));
+        }
         if let Some(checkpoint) = recovered_checkpoint.as_mut()
-            && (DetailCodec::from_version(checkpoint.format_version).is_err()
-                || checkpoint.operation_uuid != operation_uuid
+            && (checkpoint.operation_uuid != operation_uuid
                 || !checkpoint.project_identity.matches(project_identity)
                 || !checkpoint.session_identity.matches(session_identity))
         {

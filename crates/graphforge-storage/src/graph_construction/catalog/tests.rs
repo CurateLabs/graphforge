@@ -164,7 +164,7 @@ fn ingest(operation: u128, null_property: bool) -> Run {
     let evidence = session.evidence().clone();
     let shaped_catalog_sha256 = receipt_for_existing(&session.root, &shape.runtime_catalog)
         .unwrap()
-        .sha256;
+        .xxh64;
     let catalog = {
         let file = session
             .root

@@ -58,7 +58,7 @@ fn cross_process_shape_digest_helper() {
         .chain(std::iter::once(&shape.runtime_catalog))
     {
         let receipt = receipt_for_existing(&session.root, name).unwrap();
-        digests.insert(name, receipt.sha256);
+        digests.insert(name, receipt.xxh64);
     }
     std::fs::write(
         output,
