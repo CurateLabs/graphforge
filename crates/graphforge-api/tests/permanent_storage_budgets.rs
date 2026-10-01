@@ -104,15 +104,12 @@ mod delta_runs {
         )
     }
 
-    /// The property owner of every node and edge that already has property
-    /// data, read from the published fragments the way replay resolves it: a
-    /// run must name the owner that holds a value, or replay finds two.
-    pub(super) struct Owners {
-        nodes: std::collections::BTreeMap<Uuid, String>,
-        edges: std::collections::BTreeMap<Uuid, String>,
-    }
+    /// The property owner of every edge that already has property data, read
+    /// from the published fragments the way replay resolves it: a run must name
+    /// the owner that holds a value, or replay finds two.
+    pub(super) struct EdgeOwners(std::collections::BTreeMap<Uuid, String>);
 
-    impl Owners {
+    impl EdgeOwners {
         pub(super) fn read(project: &std::path::Path) -> Self {
             use arrow::array::{Array, FixedSizeBinaryArray};
             let inventory = graphforge_storage::resolve_project_generation(project)
@@ -144,23 +141,12 @@ mod delta_runs {
                         .collect()
                 })
                 .unwrap_or_default();
-            let mut owners = Self {
-                nodes: Default::default(),
-                edges: Default::default(),
-            };
-            for entry in &inventory.files {
-                let (prefix, column, edge) =
-                    if entry.relative_path.starts_with("edge_properties/") {
-                        ("edge_properties/", "edge_uuid", true)
-                    } else if entry.relative_path.starts_with("properties/") {
-                        ("properties/", "node_uuid", false)
-                    } else {
-                        continue;
-                    };
-                if !entry.relative_path.ends_with(".parquet") {
-                    continue;
-                }
-                let component = entry.relative_path[prefix.len()..]
+            let mut owners = std::collections::BTreeMap::new();
+            for entry in inventory.files.iter().filter(|entry| {
+                entry.relative_path.starts_with("edge_properties/")
+                    && entry.relative_path.ends_with(".parquet")
+            }) {
+                let component = entry.relative_path["edge_properties/".len()..]
                     .split('/')
                     .next()
                     .unwrap();
@@ -177,29 +163,22 @@ mod delta_runs {
                 for batch in reader {
                     let batch = batch.unwrap();
                     let uuids = batch
-                        .column_by_name(column)
+                        .column_by_name("edge_uuid")
                         .unwrap()
                         .as_any()
                         .downcast_ref::<FixedSizeBinaryArray>()
                         .unwrap();
                     for row in 0..uuids.len() {
-                        let uuid = Uuid::from_slice(uuids.value(row)).unwrap();
-                        let map = if edge { &mut owners.edges } else { &mut owners.nodes };
-                        map.insert(uuid, route.clone());
+                        owners.insert(Uuid::from_slice(uuids.value(row)).unwrap(), route.clone());
                     }
                 }
             }
-            owners
-        }
-
-        /// The owner of `node`, or `default` for a node with no property data.
-        pub(super) fn node(&self, node: Uuid, default: &str) -> String {
-            self.nodes.get(&node).cloned().unwrap_or_else(|| default.to_owned())
+            Self(owners)
         }
 
         /// The owner of `edge`, or its relation type for an edge with no data.
-        pub(super) fn edge(&self, edge: Uuid, relation: &str) -> String {
-            self.edges.get(&edge).cloned().unwrap_or_else(|| relation.to_owned())
+        pub(super) fn owner(&self, edge: Uuid, relation: &str) -> String {
+            self.0.get(&edge).cloned().unwrap_or_else(|| relation.to_owned())
         }
     }
 
@@ -4529,22 +4508,22 @@ fn composite_constructed_edge_properties_preserve_authenticated_owner() {
         // through the journal API (no commit publishes one now) and the facade
         // reopens over it.
         drop(graph);
-        let owners = delta_runs::Owners::read(&source);
+        let owners = delta_runs::EdgeOwners::read(&source);
         delta_runs::publish(
             &source,
             vec![
-                delta_runs::set_edge(ordinary, &owners.edge(ordinary, &edges[129].3), "weight", 23),
-                delta_runs::remove_edge(ordinary, &owners.edge(ordinary, &edges[129].3), "text"),
-                delta_runs::set_edge(empty, &owners.edge(empty, &edges[130].3), "weight", 29),
+                delta_runs::set_edge(ordinary, &owners.owner(ordinary, &edges[129].3), "weight", 23),
+                delta_runs::remove_edge(ordinary, &owners.owner(ordinary, &edges[129].3), "text"),
+                delta_runs::set_edge(empty, &owners.owner(empty, &edges[130].3), "weight", 29),
                 delta_runs::set_edge(
                     edges[0].0,
-                    &owners.edge(edges[0].0, &edges[0].3),
+                    &owners.owner(edges[0].0, &edges[0].3),
                     "weight",
                     19,
                 ),
                 delta_runs::remove_edge(
                     edges[1].0,
-                    &owners.edge(edges[1].0, &edges[1].3),
+                    &owners.owner(edges[1].0, &edges[1].3),
                     "text",
                 ),
             ],
@@ -5617,12 +5596,11 @@ fn exercise_publishing_contract(count: usize, typed: bool) {
         assert_eq!(error.code(), "GF_UNSUPPORTED_PROJECT_FORMAT");
         assert_eq!(clear_publication_files(&source), before);
     }
-    // A run over the journal API: no commit publishes one now. Each operation
-    // names the owner that already holds the value. A node with no property data
-    // is owned by its declared label's route (typed) or `_untyped`; an edge with
-    // none by its relation type.
+    // A run over the journal API: no commit publishes one now. A node is owned
+    // by its declared label's route (typed) or `_untyped`; an edge by the owner
+    // that already holds its properties, else by its relation type.
     drop(graph);
-    let owners = delta_runs::Owners::read(&source);
+    let owners = delta_runs::EdgeOwners::read(&source);
     let default_node_owner = |label: &str| {
         if typed && label == "Node0" {
             "Node0"
@@ -5636,24 +5614,24 @@ fn exercise_publishing_contract(count: usize, typed: bool) {
         vec![
             delta_runs::set_node(
                 nodes[0].0,
-                &owners.node(nodes[0].0, &default_node_owner(&nodes[0].1)),
+                &default_node_owner(&nodes[0].1),
                 "score",
                 1221,
             ),
             delta_runs::remove_node(
                 nodes[1].0,
-                &owners.node(nodes[1].0, &default_node_owner(&nodes[1].1)),
+                &default_node_owner(&nodes[1].1),
                 "score",
             ),
             delta_runs::set_edge(
                 edges[0].0,
-                &owners.edge(edges[0].0, &edges[0].3),
+                &owners.owner(edges[0].0, &edges[0].3),
                 "weight",
                 1221,
             ),
             delta_runs::remove_edge(
                 edges[1].0,
-                &owners.edge(edges[1].0, &edges[1].3),
+                &owners.owner(edges[1].0, &edges[1].3),
                 "text",
             ),
         ],

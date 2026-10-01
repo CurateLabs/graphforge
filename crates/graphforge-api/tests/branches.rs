@@ -1128,8 +1128,21 @@ fn selected_branch_releases_large_parent_after_evolution_and_cleanup() {
             graphforge_storage::ProjectRetentionLimits::default(),
         )
         .unwrap();
-        let retained = bytes(&root.join("graph-objects/sha256"));
-        assert!(retained < before);
+        let retained_total = bytes(&root.join("graph-objects/sha256"));
+        assert!(retained_total < before);
+        // A compact owner's generations keep their own payloads in the content
+        // store, and those grow with the history of the project (retired
+        // identities stay indexed). The branch under test is accountable for
+        // what is retained beyond them.
+        let mut generation_objects = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(root.join("generations")).unwrap() {
+            let uuid = Uuid::parse_str(entry.unwrap().file_name().to_str().unwrap()).unwrap();
+            let generation = graphforge_storage::resolve_generation_by_uuid(&root, uuid).unwrap();
+            for file in generation.graph_files_inventory().unwrap().into_iter().flat_map(|inventory| inventory.files) {
+                generation_objects.insert(file.content_sha256, file.byte_length);
+            }
+        }
+        let retained = retained_total - generation_objects.values().sum::<u64>();
         let graph = GraphForge::new(root.to_str()).unwrap();
         let view = graph.open_research_branch(request.branch_uuid).unwrap();
         assert_eq!(count_nodes(view.graph()), 1);

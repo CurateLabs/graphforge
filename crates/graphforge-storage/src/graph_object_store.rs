@@ -1979,6 +1979,7 @@ pub(crate) use installation::install_graph_object_file_with_lease;
 pub(crate) use installation::set_captured_copy_hook;
 pub(crate) use installation::{
     install_captured_encoded_artifact_with_lease, install_captured_portable_source_with_lease,
+    install_captured_workspace_file_with_lease,
 };
 pub use manifest_tree::GraphManifestState;
 #[allow(
@@ -1998,6 +1999,5 @@ pub(crate) use manifest_tree::append_replayed_graph_files;
     reason = "preserve the existing staged CAS root API across feature and test configurations"
 )]
 pub use manifest_tree::compact_graph_files;
-pub use manifest_tree::prepare_graph_files_replacement;
-pub(crate) use manifest_tree::replace_replayed_graph_files;
+pub use manifest_tree::{prepare_compact_graph_publication, prepare_graph_files_replacement};
 pub use materialization::materialize_graph_objects;

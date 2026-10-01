@@ -568,6 +568,11 @@ fn map_resolution(e: &GfError) -> ReloadRequiredReason {
     if message.contains("manifest digest does not match") {
         return ReloadRequiredReason::IdentityMismatch;
     }
+    // A compact generation refuses a payload that fails its checksum on first
+    // touch with a validation error; it is corruption all the same.
+    if message.contains("XXH64 checksum") {
+        return ReloadRequiredReason::CorruptGeneration;
+    }
     if message.contains("required directory is missing")
         || message.contains("selected generation manifest is missing")
     {

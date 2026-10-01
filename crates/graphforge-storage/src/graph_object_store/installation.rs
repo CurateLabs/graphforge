@@ -384,6 +384,18 @@ pub(crate) fn install_captured_encoded_artifact_with_lease(
     install_captured_source_with_lease(lease, &CapturedSource::Encoded(source), cancelled)
 }
 
+/// Install a workspace file that a capture hashed and kept open, checking the
+/// copied bytes against the checksum taken while hashing rather than hashing
+/// them with SHA-256 again. Only [`crate::graph_files::capture_workspace_over_parent`]
+/// mints the capability; public file and byte installers stay SHA boundaries.
+pub(crate) fn install_captured_workspace_file_with_lease(
+    lease: &GraphObjectPublicationLease,
+    source: &crate::graph_files::CapturedWorkspaceFile,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<GraphObjectInstallEvidence, GfError> {
+    install_captured_source_with_lease(lease, &CapturedSource::Workspace(source), cancelled)
+}
+
 pub(crate) fn install_captured_portable_source_with_lease(
     lease: &GraphObjectPublicationLease,
     source: &crate::project_portable_v2::CapturedPortableSource<'_>,
@@ -396,42 +408,49 @@ pub(crate) fn install_captured_portable_source_with_lease(
 enum CapturedSource<'a, 'b> {
     Encoded(&'a crate::graph_construction::CapturedEncodedArtifact<'b>),
     Portable(&'a crate::project_portable_v2::CapturedPortableSource<'b>),
+    Workspace(&'a crate::graph_files::CapturedWorkspaceFile),
 }
 impl CapturedSource<'_, '_> {
     fn kind(&self) -> &'static str {
         match self {
             Self::Encoded(_) => "encoded",
             Self::Portable(_) => "portable",
+            Self::Workspace(_) => "workspace",
         }
     }
     fn content_sha256(&self) -> &str {
         match self {
             Self::Encoded(s) => s.content_sha256(),
             Self::Portable(s) => s.content_sha256(),
+            Self::Workspace(s) => s.content_sha256(),
         }
     }
     fn bytes(&self) -> u64 {
         match self {
             Self::Encoded(s) => s.bytes(),
             Self::Portable(s) => s.bytes(),
+            Self::Workspace(s) => s.bytes(),
         }
     }
     fn checksum(&self) -> u64 {
         match self {
             Self::Encoded(s) => s.checksum(),
             Self::Portable(s) => s.checksum(),
+            Self::Workspace(s) => s.checksum(),
         }
     }
     fn source(&self) -> &File {
         match self {
             Self::Encoded(s) => s.source(),
             Self::Portable(s) => s.source(),
+            Self::Workspace(s) => s.source(),
         }
     }
     fn revalidate(&self) -> Result<(), GfError> {
         match self {
             Self::Encoded(s) => s.revalidate(),
             Self::Portable(s) => s.revalidate(),
+            Self::Workspace(s) => s.revalidate(),
         }
     }
 }

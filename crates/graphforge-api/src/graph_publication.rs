@@ -11,7 +11,7 @@ pub(super) type BoundGenerationStorage = (
     Vec<(std::path::PathBuf, std::path::PathBuf)>,
 );
 
-/// Capture the private workspace over `parent` and prepare its compact root.
+/// Prepare the compact root for the private workspace over `parent`.
 ///
 /// Every mutating commit publishes a compact graph root: only files that changed
 /// since the parent install, and the generation owns no graph tree. Keep the
@@ -26,8 +26,7 @@ pub(crate) fn compact_graph_participant(
     ),
     GfError,
 > {
-    let (inventory, _) = graphforge_storage::capture_graph_files_over_parent(workspace, parent)?;
-    graphforge_storage::prepare_graph_files_replacement(parent, workspace, &inventory)
+    graphforge_storage::prepare_compact_graph_publication(parent, workspace)
 }
 
 impl GraphForge {

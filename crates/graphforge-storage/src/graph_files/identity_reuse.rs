@@ -1,9 +1,18 @@
 //! Reuse of already-authenticated graph file identities during capture.
 
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::path::PathBuf;
+
 use super::{
     ARTIFACT_IDENTITY, GfError, GraphFileEntry, GraphFilesInventory, GraphFilesParticipant, Path,
-    ProjectParticipant, capture_graph_files_reusing_digests,
+    ProjectParticipant, build_inventory_for_owned_layout, capture_graph_files_reusing_digests,
 };
+
+/// How many freshly hashed files a capture keeps open at once. Beyond it a
+/// file is simply hashed again as it is installed, so a commit that rewrites
+/// thousands of files never holds thousands of descriptors.
+pub(crate) const MAX_RETAINED_CAPTURES: usize = 128;
 
 /// An already-authenticated graph file identity that a later capture may reuse.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,10 +51,20 @@ pub fn capture_graph_files_over_parent(
     source_root: &Path,
     parent: &crate::ResolvedProjectGeneration,
 ) -> Result<(GraphFilesInventory, ProjectParticipant), GfError> {
-    // Reuse needs only the parent's authenticated declared identities: every
-    // reuse is gated by a fresh checksum of the new bytes, so the parent's
-    // payload files are never read here.
-    let entries = match parent.declared_graph_files_participant()? {
+    let known = known_files(parent)?;
+    capture_graph_files_reusing_digests(source_root, &known, ARTIFACT_IDENTITY)
+}
+
+/// The parent's authenticated declared identities, keyed by path. Reuse needs
+/// nothing more: every reuse is gated by a fresh checksum of the new bytes (or
+/// by the file being the parent's own content-store object), so the parent's
+/// payload files are never read here.
+fn known_files(
+    parent: &crate::ResolvedProjectGeneration,
+) -> Result<std::collections::HashMap<String, KnownGraphFile>, GfError> {
+    let participant = parent.declared_graph_files_participant()?;
+    let compact = matches!(participant, Some(GraphFilesParticipant::V2(_)));
+    let entries = match participant {
         Some(GraphFilesParticipant::V1(inventory)) => inventory.files,
         Some(GraphFilesParticipant::V2(root)) => {
             crate::resolve_graph_manifest(&root, crate::GraphManifestLimits::default(), |digest| {
@@ -59,10 +78,6 @@ pub fn capture_graph_files_over_parent(
         }
         None => Vec::new(),
     };
-    let compact = matches!(
-        parent.declared_graph_files_participant()?,
-        Some(GraphFilesParticipant::V2(_))
-    );
     let known = entries
         .iter()
         .map(|entry| {
@@ -76,5 +91,110 @@ pub fn capture_graph_files_over_parent(
             (entry.relative_path.clone(), known)
         })
         .collect::<std::collections::HashMap<_, _>>();
-    capture_graph_files_reusing_digests(source_root, &known, ARTIFACT_IDENTITY)
+    Ok(known)
+}
+
+/// A workspace file hashed by a capture, kept open so that installing it into
+/// the content store checks the copied bytes against the checksum taken while
+/// hashing instead of hashing the same bytes with SHA-256 a second time.
+///
+/// Only [`capture_workspace_over_parent`] mints one, from the handle it hashed.
+pub(crate) struct CapturedWorkspaceFile {
+    file: File,
+    path: PathBuf,
+    identity: Option<graphforge_filesystem::FileIdentity>,
+    byte_length: u64,
+    content_sha256: String,
+    content_xxh64: u64,
+}
+
+impl CapturedWorkspaceFile {
+    pub(super) fn new(
+        file: File,
+        path: PathBuf,
+        byte_length: u64,
+        content_sha256: String,
+        content_xxh64: u64,
+    ) -> Self {
+        let identity = graphforge_filesystem::file_identity(&file).ok();
+        Self {
+            file,
+            path,
+            identity,
+            byte_length,
+            content_sha256,
+            content_xxh64,
+        }
+    }
+
+    pub(crate) fn content_sha256(&self) -> &str {
+        &self.content_sha256
+    }
+
+    pub(crate) const fn bytes(&self) -> u64 {
+        self.byte_length
+    }
+
+    pub(crate) const fn checksum(&self) -> u64 {
+        self.content_xxh64
+    }
+
+    pub(crate) const fn source(&self) -> &File {
+        &self.file
+    }
+
+    /// The captured handle and the workspace name still denote one file of the
+    /// captured length. A change in between is refused, never installed.
+    pub(crate) fn revalidate(&self) -> Result<(), GfError> {
+        let unchanged = self.identity.is_some_and(|identity| {
+            self.file
+                .metadata()
+                .is_ok_and(|metadata| metadata.is_file() && metadata.len() == self.byte_length)
+                && graphforge_filesystem::file_identity(&self.file)
+                    .is_ok_and(|current| current == identity)
+                && graphforge_filesystem::path_identity(&self.path)
+                    .is_ok_and(|named| named == identity)
+        });
+        if unchanged {
+            Ok(())
+        } else {
+            Err(GfError::Validation(
+                "captured workspace file identity or length changed before install".into(),
+            ))
+        }
+    }
+}
+
+/// An inventory of a private workspace over its parent, with the handles of the
+/// files that must be installed.
+pub(crate) struct WorkspaceCapture {
+    pub(crate) inventory: GraphFilesInventory,
+    pub(crate) captured: BTreeMap<String, CapturedWorkspaceFile>,
+}
+
+/// Capture a private workspace for compact publication over `parent`: the
+/// parent's identities are reused exactly as in [`capture_graph_files_over_parent`],
+/// and every file that had to be hashed is retained for installation.
+///
+/// # Errors
+/// Rejects links, special files, unsafe relative paths, duplicates, and
+/// inventory size overflow, and propagates parent inventory admission errors.
+pub(crate) fn capture_workspace_over_parent(
+    source_root: &Path,
+    parent: &crate::ResolvedProjectGeneration,
+) -> Result<WorkspaceCapture, GfError> {
+    let known = known_files(parent)?;
+    let mut captured = BTreeMap::new();
+    let (inventory, _) = build_inventory_for_owned_layout(
+        source_root,
+        false,
+        Some(&known),
+        ARTIFACT_IDENTITY,
+        &mut || Ok(()),
+        Some(&mut captured),
+    )?;
+    Ok(WorkspaceCapture {
+        inventory,
+        captured,
+    })
 }
