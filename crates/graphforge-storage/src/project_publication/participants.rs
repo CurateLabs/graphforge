@@ -306,72 +306,16 @@ pub(super) fn stage_participant_files(
                     file.write_all(&input.bytes).map_err(publication_io)?;
                 }
                 ParticipantPayloads::Files(files, cancelled, copy_buffer_bytes, captures) => {
-                    let source = &files[index];
-                    let mut input = crate::project_portable::open_regular_nofollow(&source.source)
-                        .map_err(publication_io)?;
-                    let captured = captures
-                        .and_then(|captures| captures.get(&source.source))
-                        .is_some_and(|capture| {
-                            capture.matches_file(
-                                &input,
-                                source.byte_length,
-                                source.content_sha256,
-                                metadata.content_xxh64,
-                            )
-                        });
-                    let identity =
-                        graphforge_filesystem::file_identity(&input).map_err(publication_io)?;
-                    let mut hash =
-                        (!captured).then(graphforge_core::hash_observation::ArtifactSha256::new);
-                    let mut checksum = crate::corruption_checksum::Checksum::new();
-                    let mut copied = 0;
-                    let mut buffer = vec![0; copy_buffer_bytes];
-                    let bound = source.byte_length.checked_add(1).ok_or_else(|| {
-                        project_error(
-                            ProjectErrorCode::PublicationFailed,
-                            "portable participant length overflows",
-                        )
-                    })?;
-                    let mut reader = (&mut input).take(bound);
-                    loop {
-                        if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-                            return Err(project_error(
-                                ProjectErrorCode::PublicationFailed,
-                                "portable import cancelled during staging",
-                            ));
-                        }
-                        let count = reader.read(&mut buffer).map_err(publication_io)?;
-                        if count == 0 {
-                            break;
-                        }
-                        copied += count as u64;
-                        if copied > source.byte_length {
-                            return Err(project_error(
-                                ProjectErrorCode::PublicationFailed,
-                                "portable participant grew during staging",
-                            ));
-                        }
-                        file.write_all(&buffer[..count]).map_err(publication_io)?;
-                        if let Some(hash) = &mut hash {
-                            hash.update(&buffer[..count]);
-                        }
-                        checksum.update(&buffer[..count]);
-                    }
-                    let digest: [u8; 32] =
-                        hash.map_or(source.content_sha256, |hash| hash.finalize().into());
-                    if copied != source.byte_length
-                        || digest != source.content_sha256
-                        || checksum.finish() != metadata.content_xxh64
-                        || graphforge_filesystem::path_identity(&source.source)
-                            .map_err(publication_io)?
-                            != identity
-                        || input.metadata().map_err(publication_io)?.len() != source.byte_length
-                    {
-                        return Err(project_error(
-                            ProjectErrorCode::PublicationFailed,
-                            "portable participant changed during staging",
-                        ));
-                    }
+                    copy_file_participant(
+                        &mut file,
+                        &files[index],
+                        metadata,
+                        cancelled,
+                        copy_buffer_bytes,
+                        captures
+                            .and_then(|authorities| authorities.get(&files[index].source))
+                            .copied(),
+                    )?;
                 }
             }
             Ok(())
@@ -400,6 +344,77 @@ pub(super) fn stage_participant_files(
             false,
         )?;
         verify_participant_file(&destination, metadata)?;
+    }
+    Ok(())
+}
+
+// Preserve the exact FD/copy boundary while keeping allocation observation
+// in stage_participant_files even when a partially written copy fails.
+fn copy_file_participant(
+    file: &mut File,
+    source: &super::ProjectFileParticipant,
+    metadata: &StagedParticipant,
+    cancelled: Option<&super::AtomicBool>,
+    copy_buffer_bytes: usize,
+    capture: Option<&crate::project_portable_v2::MaterializedCapture>,
+) -> Result<(), GfError> {
+    let mut input =
+        crate::project_portable::open_regular_nofollow(&source.source).map_err(publication_io)?;
+    let admitted = capture.is_some_and(|capture| {
+        capture.matches_file(
+            &input,
+            source.byte_length,
+            source.content_sha256,
+            metadata.content_xxh64,
+        )
+    });
+    let identity = graphforge_filesystem::file_identity(&input).map_err(publication_io)?;
+    let mut hash = (!admitted).then(graphforge_core::hash_observation::ArtifactSha256::new);
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut copied = 0;
+    let mut buffer = vec![0; copy_buffer_bytes];
+    let bound = source.byte_length.checked_add(1).ok_or_else(|| {
+        project_error(
+            ProjectErrorCode::PublicationFailed,
+            "portable participant length overflows",
+        )
+    })?;
+    let mut reader = (&mut input).take(bound);
+    loop {
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Err(project_error(
+                ProjectErrorCode::PublicationFailed,
+                "portable import cancelled during staging",
+            ));
+        }
+        let count = reader.read(&mut buffer).map_err(publication_io)?;
+        if count == 0 {
+            break;
+        }
+        copied += count as u64;
+        if copied > source.byte_length {
+            return Err(project_error(
+                ProjectErrorCode::PublicationFailed,
+                "portable participant grew during staging",
+            ));
+        }
+        file.write_all(&buffer[..count]).map_err(publication_io)?;
+        if let Some(hash) = &mut hash {
+            hash.update(&buffer[..count]);
+        }
+        checksum.update(&buffer[..count]);
+    }
+    let digest: [u8; 32] = hash.map_or(source.content_sha256, |hash| hash.finalize().into());
+    if copied != source.byte_length
+        || digest != source.content_sha256
+        || checksum.finish() != metadata.content_xxh64
+        || graphforge_filesystem::path_identity(&source.source).map_err(publication_io)? != identity
+        || input.metadata().map_err(publication_io)?.len() != source.byte_length
+    {
+        return Err(project_error(
+            ProjectErrorCode::PublicationFailed,
+            "portable participant changed during staging",
+        ));
     }
     Ok(())
 }

@@ -348,10 +348,124 @@ fn portable_domain() { ObservedSha256::for_domain(HashDomain::PortableAuthentica
     assert run.returncode == 1, (run.stdout, run.stderr)
     gaps = json.loads((out / "review-gaps.json").read_text())["gaps"]
     assert any(g["kind"] == "unreviewed_crypto_algorithm" for g in gaps), gaps
+    # Only the pinned private writer getter is exempt; other digest receivers
+    # stay unresolved, and adding a producer to that getter invalidates its pin.
+    p.write_text(source)
+    storage = root / "crates/graphforge-storage/src"
+    storage.mkdir(parents=True)
+    digest_producer = "fn digest() { Transport::new(); }"
+    p.write_text(source + digest_producer + "\n")
+    fixtures = {
+        "project_portable_v2_export.rs": "fn export() { written.digest(); }\n",
+        "project_portable_v2_export/transport.rs": (
+            "use graphforge_core::hash_observation::{ControlSha256, PortableSha256 as Sha256};\n"
+            "fn digest(&self) -> [u8; 32] { self.digest }\n"
+            'fn copy() { ControlSha256::digest(b"control"); Sha256::new(); }\n'
+        ),
+        "project_portable_v2.rs": (
+            "fn hash_file() { StreamHash::new(); }\nfn scan() { hash_file(); }\n"
+        ),
+        "project_portable_v2/authenticated_entries.rs": (
+            "use graphforge_core::hash_observation::PortableSha256 as Transport;\n"
+            "fn new() { Transport::new(); }\n"
+        ),
+    }
+    decision = json.loads(overrides.read_text())
+    decision["function_overrides"].append(
+        {
+            "path": str(p.relative_to(root)),
+            "function": "digest",
+            "function_bodies_sha256": [hashlib.sha256(digest_producer.encode()).hexdigest()],
+            "role": "portable_authentication",
+            "input_contract": "Fixture real producer namesake.",
+        }
+    )
+    for relative, text in fixtures.items():
+        path = storage / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        name = {
+            "project_portable_v2.rs": "hash_file",
+            "project_portable_v2_export/transport.rs": "digest",
+            "project_portable_v2/authenticated_entries.rs": "new",
+        }.get(relative)
+        if name:
+            body = re.search(rf"fn {name}\b[^\n]*", text).group()
+            decision["function_overrides"].append(
+                {
+                    "path": str(path.relative_to(root)),
+                    "function": name,
+                    "function_bodies_sha256": [hashlib.sha256(body.encode()).hexdigest()],
+                    "role": "portable_authentication" if name == "new" else "producer_delegate",
+                    "input_contract": "Fixture private stored getter or bounded source delegate.",
+                }
+            )
+    overrides.write_text(json.dumps(decision))
+    mixed_body = re.search(
+        r"fn copy\b[^\n]*", fixtures["project_portable_v2_export/transport.rs"]
+    ).group()
+    decision["function_overrides"].append(
+        {
+            "path": str((storage / "project_portable_v2_export/transport.rs").relative_to(root)),
+            "function": "copy",
+            "function_bodies_sha256": [hashlib.sha256(mixed_body.encode()).hexdigest()],
+            "role": "caller_selected",
+            "input_contract": "Fixture separates resident control and payload SHA.",
+        }
+    )
+    overrides.write_text(json.dumps(decision))
+
+    def probe_private_getter():
+        return subprocess.run(
+            [
+                "python3",
+                method,
+                "--repo",
+                str(root),
+                "--output",
+                str(out),
+                "--overrides",
+                str(overrides),
+            ],
+            text=True,
+            env=git_env,
+            capture_output=True,
+            check=False,
+        )
+
+    run = probe_private_getter()
+    assert run.returncode == 0, (run.stdout, run.stderr)
+    producers = json.loads((out / "producers.json").read_text())["producers"]
+    mixed = [
+        row
+        for row in producers
+        if row["path"].endswith("/transport.rs") and row["function"] == "copy"
+    ]
+    assert {row["class"] for row in mixed} == {
+        "control_authentication",
+        "portable_authentication",
+    }, mixed
+    getter = storage / "project_portable_v2_export/transport.rs"
+    getter.write_text(
+        getter.read_text().replace("self.digest", 'Transport::digest(b"new producer")')
+    )
+    run = probe_private_getter()
+    assert run.returncode == 1, (run.stdout, run.stderr)
+    gaps = json.loads((out / "review-gaps.json").read_text())["gaps"]
+    assert any(g["kind"] == "reviewed_input_changed" and g["function"] == "digest" for g in gaps), (
+        gaps
+    )
+    getter.write_text(fixtures["project_portable_v2_export/transport.rs"])
+    caller = storage / "project_portable_v2_export.rs"
+    caller.write_text(caller.read_text().replace("written.digest()", "untrusted.digest()"))
+    run = probe_private_getter()
+    assert run.returncode == 1, (run.stdout, run.stderr)
+    gaps = json.loads((out / "review-gaps.json").read_text())["gaps"]
+    assert any(g["kind"] == "unresolved_helper" and g["callee"] == "digest" for g in gaps), gaps
     print(
         "PASS: alias, typed portable authentication and changed portable input refusal, "
         "constructor callback, nested comments, raw/byte literals, "
         "test impl/block/module exclusion, "
         "mixed cfg feature retention, output refusal, changed-input/new-producer/unpinned refusal, "
-        "unknown crypto fail-closed"
+        "unknown crypto fail-closed, pinned writer getter and wrong-receiver refusal"
     )

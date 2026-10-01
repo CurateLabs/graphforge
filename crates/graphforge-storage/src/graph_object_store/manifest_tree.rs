@@ -34,6 +34,38 @@ use super::validate_publication_identity;
 use super::validation;
 use graphforge_core::hash_observation::ControlSha256 as Sha256;
 
+#[derive(Clone, Copy)]
+enum CapturedGraphInventory<'a, 'b> {
+    Encoded(&'a crate::graph_construction::CapturedEncodedInventory<'b>),
+    Portable(&'a BTreeMap<PathBuf, &'b crate::project_portable_v2::MaterializedCapture>),
+}
+
+/// Only the import owner's privately authenticated copies can choose this path.
+pub(crate) fn append_captured_portable_graph_files(
+    lease: &GraphObjectPublicationLease,
+    workspace: &Path,
+    state: &mut GraphManifestState,
+    files: &[AuthenticatedGraphFile],
+    routes: Option<&crate::route_component::RouteTable>,
+    captures: &BTreeMap<PathBuf, &crate::project_portable_v2::MaterializedCapture>,
+) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
+    let paths = files
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect::<Vec<_>>();
+    append_graph_files_v2_inner(
+        lease,
+        workspace,
+        state,
+        &paths,
+        Some(files),
+        &[],
+        routes,
+        Some(CapturedGraphInventory::Portable(captures)),
+        &mut || false,
+    )
+}
+
 /// Storage-owned, root-bound state for a sequence of path-copy publications.
 ///
 /// Opening an existing root authenticates its inventory exactly once. Callers
@@ -273,6 +305,7 @@ pub(crate) fn append_mapped_import_graph_files(
 
 /// Publish writer-authenticated files with one copy-and-hash authentication
 /// pass. The expected digest is never trusted without that install-time pass.
+#[cfg(test)]
 pub(crate) fn append_authenticated_graph_files_v2(
     lease: &GraphObjectPublicationLease,
     workspace: &Path,
@@ -379,7 +412,7 @@ pub(crate) fn append_captured_mapped_graph_files(
         None,
         tombstones,
         Some(routes),
-        Some(captured),
+        Some(CapturedGraphInventory::Encoded(captured)),
         cancelled,
     )?;
     evidence.publication_io.checked_add_assign(&migration_io)?;
@@ -409,7 +442,7 @@ fn append_graph_files_v2_inner(
     authenticated: Option<&[AuthenticatedGraphFile]>,
     tombstones: &[String],
     mapped_routes: Option<&crate::route_component::RouteTable>,
-    captured: Option<&crate::graph_construction::CapturedEncodedInventory<'_>>,
+    captured: Option<CapturedGraphInventory<'_, '_>>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
     validate_publication_identity(lease)?;
@@ -449,38 +482,55 @@ fn append_graph_files_v2_inner(
         .map_or(0, |root| root.logical_byte_length);
     for (index, relative) in sealed_paths.iter().enumerate() {
         let source = workspace.join(relative);
-        let (digest, expected_length, prehash_io) = if let Some(captured) = captured {
-            let source = captured.open(relative)?;
-            (
-                source.content_sha256().to_owned(),
-                source.bytes(),
-                ReadIoEvidence::default(),
-            )
-        } else if let Some(files) = authenticated {
-            let expected = files
-                .get(index)
-                .ok_or_else(|| validation("authenticated graph inventory is incomplete"))?;
-            if expected.relative_path != *relative {
-                return Err(validation("authenticated graph file metadata changed"));
+        let portable = match captured {
+            Some(CapturedGraphInventory::Portable(authorities)) => {
+                authorities.get(&source).copied()
             }
-            validate_digest(&expected.content_sha256)?;
-            (
-                expected.content_sha256.clone(),
-                expected.byte_length,
-                ReadIoEvidence::default(),
-            )
-        } else {
-            let metadata = fs::symlink_metadata(&source)
-                .map_err(|error| storage("inspect sealed graph file", &source, error))?;
-            if !metadata.is_file() || metadata.file_type().is_symlink() {
-                return Err(validation("sealed graph path is not a regular file"));
-            }
-            let (digest, io) = hash_regular_file(&source)?;
-            (hex_digest(digest), metadata.len(), io)
+            _ => None,
         };
-        let installed = if let Some(captured) = captured {
+        let (digest, expected_length, prehash_io) =
+            if let Some(CapturedGraphInventory::Encoded(captured)) = captured {
+                let source = captured.open(relative)?;
+                (
+                    source.content_sha256().to_owned(),
+                    source.bytes(),
+                    ReadIoEvidence::default(),
+                )
+            } else if let Some(files) = authenticated {
+                let expected = files
+                    .get(index)
+                    .ok_or_else(|| validation("authenticated graph inventory is incomplete"))?;
+                if expected.relative_path != *relative {
+                    return Err(validation("authenticated graph file metadata changed"));
+                }
+                validate_digest(&expected.content_sha256)?;
+                (
+                    expected.content_sha256.clone(),
+                    expected.byte_length,
+                    ReadIoEvidence::default(),
+                )
+            } else {
+                let metadata = fs::symlink_metadata(&source)
+                    .map_err(|error| storage("inspect sealed graph file", &source, error))?;
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return Err(validation("sealed graph path is not a regular file"));
+                }
+                let (digest, io) = hash_regular_file(&source)?;
+                (hex_digest(digest), metadata.len(), io)
+            };
+        let installed = if let Some(CapturedGraphInventory::Encoded(captured)) = captured {
             let source = captured.open(relative)?;
             super::install_captured_encoded_artifact_with_lease(lease, &source, cancelled)?
+        } else if let Some(capture) = portable {
+            let source = capture
+                .open_source(&source)
+                .map_err(|error| validation(error.to_string()))?;
+            if source.content_sha256() != digest || source.bytes() != expected_length {
+                return Err(validation(
+                    "portable graph capture disagrees with file metadata",
+                ));
+            }
+            super::install_captured_portable_source_with_lease(lease, &source, cancelled)?
         } else {
             install_graph_object_file_with_lease(lease, &source, &digest, expected_length)?
         };

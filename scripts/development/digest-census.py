@@ -506,6 +506,19 @@ for x in entries:
             "Ordered already-computed entry path/length/digest metadata and "
             "tagmanifest define transport identity."
         )
+    if path.endswith("/project_portable_v2_export/transport.rs") and x["symbol"] == "ControlSha256":
+        role = "control_authentication"
+        reason = (
+            "Explicit ControlSha256 consumes bounded resident canonical portable control/tag bytes."
+        )
+    if (
+        path.endswith("/project_portable_v2_export/transport.rs")
+        and x["role_by_explicit_type"] == "portable_authentication"
+    ):
+        role = "portable_authentication"
+        reason = (
+            "Explicit Portable SHA consumes actual untrusted member or emitted transport bytes."
+        )
     if (
         path.endswith("/project_publication/participants.rs")
         and fn == "request_metadata_with_payloads"
@@ -601,6 +614,29 @@ for c in d["delegate_candidates"]:
         reason = (
             "selection::digest parses optional recorded hexadecimal baseline "
             "identity, does not compute digest."
+        )
+    elif (
+        name == "digest"
+        and p == "crates/graphforge-storage/src/project_portable_v2_export.rs"
+        and re.search(r"\bwritten\s*\.\s*digest\s*\(", text)
+    ):
+        target = ("crates/graphforge-storage/src/project_portable_v2_export/transport.rs", "digest")
+        role = "producer_delegate"
+        kind = "stored_digest_getter"
+        reason = (
+            "Privately written package accessor returns captured digest bytes; "
+            "pinned getter adds no SHA pass."
+        )
+    elif name == "hash_file" and p == "crates/graphforge-storage/src/project_portable_v2.rs":
+        target = (
+            "crates/graphforge-storage/src/project_portable_v2/authenticated_entries.rs",
+            "new",
+        )
+        role = "portable_authentication"
+        kind = "same_file_source_wrapper"
+        reason = (
+            "Pinned bounded file wrapper forwards actual buffers to StreamHash; "
+            "its new constructor accounts the untrusted SHA producer."
         )
     elif (p, name) in by:
         target = (p, name)

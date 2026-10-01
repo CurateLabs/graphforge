@@ -97,28 +97,34 @@ pub(super) fn validate_with_reader(
     Ok(Some((registry, provided)))
 }
 
-pub(crate) fn install(
-    stage: &Path,
-    target: &Path,
-    objects: &BTreeMap<String, u64>,
-) -> Result<(), PortableV2Error> {
-    let lease = crate::begin_graph_object_publication(target).map_err(|_| invalid())?;
-    install_with_lease(stage, &lease, objects)
-}
-
-pub(crate) fn install_with_lease(
+pub(crate) fn install_captured_with_lease(
     stage: &Path,
     lease: &crate::GraphObjectPublicationLease,
     objects: &BTreeMap<String, u64>,
+    captures: &BTreeMap<String, super::MaterializedCapture>,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<(), PortableV2Error> {
     for (digest, length) in objects {
-        crate::graph_object_store::install_graph_object_file_with_lease(
+        super::check_cancel(cancelled)?;
+        let relative = format!("{PREFIX}{digest}");
+        let capture = captures.get(&relative).ok_or_else(invalid)?;
+        let source = capture.open_source(&stage.join(relative))?;
+        if source.content_sha256() != digest || source.bytes() != *length {
+            return Err(invalid());
+        }
+        crate::graph_object_store::install_captured_portable_source_with_lease(
             lease,
-            &stage.join(format!("{PREFIX}{digest}")),
-            digest,
-            *length,
+            &source,
+            &mut || cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)),
         )
-        .map_err(|_| invalid())?;
+        .map_err(|_| {
+            super::check_cancel(cancelled).err().unwrap_or_else(|| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::ConcurrentMutation,
+                    "captured research object installation refused",
+                )
+            })
+        })?;
     }
     Ok(())
 }

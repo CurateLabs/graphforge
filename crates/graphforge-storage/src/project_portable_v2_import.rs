@@ -26,7 +26,7 @@ use crate::project_portable_v2::{
     PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2PackageClass,
     PortableV2Report, RUNTIME_MAP_PATH, decode_runtime_map, materialize_verified_portable_v2,
 };
-mod adjacency;
+pub(crate) mod adjacency;
 mod materialized_graph;
 use materialized_graph::prepare_compact_import_graph_with_allocation;
 mod allocation;
@@ -1103,16 +1103,20 @@ fn import_materialized(
         .graph_tree
         .as_ref()
         .map(|_| stage.join("data/components/graph-data/graph-tree"));
+    let mut derived_captures = std::collections::BTreeMap::new();
     if let Some(graph_tree) = &package_graph_tree {
         validate_import_graph_identities(graph_tree, cancelled)?;
         validate_import_property_values(graph_tree, report.entry_count, cancelled)?;
-        *added_stage_entries = adjacency::persist_import_adjacency(
+        let (added, derived) = crate::project_portable_v2::capture_import_adjacency(
             stage,
             graph_tree,
             &participants,
             cancelled,
             allocation,
+            limits.max_entry_bytes,
         )?;
+        *added_stage_entries = added;
+        derived_captures = derived;
     }
     let stage_entry_count = usize::try_from(report.entry_count)
         .map_err(|_| {
@@ -1125,7 +1129,7 @@ fn import_materialized(
     let research =
         crate::project_portable_v2::research::validate_stage(stage, report, limits, cancelled)?;
     if let Some((registry, objects)) = &research {
-        native_validation::validate(stage, registry, objects, cancelled, validator)?;
+        native_validation::validate(stage, registry, objects, captures, cancelled, validator)?;
     }
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         target,
@@ -1172,6 +1176,11 @@ fn import_materialized(
     let participant_captures = captures
         .iter()
         .map(|(relative, capture)| (stage.join(relative), capture))
+        .chain(
+            derived_captures
+                .iter()
+                .map(|(path, capture)| (path.clone(), capture)),
+        )
         .collect();
     let graph_object_lease = prepare_compact_import_graph_with_allocation(
         admission.root(),
@@ -1182,13 +1191,22 @@ fn import_materialized(
         Some(&participant_captures),
     )?;
     let _research_lease = if let Some((_, objects)) = &research {
-        let mut lease = crate::begin_graph_object_publication(admission.root())
-            .map_err(|error| storage(&error))?;
-        lease
-            .set_import_allocation_operation(allocation.cloned())
-            .map_err(|error| storage(&error))?;
-        crate::project_portable_v2::research::install_with_lease(stage, &lease, objects)?;
-        Some(lease)
+        if let Some(lease) = &graph_object_lease {
+            crate::project_portable_v2::research::install_captured_with_lease(
+                stage, lease, objects, captures, cancelled,
+            )?;
+            None
+        } else {
+            let mut lease = crate::begin_graph_object_publication(admission.root())
+                .map_err(|error| storage(&error))?;
+            lease
+                .set_import_allocation_operation(allocation.cloned())
+                .map_err(|error| storage(&error))?;
+            crate::project_portable_v2::research::install_captured_with_lease(
+                stage, &lease, objects, captures, cancelled,
+            )?;
+            Some(lease)
+        }
     } else {
         None
     };

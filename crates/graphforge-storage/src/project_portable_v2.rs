@@ -6,17 +6,18 @@
 
 mod materialization;
 pub use materialization::materialize_verified_portable_v2;
-pub(crate) use materialization::{MaterializedCapture, materialize_verified_portable_v2_observed};
+pub(crate) use materialization::{
+    CapturedPortableSource, MaterializedCapture, capture_import_adjacency,
+    materialize_verified_portable_v2_observed,
+};
 mod authenticated_entries;
 use authenticated_entries::StreamHash;
 pub(crate) mod research;
 mod semantic_validation;
+pub(crate) use semantic_validation::decode_runtime_map;
 use semantic_validation::{
     admit_composition_features, package_class, validate_ontology_composition, validate_runtime_map,
     validate_semantics,
-};
-pub(crate) use semantic_validation::{
-    decode_runtime_map, validate_materialized_ontology_composition,
 };
 
 use graphforge_core::hash_observation::{ContractSha256, ControlSha256, PortableSha256 as Sha256};

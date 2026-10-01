@@ -1,43 +1,64 @@
 //! Single-pass authentication and private component materialization.
-use super::*;
+use super::{
+    AtomicBool, BTreeMap, BTreeSet, File, Path, PortableV2Error, PortableV2ErrorCode,
+    PortableV2Limits, PortableV2Mode, PortableV2Report, Read, VerifiedMaterialization,
+    check_cancel, fs, hex, preflight, scan,
+};
 use graphforge_filesystem::ObservedSync as _;
 use std::io::Write;
+mod derived;
+pub(crate) use derived::capture_import_adjacency;
 
 /// A private exact-byte capture from the authenticated import copy.
-/// Its constructor remains inside the copier; metadata alone cannot mint it.
+/// Only the authenticated copier or actual derived writer can mint it.
 pub(crate) struct MaterializedCapture {
     identity: graphforge_filesystem::FileIdentity,
     length: u64,
     digest: [u8; 32],
     checksum: u64,
+    allocated_bytes: u64,
 }
 impl MaterializedCapture {
-    pub(crate) fn graph_file(
+    pub(crate) fn open_source(
         &self,
         path: &Path,
-        relative_path: std::path::PathBuf,
-    ) -> Result<crate::graph_object_store::AuthenticatedGraphFile, PortableV2Error> {
-        let file = crate::project_portable_v2_export::open_source_no_follow(path)?;
-        if !self.matches_file(
-            &file,
-            file.metadata()
-                .map_err(|_| {
-                    PortableV2Error::new(PortableV2ErrorCode::Io, "graph source metadata")
-                })?
-                .len(),
-            self.digest,
-            self.checksum,
-        ) {
-            return Err(PortableV2Error::new(
+    ) -> Result<CapturedPortableSource<'_>, PortableV2Error> {
+        let parent =
+            graphforge_filesystem::StableDirectory::open(path.parent().ok_or_else(|| {
+                PortableV2Error::new(PortableV2ErrorCode::InvalidPath, "captured source parent")
+            })?)
+            .map_err(|_| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::ConcurrentMutation,
+                    "captured source directory changed",
+                )
+            })?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| {
+                PortableV2Error::new(PortableV2ErrorCode::InvalidPath, "captured source name")
+            })?
+            .to_os_string();
+        let file = parent.open_child_file(&name).map_err(|_| {
+            PortableV2Error::new(
                 PortableV2ErrorCode::ConcurrentMutation,
-                "imported graph source changed",
-            ));
-        }
-        Ok(crate::graph_object_store::AuthenticatedGraphFile {
-            relative_path,
-            byte_length: self.length,
-            content_sha256: hex(&self.digest),
-        })
+                "captured source changed",
+            )
+        })?;
+        let source = CapturedPortableSource {
+            parent,
+            name,
+            file,
+            capture: self,
+            digest: hex(&self.digest),
+        };
+        source.revalidate().map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::ConcurrentMutation,
+                "captured source identity changed",
+            )
+        })?;
+        Ok(source)
     }
     pub(crate) fn matches_file(
         &self,
@@ -76,7 +97,7 @@ impl MaterializedCapture {
         }
         let mut checksum = crate::corruption_checksum::Checksum::new();
         let mut bytes = 0_u64;
-        let mut buffer = [0; 64 * 1024];
+        let mut buffer = vec![0; 64 * 1024];
         let bound = self.length.checked_add(1).ok_or_else(|| {
             PortableV2Error::new(
                 PortableV2ErrorCode::LimitExceeded,
@@ -110,6 +131,51 @@ impl MaterializedCapture {
             ));
         }
         Ok(self.digest)
+    }
+}
+
+/// Retained authority from a successful authenticated copy or private derived writer.
+/// Metadata tuples and public installers cannot construct this capability.
+pub(crate) struct CapturedPortableSource<'a> {
+    parent: graphforge_filesystem::StableDirectory,
+    name: std::ffi::OsString,
+    file: File,
+    capture: &'a MaterializedCapture,
+    digest: String,
+}
+impl CapturedPortableSource<'_> {
+    pub(crate) fn content_sha256(&self) -> &str {
+        &self.digest
+    }
+    pub(crate) fn bytes(&self) -> u64 {
+        self.capture.length
+    }
+    pub(crate) fn checksum(&self) -> u64 {
+        self.capture.checksum
+    }
+    pub(crate) fn source(&self) -> &File {
+        &self.file
+    }
+    pub(crate) fn revalidate(&self) -> Result<(), graphforge_core::GfError> {
+        let check = || -> std::io::Result<bool> {
+            self.parent.revalidate_named()?;
+            let named = self.parent.open_child_file(&self.name)?;
+            let metadata = self.file.metadata()?;
+            Ok(metadata.is_file()
+                && metadata.len() == self.bytes()
+                && graphforge_filesystem::file_identity(&self.file)? == self.capture.identity
+                && graphforge_filesystem::file_identity(&named)? == self.capture.identity
+                && graphforge_filesystem::file_link_count(&self.file)? == 1
+                && graphforge_filesystem::file_space_usage(&self.file)?.allocated_bytes
+                    == self.capture.allocated_bytes)
+        };
+        if check().unwrap_or(false) {
+            Ok(())
+        } else {
+            Err(graphforge_core::GfError::Validation(
+                "captured portable source identity, length, links or allocation changed".into(),
+            ))
+        }
     }
 }
 
@@ -277,6 +343,15 @@ impl CopySink<'_> {
                 length,
                 digest,
                 checksum,
+                allocated_bytes: graphforge_filesystem::file_space_usage(file)
+                    .map_err(|_| {
+                        PortableV2Error::at(
+                            PortableV2ErrorCode::Io,
+                            relative,
+                            "cannot capture materialized allocation",
+                        )
+                    })?
+                    .allocated_bytes,
             },
         );
         Ok(())

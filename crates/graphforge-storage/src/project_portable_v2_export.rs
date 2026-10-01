@@ -8,10 +8,7 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::{
-    PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2Mode, PortableV2PackageClass,
-    verify_portable_v2,
-};
+use crate::{PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2PackageClass};
 use uuid::Uuid;
 pub(crate) mod planning;
 mod transport;
@@ -719,6 +716,8 @@ mod tests {
     use crate::project_portable_v2::{
         PortableV2ExactIdentity, PortableV2OntologyComposition, canonical_json,
     };
+    #[cfg(test)]
+    use crate::project_portable_v2::{PortableV2Mode, verify_portable_v2};
     use crate::{
         PortableV2SelectionProfile, PortableV2SelectionRequest, ResolvedProjectGeneration,
         preview_portable_v2_selection,

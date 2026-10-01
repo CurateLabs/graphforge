@@ -1109,10 +1109,6 @@ pub(super) fn inspect(
         checksum: Some(checksum.finish()),
     })
 }
-#[expect(
-    clippy::too_many_arguments,
-    reason = "private planner forwards one manifest-authenticated file identity"
-)]
 fn inspect_admitted(
     source: &Path,
     path: &str,

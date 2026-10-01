@@ -360,3 +360,136 @@ fn source_changes_during_materialization_release_routes_and_allow_retry() {
         );
     }
 }
+
+fn captured_ontology() -> (tempfile::TempDir, std::path::PathBuf, MaterializedCapture) {
+    let package = package();
+    let owner = tempfile::tempdir().unwrap();
+    let stage = owner.path().join("materialized");
+    let mut materialized = materialize_verified_portable_v2_observed(
+        package.path(),
+        &stage,
+        PortableV2Limits::default(),
+        None,
+        |_, _| Ok(()),
+        false,
+    )
+    .unwrap();
+    let relative = "data/components/ontology/core-ontology/ontology.json";
+    let capture = materialized.captures.remove(relative).unwrap();
+    (owner, stage.join(relative), capture)
+}
+
+#[test]
+fn portable_captured_cas_refuses_consumed_mutation_restored_before_revalidation() {
+    let (_owner, path, capture) = captured_ontology();
+    let target = tempfile::tempdir().unwrap();
+    crate::open_or_initialize_project(target.path()).unwrap();
+    let current = fs::read(target.path().join("CURRENT")).unwrap();
+    let before = fs::metadata(&path).unwrap();
+    let identity = graphforge_filesystem::path_identity(&path).unwrap();
+    let source = capture.open_source(&path).unwrap();
+    let lease = crate::begin_graph_object_publication(target.path()).unwrap();
+    let hook_path = path.clone();
+    let injected = std::rc::Rc::new(std::cell::Cell::new(false));
+    let restored = std::rc::Rc::new(std::cell::Cell::new(false));
+    let hook_injected = injected.clone();
+    let hook_restored = restored.clone();
+    crate::graph_object_store::set_captured_copy_hook(Some(Box::new(move |phase| {
+        if phase == "before_read" && !hook_injected.get() {
+            fs::write(&hook_path, b"[]").unwrap();
+            hook_injected.set(true);
+        } else if phase == "after_read" && hook_injected.get() && !hook_restored.get() {
+            fs::write(&hook_path, b"{}").unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&hook_path)
+                .unwrap()
+                .set_modified(before.modified().unwrap())
+                .unwrap();
+            hook_restored.set(true);
+        }
+    })));
+    let observed = graphforge_core::hash_observation::operation::Capture::start();
+    let result = crate::graph_object_store::install_captured_portable_source_with_lease(
+        &lease,
+        &source,
+        &mut || false,
+    );
+    let work = observed.snapshot();
+    drop(observed);
+    crate::graph_object_store::set_captured_copy_hook(None);
+    assert!(injected.get() && restored.get());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("checksum or length changed during copy")
+    );
+    assert_eq!(work.artifact_payload_sha256_bytes, 0);
+    assert_eq!(work.unclassified_sha256_bytes, 0);
+    assert!(work.checksum_bytes >= 2);
+    assert_eq!(fs::read(&path).unwrap(), b"{}");
+    assert_eq!(
+        graphforge_filesystem::path_identity(&path).unwrap(),
+        identity
+    );
+    assert_eq!(fs::read(target.path().join("CURRENT")).unwrap(), current);
+}
+
+#[test]
+fn research_captured_cas_counts_real_bytes_reuses_authority_and_refuses_corruption() {
+    let (owner, path, capture) = captured_ontology();
+    let stage = owner.path().join("materialized");
+    let digest = hex(&capture.digest);
+    let relative = format!("data/components/research/research-content/{digest}");
+    let research_path = stage.join(&relative);
+    fs::create_dir_all(research_path.parent().unwrap()).unwrap();
+    fs::rename(path, &research_path).unwrap();
+    let objects = BTreeMap::from([(digest.clone(), 2)]);
+    let captures = BTreeMap::from([(relative, capture)]);
+    let target = tempfile::tempdir().unwrap();
+    crate::open_or_initialize_project(target.path()).unwrap();
+    let lease = crate::begin_graph_object_publication(target.path()).unwrap();
+    let observed = graphforge_core::hash_observation::operation::Capture::start();
+    for _ in 0..2 {
+        super::super::research::install_captured_with_lease(
+            &stage, &lease, &objects, &captures, None,
+        )
+        .unwrap();
+    }
+    let work = observed.snapshot();
+    drop(observed);
+    assert_eq!(work.artifact_payload_sha256_bytes, 0);
+    assert_eq!(work.portable_authentication_sha256_bytes, 0);
+    assert_eq!(work.unclassified_sha256_bytes, 0);
+    assert!(work.checksum_bytes >= 6);
+    eprintln!("research actual captured install/reuse bytes: {work:?}");
+    assert_eq!(
+        crate::read_graph_object_by_digest(target.path(), &digest, 2).unwrap(),
+        b"{}"
+    );
+    let unknown = crate::begin_graph_object_publication(target.path()).unwrap();
+    let observed = graphforge_core::hash_observation::operation::Capture::start();
+    super::super::research::install_captured_with_lease(
+        &stage, &unknown, &objects, &captures, None,
+    )
+    .unwrap();
+    let work = observed.snapshot();
+    drop(observed);
+    assert_eq!(
+        work.artifact_payload_sha256_bytes, 2,
+        "unknown lease must authenticate existing CAS bytes"
+    );
+    let refused = tempfile::tempdir().unwrap();
+    crate::open_or_initialize_project(refused.path()).unwrap();
+    let current = fs::read(refused.path().join("CURRENT")).unwrap();
+    let lease = crate::begin_graph_object_publication(refused.path()).unwrap();
+    fs::write(research_path, b"[]").unwrap();
+    assert!(
+        super::super::research::install_captured_with_lease(
+            &stage, &lease, &objects, &captures, None
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(refused.path().join("CURRENT")).unwrap(), current);
+}

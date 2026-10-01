@@ -131,9 +131,27 @@ fn file_bytes(path: &Path) -> u64 {
     std::fs::metadata(path).unwrap().len()
 }
 
+fn reopen_counts(target: &Path) -> (u64, i64) {
+    let imported = GraphForge::new(target.to_str()).unwrap();
+    let nodes = imported.node_count("Person").unwrap();
+    let edges = imported
+        .execute("MATCH ()-[r]->() RETURN count(r) AS total")
+        .unwrap();
+    assert_eq!(edges.batches.len(), 1);
+    assert_eq!(edges.batches[0].num_rows(), 1);
+    let edges = edges.batches[0]
+        .column_by_name("total")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .value(0);
+    (nodes, edges)
+}
+
 // Publish only measured values from this successful execution. The optional
 // CI summary is written after all measurement windows and assertions.
-fn ci_summary(package: u64, export: &Measured, import: &Measured) {
+fn ci_summary(package: u64, export: &Measured, import: &Measured, reopen: &Measured) {
     use std::io::Write as _;
     let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY") else {
         return;
@@ -147,7 +165,11 @@ fn ci_summary(package: u64, export: &Measured, import: &Measured) {
          |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
         NODES - 1,
     );
-    for (label, measured) in [("export", export), ("import", import)] {
+    for (label, measured) in [
+        ("export", export),
+        ("import", import),
+        ("reopen/query", reopen),
+    ] {
         let work = &measured.work;
         summary.push_str(&format!(
             "| {label} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
@@ -215,24 +237,12 @@ fn portable_export_and_import_hash_and_copy_the_package_a_bounded_number_of_time
     });
     report("import", package_bytes, &import);
 
-    let imported = GraphForge::new(target.to_str()).unwrap();
-    assert_eq!(
-        imported.node_count("Person").unwrap(),
-        u64::try_from(NODES).unwrap()
-    );
-    let edges = imported
-        .execute("MATCH ()-[r]->() RETURN count(r) AS total")
-        .unwrap();
-    assert_eq!(edges.batches.len(), 1);
-    assert_eq!(edges.batches[0].num_rows(), 1);
-    let count = edges.batches[0]
-        .column_by_name("total")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap()
-        .value(0);
-    assert_eq!(count, i64::try_from(NODES - 1).unwrap());
+    let ((nodes, edges), reopen) = measure(|| reopen_counts(&target));
+    assert_eq!(nodes, u64::try_from(NODES).unwrap());
+    assert_eq!(edges, i64::try_from(NODES - 1).unwrap());
+    assert_eq!(reopen.work.artifact_payload_sha256_bytes, 0);
+    assert_eq!(reopen.work.unclassified_sha256_bytes, 0);
+    report("reopen/query", package_bytes, &reopen);
     assert!(!exported.package_digest.is_empty());
     for (label, measured) in [("export", &export), ("import", &import)] {
         assert_eq!(measured.work.unclassified_sha256_bytes, 0, "{label}");
@@ -261,5 +271,5 @@ fn portable_export_and_import_hash_and_copy_the_package_a_bounded_number_of_time
         "import wrote {} for a {package_bytes}-byte package",
         import.written
     );
-    ci_summary(package_bytes, &export, &import);
+    ci_summary(package_bytes, &export, &import, &reopen);
 }

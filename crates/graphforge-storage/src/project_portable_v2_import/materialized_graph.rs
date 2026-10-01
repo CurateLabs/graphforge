@@ -1,7 +1,5 @@
 //! Forward actual portable copy captures into graph installation.
 use super::*;
-use graphforge_filesystem::ObservedSync as _;
-use std::io::Read as _;
 
 fn capture_graph_sources(
     graph_tree: &Path,
@@ -14,12 +12,28 @@ fn capture_graph_sources(
     for relative in paths {
         let source = graph_tree.join(relative);
         let file = if let Some(capture) = captures.and_then(|captures| captures.get(&source)) {
-            capture.graph_file(&source, relative.clone())?
+            let source = capture.open_source(&source)?;
+            crate::graph_object_store::AuthenticatedGraphFile {
+                relative_path: relative.clone(),
+                byte_length: source.bytes(),
+                content_sha256: source.content_sha256().to_owned(),
+            }
         } else {
-            // Newly derived adjacency is not an authenticated archive member.
-            // Generic naming remains genuine for these newly produced artifacts.
+            if captures.is_some() {
+                return Err(PortableV2Error::new(
+                    PortableV2ErrorCode::ConcurrentMutation,
+                    "portable graph file lacks private byte capture",
+                ));
+            }
+            // Private test helpers can provide an untrusted tree without a
+            // scanner/writer capture. Its generic installer keeps genuine SHA.
             let length = fs::metadata(&source)
-                .map_err(|error| storage(&error))?
+                .map_err(|_| {
+                    PortableV2Error::new(
+                        PortableV2ErrorCode::Io,
+                        "cannot inspect untrusted graph file",
+                    )
+                })?
                 .len();
             let input = crate::project_portable_v2_export::open_source_no_follow(&source)?;
             let bound = length.checked_add(1).ok_or_else(|| {
@@ -30,9 +44,14 @@ fn capture_graph_sources(
             })?;
             let mut input = input.take(bound);
             let mut digest = Sha256::new();
-            let mut buffer = [0; 64 * 1024];
+            let mut buffer = vec![0; 64 * 1024];
             loop {
-                let count = input.read(&mut buffer).map_err(|error| storage(&error))?;
+                let count = input.read(&mut buffer).map_err(|_| {
+                    PortableV2Error::new(
+                        PortableV2ErrorCode::Io,
+                        "cannot read untrusted graph file",
+                    )
+                })?;
                 if count == 0 {
                     break;
                 }
@@ -41,7 +60,14 @@ fn capture_graph_sources(
             crate::graph_object_store::AuthenticatedGraphFile {
                 relative_path: relative.clone(),
                 byte_length: length,
-                content_sha256: hex(digest.finalize().into()),
+                content_sha256: digest.finalize().iter().fold(
+                    String::with_capacity(64),
+                    |mut text, byte| {
+                        use std::fmt::Write as _;
+                        write!(text, "{byte:02x}").expect("writing a digest to String succeeds");
+                        text
+                    },
+                ),
             }
         };
         authenticated.push(file);
@@ -94,32 +120,29 @@ pub(super) fn prepare_compact_import_graph_with_allocation(
     collect_portable_graph_paths(&directory, Path::new(""), &mut paths, &mut remaining)?;
     paths.sort();
     let authenticated = capture_graph_sources(graph_tree, &paths, captures)?;
-    let (root, _) = if crate::graph_files::root_is_mapped(participant.participant.record_version) {
-        let routes = crate::route_component::owned::read_owned_layout_table(&directory)
-            .map_err(|error| storage(&error))?
-            .ok_or_else(|| {
-                PortableV2Error::new(
-                    PortableV2ErrorCode::InvalidStructure,
-                    "mapped compact import requires route authority",
-                )
-            })?;
-        crate::graph_object_store::append_authenticated_mapped_graph_files(
-            &lease,
-            graph_tree,
-            &mut crate::graph_object_store::GraphManifestState::empty(),
-            &authenticated,
-            &[],
-            &routes,
+    let routes = if crate::graph_files::root_is_mapped(participant.participant.record_version) {
+        Some(
+            crate::route_component::owned::read_owned_layout_table(&directory)
+                .map_err(|error| storage(&error))?
+                .ok_or_else(|| {
+                    PortableV2Error::new(
+                        PortableV2ErrorCode::InvalidStructure,
+                        "mapped compact import requires route authority",
+                    )
+                })?,
         )
     } else {
-        crate::graph_object_store::append_authenticated_graph_files_v2(
-            &lease,
-            graph_tree,
-            &mut crate::graph_object_store::GraphManifestState::empty(),
-            &authenticated,
-            &[],
-        )
-    }
+        None
+    };
+    let empty_captures = std::collections::BTreeMap::new();
+    let (root, _) = crate::graph_object_store::append_captured_portable_graph_files(
+        &lease,
+        graph_tree,
+        &mut crate::graph_object_store::GraphManifestState::empty(),
+        &authenticated,
+        routes.as_ref(),
+        captures.unwrap_or(&empty_captures),
+    )
     .map_err(|error| storage(&error))?;
     let published =
         crate::graph_files::graph_files_root_participant(&root).map_err(|error| storage(&error))?;

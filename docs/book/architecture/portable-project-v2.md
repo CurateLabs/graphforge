@@ -273,6 +273,14 @@ removes the private directory and its tracked allocation routes.
 Expanded and bundle forms therefore yield the same component tree without
 making unverified bytes available to project publication.
 
+Graph and research installation retain private capabilities from that actual
+copy, binding SHA and XXH64 to native identity, length, allocation and a single
+link. CAS installation verifies the checksum of its consumed buffers and reuses
+only identities installed under the same live publication lease; unknown CAS
+objects and concurrent winners retain genuine SHA authentication. Import's
+missing-CSR builder supplies its own writer captures, while uncaptured derived
+outputs receive one bounded naming pass before following the same private path.
+
 Expanded output is built in a unique sibling directory, synced bottom-up, and
 published with a no-replace atomic rename. Bundles use a unique sibling file,
 canonical header order and PAX paths, exactly two end blocks, and the same

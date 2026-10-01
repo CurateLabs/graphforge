@@ -32,7 +32,7 @@ pub(crate) use control::write_journal;
 #[cfg(test)]
 use participants::request_metadata;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
