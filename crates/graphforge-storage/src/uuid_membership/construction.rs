@@ -5,6 +5,7 @@ use super::BULK_IO_BYTES;
 use super::CONSTRUCTION_INTENT;
 use super::ConstructionIndexEncoding;
 use super::ConstructionIndexOutput;
+use super::CONSTRUCTION_INTENT_FORMAT_VERSION;
 use super::FORMAT_VERSION;
 use super::FileRecord;
 use super::IDENTITY_RECORD_BYTES;
@@ -36,7 +37,7 @@ use super::validate_run_descriptors;
 use crate::construction_record_layout::BASE_IDENTITY_WIDTH as CONSTRUCTION_IDENTITY_WIDTH;
 use crate::construction_record_layout::IDENTITY_SURROGATE_OFFSET;
 use graphforge_core::GfError;
-use graphforge_core::hash_observation::ControlSha256 as Sha256;
+use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use graphforge_filesystem::ObservedSync as _;
 use serde::Deserialize;
 use serde::Serialize;
@@ -127,7 +128,9 @@ impl ConstructionRecoveryIntent {
             self.source_bytes,
             &self.source_xxh64,
         );
-        if self.format_version != FORMAT_VERSION || self.authority_sha256 != expected {
+        if self.format_version != CONSTRUCTION_INTENT_FORMAT_VERSION
+            || self.authority_sha256 != expected
+        {
             return Err(storage_err(
                 "construction recovery intent authentication failed",
             ));
@@ -278,7 +281,7 @@ fn encode_construction_index_inner(
     let source_identity = graphforge_filesystem::file_identity(&input).map_err(storage_err)?;
     let source_file_id = hex_bytes(&source_identity.file_id);
     let mut intent = ConstructionRecoveryIntent {
-        format_version: FORMAT_VERSION,
+        format_version: CONSTRUCTION_INTENT_FORMAT_VERSION,
         generation,
         parent_generation,
         identities_name: identities_name.to_owned(),

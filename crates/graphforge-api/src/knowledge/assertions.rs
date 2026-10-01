@@ -301,7 +301,6 @@ impl GraphForge {
     /// Atomically create one assertion, its graph references, and provenance.
     #[allow(
         clippy::needless_pass_by_value,
-        clippy::too_many_lines,
         reason = "graphforge-knowledge-api/1 freezes owned request structs"
     )]
     pub fn create_assertion(

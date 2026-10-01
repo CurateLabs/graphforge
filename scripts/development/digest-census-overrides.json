@@ -1062,7 +1062,7 @@
       "role": "control_authentication",
       "input_contract": "Ordinal manifest, canonical shape-authority envelope or canonical receipt body authenticate construction control chain.",
       "function_bodies_sha256": [
-        "657f6c1f04b64bccd5d5bcac5ddb9ad26950d62e9858f7e015f38086ecb1e35a"
+        "4d243dccbebe8384e901551b6b9924289b18d5a37b7d755147a194c9f733e3e2"
       ]
     },
     {
@@ -1102,58 +1102,12 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/graph_construction/io_evidence.rs",
-      "function": "with_cache_window",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "HashingWriter hashes staged artifact bytes inline with required artifact publication.",
-      "function_bodies_sha256": [
-        "a223bf65619dc62d85b26f34ed85c71df826b942d67df1e04b305cd17c3bc5b2",
-        "002412ded660a5ffcc2c27b548b3f634fd844623db5d9684a1c0627958036b20"
-      ]
-    },
-    {
       "path": "crates/graphforge-storage/src/graph_construction/progress.rs",
       "function": "sha256_of_body",
       "role": "control_authentication",
       "input_contract": "Canonical construction progress JSON body is authenticated against envelope digest.",
       "function_bodies_sha256": [
-        "ccb77c3978c53612165314885853d3663c9de3e396a9f11f976254993f240104"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_construction/recovery.rs",
-      "function": "authenticate_artifact_contents",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Construction-owned run/Parquet artifact bytes are authenticated against durable receipt during recovery.",
-      "function_bodies_sha256": [
-        "95196fd59570511437ed509df69086fdb86a4e66c63fe6babeb2e37ee390fde4"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_construction/recovery.rs",
-      "function": "receipt_for_existing_with_work",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Construction-owned run/Parquet artifact bytes are authenticated against durable receipt during recovery.",
-      "function_bodies_sha256": [
-        "d3205a02ac5720323e2d81b80c1a5ce8b05fa198661b03aac506291d266f5736"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_construction/shape.rs",
-      "function": "route_fixed_run",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Construction route input run bytes are authenticated against sealed run digest while rewriting.",
-      "function_bodies_sha256": [
-        "e2e0af6a6db3e8ed5962d2995f0345356851db212c0d88c62c5bf73d0012170d"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_construction/shape.rs",
-      "function": "route_identity_run",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Construction route input run bytes are authenticated against sealed run digest while rewriting.",
-      "function_bodies_sha256": [
-        "8397ece939740c3a2a3fe3fcc4d964723512ca924b0956b04a6ac23d1c198d0e"
+        "32ba1388f5290cd8dc1ae26c6bb78f0214ac2efe8f8837859c160a129eb29e21"
       ]
     },
     {
@@ -1162,16 +1116,7 @@
       "role": "contract_identity",
       "input_contract": "Canonical catalog logical contents form semantic construction authority.",
       "function_bodies_sha256": [
-        "821964139860a93b7bf388b23bb8044e5340dd91316d206f91a2cc1fb27f35d5"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_construction/supersession.rs",
-      "function": "authenticate_payload",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Construction supersession payload bytes authenticate owned artifact before replacement.",
-      "function_bodies_sha256": [
-        "d1fcacc060727753e48d69225e7e6734e8a39db8b8923baf2e799fc37cfd627f"
+        "ace041bb4b4d35ee4f5555269923600bce5a664c13b73f5343b874e33ac47eb6"
       ]
     },
     {
@@ -1181,15 +1126,6 @@
       "input_contract": "Construction source/run/artifact byte stream authenticates input or computes output publication receipt.",
       "function_bodies_sha256": [
         "02912866a93b15533a4ddcd88943d1f52d63d0701cd48e5d0f3df3af4065acc2"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_construction_encoding.rs",
-      "function": "authenticated_source_spool",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Construction source/run/artifact byte stream authenticates input or computes output publication receipt.",
-      "function_bodies_sha256": [
-        "d42ad31aad8f935dd2e726c9140d2c2c2a25c5b13a54a3c7a0a717a28b37ca1d"
       ]
     },
     {
@@ -1207,16 +1143,7 @@
       "role": "control_authentication",
       "input_contract": "Canonical inventory JSON defines pinned construction inventory authority.",
       "function_bodies_sha256": [
-        "e5a634ec8d8dbfb5cf10e570df685aa62fc3dd3c7162f1c395d1e0009b28ce04"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/graph_construction_encoding.rs",
-      "function": "open_with_codec",
-      "role": "durable_artifact_or_trust_boundary",
-      "input_contract": "Construction source/run/artifact byte stream authenticates input or computes output publication receipt.",
-      "function_bodies_sha256": [
-        "c559d0400f67a3a029dea4a963e79d7981e224cf7d157fdf8c9590321095cdb6"
+        "a8e878bc309fb23fc88a5d648db10c4fff2ee8811b4eea48c0feff0b2563bb31"
       ]
     },
     {
@@ -2282,7 +2209,7 @@
       "role": "control_authentication",
       "input_contract": "Construction intent version/generation/names/digests authenticate control intent metadata.",
       "function_bodies_sha256": [
-        "8683ff9c23459c8b35cf349e1c6db442b2daebd938f9c05410bdc502c78dfc01"
+        "f88d7b2f45f4dce58c4779264935586667490f7eea1a40310127f8355a68b985"
       ]
     },
     {
@@ -2291,7 +2218,7 @@
       "role": "durable_artifact",
       "input_contract": "Construction source identity artifact byte stream authenticates required construction input.",
       "function_bodies_sha256": [
-        "eaa0454e9d0783a693093d4e36d3506a5856cbf0c47ddfea7e7fa0c9643d3a87"
+        "c63969f9a28852e4a0dd0008a255c5a6ebe2c3fd5a132660fd55bb4f2ad0c3d2"
       ]
     },
     {

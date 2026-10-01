@@ -66,7 +66,12 @@ pub(crate) use topology_delta::prepare_v4_ordinal_delta;
 
 mod identity_codec;
 
-const FORMAT_VERSION: u32 = 7;
+const FORMAT_VERSION: u32 = 6;
+/// Private version tag for the construction recovery intent only — independent
+/// of the published UUID membership manifest format. Bumped when the intent
+/// struct fields or digest inputs change (v3: replaces source_sha256 with
+/// source_xxh64). Old in-flight intents fail closed on the version mismatch.
+const CONSTRUCTION_INTENT_FORMAT_VERSION: u32 = 3;
 const NODE_LOOKUP_RECORD_BYTES: u64 = 24;
 const IDENTITY_RECORD_BYTES: u64 = 25;
 const NODE_LOOKUP_RECORD_WIDTH: usize = 24;
