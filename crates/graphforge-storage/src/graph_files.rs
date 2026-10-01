@@ -135,10 +135,16 @@ pub(crate) enum GraphFilesParticipant {
 pub struct GraphFilesOpenEvidence {
     /// How the workspace was obtained.
     pub strategy: GraphFilesOpenStrategy,
-    /// Files whose length and digest were verified.
+    /// Files whose presence and exact length were validated.
     pub files_validated: u64,
-    /// Bytes whose digests were verified.
+    /// Bytes whose presence and exact length were validated. This is declared
+    /// length, not content read: compact generations checksum a hard-linked
+    /// payload on its first touch, not when the workspace is hydrated.
     pub bytes_validated: u64,
+    /// Bytes actually read and checksummed while hydrating. Zero for a compact
+    /// generation's hard-linked payloads; control files copied into the
+    /// workspace and expanded (V1) trees are checksummed here.
+    pub bytes_checksummed: u64,
     /// Files copied into a private workspace.
     pub files_copied: u64,
     /// Bytes copied into a private workspace.
@@ -422,6 +428,7 @@ pub(crate) fn stage_graph_tree_with_allocation(
             .bytes_validated
             .checked_add(entry.byte_length)
             .ok_or_else(|| validation("graph staging validated-byte count overflows"))?;
+        evidence.bytes_checksummed = evidence.bytes_checksummed.saturating_add(entry.byte_length);
         evidence.files_copied = evidence
             .files_copied
             .checked_add(1)
@@ -648,6 +655,7 @@ pub fn materialize_graph_tree(
         files_validated: u64::try_from(inventory.files.len())
             .map_err(|_| validation("graph hydration file inventory exceeds u64"))?,
         bytes_validated: inventory.total_byte_length,
+        bytes_checksummed: inventory.total_byte_length,
         application_read_bytes: route_reads.0,
         application_read_calls: route_reads.1,
         ..GraphFilesOpenEvidence::default()
@@ -713,6 +721,7 @@ pub fn pinned_open_evidence(inventory: &GraphFilesInventory) -> GraphFilesOpenEv
         strategy: GraphFilesOpenStrategy::PinnedInPlace,
         files_validated: u64::try_from(inventory.files.len()).unwrap_or(u64::MAX),
         bytes_validated: inventory.total_byte_length,
+        bytes_checksummed: inventory.total_byte_length,
         files_copied: 0,
         bytes_copied: 0,
         files_opened_in_place: u64::try_from(inventory.files.len()).unwrap_or(u64::MAX),
@@ -875,6 +884,10 @@ fn capture_payload_identity(
     domain: graphforge_core::hash_observation::HashDomain,
 ) -> Result<(String, u64, u64), GfError> {
     let mut file = File::open(path).map_err(|error| storage("open graph file", path, error))?;
+    // A hydrated payload nothing has read yet is admitted before its bytes can
+    // name a new identity: a corrupted hard-linked object must be refused, not
+    // republished under a fresh digest (#1388).
+    crate::graph_admission::admit_file(&file)?;
     let mut prior_calls = 0;
     if let Some(known) = reused {
         // Reuse the authenticated identity only when these exact bytes still

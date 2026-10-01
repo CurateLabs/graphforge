@@ -758,7 +758,7 @@ fn read_parquet_filtered_u64_attempt(
     // page index; Optional enables page-level skipping when one is present.
     let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional);
     let builder = ParquetRecordBatchReaderBuilder::try_new_with_options(
-        crate::lifecycle_io::ReadPathFile::new(file),
+        crate::catalog::admitted_path_file(file)?,
         options,
     )
     .map_err(parquet_err)?;

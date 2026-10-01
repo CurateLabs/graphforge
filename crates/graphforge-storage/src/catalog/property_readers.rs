@@ -394,7 +394,7 @@ where
             metadata.len(),
         )?);
         let mut builder =
-            ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
+            ParquetRecordBatchReaderBuilder::try_new(crate::catalog::admitted_path_file(file)?)
                 .map_err(parquet_err)?;
         admit_decoded_parquet(&builder)?;
         if let Some(columns) = projected_columns {

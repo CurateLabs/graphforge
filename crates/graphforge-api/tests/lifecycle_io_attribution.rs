@@ -13,6 +13,9 @@ use graphforge_api::{
 };
 use graphforge_storage::StorageIoPhase;
 
+#[path = "support/bulk_fixture.rs"]
+mod bulk_fixture;
+
 #[test]
 fn default_reopen_and_query_do_no_optional_observation_work() {
     let root = tempfile::tempdir().unwrap();
@@ -455,4 +458,145 @@ fn report_instrumentation_overhead() {
         elapsed,
         elapsed.as_nanos() as f64 / SAMPLES as f64
     );
+}
+
+/// One compact (V2) project measured through open and two identical queries.
+struct OpenCost {
+    payload_bytes: u64,
+    open: Region,
+    open_evidence: graphforge_storage::GraphFilesOpenEvidence,
+    first_query: Region,
+    second_query: Region,
+}
+
+fn total_read_bytes(region: &Region) -> u64 {
+    region.attribution.totals.read_bytes
+}
+
+fn measure_open_cost(nodes: usize, fan_out: usize) -> OpenCost {
+    let project = tempfile::tempdir().expect("project directory");
+    let path = project.path().join("state");
+    // Skip the trailing `index_adjacency`: it republishes the project as an
+    // expanded (V1) generation tree. The construction session's own compact
+    // publication, with its shipped adjacency CSR, is what this measures.
+    bulk_fixture::generate_bulk_graph_with_index(&path, nodes, fan_out, false);
+    let (forge, open) = measure(|| {
+        GraphForge::new(Some(path.to_str().expect("utf-8 project path"))).expect("project reopens")
+    });
+    let open_evidence = forge.graph_open_evidence().clone();
+    let query = "MATCH (a)-[r]->(b) RETURN count(*) AS edges";
+    let (_, first_query) = measure(|| forge.execute(query).expect("first query"));
+    let (_, second_query) = measure(|| forge.execute(query).expect("second query"));
+    OpenCost {
+        payload_bytes: open_evidence.bytes_validated,
+        open,
+        open_evidence,
+        first_query,
+        second_query,
+    }
+}
+
+/// Opening a compact project is O(files) in graph payload bytes (#1388): the
+/// manifest, route table and every payload's presence and exact length, plus
+/// the small sidecars and identity controls that are copied and checksummed
+/// while hydrating. A payload's content is checksummed on its first touch, once.
+///
+/// Node count is fixed and the edge payload grows 16x, so any open-time work
+/// proportional to payload bytes shows up as growth. The residual that does
+/// scale, with nodes and not with edges, is the UUID-membership identity
+/// controls copied into the private workspace (about 40 bytes per node).
+#[test]
+fn open_reads_control_bytes_not_payload_bytes() {
+    const NODES: usize = 1 << 12;
+    let small = measure_open_cost(NODES, 4);
+    let large = measure_open_cost(NODES, 64);
+
+    for (label, cost) in [("small", &small), ("large", &large)] {
+        eprintln!(
+            "open cost {label}: payload={} open_read={} checksummed={} copied={} \
+             first_query_read={} second_query_read={}",
+            cost.payload_bytes,
+            total_read_bytes(&cost.open),
+            cost.open_evidence.bytes_checksummed,
+            cost.open_evidence.bytes_copied,
+            total_read_bytes(&cost.first_query),
+            total_read_bytes(&cost.second_query)
+        );
+    }
+    // The comparison is meaningful only if the payload really grew.
+    assert!(
+        large.payload_bytes > 6 * small.payload_bytes,
+        "edge payload did not grow: {} -> {}",
+        small.payload_bytes,
+        large.payload_bytes
+    );
+
+    // 1. Open reads far less than the payload it declares. The small project
+    //    is the harsher ratio because its controls are the same size.
+    for (label, cost) in [("small", &small), ("large", &large)] {
+        assert!(
+            total_read_bytes(&cost.open) * 8 < cost.payload_bytes,
+            "{label}: open read {} bytes against {} declared payload bytes",
+            total_read_bytes(&cost.open),
+            cost.payload_bytes
+        );
+    }
+    // 2. Open does not grow with the edge payload. What does grow is O(files):
+    //    more edge files mean more manifest and route-table entries.
+    assert!(
+        total_read_bytes(&large.open) < 2 * total_read_bytes(&small.open),
+        "open reads grew with edge payload: {} -> {} bytes",
+        total_read_bytes(&small.open),
+        total_read_bytes(&large.open)
+    );
+    // 3. Hydration checksums only what it copies (identity controls, read once
+    //    to copy and once to verify) plus small sidecars, and the copied
+    //    controls are node-linear, not payload-linear.
+    for (label, cost) in [("small", &small), ("large", &large)] {
+        let evidence = &cost.open_evidence;
+        assert!(
+            evidence.bytes_copied <= 64 * NODES as u64,
+            "{label}: {} control bytes copied for {NODES} nodes",
+            evidence.bytes_copied
+        );
+        assert!(
+            evidence.bytes_checksummed <= 2 * evidence.bytes_copied + 64 * 1024,
+            "{label}: hydration checksummed {} bytes but copied only {}: {evidence:#?}",
+            evidence.bytes_checksummed,
+            evidence.bytes_copied
+        );
+    }
+    let growth = large
+        .open_evidence
+        .bytes_checksummed
+        .abs_diff(small.open_evidence.bytes_checksummed);
+    assert!(
+        growth * 20 < small.open_evidence.bytes_checksummed,
+        "checksummed bytes moved {growth} with a 16x edge payload: {} -> {}",
+        small.open_evidence.bytes_checksummed,
+        large.open_evidence.bytes_checksummed
+    );
+
+    // 4. The first query pays its payloads' checksums (a read-path scan), and
+    //    the second query on the same session pays none of it again.
+    for (label, cost) in [("small", &small), ("large", &large)] {
+        assert!(
+            total_read_bytes(&cost.first_query) > 0,
+            "{label}: the first query read nothing"
+        );
+        assert_eq!(
+            read_bytes(
+                &cost.second_query.attribution,
+                StorageIoPhase::HydrationVerification
+            ),
+            0,
+            "{label}: a repeated query re-paid hydration verification"
+        );
+        assert!(
+            total_read_bytes(&cost.second_query) * 4 < total_read_bytes(&cost.first_query),
+            "{label}: the repeated query re-paid first-touch admission: {} vs {} bytes",
+            total_read_bytes(&cost.second_query),
+            total_read_bytes(&cost.first_query)
+        );
+    }
 }

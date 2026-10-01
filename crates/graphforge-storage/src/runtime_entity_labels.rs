@@ -468,7 +468,7 @@ fn promote_node_properties(
         .collect::<HashMap<_, _>>();
     for path in crate::mutator::node_parquet_files(dir)? {
         let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            std::fs::File::open(path).map_err(pq_err)?,
+            crate::graph_admission::open_admitted(&path)?,
         )
         .map_err(pq_err)?
         .with_batch_size(4096)
@@ -546,7 +546,7 @@ fn promote_edge_properties(dir: &Path) -> Result<HashSet<std::path::PathBuf>, Gf
     };
     for (_, path) in inventory.edge_files(Some("_exploratory")) {
         let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            std::fs::File::open(path).map_err(pq_err)?,
+            crate::graph_admission::open_admitted(&path)?,
         )
         .map_err(pq_err)?
         .with_batch_size(4096)
@@ -679,7 +679,7 @@ fn stage_retired_edge_property_owners(
     }
     for fragment in fragments {
         let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            std::fs::File::open(&fragment.path).map_err(pq_err)?,
+            crate::graph_admission::open_admitted(&fragment.path)?,
         )
         .map_err(pq_err)?
         .with_batch_size(4096)
@@ -762,7 +762,7 @@ fn stage_promoted_edges(dir: &Path, staged: &mut RewriteBatch) -> Result<bool, G
     for (_, path) in inventory.edge_files(Some("_exploratory")) {
         let reader = || -> Result<_, GfError> {
             parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-                std::fs::File::open(&path).map_err(pq_err)?,
+                crate::graph_admission::open_admitted(&path)?,
             )
             .map_err(pq_err)?
             .with_batch_size(4096)
@@ -878,7 +878,7 @@ fn reconcile_inner(
     for path in crate::mutator::node_parquet_files(dir)? {
         let reader = || -> Result<_, GfError> {
             parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-                std::fs::File::open(&path).map_err(pq_err)?,
+                crate::graph_admission::open_admitted(&path)?,
             )
             .map_err(pq_err)?
             .with_batch_size(4096)

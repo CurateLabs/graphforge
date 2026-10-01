@@ -57,6 +57,19 @@ admission path.
 Current-format graph-inventory admission checks exact length and XXH64 on
 the retained payload handle. It preserves path, link, identity, filesystem
 and atomic-publication checks. It performs no payload SHA-256 pass.
+Opening a compact generation does not read payload content. The open
+authenticates the manifest and route table, checks every payload for presence
+and exact length, and hard-links payloads into the private workspace; it
+checksums only the small sidecars and identity controls, which it copies into
+single-link files and verifies as it copies. Bulk payloads (nodes, edges, property fragments and search segments)
+are checked for XXH64 on the first read of each object, memoized for that
+hydration, so a project that never reads an object never pays for it. A
+refusal is memoized as well. Every consumer that would otherwise bless a
+payload's current bytes (inventory capture for publication, rewrite baselines,
+appends) admits it first, so corruption cannot be republished under a fresh
+digest. The explicit full-admission API remains for callers that want a whole
+generation checked.
+
 Retired graph/files formats 1–4 and persisted graph/snapshot Arrow records
 are refused with an unsupported-format error. Their compatibility readers,
 SHA-256 read fallback and publication upgrade path are removed. Projects

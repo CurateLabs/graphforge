@@ -32,6 +32,19 @@ pub(crate) struct BulkFixtureEvidence {
 /// deliberately checks its in-flight topology window for duplicate UUIDs and
 /// is therefore not a realistic bulk-ingestion primitive.
 pub(crate) fn generate_bulk_graph(dir: &Path, nodes: usize, fan_out: usize) -> BulkFixtureEvidence {
+    generate_bulk_graph_with_index(dir, nodes, fan_out, true)
+}
+
+/// [`generate_bulk_graph`] with the trailing `index_adjacency` optional.
+/// That call republishes the project as an expanded (V1) generation tree, so
+/// a fixture that must stay as the construction session published it (compact
+/// V2 with its shipped adjacency CSR) passes `false`.
+pub(crate) fn generate_bulk_graph_with_index(
+    dir: &Path,
+    nodes: usize,
+    fan_out: usize,
+    index_adjacency: bool,
+) -> BulkFixtureEvidence {
     assert!(nodes > fan_out);
     let forge = GraphForge::new(Some(dir.to_str().expect("temp path is UTF-8"))).unwrap();
     let mut session = forge
@@ -106,7 +119,9 @@ pub(crate) fn generate_bulk_graph(dir: &Path, nodes: usize, fan_out: usize) -> B
     session.seal_and_publish().unwrap();
     let progress = session.progress();
     drop(session);
-    forge.index_adjacency().unwrap();
+    if index_adjacency {
+        forge.index_adjacency().unwrap();
+    }
     drop(forge);
 
     BulkFixtureEvidence {

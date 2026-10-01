@@ -4,15 +4,15 @@
 //! enumerate `generations/`, inspect transaction journals, or decode any
 //! participant table.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(windows)]
-use std::sync::{Condvar, Mutex};
+use std::sync::Condvar;
 
 use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
@@ -90,6 +90,9 @@ pub struct ProjectParticipantDescriptor {
     pub content_sha256: [u8; 32],
 }
 
+/// One payload object's memoized admission outcome.
+type PayloadAdmissionCell = Arc<OnceLock<Result<(), GfError>>>;
+
 /// A validated, lifetime-pinned view of one committed project generation.
 ///
 /// The retained lease handle gives publication/cleanup work a stable file
@@ -112,6 +115,15 @@ pub struct ResolvedProjectGeneration {
     /// share one computation instead of independently re-running the full
     /// per-entry admission sweep.
     inventory_cache: Arc<OnceLock<Result<Option<Arc<crate::GraphFilesInventory>>, GfError>>>,
+    /// Per-object payload admission memo for this resolved generation, keyed by
+    /// content-store name so hard-linked duplicates pay once and every clone
+    /// shares the result. The map lock only mints a cell; the checksum runs
+    /// inside `OnceLock::get_or_init`, so concurrent first touches of one
+    /// object wait on a single computation while other objects proceed. A
+    /// refusal is memoized like a success.
+    payload_admissions: Arc<Mutex<BTreeMap<String, PayloadAdmissionCell>>>,
+    /// Memo of [`Self::admit_all_payloads`].
+    all_payloads_admitted: Arc<OnceLock<Result<(), GfError>>>,
 }
 
 /// Portable export authority minted from this generation's authenticated manifest.
@@ -343,12 +355,44 @@ impl ResolvedProjectGeneration {
         crate::graph_tree_root(&self.generation_root)
     }
 
-    /// Load and validate the file-backed graph inventory when declared.
+    /// Load and validate the file-backed graph inventory when declared, with
+    /// every declared payload authenticated by exact length and required
+    /// XXH64 checksum. Content authentication is memoized per object, so
+    /// repeat calls are cheap.
+    ///
+    /// Use this wherever the caller will read or republish payload bytes
+    /// without routing each read through [`crate::graph_admission`]. Opening a
+    /// project uses [`Self::unadmitted_graph_files_inventory`] instead and
+    /// admits each payload on first touch.
+    ///
+    /// # Errors
+    /// Returns structured validation/corruption errors for unsupported
+    /// contracts, inventory/tree mismatch, or a corrupted payload.
+    pub fn graph_files_inventory(&self) -> Result<Option<crate::GraphFilesInventory>, GfError> {
+        let inventory = self.unadmitted_graph_files_inventory()?;
+        if inventory.is_some() {
+            self.admit_all_payloads()?;
+        }
+        Ok(inventory)
+    }
+
+    /// Load and validate the file-backed graph inventory without reading any
+    /// payload content. The manifest, route table, and the presence and exact
+    /// length of every payload are authenticated; payload checksums are not
+    /// checked here. A caller must admit each payload before trusting its
+    /// bytes, either by routing reads through [`crate::graph_admission`] after
+    /// hydrating with [`crate::materialize_graph_objects`], or by calling
+    /// [`Self::admit_payload`] / [`Self::admit_all_payloads`].
+    ///
+    /// Expanded (V1) generations still verify their payloads here; only
+    /// compact generations defer content authentication.
     ///
     /// # Errors
     /// Returns structured validation/corruption errors for unsupported
     /// contracts or inventory/tree mismatch.
-    pub fn graph_files_inventory(&self) -> Result<Option<crate::GraphFilesInventory>, GfError> {
+    pub fn unadmitted_graph_files_inventory(
+        &self,
+    ) -> Result<Option<crate::GraphFilesInventory>, GfError> {
         // Memoized: a resolved generation never mutates and `CURRENT` is not
         // re-consulted after resolution (see `inventory_cache`'s doc comment
         // on the struct), so this admits the manifest-authenticated
@@ -365,11 +409,58 @@ impl ResolvedProjectGeneration {
         }
     }
 
-    /// Uncached body of [`Self::graph_files_inventory`]. Every call performs
-    /// full manifest decode and checks each declared graph payload against
-    /// its required checksum and exact length. Control nodes retain SHA-256
-    /// authentication. Call only through the memoized public
-    /// method above.
+    /// Admit one declared payload by exact length and required XXH64
+    /// checksum, memoized per content-store object for this resolved
+    /// generation (clones share the memo). Content-store names were
+    /// authenticated when each object was installed.
+    ///
+    /// # Errors
+    /// Returns the memoized refusal for a missing, truncated, or corrupted object.
+    pub fn admit_payload(&self, entry: &crate::GraphFileEntry) -> Result<(), GfError> {
+        let cell = {
+            let mut admissions = self
+                .payload_admissions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Arc::clone(admissions.entry(entry.content_sha256.clone()).or_default())
+        };
+        cell.get_or_init(|| {
+            crate::graph_object_store::admit_graph_object(self.container_root(), entry)
+        })
+        .clone()
+    }
+
+    /// Admit every declared compact payload. Expanded (V1) payloads were
+    /// verified when the inventory was loaded.
+    ///
+    /// # Errors
+    /// Returns the first refusal; the result is memoized for this generation.
+    pub fn admit_all_payloads(&self) -> Result<(), GfError> {
+        self.all_payloads_admitted
+            .get_or_init(|| {
+                if !matches!(
+                    self.declared_graph_files_participant()?,
+                    Some(crate::GraphFilesParticipant::V2(_))
+                ) {
+                    return Ok(());
+                }
+                let Some(inventory) = self.unadmitted_graph_files_inventory()? else {
+                    return Ok(());
+                };
+                inventory
+                    .files
+                    .iter()
+                    .try_for_each(|entry| self.admit_payload(entry))
+            })
+            .clone()
+    }
+
+    /// Uncached body of [`Self::unadmitted_graph_files_inventory`]. Performs
+    /// full manifest decode and route authentication and checks that each
+    /// declared compact payload is present with its exact length. Content
+    /// checksums are deferred to [`Self::admit_payload`]; expanded (V1)
+    /// payloads are verified here. Control nodes retain SHA-256
+    /// authentication. Call only through the memoized method above.
     fn compute_graph_files_inventory(&self) -> Result<Option<crate::GraphFilesInventory>, GfError> {
         let Some(participant) = self.declared_graph_files_participant()? else {
             return Ok(None);
@@ -392,11 +483,11 @@ impl ResolvedProjectGeneration {
                         )
                     },
                 )?;
-                // Refuse payload corruption before exposing any reader by
-                // comparing required XXH64 and exact length. The same-inode
-                // topology regression (#1435) continues to exercise this check.
-                // SHA-256 names are authenticated at installation and existing
-                // trust boundaries; legacy formats and standalone audits are retired.
+                // Open is O(files), not O(bytes): refuse a missing or resized
+                // payload here, and leave the content checksum to the first
+                // reader (#1388). The same-inode topology regression (#1435)
+                // is proven on that first touch. SHA-256 names are
+                // authenticated at installation and existing trust boundaries.
                 for entry in &files {
                     let path =
                         crate::graph_object_path(self.container_root(), &entry.content_sha256)?;
@@ -411,7 +502,6 @@ impl ResolvedProjectGeneration {
                             "graph payload object length does not match manifest".into(),
                         ));
                     }
-                    crate::graph_object_store::admit_graph_object(self.container_root(), entry)?;
                 }
                 crate::route_component::authenticate_manifest_routes(
                     root.format_version,
@@ -899,6 +989,8 @@ pub fn resolve_project_generation(
             manifest: Arc::new(manifest),
             _lease_handle: Arc::new(lease),
             inventory_cache: Arc::new(OnceLock::new()),
+            payload_admissions: Arc::default(),
+            all_payloads_admitted: Arc::new(OnceLock::new()),
         });
     }
 }
@@ -948,6 +1040,8 @@ pub fn resolve_verified_generation(
         manifest: Arc::new(manifest),
         _lease_handle: Arc::new(lease),
         inventory_cache: Arc::new(OnceLock::new()),
+        payload_admissions: Arc::default(),
+        all_payloads_admitted: Arc::new(OnceLock::new()),
     })
 }
 

@@ -236,6 +236,11 @@ impl Drop for PhaseScope {
         }
     }
 }
+/// Whether an explicit [`PhaseScope`] currently overrides the primitive's phase.
+#[must_use]
+pub(crate) fn phase_override_active() -> bool {
+    ACTIVE_PHASE.with(Cell::get).is_some()
+}
 /// Requested override, otherwise the primitive's own phase.
 #[must_use]
 pub fn effective_phase(default: StorageIoPhase) -> StorageIoPhase {
@@ -439,13 +444,20 @@ pub struct ReadPathFile {
 }
 
 impl ReadPathFile {
-    /// Wrap an already-opened committed data file.
-    #[must_use]
-    pub fn new(file: std::fs::File) -> Self {
-        Self {
+    /// Wrap an already-opened committed data file, first admitting it when it
+    /// is a hydrated payload no reader has yet checked (#1388): the first
+    /// touch checks exact length and the required XXH64 checksum, memoized per
+    /// hydration, so a corrupted payload is refused before any byte of it is
+    /// decoded. Files that are not unadmitted payloads pass through unchanged.
+    ///
+    /// # Errors
+    /// Returns the corruption refusal for a payload that fails admission.
+    pub fn admitted(file: std::fs::File) -> Result<Self, GfError> {
+        crate::graph_admission::admit_file(&file)?;
+        Ok(Self {
             file,
             capture: CaptureContext::current(),
-        }
+        })
     }
 }
 
@@ -635,12 +647,14 @@ mod tests {
         let file = std::fs::File::open(named.path()).unwrap();
         let _first = CaptureScope::install();
         let _phase = PhaseScope::enter(StorageIoPhase::HydrationVerification);
-        let first = ReadPathFile::new(file.try_clone().unwrap())
+        let first = ReadPathFile::admitted(file.try_clone().unwrap())
+            .unwrap()
             .get_read(0)
             .unwrap();
         {
             let _second = CaptureScope::install();
-            let second = ReadPathFile::new(std::fs::File::open(named.path()).unwrap());
+            let second =
+                ReadPathFile::admitted(std::fs::File::open(named.path()).unwrap()).unwrap();
             std::thread::scope(|scope| {
                 let first_worker = scope.spawn(move || {
                     let mut reader = first;
