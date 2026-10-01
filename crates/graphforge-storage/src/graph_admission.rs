@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
 
+use crate::corruption_checksum::{PAYLOAD_BLOCK_BYTES, block_count};
+
 use graphforge_core::GfError;
 
 type IdentityKey = (u64, [u8; 16]);
@@ -106,15 +108,27 @@ pub fn open_admitted(path: &Path) -> Result<File, GfError> {
 
 /// One unadmitted hard-linked payload inode.
 #[derive(Debug)]
-struct PayloadTicket {
+pub struct PayloadTicket {
     entry: crate::GraphFileEntry,
     cas_object: PathBuf,
     workspace_root: PathBuf,
     workspace_file: PathBuf,
     batch: u64,
+    /// Whole-object outcome: `Ok` once every byte is admitted (whole check or
+    /// every block), `Err` once any check refused. Memoized for the ticket.
     outcome: OnceLock<Result<(), GfError>>,
+    /// Per-block admission state for payloads whose entry carries a block
+    /// table (#1388 range authentication prototype).
+    blocks: Mutex<BlockState>,
     #[cfg(test)]
     checksum_runs: AtomicU64,
+}
+
+#[derive(Debug, Default)]
+struct BlockState {
+    admitted: Vec<bool>,
+    admitted_count: usize,
+    length_checked: bool,
 }
 
 static REGISTRY: LazyLock<Mutex<HashMap<IdentityKey, Arc<PayloadTicket>>>> =
@@ -172,6 +186,11 @@ impl AdmissionBatch {
                 workspace_file,
                 batch: self.0,
                 outcome: OnceLock::new(),
+                blocks: Mutex::new(BlockState {
+                    admitted: vec![false; entry.block_xxh64.len()],
+                    admitted_count: 0,
+                    length_checked: false,
+                }),
                 #[cfg(test)]
                 checksum_runs: AtomicU64::new(0),
             }),
@@ -229,6 +248,157 @@ impl PayloadTicket {
         }
         outcome.clone()
     }
+}
+
+impl PayloadTicket {
+    fn has_block_table(&self) -> bool {
+        !self.entry.block_xxh64.is_empty()
+            && self.entry.block_xxh64.len() as u64 == block_count(self.entry.byte_length)
+    }
+
+    fn forget(self: &Arc<Self>, identity: graphforge_filesystem::FileIdentity) {
+        let mut registry = registry();
+        if registry
+            .get(&key_of(identity))
+            .is_some_and(|current| Arc::ptr_eq(current, self))
+        {
+            registry.remove(&key_of(identity));
+        }
+    }
+
+    /// Admit the blocks covering `[start, start + length)` of `file`, reading
+    /// and checksumming only the blocks not yet admitted for this ticket.
+    /// Every byte a reader receives after this returns `Ok` lies in a block
+    /// whose XXH64 matched the manifest table.
+    fn admit_range(
+        self: &Arc<Self>,
+        file: &File,
+        identity: graphforge_filesystem::FileIdentity,
+        start: u64,
+        length: u64,
+    ) -> Result<(), GfError> {
+        if let Some(outcome) = self.outcome.get() {
+            return outcome.clone();
+        }
+        if length == 0 {
+            return Ok(());
+        }
+        let _phase = (!crate::lifecycle_io::phase_override_active())
+            .then(|| crate::lifecycle_io::PhaseScope::enter(crate::StorageIoPhase::ReadPathScan));
+        let end = start.saturating_add(length);
+        let mut state = self
+            .blocks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(outcome) = self.outcome.get() {
+            return outcome.clone();
+        }
+        let refuse = |message: &str| -> Result<(), GfError> {
+            let error = GfError::Validation(message.into());
+            let _ = self.outcome.set(Err(error.clone()));
+            Err(error)
+        };
+        if !state.length_checked {
+            let metadata = file.metadata().map_err(|error| {
+                GfError::Storage(format!(
+                    "inspect graph payload {}: {error}",
+                    self.cas_object.display()
+                ))
+            })?;
+            if !metadata.is_file() || metadata.len() != self.entry.byte_length {
+                return refuse("graph payload length does not match checksum inventory");
+            }
+            state.length_checked = true;
+        }
+        if end > self.entry.byte_length {
+            return refuse("graph payload range read beyond its inventory length");
+        }
+        let first = start / PAYLOAD_BLOCK_BYTES;
+        let last = (end - 1) / PAYLOAD_BLOCK_BYTES;
+        let mut buffer = vec![0_u8; PAYLOAD_BLOCK_BYTES as usize];
+        for block in first..=last {
+            let index = usize::try_from(block).expect("block index fits");
+            if state.admitted[index] {
+                continue;
+            }
+            let offset = block * PAYLOAD_BLOCK_BYTES;
+            let block_length = (self.entry.byte_length - offset).min(PAYLOAD_BLOCK_BYTES);
+            let block_buffer = &mut buffer[..block_length as usize];
+            let mut reader = ReadAt { file, offset };
+            std::io::Read::read_exact(&mut reader, block_buffer).map_err(|error| {
+                GfError::Storage(format!(
+                    "read graph payload block {block} of {}: {error}",
+                    self.cas_object.display()
+                ))
+            })?;
+            #[cfg(test)]
+            self.checksum_runs.fetch_add(1, Ordering::Relaxed);
+            crate::lifecycle_io::record_read(
+                crate::StorageIoPhase::HydrationVerification,
+                block_length,
+                1,
+            );
+            crate::lifecycle_io::record_blocks(crate::StorageIoPhase::HydrationVerification, 1);
+            if crate::corruption_checksum::checksum(block_buffer) != self.entry.block_xxh64[index] {
+                return refuse("graph payload XXH64 block checksum does not match its inventory");
+            }
+            state.admitted[index] = true;
+            state.admitted_count += 1;
+        }
+        if state.admitted_count == state.admitted.len() {
+            let _ = self.outcome.set(Ok(()));
+            crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
+            drop(state);
+            self.forget(identity);
+        }
+        Ok(())
+    }
+}
+
+/// A reader's hold on the ticket for one payload inode, for range admission.
+#[derive(Debug, Clone)]
+pub struct RangeAdmission {
+    ticket: Arc<PayloadTicket>,
+    identity: graphforge_filesystem::FileIdentity,
+}
+
+impl RangeAdmission {
+    /// Admit the blocks covering `[start, start + length)` before a reader
+    /// consumes those bytes.
+    ///
+    /// # Errors
+    /// Returns the memoized length or checksum refusal.
+    pub fn admit(&self, file: &File, start: u64, length: u64) -> Result<(), GfError> {
+        self.ticket.admit_range(file, self.identity, start, length)
+    }
+}
+
+/// Prepare `file` for range-admitted reads. A payload whose manifest entry
+/// carries a block table is not read here: the returned hold admits blocks as
+/// the reader touches them. Any other unadmitted payload is admitted whole
+/// now, as before, and `None` is returned. Files that are not registered pass
+/// through as `None`.
+///
+/// # Errors
+/// Returns the whole-object corruption refusal for a payload without a table.
+pub fn range_admission(file: &File) -> Result<Option<RangeAdmission>, GfError> {
+    if registry().is_empty() {
+        return Ok(None);
+    }
+    let identity = graphforge_filesystem::file_identity(file).map_err(|error| {
+        GfError::Storage(format!("identify graph payload for admission: {error}"))
+    })?;
+    let Some(ticket) = registry().get(&key_of(identity)).cloned() else {
+        return Ok(None);
+    };
+    if ticket.outcome.get().is_some() || !ticket.has_block_table() {
+        return ticket.admit(file, identity).map(|()| None);
+    }
+    if !ticket.describes(identity) {
+        ticket.forget(identity);
+        return Ok(None);
+    }
+    Ok(Some(RangeAdmission { ticket, identity }))
 }
 
 /// Admit an opened payload handle. A handle that is not a registered
@@ -391,6 +561,7 @@ mod tests {
             std::fs::write(&object, bytes).unwrap();
             std::fs::hard_link(&object, &link).unwrap();
             let entry = crate::GraphFileEntry {
+                block_xxh64: Vec::new(),
                 relative_path: "topology.parquet".into(),
                 byte_length: bytes.len() as u64,
                 content_sha256: "0".repeat(64),

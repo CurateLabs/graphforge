@@ -193,6 +193,7 @@ pub(crate) fn install_graph_object_file_with_lease(
     let write_calls = std::cell::Cell::new(0_u64);
     let file_sync_calls = std::cell::Cell::new(0_u64);
     let payload_checksum = std::cell::Cell::new(None);
+    let payload_blocks = std::cell::RefCell::new(Vec::new());
     let result =
         install_object(
             &lease.cas,
@@ -238,6 +239,7 @@ pub(crate) fn install_graph_object_file_with_lease(
                     })?;
                 let mut hasher = crate::payload_digest::PayloadSha256::new();
                 let mut checksum = crate::corruption_checksum::Checksum::new();
+                let mut block_table = crate::corruption_checksum::BlockChecksums::new();
                 let mut total = 0_u64;
                 let mut buffer = vec![0_u8; BUFFER_BYTES];
                 let copied =
@@ -275,6 +277,7 @@ pub(crate) fn install_graph_object_file_with_lease(
                             })?);
                             hasher.update(&buffer[..read]);
                             checksum.update(&buffer[..read]);
+                            block_table.update(&buffer[..read]);
                             total = total
                                 .checked_add(u64::try_from(read).map_err(|_| {
                                     validation("object install read length exceeds u64")
@@ -289,6 +292,7 @@ pub(crate) fn install_graph_object_file_with_lease(
                             ));
                         }
                         payload_checksum.set(Some(checksum.finish()));
+                        *payload_blocks.borrow_mut() = block_table.finish();
                         Ok(total)
                     })();
                 let released = input
@@ -344,6 +348,7 @@ pub(crate) fn install_graph_object_file_with_lease(
          }| {
             if evidence.attempted_install {
                 evidence.content_xxh64 = payload_checksum.get();
+                evidence.block_xxh64 = payload_blocks.take();
                 evidence.read_calls = evidence
                     .read_calls
                     .checked_add(read_calls.get())
@@ -446,6 +451,7 @@ fn install_captured_source_with_lease(
     let reads = std::cell::Cell::new(0_u64);
     let writes = std::cell::Cell::new(0_u64);
     let syncs = std::cell::Cell::new(0_u64);
+    let blocks = std::cell::RefCell::new(Vec::new());
     let captured_identity = lease
         .installed_objects
         .lock()
@@ -464,7 +470,7 @@ fn install_captured_source_with_lease(
             identity: captured_identity,
         },
         true,
-        |output| copy_captured_source(source, output, cancelled, &reads, &writes, &syncs),
+        |output| copy_captured_source(source, output, cancelled, &reads, &writes, &syncs, &blocks),
     )?;
     source.revalidate()?;
     let InstalledObject {
@@ -473,6 +479,7 @@ fn install_captured_source_with_lease(
     } = installed;
     if evidence.attempted_install {
         evidence.content_xxh64 = Some(source.checksum());
+        evidence.block_xxh64 = blocks.take();
         evidence.read_calls = evidence
             .read_calls
             .checked_add(reads.get())
@@ -502,6 +509,7 @@ fn copy_captured_source(
     reads: &std::cell::Cell<u64>,
     writes: &std::cell::Cell<u64>,
     syncs: &std::cell::Cell<u64>,
+    blocks: &std::cell::RefCell<Vec<u64>>,
 ) -> Result<(u64, crate::durable_commit::FileSeal), GfError> {
     let window = graphforge_filesystem::cache_release_window_for_streams(2)
         .map_err(|error| validation(error.to_string()))?;
@@ -526,6 +534,7 @@ fn copy_captured_source(
     )
     .map_err(|error| validation(error.to_string()))?;
     let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut block_table = crate::corruption_checksum::BlockChecksums::new();
     let mut total = 0_u64;
     let mut buffer = vec![0; BUFFER_BYTES];
     let copied = (|| {
@@ -569,6 +578,7 @@ fn copy_captured_source(
                     .ok_or_else(|| validation("captured write calls overflow"))?,
             );
             checksum.update(&buffer[..count]);
+            block_table.update(&buffer[..count]);
         }
         source.revalidate()?;
         if total != source.bytes() || checksum.finish() != source.checksum() {
@@ -577,6 +587,7 @@ fn copy_captured_source(
                 source.kind()
             )));
         }
+        *blocks.borrow_mut() = block_table.finish();
         Ok(total)
     })();
     let cleanup = input

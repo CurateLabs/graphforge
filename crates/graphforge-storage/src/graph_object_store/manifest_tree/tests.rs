@@ -195,6 +195,7 @@ fn compacts_windows_authored_current_inventory_into_canonical_manifest() {
         format: "graphforge-graph-files".into(),
         format_version: crate::GRAPH_FILES_CHECKSUM_RECORD_VERSION,
         files: vec![crate::GraphFileEntry {
+            block_xxh64: Vec::new(),
             content_xxh64: crate::corruption_checksum::checksum(b"nodes"),
             relative_path: "topology\\nodes.parquet".into(),
             byte_length: 5,

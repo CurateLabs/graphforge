@@ -627,6 +627,7 @@ fn installation_capture_uses_the_final_inode_without_rehashing_or_accepting_new_
         assert_eq!(installed.reused_existing, mode != "new");
         assert_eq!(installed.attempted_install, mode != "existing");
         let mut entry = crate::GraphFileEntry {
+            block_xxh64: Vec::new(),
             relative_path: "topology/nodes/Person.parquet".into(),
             byte_length: payload.len() as u64,
             content_sha256: digest.clone(),

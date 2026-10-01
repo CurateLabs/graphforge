@@ -287,6 +287,7 @@ fn compact_fixture_path(root: &Path, value: &str, legacy_path: &str) -> String {
         file_count: 1,
         total_byte_length: bytes.len() as u64,
         files: vec![crate::GraphFileEntry {
+            block_xxh64: Vec::new(),
             content_xxh64: crate::corruption_checksum::checksum(&bytes),
             relative_path: legacy_path.into(),
             byte_length: bytes.len() as u64,

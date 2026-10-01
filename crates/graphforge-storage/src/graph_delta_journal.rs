@@ -1649,6 +1649,7 @@ fn prepare_graph_delta_inner(
     extended_files.insert(
         run_relative_path.clone(),
         GraphFileEntry {
+            block_xxh64: Vec::new(),
             content_xxh64: crate::corruption_checksum::checksum(&run_bytes),
             relative_path: run_relative_path,
             byte_length: run_byte_length,
@@ -2363,6 +2364,7 @@ mod crash_oracle_tests {
             format: "graphforge-graph-files".to_owned(),
             format_version: crate::GRAPH_FILES_CHECKSUM_RECORD_VERSION,
             files: vec![GraphFileEntry {
+                block_xxh64: Vec::new(),
                 content_xxh64: 0,
                 relative_path: relative_path.to_owned(),
                 byte_length: 7,

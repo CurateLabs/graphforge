@@ -1319,6 +1319,7 @@ fn gapped_run_sequence_in_inventory_fails_closed() {
         format_version: graphforge_storage::GRAPH_FILES_CHECKSUM_RECORD_VERSION,
         files: vec![
             GraphFileEntry {
+                block_xxh64: Vec::new(),
                 content_xxh64: 0,
                 relative_path: delta_run_relative_path(1),
                 byte_length: 1,
@@ -1326,6 +1327,7 @@ fn gapped_run_sequence_in_inventory_fails_closed() {
                 role: GraphFileRole::Delta,
             },
             GraphFileEntry {
+                block_xxh64: Vec::new(),
                 content_xxh64: 0,
                 relative_path: delta_run_relative_path(3),
                 byte_length: 2,

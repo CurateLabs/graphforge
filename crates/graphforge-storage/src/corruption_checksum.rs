@@ -198,6 +198,116 @@ pub(crate) fn checksum(bytes: &[u8]) -> u64 {
     checksum.finish()
 }
 
+/// Fixed block size over which published payloads carry per-block XXH64
+/// checksums (#1388 range authentication prototype). Every block but the last
+/// is exactly this long; the last holds the remainder. A reader that touches
+/// a byte range admits only the blocks covering it.
+///
+/// Prototype value. The production constant is a maintainer decision: see the
+/// design note for the trade-off between manifest growth (16 hex per block)
+/// and the smallest range a reader can pay for.
+pub(crate) const PAYLOAD_BLOCK_BYTES: u64 = 16 * 1024;
+
+/// Number of blocks a payload of `byte_length` bytes carries.
+pub(crate) const fn block_count(byte_length: u64) -> u64 {
+    byte_length.div_ceil(PAYLOAD_BLOCK_BYTES)
+}
+
+/// Streaming per-block XXH64 table beside the whole-payload checksum. Feed the
+/// payload in order from offset zero in any chunking; [`BlockChecksums::finish`]
+/// yields `block_count(length)` block checksums.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct BlockChecksums {
+    current: Checksum,
+    filled: u64,
+    blocks: Vec<u64>,
+}
+
+impl BlockChecksums {
+    pub(crate) const fn new() -> Self {
+        Self {
+            current: Checksum::new(),
+            filled: 0,
+            blocks: Vec::new(),
+        }
+    }
+
+    pub(crate) fn update(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            let room = PAYLOAD_BLOCK_BYTES - self.filled;
+            let take = usize::try_from(room).map_or(bytes.len(), |room| room.min(bytes.len()));
+            let (head, tail) = bytes.split_at(take);
+            self.current.update(head);
+            self.filled += take as u64;
+            if self.filled == PAYLOAD_BLOCK_BYTES {
+                self.blocks.push(self.current.finish());
+                self.current = Checksum::new();
+                self.filled = 0;
+            }
+            bytes = tail;
+        }
+    }
+
+    /// The table for everything fed so far. Does not consume the state.
+    pub(crate) fn finish(&self) -> Vec<u64> {
+        let mut blocks = self.blocks.clone();
+        if self.filled != 0 {
+            blocks.push(self.current.finish());
+        }
+        blocks
+    }
+}
+
+/// The block table of a complete payload already held in memory.
+#[cfg(test)]
+pub(crate) fn block_checksums(bytes: &[u8]) -> Vec<u64> {
+    let mut blocks = BlockChecksums::new();
+    blocks.update(bytes);
+    blocks.finish()
+}
+
+/// Wire encoding of a per-block checksum table: the fixed-width hex of every
+/// block concatenated, so the field's length is a function of the payload
+/// length alone. An empty string is the prototype's "no table" marker and
+/// selects whole-object admission; the production format requires the table.
+pub(crate) mod wire_hex_blocks {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(crate) fn serialize<S: Serializer>(
+        value: &[u64],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut text = String::with_capacity(value.len() * 16);
+        for block in value {
+            text.push_str(&super::hex(*block));
+        }
+        serializer.serialize_str(&text)
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<u64>, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        if !value.len().is_multiple_of(16)
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(serde::de::Error::custom(
+                "block XXH64 table must be 16 lowercase hexadecimal digits per block",
+            ));
+        }
+        value
+            .as_bytes()
+            .chunks(16)
+            .map(|chunk| {
+                u64::from_str_radix(std::str::from_utf8(chunk).expect("ascii"), 16)
+                    .map_err(serde::de::Error::custom)
+            })
+            .collect()
+    }
+}
+
 /// Canonical fixed-width wire encoding for published checksums.
 /// Canonical required checksum field; null and missing fields are refused.
 pub(crate) mod wire_hex {

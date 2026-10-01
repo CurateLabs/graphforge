@@ -44,6 +44,11 @@ pub struct ParquetFragment {
     pub normalize_topology: bool,
     /// Footer-only row count when known (no row-group decode).
     pub exact_rows: Option<usize>,
+    /// Whether `exact_rows` is the authenticated footer's count (`true`) or a
+    /// hint derived from the canonical shard name without touching the file
+    /// (`false`, reported as inexact statistics). #1388: planning must not
+    /// read, and so must not admit, every node and edge object.
+    pub rows_exact: bool,
 }
 
 impl ParquetFragment {
@@ -55,10 +60,10 @@ impl ParquetFragment {
     #[must_use]
     pub fn for_path(path: PathBuf, normalize_topology: bool) -> Self {
         let exists = path.exists();
-        let exact_rows = if exists {
-            footer_num_rows(&path)
+        let (exact_rows, rows_exact) = if exists {
+            row_hint(&path)
         } else {
-            Some(0)
+            (Some(0), true)
         };
         Self {
             path,
@@ -66,20 +71,33 @@ impl ParquetFragment {
             rel_type_name: None,
             normalize_topology,
             exact_rows,
+            rows_exact,
         }
     }
 
     /// Union-edge fragment tagged with `rel_type_name` (file already listed).
     #[must_use]
     pub fn for_union_edge(path: PathBuf, rel_type_name: String) -> Self {
-        let exact_rows = footer_num_rows(&path);
+        let (exact_rows, rows_exact) = row_hint(&path);
         Self {
             path,
             exists: true,
             rel_type_name: Some(rel_type_name),
             normalize_topology: false,
             exact_rows,
+            rows_exact,
         }
+    }
+}
+
+/// Row-count hint for planning statistics. A canonical construction shard
+/// (`<first>-<last>.parquet`, contiguous surrogates) yields its count from the
+/// authenticated inventory name without opening the file; anything else reads
+/// the admitted footer.
+fn row_hint(path: &Path) -> (Option<usize>, bool) {
+    match crate::mutator::canonical_topology_shard_range(path, "topology") {
+        Ok((first, last)) => (usize::try_from(last - first + 1).ok(), false),
+        Err(_) => (footer_num_rows(path), true),
     }
 }
 
@@ -308,9 +326,11 @@ impl ExecutionPlan for GraphForgeParquetExec {
                 }
             }
         };
+        let rows_exact = self.fragments.iter().all(|fragment| fragment.rows_exact);
         Ok(Arc::new(Statistics {
             num_rows: match num_rows {
-                Some(n) => Precision::Exact(n),
+                Some(n) if rows_exact => Precision::Exact(n),
+                Some(n) => Precision::Inexact(n),
                 None => Precision::Absent,
             },
             total_byte_size: Precision::Absent,
@@ -807,6 +827,7 @@ mod tests {
             rel_type_name: None,
             normalize_topology: false,
             exact_rows: None,
+            rows_exact: true,
         };
         let plan =
             GraphForgeParquetExec::try_new(edge_schema(), vec![fragment], None, None, 8).unwrap();

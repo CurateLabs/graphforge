@@ -467,6 +467,7 @@ mod tests {
     #[test]
     fn mapped_manifest_refuses_hidden_backslash_routes_before_table_read() {
         let entries = vec![crate::GraphFileEntry {
+            block_xxh64: Vec::new(),
             content_xxh64: 0,
             relative_path: "properties\\r-hidden.parquet".into(),
             byte_length: 1,

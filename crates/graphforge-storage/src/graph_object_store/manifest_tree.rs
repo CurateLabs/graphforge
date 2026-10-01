@@ -549,6 +549,7 @@ fn append_graph_files_v2_inner(
             content_xxh64: installed.content_xxh64.ok_or_else(|| {
                 validation("graph object installation omitted its payload checksum")
             })?,
+            block_xxh64: installed.block_xxh64.clone(),
             relative_path: relative_path.clone(),
             byte_length: expected_length,
             content_sha256: digest,
@@ -711,9 +712,12 @@ pub fn compact_graph_files(
         )?;
         installed_checksums.insert(
             entry.relative_path.clone(),
-            installed.content_xxh64.ok_or_else(|| {
-                validation("graph object installation omitted its payload checksum")
-            })?,
+            (
+                installed.content_xxh64.ok_or_else(|| {
+                    validation("graph object installation omitted its payload checksum")
+                })?,
+                installed.block_xxh64.clone(),
+            ),
         );
         evidence.payload_objects = evidence
             .payload_objects
@@ -732,7 +736,9 @@ pub fn compact_graph_files(
     let mut root_digest = install_manifest_node(lease, &empty_branch(0), &mut publication_io)?;
     for entry in &inventory.files {
         let mut canonical_entry = entry.clone();
-        canonical_entry.content_xxh64 = installed_checksums[&entry.relative_path];
+        let (checksum, blocks) = &installed_checksums[&entry.relative_path];
+        canonical_entry.content_xxh64 = *checksum;
+        canonical_entry.block_xxh64 = blocks.clone();
         canonical_entry.relative_path =
             crate::graph_files::canonical_inventory_relative_text(&entry.relative_path)?;
         let canonical_path = canonical_entry.relative_path.clone();

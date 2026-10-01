@@ -149,6 +149,7 @@ fn mapped_route_admission_does_not_open_unrelated_missing_payload() {
     )
     .unwrap();
     let entry = |relative_path: String, bytes: &[u8], role| crate::GraphFileEntry {
+        block_xxh64: Vec::new(),
         content_xxh64: crate::corruption_checksum::checksum(bytes),
         relative_path,
         byte_length: bytes.len() as u64,
@@ -423,6 +424,7 @@ fn only_flat_property_inventory_entries_receive_legacy_validation() {
         writer.close().unwrap();
         let bytes = fs::read(path).unwrap();
         crate::GraphFileEntry {
+            block_xxh64: Vec::new(),
             content_xxh64: crate::corruption_checksum::checksum(&bytes),
             relative_path: relative.to_owned(),
             byte_length: u64::try_from(bytes.len()).unwrap(),
@@ -510,6 +512,7 @@ fn property_authentication_reaches_the_lifecycle_counters() {
     )
     .unwrap();
     let entry = |relative_path: String, bytes: &[u8], role| crate::GraphFileEntry {
+        block_xxh64: Vec::new(),
         content_xxh64: crate::corruption_checksum::checksum(bytes),
         relative_path,
         byte_length: bytes.len() as u64,

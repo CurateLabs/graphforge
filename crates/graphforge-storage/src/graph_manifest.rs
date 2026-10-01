@@ -114,6 +114,8 @@ struct BoundedEntry {
     content_sha256: BoundedText<64>,
     #[serde(with = "crate::corruption_checksum::wire_hex")]
     content_xxh64: u64,
+    #[serde(default, with = "crate::corruption_checksum::wire_hex_blocks")]
+    block_xxh64: Vec<u64>,
     role: GraphFileRole,
 }
 struct BoundedEntries(Vec<GraphFileEntry>);
@@ -136,6 +138,7 @@ impl<'de> Deserialize<'de> for BoundedEntries {
                     };
                     entries.push(GraphFileEntry {
                         content_xxh64: entry.content_xxh64,
+                        block_xxh64: entry.block_xxh64,
                         relative_path: entry.relative_path.0,
                         byte_length: entry.byte_length,
                         content_sha256: entry.content_sha256.0,
@@ -866,6 +869,7 @@ mod tests {
     fn checksum_root_and_bucket_versions_cannot_downgrade_payload_admission() {
         let path = "topology/nodes.parquet";
         let entry = GraphFileEntry {
+            block_xxh64: Vec::new(),
             relative_path: path.into(),
             byte_length: 7,
             content_sha256: "0".repeat(64),
@@ -969,6 +973,7 @@ mod tests {
             ] {
                 for bytes in [0, u64::MAX] {
                     let entry = GraphFileEntry {
+                        block_xxh64: Vec::new(),
                         content_xxh64: u64::MAX,
                         relative_path: path.into(),
                         byte_length: bytes,
@@ -1039,6 +1044,7 @@ mod tests {
                 prefix: String::new(),
                 kind: GraphManifestNodeKind::Bucket {
                     entries: vec![GraphFileEntry {
+                        block_xxh64: Vec::new(),
                         content_xxh64: 0,
                         relative_path: path.into(),
                         byte_length: 0,
@@ -1165,6 +1171,7 @@ mod tests {
         let path = "topology/nodes/a.parquet";
         let path_sha256 = hex_digest(logical_path_digest(path));
         let entry = GraphFileEntry {
+            block_xxh64: Vec::new(),
             content_xxh64: 0,
             relative_path: path.into(),
             byte_length: 1,
@@ -1255,6 +1262,7 @@ mod tests {
                 prefix: route[1..].into(),
                 kind: GraphManifestNodeKind::Bucket {
                     entries: vec![GraphFileEntry {
+                        block_xxh64: Vec::new(),
                         content_xxh64: 0,
                         relative_path: path.clone(),
                         byte_length: 1,
@@ -1314,6 +1322,7 @@ mod tests {
         let mut entries = paths
             .iter()
             .map(|path| GraphFileEntry {
+                block_xxh64: Vec::new(),
                 content_xxh64: 0,
                 relative_path: path.clone(),
                 byte_length: u64::MAX,

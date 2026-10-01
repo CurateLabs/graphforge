@@ -35,6 +35,7 @@ fn checksum_admission_hashes_no_payload_bytes_and_boundary_authentication_keeps_
     let payload = vec![0x5a; BUFFER_BYTES + 17];
     let (digest, evidence) = install_graph_object_bytes(root.path(), &payload).unwrap();
     let entry = crate::GraphFileEntry {
+        block_xxh64: Vec::new(),
         relative_path: "topology/nodes.parquet".into(),
         byte_length: payload.len() as u64,
         content_sha256: digest,
@@ -307,6 +308,7 @@ fn pure_reads_require_only_existing_digest_namespace_and_never_create() {
             format: "graphforge-graph-files".into(),
             format_version: crate::GRAPH_FILES_CHECKSUM_RECORD_VERSION,
             files: vec![crate::GraphFileEntry {
+                block_xxh64: Vec::new(),
                 content_xxh64: crate::corruption_checksum::checksum(payload),
                 relative_path: "payload.bin".into(),
                 byte_length: payload.len() as u64,

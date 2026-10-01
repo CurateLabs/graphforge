@@ -656,6 +656,9 @@ pub fn graph_object_publication_is_live(root: &Path) -> Result<bool, GfError> {
 pub struct GraphObjectInstallEvidence {
     /// XXH64 of the authenticated bytes, captured in an existing read pass.
     pub content_xxh64: Option<u64>,
+    /// Per-block XXH64 table captured by the same pass (#1388 prototype);
+    /// empty when the pass that ran does not produce one.
+    pub block_xxh64: Vec<u64>,
     /// Source payload bytes read and hashed.
     pub bytes_hashed: u64,
     /// Actual checksum-only reads under private admitted producer authority.

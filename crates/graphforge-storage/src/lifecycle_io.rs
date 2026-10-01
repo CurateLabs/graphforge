@@ -441,6 +441,9 @@ impl LifecyclePhaseAttribution {
 pub struct ReadPathFile {
     file: std::fs::File,
     capture: CaptureContext,
+    /// Range admission for a hydrated payload with a block table (#1388):
+    /// every byte handed to Parquet is first covered by an admitted block.
+    admission: Option<crate::graph_admission::RangeAdmission>,
 }
 
 impl ReadPathFile {
@@ -453,11 +456,21 @@ impl ReadPathFile {
     /// # Errors
     /// Returns the corruption refusal for a payload that fails admission.
     pub fn admitted(file: std::fs::File) -> Result<Self, GfError> {
-        crate::graph_admission::admit_file(&file)?;
+        let admission = crate::graph_admission::range_admission(&file)?;
         Ok(Self {
             file,
             capture: CaptureContext::current(),
+            admission,
         })
+    }
+
+    fn admit_range(&self, start: u64, length: u64) -> parquet::errors::Result<()> {
+        if let Some(admission) = &self.admission {
+            admission
+                .admit(&self.file, start, length)
+                .map_err(|error| parquet::errors::ParquetError::General(error.to_string()))?;
+        }
+        Ok(())
     }
 }
 
@@ -471,13 +484,23 @@ impl parquet::file::reader::ChunkReader for ReadPathFile {
     type T = ReadPathRead<<std::fs::File as parquet::file::reader::ChunkReader>::T>;
 
     fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
+        let range = match &self.admission {
+            Some(admission) => Some(RangeGuard {
+                admission: admission.clone(),
+                file: self.file.try_clone()?,
+                position: start,
+            }),
+            None => None,
+        };
         Ok(ReadPathRead {
             inner: parquet::file::reader::ChunkReader::get_read(&self.file, start)?,
             capture: self.capture.clone(),
+            range,
         })
     }
 
     fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<bytes::Bytes> {
+        self.admit_range(start, length as u64)?;
         let bytes = parquet::file::reader::ChunkReader::get_bytes(&self.file, start, length)?;
         if !bytes.is_empty() {
             self.capture.record(StorageIoPhase::ReadPathScan, |row| {
@@ -499,6 +522,15 @@ impl parquet::file::reader::ChunkReader for ReadPathFile {
 pub struct ReadPathRead<R> {
     inner: R,
     capture: CaptureContext,
+    range: Option<RangeGuard>,
+}
+
+/// Position-tracking range admission for a sequential Parquet reader.
+#[derive(Debug)]
+struct RangeGuard {
+    admission: crate::graph_admission::RangeAdmission,
+    file: std::fs::File,
+    position: u64,
 }
 
 impl<R> ReadPathRead<R> {
@@ -507,6 +539,7 @@ impl<R> ReadPathRead<R> {
         Self {
             inner,
             capture: CaptureContext::current(),
+            range: None,
         }
     }
 }
@@ -514,6 +547,17 @@ impl<R> ReadPathRead<R> {
 impl<R: std::io::Read> std::io::Read for ReadPathRead<R> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         let read = self.inner.read(buffer)?;
+        if let Some(range) = &mut self.range
+            && read != 0
+        {
+            // The bytes now in `buffer` are returned only once their blocks
+            // are admitted; a refusal surfaces as the read's error.
+            range
+                .admission
+                .admit(&range.file, range.position, read as u64)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            range.position += read as u64;
+        }
         if read != 0 {
             self.capture.record(StorageIoPhase::ReadPathScan, |row| {
                 row.read_bytes.fetch_add(read as u64, Ordering::Relaxed);

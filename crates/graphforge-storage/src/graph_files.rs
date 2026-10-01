@@ -102,6 +102,15 @@ pub struct GraphFileEntry {
     /// Required XXH64, seed zero, for read-time corruption detection.
     #[serde(with = "crate::corruption_checksum::wire_hex")]
     pub content_xxh64: u64,
+    /// Per-block XXH64 table over `PAYLOAD_BLOCK_BYTES` blocks (#1388 range
+    /// authentication prototype). Empty selects whole-object admission; a
+    /// non-empty table must hold exactly `block_count(byte_length)` entries.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        with = "crate::corruption_checksum::wire_hex_blocks"
+    )]
+    pub block_xxh64: Vec<u64>,
     /// Logical role for observability and validation.
     pub role: GraphFileRole,
 }
@@ -844,13 +853,14 @@ fn build_inventory_for_owned_layout(
         let reused = reuse
             .and_then(|known| known.get(&relative_text))
             .filter(|known| known.byte_length == byte_length);
-        let (content_sha256, content_xxh64, calls) =
+        let (content_sha256, content_xxh64, block_xxh64, calls) =
             capture_payload_identity(&path, reused, domain)?;
         read_calls = read_calls
             .checked_add(calls)
             .ok_or_else(|| resource_limit("graph files authentication read calls overflow"))?;
         files.push(GraphFileEntry {
             content_xxh64,
+            block_xxh64,
             relative_path: relative_text,
             byte_length,
             content_sha256,
@@ -882,7 +892,7 @@ fn capture_payload_identity(
     path: &Path,
     reused: Option<&KnownGraphFile>,
     domain: graphforge_core::hash_observation::HashDomain,
-) -> Result<(String, u64, u64), GfError> {
+) -> Result<(String, u64, Vec<u64>, u64), GfError> {
     let mut file = File::open(path).map_err(|error| storage("open graph file", path, error))?;
     // A hydrated payload nothing has read yet is admitted before its bytes can
     // name a new identity: a corrupted hard-linked object must be refused, not
@@ -892,18 +902,18 @@ fn capture_payload_identity(
     if let Some(known) = reused {
         // Reuse the authenticated identity only when these exact bytes still
         // carry its checksum. A mismatch is a change, never a stale reuse.
-        let (checksum, calls) = checksum_reader(&mut file, path)?;
+        let (checksum, blocks, calls) = checksum_reader_with_blocks(&mut file, path)?;
         if checksum == known.content_xxh64 {
-            return Ok((known.content_sha256.clone(), checksum, calls));
+            return Ok((known.content_sha256.clone(), checksum, blocks, calls));
         }
         prior_calls = calls;
         file = File::open(path).map_err(|error| storage("reopen graph file", path, error))?;
     }
-    let (digest, checksum, calls) = hash_reader_with_checksum(&mut file, path, domain)?;
+    let (digest, checksum, blocks, calls) = hash_reader_with_checksum(&mut file, path, domain)?;
     let calls = calls
         .checked_add(prior_calls)
         .ok_or_else(|| resource_limit("graph file authentication read calls overflow"))?;
-    Ok((hex_digest(digest), checksum, calls))
+    Ok((hex_digest(digest), checksum, blocks, calls))
 }
 
 pub(crate) fn owned_inventory_path_text(
@@ -1366,18 +1376,19 @@ fn hash_file_counted(path: &Path) -> Result<([u8; 32], u64), GfError> {
 #[cfg(test)]
 fn hash_reader(file: &mut File, path: &Path) -> Result<([u8; 32], u64), GfError> {
     hash_reader_with_checksum(file, path, ARTIFACT_IDENTITY)
-        .map(|(digest, _, calls)| (digest, calls))
+        .map(|(digest, _, _, calls)| (digest, calls))
 }
 
 fn hash_reader_with_checksum(
     file: &mut File,
     path: &Path,
     domain: graphforge_core::hash_observation::HashDomain,
-) -> Result<([u8; 32], u64, u64), GfError> {
+) -> Result<([u8; 32], u64, Vec<u64>, u64), GfError> {
     // Published captures name artifact payload; a temporary replay view's
     // capture feeds only a contract fingerprint and is observed as that domain.
     let mut hasher = crate::payload_digest::PayloadSha256::for_domain(domain);
     let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut blocks = crate::corruption_checksum::BlockChecksums::new();
     let mut read_calls = 0_u64;
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
     loop {
@@ -1392,12 +1403,26 @@ fn hash_reader_with_checksum(
             .ok_or_else(|| resource_limit("graph file authentication read calls overflow"))?;
         hasher.update(&buffer[..read]);
         checksum.update(&buffer[..read]);
+        blocks.update(&buffer[..read]);
     }
-    Ok((hasher.finalize().into(), checksum.finish(), read_calls))
+    Ok((
+        hasher.finalize().into(),
+        checksum.finish(),
+        blocks.finish(),
+        read_calls,
+    ))
 }
 
 pub(crate) fn checksum_reader(file: &mut impl Read, path: &Path) -> Result<(u64, u64), GfError> {
+    checksum_reader_with_blocks(file, path).map(|(checksum, _, calls)| (checksum, calls))
+}
+
+pub(crate) fn checksum_reader_with_blocks(
+    file: &mut impl Read,
+    path: &Path,
+) -> Result<(u64, Vec<u64>, u64), GfError> {
     let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut blocks = crate::corruption_checksum::BlockChecksums::new();
     let mut calls = 0_u64;
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
     loop {
@@ -1408,11 +1433,12 @@ pub(crate) fn checksum_reader(file: &mut impl Read, path: &Path) -> Result<(u64,
             break;
         }
         checksum.update(&buffer[..read]);
+        blocks.update(&buffer[..read]);
         calls = calls
             .checked_add(1)
             .ok_or_else(|| resource_limit("graph payload checksum read calls overflow"))?;
     }
-    Ok((checksum.finish(), calls))
+    Ok((checksum.finish(), blocks.finish(), calls))
 }
 
 fn sync_file(path: &Path) -> Result<(), GfError> {
@@ -1882,6 +1908,7 @@ mod tests {
         ]
         .into_iter()
         .map(|route| GraphFileEntry {
+            block_xxh64: Vec::new(),
             content_xxh64: 0,
             relative_path: format!("properties/{route}.parquet"),
             byte_length: 1,
@@ -1918,6 +1945,7 @@ mod tests {
             let path = source.path().join(&relative_path);
             fs::write(&path, route.as_bytes()).unwrap();
             files.push(GraphFileEntry {
+                block_xxh64: Vec::new(),
                 content_xxh64: crate::corruption_checksum::checksum(route.as_bytes()),
                 relative_path,
                 byte_length: route.len() as u64,
@@ -2126,6 +2154,7 @@ mod tests {
             format: GRAPH_FILES_FORMAT.into(),
             format_version: GRAPH_FILES_CHECKSUM_RECORD_VERSION,
             files: vec![GraphFileEntry {
+                block_xxh64: Vec::new(),
                 content_xxh64: crate::corruption_checksum::checksum(b"nodes"),
                 relative_path: "topology\\nodes.parquet".into(),
                 byte_length: 5,
@@ -2172,6 +2201,7 @@ mod tests {
             format: GRAPH_FILES_FORMAT.into(),
             format_version: GRAPH_FILES_CHECKSUM_RECORD_VERSION,
             files: vec![GraphFileEntry {
+                block_xxh64: Vec::new(),
                 content_xxh64: crate::corruption_checksum::checksum(b"nodes"),
                 relative_path: "topology\\nodes.parquet".into(),
                 byte_length: 5,
@@ -2193,6 +2223,7 @@ mod tests {
             format_version: GRAPH_FILES_CHECKSUM_RECORD_VERSION,
             files: vec![
                 GraphFileEntry {
+                    block_xxh64: Vec::new(),
                     content_xxh64: 0,
                     relative_path: "topology/nodes.parquet".into(),
                     byte_length: 5,
@@ -2200,6 +2231,7 @@ mod tests {
                     role: GraphFileRole::Topology,
                 },
                 GraphFileEntry {
+                    block_xxh64: Vec::new(),
                     content_xxh64: 0,
                     relative_path: "topology\\nodes.parquet".into(),
                     byte_length: 5,
@@ -2222,6 +2254,7 @@ mod tests {
             format_version: GRAPH_FILES_CHECKSUM_RECORD_VERSION,
             files: vec![
                 GraphFileEntry {
+                    block_xxh64: Vec::new(),
                     content_xxh64: 0,
                     relative_path: "topology/Å.parquet".into(),
                     byte_length: 5,
@@ -2229,6 +2262,7 @@ mod tests {
                     role: GraphFileRole::Topology,
                 },
                 GraphFileEntry {
+                    block_xxh64: Vec::new(),
                     content_xxh64: 0,
                     relative_path: "topology/å.parquet".into(),
                     byte_length: 5,
@@ -2265,6 +2299,7 @@ mod tests {
             format: GRAPH_FILES_FORMAT.into(),
             format_version: GRAPH_FILES_CHECKSUM_RECORD_VERSION,
             files: vec![GraphFileEntry {
+                block_xxh64: Vec::new(),
                 content_xxh64: crate::corruption_checksum::checksum(b"nodes"),
                 relative_path: "topology\\nodes.parquet".into(),
                 byte_length: 5,

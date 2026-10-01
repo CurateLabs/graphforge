@@ -27,6 +27,7 @@ fn materialization_rejects_target_and_intermediate_symlink_escape() {
     let objects = tempfile::tempdir().unwrap();
     let (digest, _) = install_graph_object_bytes(objects.path(), b"payload").unwrap();
     let entry = crate::GraphFileEntry {
+        block_xxh64: Vec::new(),
         content_xxh64: crate::corruption_checksum::checksum(b"payload"),
         relative_path: "nested/payload.bin".into(),
         byte_length: 7,
@@ -66,6 +67,7 @@ fn materialization_translates_legacy_topology_route_and_counts_owned_copy() {
     let source_path = graph_object_path(root.path(), &digest).unwrap();
     let source_identity = graphforge_filesystem::path_identity(&source_path).unwrap();
     let inventory = crate::graph_files::inventory_from_entries(vec![crate::GraphFileEntry {
+        block_xxh64: Vec::new(),
         content_xxh64: crate::corruption_checksum::checksum(payload),
         relative_path: "topology/edges/knows.parquet".into(),
         byte_length: payload.len() as u64,
@@ -149,6 +151,7 @@ fn materialization_gives_mutable_uuid_controls_private_single_link_inodes() {
     for (relative_path, payload) in files {
         let (digest, _) = install_graph_object_bytes(root.path(), payload).unwrap();
         entries.push(crate::GraphFileEntry {
+            block_xxh64: Vec::new(),
             content_xxh64: crate::corruption_checksum::checksum(payload),
             relative_path: relative_path.to_owned(),
             byte_length: payload.len() as u64,

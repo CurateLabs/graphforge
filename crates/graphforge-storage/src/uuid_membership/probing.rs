@@ -868,6 +868,7 @@ impl AuthenticatedUuidIndexSnapshot {
             .get(MANIFEST)
             .ok_or_else(|| storage_err("compact UUID manifest authority is absent"))?;
         let manifest_entry = crate::GraphFileEntry {
+            block_xxh64: Vec::new(),
             relative_path: MANIFEST.to_owned(),
             content_sha256: manifest_digest.clone(),
             byte_length: *manifest_length,
@@ -899,6 +900,7 @@ impl AuthenticatedUuidIndexSnapshot {
                     .get(&record.name)
                     .ok_or_else(|| storage_err("compact UUID run authority is absent"))?;
                 let entry = crate::GraphFileEntry {
+                    block_xxh64: Vec::new(),
                     relative_path: record.name.clone(),
                     content_sha256: digest.clone(),
                     byte_length: *length,

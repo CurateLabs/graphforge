@@ -409,6 +409,7 @@ mod tests {
         let mut files = names
             .iter()
             .map(|route| crate::GraphFileEntry {
+                block_xxh64: Vec::new(),
                 content_xxh64: crate::corruption_checksum::checksum(&payload),
                 relative_path: format!("properties/{route}.parquet"),
                 byte_length: payload.len() as u64,
