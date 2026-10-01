@@ -1214,6 +1214,31 @@ impl ExpandExec {
         self.direction
     }
 
+    /// The owned per-stream configuration of one `execute` call.
+    fn single_hop_config(&self, context: &TaskContext) -> SingleHopConfig {
+        #[cfg(not(feature = "read-path-experiment"))]
+        let _ = context;
+        SingleHopConfig {
+            rel_type_name: self.rel_type_name.clone(),
+            direction: self.direction,
+            dir: self.dir.clone(),
+            mode: self.mode,
+            src_col_idx: self.src_col_idx,
+            edge_prop_count: self.edge_prop_count,
+            input_width: self.input_width,
+            out_schema: self.schema.clone(),
+            provider: self.provider.clone(),
+            edge_var: self.edge_var,
+            capture_epoch: self.capture_epoch,
+            demand: self.demand.clone(),
+            required_output: self.required_output.clone(),
+            ordinal_identities: self.ordinal_identities.clone(),
+            ordinal_identity_required: self.ordinal_identity_required,
+            #[cfg(feature = "read-path-experiment")]
+            reservation: crate::fast_path::expand_reservation(context).map(std::sync::Mutex::new),
+        }
+    }
+
     pub(crate) fn provider(&self) -> &Arc<dyn AdjacencyProvider> {
         &self.provider
     }
@@ -1401,23 +1426,7 @@ impl ExecutionPlan for ExpandExec {
             )));
         }
         let input = self.input.clone();
-        let cfg = SingleHopConfig {
-            rel_type_name: self.rel_type_name.clone(),
-            direction: self.direction,
-            dir: self.dir.clone(),
-            mode: self.mode,
-            src_col_idx: self.src_col_idx,
-            edge_prop_count: self.edge_prop_count,
-            input_width: self.input_width,
-            out_schema: self.schema.clone(),
-            provider: self.provider.clone(),
-            edge_var: self.edge_var,
-            capture_epoch: self.capture_epoch,
-            demand: self.demand.clone(),
-            required_output: self.required_output.clone(),
-            ordinal_identities: self.ordinal_identities.clone(),
-            ordinal_identity_required: self.ordinal_identity_required,
-        };
+        let cfg = self.single_hop_config(&context);
         let schema = self.schema.clone();
         let batch_size = context.session_config().batch_size();
         let input_stream = datafusion::physical_plan::execute_stream(input, context)?;
@@ -1460,6 +1469,8 @@ impl ExecutionPlan for ExpandExec {
                         if position.row >= input_batch.num_rows() {
                             pending = None;
                         }
+                        #[cfg(feature = "read-path-experiment")]
+                        cfg.account(pending.as_ref().map(|(batch, _)| batch), &output)?;
                         if let Some(left) = remaining.as_mut() {
                             *left = left.saturating_sub(output.num_rows());
                         }
@@ -1486,6 +1497,11 @@ impl ExecutionPlan for ExpandExec {
                     };
                     let input_batch = input_batch?;
                     demand::record_input(cfg.capture_epoch, cfg.edge_var, input_batch.num_rows());
+                    #[cfg(feature = "read-path-experiment")]
+                    cfg.account(
+                        Some(&input_batch),
+                        &RecordBatch::new_empty(cfg.out_schema.clone()),
+                    )?;
                     pending = Some((input_batch, SingleHopPosition::default()));
                 }
             },
@@ -1512,6 +1528,30 @@ struct SingleHopConfig {
     required_output: Option<Arc<[bool]>>,
     ordinal_identities: Option<Arc<V4OrdinalIdentitySession>>,
     ordinal_identity_required: bool,
+    /// #1688 candidate C: the memory-pool reservation for held batches.
+    #[cfg(feature = "read-path-experiment")]
+    reservation: Option<std::sync::Mutex<datafusion::execution::memory_pool::MemoryReservation>>,
+}
+
+#[cfg(feature = "read-path-experiment")]
+impl SingleHopConfig {
+    /// Charge the held input batch and the output batch to the session memory
+    /// pool, when the session accounts for them (#1688 candidate C).
+    fn account(
+        &self,
+        held: Option<&RecordBatch>,
+        output: &RecordBatch,
+    ) -> Result<(), DataFusionError> {
+        let Some(reservation) = self.reservation.as_ref() else {
+            return Ok(());
+        };
+        let bytes =
+            held.map_or(0, RecordBatch::get_array_memory_size) + output.get_array_memory_size();
+        reservation
+            .lock()
+            .map_err(|_| DataFusionError::Internal("ExpandExec reservation poisoned".into()))?
+            .try_resize(bytes)
+    }
 }
 
 /// Resumable position within one input batch. Keeping the raw adjacency offset

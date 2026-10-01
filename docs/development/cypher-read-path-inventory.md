@@ -153,6 +153,19 @@ A run whose plan doesn't match is invalid, not slow. The mismatch is itself a re
 - **Metrics per run:** wall time, CPU seconds, peak RSS, and, for C, the peak pool reservation charged by `ExpandExec`.
 - **Where results go.** Raw output (driver log, `runexec` output, explain output, TCK reports) is attached to #1619. The digests of the inputs and binaries used go in #1688's final comment, and are cited from the ADR.
 
+### 6.5a Method (#1688)
+
+The candidate is selected per session by `GF_READ_PATH_CANDIDATE` (`current`, `stock`, `structural`) in a `gf` built with `--features read-path-experiment`. `GF_READ_PATH_INJECT=between-expands` adds the §6.3 fast-path survival variant.
+
+- **Driver.** [`benchmarks/tools/read-path-candidates/ab.sh`](../../benchmarks/tools/read-path-candidates/ab.sh) runs the pairs. [`summarize.py`](../../benchmarks/tools/read-path-candidates/summarize.py) produces the per-pair table and the same-sign verdicts. Besides the quiet helper, the driver treats any `cargo`, `rustc`, `gf`, `runexec` or test process as busy.
+- **Plan path.** `gf` has no `explain` command, so verification uses two sources:
+  - The `read_path_explain` example in `graphforge-api` prints each candidate's plan for the four queries, once per scale.
+  - Every timed run's receipt lists its `operator_rss` labels. `summarize.py` rejects any run whose labels contradict the candidate. B's only label on the ordered queries is the stock `sort`.
+- **Results.** Every receipt's `result_sha256` must equal A's for that scale and query. `scalar_u64` carries the counts.
+- **Refusals.** One refusal of a candidate on a query ends that series. The candidate is not run on that query again at the same or larger scales.
+- **Project state.** A digest of each project's file list, sizes and modification times is taken before and after every run. A run that changes the project is rejected.
+- **Exploratory projects.** In exploratory projects with an `_untyped` node property table, a LEFT join sits between the first node scan and the expand. Candidate A's `has_complete_frontier` does not trace through it, so A refuses the fast path where C takes it. This was found in the #1688 review. On the Graph500 projects used here, A's fast paths fire (receipt labels `edge_count`, `ordered_one_hop`).
+
 ### 6.6 Maintenance measures specific to the read path
 
 In addition to #1505 §5.6, #1688 reports for each candidate:
@@ -163,3 +176,4 @@ In addition to #1505 §5.6, #1688 reports for each candidate:
 ## 7. Changelog
 
 - 2026-09-30: recorded (#1687).
+- 2026-10-01 (#1688, before any timed run): added §6.5a. It records how plan paths are verified without `gf explain`, the result digests, the project-state check, and that one refusal ends a series. None of these replaces an earlier rule.

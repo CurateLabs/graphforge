@@ -244,6 +244,24 @@ pub(crate) struct EdgeCountExec {
 }
 
 impl EdgeCountExec {
+    /// Build from parts chosen from the Graph IR (#1688 candidate C).
+    #[cfg(feature = "read-path-experiment")]
+    pub(crate) fn from_parts(
+        schema: SchemaRef,
+        props: Arc<PlanProperties>,
+        rel_type_name: String,
+        direction: Direction,
+        provider: Arc<dyn AdjacencyProvider>,
+    ) -> Self {
+        Self::new(EdgeCountSpec {
+            schema,
+            props,
+            rel_type_name,
+            direction,
+            provider,
+        })
+    }
+
     fn new(spec: EdgeCountSpec) -> Self {
         Self {
             schema: spec.schema,
