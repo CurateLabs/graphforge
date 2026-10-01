@@ -24,21 +24,24 @@
 //! from any observed output:
 //!
 //! - **Open** (attributed): the manifest, the route table, the sidecars, and
-//!   each copied identity control twice, once to copy it and once to verify the
-//!   private copy (`copy_and_authenticate_materialized_object` and
-//!   `checksum_materialized_file` each read the file once). Copied controls are
-//!   node-linear, at most `COPIED_CONTROL_BYTES_PER_NODE` a node. Never a
-//!   payload.
+//!   each copied control twice, once to copy it and once to verify the private
+//!   copy (`copy_and_authenticate_materialized_object` and
+//!   `checksum_materialized_file` each read the file once). Only the small
+//!   mutable controls are copied, at most `COPIED_CONTROL_BYTES`: the
+//!   node-linear identity runs are hard-linked and read nothing at open. Never
+//!   a payload.
 //! - **Execution** (attributed): every node object once, checksummed whole on
 //!   first touch (the node-linear term, see below); at most one CSR shard per
-//!   hop, read whole because a shard carries its own checksum; and a bounded
-//!   residual of footers and manifests. Edge objects are never read.
-//! - **Unattributed**: the ordinal-v4 and forward-v4 identity readers read the
-//!   node-linear identity controls an unreported number of times (about four
-//!   passes at open, and 64 KiB per range at execution). Their pass counts are
-//!   being reworked, so this gate does not pin them: it asserts that the
-//!   remainder does not grow with the edge payload (the node count is fixed),
-//!   which is what any reader of an edge-linear object would break.
+//!   hop, read whole because a shard carries its own checksum; the 64 KiB
+//!   ordinal blocks that hold the destinations it resolves
+//!   (`ceil(destinations / ORDINAL_BLOCK_RECORDS)` blocks, each read once per
+//!   handle and then held; never a block that holds none, and never all of
+//!   them, because the manifest records that UUID order follows ordinals); and
+//!   a bounded residual of footers and manifests. Edge objects are never read.
+//! - **Unattributed**: whatever a reader reads without reporting it. The
+//!   identity readers now report. The gate asserts that the remainder does not
+//!   grow with the edge payload (the node count is fixed), which is what any
+//!   reader of an edge-linear object would break.
 //!
 //! The node-linear term is a known defect, not a design: planning registers the
 //! node table with `ParquetFragment::for_path`, whose footer read admits every
@@ -53,6 +56,7 @@ use std::time::{Duration, Instant};
 use arrow::array::{Array, FixedSizeBinaryArray};
 use graphforge_api::{GraphForge, LifecycleIoCapture, lifecycle_io_snapshot};
 use graphforge_exec::demand::{self, DemandSnapshot};
+use graphforge_storage::ordinal_identity_v4::{ORDINAL_BLOCK_BYTES, ORDINAL_BLOCK_RECORDS};
 use graphforge_storage::{GraphFilesInventory, resolve_project_generation};
 
 #[path = "support/bulk_fixture.rs"]
@@ -67,10 +71,11 @@ const ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id L
 const TWO_HOP: &str =
     "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000";
 
-/// Identity controls copied while hydrating are about 40 bytes a node; the
-/// open-cost test (`open_reads_control_bytes_not_payload_bytes`) bounds the
-/// copied bytes at 64 a node, and so does this gate.
-const COPIED_CONTROL_BYTES_PER_NODE: u64 = 64;
+/// The mutable controls hydration still copies privately (UUID-membership and
+/// ordinal manifests, receipts, lock, tombstones, route table). The node-linear
+/// forward and ordinal runs are hard-linked, not copied, so this does not scale
+/// with the node count: copying the 4,096-node runs alone would be 64 KiB.
+const COPIED_CONTROL_BYTES: u64 = 16 * 1024;
 /// Manifest, route table, sidecar and footer reads that do not scale with
 /// either axis of this fixture.
 const CONTROL_SLACK_BYTES: u64 = 64 * 1024;
@@ -403,10 +408,10 @@ fn assert_query_bounds(query: &Query, size: &Size, measured: &Measured) {
         "{name} fan-out {fan_out}: wrong answer"
     );
 
-    // Open reads controls, not payload: the copied controls are node-linear
-    // and are each read twice (copy, then verify the private copy).
+    // Open reads controls, not payload: only the small mutable controls are
+    // copied, each read twice (copy, then verify the private copy).
     assert!(
-        measured.copied_bytes <= COPIED_CONTROL_BYTES_PER_NODE * NODES as u64,
+        measured.copied_bytes <= COPIED_CONTROL_BYTES,
         "{name} fan-out {fan_out}: {} control bytes copied for {NODES} nodes",
         measured.copied_bytes
     );
@@ -419,22 +424,38 @@ fn assert_query_bounds(query: &Query, size: &Size, measured: &Measured) {
         measured.copied_bytes
     );
 
-    // Execution reads every node object once, at most one shard per hop, and
-    // a bounded residual: and never an edge object.
-    let execution_bound =
-        layout.node_bytes + query.hops * layout.largest_shard_bytes + EXECUTION_RESIDUAL_BYTES;
+    // Each destination yields `paths` rows, so `ceil(LIMIT / paths)` destinations
+    // satisfy the limit, plus the one empty degree probe bulk construction's
+    // ordinal-from-one leaves in front.
+    let destinations = (LIMIT.div_ceil(paths) + 1) as u64;
+
+    // Execution reads every node object once, at most one shard per hop, the
+    // ordinal blocks that hold the destinations it resolves (a block is read
+    // once per handle, then held), and a bounded residual: and never an edge
+    // object, and never a block it has no destination in.
+    let identity_blocks = destinations.div_ceil(ORDINAL_BLOCK_RECORDS);
+    let identity_bound = identity_blocks * ORDINAL_BLOCK_BYTES;
+    let execution_bound = layout.node_bytes
+        + query.hops * layout.largest_shard_bytes
+        + identity_bound
+        + EXECUTION_RESIDUAL_BYTES;
     assert!(
         measured.execution_read <= execution_bound,
         "{name} fan-out {fan_out}: execution read {} bytes against a structural bound of \
-         {execution_bound} (nodes {}, {} shard(s) of at most {}, residual {EXECUTION_RESIDUAL_BYTES})",
+         {execution_bound} (nodes {}, {} shard(s) of at most {}, {identity_blocks} identity \
+         block(s) of {ORDINAL_BLOCK_BYTES}, residual {EXECUTION_RESIDUAL_BYTES})",
         measured.execution_read,
         layout.node_bytes,
         query.hops,
         layout.largest_shard_bytes
     );
     // The bound must be tighter than the work it forbids, or it proves nothing.
+    // That holds where the edge payload is the thing being scaled. At the small
+    // fan-out the whole edge payload (about one CSR shard) sits below the
+    // structural terms by construction, so the claim there is carried by the
+    // 16x comparison in the test body, not by this inequality.
     assert!(
-        execution_bound < layout.edge_bytes,
+        fan_out < LARGE_FAN_OUT || execution_bound < layout.edge_bytes,
         "{name} fan-out {fan_out}: the bound {execution_bound} admits a full edge scan \
          ({} edge bytes)",
         layout.edge_bytes
@@ -451,10 +472,8 @@ fn assert_query_bounds(query: &Query, size: &Size, measured: &Measured) {
         );
     }
 
-    // Rows examined follow from the limit: each destination yields `paths`
-    // rows, so `ceil(LIMIT / paths)` destinations satisfy it, plus the one
-    // empty degree probe bulk construction's ordinal-from-one leaves in front.
-    let rows_bound = (LIMIT.div_ceil(paths) + 1) as u64;
+    // Rows examined follow from the limit: one adjacency row per destination.
+    let rows_bound = destinations;
     assert!(
         (1..=rows_bound).contains(&measured.rows_examined),
         "{name} fan-out {fan_out}: {} adjacency rows examined against a bound of {rows_bound}",

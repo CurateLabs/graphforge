@@ -37,7 +37,10 @@ const UUID_WIDTH_USIZE: usize = 16;
 const TOMBSTONE_WIDTH: u64 = 8;
 const TOMBSTONE_WIDTH_USIZE: usize = 8;
 const TOMBSTONE_BLOCK_BYTES: u64 = 64 * 1024;
-const ORDINAL_BLOCK_BYTES: u64 = 64 * 1024;
+/// Bytes in one authenticated ordinal block, the unit a lookup reads.
+pub const ORDINAL_BLOCK_BYTES: u64 = 64 * 1024;
+/// UUIDs in one full ordinal block.
+pub const ORDINAL_BLOCK_RECORDS: u64 = ORDINAL_BLOCK_BYTES / UUID_WIDTH;
 const ORDINAL_BLOCK_BYTES_USIZE: usize = 64 * 1024;
 pub(crate) const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const STREAM_BYTES: usize = 1024 * 1024;
