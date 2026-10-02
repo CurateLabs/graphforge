@@ -616,6 +616,8 @@ jobs:
           cargo test --locked --manifest-path benchmarks/Cargo.toml \
             -p graphforge-benchmark-graph500-generator
           cargo test --locked --manifest-path benchmarks/Cargo.toml \
+            -p graphforge-benchmark-gdc-scorecard
+          cargo test --locked --manifest-path benchmarks/Cargo.toml \
             -p graphforge-benchmark-certify --lib
           cargo build --locked -p graphforge-cli --bin gf
           gf_bin="$GITHUB_WORKSPACE/target/debug/gf"
