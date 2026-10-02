@@ -53,6 +53,30 @@ pub fn project_text_source<C>(
     label_id: graphforge_value::EntityTypeSelection,
     selected_properties: Option<&[String]>,
     limits: TextSearchLimits,
+    checkpoint: C,
+) -> Result<TextSourceProjection, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    let topology = graphforge_storage::TopologyFiles::discover_legacy(project_dir)
+        .map_err(|error| source(error.to_string()))?;
+    project_text_source_from_files(
+        project_dir,
+        &topology,
+        label_id,
+        selected_properties,
+        limits,
+        checkpoint,
+    )
+}
+
+/// Project the selected canonical topology files.
+pub fn project_text_source_from_files<C>(
+    project_dir: &Path,
+    topology: &graphforge_storage::TopologyFiles,
+    label_id: graphforge_value::EntityTypeSelection,
+    selected_properties: Option<&[String]>,
+    limits: TextSearchLimits,
     mut checkpoint: C,
 ) -> Result<TextSourceProjection, SearchArtifactError>
 where
@@ -71,6 +95,7 @@ where
     let mut source_bytes = 0_u64;
     let eligible = select_eligible_nodes(
         project_dir,
+        topology,
         label_id,
         limits,
         &mut checkpoint,
@@ -143,9 +168,40 @@ where
     })
 }
 
+pub(crate) fn project_text_source_with_topology<C>(
+    project_dir: &Path,
+    topology: Option<&graphforge_storage::TopologyFiles>,
+    label_id: graphforge_value::EntityTypeSelection,
+    selected_properties: Option<&[String]>,
+    limits: TextSearchLimits,
+    checkpoint: C,
+) -> Result<TextSourceProjection, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    match topology {
+        Some(files) => project_text_source_from_files(
+            project_dir,
+            files,
+            label_id,
+            selected_properties,
+            limits,
+            checkpoint,
+        ),
+        None => project_text_source(
+            project_dir,
+            label_id,
+            selected_properties,
+            limits,
+            checkpoint,
+        ),
+    }
+}
+
 #[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
 fn select_eligible_nodes<C>(
     project_dir: &Path,
+    topology: &graphforge_storage::TopologyFiles,
     label_id: graphforge_value::EntityTypeSelection,
     limits: TextSearchLimits,
     checkpoint: &mut C,
@@ -166,8 +222,8 @@ where
     // generations authenticate UUID uniqueness through the disk index instead.
     let mut legacy_seen = index.is_none().then(BTreeSet::new);
     let mut failure = None;
-    let admitted = graphforge_storage::visit_node_fragments_admitted(
-        project_dir,
+    let admitted = graphforge_storage::visit_node_fragments_admitted_from_files(
+        topology,
         8192,
         limits.source_bytes,
         source_evidence,

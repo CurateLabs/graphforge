@@ -766,6 +766,7 @@ fn property_map_charge(props: &HashMap<String, IrLiteral>) -> usize {
 ///
 /// See the [module docs](self) for routing rules and limitations.
 pub struct GraphWriter {
+    topology: Option<std::sync::Arc<crate::TopologyFileAuthority>>,
     dir: PathBuf,
     mode: OntologyMode,
     /// One timestamp captured at open time, reused for every row's
@@ -820,19 +821,61 @@ impl GraphWriter {
     /// # Errors
     /// Returns [`GfError::Storage`] if the directory cannot be created.
     pub fn open_at(dir: &Path, mode: OntologyMode, now_micros: i64) -> Result<Self, GfError> {
+        Self::open_at_with_topology(dir, mode, now_micros, None)
+    }
+
+    /// Open a writer with explicit session-owned topology membership.
+    pub fn open_with_topology(
+        dir: &Path,
+        mode: OntologyMode,
+        topology: std::sync::Arc<crate::TopologyFileAuthority>,
+    ) -> Result<Self, GfError> {
+        let now_micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
+        Self::open_at_with_topology(dir, mode, now_micros, Some(topology))
+    }
+
+    /// The selected files used by writer preparation and mutation readers.
+    pub fn topology_files(&self) -> Result<crate::TopologyFiles, GfError> {
+        match &self.topology {
+            Some(authority) => crate::enumerate_topology_files(authority, None),
+            None => crate::TopologyFiles::discover_legacy(&self.dir),
+        }
+    }
+
+    /// Retain the owner when staging this writer's outputs.
+    #[must_use]
+    pub fn topology_authority(&self) -> Option<std::sync::Arc<crate::TopologyFileAuthority>> {
+        self.topology.clone()
+    }
+
+    /// Open with an injected timestamp and explicit session membership.
+    pub fn open_at_with_topology(
+        dir: &Path,
+        mode: OntologyMode,
+        now_micros: i64,
+        topology: Option<std::sync::Arc<crate::TopologyFileAuthority>>,
+    ) -> Result<Self, GfError> {
         fs::create_dir_all(dir).map_err(|e| io_err(&e))?;
         crate::route_component::owned::admit_owned_workspace(dir)?;
         // Continue surrogate assignment from the on-disk maximum so a writer
         // opened on an existing project appends rather than colliding with /
         // overwriting prior rows. Absent files → max 0 → start at 1.
-        let (max_node_id, max_edge_id) = match read_surrogate_tails(dir)? {
-            Some(tails) => tails,
-            None => (
-                crate::catalog::max_node_id(dir).map_err(pq_err)?,
-                crate::catalog::max_edge_id(dir).map_err(pq_err)?,
-            ),
+        let (max_node_id, max_edge_id) = if let Some(tails) = read_surrogate_tails(dir)? {
+            tails
+        } else {
+            let files = match &topology {
+                Some(authority) => crate::enumerate_topology_files(authority, None)?,
+                None => crate::TopologyFiles::discover_legacy(dir)?,
+            };
+            (
+                crate::catalog::max_node_id_from_files(&files).map_err(pq_err)?,
+                crate::catalog::max_edge_id_from_files(&files).map_err(pq_err)?,
+            )
         };
         Ok(Self {
+            topology,
             dir: dir.to_path_buf(),
             mode,
             now_micros,
@@ -1126,7 +1169,10 @@ impl GraphWriter {
             self.uuid_snapshot_refresh_needed = None;
         }
         if self.uuid_index_snapshot.is_none() {
-            crate::uuid_membership::ensure_uuid_membership_migrated(&self.dir)?;
+            crate::uuid_membership::ensure_uuid_membership_migrated_with_topology(
+                &self.dir,
+                self.topology.clone(),
+            )?;
             let generation = crate::read_topology_generation(&self.dir)?;
             self.uuid_index_snapshot = Some(
                 crate::AuthenticatedUuidIndexSnapshot::open_at_generation(&self.dir, generation)?,
@@ -1923,6 +1969,9 @@ impl GraphWriter {
     /// # Errors
     /// Returns [`GfError::Storage`] on any I/O, Arrow, or Parquet failure.
     pub fn flush_into(&mut self, staged: &mut RewriteBatch) -> Result<(), GfError> {
+        if let Some(authority) = &self.topology {
+            staged.bind_topology_authority(std::sync::Arc::clone(authority))?;
+        }
         let result = (|| {
             let topology_pending = !self.nodes.is_empty() || !self.edges.is_empty();
             self.flush_nodes(staged)?;
@@ -1988,7 +2037,8 @@ impl GraphWriter {
         let batch = self.pending_nodes_batch()?;
 
         let legacy = topology.join("nodes.parquet");
-        let path = if !legacy.exists() && !topology.join("nodes").exists() {
+        let files = self.topology_files()?;
+        let path = if files.nodes.is_empty() {
             legacy.clone()
         } else {
             let first = self.nodes.first().map_or(0, |row| row.node_id);
@@ -1997,7 +2047,10 @@ impl GraphWriter {
                 .join("nodes")
                 .join(format!("{first:020}-{last:020}.parquet"))
         };
-        if path != legacy && (path.exists() || staged.staged_temp(&path).is_some()) {
+        if path != legacy
+            && (files.nodes.iter().any(|(owned, _)| owned == &path)
+                || staged.staged_temp(&path).is_some())
+        {
             return Err(GfError::Storage(
                 "node shard surrogate range already exists".into(),
             ));
@@ -2049,15 +2102,17 @@ impl GraphWriter {
             let first = rows.first().map_or(0, |row| row.edge_id);
             let last = rows.last().map_or(first, |row| row.edge_id);
             let component = staged.route_component(&self.dir, &stem)?;
-            let existing = crate::mutator::edge_parquet_files(&self.dir, Some(&component))?;
-            let path = if existing.is_empty() {
-                edges_dir.join(format!("{component}.parquet"))
-            } else {
+            let files = self.topology_files()?;
+            let path = if files.edges.iter().any(|(route, _, _)| route == &stem) {
                 edges_dir
                     .join(&component)
                     .join(format!("{first:020}-{last:020}.parquet"))
+            } else {
+                edges_dir.join(format!("{component}.parquet"))
             };
-            if path.exists() || staged.staged_temp(&path).is_some() {
+            if files.edges.iter().any(|(_, owned, _)| owned == &path)
+                || staged.staged_temp(&path).is_some()
+            {
                 return Err(GfError::Storage(
                     "edge shard surrogate range already exists".into(),
                 ));

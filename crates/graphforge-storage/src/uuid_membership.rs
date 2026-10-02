@@ -52,10 +52,12 @@ pub(crate) use probing::UuidConstructionSnapshot;
 pub(crate) use probing::open_uuid_construction_snapshot;
 #[cfg(test)]
 pub(crate) use probing::pin_uuid_construction_snapshot;
-pub(crate) use rebuild::ensure_uuid_membership_migrated;
-pub use rebuild::rebuild_uuid_membership_indexes;
 pub use rebuild::rebuild_v4_ordinal_identity;
 pub use rebuild::rebuild_v4_ordinal_identity_with_evidence;
+pub(crate) use rebuild::{
+    ensure_uuid_membership_migrated, ensure_uuid_membership_migrated_with_topology,
+};
+pub use rebuild::{rebuild_uuid_membership_indexes, rebuild_uuid_membership_indexes_with_topology};
 #[cfg(test)]
 pub(crate) use topology_delta::append_uuid_membership_delta;
 pub(crate) use topology_delta::commit_uuid_neutral_topology_rewrite;

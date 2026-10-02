@@ -1,9 +1,11 @@
 //! Generation-bound bindings between physical graph storage and qualified ontology authority.
 
 mod migration;
-pub use migration::materialize_semantic_migration;
+pub use migration::{materialize_semantic_migration, materialize_semantic_migration_from_files};
 mod legacy_routes;
-pub use legacy_routes::{LegacyRouteMigration, apply_legacy_route_moves};
+pub use legacy_routes::{
+    LegacyRouteMigration, apply_legacy_route_moves, apply_legacy_route_moves_with_topology,
+};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;

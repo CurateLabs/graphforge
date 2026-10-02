@@ -623,7 +623,7 @@ impl AuthenticatedPropertyInventory {
                 generation_lease: Some(generation.clone()),
                 routes: BTreeMap::new(),
                 edge_routes: BTreeMap::new(),
-                node_files: None,
+                node_files: requested_route.is_none().then(Vec::new),
                 schemas: BTreeMap::new(),
                 authority_bytes: 0,
                 authority_block_equivalents: 0,
@@ -878,6 +878,20 @@ impl AuthenticatedPropertyInventory {
     /// The generation's historical live counts are not workspace statistics.
     pub fn capture_workspace(project: &Path, pinned: Option<&Self>) -> Result<Self, GfError> {
         let mut inventory = Self::capture(project)?;
+        if let Some(generation) = pinned.and_then(|pinned| pinned.generation_lease.as_ref()) {
+            inventory.seed_semantic_property_schemas(generation)?;
+        }
+        Ok(inventory)
+    }
+
+    /// Refresh property bytes while retaining explicit topology membership.
+    pub fn capture_workspace_with_topology(
+        project: &Path,
+        pinned: Option<&Self>,
+        topology: &crate::TopologyFiles,
+    ) -> Result<Self, GfError> {
+        let captured = crate::capture_graph_read_inventory_with_topology(project, topology)?;
+        let mut inventory = Self::from_read_inventory_at_root(project, captured, None)?;
         if let Some(generation) = pinned.and_then(|pinned| pinned.generation_lease.as_ref()) {
             inventory.seed_semantic_property_schemas(generation)?;
         }

@@ -449,8 +449,11 @@ fn expand_bfs(cfg: &ExpandConfig, input_batches: &[RecordBatch]) -> Result<Recor
     // row's seed, which is in `emissions`), so an index Hit no longer scans the
     // whole node table. Source columns come from the input batch, not here.
     let reached: std::collections::HashSet<u64> = emissions.iter().map(|(_, id, _)| *id).collect();
-    let node_batches = graphforge_storage::read_nodes_filtered(&cfg.dir, &reached)
-        .map_err(|e| exec_err(e.to_string()))?;
+    let node_batches = graphforge_storage::read_nodes_filtered_from_files(
+        &topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?,
+        &reached,
+    )
+    .map_err(|e| exec_err(e.to_string()))?;
     // `read_nodes_filtered` always returns at least one (possibly empty) batch,
     // but guard defensively: with no node batch there is nothing to reach, so
     // emit zero rows rather than indexing into an empty Vec.
@@ -1910,14 +1913,18 @@ fn expand_single_hop_chunk(
             .saturating_add(1_usize.saturating_sub(node_key_already_demanded)),
     );
     let node_batches = if required.is_some() {
-        graphforge_storage::read_nodes_filtered_projected_observed(
-            &cfg.dir,
+        graphforge_storage::read_nodes_filtered_projected_observed_from_files(
+            &topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?,
             &reached,
             &node_projection,
             node_observer.as_ref(),
         )
     } else {
-        graphforge_storage::read_nodes_filtered_observed(&cfg.dir, &reached, node_observer.as_ref())
+        graphforge_storage::read_nodes_filtered_observed_from_files(
+            &topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?,
+            &reached,
+            node_observer.as_ref(),
+        )
     }
     .map_err(|e| exec_err(e.to_string()))?;
     drop(node_permit);
@@ -2060,3 +2067,13 @@ fn expand_single_hop_chunk(
 
 #[cfg(test)]
 mod tests;
+
+fn topology_for_provider(
+    provider: &dyn AdjacencyProvider,
+    legacy_root: &Path,
+) -> Result<graphforge_storage::TopologyFiles, GfError> {
+    match provider.admitted_inventory() {
+        Some(inventory) => graphforge_storage::TopologyFiles::from_inventory(&inventory),
+        None => graphforge_storage::TopologyFiles::discover_legacy(legacy_root),
+    }
+}

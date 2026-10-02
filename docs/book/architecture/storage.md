@@ -1424,6 +1424,23 @@ See [`bounded-csr-1205.json`](https://github.com/CurateLabs/graphforge/blob/29a7
 for frozen source/executable hashes, exact observations, commands, decoded bounds,
 CPU/I/O costs and limitations, including the superseded incomplete baseline trace.
 
+### Topology file membership
+
+A compact session retains an explicit topology authority from its generation's
+manifest. `enumerate_topology_files` returns those node and edge files together
+with the session's own staged replacements and appends. Payload readers receive
+that file list; directory discovery is confined to the explicit standalone
+legacy boundary. A route-scoped property inventory cannot authorize a complete
+topology scan. A newly created generation without graph participants has an
+explicit empty authority.
+
+The same authority governs mutation preparation, UUID rebuilding, publication,
+and reopen. Publication captures only selected topology files, so an unrelated
+well-formed file placed in a node or edge directory cannot become authenticated
+through a refresh. A staged commit prepares its candidate membership before
+installing files and swaps the authority after successful installation; rollback
+restores the session's prior membership along with its files.
+
 ### Ordinary Cypher property ownership
 
 Committed edge SET, map updates and REMOVE resolve the authenticated property

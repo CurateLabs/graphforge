@@ -443,6 +443,7 @@ fn promote_node_properties(
     dir: &Path,
     ontology: &OntologyHandle,
     runtime_catalog: &RuntimeCatalog,
+    topology: &crate::TopologyFiles,
 ) -> Result<(), GfError> {
     use arrow::array::FixedSizeBinaryArray;
     use std::collections::{BTreeMap, BTreeSet};
@@ -466,9 +467,9 @@ fn promote_node_properties(
                 .then_some((EntityTypeId::runtime(id).encode(), name.to_owned()))
         })
         .collect::<HashMap<_, _>>();
-    for path in crate::mutator::node_parquet_files(dir)? {
+    for (path, _) in &topology.nodes {
         let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            crate::graph_admission::open_admitted(&path)?,
+            crate::graph_admission::open_admitted(path)?,
         )
         .map_err(pq_err)?
         .with_batch_size(4096)
@@ -915,6 +916,7 @@ fn reconcile_inner(
     runtime_catalog: &RuntimeCatalog,
     rewrite: bool,
     promotion: bool,
+    topology: Option<std::sync::Arc<crate::TopologyFileAuthority>>,
 ) -> Result<RuntimeEntityLabelReconcile, GfError> {
     let marked = has_runtime_entity_label_encoding_marker(dir);
     let ontology_ids = ontology_entity_ids(ontology);
@@ -953,11 +955,18 @@ fn reconcile_inner(
 
     let candidate_keys = remap.keys().copied().collect::<HashSet<_>>();
     let mut remapped_label_values = 0u64;
+    let files = match &topology {
+        Some(authority) => crate::enumerate_topology_files(authority, None)?,
+        None => crate::TopologyFiles::discover_legacy(dir)?,
+    };
     let mut staged = RewriteBatch::new();
-    for path in crate::mutator::node_parquet_files(dir)? {
+    if let Some(authority) = topology {
+        staged.bind_topology_authority(authority)?;
+    }
+    for (path, _) in &files.nodes {
         let reader = || -> Result<_, GfError> {
             parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-                crate::graph_admission::open_admitted(&path)?,
+                crate::graph_admission::open_admitted(path)?,
             )
             .map_err(pq_err)?
             .with_batch_size(4096)
@@ -988,13 +997,13 @@ fn reconcile_inner(
             remapped_label_values = remapped_label_values.saturating_add(count);
             Ok(rewritten.remove(0))
         });
-        staged.stage_batches(&path, TOPOLOGY_NODES_SCHEMA.clone(), batches)?;
+        staged.stage_batches(path, TOPOLOGY_NODES_SCHEMA.clone(), batches)?;
     }
     if promotion
         && remapped_label_values > 0
         && let Some(ontology) = ontology
     {
-        promote_node_properties(dir, ontology, runtime_catalog)?;
+        promote_node_properties(dir, ontology, runtime_catalog, &files)?;
     }
     let mut retired_property_objects = Vec::new();
     let edges_changed = if promotion
@@ -1046,7 +1055,17 @@ pub fn reconcile_runtime_entity_label_ids(
     ontology: Option<&OntologyHandle>,
     runtime_catalog: &RuntimeCatalog,
 ) -> Result<RuntimeEntityLabelReconcile, GfError> {
-    reconcile_inner(dir, ontology, runtime_catalog, true, false)
+    reconcile_inner(dir, ontology, runtime_catalog, true, false, None)
+}
+
+/// Reconcile labels using only the owning session's topology membership.
+pub fn reconcile_runtime_entity_label_ids_with_topology(
+    dir: &Path,
+    ontology: Option<&OntologyHandle>,
+    runtime_catalog: &RuntimeCatalog,
+    topology: std::sync::Arc<crate::TopologyFileAuthority>,
+) -> Result<RuntimeEntityLabelReconcile, GfError> {
+    reconcile_inner(dir, ontology, runtime_catalog, true, false, Some(topology))
 }
 
 /// Promote labels and property/relationship routes in a private adoption candidate.
@@ -1059,7 +1078,24 @@ pub fn promote_runtime_graph_for_ontology(
     ontology: &OntologyHandle,
     runtime_catalog: &RuntimeCatalog,
 ) -> Result<RuntimeEntityLabelReconcile, GfError> {
-    reconcile_inner(dir, Some(ontology), runtime_catalog, true, true)
+    reconcile_inner(dir, Some(ontology), runtime_catalog, true, true, None)
+}
+
+/// Promote a private ontology candidate through its explicit topology owner.
+pub fn promote_runtime_graph_for_ontology_with_topology(
+    dir: &Path,
+    ontology: &OntologyHandle,
+    runtime_catalog: &RuntimeCatalog,
+    topology: std::sync::Arc<crate::TopologyFileAuthority>,
+) -> Result<RuntimeEntityLabelReconcile, GfError> {
+    reconcile_inner(
+        dir,
+        Some(ontology),
+        runtime_catalog,
+        true,
+        true,
+        Some(topology),
+    )
 }
 
 /// Validate runtime entity label encoding without rewriting topology.
@@ -1076,7 +1112,7 @@ pub fn validate_runtime_entity_label_ids(
     ontology: Option<&OntologyHandle>,
     runtime_catalog: &RuntimeCatalog,
 ) -> Result<RuntimeEntityLabelReconcile, GfError> {
-    reconcile_inner(dir, ontology, runtime_catalog, false, false)
+    reconcile_inner(dir, ontology, runtime_catalog, false, false, None)
 }
 
 /// Pure helper: tagged runtime entity plan IDs stay disjoint from ontology IDs.
@@ -1087,6 +1123,16 @@ pub fn runtime_entity_plan_id_is_disjoint_from_ontology(
 ) -> bool {
     EntityTypeId::ontology(ontology_id)
         .is_ok_and(|ontology| EntityTypeId::runtime(runtime_id) != ontology)
+}
+
+/// Validate labels using only the owning session's topology membership.
+pub fn validate_runtime_entity_label_ids_with_topology(
+    dir: &Path,
+    ontology: Option<&OntologyHandle>,
+    runtime_catalog: &RuntimeCatalog,
+    topology: std::sync::Arc<crate::TopologyFileAuthority>,
+) -> Result<RuntimeEntityLabelReconcile, GfError> {
+    reconcile_inner(dir, ontology, runtime_catalog, false, false, Some(topology))
 }
 
 #[cfg(test)]

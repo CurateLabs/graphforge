@@ -39,6 +39,8 @@ impl Default for VectorLifecycleLimits {
 /// Caller-resolved vector artifact identity and local label membership ID.
 #[derive(Clone, Copy, Debug)]
 pub struct VectorIndexRequest<'a> {
+    /// Explicit topology membership; absent only for standalone legacy callers.
+    pub topology: Option<&'a graphforge_storage::TopologyFiles>,
     /// Normalized graph label persisted in the artifact key.
     pub label: &'a str,
     /// Local catalog identity used only for topology membership projection.
@@ -82,8 +84,9 @@ where
         limits.coordination,
         || {
             if projection.borrow().is_none() {
-                *projection.borrow_mut() = Some(project_label_members_snapshot(
+                *projection.borrow_mut() = Some(project_label_members_snapshot_with_topology(
                     project_dir,
+                    request.topology,
                     request.label_id,
                     limits,
                     || checkpoint.borrow_mut()(),
@@ -165,8 +168,9 @@ where
             projection.validate_binding(project_dir, request.label_id)?;
             projection
         } else {
-            captured = project_label_members_snapshot(
+            captured = project_label_members_snapshot_with_topology(
                 project_dir,
+                request.topology,
                 request.label_id,
                 limits,
                 &mut checkpoint,
@@ -249,7 +253,6 @@ impl LabelMemberProjection {
     }
 }
 
-#[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
 /// Read the canonical topology membership once for a label at one generation.
 ///
 /// # Errors
@@ -258,11 +261,34 @@ pub fn project_label_members_snapshot<C>(
     project_dir: &Path,
     label_id: graphforge_value::EntityTypeSelection,
     limits: VectorLifecycleLimits,
+    checkpoint: C,
+) -> Result<LabelMemberProjection, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    project_label_members_snapshot_with_topology(project_dir, None, label_id, limits, checkpoint)
+}
+
+/// Project membership from an explicit file authority, or standalone legacy source.
+#[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
+pub fn project_label_members_snapshot_with_topology<C>(
+    project_dir: &Path,
+    topology: Option<&graphforge_storage::TopologyFiles>,
+    label_id: graphforge_value::EntityTypeSelection,
+    limits: VectorLifecycleLimits,
     mut checkpoint: C,
 ) -> Result<LabelMemberProjection, SearchArtifactError>
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
+    let legacy;
+    let topology = if let Some(topology) = topology {
+        topology
+    } else {
+        legacy = graphforge_storage::TopologyFiles::discover_legacy(project_dir)
+            .map_err(|error| source(error.to_string()))?;
+        &legacy
+    };
     graphforge_core::hash_observation::record_topology_projection();
     checkpoint()?;
     let source_generation = SearchSourceSnapshot::generation(project_dir)?;
@@ -276,8 +302,8 @@ where
         .map_err(|error| source(error.to_string()))?;
     let mut legacy_seen = index.is_none().then(BTreeSet::new);
     let mut failure = None;
-    graphforge_storage::visit_node_fragments_admitted(
-        project_dir,
+    graphforge_storage::visit_node_fragments_admitted_from_files(
+        topology,
         8192,
         limits.source_bytes,
         &mut source_evidence,
@@ -504,6 +530,7 @@ mod tests {
 
     fn request() -> VectorIndexRequest<'static> {
         VectorIndexRequest {
+            topology: None,
             label: "Person",
             label_id: graphforge_value::EntityTypeSelection::Known(
                 graphforge_value::EntityTypeId::decode(9).unwrap(),

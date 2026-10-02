@@ -364,10 +364,11 @@ impl GraphConstructionSession<'_> {
                         graph.prepare_generation_read_authority(candidate, &prepared_dir)?;
                     drop(read_authority);
                     prepared = Some(PreparedGenerationRefresh {
-                        workspace: super::GraphWorkspace {
-                            dir: prepared_dir,
-                            owner: prepared_guard,
-                        },
+                        workspace: super::GraphWorkspace::new(
+                            prepared_dir,
+                            prepared_guard,
+                            &read_authority_prepared.properties,
+                        )?,
                         runtime_catalog,
                         read_authority: read_authority_prepared,
                         hydration_evidence,
@@ -432,10 +433,11 @@ impl GraphConstructionSession<'_> {
                     drop(read_authority);
                     refresh_boundary(RefreshBoundary::BeforeInstall)?;
                     Ok(PreparedGenerationRefresh {
-                        workspace: super::GraphWorkspace {
-                            dir: prepared_dir,
-                            owner: prepared_guard,
-                        },
+                        workspace: super::GraphWorkspace::new(
+                            prepared_dir,
+                            prepared_guard,
+                            &read_authority_prepared.properties,
+                        )?,
                         runtime_catalog,
                         read_authority: read_authority_prepared,
                         hydration_evidence,

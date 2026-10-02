@@ -140,6 +140,7 @@ impl GraphForge {
         options: SearchIndexOptions,
     ) -> Result<Option<TextIndexInspection>, GfError> {
         let label_id = self.search_label_id(label)?;
+        let topology = self.dir().topology_files()?;
         let mut text_properties = None;
         match options {
             SearchIndexOptions::Text {
@@ -149,6 +150,7 @@ impl GraphForge {
                 prepare_search_index(
                     &self.dir(),
                     SearchIndexRequest::Text {
+                        topology: Some(&topology),
                         label,
                         label_id,
                         properties: properties.as_deref(),
@@ -168,6 +170,7 @@ impl GraphForge {
                 prepare_search_index(
                     &self.dir(),
                     SearchIndexRequest::Vector {
+                        topology: Some(&topology),
                         label,
                         label_id,
                         node_uuid: *node_uuid.as_bytes(),
@@ -203,9 +206,14 @@ impl GraphForge {
         properties: Option<&[String]>,
     ) -> Result<TextIndexInspection, GfError> {
         let label_id = self.search_label_id(label)?;
+        let topology = self.dir().topology_files()?;
         let inspection = inspect_text_index_freshness(
             &self.dir(),
-            LazyTextRequest { label, label_id },
+            LazyTextRequest {
+                topology: Some(&topology),
+                label,
+                label_id,
+            },
             properties,
             graphforge_search::TextLifecycleLimits::default(),
             || Ok(()),

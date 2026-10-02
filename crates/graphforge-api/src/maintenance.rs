@@ -174,10 +174,11 @@ impl GraphForge {
             let prepared = self.prepare_generation_read_authority(&current, &dir)?;
             let catalog = crate::load_runtime_catalog(&dir)?;
             let bindings = graphforge_storage::semantic_storage_bindings(&current)?;
-            let old_workspace = self.replace_workspace_owner(crate::GraphWorkspace {
+            let old_workspace = self.replace_workspace_owner(crate::GraphWorkspace::new(
                 dir,
-                owner: workspace,
-            });
+                workspace,
+                &prepared.properties,
+            )?);
             self.graph_open_evidence = evidence;
             self.install_prepared_generation_read_authority(current.generation_uuid(), prepared);
             self.resolved_generation = current;

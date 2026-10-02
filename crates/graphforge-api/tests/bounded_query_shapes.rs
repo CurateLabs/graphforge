@@ -865,6 +865,328 @@ fn an_unregistered_file_in_the_hydrated_node_directory_is_never_read() {
     );
 }
 
+/// Every topology consumer shares the declared-file boundary, including
+/// readers used while preparing and publishing writes. The planted files are
+/// valid Parquet with canonical, non-overlapping names, so corruption checks
+/// and filename validation cannot substitute for membership in the authority.
+#[test]
+fn undeclared_topology_files_do_not_change_readers_or_writes() {
+    fn rows(batches: &[RecordBatch]) -> String {
+        // Query ids and generation ids are intentionally fresh per invocation.
+        // Compare data and counters, never random schema metadata.
+        batches
+            .iter()
+            .map(|batch| format!("{:?}", batch.columns()))
+            .collect()
+    }
+    fn exercise(surface: &str, planted: bool) -> Result<String, String> {
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().join("state");
+        build(&path, 8, 1);
+        let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+        let generation = resolve_project_generation(&path).unwrap();
+        let workspace = std::fs::read_dir(generation.container_root())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|candidate| {
+                candidate.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .starts_with("graphforge-graph-workspace-")
+                })
+            })
+            .unwrap();
+        let declared =
+            graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
+                &generation,
+            )
+            .unwrap();
+        let topology =
+            graphforge_storage::TopologyFileAuthority::from_inventory(&workspace, &declared)
+                .unwrap();
+        if surface == "bounded" && !planted {
+            let narrowed = graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation_for_route(
+                &generation, graphforge_storage::PropertyRouteKind::Node, "Entity").unwrap();
+            assert!(
+                graphforge_storage::TopologyFiles::from_inventory(&narrowed).is_err(),
+                "route-scoped authority cannot authorize a complete topology read"
+            );
+        }
+        #[cfg(feature = "search")]
+        let search_before = if surface == "search" {
+            Some(
+                forge
+                    .index_search(
+                        "Entity",
+                        graphforge_api::SearchIndexOptions::Text {
+                            properties: Some(vec!["name".into()]),
+                            rebuild: true,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?
+                    .unwrap()
+                    .source_fingerprint,
+            )
+        } else {
+            None
+        };
+        if planted {
+            let nodes = workspace.join("topology/nodes");
+            let source = canonical_shards(&nodes, "nodes").remove(0);
+            let planted = nodes.join(format!("{:020}-{:020}.parquet", 9, 16));
+            // Conflicting labels make a UUID-map reader observable too: merely
+            // copying identical labels could hide an unauthorized second read.
+            let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                std::fs::File::open(source).unwrap(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+            let mut writer = None;
+            for batch in reader {
+                let batch = batch.unwrap();
+                let column = batch.schema().index_of("type_ids").unwrap();
+                let arrow::datatypes::DataType::List(field) = batch.column(column).data_type()
+                else {
+                    unreachable!()
+                };
+                let mut labels = arrow::array::ListBuilder::new(arrow::array::UInt32Builder::new())
+                    .with_field(Arc::clone(field));
+                for _ in 0..batch.num_rows() {
+                    labels.append(true);
+                }
+                let mut columns = batch.columns().to_vec();
+                columns[column] = Arc::new(labels.finish());
+                let batch = RecordBatch::try_new(batch.schema(), columns).unwrap();
+                let writer = writer.get_or_insert_with(|| {
+                    parquet::arrow::ArrowWriter::try_new(
+                        std::fs::File::create(&planted).unwrap(),
+                        batch.schema(),
+                        None,
+                    )
+                    .unwrap()
+                });
+                writer.write(&batch).unwrap();
+            }
+            writer.unwrap().close().unwrap();
+            if surface == "path" {
+                let flat = workspace.join("topology/nodes.parquet");
+                assert!(!flat.exists());
+                assert!(
+                    !declared
+                        .node_fragments()
+                        .unwrap()
+                        .iter()
+                        .any(|(_, relative)| relative == "topology/nodes.parquet")
+                );
+                std::fs::copy(&planted, flat).unwrap();
+            }
+            let edges = workspace.join("topology/edges");
+            let route = std::fs::read_dir(&edges)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path())
+                .find(|candidate| candidate.is_dir())
+                .unwrap();
+            let source = canonical_shards(&route, "edges").remove(0);
+            std::fs::copy(source, route.join(format!("{:020}-{:020}.parquet", 9, 16))).unwrap();
+        }
+        let query = match surface {
+            "bounded" => "MATCH (n) RETURN count(n) AS total",
+            "recount" => "MATCH ()-[r]->() RETURN count(r) AS total",
+            "filtered" => "MATCH (a {name:'entity-0'})-->(b) RETURN labels(b) AS labels",
+            "delete" => "MATCH (n {name:'entity-0'}) DETACH DELETE n",
+            "label set" => "MATCH (n) SET n:Tagged",
+            "merge" => "MERGE (n:Entity) RETURN n.node_uuid AS id",
+            "path" => {
+                "MATCH p=(a {name:'entity-0'})-[*1..2]->(b) RETURN [n IN nodes(p) | labels(n)] AS labels"
+            }
+            "analyst" => {
+                let batch = forge
+                    .rank("Entity", graphforge_api::RankOptions::default())
+                    .map_err(|error| error.to_string())?;
+                return Ok(rows(&[batch]));
+            }
+            "search" => {
+                #[cfg(feature = "search")]
+                {
+                    let inspection = forge
+                        .index_search(
+                            "Entity",
+                            graphforge_api::SearchIndexOptions::Text {
+                                properties: Some(vec!["name".into()]),
+                                rebuild: true,
+                            },
+                        )
+                        .map_err(|error| error.to_string())?;
+                    let inspection = inspection.expect("text index inspection");
+                    assert_eq!(
+                        Some(&inspection.source_fingerprint),
+                        search_before.as_ref(),
+                        "undeclared topology changed the selected source"
+                    );
+                    let hits = forge
+                        .find(graphforge_api::FindOptions {
+                            label: Some("Entity".into()),
+                            query: Some("entity".into()),
+                            limit: 20,
+                            ..Default::default()
+                        })
+                        .map_err(|error| error.to_string())?;
+                    assert_eq!(hits.num_rows(), 8, "text retrieval lost selected members");
+                    return Ok(format!(
+                        "{:?}; {:?}; {}",
+                        inspection.properties,
+                        inspection.state,
+                        rows(&[hits])
+                    ));
+                }
+                #[cfg(not(feature = "search"))]
+                return Ok("search feature disabled".into());
+            }
+            "uuid" => {
+                let metrics = graphforge_storage::rebuild_uuid_membership_indexes_with_topology(
+                    &workspace,
+                    graphforge_storage::UuidIndexBuildLimits::default(),
+                    topology,
+                )
+                .map_err(|error| error.to_string())?;
+                return Ok(format!(
+                    "nodes={}, edges={}",
+                    metrics.node_count, metrics.edge_count
+                ));
+            }
+            _ => unreachable!(),
+        };
+        let result = forge.execute(query).map_err(|error| error.to_string())?;
+        if surface == "path" {
+            let mut lengths = Vec::new();
+            for batch in &result.batches {
+                let paths = batch
+                    .column_by_name("labels")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<arrow::array::ListArray>()
+                    .unwrap();
+                for row in 0..batch.num_rows() {
+                    let value = paths.value(row);
+                    let cells = value
+                        .as_any()
+                        .downcast_ref::<arrow::array::ListArray>()
+                        .unwrap();
+                    lengths.push(cells.len());
+                    for node in 0..cells.len() {
+                        let value = cells.value(node);
+                        let labels = value
+                            .as_any()
+                            .downcast_ref::<arrow::array::StringArray>()
+                            .unwrap();
+                        assert_eq!(labels.iter().collect::<Vec<_>>(), vec![Some("Entity")]);
+                    }
+                }
+            }
+            lengths.sort_unstable();
+            assert_eq!(lengths, vec![2, 3]);
+        }
+        if matches!(surface, "delete" | "label set" | "merge") {
+            let staged = forge
+                .execute("CREATE (n:Entity {name:'owned-after'}) WITH n MATCH (m:Entity) RETURN m")
+                .map_err(|error| error.to_string())?;
+            let expected = if surface == "delete" { 8 } else { 9 };
+            assert_eq!(
+                staged
+                    .batches
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .sum::<usize>(),
+                expected,
+                "a statement-owned append disappeared before publication"
+            );
+            let own = forge
+                .execute("MATCH (n {name:'owned-after'}) RETURN count(n) AS total")
+                .map_err(|error| error.to_string())?;
+            let count = own.batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .unwrap()
+                .value(0);
+            assert_eq!(count, 1, "a same-session staged append disappeared");
+        }
+        let after = forge
+            .execute("MATCH (n) RETURN count(n) AS total")
+            .map_err(|error| error.to_string())?;
+        let reopened = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+        let reopened_count = reopened
+            .execute("MATCH (n) RETURN count(n) AS total")
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            rows(&after.batches),
+            rows(&reopened_count.batches),
+            "selected topology changed on reopen"
+        );
+        let installed = resolve_project_generation(&path).unwrap();
+        let admitted =
+            graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
+                &installed,
+            )
+            .unwrap();
+        let stray = format!("topology/nodes/{:020}-{:020}.parquet", 9, 16);
+        assert!(
+            !admitted
+                .node_fragments()
+                .unwrap()
+                .iter()
+                .any(|(_, name)| name == &stray),
+            "publication authenticated an undeclared node file"
+        );
+        assert!(
+            !admitted
+                .edge_fragments(None)
+                .iter()
+                .any(|(_, _, name)| name.ends_with(&format!("/{:020}-{:020}.parquet", 9, 16))),
+            "publication authenticated an undeclared edge file"
+        );
+        Ok(format!(
+            "{}; {:?}; after={}",
+            rows(&result.batches),
+            result.side_effects,
+            rows(&after.batches)
+        ))
+    }
+
+    let mut differences = Vec::new();
+    for surface in [
+        "bounded",
+        "recount",
+        "filtered",
+        "delete",
+        "label set",
+        "merge",
+        "analyst",
+        "search",
+        "path",
+        "uuid",
+    ] {
+        let declared = exercise(surface, false);
+        assert!(
+            declared.is_ok(),
+            "{surface}: clean fixture failed: {declared:?}"
+        );
+        let planted = exercise(surface, true);
+        if declared != planted {
+            differences.push(format!(
+                "{surface}: declared={declared:?}, planted={planted:?}"
+            ));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "undeclared topology changed answers:\n{}",
+        differences.join("\n")
+    );
+}
+
 /// Construction allocates edge surrogates per window and then splits the
 /// rows by route, so each route's shard spans a range it only half fills:
 /// the hint is an upper bound per route, inexact, and the fragments of one

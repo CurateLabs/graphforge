@@ -1297,6 +1297,11 @@ fn commit_locked(
     let transaction = Uuid::now_v7().simple().to_string();
     let root_identity = guard.directory.identity();
     let mut entries = Vec::new();
+    let topology = batch.topology_authority().cloned();
+    let topology_candidate = topology
+        .as_ref()
+        .map(|authority| authority.prepare_installed(&batch))
+        .transpose()?;
     let crate::staging::StagedRewrite {
         mut staged,
         mut moves,
@@ -1467,6 +1472,9 @@ fn commit_locked(
     recover_locked(root, &guard.directory, prior)?;
     guard.revalidate()?;
     crate::io_stats::record_rewrite_commit();
+    if let (Some(topology), Some(candidate)) = (topology, topology_candidate) {
+        topology.install(candidate);
+    }
     Ok(next)
 }
 

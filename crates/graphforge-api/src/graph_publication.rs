@@ -46,10 +46,11 @@ impl GraphForge {
         let (projected, route_moves) =
             if current.is_none() && context.composition().modules.len() == 1 {
                 let projection =
-                    graphforge_storage::SemanticStorageBindings::project_legacy_unambiguous(
-                        context.composition(),
-                        &self.dir(),
-                    )?;
+                graphforge_storage::SemanticStorageBindings::project_legacy_unambiguous_from_files(
+                    context.composition(),
+                    &self.dir(),
+                    &self.dir().topology_files()?,
+                )?;
                 (projection.bindings, projection.route_moves)
             } else {
                 if current.is_none() {
@@ -140,12 +141,18 @@ impl GraphForge {
         }
 
         if !graphforge_storage::uuid_membership_index_is_fresh(&self.dir())? {
-            graphforge_storage::rebuild_uuid_membership_indexes(
+            graphforge_storage::rebuild_uuid_membership_indexes_with_topology(
                 &self.dir(),
                 graphforge_storage::UuidIndexBuildLimits::default(),
+                std::sync::Arc::clone(&self.dir().topology),
             )?;
         }
-        let graph = graphforge_storage::capture_graph_files_over_parent(&self.dir(), &parent)?.1;
+        let graph = graphforge_storage::capture_graph_files_over_parent_with_topology(
+            &self.dir(),
+            &parent,
+            &self.dir().topology_files()?,
+        )?
+        .1;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let installed_bindings = self
             .semantic_storage_bindings
@@ -243,12 +250,18 @@ impl GraphForge {
             ));
         }
         if !graphforge_storage::uuid_membership_index_is_fresh(&self.dir())? {
-            graphforge_storage::rebuild_uuid_membership_indexes(
+            graphforge_storage::rebuild_uuid_membership_indexes_with_topology(
                 &self.dir(),
                 graphforge_storage::UuidIndexBuildLimits::default(),
+                std::sync::Arc::clone(&self.dir().topology),
             )?;
         }
-        let graph = graphforge_storage::capture_graph_files_over_parent(&self.dir(), &parent)?.1;
+        let graph = graphforge_storage::capture_graph_files_over_parent_with_topology(
+            &self.dir(),
+            &parent,
+            &self.dir().topology_files()?,
+        )?
+        .1;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let participants = graph_publication_participants(
             &parent,
@@ -407,7 +420,11 @@ impl GraphForge {
     /// Replace the session's read authority with what the workspace holds now.
     fn reset_read_authority_from_workspace(&self) -> Result<(), GfError> {
         let generation = self.generation_for_read()?;
-        let (captured, _) = graphforge_storage::capture_graph_files(&self.dir())?;
+        self.dir().topology.clear();
+        let (captured, _) = graphforge_storage::capture_graph_files_with_topology(
+            &self.dir(),
+            &self.dir().topology_files()?,
+        )?;
         let inventory = std::sync::Arc::new(
             graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
                 &generation,

@@ -329,8 +329,13 @@ fn facade_migrates_legacy_routes_with_atomic_participants_and_plain_reopen() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("project");
     let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
-    let mut writer =
-        graphforge_storage::GraphWriter::open_at(&forge.dir(), OntologyMode::Strict, 1).unwrap();
+    let mut writer = graphforge_storage::GraphWriter::open_at_with_topology(
+        &forge.dir(),
+        OntologyMode::Strict,
+        1,
+        Some(Arc::clone(&forge.dir().topology)),
+    )
+    .unwrap();
     let left = graphforge_core::uuid::new_v7();
     let right = graphforge_core::uuid::new_v7();
     writer

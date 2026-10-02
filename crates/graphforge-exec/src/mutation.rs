@@ -351,6 +351,8 @@ impl MutationTransaction {
         resource: &crate::write_resource::BoundWriteResource,
     ) -> Result<(), graphforge_core::GfError> {
         self.admit(resource)?;
+        self.staged
+            .bind_topology_authority(resource.topology_authority())?;
         let staged = std::mem::replace(&mut self.staged, graphforge_storage::RewriteBatch::new());
         match &mut self.topology {
             Some(topology) => MutationState::commit_topology(

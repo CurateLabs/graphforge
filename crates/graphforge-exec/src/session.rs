@@ -1040,8 +1040,12 @@ impl ExecutionSession {
                 Arc::clone(&self.ctx.runtime_env().memory_pool),
             ),
         };
-        let mut wctx = write_driver::StatementWriteContext::new(&resource.dir, resource.mode)?
-            .with_semantic_composition_fingerprint(self.semantic_composition_fingerprint.clone());
+        let mut wctx = write_driver::StatementWriteContext::new_with_topology(
+            &resource.dir,
+            resource.mode,
+            Some(resource.topology_authority()),
+        )?
+        .with_semantic_composition_fingerprint(self.semantic_composition_fingerprint.clone());
         let create_retention =
             write_driver::create_retention_by_write(&plan.ops, &plan.exprs, &split);
         let mut cursor = split.prefix_len;

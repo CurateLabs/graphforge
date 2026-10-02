@@ -72,6 +72,10 @@ pub use filtered_parquet::read_edges_filtered_projected_observed;
 pub use filtered_parquet::read_nodes_filtered;
 pub use filtered_parquet::read_nodes_filtered_observed;
 pub use filtered_parquet::read_nodes_filtered_projected_observed;
+pub use filtered_parquet::{
+    read_nodes_filtered_from_files, read_nodes_filtered_observed_from_files,
+    read_nodes_filtered_projected_observed_from_files,
+};
 pub use property_readers::read_edge_properties;
 pub use property_readers::read_edge_properties_from_inventory;
 pub use property_readers::read_edge_properties_projected;
@@ -130,7 +134,7 @@ pub(crate) fn read_parquet_or_empty(
     read_parquet_required(path)
 }
 
-fn read_parquet_required(path: &Path) -> Result<Vec<RecordBatch>, DataFusionError> {
+pub(crate) fn read_parquet_required(path: &Path) -> Result<Vec<RecordBatch>, DataFusionError> {
     let builder = admitted_parquet(path)?;
     let file_schema = builder.schema().clone();
     let reader = builder.build().map_err(parquet_err)?;
@@ -640,14 +644,20 @@ pub fn node_property_source_fragments(
 
 /// Read all node rows from every canonical topology fragment.
 pub fn read_nodes(dir: &Path) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let paths = crate::mutator::node_parquet_files(dir)
-        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    read_nodes_from_files(
+        &crate::TopologyFiles::discover_legacy(dir)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+    )
+}
+
+/// Read only the node payloads selected by the caller's topology authority.
+pub fn read_nodes_from_files(
+    files: &crate::TopologyFiles,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let paths = files.nodes.iter().map(|(path, _)| path.clone());
     let mut batches = Vec::new();
     for path in paths {
-        batches.extend(normalize_topology_nodes(read_parquet_or_empty(
-            &path,
-            TOPOLOGY_NODES_SCHEMA.clone(),
-        )?)?);
+        batches.extend(normalize_topology_nodes(read_parquet_required(&path)?)?);
     }
     if batches.is_empty() {
         batches.push(RecordBatch::new_empty(TOPOLOGY_NODES_SCHEMA.clone()));
@@ -695,15 +705,21 @@ pub fn node_topology_present(dir: &Path) -> Result<bool, DataFusionError> {
 ///
 /// # Errors
 /// Propagates Parquet / Arrow errors encountered while reading an edge file.
+#[cfg(test)]
 pub(crate) fn max_edge_id(dir: &Path) -> Result<u64, DataFusionError> {
+    max_edge_id_from_files(
+        &crate::TopologyFiles::discover_legacy(dir)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+    )
+}
+
+pub(crate) fn max_edge_id_from_files(files: &crate::TopologyFiles) -> Result<u64, DataFusionError> {
     let mut max = 0u64;
-    for (_, path) in crate::mutator::edge_parquet_files(dir, None)
-        .map_err(|error| DataFusionError::Execution(error.to_string()))?
-    {
+    for (_, path, _) in &files.edges {
         // Every enumerated Parquet path is canonical topology. Ignoring a
         // malformed shard here could resume surrogate allocation from an
         // incomplete maximum and authenticate colliding edge identities.
-        max = max.max(max_ordered_u64_tail(&path, "edge_id")?);
+        max = max.max(max_ordered_u64_tail(path, "edge_id")?);
     }
     Ok(max)
 }
@@ -711,12 +727,18 @@ pub(crate) fn max_edge_id(dir: &Path) -> Result<u64, DataFusionError> {
 /// Return the largest canonical node surrogate without decoding the complete
 /// node table. Canonical topology keeps surrogate ids strictly increasing, so
 /// only the final bounded Parquet row group is needed.
-pub(crate) fn max_node_id(dir: &Path) -> Result<u64, DataFusionError> {
+#[cfg(test)]
+fn max_node_id(dir: &Path) -> Result<u64, DataFusionError> {
+    max_node_id_from_files(
+        &crate::TopologyFiles::discover_legacy(dir)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+    )
+}
+
+pub(crate) fn max_node_id_from_files(files: &crate::TopologyFiles) -> Result<u64, DataFusionError> {
     let mut max = 0;
-    for path in crate::mutator::node_parquet_files(dir)
-        .map_err(|error| DataFusionError::Execution(error.to_string()))?
-    {
-        max = max.max(max_ordered_u64_tail(&path, "node_id")?);
+    for (path, _) in &files.nodes {
+        max = max.max(max_ordered_u64_tail(path, "node_id")?);
     }
     Ok(max)
 }
@@ -878,15 +900,29 @@ pub fn visit_node_fragments_admitted<F>(
     batch_size: usize,
     byte_limit: u64,
     evidence: &mut Vec<AdmittedSourceFile>,
+    visit: F,
+) -> Result<u64, DataFusionError>
+where
+    F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
+{
+    let files = crate::TopologyFiles::discover_legacy(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    visit_node_fragments_admitted_from_files(&files, batch_size, byte_limit, evidence, visit)
+}
+
+/// Visit only the selected topology payloads through admitted file handles.
+pub fn visit_node_fragments_admitted_from_files<F>(
+    files: &crate::TopologyFiles,
+    batch_size: usize,
+    byte_limit: u64,
+    evidence: &mut Vec<AdmittedSourceFile>,
     mut visit: F,
 ) -> Result<u64, DataFusionError>
 where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
 {
-    let paths = crate::mutator::node_parquet_files(dir)
-        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
     let mut total = 0_u64;
-    for path in paths {
+    for (path, relative) in &files.nodes {
         let mut options = std::fs::OpenOptions::new();
         options.read(true);
         #[cfg(unix)]
@@ -894,7 +930,7 @@ where
             use std::os::unix::fs::OpenOptionsExt as _;
             options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         }
-        let mut file = options.open(&path).map_err(|e| io_err(&e))?;
+        let mut file = options.open(path).map_err(|e| io_err(&e))?;
         let metadata = file.metadata().map_err(|e| io_err(&e))?;
         if !metadata.file_type().is_file() {
             return Err(DataFusionError::Execution(format!(
@@ -912,7 +948,7 @@ where
         }
         preflight_parquet_handle(&mut file, metadata.len())?;
         evidence.push(checksum_admitted_source(
-            node_relative_name(&path)?,
+            relative.clone(),
             &mut file,
             metadata.len(),
         )?);
@@ -966,25 +1002,6 @@ fn property_relative_name(stem: &str, path: &Path) -> Result<String, DataFusionE
     )
 }
 
-fn node_relative_name(path: &Path) -> Result<String, DataFusionError> {
-    let file = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| DataFusionError::Execution("topology source name is not UTF-8".into()))?;
-    Ok(
-        if path
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            == Some("nodes")
-        {
-            format!("topology/nodes/{file}")
-        } else {
-            "topology/nodes.parquet".into()
-        },
-    )
-}
-
 fn checksum_admitted_source(
     name: String,
     file: &mut File,
@@ -1034,13 +1051,29 @@ fn checksum_admitted_source(
 pub fn visit_nodes_batched<F>(
     dir: &Path,
     batch_size: usize,
+    visit: F,
+) -> Result<(), DataFusionError>
+where
+    F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
+{
+    visit_nodes_batched_from_files(
+        &crate::TopologyFiles::discover_legacy(dir)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+        batch_size,
+        visit,
+    )
+}
+
+/// Stream the selected node payloads without any directory capability.
+pub fn visit_nodes_batched_from_files<F>(
+    files: &crate::TopologyFiles,
+    batch_size: usize,
     mut visit: F,
 ) -> Result<(), DataFusionError>
 where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
 {
-    let paths = crate::mutator::node_parquet_files(dir)
-        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let paths: Vec<_> = files.nodes.iter().map(|(path, _)| path.clone()).collect();
     if paths.is_empty() {
         let empty = RecordBatch::new_empty(TOPOLOGY_NODES_SCHEMA.clone());
         let _ = visit(&empty)?;
@@ -1140,6 +1173,8 @@ struct GraphSchema {
 struct GraphCatalogAuthority {
     tables: HashMap<String, Arc<dyn TableProvider>>,
     property_inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
+    topology: Option<Arc<crate::TopologyFileAuthority>>,
+    legacy_topology: bool,
 }
 
 impl fmt::Debug for GraphSchema {
@@ -1156,6 +1191,8 @@ impl GraphSchema {
             authority: std::sync::RwLock::new(GraphCatalogAuthority {
                 tables: HashMap::new(),
                 property_inventory: None,
+                topology: None,
+                legacy_topology: false,
             }),
         }
     }
@@ -1301,6 +1338,7 @@ impl GraphCatalog {
         semantic: Option<&crate::SemanticStorageBindings>,
         inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
     ) -> Result<Self, DataFusionError> {
+        let legacy_topology = inventory.is_none() && !dir.join(crate::CURRENT_FILE).exists();
         let inventory = match inventory {
             Some(inventory) => Some(inventory),
             None if !dir.exists() => None,
@@ -1489,11 +1527,20 @@ impl GraphCatalog {
             }
         }
 
-        schema
+        let authority = schema
             .authority
             .get_mut()
-            .expect("new graph schema lock is not poisoned")
-            .property_inventory = inventory;
+            .expect("new graph schema lock is not poisoned");
+        authority.topology = if let Some(inventory) = inventory.as_deref() {
+            Some(
+                crate::TopologyFileAuthority::from_inventory(dir, inventory)
+                    .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        authority.legacy_topology = legacy_topology;
+        authority.property_inventory = inventory;
         Ok(Self {
             schema: Arc::new(schema),
             prop_names,
@@ -1514,28 +1561,70 @@ impl GraphCatalog {
         self.lowering_property_inventory()
     }
 
+    /// Bind this catalog to the session's declared and locally committed topology.
+    #[must_use]
+    pub fn with_topology_authority(self, topology: Arc<crate::TopologyFileAuthority>) -> Self {
+        let mut authority = self
+            .schema
+            .authority
+            .write()
+            .expect("graph schema lock poisoned");
+        authority.topology = Some(topology);
+        authority.legacy_topology = false;
+        drop(authority);
+        self
+    }
+
+    /// Retain membership independently of payload admission tickets.
+    #[must_use]
+    pub fn topology_authority(&self) -> Option<Arc<crate::TopologyFileAuthority>> {
+        self.schema
+            .authority
+            .read()
+            .expect("graph schema lock poisoned")
+            .topology
+            .clone()
+    }
+
+    /// Select physical topology payloads without directory discovery.
+    pub fn topology_files(&self) -> Result<crate::TopologyFiles, graphforge_core::GfError> {
+        match self.topology_authority() {
+            Some(authority) => crate::enumerate_topology_files(&authority, None),
+            None => crate::TopologyFiles::from_inventory(
+                self.admitted_inventory()
+                    .as_deref()
+                    .ok_or_else(crate::topology_files::missing_authority)?,
+            ),
+        }
+    }
+
     /// Node provider over the files this catalog's admitted inventory
-    /// declares (#1388); a catalog without that authority lists the directory.
+    /// declares (#1388), plus the owning session's installed writes.
     ///
     /// # Errors
-    /// Returns the directory listing failure when no inventory is retained.
-    pub fn node_table(&self, dir: &Path) -> Result<TopologyNodeTable, DataFusionError> {
-        TopologyNodeTable::open_with_inventory(dir, self.lowering_property_inventory().as_deref())
+    /// Refuses a catalog without full topology membership authority.
+    pub fn node_table(&self) -> Result<TopologyNodeTable, DataFusionError> {
+        Ok(TopologyNodeTable::from_files(
+            &self
+                .topology_files()
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+        ))
     }
 
-    /// Relation provider pinned to this catalog's admitted route authority.
-    #[must_use]
-    pub fn edge_table(&self, dir: &Path, route: &str) -> TypedEdgeTable {
-        TypedEdgeTable::open(dir, route).with_inventory(self.lowering_property_inventory())
+    /// Relation provider over this session's selected payloads.
+    pub fn edge_table(&self, route: &str) -> Result<TypedEdgeTable, DataFusionError> {
+        Ok(TypedEdgeTable::from_files(
+            self.topology_files()
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+            route,
+        ))
     }
 
-    /// Union provider preserving semantic relation names from admitted authority.
-    #[must_use]
-    pub fn union_edge_table(&self, dir: &Path) -> UnionEdgeTable {
-        UnionEdgeTable {
-            dir: dir.to_path_buf(),
-            inventory: self.lowering_property_inventory(),
-        }
+    /// Union provider preserving selected semantic relation names.
+    pub fn union_edge_table(&self) -> Result<UnionEdgeTable, DataFusionError> {
+        Ok(UnionEdgeTable::from_files(self.topology_files().map_err(
+            |error| DataFusionError::Execution(error.to_string()),
+        )?))
     }
 
     /// Node-property provider pinned to this catalog's generation authority.
@@ -1602,9 +1691,32 @@ impl GraphCatalog {
     /// Plans already executing retain their provider and immutable inventory;
     /// later plans resolve tables from this atomically refreshed catalog view.
     pub fn refresh_property_inventory(&self, dir: &Path) -> Result<(), DataFusionError> {
+        let legacy = self
+            .schema
+            .authority
+            .read()
+            .expect("graph schema lock poisoned")
+            .legacy_topology;
+        let files = if legacy {
+            // Only the explicit standalone entry point discovers externally
+            // committed legacy files. Compact facades retain session authority.
+            let files = crate::TopologyFiles::discover_legacy(dir)
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+            if let Some(authority) = self.topology_authority() {
+                authority.restore(files.clone());
+            }
+            files
+        } else {
+            self.topology_files()
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?
+        };
         let inventory = Arc::new(
-            crate::property_overlay::authenticated_property_inventory(dir)
-                .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+            crate::AuthenticatedPropertyInventory::capture_workspace_with_topology(
+                dir,
+                self.admitted_inventory().as_deref(),
+                &files,
+            )
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?,
         );
         let replacements = {
             let authority = self

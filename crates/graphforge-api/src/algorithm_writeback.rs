@@ -60,7 +60,7 @@ impl GraphForge {
             &expected,
         )?;
 
-        let known = persisted_node_uuids(&dir)?;
+        let known = persisted_node_uuids(&workspace.topology_files()?)?;
         let updates = algorithm_property_updates(
             algorithm,
             property,
@@ -88,7 +88,8 @@ impl GraphForge {
                 .as_ref(),
             self.property_inventory_for_session(),
         )
-        .map_err(GfError::from_execution_error)?;
+        .map_err(GfError::from_execution_error)?
+        .with_topology_authority(std::sync::Arc::clone(&workspace.topology));
         let session =
             graphforge_exec::ExecutionSession::new_with_target_provider_resources_and_identity(
                 catalog,
@@ -222,10 +223,12 @@ fn uuid_at(column: &FixedSizeBinaryArray, row: usize) -> Result<[u8; 16], GfErro
         .map_err(|_| GfError::Validation("malformed algorithm node_uuid".into()))
 }
 
-fn persisted_node_uuids(dir: &std::path::Path) -> Result<HashSet<[u8; 16]>, GfError> {
+fn persisted_node_uuids(
+    files: &graphforge_storage::TopologyFiles,
+) -> Result<HashSet<[u8; 16]>, GfError> {
     let mut known = HashSet::new();
-    for batch in
-        graphforge_storage::read_nodes(dir).map_err(|error| GfError::Storage(error.to_string()))?
+    for batch in graphforge_storage::read_nodes_from_files(files)
+        .map_err(|error| GfError::Storage(error.to_string()))?
     {
         let uuids = fixed_uuid_column(&batch, "node_uuid")?;
         for row in 0..uuids.len() {

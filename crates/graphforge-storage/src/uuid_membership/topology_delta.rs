@@ -62,7 +62,7 @@ use super::ordinal_artifacts::write_v4_tombstone_artifact;
 use super::ordinal_compaction::compact_v4_binary_carry;
 use super::ordinal_compaction::read_v4_forward_record;
 use super::rebuild::build_surrogate_run;
-use super::rebuild::ensure_uuid_membership_migrated;
+
 use super::rebuild::flush_entity_surrogate_run;
 use super::rebuild::merge_node_surrogate_runs;
 #[cfg(test)]
@@ -115,7 +115,10 @@ pub(crate) fn commit_uuid_topology_rewrite(
     if delta_is_empty && staged.is_empty() {
         return Ok(CommittedUuidTopologyRewrite::NoTopologyChange);
     }
-    ensure_uuid_membership_migrated(project_dir)?;
+    super::rebuild::ensure_uuid_membership_migrated_with_topology(
+        project_dir,
+        staged.topology_authority().cloned(),
+    )?;
     let selected = selected_generation_for_graph_root(project_dir)?;
     let ordinal_authority = selected
         .as_ref()
