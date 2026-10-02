@@ -749,7 +749,7 @@ fn read_nodes_returns_rows_and_empty_when_absent() {
 
 #[test]
 fn catalog_and_schema_debug_identity_are_stable_and_content_free() {
-    let schema = GraphSchema::new();
+    let schema = GraphSchema::new(std::path::Path::new(""));
     assert_eq!(format!("{schema:?}"), "GraphSchema { table_names: [] }");
     let schema_provider: Arc<dyn SchemaProvider> = Arc::new(schema);
     assert!(schema_provider.downcast_ref::<GraphSchema>().is_some());

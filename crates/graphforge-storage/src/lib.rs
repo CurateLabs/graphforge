@@ -542,7 +542,7 @@ pub use staging::{RewriteBatch, STAGE_FILE_BLOCK_BYTES, remove_stale_temps};
 pub use graphforge_core::GfError;
 
 mod lowering_snapshot;
-pub use lowering_snapshot::lowering_snapshot;
+pub use lowering_snapshot::{lowering_snapshot, lowering_snapshot_for};
 
 #[doc(hidden)]
 pub use project_recovery::open_or_initialize_project_with_allocation;

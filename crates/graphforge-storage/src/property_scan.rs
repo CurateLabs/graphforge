@@ -25,6 +25,9 @@ pub(crate) struct PropertyScanOptions<'a> {
     pub(crate) projection: Option<&'a Vec<usize>>,
     pub(crate) limit: Option<usize>,
     pub(crate) batch_size: usize,
+    /// Whether planning may admit the route for a footer row bound. A
+    /// key-only scan of an unread route reports no statistics instead.
+    pub(crate) footer_statistics: bool,
 }
 
 #[derive(Clone)]
@@ -93,6 +96,7 @@ impl PropertyOverlayExec {
         };
         let row_upper_bound = inventory
             .as_ref()
+            .filter(|_| options.footer_statistics)
             .map(|inventory| {
                 let rows = inventory
                     .route_row_upper_bound(kind, &route)

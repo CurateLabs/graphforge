@@ -324,6 +324,7 @@ pub struct PropertyTable {
     pub(super) inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
     route: String,
     schema: SchemaRef,
+    keys_only: bool,
 }
 
 impl PropertyTable {
@@ -338,6 +339,25 @@ impl PropertyTable {
             inventory: None,
             route: entity_type.to_owned(),
             schema,
+            keys_only: false,
+        }
+    }
+
+    /// Open the route's `node_uuid` keys alone. Nothing is admitted to open:
+    /// the schema is the key column and planning takes no footer statistics,
+    /// while a scan still authenticates every fragment it reads.
+    #[must_use]
+    pub fn open_keys(
+        dir: &Path,
+        stem: &str,
+        inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
+    ) -> Self {
+        Self {
+            project: dir.to_path_buf(),
+            inventory,
+            route: stem.to_owned(),
+            schema: crate::schemas::PROPERTY_BASE_SCHEMA.clone(),
+            keys_only: true,
         }
     }
 
@@ -364,6 +384,7 @@ impl PropertyTable {
             inventory,
             route: stem.to_owned(),
             schema,
+            keys_only: false,
         })
     }
 
@@ -382,6 +403,7 @@ impl PropertyTable {
             inventory: Some(inventory),
             route: stem.to_owned(),
             schema,
+            keys_only: false,
         })
     }
 
@@ -432,6 +454,7 @@ pub struct EdgePropertyTable {
     pub(super) inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
     route: String,
     schema: SchemaRef,
+    keys_only: bool,
 }
 
 impl EdgePropertyTable {
@@ -457,6 +480,7 @@ impl EdgePropertyTable {
             inventory,
             route: rel_type.to_owned(),
             schema,
+            keys_only: false,
         })
     }
 
@@ -475,7 +499,24 @@ impl EdgePropertyTable {
             inventory: Some(inventory),
             route: route.to_owned(),
             schema,
+            keys_only: false,
         })
+    }
+
+    /// Open the route's `edge_uuid` keys alone; see [`PropertyTable::open_keys`].
+    #[must_use]
+    pub fn open_keys(
+        dir: &Path,
+        route: &str,
+        inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
+    ) -> Self {
+        Self {
+            project: dir.to_path_buf(),
+            inventory,
+            route: route.to_owned(),
+            schema: crate::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone(),
+            keys_only: true,
+        }
     }
 
     /// The property column schema (including the `edge_uuid` join key).
@@ -526,6 +567,7 @@ impl TableProvider for EdgePropertyTable {
                     projection,
                     limit,
                     batch_size: state.config().batch_size(),
+                    footer_statistics: !self.keys_only,
                 },
             )?,
         ))
@@ -560,6 +602,7 @@ impl TableProvider for PropertyTable {
                     projection,
                     limit,
                     batch_size: state.config().batch_size(),
+                    footer_statistics: !self.keys_only,
                 },
             )?,
         ))
