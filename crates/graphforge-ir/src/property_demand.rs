@@ -44,9 +44,11 @@ pub fn property_demand<S: BuildHasher>(
     }
 }
 
-/// Node variables bound by `plan` and the subplans that share its variable
-/// numbering. A `UNION` branch is bound afresh and numbers its variables from
-/// zero, so its variables are not this plan's.
+/// Node variables visible in `plan`: its own and those an `OPTIONAL` child
+/// binds into it. An `EXISTS` or pattern-comprehension child's variables stay in
+/// that child, and the binder may reuse their numbers for later variables of
+/// this plan; a `UNION` branch is bound afresh and numbers its variables from
+/// zero. Neither is this plan's.
 fn collect_node_vars(plan: &GraphPlan, vars: &mut HashSet<VarId>) {
     for op in &plan.ops {
         match op {
@@ -57,9 +59,7 @@ fn collect_node_vars(plan: &GraphPlan, vars: &mut HashSet<VarId>) {
                 vars.insert(*src);
                 vars.insert(*dst);
             }
-            GraphOp::Optional { child }
-            | GraphOp::Exists { child, .. }
-            | GraphOp::PatternComprehension { child, .. } => collect_node_vars(child, vars),
+            GraphOp::Optional { child } => collect_node_vars(child, vars),
             _ => {}
         }
     }
@@ -70,8 +70,8 @@ struct DemandAnalysis<'a, S> {
 }
 
 impl<S: BuildHasher> DemandAnalysis<'_, S> {
-    /// `inherited` holds the node variables of the enclosing plan whose
-    /// numbering `plan` shares.
+    /// `inherited` holds the enclosing plan's node variables that are in scope
+    /// inside `plan`.
     fn plan_is_value_free(&self, plan: &GraphPlan, inherited: &HashSet<VarId>) -> bool {
         let mut node_vars = inherited.clone();
         collect_node_vars(plan, &mut node_vars);
@@ -456,6 +456,42 @@ mod tests {
             property_demand(&edge_property, &names),
             PropertyDemand::Complete
         );
+    }
+
+    /// A pattern predicate binds its anonymous variables in a child scope, and
+    /// the binder may number later variables of the enclosing plan the same
+    /// way. An edge bound after the predicate must not borrow the predicate's
+    /// node, so its topology-named property still demands every schema.
+    #[test]
+    fn pattern_predicate_variables_stay_in_their_scope() {
+        let mut names = names();
+        names.insert(property(UPDATED_AT), "updated_at".to_owned());
+        let expand = |src: u32, edge: u32, dst: u32| GraphOp::Expand {
+            src: VarId(src),
+            edge: VarId(edge),
+            dst: VarId(dst),
+            rel_ty: None,
+            dir: crate::Direction::Out,
+            min_hops: 1,
+            max_hops: Some(1),
+        };
+        let mut predicate = GraphPlan::builder("openCypher").build();
+        predicate.ops = vec![expand(0, 1, 2)];
+        let mut exprs = ExprArena::new();
+        let read = read(&mut exprs, 2, UPDATED_AT);
+        let mut plan = GraphPlan::builder("openCypher").build();
+        plan.ops = vec![
+            scan(0),
+            GraphOp::Exists {
+                child: Box::new(predicate),
+                negated: false,
+            },
+            scan(1),
+            expand(1, 2, 0),
+            returning(read),
+        ];
+        plan.exprs = exprs;
+        assert_eq!(property_demand(&plan, &names), PropertyDemand::Complete);
     }
 
     #[test]

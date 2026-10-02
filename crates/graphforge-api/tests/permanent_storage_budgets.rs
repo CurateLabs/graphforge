@@ -7645,6 +7645,27 @@ fn union_branch_edge_property_named_like_node_topology_is_read() {
     assert_eq!(values, vec![Some(8), Some(42)]);
 }
 
+/// A pattern predicate binds its anonymous variables in a child scope. An edge
+/// bound after it must not be taken for that scope's node, so an edge property
+/// named like a node topology column is still read.
+#[test]
+fn edge_property_named_like_node_topology_after_a_pattern_predicate_is_read() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    graph
+        .execute("CREATE (:B)-[:T {updated_at: 42}]->(a:A)-[:U]->(:C)")
+        .unwrap();
+    let result = graph
+        .execute("MATCH (a:A) WHERE (a)-->() MATCH (x)-[r:T]->(a) RETURN r.updated_at AS v")
+        .unwrap();
+    let values = result
+        .batches
+        .iter()
+        .flat_map(|batch| (0..batch.num_rows()).map(move |row| int_at(batch, 0, row)))
+        .collect::<Vec<_>>();
+    assert_eq!(values, vec![Some(42)]);
+}
+
 fn count_marker_rows(batches: &[RecordBatch]) -> Vec<(Uuid, Option<i64>, Option<String>)> {
     let mut rows = Vec::new();
     for batch in batches {
