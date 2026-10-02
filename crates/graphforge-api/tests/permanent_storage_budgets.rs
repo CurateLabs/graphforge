@@ -7723,10 +7723,10 @@ fn count_row_marker_avoids_property_values_through_public_lifecycle() {
         "MATCH (n) RETURN count(n.z_payload) AS value",
         payloads.iter().filter(|payload| payload.is_some()).count() as i64,
     );
-    // Property fragments are admitted on the first read of each, not at open and
-    // not per read (#1388): the first query, a bare `count(*)`, pays for every
-    // node-property fragment it must admit, whole and once, and the query that
-    // then reads the values pays nothing more.
+    // Property fragments are not admitted at open (#1388). Every read decodes a
+    // privately authenticated snapshot of each fragment it touches, so a bare
+    // `count(*)` and the query that reads the values each authenticate every
+    // declared node-property byte, whole, once per read.
     let declared_property_bytes = graphforge_storage::resolve_project_generation(&source)
         .unwrap()
         .graph_files_inventory()
@@ -7739,7 +7739,7 @@ fn count_row_marker_avoids_property_values_through_public_lifecycle() {
         .sum::<u64>();
     assert!(declared_property_bytes > 0);
     assert_eq!(counted.authentication_bytes, declared_property_bytes);
-    assert_eq!(values.authentication_bytes, 0);
+    assert_eq!(values.authentication_bytes, counted.authentication_bytes);
     let initial = verify_count_marker_graph(&graph, &nodes, &payloads);
     assert!(counted.physical_rows > 0);
     assert_eq!(counted.physical_rows, values.physical_rows);
