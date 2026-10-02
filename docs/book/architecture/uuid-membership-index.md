@@ -109,10 +109,18 @@ transaction entry is staged.
 
 Forward files are canonical and strictly UUID-sorted within each generation.
 Their descriptors are strictly generation-ordered; they are not required to be
-globally concatenation-sorted. The reader authenticates every run and compares
-the aggregate forward mapping commitment with the aggregate ordinal mapping
-commitment. Historical UUID and surrogate uniqueness is also proved by the
+globally concatenation-sorted. Opening reads no artifact byte: it authenticates
+the manifest and validates every descriptor and block fence, and each lookup
+authenticates the ordinal or tombstone blocks it reads. Complete admission, which
+every writer runs before building on the artifacts, authenticates every run and
+compares the aggregate forward mapping commitment with the aggregate ordinal
+mapping commitment. Historical UUID and surrogate uniqueness is also proved by the
 coupled authenticated v5 participant in the same topology transaction.
+
+The manifest may record `uuid_order_matches_ordinals`: whether UUIDs ascend
+strictly across every ordinal, derived by the publisher from the records it
+streamed (see [ADR 0038](../../adr/0038-determinism-at-the-publication-boundary.md)).
+The ordered fast path reads it instead of scanning; it is omitted when unknown.
 
 The construction artifact remains an immutable base. Later forward artifacts
 close implicit contiguous generation intervals. Two adjacent equal-width delta

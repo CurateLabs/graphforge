@@ -60,8 +60,16 @@ and atomic-publication checks. It performs no payload SHA-256 pass.
 Opening a compact generation does not read payload content. The open
 authenticates the manifest and route table, checks every payload for presence
 and exact length, and hard-links payloads into the private workspace; it
-checksums only the small sidecars and identity controls, which it copies into
-single-link files and verifies as it copies. Bulk payloads (nodes, edges, property fragments and search segments)
+checksums only the small sidecars and the small identity controls (manifests,
+receipt, lock, tombstones), which it copies into single-link files and verifies
+as it copies. The node-linear forward and ordinal identity runs are hard-linked
+read-only and opened without reading a byte: each lookup checks the required
+XXH64 of every ordinal or tombstone block it returns a value from, forward runs
+(read only by writers) are authenticated whole before a writer builds on them,
+and the fact that UUID order matches ordinal order is recorded by the publisher in
+the authenticated manifest ([ADR 0038](0038-determinism-at-the-publication-boundary.md));
+a manifest published before the field is proven by reading every ordinal block
+once, on the first ordered fast-path query. Bulk payloads (nodes, edges, property fragments and search segments)
 are checked for XXH64 on the first read of each object, memoized for that
 hydration, so a project that never reads an object never pays for it. A
 refusal is memoized as well. Every consumer that would otherwise bless a

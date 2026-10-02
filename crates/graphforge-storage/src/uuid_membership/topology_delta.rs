@@ -129,7 +129,7 @@ pub(crate) fn commit_uuid_topology_rewrite(
                 .open(project_dir, crate::V4OrdinalIdentityLimits::default())
                 .map_err(storage_err)?
             {
-                crate::V4OrdinalIdentityOpen::Ready(handle) => {
+                crate::V4OrdinalIdentityOpen::Ready(mut handle) => {
                     handle.pinned_update_inputs().map(Some).map_err(storage_err)
                 }
                 crate::V4OrdinalIdentityOpen::RebuildRequired { .. } => Err(storage_err(
@@ -1806,6 +1806,7 @@ pub(crate) fn prepare_v4_ordinal_delta(
         manifest: delta_manifest,
         metrics: build,
         publications: delta_publications,
+        first_ordinal_uuid: delta_first_uuid,
     } = writer.finish()?;
     let (tombstones, tombstone_bytes, tombstone_blocks) =
         write_v4_tombstone_artifact(&artifacts, generation, &deleted)?;
@@ -1818,6 +1819,7 @@ pub(crate) fn prepare_v4_ordinal_delta(
         false,
     )?;
 
+    let delta_uuid_order = delta_manifest.uuid_order_matches_ordinals;
     let mut manifest = pinned.manifest.clone();
     manifest.topology_generation = generation;
     manifest
@@ -1830,6 +1832,14 @@ pub(crate) fn prepare_v4_ordinal_delta(
     manifest
         .ordinal_ranges
         .sort_unstable_by_key(|range| range.first_node_id);
+    // Derived from the streamed delta and the authenticated tail of the parent,
+    // never assumed. Compaction below re-packs the same sequence, so it keeps it.
+    manifest.uuid_order_matches_ordinals = crate::ordinal_identity_v4::combine_uuid_order(
+        pinned.manifest.uuid_order_matches_ordinals,
+        pinned.last_ordinal_uuid()?,
+        delta_uuid_order,
+        delta_first_uuid,
+    );
 
     let mut created = manifest
         .forward_identities

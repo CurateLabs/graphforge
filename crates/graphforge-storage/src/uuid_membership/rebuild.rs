@@ -335,6 +335,7 @@ fn stage_v4_ordinal_rebuild_locked(
         manifest,
         metrics: v4_metrics,
         publications,
+        ..
     } = writer.finish()?;
     scratch_accounting.register_artifacts(v4_metrics.peak_temporary_bytes)?;
     metrics.node_count = v4_metrics.input_records;

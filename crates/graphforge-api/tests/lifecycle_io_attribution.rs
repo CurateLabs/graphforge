@@ -502,9 +502,11 @@ fn measure_open_cost(nodes: usize, fan_out: usize) -> OpenCost {
 /// while hydrating. A payload's content is checksummed on its first touch, once.
 ///
 /// Node count is fixed and the edge payload grows 16x, so any open-time work
-/// proportional to payload bytes shows up as growth. The residual that does
-/// scale, with nodes and not with edges, is the UUID-membership identity
-/// controls copied into the private workspace (about 40 bytes per node).
+/// proportional to payload bytes shows up as growth. The forward and ordinal
+/// identity runs are hard-linked, not copied, and authenticated block by block
+/// when a lookup reads them, so only small controls are copied. The node axis
+/// (nodes and edges scaling together, whole-process `rchar`) is
+/// `open_identity_cost.rs`.
 #[test]
 fn open_reads_control_bytes_not_payload_bytes() {
     const NODES: usize = 1 << 12;
@@ -512,6 +514,13 @@ fn open_reads_control_bytes_not_payload_bytes() {
     let large = measure_open_cost(NODES, 64);
 
     for (label, cost) in [("small", &small), ("large", &large)] {
+        for phase in StorageIoPhase::LIFECYCLE {
+            let totals = &cost.open.attribution.phases[&phase];
+            eprintln!(
+                "  open phase {label} {phase:?}: read {} bytes / {} calls",
+                totals.read_bytes, totals.read_calls
+            );
+        }
         eprintln!(
             "open cost {label}: payload={} open_read={} checksummed={} copied={} \
              first_query_read={} second_query_read={}",
@@ -562,9 +571,8 @@ fn open_reads_control_bytes_not_payload_bytes() {
         total_read_bytes(&small.open),
         total_read_bytes(&large.open)
     );
-    // 3. Hydration checksums only what it copies (identity controls, read once
-    //    to copy and once to verify) plus small sidecars, and the copied
-    //    controls are node-linear, not payload-linear.
+    // 3. Hydration checksums only what it copies (small controls, read once to
+    //    copy and once to verify) plus small sidecars.
     for (label, cost) in [("small", &small), ("large", &large)] {
         let evidence = &cost.open_evidence;
         assert!(
@@ -583,9 +591,12 @@ fn open_reads_control_bytes_not_payload_bytes() {
         .open_evidence
         .bytes_checksummed
         .abs_diff(small.open_evidence.bytes_checksummed);
+    // What moves is descriptors (one manifest entry per edge file), a sliver of
+    // the payload growth; it is no longer a fraction of copied identity bytes.
+    let payload_growth = large.payload_bytes - small.payload_bytes;
     assert!(
-        growth * 20 < small.open_evidence.bytes_checksummed,
-        "checksummed bytes moved {growth} with a 16x edge payload: {} -> {}",
+        growth * 1024 < payload_growth,
+        "checksummed bytes moved {growth} with a {payload_growth}-byte payload growth: {} -> {}",
         small.open_evidence.bytes_checksummed,
         large.open_evidence.bytes_checksummed
     );

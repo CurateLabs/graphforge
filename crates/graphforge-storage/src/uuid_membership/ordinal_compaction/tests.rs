@@ -201,6 +201,7 @@ fn v4_ordinal_cancellation_finalizes_and_removes_unpublished_output() {
             },
         ],
         tombstones: Vec::new(),
+        uuid_order_matches_ordinals: None,
     };
     let pinned = pinned_v4_update(root.path(), manifest.clone());
     let mut created = HashMap::new();
@@ -270,6 +271,7 @@ fn v4_tombstone_cancellation_finalizes_and_removes_unpublished_output() {
                 blocks: Vec::new(),
             },
         ],
+        uuid_order_matches_ordinals: None,
     };
     let pinned = pinned_v4_update(root.path(), manifest.clone());
     let mut created = HashMap::new();

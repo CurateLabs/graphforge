@@ -50,10 +50,36 @@ pub(crate) fn plan_extension(
             "FastPath requires one input".into(),
         )));
     };
-    Some(Ok(match choose(fast.kind, logical, input, session_state) {
-        Ok(fast) => fast,
-        Err(reason) => Arc::new(FastPathFallbackExec::new(Arc::clone(input), reason)),
-    }))
+    Some(match choose(fast.kind, logical, input, session_state) {
+        Ok(fast) => Ok(fast),
+        Err(Refusal::Precondition(reason)) => Ok(Arc::new(FastPathFallbackExec::new(
+            Arc::clone(input),
+            reason,
+        ))),
+        Err(Refusal::Failed(error)) => Err(error),
+    })
+}
+
+/// Why a fast path was not chosen.
+enum Refusal {
+    /// A session precondition does not hold; the generic plan answers instead,
+    /// under a visible fallback naming the reason.
+    Precondition(String),
+    /// Establishing a precondition failed closed (a corrupted identity block).
+    /// The generic plan is not an answer to a failed check.
+    Failed(DataFusionError),
+}
+
+impl From<&str> for Refusal {
+    fn from(reason: &str) -> Self {
+        Self::Precondition(reason.to_owned())
+    }
+}
+
+impl From<String> for Refusal {
+    fn from(reason: String) -> Self {
+        Self::Precondition(reason)
+    }
 }
 
 fn choose(
@@ -61,7 +87,7 @@ fn choose(
     logical_input: &LogicalPlan,
     input: &Arc<dyn ExecutionPlan>,
     session_state: &SessionState,
-) -> Result<Arc<dyn ExecutionPlan>, String> {
+) -> Result<Arc<dyn ExecutionPlan>, Refusal> {
     let expands = provider_expands(logical_input);
     let provider = session_state
         .config()
@@ -105,7 +131,7 @@ fn choose(
             require_edge_disjoint,
         } => {
             let [first, second] = expands.as_slice() else {
-                return Err(format!("{} provider expands, expected 2", expands.len()));
+                return Err(format!("{} provider expands, expected 2", expands.len()).into());
             };
             if first.rel_type_name != second.rel_type_name
                 || [first.direction, second.direction] != [Direction::Out, Direction::Out]
@@ -140,24 +166,27 @@ fn provider_expands(plan: &LogicalPlan) -> Vec<ExpandNode> {
     expands
 }
 
-fn single_out_expand(expands: &[ExpandNode]) -> Result<&ExpandNode, String> {
+fn single_out_expand(expands: &[ExpandNode]) -> Result<&ExpandNode, Refusal> {
     match expands {
         [expand] if expand.direction == Direction::Out => Ok(expand),
         [_] => Err("the hop is not outgoing".into()),
-        _ => Err(format!("{} provider expands, expected 1", expands.len())),
+        _ => Err(format!("{} provider expands, expected 1", expands.len()).into()),
     }
 }
 
 /// The session's ordinal identities, when node-ordinal order is UUID order.
 fn ordered_identities(
     session_state: &SessionState,
-) -> Result<Arc<V4OrdinalIdentitySession>, String> {
+) -> Result<Arc<V4OrdinalIdentitySession>, Refusal> {
     let identities = session_state
         .config()
         .get_extension::<OrdinalIdentityResolverExt>()
         .and_then(|extension| extension.0.clone())
         .ok_or("the session has no ordinal identity authority")?;
-    if !identities.uuid_order_matches_ordinals() {
+    if !identities
+        .uuid_order_matches_ordinals()
+        .map_err(|error| Refusal::Failed(DataFusionError::External(Box::new(error))))?
+    {
         return Err("node-ordinal order is not UUID order".into());
     }
     Ok(identities)

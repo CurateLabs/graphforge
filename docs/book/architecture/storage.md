@@ -315,13 +315,15 @@ and exact length, then hard-links the payloads into the private workspace. A
 payload's content is checked (exact length and XXH64) in one of three ways,
 chosen by path in `graphforge_storage::graph_admission`:
 
-- **First touch.** Nodes, edges, property fragments and search segments are
-  checked when the first reader opens each object, memoized for that hydration,
+- **First touch.** Nodes, edges, property fragments, search segments and the
+  v4 forward and ordinal identity runs are checked when the first reader opens each object, memoized for that hydration,
   and a refusal is memoized too. Readers reach the check through
   `ReadPathFile::admitted`, `open_admitted`, and `current_search_artifact`.
   Anything that would bless a payload's current bytes (inventory capture for
   publication, rewrite baselines, appends) admits it first, so corruption is
-  refused rather than republished under a fresh digest.
+  refused rather than republished under a fresh digest. (The identity handle
+  authenticates the blocks it reads itself, so for the identity runs only that
+  capture check applies.)
 - **Self-authenticating.** UUID-membership runs (block checksums in their
   manifest), CSR shards (per-shard XXH64) and delta runs (verified at replay)
   carry their own authority; hydration neither reads nor registers them.
@@ -330,7 +332,10 @@ chosen by path in `graphforge_storage::graph_admission`:
   build records, CSR shard manifests, unclassified files). Hydration
   hard-links it from the object store and checks its length and XXH64 as it
   links, so an unforeseen reader fails closed. Only the route table and the
-  UUID-membership controls are copied into single-link private files.
+  small mutable UUID-membership controls (manifests, receipts, lock,
+  tombstones) are copied into single-link private files. The forward and
+  ordinal identity runs are hard-linked read-only; the identity handle admits a
+  shared inode only when it is read-only and authenticates each block it reads.
 
 `GraphFilesOpenEvidence.bytes_validated` is declared length validated, and
 `bytes_checksummed` is content actually read and checksummed while hydrating.

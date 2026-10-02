@@ -445,6 +445,7 @@ pub(super) fn install_test_v4_facet(
                 xxh64: crate::corruption_checksum::checksum(&tombstone_bytes),
             }],
         }],
+        uuid_order_matches_ordinals: None,
     };
     let body = serde_json::to_vec(&manifest).unwrap();
     fs::write(root.join(V4_ORDINAL_MANIFEST), &body).unwrap();
