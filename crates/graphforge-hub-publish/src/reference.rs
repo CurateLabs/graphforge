@@ -463,33 +463,7 @@ impl ReferenceHub {
             }
         }
 
-        // Objects already stored in this repository start complete only while
-        // they still verify; a copy corrupted at rest must be uploaded again.
-        // A superseded attempt hands its retained bytes to the new session by
-        // digest, so identical bytes are never sent twice.
-        let mut carried: BTreeMap<String, (Vec<u8>, bool)> = BTreeMap::new();
-        if let Some(previous) = &superseded {
-            let previous = state.sessions.remove(previous).expect("operation session");
-            for (object, upload) in previous.request.objects.iter().zip(previous.uploads) {
-                state.uploads.remove(&upload.id);
-                carried.insert(object.digest.clone(), (upload.bytes, upload.complete));
-            }
-        }
-        let admitted = state.repositories.get(repository);
-        let prior: Vec<(Vec<u8>, bool)> = open
-            .objects
-            .iter()
-            .map(|object| {
-                admitted
-                    .and_then(|r| r.objects.get(&object.digest))
-                    .filter(|bytes| {
-                        bytes.len() as u64 == object.length && sha256_digest(bytes) == object.digest
-                    })
-                    .map(|bytes| (bytes.clone(), true))
-                    .or_else(|| carried.remove(&object.digest))
-                    .unwrap_or_default()
-            })
-            .collect();
+        let prior = initial_uploads(state, repository, &open, superseded.as_deref());
         let session_id = self.next_id(state, "session");
         let mut uploads = Vec::with_capacity(open.objects.len());
         for (index, (bytes, complete)) in prior.into_iter().enumerate() {
@@ -1036,6 +1010,42 @@ impl HubExchange for ReferenceHub {
     fn exchange(&self, request: HubRequest) -> Result<HubResponse, HubPublishError> {
         Ok(self.handle(&request))
     }
+}
+
+/// Retained bytes and completion for each object of a new session.
+///
+/// Objects already stored in this repository start complete only while they
+/// still verify; a copy corrupted at rest must be uploaded again. A superseded
+/// attempt hands its retained bytes to the new session by digest, so identical
+/// bytes are never sent twice.
+fn initial_uploads(
+    state: &mut State,
+    repository: &RepositoryIdentity,
+    open: &OpenSessionRequest,
+    superseded: Option<&str>,
+) -> Vec<(Vec<u8>, bool)> {
+    let mut carried: BTreeMap<String, (Vec<u8>, bool)> = BTreeMap::new();
+    if let Some(previous) = superseded {
+        let previous = state.sessions.remove(previous).expect("operation session");
+        for (object, upload) in previous.request.objects.iter().zip(previous.uploads) {
+            state.uploads.remove(&upload.id);
+            carried.insert(object.digest.clone(), (upload.bytes, upload.complete));
+        }
+    }
+    let admitted = state.repositories.get(repository);
+    open.objects
+        .iter()
+        .map(|object| {
+            admitted
+                .and_then(|r| r.objects.get(&object.digest))
+                .filter(|bytes| {
+                    bytes.len() as u64 == object.length && sha256_digest(bytes) == object.digest
+                })
+                .map(|bytes| (bytes.clone(), true))
+                .or_else(|| carried.remove(&object.digest))
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 fn upload_head(state: &State, id: &str) -> Handled {
