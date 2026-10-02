@@ -1094,7 +1094,10 @@ fn import_materialized(
             cancelled,
             allocation,
             limits.max_entry_bytes,
-        )?;
+        )
+        .map_err(|error| {
+            outcome::with_io_context(error, "capture imported adjacency", graph_tree)
+        })?;
         *added_stage_entries = added;
         derived_captures = derived;
     }
@@ -1116,34 +1119,55 @@ fn import_materialized(
         crate::filesystem_admission::ProjectLifecycleMode::Durable,
         crate::filesystem_admission::ProjectRootRequirement::CreateIfMissing,
     )
-    .map_err(|error| storage(&error))?;
-    admission
-        .revalidate_identity()
-        .map_err(|error| storage(&error))?;
+    .map_err(|error| outcome::with_io_context(storage(&error), "admit import target", target))?;
+    admission.revalidate_identity().map_err(|error| {
+        outcome::with_io_context(storage(&error), "revalidate import target", target)
+    })?;
     let replay = crate::published_project_transaction(admission.root(), transaction_uuid)
-        .map_err(|error| storage(&error))?
+        .map_err(|error| {
+            outcome::with_io_context(storage(&error), "inspect import replay", admission.root())
+        })?
         .is_some();
     let existing = if replay {
-        Some(crate::resolve_project_generation(admission.root()).map_err(|error| storage(&error))?)
+        Some(
+            crate::resolve_project_generation(admission.root()).map_err(|error| {
+                outcome::with_io_context(storage(&error), "resolve import replay", admission.root())
+            })?,
+        )
     } else if owned_retry
-        || outcome::aborted_retry(admission.root(), transaction_uuid, generation_uuid)?
+        || outcome::aborted_retry(admission.root(), transaction_uuid, generation_uuid).map_err(
+            |error| outcome::with_io_context(error, "inspect aborted import", admission.root()),
+        )?
     {
-        let generation =
-            semantically_pristine_generation(admission.root()).map_err(|error| storage(&error))?;
+        let generation = semantically_pristine_generation(admission.root()).map_err(|error| {
+            outcome::with_io_context(
+                storage(&error),
+                "inspect import retry target",
+                admission.root(),
+            )
+        })?;
         if generation.is_none() {
             return Err(PortableV2Error::new(
                 PortableV2ErrorCode::Io,
                 "owned retry target is not pristine",
             ));
         }
-        Some(crate::resolve_project_generation(admission.root()).map_err(|error| storage(&error))?)
+        Some(
+            crate::resolve_project_generation(admission.root()).map_err(|error| {
+                outcome::with_io_context(storage(&error), "resolve import retry", admission.root())
+            })?,
+        )
     } else {
-        prepare_import_target(admission.root()).map_err(|error| storage(&error))?
+        prepare_import_target(admission.root()).map_err(|error| {
+            outcome::with_io_context(storage(&error), "prepare import target", admission.root())
+        })?
     };
     // Only admitted retained authorities join this operation; other attempts'
     // private preparation remains outside its resource ownership.
     if let Some(allocation) = allocation {
-        allocation::observe_destination(allocation, admission.root(), existing.as_ref())?;
+        allocation::observe_destination(allocation, admission.root(), existing.as_ref()).map_err(
+            |error| outcome::with_io_context(error, "observe import destination", admission.root()),
+        )?;
     }
     let parent = match existing {
         Some(parent) => parent,
@@ -1151,7 +1175,13 @@ fn import_materialized(
             admission.root(),
             allocation,
         )
-        .map_err(|error| storage(&error))?,
+        .map_err(|error| {
+            outcome::with_io_context(
+                storage(&error),
+                "initialize import target",
+                admission.root(),
+            )
+        })?,
     };
     let mut participant_captures = captures
         .iter()
