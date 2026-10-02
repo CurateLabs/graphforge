@@ -148,7 +148,7 @@ impl HydrationResource {
                         .prop_stems
                         .iter()
                         .map(|stem| self.graph.catalog.property_table(&self.graph.dir, stem))
-                        .collect(),
+                        .collect::<Result<Vec<_>, _>>()?,
                     descriptor: descriptor.clone(),
                     resource: Arc::clone(self),
                 }));

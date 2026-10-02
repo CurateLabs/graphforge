@@ -91,10 +91,15 @@ impl PropertyOverlayExec {
         } else {
             crate::PropertyRouteKind::Node
         };
-        let row_upper_bound = inventory.as_ref().map(|inventory| {
-            let rows = inventory.route_row_upper_bound(kind, &route);
-            options.limit.map_or(rows, |limit| rows.min(limit))
-        });
+        let row_upper_bound = inventory
+            .as_ref()
+            .map(|inventory| {
+                let rows = inventory
+                    .route_row_upper_bound(kind, &route)
+                    .map_err(|error| DataFusionError::External(Box::new(error)))?;
+                Ok::<_, DataFusionError>(options.limit.map_or(rows, |limit| rows.min(limit)))
+            })
+            .transpose()?;
         let props = Arc::new(
             PlanProperties::new(
                 EquivalenceProperties::new(Arc::clone(&schema)),

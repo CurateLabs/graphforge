@@ -228,9 +228,10 @@ fn stage_set_node_properties_from_inventory(
         .into_iter()
         .filter(|row| updates.contains_key(&row.node_uuid))
         .collect::<Vec<_>>();
-    let route_schema = staged
-        .property_window_schema(crate::PropertyRouteKind::Node, stem)
-        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Node, stem));
+    let route_schema = match staged.property_window_schema(crate::PropertyRouteKind::Node, stem) {
+        Some(schema) => Some(schema),
+        None => inventory.route_schema(crate::PropertyRouteKind::Node, stem)?,
+    };
     stage_node_property_file(
         staged,
         dir,
@@ -341,9 +342,10 @@ fn stage_remove_node_properties_from_inventory(
         .into_iter()
         .filter(|row| removals.contains_key(&row.node_uuid))
         .collect::<Vec<_>>();
-    let route_schema = staged
-        .property_window_schema(crate::PropertyRouteKind::Node, stem)
-        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Node, stem));
+    let route_schema = match staged.property_window_schema(crate::PropertyRouteKind::Node, stem) {
+        Some(schema) => Some(schema),
+        None => inventory.route_schema(crate::PropertyRouteKind::Node, stem)?,
+    };
     stage_node_property_file(
         staged,
         dir,
@@ -431,9 +433,11 @@ fn stage_set_edge_properties_from_inventory(
         .into_iter()
         .filter(|row| updates.contains_key(&row.edge_uuid))
         .collect::<Vec<_>>();
-    let route_schema = staged
-        .property_window_schema(crate::PropertyRouteKind::Edge, rel_stem)
-        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Edge, rel_stem));
+    let route_schema = match staged.property_window_schema(crate::PropertyRouteKind::Edge, rel_stem)
+    {
+        Some(schema) => Some(schema),
+        None => inventory.route_schema(crate::PropertyRouteKind::Edge, rel_stem)?,
+    };
     stage_edge_property_file(
         staged,
         dir,
@@ -524,9 +528,11 @@ fn stage_remove_edge_properties_from_inventory(
         .into_iter()
         .filter(|row| removals.contains_key(&row.edge_uuid))
         .collect::<Vec<_>>();
-    let route_schema = staged
-        .property_window_schema(crate::PropertyRouteKind::Edge, rel_stem)
-        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Edge, rel_stem));
+    let route_schema = match staged.property_window_schema(crate::PropertyRouteKind::Edge, rel_stem)
+    {
+        Some(schema) => Some(schema),
+        None => inventory.route_schema(crate::PropertyRouteKind::Edge, rel_stem)?,
+    };
     stage_edge_property_file(
         staged,
         dir,
@@ -632,7 +638,7 @@ pub(crate) fn stage_promoted_properties(
             ));
         }
     }
-    let destination = inventory.route_schema(kind, stem);
+    let destination = inventory.route_schema(kind, stem)?;
     let mut source_metadata = source_schema.metadata().clone();
     source_metadata.insert(
         match kind {
@@ -935,9 +941,10 @@ pub(super) fn complete_node_property_window(
             values: row.props.clone().into_iter().collect(),
         })
         .collect::<Vec<_>>();
-    let authority = staged
-        .property_window_schema(crate::PropertyRouteKind::Node, route)
-        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Node, route));
+    let authority = match staged.property_window_schema(crate::PropertyRouteKind::Node, route) {
+        Some(schema) => Some(schema),
+        None => inventory.route_schema(crate::PropertyRouteKind::Node, route)?,
+    };
     let schema = crate::property_overlay::update_live_route_schema(
         crate::PropertyRouteKind::Node,
         route,
@@ -1011,9 +1018,10 @@ pub(super) fn complete_edge_property_window(
             values: row.props.clone().into_iter().collect(),
         })
         .collect::<Vec<_>>();
-    let authority = staged
-        .property_window_schema(crate::PropertyRouteKind::Edge, route)
-        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Edge, route));
+    let authority = match staged.property_window_schema(crate::PropertyRouteKind::Edge, route) {
+        Some(schema) => Some(schema),
+        None => inventory.route_schema(crate::PropertyRouteKind::Edge, route)?,
+    };
     let schema = crate::property_overlay::update_live_route_schema(
         crate::PropertyRouteKind::Edge,
         route,
@@ -1083,9 +1091,10 @@ fn stage_property_tombstones_from_inventory<S: std::hash::BuildHasher>(
         vec![Field::new(uuid_field, DataType::FixedSizeBinary(16), false)],
         HashMap::from([(route_key.to_owned(), route.to_owned())]),
     ));
-    let authority = staged
-        .property_window_schema(kind, route)
-        .or_else(|| inventory.route_schema(kind, route));
+    let authority = match staged.property_window_schema(kind, route) {
+        Some(schema) => Some(schema),
+        None => inventory.route_schema(kind, route)?,
+    };
     let schema = crate::property_overlay::update_live_route_schema(
         kind,
         route,

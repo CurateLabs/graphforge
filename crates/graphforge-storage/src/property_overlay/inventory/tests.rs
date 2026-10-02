@@ -181,11 +181,13 @@ fn mapped_route_admission_does_not_open_unrelated_missing_payload() {
     assert!(
         admitted
             .route_schema(PropertyRouteKind::Node, "CON")
+            .unwrap()
             .is_some()
     );
     assert!(
         admitted
             .route_schema(PropertyRouteKind::Node, "con")
+            .unwrap()
             .is_none()
     );
     assert_eq!(

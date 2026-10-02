@@ -7,15 +7,16 @@
 //!    same bytes whether its property fragments are 16 or 1,024 bytes a row. The
 //!    manifest names each fragment's length and XXH64, so open checks the length
 //!    and leaves the content to the first read of each fragment.
-//! 2. **`find` does not read the graph.** A text `find` against a fresh index
-//!    costs the same bytes at 8 and 128 edges per node (16x the edges). It reads
-//!    the node and property sources it must discover properties from, and the
-//!    index, and never an edge object.
+//! 2. **`find` reads no edge payload.** With a fixed node set and 8 versus 128
+//!    edges per node (16x the edges), its attributed source and index reads
+//!    stay bounded. It reads node and node-property sources and the index.
+//!    Whole-process reads still grow with the UUID-membership index; this
+//!    slice does not establish a bound while both nodes and edges scale.
 //!
-//! Both are measured two ways, because the lifecycle attribution only counts
-//! what readers report: the attributed read bytes, and the whole-process `rchar`
-//! of `/proc/self/io` (every `read(2)`/`pread(2)` the process makes). The
-//! `rchar` assertions print a `SKIPPED` line where `/proc/self/io` is missing.
+//! Both report attributed read bytes and whole-process `rchar` from
+//! `/proc/self/io` (every `read(2)`/`pread(2)` the process makes). Open gates
+//! both measures; `find` gates only attributed reads and reports its remaining
+//! UUID-membership growth. Missing `/proc/self/io` prints a `SKIPPED` line.
 //!
 //! The tests share one process counter, so they serialize on a lock.
 
@@ -355,8 +356,9 @@ fn text_find_does_not_read_the_graph_across_a_16x_edge_range() {
         build_indexed_project(&path, fan_out);
         let layout = layout(&path);
         let forge = open(&path);
-        // The first call may settle first-touch admissions; the second is the
-        // steady cost of one `find`. Both are bounded by the same structure.
+        // The first call settles first-touch admissions; the second is steady
+        // cost. The source/index attribution bound covers both; total process
+        // reads still include the growing UUID-membership index.
         let (rows, first) = measured(|| find_text(&forge));
         assert_eq!(rows, 1, "fan-out {fan_out}: wrong answer");
         let (rows, second) = measured(|| find_text(&forge));

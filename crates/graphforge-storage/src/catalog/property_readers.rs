@@ -117,7 +117,9 @@ where
                 .map_err(|error| DataFusionError::External(Box::new(error)))?;
         &captured
     };
-    let schema = inventory.route_schema(kind, stem);
+    let schema = inventory
+        .route_schema(kind, stem)
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
     let scratch = inventory
         .create_snapshot_scratch()
         .map_err(|error| DataFusionError::External(Box::new(error)))?;

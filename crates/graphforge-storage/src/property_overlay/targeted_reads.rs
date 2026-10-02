@@ -76,7 +76,7 @@ fn resolve_edge_property_owners(
     for (uuid, route) in owners.iter() {
         for candidate in [route.as_str(), "_exploratory"] {
             if inventory
-                .route_schema(PropertyRouteKind::Edge, candidate)
+                .route_schema(PropertyRouteKind::Edge, candidate)?
                 .is_some()
             {
                 if let Some(targets) = candidates.get_mut(candidate) {

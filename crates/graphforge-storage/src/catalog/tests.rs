@@ -301,8 +301,8 @@ fn raw_catalog_shares_one_authenticated_property_inventory() {
         .property_inventory
         .as_ref()
         .expect("raw catalog admits one complete property authority");
-    let node = catalog.property_table(dir.path(), "Person");
-    let edge = catalog.edge_property_table(dir.path(), "KNOWS");
+    let node = catalog.property_table(dir.path(), "Person").unwrap();
+    let edge = catalog.edge_property_table(dir.path(), "KNOWS").unwrap();
     assert!(Arc::ptr_eq(
         authority,
         node.inventory.as_ref().expect("node authority")

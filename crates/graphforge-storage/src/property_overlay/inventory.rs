@@ -226,20 +226,21 @@ impl AuthenticatedPropertyInventory {
     pub(crate) fn retain_property_fragment_paths(
         &mut self,
         paths: &std::collections::HashSet<PathBuf>,
-    ) {
+    ) -> Result<(), GfError> {
         let Some(root) = self.root_path.clone() else {
-            return;
+            return Ok(());
         };
         // A lazily admitted route summarizes all of its fragments; resolve it
         // before narrowing so the schema authority does not depend on the subset.
         let keys = self.routes.keys().cloned().collect::<Vec<_>>();
         for (kind, route) in keys {
-            let _ = self.route_summary(kind, &route);
+            self.route_summary(kind, &route)?;
         }
         self.routes.retain(|_, fragments| {
             fragments.retain(|fragment| paths.contains(&root.join(&fragment.physical_relative)));
             !fragments.is_empty()
         });
+        Ok(())
     }
 
     /// Return admitted immutable property fragments in oldest-to-newest order.
@@ -850,20 +851,18 @@ impl AuthenticatedPropertyInventory {
 
     /// Canonical logical schema authenticated across every fragment in a route.
     ///
-    /// A route whose footers cannot be summarized has no schema here. That is
-    /// never a silent downgrade: every read of the route resolves the same
-    /// memoized summary through [`Self::route_summary`] and returns its error.
-    #[must_use]
+    /// # Errors
+    /// Propagates content admission and footer errors; only an absent route
+    /// has no schema.
     pub fn route_schema(
         &self,
         kind: PropertyRouteKind,
         route: &str,
-    ) -> Option<arrow::datatypes::SchemaRef> {
-        match self.route_summary(kind, route) {
-            Ok(Some(summary)) => Some(Arc::clone(&summary.schema)),
-            Ok(None) => self.schemas.get(&(kind, route.to_owned())).cloned(),
-            Err(_) => None,
-        }
+    ) -> Result<Option<arrow::datatypes::SchemaRef>, GfError> {
+        Ok(match self.route_summary(kind, route)? {
+            Some(summary) => Some(Arc::clone(&summary.schema)),
+            None => self.schemas.get(&(kind, route.to_owned())).cloned(),
+        })
     }
 
     /// Sound upper bound on logical rows for one route.
@@ -871,21 +870,23 @@ impl AuthenticatedPropertyInventory {
     /// The newest-wins merge and tombstones can only remove physical fragment
     /// rows, so their admitted footer counts are a safe planning estimate. It
     /// is deliberately not advertised as an exact logical count.
-    #[must_use]
-    pub fn route_row_upper_bound(&self, kind: PropertyRouteKind, route: &str) -> usize {
+    /// # Errors
+    /// Propagates content admission and footer errors.
+    pub fn route_row_upper_bound(
+        &self,
+        kind: PropertyRouteKind,
+        route: &str,
+    ) -> Result<usize, GfError> {
         let key = (kind, route.to_owned());
         let Some(fragments) = self.routes.get(&key) else {
-            return 0;
+            return Ok(0);
         };
         let Some(root) = self.root.as_ref() else {
-            return 0;
+            return Ok(0);
         };
-        fragments.iter().fold(0usize, |rows, fragment| {
-            // An unreadable footer cannot bound the route; the read that follows
-            // refuses it, so the planning estimate only has to stay sound.
-            let physical_rows = fragment_footer(root, fragment, kind, route)
-                .map_or(usize::MAX, |footer| footer.physical_rows);
-            rows.saturating_add(physical_rows)
+        fragments.iter().try_fold(0usize, |rows, fragment| {
+            let physical_rows = fragment_footer(root, fragment, kind, route)?.physical_rows;
+            Ok(rows.saturating_add(physical_rows))
         })
     }
 }
@@ -1302,11 +1303,9 @@ fn decode_fragment_footer(
 
 /// Footer facts of one fragment, read on first use and memoized with failures.
 ///
-/// Only the footer is read, from a handle whose identity and exact length match
-/// the manifest. The bytes are not yet admitted, so a footer that cannot be
-/// decoded is attributed to the content check first: corruption is refused as
-/// corruption, and only a fragment that verifies and still cannot be decoded
-/// reports the decode error.
+/// Admit the retained handle before decoding its footer: schema and row count
+/// are authoritative payload facts, so even a decodable mutation must be
+/// refused before it influences planning.
 fn fragment_footer<'a>(
     root: &graphforge_filesystem::StableDirectory,
     fragment: &'a AuthenticatedPropertyFragment,
@@ -1324,13 +1323,8 @@ fn fragment_footer<'a>(
                     "property fragment identity changed after admission",
                 ));
             }
-            let probe = file.try_clone().map_err(io_error)?;
-            decode_fragment_footer(file, fragment.id, fragment.layout, kind, route).or_else(
-                |error| {
-                    admit_fragment(fragment, &probe)?;
-                    Err(error)
-                },
-            )
+            admit_fragment(fragment, &file)?;
+            decode_fragment_footer(file, fragment.id, fragment.layout, kind, route)
         })
         .as_ref()
         .map_err(Clone::clone)

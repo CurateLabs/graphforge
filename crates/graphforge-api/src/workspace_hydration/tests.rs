@@ -1254,6 +1254,40 @@ const PROJECT_SINCE: &str = "MATCH ()-[r:KNOWS]->() RETURN r.since AS v";
 const FILTER_SINCE: &str = "MATCH ()-[r:KNOWS]->() WHERE r.since = 5 RETURN r.since AS v";
 const SET_SINCE: &str = "MATCH ()-[r:KNOWS {since: 1}]->() SET r.since = 0";
 
+/// A failed footer load must remain an integrity error through schema discovery.
+/// It must not become a base-only schema that plans the property as NULL.
+#[test]
+fn property_schema_refuses_corrupted_parquet_magic_before_planning() {
+    let project = tempfile::tempdir().unwrap();
+    compact_person_project(project.path());
+    let entry = compact_entry(
+        project.path(),
+        graphforge_storage::GraphFileRole::Properties,
+        "properties/",
+        ".parquet",
+    );
+    for offset in [0, entry.byte_length - 1] {
+        let _corruption = InPlaceCorruption::apply_at(project.path(), &entry, offset, 0x01);
+        for query in [PROJECT_NAMES, "MATCH (n:Person) RETURN n.name AS v LIMIT 0"] {
+            let reopened = GraphForge::new(Some(project.path().to_str().unwrap()))
+                .expect("project open must defer property payload admission");
+            let error = reopened
+                .execute(query)
+                .expect_err("corrupt property schema must not plan NULL rows");
+            assert_eq!(
+                error.code(),
+                "GF_PROJECT_CORRUPT",
+                "offset {offset}, {query}: {error}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.to_lowercase().contains("checksum"),
+                "offset {offset}, {query}: {message}"
+            );
+        }
+    }
+}
+
 /// [`compact_person_project`] plus a published text index over `name`.
 #[cfg(feature = "search")]
 fn compact_person_project_with_text_index(project: &Path) {

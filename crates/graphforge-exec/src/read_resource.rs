@@ -69,7 +69,7 @@ impl GraphReadContext {
                 })?
             }
             GraphReadTable::Properties(stem) => {
-                Arc::new(self.catalog.property_table(&self.dir, stem))
+                Arc::new(self.catalog.property_table(&self.dir, stem)?)
             }
             GraphReadTable::EdgeProperties(_, Some(id)) => self
                 .catalog
@@ -80,7 +80,7 @@ impl GraphReadContext {
                     )
                 })?,
             GraphReadTable::EdgeProperties(stem, None) => {
-                Arc::new(self.catalog.edge_property_table(&self.dir, stem))
+                Arc::new(self.catalog.edge_property_table(&self.dir, stem)?)
             }
         };
         if graphforge_plan::read_resource::semantic_read_schema(&table.schema()) != source.schema()

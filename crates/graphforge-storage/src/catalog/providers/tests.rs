@@ -147,8 +147,8 @@ async fn every_table_provider_exposes_base_contract_and_empty_scan() {
         )),
         Arc::new(TypedEdgeTable::open(dir.path(), "KNOWS")),
         Arc::new(UnionEdgeTable::open(dir.path())),
-        Arc::new(PropertyTable::open_discovered(dir.path(), "Person")),
-        Arc::new(EdgePropertyTable::open_discovered(dir.path(), "KNOWS")),
+        Arc::new(PropertyTable::open_discovered(dir.path(), "Person").unwrap()),
+        Arc::new(EdgePropertyTable::open_discovered(dir.path(), "KNOWS").unwrap()),
     ];
     let ctx = SessionContext::new();
     for (index, provider) in providers.into_iter().enumerate() {
@@ -187,11 +187,11 @@ async fn query_providers_build_streaming_parquet_plan_not_memtable() {
         ("union", Arc::new(UnionEdgeTable::open(dir.path()))),
         (
             "props",
-            Arc::new(PropertyTable::open_discovered(dir.path(), "Person")),
+            Arc::new(PropertyTable::open_discovered(dir.path(), "Person").unwrap()),
         ),
         (
             "edge_props",
-            Arc::new(EdgePropertyTable::open_discovered(dir.path(), "KNOWS")),
+            Arc::new(EdgePropertyTable::open_discovered(dir.path(), "KNOWS").unwrap()),
         ),
     ];
     for (label, provider) in cases {

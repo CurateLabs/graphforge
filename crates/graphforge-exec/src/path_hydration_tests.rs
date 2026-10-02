@@ -34,7 +34,7 @@ fn test_udf(hydrate: TestHydration) -> HydratedPathNodes {
     let tables = hydrate
         .prop_stems
         .iter()
-        .map(|stem| catalog.property_table(&dir, stem))
+        .map(|stem| catalog.property_table(&dir, stem).unwrap())
         .collect();
     let graph = Arc::new(crate::read_resource::GraphReadContext {
         health: crate::mutation::MutationHealth::default(),

@@ -455,7 +455,7 @@ fn promote_node_properties(
         crate::PropertyRouteKind::Node,
         "_untyped",
     )?;
-    let Some(schema) = source.route_schema(crate::PropertyRouteKind::Node, "_untyped") else {
+    let Some(schema) = source.route_schema(crate::PropertyRouteKind::Node, "_untyped")? else {
         return Ok(());
     };
     let names = runtime_catalog
@@ -541,7 +541,7 @@ fn promote_edge_properties(dir: &Path) -> Result<HashSet<std::path::PathBuf>, Gf
     let inventory = crate::property_overlay::authenticated_property_inventory(dir)?;
     let kind = crate::PropertyRouteKind::Edge;
     let mut transferred = HashSet::new();
-    let Some(schema) = inventory.route_schema(kind, "_exploratory") else {
+    let Some(schema) = inventory.route_schema(kind, "_exploratory")? else {
         return Ok(transferred);
     };
     for (_, path) in inventory.edge_files(Some("_exploratory")) {
@@ -661,11 +661,11 @@ fn stage_retired_edge_property_owners(
         crate::property_overlay::authenticated_property_inventory_for_rewrite(dir, staged)?;
     let mut transferred_inventory =
         crate::property_overlay::authenticated_property_inventory_for_rewrite(dir, staged)?;
-    transferred_inventory.retain_property_fragment_paths(transferred);
+    transferred_inventory.retain_property_fragment_paths(transferred)?;
     let kind = crate::PropertyRouteKind::Edge;
     let routes = transferred_inventory.routes(kind).collect::<Vec<_>>();
     let final_summary = inventory
-        .route_schema(kind, "_exploratory")
+        .route_schema(kind, "_exploratory")?
         .and_then(|schema| {
             schema
                 .metadata()

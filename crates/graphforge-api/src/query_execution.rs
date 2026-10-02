@@ -204,7 +204,12 @@ impl GraphForge {
             candidate.or(installed.as_ref()),
             self.property_inventory_for_session(),
         )
-        .map_err(|error| GfError::Storage(error.to_string()))
+        .map_err(|error| match GfError::from_plan_error(error) {
+            // Preserve typed integrity refusals while keeping foreign catalog
+            // failures in their existing storage-error classification.
+            GfError::Plan(message) => GfError::Storage(message),
+            original => original,
+        })
     }
 
     fn run_query_with_composition(

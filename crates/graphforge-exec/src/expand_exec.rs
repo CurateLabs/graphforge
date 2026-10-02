@@ -769,7 +769,7 @@ fn read_target_edge_properties(
             message: "edge properties have multiple authenticated owners".into(),
         });
     }
-    let schema = inventory.route_schema(graphforge_storage::PropertyRouteKind::Edge, stem);
+    let schema = inventory.route_schema(graphforge_storage::PropertyRouteKind::Edge, stem)?;
     match schema {
         Some(schema) => {
             let indices = schema
@@ -794,8 +794,8 @@ fn edge_property_stems(
     inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
     dir: &Path,
     rel_type_name: &str,
-) -> Vec<String> {
-    if rel_type_name == "*" {
+) -> Result<Vec<String>, GfError> {
+    Ok(if rel_type_name == "*" {
         match inventory {
             Some(inventory) => inventory
                 .routes(graphforge_storage::PropertyRouteKind::Edge)
@@ -807,7 +807,7 @@ fn edge_property_stems(
         let mut candidates = vec![rel_type_name.to_owned()];
         let has_shared = match inventory {
             Some(inventory) => inventory
-                .route_schema(graphforge_storage::PropertyRouteKind::Edge, "_exploratory")
+                .route_schema(graphforge_storage::PropertyRouteKind::Edge, "_exploratory")?
                 .is_some(),
             None => graphforge_storage::list_edge_property_stems(dir)
                 .iter()
@@ -818,7 +818,7 @@ fn edge_property_stems(
         }
         candidates.sort();
         candidates
-    }
+    })
 }
 
 /// Build one child array per edge-property struct field (#755), in field order.
@@ -848,7 +848,7 @@ fn build_edge_prop_children(
     }
 
     // Resolve selected rows once per candidate route, then assemble hop order.
-    let stems = edge_property_stems(inventory, dir, rel_type_name);
+    let stems = edge_property_stems(inventory, dir, rel_type_name)?;
     let targets = hop_edge_uuids.iter().copied().collect();
     let mut owners = std::collections::BTreeSet::new();
     let mut prop_batches_by_rel = Vec::with_capacity(stems.len());

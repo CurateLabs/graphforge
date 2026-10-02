@@ -327,9 +327,10 @@ chosen by path in `graphforge_storage::graph_admission`:
   The property inventory of a compact generation holds each fragment's
   manifest entry and reads nothing at open: the exact length is checked, the
   footer (schema and row count, which the manifest does not carry) is read the
-  first time a route is used, and the content is checked the first time a
-  reader opens the fragment, directly on the read-only content-store inode and
-  memoized for the inventory's life. A checksum refusal under `indexes/search/`
+  first time a route is used, after checking the content directly on the
+  read-only content-store inode. Schema and row-count failures propagate
+  through planning; only an absent route receives a base-schema default.
+  Content admission is memoized for the inventory's life. A checksum refusal under `indexes/search/`
   is a hard validation error, never a reason to rebuild the index. Text `find`
   takes its freshness identity from the same manifest (node and node-property
   objects by name, length and XXH64), so it reads no edge object and re-reads no

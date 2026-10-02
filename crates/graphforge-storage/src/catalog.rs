@@ -1372,7 +1372,7 @@ impl GraphCatalog {
                                         Arc::clone(inventory),
                                     )
                                 },
-                            )),
+                            )?),
                         );
                     }
                     crate::SemanticRouteKind::EdgeProperty => {
@@ -1387,14 +1387,14 @@ impl GraphCatalog {
                                         Arc::clone(inventory),
                                     )
                                 },
-                            )),
+                            )?),
                         );
                     }
                     _ => {}
                 }
             }
         } else {
-            register_property_tables(dir, ontology, &mut schema, inventory.as_ref());
+            register_property_tables(dir, ontology, &mut schema, inventory.as_ref())?;
         }
 
         // ---- name maps (for read-path property + relation resolution) ----
@@ -1456,7 +1456,7 @@ impl GraphCatalog {
                                     Arc::clone(inventory),
                                 )
                             },
-                        )),
+                        )?),
                     );
                 }
             }
@@ -1503,8 +1503,11 @@ impl GraphCatalog {
     }
 
     /// Node-property provider pinned to this catalog's generation authority.
-    #[must_use]
-    pub fn property_table(&self, dir: &Path, route: &str) -> PropertyTable {
+    pub fn property_table(
+        &self,
+        dir: &Path,
+        route: &str,
+    ) -> Result<PropertyTable, DataFusionError> {
         self.schema
             .authority
             .read()
@@ -1518,8 +1521,11 @@ impl GraphCatalog {
     }
 
     /// Edge-property provider pinned to this catalog's generation authority.
-    #[must_use]
-    pub fn edge_property_table(&self, dir: &Path, route: &str) -> EdgePropertyTable {
+    pub fn edge_property_table(
+        &self,
+        dir: &Path,
+        route: &str,
+    ) -> Result<EdgePropertyTable, DataFusionError> {
         self.schema
             .authority
             .read()
@@ -1589,25 +1595,33 @@ impl GraphCatalog {
                 })
                 .collect::<Vec<_>>()
         };
+        // Finish all fallible schema loads before changing the catalog's
+        // generation authority, so a refusal leaves every provider unchanged.
+        let replacements = replacements
+            .into_iter()
+            .map(|(name, route, edge)| {
+                let table: Arc<dyn TableProvider> = if edge {
+                    Arc::new(EdgePropertyTable::open_authenticated(
+                        dir,
+                        &route,
+                        Arc::clone(&inventory),
+                    )?)
+                } else {
+                    Arc::new(PropertyTable::open_authenticated(
+                        dir,
+                        &route,
+                        Arc::clone(&inventory),
+                    )?)
+                };
+                Ok((name, table))
+            })
+            .collect::<Result<Vec<_>, DataFusionError>>()?;
         let mut authority = self
             .schema
             .authority
             .write()
             .expect("graph schema lock poisoned");
-        for (name, route, edge) in replacements {
-            let table: Arc<dyn TableProvider> = if edge {
-                Arc::new(EdgePropertyTable::open_authenticated(
-                    dir,
-                    &route,
-                    Arc::clone(&inventory),
-                ))
-            } else {
-                Arc::new(PropertyTable::open_authenticated(
-                    dir,
-                    &route,
-                    Arc::clone(&inventory),
-                ))
-            };
+        for (name, table) in replacements {
             authority.tables.insert(name, table);
         }
         let mut edge_routes = authority
@@ -1771,18 +1785,18 @@ fn register_property_tables(
     ontology: Option<&OntologyHandle>,
     schema: &mut GraphSchema,
     inventory: Option<&Arc<crate::AuthenticatedPropertyInventory>>,
-) {
+) -> Result<(), DataFusionError> {
     if let Some(handle) = ontology {
         for (entity_name, prop_defs) in handle.entity_property_defs() {
             let prop_schema = Arc::new(property_schema(entity_name, &prop_defs));
             schema.register(
                 format!("properties_{entity_name}"),
                 Arc::new(inventory.map_or_else(
-                    || PropertyTable::open(dir, entity_name, prop_schema),
+                    || Ok(PropertyTable::open(dir, entity_name, prop_schema)),
                     |inventory| {
                         PropertyTable::open_authenticated(dir, entity_name, Arc::clone(inventory))
                     },
-                )),
+                )?),
             );
         }
     } else {
@@ -1796,9 +1810,10 @@ fn register_property_tables(
                 |inventory| {
                     PropertyTable::open_authenticated(dir, "_untyped", Arc::clone(inventory))
                 },
-            )),
+            )?),
         );
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

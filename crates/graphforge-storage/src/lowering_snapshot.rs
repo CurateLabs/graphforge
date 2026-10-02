@@ -87,6 +87,7 @@ impl GraphCatalog {
                         &stem,
                         std::sync::Arc::clone(&inventory),
                     )
+                    .map_err(GfError::from_plan_error)?
                     .schema(),
                 );
             }
@@ -98,6 +99,7 @@ impl GraphCatalog {
                         &stem,
                         std::sync::Arc::clone(&inventory),
                     )
+                    .map_err(GfError::from_plan_error)?
                     .schema(),
                 );
             }
