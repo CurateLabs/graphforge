@@ -9,14 +9,15 @@ use graphforge_api::telemetry::{
 };
 use graphforge_api::{
     DiscoveryPortableV2Error, DiscoveryPortableV2Mismatch, DiscoveryPortableV2Request,
-    PortableV2ErrorCode, verify_discovered_portable_v2,
+    DiscoveryResearchVersionError, DiscoveryResearchVersionRequest, PortableV2ErrorCode,
+    verify_discovered_portable_v2, verify_discovered_research_version,
 };
 use graphforge_api::{
     GraphForge, OperationId, PortableV2ImportRequest, PortableV2Limits, PortableV2Mode,
 };
 use graphforge_discovery::{
     DiscoveryError, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor,
-    RefSet, RepositoryIdentity,
+    RefSet, RepositoryIdentity, ResearchLineage,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -48,6 +49,12 @@ pub(crate) struct CloneArgs {
     /// Explicit local OTLP collector base URL. Clone telemetry is otherwise disabled.
     #[arg(long)]
     pub telemetry_endpoint: Option<String>,
+    /// Branch ref naming a research head when the Hub advertises `lineage`.
+    #[arg(long = "ref")]
+    pub git_ref: Option<String>,
+    /// Immutable research Version UUID to clone instead of the Project package.
+    #[arg(long)]
+    pub version_uuid: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -284,6 +291,16 @@ struct CloneResult {
     package_digest: String,
     generation_uuid: String,
     resumed_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    research_version_uuid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    research_version_kind: Option<String>,
+}
+
+struct ResearchCloneContext {
+    lineage_bytes: Vec<u8>,
+    version_uuid: String,
+    version_kind: String,
 }
 
 #[derive(Debug)]
@@ -575,6 +592,97 @@ fn select_bundle(
     manifest
         .package_object()
         .map_err(|error| protocol_error(&error))
+}
+
+fn fetch_inventory_object(
+    transport: &dyn Transport,
+    object: &ObjectDescriptor,
+    max_bytes: usize,
+) -> Result<Vec<u8>, graphforge_api::GfError> {
+    let location = object
+        .locations
+        .first()
+        .ok_or_else(|| validation("hub.missing_object", "inventory object has no location"))?;
+    let url = Url::parse(location)
+        .map_err(|_| validation("hub.unsafe_location", "inventory location is invalid"))?;
+    validate_url(&url)?;
+    let mut attempts = 0;
+    let response =
+        fetch_with_attempts(transport, &url, None, None, max_bytes as u64, &mut attempts)?;
+    let bytes = read_bounded(response, max_bytes)?;
+    let actual = hash_reader(&mut std::io::Cursor::new(&bytes))?;
+    if actual != object.digest.0 {
+        return Err(validation(
+            "hub.integrity_failure",
+            "inventory object digest mismatch",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn resolve_research_version_uuid(
+    lineage: &ResearchLineage,
+    git_ref: Option<&str>,
+    version_uuid: Option<&str>,
+) -> Result<String, graphforge_api::GfError> {
+    if let Some(uuid) = version_uuid {
+        if lineage.version(uuid).is_none() {
+            return Err(validation(
+                "hub.missing_object",
+                "research Version is absent from lineage",
+            ));
+        }
+        return Ok(uuid.to_owned());
+    }
+    let git_ref = git_ref.ok_or_else(|| {
+        validation(
+            "hub.missing_ref",
+            "branch ref or version UUID is required for research clone",
+        )
+    })?;
+    let branch = lineage
+        .branches
+        .iter()
+        .find(|branch| branch.ref_name == git_ref)
+        .ok_or_else(|| {
+            validation(
+                "hub.missing_ref",
+                "branch ref is absent from research lineage",
+            )
+        })?;
+    Ok(branch.head_version_uuid.clone())
+}
+
+fn prepare_research_clone(
+    transport: &dyn Transport,
+    manifest: &DiscoveryManifest,
+    refs: &RefSet,
+    limits: DiscoveryLimits,
+    git_ref: Option<&str>,
+    version_uuid: Option<&str>,
+) -> Result<(ObjectDescriptor, ResearchCloneContext), graphforge_api::GfError> {
+    let lineage_object = manifest
+        .lineage_object()
+        .map_err(|error| protocol_error(&error))?;
+    let lineage_bytes =
+        fetch_inventory_object(transport, lineage_object, limits.max_lineage_bytes)?;
+    let lineage = ResearchLineage::from_json(&lineage_bytes, limits)
+        .map_err(|error| protocol_error(&error))?;
+    manifest
+        .bind_lineage(refs, &lineage)
+        .map_err(|error| protocol_error(&error))?;
+    let selected_uuid = resolve_research_version_uuid(&lineage, git_ref, version_uuid)?;
+    let (version, object) = manifest
+        .research_version_object(&lineage, &selected_uuid)
+        .map_err(|error| protocol_error(&error))?;
+    Ok((
+        object.clone(),
+        ResearchCloneContext {
+            lineage_bytes,
+            version_uuid: selected_uuid,
+            version_kind: version.kind.clone(),
+        },
+    ))
 }
 
 fn staging_path(destination: &Path) -> Result<PathBuf, graphforge_api::GfError> {
@@ -1065,6 +1173,12 @@ fn run_clone_job(
     profile: &mut CloneProfile<'_>,
     delays: &CloneDelays,
 ) -> Result<CloneResult, graphforge_api::GfError> {
+    if args.git_ref.is_some() && args.version_uuid.is_some() {
+        return Err(validation(
+            "hub.invalid_identity",
+            "specify only one of --ref and --version-uuid",
+        ));
+    }
     let (identity, base, destination) = profile.stage(
         Stage::IdentityValidation,
         ComponentKind::Cli,
@@ -1171,7 +1285,39 @@ fn run_clone_job(
             Ok(((manifest, staging), None, None))
         },
     )?;
-    let object = select_bundle(&manifest)?;
+    let refs = RefSet::from_json(&refs_bytes, limits).map_err(|error| protocol_error(&error))?;
+    let research_requested = args.git_ref.is_some() || args.version_uuid.is_some();
+    let (object, research_context) = if research_requested {
+        if manifest.lineage.is_none() {
+            return Err(validation(
+                "hub.missing_object",
+                "research clone requires an advertised lineage document",
+            ));
+        }
+        profile.handoff(
+            ComponentKind::Discovery,
+            ComponentKind::NetworkTransport,
+            HandoffKind::Call,
+            None,
+        );
+        let (object, context) = prepare_research_clone(
+            transport,
+            &manifest,
+            &refs,
+            limits,
+            args.git_ref.as_deref(),
+            args.version_uuid.as_deref(),
+        )?;
+        profile.handoff(
+            ComponentKind::NetworkTransport,
+            ComponentKind::Discovery,
+            HandoffKind::Return,
+            Some(context.lineage_bytes.len() as u64),
+        );
+        (object, Some(context))
+    } else {
+        (select_bundle(&manifest)?.clone(), None)
+    };
     let partial = staging.partial.clone();
     profile.handoff(
         ComponentKind::Discovery,
@@ -1188,7 +1334,7 @@ fn run_clone_job(
         1,
         || {
             let report =
-                download_with_progress(transport, object, &partial, &mut download_progress)?;
+                download_with_progress(transport, &object, &partial, &mut download_progress)?;
             Ok((report, Some(report.transferred_bytes), None))
         },
     );
@@ -1213,23 +1359,46 @@ fn run_clone_job(
         1,
         || {
             delays.clock.wait(delays.verification);
-            verify_discovered_portable_v2(&DiscoveryPortableV2Request {
-                manifest_json: &manifest_bytes,
-                refs_json: &refs_bytes,
-                expected_repository: &identity,
-                package: &partial,
-                discovery_limits: limits,
-                portable_limits,
-                mode: PortableV2Mode::Full,
-                cancelled: None,
-            })
-            .map_err(portable_error)
-            .map(|verified| (verified, Some(object.length), None))
+            let outcome = if let Some(context) = &research_context {
+                verify_discovered_research_version(&DiscoveryResearchVersionRequest {
+                    manifest_json: &manifest_bytes,
+                    refs_json: &refs_bytes,
+                    lineage_json: &context.lineage_bytes,
+                    expected_repository: &identity,
+                    version_uuid: &context.version_uuid,
+                    package: &partial,
+                    discovery_limits: limits,
+                    portable_limits,
+                    mode: PortableV2Mode::Full,
+                    cancelled: None,
+                })
+                .map_err(research_version_error)?;
+                (
+                    manifest.immutable_version.0.clone(),
+                    Some(context.version_uuid.clone()),
+                    Some(context.version_kind.clone()),
+                )
+            } else {
+                let accepted = verify_discovered_portable_v2(&DiscoveryPortableV2Request {
+                    manifest_json: &manifest_bytes,
+                    refs_json: &refs_bytes,
+                    expected_repository: &identity,
+                    package: &partial,
+                    discovery_limits: limits,
+                    portable_limits,
+                    mode: PortableV2Mode::Full,
+                    cancelled: None,
+                })
+                .map_err(portable_error)?;
+                (accepted.immutable_version, None, None)
+            };
+            Ok((outcome, Some(object.length), None))
         },
     )?;
+    let (immutable_version, research_version_uuid, research_version_kind) = verified;
     let operation_id = OperationId(graphforge_api::hub_clone_operation(
         &canonical_name(&identity),
-        &verified.immutable_version,
+        &immutable_version,
     ));
     profile.handoff(
         ComponentKind::PortableVerify,
@@ -1333,10 +1502,12 @@ fn run_clone_job(
         contract: "graphforge-hub-clone/1",
         repository: canonical_name(&identity),
         destination: destination.display().to_string(),
-        immutable_version: verified.immutable_version,
+        immutable_version,
         package_digest: imported.package_digest,
         generation_uuid: imported.generation_uuid.to_string(),
         resumed_bytes: download.resumed_bytes,
+        research_version_uuid,
+        research_version_kind,
     })
 }
 
@@ -1380,6 +1551,41 @@ fn protocol_error(error: &DiscoveryError) -> graphforge_api::GfError {
     };
     validation(code, error.detail())
 }
+fn research_version_error(error: DiscoveryResearchVersionError) -> graphforge_api::GfError {
+    match error {
+        DiscoveryResearchVersionError::Discovery(error) => protocol_error(&error),
+        DiscoveryResearchVersionError::ReferenceMismatch(mismatch) => validation(
+            match mismatch {
+                DiscoveryPortableV2Mismatch::Repository => "hub.package.repository_mismatch",
+                DiscoveryPortableV2Mismatch::ImmutableVersion => {
+                    "hub.package.immutable_version_mismatch"
+                }
+                DiscoveryPortableV2Mismatch::PackageDigest => "hub.package.package_digest_mismatch",
+                DiscoveryPortableV2Mismatch::ModuleIdentity => "hub.module.identity_mismatch",
+                DiscoveryPortableV2Mismatch::ModuleContentDigest => {
+                    "hub.module.content_digest_mismatch"
+                }
+            },
+            "research discovery reference mismatch",
+        ),
+        DiscoveryResearchVersionError::Portable(error) => validation(
+            match error.code {
+                PortableV2ErrorCode::Cancelled => "hub.package.cancelled",
+                PortableV2ErrorCode::LimitExceeded => "hub.package.limit_exceeded",
+                PortableV2ErrorCode::Io => "hub.package.io",
+                PortableV2ErrorCode::InvalidStructure => "hub.package.invalid_structure",
+                PortableV2ErrorCode::InvalidPath => "hub.package.invalid_path",
+                PortableV2ErrorCode::DuplicateEntry => "hub.package.duplicate_entry",
+                PortableV2ErrorCode::UnsupportedFuture => "hub.package.unsupported_future",
+                PortableV2ErrorCode::Incompatible => "hub.package.incompatible",
+                PortableV2ErrorCode::DigestMismatch => "hub.package.digest_mismatch",
+                PortableV2ErrorCode::ConcurrentMutation => "hub.package.concurrent_mutation",
+            },
+            "research portable verification failed",
+        ),
+    }
+}
+
 fn portable_error(error: DiscoveryPortableV2Error) -> graphforge_api::GfError {
     match error {
         DiscoveryPortableV2Error::Discovery(error) => protocol_error(&error),
@@ -1819,6 +2025,8 @@ mod tests {
                 repository: "openalex/openalex".into(),
                 destination: Some(destination),
                 telemetry_endpoint: None,
+                git_ref: None,
+                version_uuid: None,
             },
             false,
             &mut Vec::new(),
@@ -1871,6 +2079,60 @@ mod tests {
     }
 
     #[test]
+    fn research_ref_without_lineage_stops_before_project_download() {
+        let repository = serde_json::json!({"owner":"openalex","repository":"openalex"});
+        let immutable = format!("sha256:{}", "a".repeat(64));
+        let refs = serde_json::to_vec(&serde_json::json!({
+            "format":"graphforge-discovery/1","version":{"major":1,"minor":0},
+            "repository":repository.clone(),"default_ref":"main",
+            "refs":[{"name":"main","target":immutable,"validator":format!("sha256:{}", "d".repeat(64))}]
+        }))
+        .unwrap();
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "format":"graphforge-discovery/1","version":{"major":1,"minor":0},
+            "repository":repository,"default_ref":"main","resolved_ref":"main",
+            "immutable_version":format!("sha256:{}", "a".repeat(64)),
+            "package":{
+                "format":"graphforge-project/2",
+                "package_digest":format!("sha256:{}", "b".repeat(64)),
+                "object_digest":format!("sha256:{}", "c".repeat(64))
+            },
+            "requirements":[{"capability":"portable-v2","major":1}],"capabilities":[],
+            "objects":[{
+                "digest":format!("sha256:{}", "c".repeat(64)),"length":1,
+                "media_type":graphforge_discovery::PORTABLE_V2_MEDIA_TYPE,
+                "locations":["https://objects.example/project.gfpb"]
+            }]
+        }))
+        .unwrap();
+        let transport = Scripted::new(vec![
+            response(200, None, &refs),
+            response(200, None, &manifest),
+            response(200, None, b"must not be read"),
+        ]);
+        let root = tempfile::tempdir().unwrap();
+        let error = run_clone_with(
+            &transport,
+            CloneArgs {
+                repository: "openalex/openalex".into(),
+                destination: Some(root.path().join("project")),
+                telemetry_endpoint: None,
+                git_ref: Some("main".into()),
+                version_uuid: None,
+            },
+            true,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("hub.missing_object"), "{error}");
+        assert_eq!(
+            transport.remaining(),
+            1,
+            "project object was never requested"
+        );
+    }
+
+    #[test]
     fn unsupported_future_manifest_stops_before_object_access() {
         let repository = serde_json::json!({"owner":"openalex","repository":"openalex"});
         let immutable = format!("sha256:{}", "a".repeat(64));
@@ -1909,6 +2171,8 @@ mod tests {
                 repository: "openalex/openalex".into(),
                 destination: Some(root.path().join("project")),
                 telemetry_endpoint: None,
+                git_ref: None,
+                version_uuid: None,
             },
             true,
             &mut Vec::new(),
@@ -1987,6 +2251,8 @@ mod tests {
                 repository: "openalex/openalex".into(),
                 destination: Some(destination),
                 telemetry_endpoint: None,
+                git_ref: None,
+                version_uuid: None,
             },
             true,
             &mut Vec::new(),
@@ -2070,6 +2336,8 @@ mod tests {
                 repository: canary.into(),
                 destination: None,
                 telemetry_endpoint: None,
+                git_ref: None,
+                version_uuid: None,
             },
             true,
             &mut Vec::new(),
@@ -2229,6 +2497,8 @@ mod tests {
                     repository: input.into(),
                     destination: Some(destination.clone()),
                     telemetry_endpoint: None,
+                    git_ref: None,
+                    version_uuid: None,
                 },
                 true,
                 &mut output,
@@ -2376,6 +2646,8 @@ mod tests {
                     repository: "openalex/openalex".into(),
                     destination: Some(destination),
                     telemetry_endpoint: None,
+                    git_ref: None,
+                    version_uuid: None,
                 },
                 true,
                 &mut Vec::new(),

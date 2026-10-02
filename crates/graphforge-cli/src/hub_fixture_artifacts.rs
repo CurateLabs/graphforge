@@ -154,6 +154,7 @@ pub fn generate(source: &Path, destination: &Path) -> Result<(), String> {
         },
         summary: None,
         ontology: None,
+        lineage: None,
         requirements: vec![ProtocolRequirement {
             capability: "portable-v2".into(),
             major: 1,

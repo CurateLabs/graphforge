@@ -1,0 +1,351 @@
+{
+  "$defs": {
+    "branch": {
+      "additionalProperties": false,
+      "properties": {
+        "base_version_uuid": {
+          "$ref": "#/$defs/uuid"
+        },
+        "branch_uuid": {
+          "$ref": "#/$defs/uuid"
+        },
+        "head_version_uuid": {
+          "$ref": "#/$defs/uuid"
+        },
+        "label": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "origin_version_uuid": {
+          "$ref": "#/$defs/uuid"
+        },
+        "parent_branch_uuid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "project_uuid": {
+          "$ref": "#/$defs/uuid"
+        },
+        "ref_name": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "selection_sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "branch_uuid",
+        "ref_name",
+        "project_uuid",
+        "head_version_uuid",
+        "origin_version_uuid",
+        "base_version_uuid",
+        "selection_sha256",
+        "label"
+      ],
+      "type": "object"
+    },
+    "digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "extensions": {
+      "maxProperties": 256,
+      "propertyNames": {
+        "pattern": "^x-[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$"
+      },
+      "type": "object"
+    },
+    "fork_origin": {
+      "additionalProperties": false,
+      "properties": {
+        "origin_project_uuid": {
+          "$ref": "#/$defs/uuid"
+        },
+        "origin_repository": {
+          "$ref": "#/$defs/identity"
+        },
+        "origin_version_identity": {
+          "$ref": "#/$defs/digest"
+        },
+        "origin_version_uuid": {
+          "$ref": "#/$defs/uuid"
+        }
+      },
+      "required": [
+        "origin_repository",
+        "origin_project_uuid",
+        "origin_version_uuid",
+        "origin_version_identity"
+      ],
+      "type": "object"
+    },
+    "identity": {
+      "additionalProperties": false,
+      "properties": {
+        "owner": {
+          "$ref": "#/$defs/slug"
+        },
+        "repository": {
+          "$ref": "#/$defs/slug"
+        }
+      },
+      "required": [
+        "owner",
+        "repository"
+      ],
+      "type": "object"
+    },
+    "package_reference": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "const": "graphforge-project/2"
+        },
+        "object_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "package_digest": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "format",
+        "package_digest",
+        "object_digest"
+      ],
+      "type": "object"
+    },
+    "proposal": {
+      "additionalProperties": false,
+      "properties": {
+        "package": {
+          "$ref": "#/$defs/package_reference"
+        },
+        "payload_version_uuid": {
+          "$ref": "#/$defs/uuid"
+        },
+        "proposal_uuid": {
+          "$ref": "#/$defs/uuid"
+        },
+        "source_branch_uuid": {
+          "$ref": "#/$defs/uuid"
+        },
+        "source_version_uuid": {
+          "$ref": "#/$defs/uuid"
+        }
+      },
+      "required": [
+        "proposal_uuid",
+        "source_branch_uuid",
+        "source_version_uuid",
+        "payload_version_uuid",
+        "package"
+      ],
+      "type": "object"
+    },
+    "research_version": {
+      "additionalProperties": false,
+      "properties": {
+        "branch_uuid": {
+          "$ref": "#/$defs/uuid"
+        },
+        "identity_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "kind": {
+          "enum": [
+            "complete",
+            "projection"
+          ]
+        },
+        "package": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/package_reference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_version_uuid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version_uuid": {
+          "$ref": "#/$defs/uuid"
+        }
+      },
+      "required": [
+        "version_uuid",
+        "identity_digest",
+        "kind",
+        "branch_uuid"
+      ],
+      "type": "object"
+    },
+    "semantic": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "major": {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "capability",
+        "major"
+      ],
+      "type": "object"
+    },
+    "slug": {
+      "maxLength": 100,
+      "minLength": 1,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$",
+      "type": "string"
+    },
+    "uuid": {
+      "maxLength": 36,
+      "minLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "version": {
+      "additionalProperties": false,
+      "properties": {
+        "major": {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://graphforge.sh/schemas/discovery/v1/lineage.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "branches": {
+      "items": {
+        "$ref": "#/$defs/branch"
+      },
+      "maxItems": 10000,
+      "type": "array"
+    },
+    "capabilities": {
+      "items": {
+        "$ref": "#/$defs/semantic"
+      },
+      "maxItems": 256,
+      "type": "array"
+    },
+    "extensions": {
+      "$ref": "#/$defs/extensions"
+    },
+    "fork": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/fork_origin"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "format": {
+      "const": "graphforge-research-lineage/1"
+    },
+    "immutable_version": {
+      "$ref": "#/$defs/digest"
+    },
+    "project_uuid": {
+      "$ref": "#/$defs/uuid"
+    },
+    "proposals": {
+      "items": {
+        "$ref": "#/$defs/proposal"
+      },
+      "maxItems": 10000,
+      "type": "array"
+    },
+    "repository": {
+      "$ref": "#/$defs/identity"
+    },
+    "requirements": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "capability": {
+            "const": "research-lineage"
+          },
+          "major": {
+            "const": 1
+          }
+        },
+        "required": [
+          "capability",
+          "major"
+        ],
+        "type": "object"
+      },
+      "maxItems": 1,
+      "type": "array"
+    },
+    "version": {
+      "$ref": "#/$defs/version"
+    },
+    "versions": {
+      "items": {
+        "$ref": "#/$defs/research_version"
+      },
+      "maxItems": 10000,
+      "type": "array"
+    }
+  },
+  "required": [
+    "format",
+    "version",
+    "repository",
+    "immutable_version",
+    "project_uuid",
+    "requirements",
+    "capabilities",
+    "branches",
+    "versions",
+    "proposals"
+  ],
+  "title": "lineage",
+  "type": "object"
+}
