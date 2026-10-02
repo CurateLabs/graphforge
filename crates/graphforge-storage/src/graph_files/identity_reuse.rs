@@ -234,6 +234,32 @@ pub(crate) fn capture_workspace_over_parent(
         ARTIFACT_IDENTITY,
         &mut || Ok(()),
         Some(&mut captured),
+        None,
+    )?;
+    Ok(WorkspaceCapture {
+        inventory,
+        captured,
+        read_calls,
+    })
+}
+
+/// Capture rebuilt adjacency files afresh even when their bytes match the
+/// parent's inventory. Explicit repair needs retained SHA-authenticated source
+/// handles so compact publication can replace a corrupt object at that digest.
+pub(crate) fn capture_workspace_over_parent_repairing_adjacency(
+    source_root: &Path,
+    parent: &crate::ResolvedProjectGeneration,
+) -> Result<WorkspaceCapture, GfError> {
+    let known = known_files(parent)?;
+    let mut captured = BTreeMap::new();
+    let (inventory, read_calls) = build_inventory_for_owned_layout(
+        source_root,
+        false,
+        Some(&known),
+        ARTIFACT_IDENTITY,
+        &mut || Ok(()),
+        Some(&mut captured),
+        Some("indexes/adjacency/"),
     )?;
     Ok(WorkspaceCapture {
         inventory,

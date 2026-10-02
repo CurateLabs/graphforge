@@ -536,7 +536,7 @@ fn publish_workspace_records_inner(
     // the parent like every other mutating commit: only changed files install.
     let mut candidate_lease = None;
     if let Some(candidate_graph_root) = candidate_graph_root {
-        let (participant, lease) = compact_graph_participant(candidate_graph_root, &parent)?;
+        let (participant, lease) = compact_graph_participant(candidate_graph_root, &parent, false)?;
         candidate_lease = Some(lease);
         participants.push(participant);
     }

@@ -781,6 +781,62 @@ fn authenticated_replacement_preserves_shared_payload_and_open_snapshot() {
     );
 }
 
+#[test]
+fn authenticated_cross_directory_replacement_preserves_old_inode() {
+    use std::io::Read as _;
+
+    let root = tempfile::tempdir().unwrap();
+    let source_path = root.path().join("temporary");
+    let target_path = root.path().join("objects");
+    std::fs::create_dir(&source_path).unwrap();
+    std::fs::create_dir(&target_path).unwrap();
+    let source = StableDirectory::open(&source_path).unwrap();
+    let target = StableDirectory::open(&target_path).unwrap();
+    std::fs::write(source_path.join("temporary"), b"repaired payload").unwrap();
+    std::fs::write(target_path.join("target"), b"corrupted payload").unwrap();
+    std::fs::hard_link(target_path.join("target"), target_path.join("snapshot")).unwrap();
+
+    let prior_file = File::open(target_path.join("target")).unwrap();
+    let prior = file_identity(&prior_file).unwrap();
+    let replacement_file = File::open(source_path.join("temporary")).unwrap();
+    let replacement = file_identity(&replacement_file).unwrap();
+    let mut permissions = std::fs::metadata(source_path.join("temporary"))
+        .unwrap()
+        .permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(source_path.join("temporary"), permissions).unwrap();
+    drop(replacement_file);
+
+    target
+        .replace_authenticated_child_from(
+            &source,
+            OsStr::new("temporary"),
+            replacement,
+            OsStr::new("target"),
+            prior,
+        )
+        .unwrap();
+    target.sync().unwrap();
+    source.sync().unwrap();
+
+    let mut old = Vec::new();
+    File::open(target_path.join("snapshot"))
+        .unwrap()
+        .read_to_end(&mut old)
+        .unwrap();
+    assert_eq!(old, b"corrupted payload");
+    assert_eq!(file_identity(&prior_file).unwrap(), prior);
+    assert_eq!(
+        std::fs::read(target_path.join("target")).unwrap(),
+        b"repaired payload"
+    );
+    assert_eq!(
+        path_identity(&target_path.join("target")).unwrap(),
+        replacement
+    );
+    assert!(!source_path.join("temporary").exists());
+}
+
 #[cfg(windows)]
 #[test]
 fn authenticated_replacement_respects_retained_authentication_guard() {

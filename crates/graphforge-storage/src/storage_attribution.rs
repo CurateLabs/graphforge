@@ -832,6 +832,11 @@ impl StorageAllocationLifecycle {
                 .unwrap_or_else(|| self.active.get(id).copied());
             let next = if let Some((previous, references)) = previous {
                 if previous != *allocated || references == 0 {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "allocation transition mismatch: identity={id}, old_bytes={previous}, new_bytes={allocated}, references={references}, old_owner={:?}, new_owner={component:?}",
+                        self.identity_components.get(id)
+                    );
                     return Err(validation("active identity allocation changed"));
                 }
                 (*allocated, checked_add(references, 1)?)

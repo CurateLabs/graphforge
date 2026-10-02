@@ -400,6 +400,80 @@ pub(super) fn replace_file(
     ))
 }
 
+pub(super) fn replace_file_from(
+    source_directory: &File,
+    target_directory: &File,
+    source_name: &OsStr,
+    target_name: &OsStr,
+    expected_source: Option<FileIdentity>,
+    expected_target: Option<FileIdentity>,
+) -> Result<(), ReplaceFileError> {
+    let (_source_guard, source_directory_path) =
+        guarded_directory_path(source_directory).map_err(ReplaceFileError::NotReplaced)?;
+    let (_target_guard, target_directory_path) =
+        guarded_directory_path(target_directory).map_err(ReplaceFileError::NotReplaced)?;
+    let source_path = source_directory_path.join(source_name);
+    let target_path = target_directory_path.join(target_name);
+    let source = open_rename_handle(&source_path).map_err(ReplaceFileError::NotReplaced)?;
+    verify_open_regular(&source).map_err(ReplaceFileError::NotReplaced)?;
+    source
+        .observed_sync_all()
+        .map_err(ReplaceFileError::NotReplaced)?;
+    let source_before = file_identity(&source).map_err(ReplaceFileError::NotReplaced)?;
+    if expected_source.is_some_and(|expected| expected != source_before)
+        || identity(&source_path).map_err(ReplaceFileError::NotReplaced)? != source_before
+    {
+        return Err(ReplaceFileError::NotReplaced(io::Error::other(
+            "cross-directory rename source identity changed",
+        )));
+    }
+    let target = open_identity_handle(&target_path).map_err(ReplaceFileError::NotReplaced)?;
+    verify_space_usage_metadata(&target.metadata().map_err(ReplaceFileError::NotReplaced)?)
+        .map_err(ReplaceFileError::NotReplaced)?;
+    let target_before = file_identity(&target).map_err(ReplaceFileError::NotReplaced)?;
+    if expected_target.is_some_and(|expected| expected != target_before)
+        || identity(&target_path).map_err(ReplaceFileError::NotReplaced)? != target_before
+    {
+        return Err(ReplaceFileError::NotReplaced(io::Error::other(
+            "cross-directory rename target identity changed",
+        )));
+    }
+    let result = rename_handle(
+        &source,
+        target_path.as_os_str(),
+        true,
+        expected_target.is_some(),
+    );
+    let opened_source_after = file_identity(&source).ok();
+    let opened_target_after = file_identity(&target).ok();
+    let source_after = identity(&source_path).ok();
+    let target_after = identity(&target_path).ok();
+    if result.is_ok()
+        && opened_source_after == Some(source_before)
+        && opened_target_after == Some(target_before)
+        && source_after.is_none()
+        && target_after == Some(source_before)
+    {
+        return Ok(());
+    }
+    if result.is_ok() {
+        return Err(ReplaceFileError::StateUnknown(io::Error::other(
+            "cross-directory replacement success state did not reconcile",
+        )));
+    }
+    let error = result.expect_err("failed rename result was checked");
+    if opened_source_after != Some(source_before) || opened_target_after != Some(target_before) {
+        return Err(ReplaceFileError::StateUnknown(error));
+    }
+    Err(super::classify_failed_replacement(
+        error,
+        source_before,
+        target_before,
+        source_after,
+        target_after,
+    ))
+}
+
 pub(super) fn install_new_file(
     directory: &File,
     source_name: &OsStr,

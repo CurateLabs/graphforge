@@ -245,7 +245,7 @@ impl GraphForge {
             }
             // Every mutating commit publishes a compact root and installs only
             // the changed objects; no graph tree is copied into the generation.
-            let (graph, canonical_lease) = compact_graph_participant(&dir, parent)?;
+            let (graph, canonical_lease) = compact_graph_participant(&dir, parent, false)?;
             let participants = assemble_composite_participants(self, parent, request, graph)?;
             let capabilities = parent
                 .capabilities()

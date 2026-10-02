@@ -19,6 +19,7 @@ pub(super) type BoundGenerationStorage = (
 pub(crate) fn compact_graph_participant(
     workspace: &std::path::Path,
     parent: &graphforge_storage::ResolvedProjectGeneration,
+    repair_corrupt_adjacency: bool,
 ) -> Result<
     (
         graphforge_storage::ProjectParticipant,
@@ -26,7 +27,11 @@ pub(crate) fn compact_graph_participant(
     ),
     GfError,
 > {
-    graphforge_storage::prepare_compact_graph_publication(parent, workspace)
+    if repair_corrupt_adjacency {
+        graphforge_storage::prepare_compact_graph_publication_repairing_adjacency(parent, workspace)
+    } else {
+        graphforge_storage::prepare_compact_graph_publication(parent, workspace)
+    }
 }
 
 impl GraphForge {
@@ -112,6 +117,21 @@ impl GraphForge {
             None,
             recorded_at_micros,
             candidate_bindings,
+            false,
+        )
+    }
+
+    pub(super) fn publish_graph_mutation_repairing_adjacency(&self) -> Result<(), GfError> {
+        let receipt = graphforge_exec::MutationReceipt::default();
+        let operation_uuid = uuid::Uuid::now_v7();
+        let recorded_at_micros = (self.clock.lock().expect("clock lock poisoned"))()?;
+        self.publish_graph_mutation_with_context_and_bindings(
+            &receipt,
+            operation_uuid,
+            None,
+            recorded_at_micros,
+            None,
+            true,
         )
     }
 
@@ -128,6 +148,7 @@ impl GraphForge {
             actor_uuid,
             recorded_at_micros,
             None,
+            false,
         )
     }
 
@@ -138,6 +159,7 @@ impl GraphForge {
         actor_uuid: Option<uuid::Uuid>,
         recorded_at_micros: i64,
         candidate_bindings: Option<&graphforge_storage::SemanticStorageBindings>,
+        repair_corrupt_adjacency: bool,
     ) -> Result<(), GfError> {
         use graphforge_storage::{ProjectCapability, ProjectStageOutcome};
 
@@ -163,7 +185,8 @@ impl GraphForge {
                 graphforge_storage::UuidIndexBuildLimits::default(),
             )?;
         }
-        let (graph, graph_objects) = compact_graph_participant(&self.dir(), &parent)?;
+        let (graph, graph_objects) =
+            compact_graph_participant(&self.dir(), &parent, repair_corrupt_adjacency)?;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let installed_bindings = self
             .semantic_storage_bindings
@@ -266,7 +289,7 @@ impl GraphForge {
                 graphforge_storage::UuidIndexBuildLimits::default(),
             )?;
         }
-        let (graph, graph_objects) = compact_graph_participant(&self.dir(), &parent)?;
+        let (graph, graph_objects) = compact_graph_participant(&self.dir(), &parent, false)?;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let participants = graph_publication_participants(
             &parent,
@@ -339,6 +362,10 @@ impl GraphForge {
 
     pub(super) fn publish_workspace_update(&self) -> Result<(), GfError> {
         self.publish_graph_mutation(&graphforge_exec::MutationReceipt::default())
+    }
+
+    pub(super) fn publish_workspace_update_repairing_adjacency(&self) -> Result<(), GfError> {
+        self.publish_graph_mutation_repairing_adjacency()
     }
 
     /// Remove all nodes and edges (in-memory instances only).

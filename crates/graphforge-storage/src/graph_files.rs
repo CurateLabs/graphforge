@@ -9,7 +9,7 @@ mod identity_reuse;
 mod read_materialization;
 pub(crate) use identity_reuse::{
     CapturedWorkspaceFile, KnownGraphFile, MAX_RETAINED_CAPTURES, capture_payload_identity,
-    capture_workspace_over_parent,
+    capture_workspace_over_parent, capture_workspace_over_parent_repairing_adjacency,
 };
 use read_materialization::copy_read_inventory_file;
 
@@ -212,6 +212,7 @@ pub(crate) fn capture_graph_files_with_cancellation(
         None,
         ARTIFACT_IDENTITY,
         &mut check_cancelled,
+        None,
         None,
     )
     .map(|(inventory, _)| inventory)
@@ -782,6 +783,7 @@ fn build_inventory(source_root: &Path) -> Result<(GraphFilesInventory, u64), GfE
         ARTIFACT_IDENTITY,
         &mut || Ok(()),
         None,
+        None,
     )
 }
 
@@ -814,6 +816,7 @@ pub(crate) fn capture_graph_files_reusing_digests(
         domain,
         &mut || Ok(()),
         None,
+        None,
     )?;
     let bytes = encode_inventory(&inventory)?;
     let participant = inventory_participant(bytes, inventory.file_count)?;
@@ -832,6 +835,7 @@ pub(crate) fn capture_owned_route_migration_inventory(
         ARTIFACT_IDENTITY,
         &mut || Ok(()),
         None,
+        None,
     )
     .map(|(inventory, _)| inventory)
 }
@@ -843,6 +847,7 @@ fn build_inventory_for_owned_layout(
     domain: graphforge_core::hash_observation::HashDomain,
     check_cancelled: &mut dyn FnMut() -> Result<(), GfError>,
     mut retain: Option<&mut std::collections::BTreeMap<String, CapturedWorkspaceFile>>,
+    force_hash_prefix: Option<&str>,
 ) -> Result<(GraphFilesInventory, u64), GfError> {
     let mut paths = Vec::new();
     collect_source_files(source_root, &mut paths)?;
@@ -887,6 +892,7 @@ fn build_inventory_for_owned_layout(
             .ok_or_else(|| resource_limit("graph files total size overflow"))?;
         let reused = reuse
             .and_then(|known| known.get(&relative_text))
+            .filter(|_| !force_hash_prefix.is_some_and(|prefix| relative_text.starts_with(prefix)))
             .filter(|known| known.byte_length == byte_length);
         let (content_sha256, content_xxh64, calls, hashed) =
             capture_payload_identity(&path, reused, domain)?;

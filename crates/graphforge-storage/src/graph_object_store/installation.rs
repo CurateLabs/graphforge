@@ -381,7 +381,7 @@ pub(crate) fn install_captured_encoded_artifact_with_lease(
     source: &crate::graph_construction::CapturedEncodedArtifact<'_>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphObjectInstallEvidence, GfError> {
-    install_captured_source_with_lease(lease, &CapturedSource::Encoded(source), cancelled)
+    install_captured_source_with_lease(lease, &CapturedSource::Encoded(source), false, cancelled)
 }
 
 /// Install a workspace file that a capture hashed and kept open, checking the
@@ -391,9 +391,15 @@ pub(crate) fn install_captured_encoded_artifact_with_lease(
 pub(crate) fn install_captured_workspace_file_with_lease(
     lease: &GraphObjectPublicationLease,
     source: &crate::graph_files::CapturedWorkspaceFile,
+    repair_corrupt_existing: bool,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphObjectInstallEvidence, GfError> {
-    install_captured_source_with_lease(lease, &CapturedSource::Workspace(source), cancelled)
+    install_captured_source_with_lease(
+        lease,
+        &CapturedSource::Workspace(source),
+        repair_corrupt_existing,
+        cancelled,
+    )
 }
 
 pub(crate) fn install_captured_portable_source_with_lease(
@@ -401,7 +407,7 @@ pub(crate) fn install_captured_portable_source_with_lease(
     source: &crate::project_portable_v2::CapturedPortableSource<'_>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphObjectInstallEvidence, GfError> {
-    install_captured_source_with_lease(lease, &CapturedSource::Portable(source), cancelled)
+    install_captured_source_with_lease(lease, &CapturedSource::Portable(source), false, cancelled)
 }
 
 /// A closed set of concrete, privately minted source capabilities.
@@ -458,6 +464,7 @@ impl CapturedSource<'_, '_> {
 fn install_captured_source_with_lease(
     lease: &GraphObjectPublicationLease,
     source: &CapturedSource<'_, '_>,
+    repair_corrupt_existing: bool,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphObjectInstallEvidence, GfError> {
     source.revalidate()?;
@@ -474,15 +481,23 @@ fn install_captured_source_with_lease(
             capture.byte_length == source.bytes() && capture.content_xxh64 == source.checksum()
         })
         .map(|capture| capture.identity);
+    let authentication = if repair_corrupt_existing {
+        // Repair requires a full digest check of the copied source; the
+        // ordinary checksum capture is not sufficient replacement authority.
+        ObjectAuthentication::Sha(HashDomain::ArtifactPayload)
+    } else {
+        ObjectAuthentication::CapturedChecksum {
+            checksum: source.checksum(),
+            identity: captured_identity,
+        }
+    };
     let installed = install_object_admitted(
         &lease.cas,
         source.content_sha256(),
         source.bytes(),
-        ObjectAuthentication::CapturedChecksum {
-            checksum: source.checksum(),
-            identity: captured_identity,
-        },
-        true,
+        authentication,
+        repair_corrupt_existing,
+        !repair_corrupt_existing,
         |output| copy_captured_source(source, output, cancelled, &reads, &writes, &syncs),
     )?;
     source.revalidate()?;
@@ -704,6 +719,7 @@ where
         digest,
         expected_length,
         ObjectAuthentication::Sha(domain),
+        false,
         writer_authenticated,
         write_temporary,
     )
@@ -823,6 +839,7 @@ fn install_object_admitted<F>(
     digest: &str,
     expected_length: u64,
     authentication: ObjectAuthentication,
+    repair_corrupt_existing: bool,
     writer_authenticated: bool,
     write_temporary: F,
 ) -> Result<InstalledObject, GfError>
@@ -832,13 +849,18 @@ where
     validate_digest(digest)?;
     let bucket = cas.digest_bucket(digest, true)?;
     let destination_name = std::ffi::OsStr::new(&digest[2..]);
+    let mut replace_prior = None;
     if let Some(evidence) = try_reuse_existing_object(
         cas,
         &bucket,
         destination_name,
         digest,
         expected_length,
-        authentication,
+        &mut ExistingObjectReuse {
+            authentication,
+            repair_corrupt_existing,
+            replace_prior: &mut replace_prior,
+        },
     )? {
         return Ok(evidence);
     }
@@ -904,6 +926,7 @@ where
         digest,
         expected_length,
         authentication,
+        replace_prior,
     )?;
     Ok(InstalledObject {
         evidence: installation_evidence(
@@ -969,6 +992,13 @@ fn reused_object_evidence(expected_length: u64, io: ReadIoEvidence) -> GraphObje
     }
 }
 
+#[cfg(any(unix, windows))]
+struct ExistingObjectReuse<'a> {
+    authentication: ObjectAuthentication,
+    repair_corrupt_existing: bool,
+    replace_prior: &'a mut Option<graphforge_filesystem::FileIdentity>,
+}
+
 #[cfg(unix)]
 fn try_reuse_existing_object(
     cas: &CasRoot,
@@ -976,7 +1006,7 @@ fn try_reuse_existing_object(
     destination_name: &std::ffi::OsStr,
     digest: &str,
     expected_length: u64,
-    authentication: ObjectAuthentication,
+    reuse: &mut ExistingObjectReuse<'_>,
 ) -> Result<Option<InstalledObject>, GfError> {
     let file = match bucket.open_child_file(destination_name) {
         Ok(file) => file,
@@ -989,14 +1019,31 @@ fn try_reuse_existing_object(
             ));
         }
     };
-    let io = verify_and_seal_graph_object_counted(
+    let prior_identity = graphforge_filesystem::file_identity(&file).map_err(|error| {
+        storage(
+            "identify existing graph object",
+            &cas.diagnostic_root,
+            error,
+        )
+    })?;
+    let io = match verify_and_seal_graph_object_counted(
         &file,
         digest,
         expected_length,
         &graph_object_path(&cas.diagnostic_root, digest)?,
         &cas.diagnostic_root,
-        authentication,
-    )?;
+        reuse.authentication,
+    ) {
+        Ok(io) => io,
+        Err(GfError::Validation(message))
+            if reuse.repair_corrupt_existing
+                && message == "graph object digest does not match its address" =>
+        {
+            *reuse.replace_prior = Some(prior_identity);
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
     if let Some(allocation) = &cas.allocation {
         allocation.replace_file_at(&graph_object_path(&cas.diagnostic_root, digest)?, &file)?;
     }
@@ -1020,7 +1067,7 @@ fn try_reuse_existing_object(
     destination_name: &std::ffi::OsStr,
     digest: &str,
     expected_length: u64,
-    authentication: ObjectAuthentication,
+    reuse: &mut ExistingObjectReuse<'_>,
 ) -> Result<Option<InstalledObject>, GfError> {
     let mut adoption_io = ReadIoEvidence::default();
     let file = match bucket.open_cas_child_file(destination_name) {
@@ -1045,7 +1092,7 @@ fn try_reuse_existing_object(
                 digest,
                 expected_length,
                 &cas.diagnostic_root,
-                authentication.without_existing_identity(),
+                reuse.authentication.without_existing_identity(),
             )?;
             bucket
                 .adopt_legacy_cas_child(destination_name, legacy)
@@ -1059,14 +1106,31 @@ fn try_reuse_existing_object(
                 })?
         }
     };
-    let io = verify_and_seal_graph_object_counted(
+    let prior_identity = graphforge_filesystem::file_identity(&file).map_err(|error| {
+        storage(
+            "identify existing graph object",
+            &cas.diagnostic_root,
+            error,
+        )
+    })?;
+    let io = match verify_and_seal_graph_object_counted(
         &file,
         digest,
         expected_length,
         &graph_object_path(&cas.diagnostic_root, digest)?,
         &cas.diagnostic_root,
-        authentication,
-    )?;
+        reuse.authentication,
+    ) {
+        Ok(io) => io,
+        Err(GfError::Validation(message))
+            if reuse.repair_corrupt_existing
+                && message == "graph object digest does not match its address" =>
+        {
+            *reuse.replace_prior = Some(prior_identity);
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
     let mut evidence = reused_object_evidence(expected_length, io);
     let combined = checked_read_io_sum(adoption_io, io)?;
     evidence.bytes_hashed = combined.sha_bytes;
@@ -1095,6 +1159,7 @@ fn finalize_temporary_object(
     digest: &str,
     expected_length: u64,
     authentication: ObjectAuthentication,
+    replace_prior: Option<graphforge_filesystem::FileIdentity>,
 ) -> Result<
     (
         bool,
@@ -1143,42 +1208,56 @@ fn finalize_temporary_object(
     )
     .map_err(|error| storage("adopt sealed graph object", &cas.diagnostic_root, error))?;
     let mut concurrent_io = ReadIoEvidence::default();
-    let installed = crate::durable_commit::install_immutable(
-        sealed,
-        bucket,
-        destination_name,
-        |existing, _identity| {
-            concurrent_io = verify_and_seal_graph_object_counted(
-                existing,
-                digest,
-                expected_length,
-                &graph_object_path(&cas.diagnostic_root, digest).map_err(std::io::Error::other)?,
-                &cas.diagnostic_root,
-                authentication,
-            )
-            .map_err(std::io::Error::other)?;
-            Ok(())
-        },
-        |_reused, file| {
-            if let Some(allocation) = &cas.allocation {
-                allocation
-                    .replace_file_at(
-                        &graph_object_path(&cas.diagnostic_root, digest)
-                            .map_err(std::io::Error::other)?,
-                        file,
-                    )
-                    .map_err(std::io::Error::other)?;
-            }
-            returned_error_boundary("install:final-linked").map_err(std::io::Error::other)
-        },
-        |_reused, _file| {
-            returned_error_boundary("install:bucket-synced").map_err(std::io::Error::other)
-        },
-        || returned_error_boundary("install:temp-unlinked").map_err(std::io::Error::other),
-    )
-    .map_err(|error| immutable_commit_error(error, cas))?;
-    let (_file, identity, reused) = installed;
-    let installed = !reused;
+    let (identity, installed) = if let Some(prior) = replace_prior {
+        let pending = sealed
+            .make_visible_into(bucket, destination_name, prior, || {
+                returned_error_boundary("install:before-repair-visible")
+                    .map_err(std::io::Error::other)
+            })
+            .map_err(|error| immutable_commit_error(std::io::Error::other(error), cas))?;
+        pending
+            .acknowledge(cas.allocation.as_ref())
+            .map_err(|error| immutable_commit_error(std::io::Error::other(error), cas))?;
+        (temporary.identity, true)
+    } else {
+        let installed = crate::durable_commit::install_immutable(
+            sealed,
+            bucket,
+            destination_name,
+            |existing, _identity| {
+                concurrent_io = verify_and_seal_graph_object_counted(
+                    existing,
+                    digest,
+                    expected_length,
+                    &graph_object_path(&cas.diagnostic_root, digest)
+                        .map_err(std::io::Error::other)?,
+                    &cas.diagnostic_root,
+                    authentication,
+                )
+                .map_err(std::io::Error::other)?;
+                Ok(())
+            },
+            |_reused, file| {
+                if let Some(allocation) = &cas.allocation {
+                    allocation
+                        .replace_file_at(
+                            &graph_object_path(&cas.diagnostic_root, digest)
+                                .map_err(std::io::Error::other)?,
+                            file,
+                        )
+                        .map_err(std::io::Error::other)?;
+                }
+                returned_error_boundary("install:final-linked").map_err(std::io::Error::other)
+            },
+            |_reused, _file| {
+                returned_error_boundary("install:bucket-synced").map_err(std::io::Error::other)
+            },
+            || returned_error_boundary("install:temp-unlinked").map_err(std::io::Error::other),
+        )
+        .map_err(|error| immutable_commit_error(error, cas))?;
+        let (_file, identity, reused) = installed;
+        (identity, !reused)
+    };
     Ok((
         installed,
         identity,

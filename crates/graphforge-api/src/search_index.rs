@@ -333,7 +333,7 @@ impl GraphForge {
             .current_generation_uuid
             .lock()
             .expect("generation UUID lock poisoned");
-        let publication = self.publish_workspace_update();
+        let publication = self.publish_workspace_update_repairing_adjacency();
         let observed_generation = *self
             .current_generation_uuid
             .lock()

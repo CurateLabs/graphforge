@@ -207,7 +207,7 @@ pub fn prepare_graph_files_replacement(
     ),
     GfError,
 > {
-    prepare_compact_root(parent, workspace, inventory, None)
+    prepare_compact_root(parent, workspace, inventory, None, false)
 }
 
 /// Capture a private workspace over `parent` and publish it as a compact root:
@@ -235,7 +235,34 @@ pub fn prepare_compact_graph_publication(
         workspace,
         &capture.inventory,
         Some(&capture.captured),
+        false,
     )
+}
+
+/// Capture a compact publication for the explicit adjacency repair action.
+/// The resulting lease can replace an existing corrupt CAS object only when
+/// the changed logical path is an adjacency index and the staged source hashes
+/// to that object's declared digest.
+pub fn prepare_compact_graph_publication_repairing_adjacency(
+    parent: &crate::ResolvedProjectGeneration,
+    workspace: &Path,
+) -> Result<
+    (
+        crate::ProjectParticipant,
+        crate::GraphObjectPublicationLease,
+    ),
+    GfError,
+> {
+    let capture =
+        crate::graph_files::capture_workspace_over_parent_repairing_adjacency(workspace, parent)?;
+    let (participant, lease) = prepare_compact_root(
+        parent,
+        workspace,
+        &capture.inventory,
+        Some(&capture.captured),
+        true,
+    )?;
+    Ok((participant, lease))
 }
 
 fn prepare_compact_root(
@@ -243,6 +270,7 @@ fn prepare_compact_root(
     workspace: &Path,
     inventory: &GraphFilesInventory,
     captured: Option<&BTreeMap<String, crate::graph_files::CapturedWorkspaceFile>>,
+    repair_corrupt_adjacency: bool,
 ) -> Result<
     (
         crate::ProjectParticipant,
@@ -252,7 +280,8 @@ fn prepare_compact_root(
 > {
     // Validate the complete expanded contract before installing one object.
     crate::graph_files::encode_inventory(inventory)?;
-    let lease = crate::begin_graph_object_publication(parent.container_root())?;
+    let mut lease = crate::begin_graph_object_publication(parent.container_root())?;
+    lease.repair_corrupt_adjacency = repair_corrupt_adjacency;
     let mut state = match parent.declared_graph_files_participant()? {
         Some(crate::GraphFilesParticipant::V2(root)) => {
             crate::graph_object_store::GraphManifestState::open(
@@ -286,9 +315,12 @@ fn replace_replayed_graph_files(
         .files
         .iter()
         .filter(|entry| {
-            state.entries.get(&entry.relative_path).is_none_or(|old| {
-                old.content_sha256 != entry.content_sha256 || old.byte_length != entry.byte_length
-            })
+            (lease.repair_corrupt_adjacency
+                && entry.relative_path.starts_with("indexes/adjacency/"))
+                || state.entries.get(&entry.relative_path).is_none_or(|old| {
+                    old.content_sha256 != entry.content_sha256
+                        || old.byte_length != entry.byte_length
+                })
         })
         .map(|entry| PathBuf::from(&entry.relative_path))
         .collect::<Vec<_>>();
@@ -627,7 +659,16 @@ fn append_graph_files_v2_inner(
             }
             super::install_captured_portable_source_with_lease(lease, &source, cancelled)?
         } else if let Some(capture) = workspace_capture {
-            super::install_captured_workspace_file_with_lease(lease, capture, cancelled)?
+            let repair_corrupt_adjacency = lease.repair_corrupt_adjacency
+                && relative
+                    .to_str()
+                    .is_some_and(|path| path.starts_with("indexes/adjacency/"));
+            super::install_captured_workspace_file_with_lease(
+                lease,
+                capture,
+                repair_corrupt_adjacency,
+                cancelled,
+            )?
         } else {
             install_graph_object_file_with_lease(lease, &source, &digest, expected_length)?
         };

@@ -68,6 +68,9 @@ pub struct GraphObjectPublicationLease {
     lease_identity: graphforge_filesystem::FileIdentity,
     file: Option<File>,
     installed_objects: std::sync::Mutex<BTreeMap<String, CapturedGraphObject>>,
+    // Only explicit adjacency rebuilding mints this capability. It is consumed
+    // by compact replay for files under the adjacency index namespace only.
+    pub(crate) repair_corrupt_adjacency: bool,
 }
 
 // Minted only after the installer authenticates and durably installs the actual
@@ -604,6 +607,7 @@ pub fn begin_graph_object_publication(root: &Path) -> Result<GraphObjectPublicat
         lease_identity,
         file: Some(file),
         installed_objects: std::sync::Mutex::new(BTreeMap::new()),
+        repair_corrupt_adjacency: false,
     })
 }
 
@@ -1999,5 +2003,8 @@ pub(crate) use manifest_tree::append_replayed_graph_files;
     reason = "preserve the existing staged CAS root API across feature and test configurations"
 )]
 pub use manifest_tree::compact_graph_files;
-pub use manifest_tree::{prepare_compact_graph_publication, prepare_graph_files_replacement};
+pub use manifest_tree::{
+    prepare_compact_graph_publication, prepare_compact_graph_publication_repairing_adjacency,
+    prepare_graph_files_replacement,
+};
 pub use materialization::materialize_graph_objects;
