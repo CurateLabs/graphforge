@@ -175,13 +175,23 @@ pub use ontology_composition_lifecycle::{
     CompositionPortableReceipt,
 };
 #[cfg(all(feature = "discovery", feature = "portable"))]
+mod discovery_ontology_module;
+#[cfg(all(feature = "discovery", feature = "portable"))]
 mod discovery_portable_v2;
+#[cfg(all(feature = "discovery", feature = "portable"))]
+mod discovery_project_summary;
 mod paging;
+#[cfg(all(feature = "discovery", feature = "portable"))]
+pub use discovery_ontology_module::{
+    DiscoveryOntologyModuleRequest, ResolvedOntologyModule, resolve_discovered_ontology_module,
+};
 #[cfg(all(feature = "discovery", feature = "portable"))]
 pub use discovery_portable_v2::{
     DiscoveredPortableV2, DiscoveryPortableV2Error, DiscoveryPortableV2Mismatch,
     DiscoveryPortableV2Request, verify_discovered_portable_v2,
 };
+#[cfg(all(feature = "discovery", feature = "portable"))]
+pub use discovery_project_summary::{ProjectSummaryRequest, summarize_verified_portable_v2};
 #[cfg(feature = "research")]
 pub use research_project::{DiscoverResearchProjectsRequest, UpdateResearchMetadataRequest};
 #[cfg(feature = "research")]
@@ -311,7 +321,8 @@ pub use graphforge_core::storage_receipt::{
 /// Finite portable export budgets.
 pub type PortableV2ExportLimits = PortableV2Limits;
 pub use graphforge_storage::{
-    SemanticMigrationOperation, WorkspaceOntologyComposition, WorkspacePortableOntologyStaging,
+    PortableV2FileRef, PortableV2PackageIndex, SemanticMigrationOperation,
+    WorkspaceOntologyComposition, WorkspacePortableOntologyStaging,
 };
 #[cfg(feature = "portable")]
 #[cfg(feature = "portable")]

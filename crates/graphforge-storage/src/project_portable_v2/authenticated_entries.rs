@@ -86,7 +86,7 @@ pub(super) fn validate_semantics(
     Ok(())
 }
 
-fn read(
+pub(super) fn read(
     source: &Path,
     entries: &[Entry],
     path: &str,

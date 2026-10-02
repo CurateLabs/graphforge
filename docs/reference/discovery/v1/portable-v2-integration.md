@@ -58,6 +58,18 @@ A Hub reads a Project summary without package I/O:
 Failure at any step returns no summary. Nothing in this sequence reads the Project
 package or any graph data.
 
+Publishers derive summary bytes with
+`graphforge_api::summarize_verified_portable_v2`
+(`crates/graphforge-api/src/discovery_project_summary.rs`). It fully verifies the
+package, then reads only the `workspace/research_metadata` and
+`workspace/configuration` participants through the storage-owned authenticated
+reader (`PortableV2PackageIndex`), so a verifier that runs it on the same package
+obtains the same canonical bytes for a bundle and for an expanded directory. The
+public-safe projection is one exhaustive destructuring function: a new Project
+metadata field does not compile until a maintainer decides whether it is public.
+`access.collaborators`, `extensions`, and `discovery_facets` are never included,
+and local paths and Project identity are never consulted.
+
 ## Exact module fetch
 
 A consumer resolves one exact ontology module from any publishing Project:
@@ -81,6 +93,15 @@ A consumer resolves one exact ontology module from any publishing Project:
 The module package's `package_digest` identifies that package and differs between
 Projects that publish the same module. Module identity, not package digest, is
 what two Projects have in common. The Project package is never downloaded.
+
+`graphforge_api::resolve_discovered_ontology_module`
+(`crates/graphforge-api/src/discovery_ontology_module.rs`) implements steps 1, 2,
+4 and 5 over a downloaded package: discovery parsing, repository and refs binding,
+and descriptor selection complete before any package path is read. It returns the
+module identity, the carrying `package_digest`, the module document bytes, and the
+document's file SHA-256 (the same for every Project that publishes the module).
+The document is read through the manifest-authenticated storage reader and its
+domain-separated canonical digest is recomputed, never trusted from the package.
 
 ## Hub and TypeScript consumption
 

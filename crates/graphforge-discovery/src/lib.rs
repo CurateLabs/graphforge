@@ -707,6 +707,24 @@ impl DiscoveryManifest {
         &self,
         identity: &ExactIdentity,
     ) -> Result<(&OntologyModuleDescriptor, &ObjectDescriptor), DiscoveryError> {
+        self.ontology_module_selection(identity)
+            .map(|(descriptor, _, object)| (descriptor, object))
+    }
+
+    /// Like [`Self::ontology_module_object`], and also return the module's
+    /// package reference, so a caller never re-derives an optional field the
+    /// selection already required.
+    pub fn ontology_module_selection(
+        &self,
+        identity: &ExactIdentity,
+    ) -> Result<
+        (
+            &OntologyModuleDescriptor,
+            &PortablePackageReference,
+            &ObjectDescriptor,
+        ),
+        DiscoveryError,
+    > {
         let absent = || {
             DiscoveryError::new(
                 DiscoveryErrorCode::MissingObject,
@@ -746,7 +764,7 @@ impl DiscoveryManifest {
                 "module package object is incompatible",
             ));
         }
-        Ok((descriptor, object))
+        Ok((descriptor, package, object))
     }
 
     /// Verify that a summary document is the one this manifest advertises for
