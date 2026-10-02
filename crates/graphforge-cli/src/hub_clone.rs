@@ -34,12 +34,16 @@ use url::Url;
 use crate::hub_http::fetch;
 use crate::hub_http::{
     HttpResponse, HttpTransport, MAX_METADATA_BYTES, Transport, endpoint, fetch_with_attempts,
-    hash_reader, limit_error, network, parse_input, read_bounded, storage, validate_url,
-    validation,
+    hash_reader, limit_error, network, parse_input, parse_input_at, read_bounded, storage,
+    validate_url, validation,
 };
+
+mod module_fetch;
+pub(crate) use module_fetch::{ModuleFetchArgs, run_module_fetch};
 
 const MAX_BUNDLE_BYTES: u64 = 100 * 1024 * 1024 * 1024;
 
+/// Clone a verified portable project from GraphForge Hub.
 #[derive(Args)]
 pub(crate) struct CloneArgs {
     /// Canonical owner/repository name or an HTTPS Hub repository URL.
@@ -1390,14 +1394,14 @@ mod tests {
     use ureq::unversioned::resolver::DefaultResolver;
     use ureq::unversioned::transport::DefaultConnector;
 
-    struct Scripted(Mutex<VecDeque<HttpResponse>>);
+    pub(super) struct Scripted(Mutex<VecDeque<HttpResponse>>);
 
     impl Scripted {
-        fn new(responses: Vec<HttpResponse>) -> Self {
+        pub(super) fn new(responses: Vec<HttpResponse>) -> Self {
             Self(Mutex::new(responses.into()))
         }
 
-        fn remaining(&self) -> usize {
+        pub(super) fn remaining(&self) -> usize {
             self.0.lock().unwrap().len()
         }
 
@@ -1498,7 +1502,7 @@ mod tests {
         }
     }
 
-    fn response(status: u16, content_range: Option<&str>, body: &[u8]) -> HttpResponse {
+    pub(super) fn response(status: u16, content_range: Option<&str>, body: &[u8]) -> HttpResponse {
         HttpResponse {
             status,
             location: None,
@@ -1944,9 +1948,9 @@ mod tests {
     }
 
     /// Scripted responses that also record every requested URL.
-    struct RecordingTransport {
-        inner: Scripted,
-        requested: Mutex<Vec<String>>,
+    pub(super) struct RecordingTransport {
+        pub(super) inner: Scripted,
+        pub(super) requested: Mutex<Vec<String>>,
     }
 
     impl Transport for RecordingTransport {

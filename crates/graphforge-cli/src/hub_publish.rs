@@ -113,12 +113,29 @@ pub(crate) struct PublishOutcome {
     pub replayed: bool,
 }
 
+/// Dispatch the Hub commands, `gf clone` and `gf publish`.
+pub(crate) fn run_hub_command(
+    command: crate::Command,
+    project: Option<PathBuf>,
+    project_dir: Option<PathBuf>,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<i32, crate::CliRuntimeError> {
+    match command {
+        crate::Command::Clone(args) => {
+            Ok(crate::hub_clone::run_clone(args, json, output).map(|()| 0)?)
+        }
+        crate::Command::Publish(args) => run(&args, project, project_dir, json, output),
+        _ => unreachable!("only Hub commands are dispatched here"),
+    }
+}
+
 /// `gf publish` entry point used by the CLI dispatcher.
 ///
 /// The device flow runs only in the streaming `gf` process with standard input
 /// and standard error on a terminal; otherwise a missing token is `auth_denied`
 /// before any network request.
-pub(crate) fn run(
+fn run(
     args: &PublishArgs,
     project: Option<PathBuf>,
     project_dir: Option<PathBuf>,

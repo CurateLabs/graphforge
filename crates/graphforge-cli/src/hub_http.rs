@@ -367,15 +367,35 @@ pub(crate) fn read_bounded(
 pub(crate) fn parse_input(
     value: &str,
 ) -> Result<(RepositoryIdentity, Url), graphforge_api::GfError> {
+    parse_input_at(value, None)
+}
+
+/// Resolve a repository argument against `hub`, which only applies to the
+/// `owner/repository` form; an explicit repository URL names its own Hub.
+pub(crate) fn parse_input_at(
+    value: &str,
+    hub: Option<&str>,
+) -> Result<(RepositoryIdentity, Url), graphforge_api::GfError> {
     if !value.contains("://") {
         let identity = RepositoryIdentity::parse(value)
             .map_err(|_| validation("hub.invalid_identity", "invalid repository identity"))?;
-        let base = Url::parse(&format!(
-            "{DEFAULT_HUB}/{}/{}",
-            identity.owner, identity.repository
-        ))
-        .unwrap();
+        let hub = Url::parse(hub.unwrap_or(DEFAULT_HUB))
+            .map_err(|_| validation("hub.invalid_identity", "invalid Hub URL"))?;
+        validate_url(&hub)?;
+        let mut base = hub.clone();
+        base.set_path(&format!(
+            "{}/{}/{}",
+            hub.path().trim_end_matches('/'),
+            identity.owner,
+            identity.repository
+        ));
         return Ok((identity, base));
+    }
+    if hub.is_some() {
+        return Err(validation(
+            "hub.invalid_identity",
+            "--hub applies only to an owner/repository name",
+        ));
     }
     let base = Url::parse(value)
         .map_err(|_| validation("hub.invalid_identity", "invalid repository URL"))?;

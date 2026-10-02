@@ -258,7 +258,6 @@ struct Cli {
 enum Command {
     /// Validate and exercise the Rust-owned telemetry lifecycle.
     Telemetry(TelemetryArgs),
-    /// Clone a verified portable project from GraphForge Hub.
     Clone(hub_clone::CloneArgs),
     Publish(hub_publish::PublishArgs),
     /// Initialize repository-local GraphForge definitions and state.
@@ -1266,11 +1265,13 @@ fn run_with_allocation(
         )
         .map_err(Into::into);
     }
-    if let Command::Clone(args) = command {
-        return Ok(hub_clone::run_clone(args, cli.json, output).map(|()| 0)?);
+    if let hub @ (Command::Clone(_) | Command::Publish(_)) = command {
+        return hub_publish::run_hub_command(hub, cli.project, cli.project_dir, cli.json, output);
     }
-    if let Command::Publish(args) = command {
-        return hub_publish::run(&args, cli.project, cli.project_dir, cli.json, output);
+    if let Command::Ontology { command } = &command
+        && let Some(result) = ontology_cli::run_without_project(command, cli.json, output)
+    {
+        return result.map(|()| 0).map_err(Into::into);
     }
     // Repository-independent portable commands must not call RepositoryContext::discover.
     if let Command::Portable { command } = command {

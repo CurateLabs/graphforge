@@ -103,6 +103,11 @@ pub(crate) enum ModuleCommand {
     PreviewDelete(ModuleSelectorArgs),
     Delete(ModuleDeleteArgs),
     Export(ModuleExportArgs),
+    /// Fetch and verify one exact module from a Hub repository into a new file.
+    ///
+    /// Needs no open project.
+    // Like `gf clone`, outside the four-surface multi-ontology contract.
+    Fetch(crate::hub_clone::ModuleFetchArgs),
 }
 
 #[derive(Subcommand)]
@@ -421,6 +426,25 @@ pub(crate) struct CertificationReportArgs {
     rows_scanned: u64,
 }
 
+/// Run the subcommands that act on a Hub rather than a workspace, which must
+/// not open a project, or return `None` for every other command.
+pub(crate) fn run_without_project(
+    command: &OntologyCommand,
+    json_output: bool,
+    output: &mut dyn Write,
+) -> Option<Result<(), graphforge_api::GfError>> {
+    match command {
+        OntologyCommand::Module {
+            command: ModuleCommand::Fetch(args),
+        } => Some(crate::hub_clone::run_module_fetch(
+            args,
+            json_output,
+            output,
+        )),
+        _ => None,
+    }
+}
+
 pub(crate) fn run_ontology(
     graph: &mut GraphForge,
     command: OntologyCommand,
@@ -558,6 +582,11 @@ fn run_module(
                 Some(&token),
             )?;
             emit(&receipt, json_output, output)
+        }
+        // Dispatch handles `Fetch` before a project is opened; this arm keeps the
+        // match exhaustive with the same behavior.
+        ModuleCommand::Fetch(args) => {
+            crate::hub_clone::run_module_fetch(&args, json_output, output).map_err(Into::into)
         }
         ModuleCommand::Export(args) => {
             let format = match args.format {
@@ -1025,6 +1054,9 @@ const fn export_token(format: ExportFormatArg) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Cli, Command, execute};
+    use clap::Parser as _;
+    use tempfile::tempdir;
     use uuid::Uuid;
 
     #[test]
@@ -1071,5 +1103,95 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), CLI_SURFACE_PATHS.len());
+    }
+
+    fn module_fetch_args<'a>(output: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+        let mut args = vec![
+            "gf",
+            "ontology",
+            "module",
+            "fetch",
+            "openalex/openalex",
+            "--ontology-id",
+            "https://openalex.org/ontology/works",
+            "--version",
+            "2026.01",
+            "--digest",
+            "f1f475dfcf01bdfe7a578afb0203bac26831dc0b48f4cd009bdc418b506981b4",
+            "--output",
+            output,
+        ];
+        args.extend_from_slice(extra);
+        args
+    }
+
+    #[test]
+    fn ontology_module_fetch_parses_its_flags() {
+        let cli = Cli::try_parse_from(module_fetch_args(
+            "works.json",
+            &["--hub", "https://hub.example"],
+        ))
+        .unwrap();
+        let Some(Command::Ontology {
+            command:
+                OntologyCommand::Module {
+                    command: ModuleCommand::Fetch(args),
+                },
+        }) = cli.command
+        else {
+            panic!("expected `ontology module fetch`");
+        };
+        assert_eq!(args.repository, "openalex/openalex");
+        assert_eq!(args.ontology_id, "https://openalex.org/ontology/works");
+        assert_eq!(args.version, "2026.01");
+        assert_eq!(args.digest.len(), 64);
+        assert_eq!(args.output, PathBuf::from("works.json"));
+        assert_eq!(args.hub.as_deref(), Some("https://hub.example"));
+
+        let without_hub = Cli::try_parse_from(module_fetch_args("works.json", &[])).unwrap();
+        assert!(matches!(
+            without_hub.command,
+            Some(Command::Ontology {
+                command: OntologyCommand::Module {
+                    command: ModuleCommand::Fetch(fetch),
+                },
+            }) if fetch.hub.is_none()
+        ));
+        // Every selecting flag and the output are required.
+        for omitted in ["--ontology-id", "--version", "--digest", "--output"] {
+            let mut args = module_fetch_args("works.json", &[]);
+            let at = args.iter().position(|arg| *arg == omitted).unwrap();
+            args.drain(at..=at + 1);
+            assert!(Cli::try_parse_from(args).is_err(), "{omitted} is required");
+        }
+        assert!(Cli::try_parse_from(["gf", "ontology", "module", "fetch"]).is_err());
+    }
+
+    #[test]
+    fn ontology_module_fetch_opens_no_project() {
+        let root = tempdir().unwrap();
+        let project = root.path().join("never-opened");
+        let output = root.path().join("works.json");
+        // An HTTP Hub fails before any network access; the failure is the fetch's
+        // own, not a missing repository or an unopenable project.
+        let mut args = module_fetch_args(
+            output.to_str().unwrap(),
+            &["--hub", "http://hub.example", "--json"],
+        );
+        args.splice(1..1, ["--project", project.to_str().unwrap()]);
+        let run = execute(args);
+        assert_ne!(run.exit_code, 0);
+        assert!(run.stdout.is_empty());
+        let stderr = String::from_utf8(run.stderr).unwrap();
+        assert!(stderr.contains("hub.unsafe_location"), "{stderr}");
+        assert!(!project.exists(), "the project path was never created");
+        assert!(!output.exists());
+
+        // With no --project and no repository around, discovery would fail instead.
+        let mut args =
+            module_fetch_args(output.to_str().unwrap(), &["--hub", "http://hub.example"]);
+        args.splice(1..1, ["--project-dir", root.path().to_str().unwrap()]);
+        let stderr = String::from_utf8(execute(args).stderr).unwrap();
+        assert!(stderr.contains("hub.unsafe_location"), "{stderr}");
     }
 }
