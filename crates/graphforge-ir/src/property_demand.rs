@@ -36,19 +36,17 @@ pub fn property_demand<S: BuildHasher>(
     plan: &GraphPlan,
     property_names: &HashMap<PropertyId, String, S>,
 ) -> PropertyDemand {
-    let mut node_vars = HashSet::new();
-    collect_node_vars(plan, &mut node_vars);
-    let analysis = DemandAnalysis {
-        property_names,
-        node_vars: &node_vars,
-    };
-    if analysis.plan_is_value_free(plan) {
+    let analysis = DemandAnalysis { property_names };
+    if analysis.plan_is_value_free(plan, &HashSet::new()) {
         PropertyDemand::None
     } else {
         PropertyDemand::Complete
     }
 }
 
+/// Node variables bound by `plan` and the subplans that share its variable
+/// numbering. A `UNION` branch is bound afresh and numbers its variables from
+/// zero, so its variables are not this plan's.
 fn collect_node_vars(plan: &GraphPlan, vars: &mut HashSet<VarId>) {
     for op in &plan.ops {
         match op {
@@ -62,11 +60,6 @@ fn collect_node_vars(plan: &GraphPlan, vars: &mut HashSet<VarId>) {
             GraphOp::Optional { child }
             | GraphOp::Exists { child, .. }
             | GraphOp::PatternComprehension { child, .. } => collect_node_vars(child, vars),
-            GraphOp::Union { inputs, .. } => {
-                for input in inputs {
-                    collect_node_vars(input, vars);
-                }
-            }
             _ => {}
         }
     }
@@ -74,13 +67,16 @@ fn collect_node_vars(plan: &GraphPlan, vars: &mut HashSet<VarId>) {
 
 struct DemandAnalysis<'a, S> {
     property_names: &'a HashMap<PropertyId, String, S>,
-    node_vars: &'a HashSet<VarId>,
 }
 
 impl<S: BuildHasher> DemandAnalysis<'_, S> {
-    fn plan_is_value_free(&self, plan: &GraphPlan) -> bool {
+    /// `inherited` holds the node variables of the enclosing plan whose
+    /// numbering `plan` shares.
+    fn plan_is_value_free(&self, plan: &GraphPlan, inherited: &HashSet<VarId>) -> bool {
+        let mut node_vars = inherited.clone();
+        collect_node_vars(plan, &mut node_vars);
         let exprs = &plan.exprs;
-        let free = |id: &ExprId| self.expr_is_value_free(exprs, *id);
+        let free = |id: &ExprId| self.expr_is_value_free(exprs, &node_vars, *id);
         plan.ops.iter().all(|op| match op {
             GraphOp::NodeScan { .. }
             | GraphOp::EdgeScan { .. }
@@ -109,24 +105,32 @@ impl<S: BuildHasher> DemandAnalysis<'_, S> {
             GraphOp::Unwind { list_expr, .. } => free(list_expr),
             GraphOp::Optional { child }
             | GraphOp::Exists { child, .. }
-            | GraphOp::PatternComprehension { child, .. } => self.plan_is_value_free(child),
-            GraphOp::Union { inputs, .. } => {
-                inputs.iter().all(|input| self.plan_is_value_free(input))
+            | GraphOp::PatternComprehension { child, .. } => {
+                self.plan_is_value_free(child, &node_vars)
             }
+            // Each branch numbers its own variables; none is this plan's.
+            GraphOp::Union { inputs, .. } => inputs
+                .iter()
+                .all(|input| self.plan_is_value_free(input, &HashSet::new())),
             // Writes, procedure calls, graph-valued list comprehensions and any
             // operator added later read or write entities whole.
             _ => false,
         })
     }
 
-    fn expr_is_value_free(&self, exprs: &ExprArena, id: ExprId) -> bool {
-        let free = |id: &ExprId| self.expr_is_value_free(exprs, *id);
+    fn expr_is_value_free(
+        &self,
+        exprs: &ExprArena,
+        node_vars: &HashSet<VarId>,
+        id: ExprId,
+    ) -> bool {
+        let free = |id: &ExprId| self.expr_is_value_free(exprs, node_vars, *id);
         match exprs.get(id) {
             IrExpr::Literal(_) | IrExpr::Parameter(_) => true,
             // An entity, path or bound value used whole.
             IrExpr::VarRef(_) => false,
             IrExpr::PropertyAccess { base, prop } => {
-                matches!(exprs.get(*base), IrExpr::VarRef(var) if self.node_vars.contains(var))
+                matches!(exprs.get(*base), IrExpr::VarRef(var) if node_vars.contains(var))
                     && self
                         .property_names
                         .get(prop)
@@ -169,6 +173,7 @@ mod tests {
     const NODE_UUID: u32 = 1;
     const NAME: u32 = 2;
     const UNRESOLVED: u32 = 3;
+    const UPDATED_AT: u32 = 4;
 
     fn property(id: u32) -> PropertyId {
         PropertyId::runtime(graphforge_value::RuntimePropId::new(id).unwrap())
@@ -407,6 +412,50 @@ mod tests {
                 assert_eq!(demand(|_| vec![op.clone()]), expected, "{op:?}");
             }
         }
+    }
+
+    /// Each `UNION` branch is bound afresh, so its variable numbers collide with
+    /// another branch's. An edge variable that shares a number with a node
+    /// variable elsewhere must not borrow that node's topology columns.
+    #[test]
+    fn union_branches_do_not_share_node_variables() {
+        let mut names = names();
+        names.insert(property(UPDATED_AT), "updated_at".to_owned());
+        let nodes_only = {
+            let mut plan = GraphPlan::builder("openCypher").build();
+            plan.ops = vec![scan(0), scan(1), scan(2), count(None)];
+            plan
+        };
+        let edge_property = {
+            let mut exprs = ExprArena::new();
+            let read = read(&mut exprs, 1, UPDATED_AT);
+            let mut plan = GraphPlan::builder("openCypher").build();
+            plan.ops = vec![
+                scan(0),
+                GraphOp::Expand {
+                    src: VarId(0),
+                    edge: VarId(1),
+                    dst: VarId(2),
+                    rel_ty: None,
+                    dir: crate::Direction::Out,
+                    min_hops: 1,
+                    max_hops: Some(1),
+                },
+                returning(read),
+            ];
+            plan.exprs = exprs;
+            plan
+        };
+        let mut union = GraphPlan::builder("openCypher").build();
+        union.ops = vec![GraphOp::Union {
+            all: true,
+            inputs: vec![nodes_only, edge_property.clone()],
+        }];
+        assert_eq!(property_demand(&union, &names), PropertyDemand::Complete);
+        assert_eq!(
+            property_demand(&edge_property, &names),
+            PropertyDemand::Complete
+        );
     }
 
     #[test]

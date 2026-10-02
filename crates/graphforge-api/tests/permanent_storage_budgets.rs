@@ -7619,6 +7619,32 @@ fn value_free_queries_plan_beside_refused_property_reads_in_one_session() {
     value_free(&graph);
 }
 
+/// `UNION` branches number their variables independently. An edge property
+/// named like a node topology column, read in one branch while another branch
+/// binds only nodes, is still a property value the plan must read.
+#[test]
+fn union_branch_edge_property_named_like_node_topology_is_read() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    graph
+        .execute("CREATE (:A)-[:T {updated_at: 42}]->(:B)")
+        .unwrap();
+    let result = graph
+        .execute(
+            "MATCH (a), (b), (c) RETURN count(*) AS v \
+             UNION ALL \
+             MATCH (x)-[r:T]->(y) RETURN r.updated_at AS v",
+        )
+        .unwrap();
+    let mut values = result
+        .batches
+        .iter()
+        .flat_map(|batch| (0..batch.num_rows()).map(move |row| int_at(batch, 0, row)))
+        .collect::<Vec<_>>();
+    values.sort_unstable();
+    assert_eq!(values, vec![Some(8), Some(42)]);
+}
+
 fn count_marker_rows(batches: &[RecordBatch]) -> Vec<(Uuid, Option<i64>, Option<String>)> {
     let mut rows = Vec::new();
     for batch in batches {

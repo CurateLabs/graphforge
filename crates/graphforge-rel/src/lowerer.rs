@@ -298,7 +298,11 @@ impl GraphPlanLowerer {
             // under `read_snapshot`. With no dir (schema-only/explain lowering) an empty
             // `prop_names` means "unknown", not "absent", so the missing-property→
             // null rewrite (#598) must NOT fire — gate it on having the dataset.
-            self.read_snapshot().is_some(),
+            // A snapshot that omits property schemas lists no property columns
+            // either, so an access it cannot resolve must stay a dangling column
+            // DataFusion refuses, never a silent null.
+            self.read_snapshot()
+                .is_some_and(|snapshot| !snapshot.property_schemas_omitted),
         );
         // With a dataset attached, `nodes(p)` hydrates its elements (#1024).
         if let Some(dir) = self.read_snapshot() {
