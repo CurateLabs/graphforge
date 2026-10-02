@@ -3,7 +3,7 @@
 //! Branches, Version kinds and identities, Proposal records, and the Fork origin
 //! citation all come from the authoritative research registry, without graph
 //! payload I/O. The publisher supplies only hosting facts the registry cannot
-//! know: discovery ref names for Branch heads, the portable package published
+//! know: discovery ref names for the Branch heads it publishes, the portable package published
 //! for each Version, which Proposals are published, and the origin repository
 //! of a Fork.
 
@@ -28,7 +28,8 @@ pub struct BuildResearchLineageRequest {
     pub immutable_version: Sha256Digest,
     /// Research Project authority UUID for this repository.
     pub project_uuid: Uuid,
-    /// Discovery ref name for each published Branch head.
+    /// Discovery ref name for each published Branch head. Registry Branches
+    /// without a name here are not published.
     pub branch_ref_names: BTreeMap<Uuid, String>,
     /// Portable package reference for each published research Version.
     pub version_packages: BTreeMap<Uuid, PortablePackageReference>,
@@ -70,10 +71,12 @@ pub fn build_research_lineage_from_registry(
     if request.project_uuid.is_nil() {
         return Err(GfError::Validation("project_uuid is invalid".into()));
     }
+    // Only Branches the publisher names are published; every named Branch must
+    // be a registry Branch with a head.
     let mut branches = Vec::new();
-    for (branch_uuid, record) in &registry.branches {
-        let ref_name = request.branch_ref_names.get(branch_uuid).ok_or_else(|| {
-            GfError::Validation("branch ref name is absent from discovery publication".into())
+    for (branch_uuid, ref_name) in &request.branch_ref_names {
+        let record = registry.branches.get(branch_uuid).ok_or_else(|| {
+            GfError::Validation(format!("branch {branch_uuid} is not a registry Branch"))
         })?;
         let head_version_uuid = registry
             .heads
@@ -91,15 +94,6 @@ pub fn build_research_lineage_from_registry(
                 .map_err(|error| map_discovery_error(&error))?,
             label: record.label.clone(),
         });
-    }
-    if let Some(unknown) = request
-        .branch_ref_names
-        .keys()
-        .find(|branch_uuid| !registry.branches.contains_key(branch_uuid))
-    {
-        return Err(GfError::Validation(format!(
-            "branch {unknown} is not a registry Branch"
-        )));
     }
     branches.sort_by(|left, right| left.branch_uuid.cmp(&right.branch_uuid));
 
@@ -429,6 +423,62 @@ mod tests {
                 DiscoveryLimits::default()
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn build_lineage_publishes_only_named_branches() {
+        let mut history = history();
+        let cancellation = CancellationToken::new();
+        let unnamed = Uuid::now_v7();
+        let generation = history
+            .graph
+            .generation_for_read()
+            .unwrap()
+            .generation_uuid();
+        history
+            .graph
+            .create_research_branch(
+                &CreateResearchBranchRequest {
+                    operation_uuid: Uuid::now_v7(),
+                    expected_generation_uuid: generation,
+                    branch_uuid: unnamed,
+                    version_uuid: Uuid::now_v7(),
+                    source: BranchSource::Branch {
+                        branch_uuid: history.branch_uuid,
+                    },
+                    creator_uuid: Uuid::now_v7(),
+                    created_at: 3,
+                    label: "draft".into(),
+                },
+                &cancellation,
+            )
+            .unwrap();
+        let registry = registry(&history);
+        assert!(registry.branches.contains_key(&unnamed));
+        let lineage = build_research_lineage_from_registry(
+            &request(&history),
+            &registry,
+            DiscoveryLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            lineage
+                .branches
+                .iter()
+                .map(|branch| branch.branch_uuid.clone())
+                .collect::<Vec<_>>(),
+            [history.branch_uuid.to_string()]
+        );
+
+        // Naming a Branch the registry does not hold still fails closed.
+        let mut unknown = request(&history);
+        unknown
+            .branch_ref_names
+            .insert(Uuid::now_v7(), "ghost".into());
+        assert!(
+            build_research_lineage_from_registry(&unknown, &registry, DiscoveryLimits::default())
+                .is_err()
         );
     }
 
