@@ -26,7 +26,7 @@ pub(crate) struct PropertyScanOptions<'a> {
     pub(crate) limit: Option<usize>,
     pub(crate) batch_size: usize,
     /// Whether planning may admit the route for a footer row bound. A
-    /// key-only scan of an unread route reports no statistics instead.
+    /// key-only scan of an unread route reports a manifest estimate instead.
     pub(crate) footer_statistics: bool,
 }
 
@@ -40,7 +40,7 @@ pub(crate) struct PropertyOverlayExec {
     projection: Option<Vec<String>>,
     limit: Option<usize>,
     batch_size: usize,
-    row_upper_bound: Option<usize>,
+    planned_rows: Option<usize>,
     props: Arc<PlanProperties>,
     #[cfg(any(test, feature = "test-support"))]
     digest_context: graphforge_core::hash_observation::operation::Context,
@@ -94,13 +94,19 @@ impl PropertyOverlayExec {
         } else {
             crate::PropertyRouteKind::Node
         };
-        let row_upper_bound = inventory
+        // A key-only scan of an unread route must not admit it for a footer
+        // bound; the manifest's declared lengths still give the planner an
+        // estimate, so a small route is not repartitioned as if unbounded.
+        let planned_rows = inventory
             .as_ref()
-            .filter(|_| options.footer_statistics)
             .map(|inventory| {
-                let rows = inventory
-                    .route_row_upper_bound(kind, &route)
-                    .map_err(|error| DataFusionError::External(Box::new(error)))?;
+                let rows = if options.footer_statistics {
+                    inventory
+                        .route_row_upper_bound(kind, &route)
+                        .map_err(|error| DataFusionError::External(Box::new(error)))?
+                } else {
+                    inventory.route_row_estimate(kind, &route)
+                };
                 Ok::<_, DataFusionError>(options.limit.map_or(rows, |limit| rows.min(limit)))
             })
             .transpose()?;
@@ -137,7 +143,7 @@ impl PropertyOverlayExec {
             projection,
             limit: options.limit,
             batch_size: options.batch_size.max(1),
-            row_upper_bound,
+            planned_rows,
             props,
             metrics,
             work_counts,
@@ -184,13 +190,15 @@ impl ExecutionPlan for PropertyOverlayExec {
         partition: Option<usize>,
     ) -> Result<Arc<Statistics>, DataFusionError> {
         let rows = match partition {
-            None | Some(0) => self.row_upper_bound,
+            None | Some(0) => self.planned_rows,
             Some(_) => None,
         };
         let num_rows = match rows {
             Some(0) => Precision::Exact(0),
             // Physical footer rows are a sound upper bound, but overlays and
-            // tombstones can reduce the logical output.
+            // tombstones can reduce the logical output; a key-only scan's
+            // manifest estimate is no bound at all. Zero is exact either way:
+            // the route declares no object, or the limit admits no row.
             Some(rows) => Precision::Inexact(rows),
             None => Precision::Absent,
         };

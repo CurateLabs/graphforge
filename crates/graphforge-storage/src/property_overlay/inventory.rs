@@ -1055,6 +1055,28 @@ impl AuthenticatedPropertyInventory {
         })
     }
 
+    /// A planning estimate of one route's rows, read from no payload: the
+    /// manifest-declared length of every object in the route over the 16 bytes
+    /// each row's UUID occupies. It is not a bound and must only ever be an
+    /// inexact statistic; zero means the route declares no object.
+    #[must_use]
+    pub fn route_row_estimate(&self, kind: PropertyRouteKind, route: &str) -> usize {
+        let Some(fragments) = self.routes.get(&(kind, route.to_owned())) else {
+            return 0;
+        };
+        let bytes = fragments
+            .iter()
+            .flat_map(|fragment| &fragment.parts)
+            .fold(0_u64, |total, part| {
+                total.saturating_add(part.entry.byte_length)
+            });
+        if fragments.is_empty() {
+            0
+        } else {
+            usize::try_from(bytes / 16).unwrap_or(usize::MAX).max(1)
+        }
+    }
+
     /// Sound upper bound on logical rows for one route.
     ///
     /// The newest-wins merge and tombstones can only remove physical fragment
