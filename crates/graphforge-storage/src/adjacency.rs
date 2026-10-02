@@ -48,6 +48,7 @@ pub use builder::{
 pub(crate) use builder::{
     build_adjacency_index_for_edge_files_observed, build_adjacency_index_for_edge_files_on_lanes,
 };
+use codec::{corrupt_index, corrupt_index_from, corrupt_structure, shard_io_error};
 use installation::{
     observe_csr_barriers, persist_temp_observed, promote_shards, write_csr_shard_bytes_observed,
 };
@@ -212,7 +213,7 @@ impl ShardedCsrIndex {
     /// Open the current shard manifest beside the logical `.csr` path.
     pub fn open(path: &Path) -> Result<Self, GfError> {
         let manifest_path = path.with_extension("csr.json");
-        let bytes = std::fs::read(&manifest_path).map_err(storage_err)?;
+        let bytes = codec::read_admitted_manifest(&manifest_path)?;
         crate::lifecycle_io::record_read(
             crate::StorageIoPhase::ReadPathScan,
             bytes.len() as u64,
@@ -222,7 +223,7 @@ impl ShardedCsrIndex {
         let mut prior_first = None;
         let mut edges = 0_u64;
         if !is_normal_path_component(&manifest.shard_dir) {
-            return Err(GfError::Storage("invalid CSR shard directory name".into()));
+            return Err(corrupt_index("invalid CSR shard directory name"));
         }
         let root = path
             .parent()
@@ -236,47 +237,42 @@ impl ShardedCsrIndex {
                     .is_none_or(|end| end > manifest.node_count)
                 || prior_first.is_some_and(|prior| shard.first_node < prior)
             {
-                return Err(GfError::Storage(
-                    "invalid CSR shard boundary ordering".into(),
-                ));
+                return Err(corrupt_index("invalid CSR shard boundary ordering"));
             }
             prior_first = Some(shard.first_node);
             edges = edges
                 .checked_add(shard.edge_count)
-                .ok_or_else(|| GfError::Storage("CSR manifest edge count overflow".into()))?;
-            if shard.decoded_bytes != codec::decoded_bytes(shard.node_count, shard.edge_count)?
-                || shard.encoded_bytes > codec::encoded_limit(shard.node_count, shard.edge_count)?
+                .ok_or_else(|| corrupt_index("CSR manifest edge count overflow"))?;
+            if shard.decoded_bytes
+                != codec::decoded_bytes(shard.node_count, shard.edge_count)
+                    .map_err(corrupt_structure)?
+                || shard.encoded_bytes
+                    > codec::encoded_limit(shard.node_count, shard.edge_count)
+                        .map_err(corrupt_structure)?
                 || shard.sha256.len() != 64
                 || !shard
                     .sha256
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             {
-                return Err(GfError::Storage(
-                    "CSR shard admission metadata disagrees".into(),
-                ));
+                return Err(corrupt_index("CSR shard admission metadata disagrees"));
             }
             if !is_normal_path_component(&shard.file) {
-                return Err(GfError::Storage("invalid CSR shard file name".into()));
+                return Err(corrupt_index("invalid CSR shard file name"));
             }
-            // Presence only. Checksum and structural authentication stay on the
-            // first row touch so opening a multi-shard index cannot charge O(E)
-            // process RSS (#1094).
-            let shard_path = root.join(&shard.file);
-            let metadata = std::fs::metadata(&shard_path).map_err(|error| {
-                GfError::Storage(format!("missing CSR shard {}: {error}", shard.file))
-            })?;
+            // Presence and length only; checksums stay on the first row touch so
+            // opening a multi-shard index cannot charge O(E) RSS (#1094).
+            let metadata = std::fs::metadata(root.join(&shard.file))
+                .map_err(|error| shard_io_error(&shard.file, &error))?;
             if !metadata.is_file() || metadata.len() != shard.encoded_bytes {
-                return Err(GfError::Storage(format!(
-                    "missing CSR shard {}",
+                return Err(corrupt_index(format!(
+                    "CSR shard {} length does not match its manifest",
                     shard.file
                 )));
             }
         }
         if edges != manifest.edge_count {
-            return Err(GfError::Storage(
-                "CSR shard manifest counts disagree".into(),
-            ));
+            return Err(corrupt_index("CSR shard manifest counts disagree"));
         }
         Ok(Self {
             root,
@@ -1106,29 +1102,33 @@ pub fn read_csr(path: &Path) -> Result<CsrIndex, GfError> {
     Ok(csr)
 }
 
+/// Read, authenticate and decode one shard against its manifest record. Absent,
+/// mis-sized, checksum-failing or undecodable shards are corrupt (`GF_VALIDATION`),
+/// since a correct writer never produces checksummed bytes that do not decode;
+/// only an I/O failure other than "not found" is a storage error.
 fn read_authenticated_shard(path: &Path, record: &CsrShardRecord) -> Result<CsrIndex, GfError> {
-    if record.decoded_bytes != codec::decoded_bytes(record.node_count, record.edge_count)? {
-        return Err(GfError::Storage(
-            "CSR decoded-byte admission mismatch".into(),
-        ));
+    let decoded =
+        codec::decoded_bytes(record.node_count, record.edge_count).map_err(corrupt_structure)?;
+    let limit =
+        codec::encoded_limit(record.node_count, record.edge_count).map_err(corrupt_structure)?;
+    if record.decoded_bytes != decoded {
+        return Err(corrupt_index("CSR decoded-byte admission mismatch"));
     }
-    let bytes = codec::read(
-        path,
-        record.encoded_bytes,
-        codec::encoded_limit(record.node_count, record.edge_count)?,
-    )?;
+    let bytes = codec::read(path, &record.file, record.encoded_bytes, limit)?;
     crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, record.encoded_bytes, 1);
     if crate::corruption_checksum::checksum(&bytes) != record.xxh64 {
-        return Err(GfError::Storage(format!(
+        return Err(corrupt_index(format!(
             "CSR shard checksum mismatch: {}",
             record.file
         )));
     }
-    codec::preflight(&bytes, record.node_count, record.edge_count)?;
-    let reader = FileReader::try_new(std::io::Cursor::new(&bytes), None).map_err(storage_err)?;
-    let csr = decode_csr(reader, path, record.node_count, record.edge_count)?;
+    codec::preflight(&bytes, record.node_count, record.edge_count).map_err(corrupt_structure)?;
+    let reader = FileReader::try_new(std::io::Cursor::new(&bytes), None)
+        .map_err(|error| corrupt_index(error.to_string()))?;
+    let csr = decode_csr(reader, path, record.node_count, record.edge_count)
+        .map_err(corrupt_structure)?;
     if csr.node_count() != record.node_count || csr.edge_count() != record.edge_count {
-        return Err(GfError::Storage("CSR shard count mismatch".into()));
+        return Err(corrupt_index("CSR shard count mismatch"));
     }
     Ok(csr)
 }
@@ -1281,24 +1281,26 @@ fn write_manifest_observed(
 /// readers.
 ///
 /// # Errors
-/// Returns [`GfError::Storage`] if the file exists but is not a manifest with
-/// [`ADJACENCY_MANIFEST_SCHEMA`].
+/// [`GfError::Validation`] if it fails admission or does not decode;
+/// [`GfError::Storage`] on I/O failure or a schema other than [`ADJACENCY_MANIFEST_SCHEMA`].
 pub fn read_manifest(project_dir: &Path) -> Result<Vec<AdjacencyManifestRow>, GfError> {
     let path = manifest_path(project_dir);
     if !path.exists() {
         return Ok(Vec::new());
     }
     let file = std::fs::File::open(&path).map_err(storage_err)?;
+    // Admitted (a flipped byte is refused), then decoded: it is only ever
+    // published whole, so one that does not decode is damaged.
     let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
         crate::lifecycle_io::ReadPathFile::admitted(file)?,
     )
-    .map_err(storage_err)?
+    .map_err(corrupt_index_from)?
     .build()
-    .map_err(storage_err)?;
+    .map_err(corrupt_index_from)?;
 
     let mut rows = Vec::new();
     for batch in reader {
-        let batch = batch.map_err(storage_err)?;
+        let batch = batch.map_err(corrupt_index_from)?;
         if batch.schema().fields() != ADJACENCY_MANIFEST_SCHEMA.fields() {
             return Err(GfError::Storage(format!(
                 "adjacency manifest {} has unexpected schema {:?}",
@@ -1321,7 +1323,7 @@ pub fn read_manifest(project_dir: &Path) -> Result<Vec<AdjacencyManifestRow>, Gf
         for i in 0..batch.num_rows() {
             rows.push(AdjacencyManifestRow {
                 relation_type: relation_types.value(i).to_owned(),
-                direction: Direction::parse(directions.value(i))?,
+                direction: Direction::parse(directions.value(i)).map_err(corrupt_structure)?,
                 topology_generation: generations.value(i),
                 built_at_micros: built_ats.value(i),
                 node_count: node_counts.value(i),
@@ -1996,6 +1998,8 @@ fn string_column<'a>(
 
 #[cfg(test)]
 mod capture_tests;
+#[cfg(test)]
+mod classification_tests;
 
 #[cfg(test)]
 mod tests {

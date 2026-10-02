@@ -233,6 +233,12 @@ pub struct DemandSnapshot {
     /// Statement-wide owner-resolution and replacement-key work. Decoder peaks
     /// and identity counts are logical accounting, not process-memory bounds.
     pub property_writes: BTreeMap<String, u64>,
+    /// Adjacency index rebuilds the query performed because the index was
+    /// missing or stale. A published generation ships a current index, so this
+    /// is zero there; a nonzero count is an O(E) rebuild inside the query that
+    /// would otherwise go unreported (#1388). Rebuilds are never a response to
+    /// corruption, which the query refuses instead.
+    pub adjacency_rebuilds: u64,
     /// Query memory-pool reservation before physical execution.
     pub memory_reserved_before: u64,
     /// Query memory-pool reservation after every operator stream was dropped.
@@ -526,6 +532,21 @@ pub(crate) fn record_plan_completion(
     state.snapshot.memory_reserved_after = memory_reserved_after as u64;
     state.snapshot.returned_batch_bytes = returned_batch_bytes as u64;
     state.snapshot.execution_batch_rows = execution_batch_rows as u64;
+}
+
+/// Record one adjacency index rebuild performed while serving the active
+/// capture. Capture is exclusive for its operation, so a rebuild that happens
+/// inside it, on whichever thread, belongs to it.
+pub(crate) fn record_adjacency_rebuild() {
+    if !capture_enabled() {
+        return;
+    }
+    let mut state = CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if state.enabled {
+        state.snapshot.adjacency_rebuilds += 1;
+    }
 }
 
 pub(crate) fn record_property_write_work(sums: &[(&str, u64)], peaks: &[(&str, u64)]) {
