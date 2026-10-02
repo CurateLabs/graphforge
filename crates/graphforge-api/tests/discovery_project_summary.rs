@@ -368,6 +368,7 @@ fn summary_binds_to_a_manifest_built_with_discovery_types() {
             summary_digest: summary.canonical_digest().unwrap(),
             object_digest: object_digest.clone(),
         }),
+        lineage: None,
         ontology: Some(OntologyInventory {
             composition_digest: composition.composition_digest.clone(),
             modules: composition

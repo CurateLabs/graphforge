@@ -412,6 +412,10 @@ export default defineConfig({
                   label: '0051 — Discovery carries a digest-addressed Project summary and exact ontology descriptors',
                   slug: 'adr/0051-discovery-project-summary-and-ontology-descriptors',
                 },
+                {
+                  label: '0052 — Discovery carries a digest-addressed research lineage document',
+                  slug: 'adr/0052-discovery-research-lineage-document',
+                },
                 // END generated ADR records
               ],
             },

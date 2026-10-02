@@ -9,6 +9,7 @@
 
 use graphforge_discovery::{
     DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, ExactIdentity, ProjectSummary, RefSet,
+    ResearchLineage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -20,6 +21,8 @@ const MANIFEST_SCHEMA: &str =
 const REFS_SCHEMA: &str = include_str!("../../../docs/reference/discovery/v1/refs.schema.json");
 const SUMMARY_SCHEMA: &str =
     include_str!("../../../docs/reference/discovery/v1/summary.schema.json");
+const LINEAGE_SCHEMA: &str =
+    include_str!("../../../docs/reference/discovery/v1/lineage.schema.json");
 const FIXTURES: &str = include_str!("../../../docs/reference/discovery/v1/conformance.json");
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -44,6 +47,7 @@ enum Document {
     Manifest,
     Refs,
     Summary,
+    Lineage,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
@@ -64,6 +68,10 @@ struct Limits {
     max_module_package_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_ontology_entries: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_lineage_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_lineage_entries: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -129,6 +137,7 @@ fn manifest_schema() -> Value {
             "capabilities":{"type":"array","maxItems":256,"items":{"$ref":"#/$defs/semantic"}},
             "objects":{"type":"array","minItems":1,"maxItems":1_000_000,"items":{"$ref":"#/$defs/object"}},
             "summary":{"$ref":"#/$defs/summary_reference"}, "ontology":{"$ref":"#/$defs/ontology_inventory"},
+            "lineage":{"$ref":"#/$defs/lineage_reference"},
             "extensions":{"$ref":"#/$defs/extensions"}
         }),
         {
@@ -145,6 +154,51 @@ fn manifest_schema() -> Value {
             map.insert("module_descriptor".into(), json!({"type":"object","additionalProperties":false,"required":["id","version","content_digest"],"properties":{"id":{"$ref":"#/$defs/identity_text"},"version":{"$ref":"#/$defs/identity_text"},"content_digest":{"$ref":"#/$defs/digest"},"package":{"$ref":"#/$defs/package_reference"}}}));
             map.insert("bridge_descriptor".into(), bridge_descriptor_schema());
             map.insert("ontology_inventory".into(), json!({"type":"object","additionalProperties":false,"required":["composition_digest","modules","bridge_sets"],"properties":{"composition_digest":{"$ref":"#/$defs/digest"},"modules":{"type":"array","maxItems":4096,"items":{"$ref":"#/$defs/module_descriptor"}},"bridge_sets":{"type":"array","maxItems":4096,"items":{"$ref":"#/$defs/bridge_descriptor"}}}}));
+            map.insert("lineage_reference".into(), json!({"type":"object","additionalProperties":false,"required":["format","lineage_digest","object_digest"],"properties":{"format":{"const":"graphforge-research-lineage/1"},"lineage_digest":{"$ref":"#/$defs/digest"},"object_digest":{"$ref":"#/$defs/digest"}}}));
+            defs
+        },
+    )
+}
+
+fn lineage_schema() -> Value {
+    schema(
+        "lineage",
+        &[
+            "format",
+            "version",
+            "repository",
+            "immutable_version",
+            "project_uuid",
+            "requirements",
+            "capabilities",
+            "branches",
+            "versions",
+            "proposals",
+        ],
+        json!({
+            "format":{"const":"graphforge-research-lineage/1"},
+            "version":{"$ref":"#/$defs/version"},
+            "repository":{"$ref":"#/$defs/identity"},
+            "immutable_version":{"$ref":"#/$defs/digest"},
+            "project_uuid":{"$ref":"#/$defs/uuid"},
+            "requirements":{"type":"array","maxItems":1,"items":{"type":"object","additionalProperties":false,"required":["capability","major"],"properties":{"capability":{"const":"research-lineage"},"major":{"const":1}}}},
+            "capabilities":{"type":"array","maxItems":256,"items":{"$ref":"#/$defs/semantic"}},
+            "fork":{"anyOf":[{"$ref":"#/$defs/fork_origin"},{"type":"null"}]},
+            "branches":{"type":"array","maxItems":10000,"items":{"$ref":"#/$defs/branch"}},
+            "versions":{"type":"array","maxItems":10000,"items":{"$ref":"#/$defs/research_version"}},
+            "proposals":{"type":"array","maxItems":10000,"items":{"$ref":"#/$defs/proposal"}},
+            "extensions":{"$ref":"#/$defs/extensions"}
+        }),
+        {
+            let mut defs = common_defs();
+            let map = defs.as_object_mut().unwrap();
+            map.insert("semantic".into(), json!({"type":"object","additionalProperties":false,"required":["capability","major"],"properties":{"capability":{"type":"string","minLength":1,"maxLength":128},"major":{"type":"integer","minimum":0,"maximum":65535}}}));
+            map.insert("uuid".into(), json!({"type":"string","minLength":36,"maxLength":36,"pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"}));
+            map.insert("package_reference".into(), json!({"type":"object","additionalProperties":false,"required":["format","package_digest","object_digest"],"properties":{"format":{"const":"graphforge-project/2"},"package_digest":{"$ref":"#/$defs/digest"},"object_digest":{"$ref":"#/$defs/digest"}}}));
+            map.insert("fork_origin".into(), json!({"type":"object","additionalProperties":false,"required":["origin_repository","origin_project_uuid","origin_version_uuid","origin_version_identity"],"properties":{"origin_repository":{"$ref":"#/$defs/identity"},"origin_project_uuid":{"$ref":"#/$defs/uuid"},"origin_version_uuid":{"$ref":"#/$defs/uuid"},"origin_version_identity":{"$ref":"#/$defs/digest"}}}));
+            map.insert("branch".into(), json!({"type":"object","additionalProperties":false,"required":["branch_uuid","ref_name","project_uuid","head_version_uuid","origin_version_uuid","base_version_uuid","selection_sha256","label"],"properties":{"branch_uuid":{"$ref":"#/$defs/uuid"},"ref_name":{"type":"string","minLength":1,"maxLength":4096},"project_uuid":{"$ref":"#/$defs/uuid"},"head_version_uuid":{"$ref":"#/$defs/uuid"},"parent_branch_uuid":{"anyOf":[{"$ref":"#/$defs/uuid"},{"type":"null"}]},"origin_version_uuid":{"$ref":"#/$defs/uuid"},"base_version_uuid":{"$ref":"#/$defs/uuid"},"selection_sha256":{"$ref":"#/$defs/digest"},"label":{"type":"string","minLength":1,"maxLength":4096}}}));
+            map.insert("research_version".into(), json!({"type":"object","additionalProperties":false,"required":["version_uuid","identity_digest","kind","branch_uuid"],"properties":{"version_uuid":{"$ref":"#/$defs/uuid"},"identity_digest":{"$ref":"#/$defs/digest"},"kind":{"enum":["complete","projection"]},"branch_uuid":{"$ref":"#/$defs/uuid"},"source_version_uuid":{"anyOf":[{"$ref":"#/$defs/uuid"},{"type":"null"}]},"package":{"anyOf":[{"$ref":"#/$defs/package_reference"},{"type":"null"}]}}}));
+            map.insert("proposal".into(), json!({"type":"object","additionalProperties":false,"required":["proposal_uuid","source_branch_uuid","source_version_uuid","payload_version_uuid","package"],"properties":{"proposal_uuid":{"$ref":"#/$defs/uuid"},"source_branch_uuid":{"$ref":"#/$defs/uuid"},"source_version_uuid":{"$ref":"#/$defs/uuid"},"payload_version_uuid":{"$ref":"#/$defs/uuid"},"package":{"$ref":"#/$defs/package_reference"}}}));
             defs
         },
     )
@@ -325,6 +379,77 @@ fn summary_digest(summary: &Value) -> String {
         .0
 }
 
+const LINEAGE_PROJECT: &str = "01900000-0000-7000-8000-000000000001";
+const LINEAGE_BRANCH_MAIN: &str = "01900000-0000-7000-8000-000000000010";
+const LINEAGE_BRANCH_FEATURE: &str = "01900000-0000-7000-8000-000000000011";
+const LINEAGE_VERSION_ORIGIN: &str = "01900000-0000-7000-8000-000000000020";
+const LINEAGE_VERSION_MAIN: &str = "01900000-0000-7000-8000-000000000021";
+const LINEAGE_VERSION_FEATURE: &str = "01900000-0000-7000-8000-000000000022";
+const LINEAGE_VERSION_PROJECTION: &str = "01900000-0000-7000-8000-000000000023";
+const LINEAGE_PROPOSAL: &str = "01900000-0000-7000-8000-000000000030";
+
+fn base_lineage() -> Value {
+    json!({
+        "format":"graphforge-research-lineage/1","version":{"major":1,"minor":1},
+        "repository":{"owner":"openalex","repository":"openalex-fork"},
+        "immutable_version":digest('a'),
+        "project_uuid":LINEAGE_PROJECT,
+        "requirements":[{"capability":"research-lineage","major":1}],"capabilities":[],
+        "fork":{"origin_repository":{"owner":"curate","repository":"source"},"origin_project_uuid":"01900000-0000-7000-8000-000000000099","origin_version_uuid":"01900000-0000-7000-8000-000000000098","origin_version_identity":digest('8')},
+        "branches":[
+            {"branch_uuid":LINEAGE_BRANCH_MAIN,"ref_name":"main","project_uuid":LINEAGE_PROJECT,"head_version_uuid":LINEAGE_VERSION_MAIN,"parent_branch_uuid":null,"origin_version_uuid":LINEAGE_VERSION_ORIGIN,"base_version_uuid":LINEAGE_VERSION_ORIGIN,"selection_sha256":digest('1'),"label":"main"},
+            {"branch_uuid":LINEAGE_BRANCH_FEATURE,"ref_name":"feature/claims","project_uuid":LINEAGE_PROJECT,"head_version_uuid":LINEAGE_VERSION_FEATURE,"parent_branch_uuid":LINEAGE_BRANCH_MAIN,"origin_version_uuid":LINEAGE_VERSION_MAIN,"base_version_uuid":LINEAGE_VERSION_FEATURE,"selection_sha256":digest('2'),"label":"claims"}
+        ],
+        "versions":[
+            {"version_uuid":LINEAGE_VERSION_ORIGIN,"identity_digest":digest('3'),"kind":"complete","branch_uuid":LINEAGE_BRANCH_MAIN,"source_version_uuid":null,"package":{"format":"graphforge-project/2","package_digest":digest('4'),"object_digest":digest('5')}},
+            {"version_uuid":LINEAGE_VERSION_MAIN,"identity_digest":digest('6'),"kind":"complete","branch_uuid":LINEAGE_BRANCH_MAIN,"source_version_uuid":null,"package":{"format":"graphforge-project/2","package_digest":digest('7'),"object_digest":digest('8')}},
+            {"version_uuid":LINEAGE_VERSION_FEATURE,"identity_digest":digest('9'),"kind":"complete","branch_uuid":LINEAGE_BRANCH_FEATURE,"source_version_uuid":null,"package":{"format":"graphforge-project/2","package_digest":digest('a'),"object_digest":digest('b')}},
+            {"version_uuid":LINEAGE_VERSION_PROJECTION,"identity_digest":digest('c'),"kind":"projection","branch_uuid":LINEAGE_BRANCH_FEATURE,"source_version_uuid":LINEAGE_VERSION_FEATURE,"package":{"format":"graphforge-project/2","package_digest":digest('d'),"object_digest":digest('e')}}
+        ],
+        "proposals":[
+            {"proposal_uuid":LINEAGE_PROPOSAL,"source_branch_uuid":LINEAGE_BRANCH_FEATURE,"source_version_uuid":LINEAGE_VERSION_FEATURE,"payload_version_uuid":LINEAGE_VERSION_PROJECTION,"package":{"format":"graphforge-project/2","package_digest":digest('d'),"object_digest":digest('e')}}
+        ],
+        "extensions":{"x-example":true}
+    })
+}
+
+fn lineage_digest(lineage: &Value) -> String {
+    ResearchLineage::from_json(compact(lineage).as_bytes(), DiscoveryLimits::default())
+        .unwrap()
+        .canonical_digest()
+        .unwrap()
+        .0
+}
+
+fn refs_with_research_branches() -> Value {
+    json!({
+        "format":"graphforge-discovery/1","version":{"major":1,"minor":0},
+        "repository":{"owner":"openalex","repository":"openalex-fork"},
+        "default_ref":"main",
+        "refs":[
+            {"name":"feature/claims","target":digest('a'),"validator":digest('b')},
+            {"name":"main","target":digest('a'),"validator":digest('d')}
+        ]
+    })
+}
+
+fn manifest_with_research_lineage() -> Value {
+    let lineage = base_lineage();
+    let mut v = base_manifest();
+    v["repository"] = json!({"owner":"openalex","repository":"openalex-fork"});
+    v["objects"] = json!([
+        {"digest":digest('0'),"length":42,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/0"]},
+        {"digest":digest('5'),"length":2048,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/5"]},
+        {"digest":digest('8'),"length":2048,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/8"]},
+        {"digest":digest('b'),"length":2048,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/b"]},
+        {"digest":digest('e'),"length":1024,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/e"]},
+        {"digest":digest('f'),"length":1800,"media_type":"application/vnd.graphforge.research-lineage+json","locations":["https://data.graphforge.sh/objects/f"]}
+    ]);
+    v["package"]["object_digest"] = json!(digest('0'));
+    v["lineage"] = json!({"format":"graphforge-research-lineage/1","lineage_digest":lineage_digest(&lineage),"object_digest":digest('f')});
+    v
+}
+
 /// Manifest advertising `summary` and an ontology inventory that matches it.
 fn manifest_with_summary_and_ontology_for(summary: &Value) -> Value {
     let mut v = base_manifest();
@@ -369,6 +494,13 @@ fn valid(name: &str, document: Document, value: Value) -> Case {
         .unwrap(),
         Document::Summary => String::from_utf8(
             ProjectSummary::from_json(compact(&value).as_bytes(), DiscoveryLimits::default())
+                .unwrap()
+                .to_canonical_json()
+                .unwrap(),
+        )
+        .unwrap(),
+        Document::Lineage => String::from_utf8(
+            ResearchLineage::from_json(compact(&value).as_bytes(), DiscoveryLimits::default())
                 .unwrap()
                 .to_canonical_json()
                 .unwrap(),
@@ -616,6 +748,7 @@ fn corpus() -> Corpus {
             Document::Manifest => base_manifest(),
             Document::Refs => base_refs(),
             Document::Summary => base_summary(),
+            Document::Lineage => base_lineage(),
         };
         mutate(&mut value);
         cases.push(invalid(name, *doc, value, code, *field));
@@ -685,10 +818,112 @@ fn corpus() -> Corpus {
         },
     });
     cases.extend(summary_cases());
+    cases.extend(lineage_cases());
     Corpus {
         format: "graphforge-discovery-conformance/1".into(),
         cases,
     }
+}
+
+fn lineage_cases() -> Vec<Case> {
+    let mut cases = vec![
+        valid(
+            "manifest-with-research-lineage",
+            Document::Manifest,
+            manifest_with_research_lineage(),
+        ),
+        valid(
+            "lineage-fork-two-branches-proposal",
+            Document::Lineage,
+            base_lineage(),
+        ),
+        valid(
+            "refs-with-research-branches",
+            Document::Refs,
+            refs_with_research_branches(),
+        ),
+        invalid(
+            "lineage-projection-without-source",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["versions"][3]["source_version_uuid"] = Value::Null;
+                v
+            },
+            "malformed_response",
+            Some("versions.source_version_uuid"),
+        ),
+        invalid(
+            "lineage-projection-cites-itself",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["versions"][3]["source_version_uuid"] = json!(LINEAGE_VERSION_PROJECTION);
+                v
+            },
+            "malformed_response",
+            Some("versions.source_version_uuid"),
+        ),
+        invalid(
+            "lineage-proposal-source-disagrees-with-projection",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["proposals"][0]["source_version_uuid"] = json!(LINEAGE_VERSION_MAIN);
+                v
+            },
+            "malformed_response",
+            Some("proposals.source_version_uuid"),
+        ),
+        invalid(
+            "lineage-proposal-source-branch-unlisted",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["proposals"][0]["source_branch_uuid"] =
+                    json!("01900000-0000-7000-8000-000000000012");
+                v
+            },
+            "malformed_response",
+            Some("proposals.source_branch_uuid"),
+        ),
+        invalid(
+            "lineage-proposal-payload-is-complete",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["proposals"][0]["payload_version_uuid"] = json!(LINEAGE_VERSION_FEATURE);
+                v
+            },
+            "malformed_response",
+            Some("proposals.payload_version_uuid"),
+        ),
+        invalid(
+            "lineage-proposal-package-disagrees-with-payload",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["proposals"][0]["package"]["package_digest"] = json!(digest('7'));
+                v
+            },
+            "malformed_response",
+            Some("proposals.package"),
+        ),
+    ];
+    cases.push(invalid_version(
+        "lineage-unknown-required-capability",
+        Document::Lineage,
+        {
+            let mut v = base_lineage();
+            v["requirements"] = json!([{"capability":"future-lineage","major":2}]);
+            v
+        },
+        "requirements",
+        "capability",
+        None,
+        2,
+    ));
+    cases
 }
 
 /// Cases for the Project summary document and the optional manifest fields.
@@ -995,6 +1230,7 @@ fn summary_cases() -> Vec<Case> {
             Document::Manifest => manifest_with_summary_and_ontology(),
             Document::Refs => base_refs(),
             Document::Summary => base_summary(),
+            Document::Lineage => base_lineage(),
         };
         mutate(&mut value);
         cases.push(invalid(name, *doc, value, code, *field));
@@ -1094,6 +1330,12 @@ fn limits(overrides: Option<Limits>) -> DiscoveryLimits {
         if let Some(x) = v.max_ontology_entries {
             limits.max_ontology_entries = x
         }
+        if let Some(x) = v.max_lineage_bytes {
+            limits.max_lineage_bytes = x
+        }
+        if let Some(x) = v.max_lineage_entries {
+            limits.max_lineage_entries = x
+        }
     }
     limits
 }
@@ -1115,6 +1357,7 @@ fn checked_in_contract_artifacts_match_rust_authority() {
         ("manifest.schema.json", pretty(&manifest_schema())),
         ("refs.schema.json", pretty(&refs_schema())),
         ("summary.schema.json", pretty(&summary_schema())),
+        ("lineage.schema.json", pretty(&lineage_schema())),
         ("conformance.json", pretty(&corpus())),
     ];
     if std::env::var_os("GRAPHFORGE_UPDATE_DISCOVERY_ARTIFACTS").is_some() {
@@ -1125,11 +1368,13 @@ fn checked_in_contract_artifacts_match_rust_authority() {
         }
         return;
     }
-    for ((name, expected), actual) in
-        expected
-            .iter()
-            .zip([MANIFEST_SCHEMA, REFS_SCHEMA, SUMMARY_SCHEMA, FIXTURES])
-    {
+    for ((name, expected), actual) in expected.iter().zip([
+        MANIFEST_SCHEMA,
+        REFS_SCHEMA,
+        SUMMARY_SCHEMA,
+        LINEAGE_SCHEMA,
+        FIXTURES,
+    ]) {
         assert_eq!(
             actual.as_bytes(),
             expected,
@@ -1147,6 +1392,10 @@ fn checked_in_contract_artifacts_match_rust_authority() {
                 .map(|v| String::from_utf8(v.to_canonical_json().unwrap()).unwrap()),
             Document::Summary => {
                 ProjectSummary::from_json(case.json.as_bytes(), limits(case.limits))
+                    .map(|v| String::from_utf8(v.to_canonical_json().unwrap()).unwrap())
+            }
+            Document::Lineage => {
+                ResearchLineage::from_json(case.json.as_bytes(), limits(case.limits))
                     .map(|v| String::from_utf8(v.to_canonical_json().unwrap()).unwrap())
             }
         };
@@ -1187,6 +1436,25 @@ fn parse_summary(value: &Value) -> ProjectSummary {
 
 fn parse_manifest(value: &Value) -> DiscoveryManifest {
     DiscoveryManifest::from_json(compact(value).as_bytes(), DiscoveryLimits::default()).unwrap()
+}
+
+fn parse_lineage(value: &Value) -> ResearchLineage {
+    ResearchLineage::from_json(compact(value).as_bytes(), DiscoveryLimits::default()).unwrap()
+}
+
+fn parse_refs(value: &Value) -> RefSet {
+    RefSet::from_json(compact(value).as_bytes(), DiscoveryLimits::default()).unwrap()
+}
+
+fn bind_lineage_error(
+    manifest: &Value,
+    refs: &Value,
+    lineage: &ResearchLineage,
+) -> (DiscoveryErrorCode, Option<&'static str>) {
+    let error = parse_manifest(manifest)
+        .bind_lineage(&parse_refs(refs), lineage)
+        .unwrap_err();
+    (error.code, error.field)
 }
 
 fn bind_error(
@@ -1389,6 +1657,101 @@ fn summary_string_bounds_follow_project_metadata_bounds() {
         .unwrap_err();
     assert_eq!(error.code, DiscoveryErrorCode::LimitExceeded);
     assert_eq!(error.field, Some("metadata.tags"));
+}
+
+#[test]
+fn bind_lineage_accepts_the_advertised_lineage() {
+    let manifest = manifest_with_research_lineage();
+    let refs = refs_with_research_branches();
+    let lineage = parse_lineage(&base_lineage());
+    parse_manifest(&manifest)
+        .bind_lineage(&parse_refs(&refs), &lineage)
+        .unwrap();
+}
+
+#[test]
+fn bind_lineage_requires_an_advertised_lineage() {
+    let lineage = parse_lineage(&base_lineage());
+    let refs = refs_with_research_branches();
+    let error = parse_manifest(&base_manifest())
+        .bind_lineage(&parse_refs(&refs), &lineage)
+        .unwrap_err();
+    assert_eq!(error.code, DiscoveryErrorCode::MissingObject);
+    assert_eq!(error.field, Some("lineage"));
+    assert!(parse_manifest(&base_manifest()).lineage_object().is_err());
+}
+
+#[test]
+fn bind_lineage_rejects_identity_and_ref_mismatches() {
+    let manifest = manifest_with_research_lineage();
+    let refs = refs_with_research_branches();
+    let integrity = DiscoveryErrorCode::IntegrityFailure;
+
+    let mut other = base_lineage();
+    other["repository"]["repository"] = json!("elsewhere");
+    assert_eq!(
+        bind_lineage_error(&manifest, &refs, &parse_lineage(&other)),
+        (integrity, Some("lineage.repository"))
+    );
+
+    let mut other = base_lineage();
+    other["immutable_version"] = json!(digest('7'));
+    assert_eq!(
+        bind_lineage_error(&manifest, &refs, &parse_lineage(&other)),
+        (integrity, Some("lineage.immutable_version"))
+    );
+
+    let mut other = base_lineage();
+    other["branches"][0]["label"] = json!("renamed");
+    assert_eq!(
+        bind_lineage_error(&manifest, &refs, &parse_lineage(&other)),
+        (integrity, Some("lineage.lineage_digest"))
+    );
+
+    // A Branch ref pointing at another repository snapshot names a head this
+    // lineage does not describe; it must not resolve to this snapshot's head.
+    let mut moved = refs_with_research_branches();
+    moved["refs"][0]["target"] = json!(digest('9'));
+    assert_eq!(moved["refs"][0]["name"], "feature/claims");
+    assert_eq!(
+        bind_lineage_error(&manifest, &moved, &parse_lineage(&base_lineage())),
+        (integrity, Some("lineage.branches.ref_name"))
+    );
+
+    let mut refs = refs_with_research_branches();
+    refs["refs"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|item| item["name"] != "feature/claims");
+    assert_eq!(
+        bind_lineage_error(&manifest, &refs, &parse_lineage(&base_lineage())),
+        (
+            DiscoveryErrorCode::MissingRef,
+            Some("lineage.branches.ref_name")
+        )
+    );
+}
+
+#[test]
+fn research_version_object_selects_per_version_packages() {
+    let manifest = parse_manifest(&manifest_with_research_lineage());
+    let lineage = parse_lineage(&base_lineage());
+    let (version, object) = manifest
+        .research_version_object(&lineage, LINEAGE_VERSION_FEATURE)
+        .unwrap();
+    assert_eq!(version.kind, "complete");
+    assert_eq!(object.digest.0, digest('b'));
+    assert_ne!(object.digest, manifest.package.object_digest);
+
+    let (projection, object) = manifest
+        .research_version_object(&lineage, LINEAGE_VERSION_PROJECTION)
+        .unwrap();
+    assert_eq!(projection.kind, "projection");
+    assert_eq!(
+        projection.source_version_uuid.as_deref(),
+        Some(LINEAGE_VERSION_FEATURE)
+    );
+    assert_eq!(object.digest.0, digest('e'));
 }
 
 #[test]

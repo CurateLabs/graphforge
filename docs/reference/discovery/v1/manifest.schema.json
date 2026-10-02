@@ -52,6 +52,26 @@
       "minLength": 1,
       "type": "string"
     },
+    "lineage_reference": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "const": "graphforge-research-lineage/1"
+        },
+        "lineage_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "object_digest": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "format",
+        "lineage_digest",
+        "object_digest"
+      ],
+      "type": "object"
+    },
     "module_descriptor": {
       "additionalProperties": false,
       "properties": {
@@ -248,6 +268,9 @@
     },
     "immutable_version": {
       "$ref": "#/$defs/digest"
+    },
+    "lineage": {
+      "$ref": "#/$defs/lineage_reference"
     },
     "objects": {
       "items": {

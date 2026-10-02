@@ -14,6 +14,7 @@ compatible projection of this contract.
 | Manifest | `manifest.schema.json` | adapter-defined |
 | Refs | `refs.schema.json` | adapter-defined |
 | Project summary (`graphforge-project-summary/1`) | `summary.schema.json` | `application/vnd.graphforge.project-summary+json` |
+| Research lineage (`graphforge-research-lineage/1`) | `lineage.schema.json` | `application/vnd.graphforge.research-lineage+json` |
 
 These checked-in JSON Schemas describe the wire shape of GraphForge discovery
 manifest, refs, and Project summary documents. `conformance.json` supplies valid
