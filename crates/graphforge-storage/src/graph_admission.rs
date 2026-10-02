@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
+use std::io::Seek as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
@@ -130,7 +131,6 @@ pub fn open_admitted(path: &Path) -> Result<File, GfError> {
     // Positioned reads on Windows can advance the handle cursor. This helper
     // returns a fresh file for its caller to decode, so restore the ordinary
     // post-open position after admission.
-    use std::io::Seek as _;
     file.seek(std::io::SeekFrom::Start(0)).map_err(|error| {
         GfError::Storage(format!(
             "rewind admitted graph payload {}: {error}",
