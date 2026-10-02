@@ -285,6 +285,23 @@ fn assert_large_answers(forge: &GraphForge, expected: &str) {
     assert!(values.is_null(0));
 }
 
+fn assert_mutations_persisted(forge: &GraphForge) {
+    for query in [
+        "MATCH (n) WHERE n.rank = 1 RETURN n.flag AS flag",
+        "MATCH ()-[r]->() RETURN r.flag AS flag",
+    ] {
+        let result = forge.execute(query).unwrap();
+        let values = column(&result.batches, "flag", &DataType::Boolean);
+        let values = values
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .unwrap();
+        assert_eq!(values.len(), 1);
+        assert!(!values.is_null(0));
+        assert!(values.value(0));
+    }
+}
+
 fn assert_bounded_objects(path: &std::path::Path) -> Vec<graphforge_storage::GraphFileEntry> {
     let files = resolve_project_generation(path)
         .unwrap()
@@ -337,6 +354,7 @@ fn oversized_property_values_round_trip_through_bounded_objects() {
     drop(forge);
     let forge = GraphForge::new(path.to_str()).unwrap();
     assert_large_answers(&forge, &payload);
+    assert_mutations_persisted(&forge);
     assert_bounded_objects(&path);
 
     let package = root.path().join("large-values.gfpb");
@@ -366,7 +384,9 @@ fn oversized_property_values_round_trip_through_bounded_objects() {
     )
     .unwrap();
     assert_bounded_objects(&imported);
-    assert_large_answers(&GraphForge::new(imported.to_str()).unwrap(), &payload);
+    let imported = GraphForge::new(imported.to_str()).unwrap();
+    assert_large_answers(&imported, &payload);
+    assert_mutations_persisted(&imported);
 }
 
 #[test]
