@@ -224,6 +224,20 @@ impl PayloadTicket {
         // Continuous hydration must not make one reader spin indefinitely.
         // Follow replacements without recursion, then fail closed on churn.
         for _ in 0..MAX_TICKET_CHECKS {
+            // A newer hydration may have registered this same native identity
+            // while an older reader still holds its ticket. Follow that ticket
+            // before deciding whether this ticket still describes the inode.
+            let replacement = {
+                let registry = registry();
+                match registry.get(&key_of(identity)) {
+                    Some(current) if !Arc::ptr_eq(current, &ticket) => Some(Arc::clone(current)),
+                    _ => None,
+                }
+            };
+            if let Some(replacement) = replacement {
+                ticket = replacement;
+                continue;
+            }
             // A native identity may be recycled after both authoritative names
             // disappear. Cached refusals belong only to the original payload.
             if !ticket.describes(identity) {
@@ -232,6 +246,26 @@ impl PayloadTicket {
                 };
                 ticket = replacement;
                 continue;
+            }
+            // Recheck after `describes`: a replacement could have been
+            // registered while that path metadata was read. Both tickets can
+            // still describe the same linked inode, so pointer identity is the
+            // discriminator for whether the cached outcome is current.
+            let (replacement, cached_outcome) = {
+                let registry = registry();
+                match registry.get(&key_of(identity)) {
+                    Some(current) if !Arc::ptr_eq(current, &ticket) => {
+                        (Some(Arc::clone(current)), None)
+                    }
+                    _ => (None, ticket.outcome.get().cloned()),
+                }
+            };
+            if let Some(replacement) = replacement {
+                ticket = replacement;
+                continue;
+            }
+            if let Some(outcome) = cached_outcome {
+                return outcome;
             }
             if let Some(outcome) = ticket.outcome.get() {
                 return outcome.clone();
@@ -601,6 +635,32 @@ mod tests {
         assert_eq!(error.to_string(), memoized.to_string());
         assert_eq!(replacement.checksum_runs.load(Ordering::Relaxed), 1);
         assert_eq!(stale.checksum_runs.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_stale_cached_success_authenticates_a_same_identity_replacement() {
+        let fixture = Fixture::new(PAYLOAD);
+        fixture.register();
+        let identity = graphforge_filesystem::path_identity(&fixture.object).unwrap();
+        let stale = registry().get(&key_of(identity)).cloned().unwrap();
+        let file = File::open(&fixture.link).unwrap();
+        stale.admit(&file, identity).unwrap();
+        assert!(stale.outcome.get().unwrap().is_ok());
+
+        fixture.register();
+        let replacement = registry().get(&key_of(identity)).cloned().unwrap();
+        assert!(!Arc::ptr_eq(&stale, &replacement));
+        assert!(stale.describes(identity));
+        fixture.flip_first_byte();
+
+        let error = stale.admit(&file, identity).unwrap_err();
+        assert!(error.to_string().contains("XXH64 checksum"), "{error}");
+        assert_eq!(stale.checksum_runs.load(Ordering::Relaxed), 1);
+        assert_eq!(replacement.checksum_runs.load(Ordering::Relaxed), 1);
+        assert!(Arc::ptr_eq(
+            registry().get(&key_of(identity)).unwrap(),
+            &replacement
+        ));
     }
 
     #[test]
