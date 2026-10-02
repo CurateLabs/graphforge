@@ -215,6 +215,8 @@ struct Publication {
     expected_revision: Option<String>,
     /// Object location prefix; `None` uses this Hub's object locations.
     location_base: Option<String>,
+    /// Distinguishes intents under one operation identity.
+    intent: char,
 }
 
 impl Publication {
@@ -230,6 +232,7 @@ impl Publication {
             resolved_ref: "main".into(),
             expected_revision: None,
             location_base: None,
+            intent: 'a',
         }
     }
 
@@ -310,9 +313,9 @@ impl Publication {
         .request_commitment()
     }
 
-    /// The corpus models one intent per operation identity.
+    /// The corpus intent: the operation identity plus an intent label.
     fn intent_digest(&self) -> String {
-        sha256_digest(format!("publish intent {}", self.operation).as_bytes())
+        sha256_digest(format!("publish intent {} {}", self.operation, self.intent).as_bytes())
     }
 
     fn open_body(&self) -> Value {
@@ -821,6 +824,7 @@ fn corpus() -> Corpus {
         steps.extend(publish(&publication, "token", "first", &mut model));
         let mut changed = v2(3, Some(model.revision(&repository)));
         changed.operation = publication.operation;
+        changed.intent = 'b';
         steps.push(send(
             request(
                 HubMethod::Post,
@@ -857,6 +861,51 @@ fn corpus() -> Corpus {
                     error(409, "idempotency_conflict"),
                 ),
                 refs_absent(&repository),
+            ],
+        ));
+    }
+
+    // A new attempt of the same intent supersedes the open session.
+    {
+        let first = v1(22);
+        let mut second = first.clone();
+        second.refs = vec!["main".into(), "stable".into()];
+        let object = &first.objects[0];
+        let total = object.bytes.len();
+        let mut model = RepoModel::default();
+        model.advance(&second);
+        let revision = model.revision(&repository);
+        cases.push(case(
+            "new-attempt-supersedes-open-session",
+            "Reopening an uncommitted operation with the same intent but a different request (here, more refs) replaces the open session; bytes the first attempt retained carry over by digest, the old session is closed, and the new attempt commits.",
+            vec![
+                token(&repository, "token"),
+                open_new(&first, "token", "first"),
+                put_chunk(&first, "first", 0, 0, 10),
+                send(
+                    request(
+                        HubMethod::Post,
+                        format!("{}/.gf/publish/sessions", repo_url(&repository)),
+                    )
+                    .bearer("token")
+                    .json(second.open_body()),
+                    status(201)
+                        .json(json!({
+                            "state": "open",
+                            "session_id": "${second_session}",
+                            "uploads": [{"digest": object.digest(), "length": total, "upload_url": "${second_upload_0}", "received": 10}],
+                        }))
+                        .capture("second_session", "/session_id")
+                        .capture("second_upload_0", "/uploads/0/upload_url"),
+                ),
+                send(
+                    request(HubMethod::Head, "${first_upload_0}"),
+                    error(404, "invalid_input"),
+                ),
+                put_chunk(&second, "second", 0, 10, total),
+                commit(&first, "token", "first", error(404, "invalid_input")),
+                commit(&second, "token", "second", complete(&second, &revision)),
+                get_refs(&repository, &model),
             ],
         ));
     }

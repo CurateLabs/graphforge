@@ -362,6 +362,92 @@ fn corrupt_object_is_refused_and_refs_do_not_move() {
 }
 
 #[test]
+fn a_new_attempt_of_the_same_intent_supersedes_the_open_session() {
+    let hub = ReferenceHub::new();
+    let client = Client::new(&hub, demo());
+    let first = client.publish(&Plan::new("package v1", 'b', None));
+
+    // The attempt read revision one and uploaded its object, then lost a race:
+    // another publication moved the repository.
+    let mut attempt = Plan::new(
+        "package v2 long enough to split",
+        'c',
+        Some(first.revision.clone()),
+    );
+    let (old_session, upload) = client.opened(&attempt);
+    assert_eq!(client.put(&upload, 0, &attempt.bytes).status, 200);
+    let racer = client.publish(&Plan::new("package v3", 'd', Some(first.revision.clone())));
+    assert_eq!(
+        error_code(&client.commit(&attempt, &old_session)),
+        HubPublishErrorCode::RefConflict
+    );
+
+    // The rerun reads the new revision: same operation and intent, new request.
+    attempt.expected_revision = Some(racer.revision.clone());
+    let response = client.open(&attempt);
+    assert_eq!(
+        response.status,
+        201,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let SessionResponse::Open {
+        session_id,
+        uploads,
+    } = serde_json::from_slice(&response.body).unwrap()
+    else {
+        panic!("expected an open session");
+    };
+    assert_ne!(session_id.as_str(), old_session);
+    assert_eq!(
+        uploads[0].received,
+        attempt.bytes.len() as u64,
+        "verified bytes carry over by digest and are not sent again"
+    );
+    assert_eq!(
+        hub.handle(&HubRequest::new(HubMethod::Head, &upload.upload_url))
+            .status,
+        404,
+        "the superseded session's upload location is closed"
+    );
+    let landed = receipt(&client.commit(&attempt, session_id.as_str()));
+    assert_eq!(landed.previous_revision, Some(racer.revision.clone()));
+    assert_eq!(hub.revisions(&demo()).len(), 3);
+    // A committed operation replays; a different intent still conflicts.
+    assert_eq!(receipt(&client.open(&attempt)), landed);
+    let mut other = Plan::new("package v4", 'e', Some(landed.revision.clone()));
+    other.operation = attempt.operation;
+    assert_eq!(
+        error_code(&client.open(&other)),
+        HubPublishErrorCode::IdempotencyConflict
+    );
+}
+
+#[test]
+fn an_object_corrupted_at_rest_must_be_uploaded_again() {
+    let hub = ReferenceHub::new();
+    let client = Client::new(&hub, demo());
+    let plan = Plan::new("package v1", 'b', None);
+    let first = client.publish(&plan);
+    let digest = plan.declaration().digest;
+    assert_eq!(hub.corrupt_object(&digest), 1);
+
+    // A later publication that lists the same object is not told it is
+    // complete; re-uploading verified bytes repairs the stored copy.
+    let mut again = Plan::new("package v1", 'b', Some(first.revision.clone()));
+    again.intent_digest = sha256_digest(b"republish");
+    let (session, upload) = client.opened(&again);
+    assert_eq!(upload.received, 0);
+    assert_eq!(client.put(&upload, 0, &again.bytes).status, 200);
+    receipt(&client.commit(&again, &session));
+    let object = hub.handle(&HubRequest::new(
+        HubMethod::Get,
+        client.capabilities.object_location(&digest),
+    ));
+    assert_eq!(object.body, plan.bytes);
+}
+
+#[test]
 fn stale_expected_revision_is_a_ref_conflict() {
     let hub = ReferenceHub::new();
     let client = Client::new(&hub, demo());

@@ -407,25 +407,37 @@ impl ReferenceHub {
             ));
         }
 
-        if let Some(session_id) = state.operations.get(&open.operation_uuid) {
-            let session = &state.sessions[session_id];
-            if session.request != open {
-                return Err(HubPublishError::new(
-                    HubPublishErrorCode::IdempotencyConflict,
-                    "operation identity was reused with a different request",
-                )
-                .into());
+        // An operation is one content identity (its intent); a session is one
+        // attempt at committing it. A different intent conflicts, a committed
+        // operation replays its receipt, the same request resumes its session,
+        // and a new attempt of the same intent supersedes the open session.
+        let superseded = match state.operations.get(&open.operation_uuid) {
+            Some(session_id) => {
+                let session = &state.sessions[session_id];
+                if session.request.intent_digest != open.intent_digest
+                    || session.request.repository != open.repository
+                {
+                    return Err(HubPublishError::new(
+                        HubPublishErrorCode::IdempotencyConflict,
+                        "operation identity was reused with a different intent",
+                    )
+                    .into());
+                }
+                if let Some(receipt) = &session.receipt {
+                    return Ok(json_response(
+                        200,
+                        &SessionResponse::Complete {
+                            receipt: receipt.clone(),
+                        },
+                    ));
+                }
+                if session.request == open {
+                    return Ok(json_response(200, &self.open_response(session_id, session)));
+                }
+                Some(session_id.clone())
             }
-            return Ok(match &session.receipt {
-                Some(receipt) => json_response(
-                    200,
-                    &SessionResponse::Complete {
-                        receipt: receipt.clone(),
-                    },
-                ),
-                None => json_response(200, &self.open_response(session_id, session)),
-            });
-        }
+            None => None,
+        };
 
         let admitted = state.repositories.get(repository);
         if let Some(quota) = state.quotas.get(&repository.owner) {
@@ -451,22 +463,43 @@ impl ReferenceHub {
             }
         }
 
-        let prior: Vec<Option<Vec<u8>>> = open
+        // Objects already stored in this repository start complete only while
+        // they still verify; a copy corrupted at rest must be uploaded again.
+        // A superseded attempt hands its retained bytes to the new session by
+        // digest, so identical bytes are never sent twice.
+        let mut carried: BTreeMap<String, (Vec<u8>, bool)> = BTreeMap::new();
+        if let Some(previous) = &superseded {
+            let previous = state.sessions.remove(previous).expect("operation session");
+            for (object, upload) in previous.request.objects.iter().zip(previous.uploads) {
+                state.uploads.remove(&upload.id);
+                carried.insert(object.digest.clone(), (upload.bytes, upload.complete));
+            }
+        }
+        let admitted = state.repositories.get(repository);
+        let prior: Vec<(Vec<u8>, bool)> = open
             .objects
             .iter()
-            .map(|object| admitted.and_then(|r| r.objects.get(&object.digest).cloned()))
+            .map(|object| {
+                admitted
+                    .and_then(|r| r.objects.get(&object.digest))
+                    .filter(|bytes| {
+                        bytes.len() as u64 == object.length && sha256_digest(bytes) == object.digest
+                    })
+                    .map(|bytes| (bytes.clone(), true))
+                    .or_else(|| carried.remove(&object.digest))
+                    .unwrap_or_default()
+            })
             .collect();
         let session_id = self.next_id(state, "session");
         let mut uploads = Vec::with_capacity(open.objects.len());
-        for (index, bytes) in prior.into_iter().enumerate() {
+        for (index, (bytes, complete)) in prior.into_iter().enumerate() {
             let id = self.next_id(state, "upload");
             state
                 .uploads
                 .insert(id.clone(), (session_id.clone(), index));
-            let complete = bytes.is_some();
             uploads.push(Upload {
                 id,
-                bytes: bytes.unwrap_or_default(),
+                bytes,
                 complete,
             });
         }
