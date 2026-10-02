@@ -36,9 +36,10 @@ use graphforge_ontology::ontology::{PropertyDef, PropertyValueType};
 
 pub use graphforge_ir::arrow_schema::{
     EDGE_PROPERTY_BASE_SCHEMA, EXPLORATORY_EDGE_SCHEMA, INTERNAL_SURROGATE_META_KEY,
-    PROPERTY_BASE_SCHEMA, TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, date_struct_fields,
-    datetime_struct_fields, duration_struct_fields, is_internal_surrogate_field,
-    localdatetime_struct_fields, property_data_type_supported, time_struct_fields,
+    PROPERTY_BASE_SCHEMA, TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, canonical_property_data_type,
+    date_struct_fields, datetime_struct_fields, duration_struct_fields,
+    is_internal_surrogate_field, localdatetime_struct_fields, property_data_type_canonical,
+    property_data_type_supported, time_struct_fields,
 };
 pub(crate) use graphforge_ir::arrow_schema::{id_field, ts_field, uuid_field};
 
