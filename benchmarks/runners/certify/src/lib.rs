@@ -1621,11 +1621,12 @@ fn sanitize_result_sink(
 }
 
 fn sanitized_query_evidence(value: &serde_json::Value) -> bool {
-    const KEYS: [&str; 11] = [
+    const KEYS: [&str; 12] = [
         "contract",
         "hops",
         "sorts",
         "operator_rss",
+        "adjacency_rebuilds",
         "max_in_flight_reads",
         "memory_reserved_before",
         "memory_reserved_after",
@@ -2354,10 +2355,15 @@ mod tests {
 
     #[test]
     fn cli_measurement_adapter_explicitly_requests_diagnostics() {
-        let args = ["-c", "test \"$1\" = --diagnostics", "gf"]
-            .map(str::to_owned);
-        assert_eq!(execute_cli_measured("/bin/sh", &args).unwrap().exit_code, Some(0));
-        assert_ne!(execute_process("/bin/sh", &args).unwrap().exit_code, Some(0));
+        let args = ["-c", "test \"$1\" = --diagnostics", "gf"].map(str::to_owned);
+        assert_eq!(
+            execute_cli_measured("/bin/sh", &args).unwrap().exit_code,
+            Some(0)
+        );
+        assert_ne!(
+            execute_process("/bin/sh", &args).unwrap().exit_code,
+            Some(0)
+        );
     }
 
     #[test]
@@ -2512,6 +2518,7 @@ mod tests {
                 "hops": [],
                 "sorts": [],
                 "operator_rss": [],
+                "adjacency_rebuilds": 0,
                 "max_in_flight_reads": 0,
                 "memory_reserved_before": 0,
                 "memory_reserved_after": 0,
@@ -2574,6 +2581,7 @@ mod tests {
                     "identity_revalidation_calls": 1, "identity_revalidation_bytes": 0
                 }],
                 "sorts": [],
+                "adjacency_rebuilds": 1,
                 "operator_rss": [{
                     "ordinal": 0, "operator": "ordered_one_hop",
                     "before_bytes": 100, "peak_bytes": 120, "after_bytes": 110
@@ -2587,6 +2595,21 @@ mod tests {
         let accepted = parse_receipts(&serde_json::to_vec(&query).unwrap(), true).unwrap();
         assert_eq!(accepted[0]["query_evidence"], query["query_evidence"]);
         assert!(accepted[0].get("destination").is_none());
+        for bad_value in [
+            serde_json::json!(-1),
+            serde_json::json!("1"),
+            serde_json::Value::Null,
+        ] {
+            let mut invalid = query.clone();
+            invalid["query_evidence"]["adjacency_rebuilds"] = bad_value;
+            assert!(parse_receipts(&serde_json::to_vec(&invalid).unwrap(), true).is_err());
+        }
+        let mut missing_rebuilds = query.clone();
+        missing_rebuilds["query_evidence"]
+            .as_object_mut()
+            .unwrap()
+            .remove("adjacency_rebuilds");
+        assert!(parse_receipts(&serde_json::to_vec(&missing_rebuilds).unwrap(), true).is_err());
         for bad_value in [
             serde_json::json!(-1),
             serde_json::json!("3"),
