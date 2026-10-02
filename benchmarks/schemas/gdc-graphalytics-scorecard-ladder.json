@@ -51,6 +51,14 @@
           "load_mapping": {
             "type": "string",
             "pattern": "^profiles/gdc/[A-Za-z0-9_.-]+\\.json$"
+          },
+          "listed_edges": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "discrepancy": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
@@ -61,10 +69,14 @@
           "weighted",
           "vertices",
           "edges",
+          "listed_edges",
           "load_mapping"
         ],
         "additionalProperties": false
       }
+    },
+    "counts_note": {
+      "type": "string"
     }
   },
   "required": [

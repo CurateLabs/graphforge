@@ -352,6 +352,22 @@ class ScorecardProfileTests(unittest.TestCase):
                 "graph500-22": (2_396_657, 64_155_735, False, False),
             },
         )
+        listed = {item["id"]: item["listed_edges"] for item in self.ladder["datasets"]}
+        self.assertEqual(
+            listed,
+            {
+                "wiki-Talk": 5_021_410,
+                "cit-Patents": 16_518_947,
+                "datagen-7_5-fb": 34_185_747,
+                "graph500-22": 64_155_735,
+            },
+        )
+        for item in self.ladder["datasets"]:
+            self.assertEqual(
+                "discrepancy" in item,
+                item["listed_edges"] != item["edges"],
+                f"{item['id']}: a published/listed difference must be explained, and only then",
+            )
         self.assertEqual(
             self.ladder["counts_source"],
             "https://ldbcouncil.org/benchmarks/graphalytics/datasets/",
