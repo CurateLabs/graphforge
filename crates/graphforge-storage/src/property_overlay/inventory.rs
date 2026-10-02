@@ -1135,14 +1135,20 @@ fn topology_authority(
     })
 }
 
+/// The legacy flat node file or a `.parquet` directly beneath `topology/nodes/`.
+/// Other names there (a rewrite's staged temporaries, for one) are ignored,
+/// as `mutator::node_parquet_files` ignores them when it lists the directory.
 fn is_node_topology_path(relative: &str) -> bool {
-    relative == "topology/nodes.parquet" || relative.starts_with("topology/nodes/")
+    relative == "topology/nodes.parquet"
+        || relative
+            .strip_prefix("topology/nodes/")
+            .is_some_and(|name| !name.contains('/') && name.ends_with(".parquet"))
 }
 
 /// The declared node set must satisfy what `mutator::node_parquet_files`
 /// requires of a directory listing: the legacy flat file first, then
 /// `topology/nodes/<first>-<last>.parquet` shards with canonical padded
-/// ranges that do not overlap. Anything else is refused, never read.
+/// ranges that do not overlap. A shard that fails is refused, never read.
 fn validate_declared_node_files(files: &mut [AdmittedEdgeFile]) -> Result<(), GfError> {
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     let mut prior_end = None;
@@ -1151,16 +1157,12 @@ fn validate_declared_node_files(files: &mut [AdmittedEdgeFile]) -> Result<(), Gf
             continue;
         }
         let relative = Path::new(&file.relative_path);
-        if relative.parent() != Some(Path::new("topology/nodes"))
-            || relative
-                .extension()
-                .is_none_or(|extension| extension != "parquet")
-        {
-            return Err(corrupt("declared node file is not a canonical node shard"));
-        }
         let (first, last) = crate::mutator::canonical_topology_shard_range(relative, "node")?;
         if prior_end.is_some_and(|end| first <= end) {
-            return Err(corrupt("declared node shard ranges overlap"));
+            return Err(corrupt(&format!(
+                "declared node shard ranges overlap at {}",
+                file.relative_path
+            )));
         }
         prior_end = Some(last);
     }
