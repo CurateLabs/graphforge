@@ -75,12 +75,21 @@ strictly ascending by canonical lowercase digest. The Hub checks, in order and
 before any state change: bearer token; body size; `format` and `requirements`
 (unknown → `unsupported_future`); structure; repository equals the URL; declared
 counts and lengths against `limits` (`413`); the operation identity; entitlement.
-For a known `operation_uuid`: the same request returns the original receipt
-(`{state: "complete", receipt}`) if committed, or the same session with current
-`received` offsets if not; a different request is `idempotency_conflict`.
+An operation is one content identity, its `intent_digest`; a session is one
+attempt at committing it, bound by `request_commitment`. For a known
+`operation_uuid`: a different `intent_digest` is `idempotency_conflict`; a
+committed operation returns its original receipt (`{state: "complete",
+receipt}`); the same request returns the same session with current `received`
+offsets; and a different request with the same intent supersedes the open
+session, which is what a rerun after `ref_conflict` sends (it read a newer
+revision). Superseding closes the old session and its upload URLs and answers
+`201` with a new session; bytes the old session retained carry over by digest,
+so identical bytes are never sent twice and a partial upload still resumes.
 Otherwise the Hub answers `201 {state: "open", session_id, uploads: [{digest,
-length, upload_url, received}]}`. Objects already admitted to the same repository
-start complete; nothing is deduplicated across repositories.
+length, upload_url, received}]}`. Objects already stored in the same repository
+start complete only if they still verify against their digest and length; a copy
+corrupted at rest starts empty and must be uploaded again, and the commit
+replaces it. Nothing is deduplicated across repositories.
 
 **Uploads.** `upload_url` is a capability URL on the data plane. A client must
 never send the publish token to it and must never log it. `PUT` appends exactly
@@ -89,6 +98,12 @@ is at most `max_chunk_bytes`, and the range total must equal the declared length
 When the last byte arrives the Hub verifies the digest; a mismatch discards the
 bytes (`Upload-Offset: 0`) and fails `integrity_failure`. `HEAD` reports the
 retained offset so an interrupted client resumes without re-sending.
+`gf publish` sends chunks of at most 1 MiB (or the advertised
+`max_chunk_bytes`, if smaller). Writes have no whole-request deadline; each
+chunk body may take five minutes and every other phase one minute, so any uplink
+of at least about 3.5 KB/s completes chunks, and a dropped connection loses at
+most one chunk before the next run resumes. Reads keep `gf clone`'s
+one-minute whole-request bound.
 
 **Commit.** The body is `{manifest, refs, expected_revision}`.
 `expected_revision` is required: the repository's current revision, or `null` to
@@ -123,11 +138,17 @@ is a client-defined digest of *what* the operation publishes, independent of
 package bytes; the Hub stores it per operation, the commitment binds it, and the
 operation status returns it. `gf publish` uses the SHA-256 of the canonical JSON
 `{format: "graphforge-hub-publish-intent/1", repository, ref, version_uuid,
-version_identity, project_uuid, fork_of}`. Its default operation UUID is
-`hub_publish_operation(repository, ref, version_uuid)`, so publishing the same
-Version to the same ref again replays the original receipt, and an explicit
-`--operation-uuid` reused for another Version fails `GF_IDEMPOTENCY_CONFLICT`
-before any export.
+version_identity, project_uuid, project_content, fork_of}`, where
+`project_content` is the manifest digest of the committed generation the Project
+package is exported from. A component-selective package records its exporting
+generation (`source_generation`), so the Project package changes exactly when
+that generation does, and exports of one generation are byte-identical; the
+client refuses to publish if the generation moves during the export. Its default
+operation UUID is `hub_publish_operation(repository, ref, version_uuid,
+project_content)`, so publishing the same Version of an unchanged Project to the
+same ref again replays the original receipt, a changed Project is a new
+operation, and an explicit `--operation-uuid` reused for another Version or a
+changed Project fails `GF_IDEMPOTENCY_CONFLICT` before any export.
 
 **Revision.** A repository's revision is the SHA-256 of its canonical `.gf/refs`
 document. It is the `ETag` of `.gf/refs` and the value of `expected_revision`.
@@ -174,7 +195,9 @@ The client obtains a short-lived token with the RFC 8628 device flow: `POST`
 `device_authorization_endpoint` with `client_id` and `scope`
 (`publish:<owner>/<repository>`), show `user_code` and `verification_uri`, then
 poll `token_endpoint` with the device-code grant, honouring
-`authorization_pending` and `slow_down`. `expired_token`, `access_denied`, and
+`authorization_pending` and `slow_down` (+5 s). `gf publish` bounds Hub-supplied
+timings: the poll interval to 1–60 s and the whole wait to fifteen minutes, after
+which it fails `auth_denied`. `expired_token`, `access_denied`, and
 other OAuth errors end the flow with `auth_denied`. The token endpoint uses
 RFC 6749 `{error}` bodies; every other endpoint uses `{code, message}`.
 
@@ -193,8 +216,10 @@ repository.
 
 Every non-OAuth error body is `{code, message}`. `message` is a fixed string
 chosen by the Hub; it never echoes request input, tokens, or upload URLs. `gf
-publish` branches only on `code` and prints its own fixed text, so a Hub message
-never reaches CLI output. `GF_IDEMPOTENCY_CONFLICT` exits 1, `internal` and
+publish` classifies a failure only from a parsed `{code, message}` body and
+prints its own fixed text, so a Hub message never reaches CLI output and a bare
+status (for example a proxy's `409`) is a transport failure, never a publish
+outcome. `GF_IDEMPOTENCY_CONFLICT` exits 1, `internal` and
 transport failures (`hub.network`) exit 3, and every other code exits 2 with the
 `hub.publish.*` code as the JSON `semantic_code`; an unsafe Hub, OAuth, or upload
 URL is `hub.unsafe_location`.

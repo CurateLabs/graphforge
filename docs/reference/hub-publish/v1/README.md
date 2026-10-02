@@ -40,9 +40,12 @@ or pass the HTTPS repository URL.
 
 Credentials come from `GRAPHFORGE_HUB_PUBLISH_TOKEN` or, in a terminal, the
 device flow (instructions on standard error). The token is never written to the
-Project, configuration, or output. Rerunning a publication replays its original
-receipt without uploading; an interrupted upload resumes from the Hub's offset.
-`--json` prints the receipt.
+Project, configuration, or output. The device flow waits at most fifteen
+minutes. Rerunning a publication of an unchanged Project replays its original
+receipt without uploading; after new data is committed the same command
+publishes a new snapshot. An interrupted upload resumes from the Hub's offset,
+and a rerun after `hub.publish.ref_conflict` lands on the newer revision without
+re-sending bytes the Hub already holds. `--json` prints the receipt.
 
 | Failure | Code | Exit |
 | --- | --- | --- |
