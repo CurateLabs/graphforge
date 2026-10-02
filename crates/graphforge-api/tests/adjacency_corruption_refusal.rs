@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use graphforge_api::GraphForge;
+use graphforge_api::{GraphForge, ResultSinkFormat, ResultSinkOptions};
 use graphforge_exec::demand;
 use graphforge_storage::{graph_object_path, resolve_project_generation};
 
@@ -42,6 +42,10 @@ const REVERSE_HOP: &str = "MATCH (a)<-[r]-(b) RETURN b.node_uuid AS id ORDER BY 
 /// Unordered bounded hops expand the `.out` objects.
 const FORWARD_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id LIMIT 1000";
 const FORWARD_TWO_HOP: &str = "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id LIMIT 1000";
+/// UNION ALL coalesces multiple partitions on DataFusion worker tasks.
+const FORWARD_UNION: &str = "MATCH (a)-[r]->(b) WITH b.node_uuid AS id LIMIT 1000 RETURN id UNION ALL MATCH (a)-[r]->(b) WITH b.node_uuid AS id LIMIT 1000 RETURN id";
+
+const VARIABLE_LENGTH_UNION: &str = "MATCH (a)-[r*1..2]->(b) WITH b.node_uuid AS id LIMIT 1000 RETURN id UNION ALL MATCH (a)-[r*1..2]->(b) WITH b.node_uuid AS id LIMIT 1000 RETURN id";
 
 /// Relative prefix of the files of the union (`_all`) index, whose names the
 /// storage layer encodes.
@@ -303,14 +307,51 @@ fn explicit_index_adjacency_replaces_a_corrupted_index() {
     }
 }
 
-/// A published compact generation ships a current adjacency index, so no query
-/// of it rebuilds anything. A silent O(E) rebuild inside a bounded query is the
-/// symptom #1388 removes, so the query's own evidence reports it
-/// (`DemandSnapshot::adjacency_rebuilds`) and this asserts it is zero.
+/// Construction publishes a current index. Every bounded query explains a hit
+/// and its public execution evidence records zero rebuilds.
 #[test]
 fn published_compact_generation_serves_its_index_without_rebuilding() {
-    let (_directory, path) = published_project();
+    let (directory, path) = published_project();
     let forge = GraphForge::new(Some(&path)).unwrap();
+    for (index, query) in [
+        ORDERED_ONE_HOP,
+        ORDERED_TWO_HOP,
+        REVERSE_HOP,
+        FORWARD_HOP,
+        FORWARD_TWO_HOP,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let explanation = forge.explain(query).unwrap();
+        assert!(
+            explanation.contains("adjacency=hit"),
+            "{query}: {explanation}"
+        );
+        assert!(
+            !explanation.contains("adjacency_rebuild=stale"),
+            "{query}: {explanation}"
+        );
+        let sink = directory.path().join(format!("query-{index}.arrow"));
+        let receipt = forge
+            .execute_to_result_sink_with_evidence(
+                query,
+                &Default::default(),
+                sink.to_str().unwrap(),
+                ResultSinkFormat::ArrowIpc,
+                &ResultSinkOptions::default(),
+                None,
+            )
+            .unwrap();
+        assert!(receipt.sink.progress.rows > 0, "{query}");
+        assert_eq!(receipt.evidence.adjacency_rebuilds, 0, "{query}");
+    }
+}
+
+/// A delete honestly stales the index. Explain names the pending rebuild
+/// without performing it; only the executing query pays and reports the work.
+#[test]
+fn a_stale_index_rebuild_is_reported_by_the_query_that_pays_for_it() {
     for query in [
         ORDERED_ONE_HOP,
         ORDERED_TWO_HOP,
@@ -318,39 +359,68 @@ fn published_compact_generation_serves_its_index_without_rebuilding() {
         FORWARD_HOP,
         FORWARD_TWO_HOP,
     ] {
-        let (result, snapshot) = demand::capture(|| forge.execute(query));
+        let (directory, path) = published_project();
+        let forge = GraphForge::new(Some(&path)).unwrap();
+        forge
+            .execute("MATCH (a)-[r]->(b) WITH r LIMIT 1 DELETE r")
+            .unwrap();
+        let (explanation, snapshot) = demand::capture(|| forge.explain(query));
+        let explanation = explanation.unwrap();
         assert!(
-            result
-                .unwrap()
-                .batches
-                .iter()
-                .map(|b| b.num_rows())
-                .sum::<usize>()
-                > 0
+            explanation.contains("adjacency_rebuild=stale"),
+            "{query}: {explanation}"
         );
-        assert_eq!(snapshot.adjacency_rebuilds, 0, "{query}");
+        assert_eq!(snapshot.adjacency_rebuilds, 0, "explain rebuilt: {query}");
+        let sink = directory.path().join("query.arrow");
+        let receipt = forge
+            .execute_to_result_sink_with_evidence(
+                query,
+                &Default::default(),
+                sink.to_str().unwrap(),
+                ResultSinkFormat::ArrowIpc,
+                &ResultSinkOptions::default(),
+                None,
+            )
+            .unwrap();
+        assert!(receipt.sink.progress.rows > 0, "{query}");
+        assert_eq!(receipt.evidence.adjacency_rebuilds, 1, "{query}");
+        let explanation = forge.explain(query).unwrap();
+        assert!(
+            !explanation.contains("adjacency_rebuild=stale"),
+            "{query}: {explanation}"
+        );
     }
 }
 
-/// The counter is not vacuous: a delete makes the index stale, and the next
-/// query rebuilds it (the honest derived-artifact repair) and reports that.
 #[test]
-fn a_stale_index_rebuild_is_reported_by_the_query_that_pays_for_it() {
-    let (_directory, path) = published_project();
-    let forge = GraphForge::new(Some(&path)).unwrap();
-    // A delete is not a pure append, so no delta chain can cover it.
-    forge
-        .execute("MATCH (a)-[r]->(b) WITH r LIMIT 1 DELETE r")
-        .unwrap();
-    let (result, snapshot) = demand::capture(|| forge.execute(FORWARD_HOP));
-    assert!(
-        result
-            .unwrap()
-            .batches
-            .iter()
-            .map(|b| b.num_rows())
-            .sum::<usize>()
-            > 0
-    );
-    assert!(snapshot.adjacency_rebuilds >= 1, "{snapshot:?}");
+fn a_stale_index_rebuild_on_a_worker_is_reported_by_its_query() {
+    for query in [FORWARD_UNION, VARIABLE_LENGTH_UNION] {
+        let (directory, path) = published_project();
+        let forge = GraphForge::new(Some(&path)).unwrap();
+        forge
+            .execute("MATCH (a)-[r]->(b) WITH r LIMIT 1 DELETE r")
+            .unwrap();
+        let explanation = forge.explain(query).unwrap();
+        assert!(explanation.contains("UnionExec"), "{explanation}");
+        if query == VARIABLE_LENGTH_UNION {
+            assert!(explanation.contains("VarLenExpandExec"), "{explanation}");
+        }
+        assert!(
+            explanation.contains("adjacency_rebuild=stale"),
+            "{explanation}"
+        );
+        let sink = directory.path().join("worker-query.arrow");
+        let receipt = forge
+            .execute_to_result_sink_with_evidence(
+                query,
+                &Default::default(),
+                sink.to_str().unwrap(),
+                ResultSinkFormat::ArrowIpc,
+                &ResultSinkOptions::default(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(receipt.sink.progress.rows, 2000);
+        assert_eq!(receipt.evidence.adjacency_rebuilds, 1);
+    }
 }

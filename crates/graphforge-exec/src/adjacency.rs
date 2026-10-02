@@ -547,6 +547,12 @@ pub trait AdjacencyProvider: Send + Sync {
     /// How [`adjacency`](Self::adjacency) for the same key would be served.
     fn status(&self, rel_type_name: &str, direction: Direction) -> AdjacencyStatus;
 
+    /// Explain how the request would be served, including a required stale rebuild.
+    /// This inspection never rebuilds or reads shard payloads.
+    fn explain_status(&self, rel_type_name: &str, direction: Direction) -> &'static str {
+        self.status(rel_type_name, direction).as_str()
+    }
+
     /// Cardinality of adjacency entries without opening shard payloads.
     ///
     /// The default loads the view. Persistent indexes should read the stamped
@@ -592,6 +598,10 @@ impl AdjacencyProvider for AdmittedAdjacencyProvider<'_> {
         self.provider.status(relation, direction)
     }
 
+    fn explain_status(&self, relation: &str, direction: Direction) -> &'static str {
+        self.provider.explain_status(relation, direction)
+    }
+
     fn edge_cardinality(&self, relation: &str, direction: Direction) -> Result<u64, GfError> {
         self.provider.edge_cardinality(relation, direction)
     }
@@ -611,6 +621,17 @@ pub(crate) struct AdjacencyReader<'a> {
 }
 
 impl<'a> AdjacencyReader<'a> {
+    pub(crate) fn for_capture(
+        provider: &'a dyn AdjacencyProvider,
+        relation: &str,
+        direction: Direction,
+        capture_epoch: u64,
+    ) -> Result<Self, GfError> {
+        crate::demand::with_capture_session(capture_epoch, || {
+            Self::new(provider, relation, direction)
+        })
+    }
+
     pub(crate) fn new(
         provider: &'a dyn AdjacencyProvider,
         relation: &str,
@@ -1414,6 +1435,14 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
                     AdjacencyStatus::Miss
                 }
             }
+        }
+    }
+
+    fn explain_status(&self, rel_type_name: &str, direction: Direction) -> &'static str {
+        if matches!(self.state(), IndexState::Ready { fresh: false, .. }) {
+            "miss, adjacency_rebuild=stale"
+        } else {
+            self.status(rel_type_name, direction).as_str()
         }
     }
 

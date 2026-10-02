@@ -25,6 +25,9 @@ pub struct QueryExecutionEvidence {
     pub sorts: Vec<QuerySortEvidence>,
     /// Sanitized operator RSS samples.
     pub operator_rss: Vec<QueryOperatorRssEvidence>,
+    /// Adjacency rebuilds performed because an index was missing or stale.
+    /// Construction-published generations serve their current index with zero.
+    pub adjacency_rebuilds: u64,
     /// Maximum concurrent filtered reads.
     pub max_in_flight_reads: u64,
     /// Query memory reservation before execution.
@@ -327,6 +330,7 @@ impl From<graphforge_exec::demand::DemandSnapshot> for QueryExecutionEvidence {
             hops,
             sorts,
             operator_rss,
+            adjacency_rebuilds: snapshot.adjacency_rebuilds,
             max_in_flight_reads: snapshot.max_in_flight_reads,
             memory_reserved_before: snapshot.memory_reserved_before,
             memory_reserved_after: snapshot.memory_reserved_after,
