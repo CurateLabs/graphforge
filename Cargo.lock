@@ -2327,8 +2327,11 @@ dependencies = [
 name = "graphforge-hub-publish"
 version = "0.5.2"
 dependencies = [
+ "graphforge-discovery",
  "serde",
+ "serde_json",
  "sha2",
+ "url",
  "uuid",
 ]
 

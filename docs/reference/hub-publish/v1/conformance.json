@@ -1,0 +1,3556 @@
+{
+  "format": "graphforge-hub-publish-conformance/1",
+  "hub": "https://hub.example",
+  "cases": [
+    {
+      "name": "capabilities-document",
+      "description": "The capabilities document names the format, required capabilities, device-flow endpoints, object locations, and limits.",
+      "steps": [
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/publish"
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "authorization": {
+                "device_authorization_endpoint": "https://hub.example/.gf/oauth/device_authorization",
+                "scope": "publish:openalex/demo",
+                "token_endpoint": "https://hub.example/.gf/oauth/token"
+              },
+              "capabilities": [
+                {
+                  "capability": "device-authorization",
+                  "major": 1
+                }
+              ],
+              "format": "graphforge-hub-publish/1",
+              "limits": {
+                "max_chunk_bytes": 8388608,
+                "max_document_bytes": 4194304,
+                "max_object_bytes": 67108864,
+                "max_objects": 1024,
+                "max_session_bytes": 268435456
+              },
+              "object_location_template": "https://hub.example/openalex/demo/.gf/objects/{digest}",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "requirements": [
+                {
+                  "capability": "publish-session",
+                  "major": 1
+                },
+                {
+                  "capability": "resumable-upload",
+                  "major": 1
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "create-and-read-back",
+      "description": "Create-if-absent publication; refs, manifest, and object reads (with resumable Range and If-Range) serve exactly the published bytes.",
+      "steps": [
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:openalex/demo",
+            "ttl_seconds": 900,
+            "capture": "token"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000001",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${first_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${first_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "first_session": "/session_id",
+              "first_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${first_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-46/47"
+            },
+            "body_text": "graphforge project package fixture: version one"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "47"
+            },
+            "json": {
+              "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+              "length": 47,
+              "received": 47
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions/${first_session}/commit",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "expected_revision": null,
+              "manifest": {
+                "capabilities": [
+                  {
+                    "capability": "range-requests",
+                    "major": 1
+                  }
+                ],
+                "default_ref": "main",
+                "format": "graphforge-discovery/1",
+                "immutable_version": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "objects": [
+                  {
+                    "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                    "length": 47,
+                    "locations": [
+                      "https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  }
+                ],
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "package_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "requirements": [
+                  {
+                    "capability": "portable-v2",
+                    "major": 1
+                  }
+                ],
+                "resolved_ref": "main",
+                "version": {
+                  "major": 1,
+                  "minor": 1
+                }
+              },
+              "refs": [
+                "main"
+              ]
+            }
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "receipt": {
+                "format": "graphforge-hub-publish/1",
+                "manifest_validator": "sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab",
+                "operation_uuid": "00000000-0000-7000-8000-000000000001",
+                "previous_revision": null,
+                "refs": [
+                  "main"
+                ],
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e",
+                "revision": "sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae"
+              },
+              "state": "complete"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/refs"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "etag": "\"sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae\""
+            },
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":1}}"
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/manifest"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "etag": "\"sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab\""
+            },
+            "body_text": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"objects\":[{\"digest\":\"sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60\",\"length\":47,\"locations\":[\"https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"object_digest\":\"sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":1}}"
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "accept-ranges": "bytes",
+              "etag": "\"sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60\""
+            },
+            "body_text": "graphforge project package fixture: version one"
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+            "headers": {
+              "if-range": "\"sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60\"",
+              "range": "bytes=10-"
+            }
+          },
+          "expect": {
+            "status": 206,
+            "headers": {
+              "content-range": "bytes 10-46/47"
+            },
+            "body_text": " project package fixture: version one"
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+            "headers": {
+              "if-range": "\"stale\"",
+              "range": "bytes=10-"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_text": "graphforge project package fixture: version one"
+          }
+        }
+      ]
+    },
+    {
+      "name": "same-publication-twice-returns-original-receipt",
+      "description": "Reopening and recommitting the same operation with the same commitment returns the original receipt before any upload; the repository revision does not change.",
+      "steps": [
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:openalex/demo",
+            "ttl_seconds": 900,
+            "capture": "token"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000002",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${first_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${first_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "first_session": "/session_id",
+              "first_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${first_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-46/47"
+            },
+            "body_text": "graphforge project package fixture: version one"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "47"
+            },
+            "json": {
+              "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+              "length": 47,
+              "received": 47
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions/${first_session}/commit",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "expected_revision": null,
+              "manifest": {
+                "capabilities": [
+                  {
+                    "capability": "range-requests",
+                    "major": 1
+                  }
+                ],
+                "default_ref": "main",
+                "format": "graphforge-discovery/1",
+                "immutable_version": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "objects": [
+                  {
+                    "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                    "length": 47,
+                    "locations": [
+                      "https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  }
+                ],
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "package_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "requirements": [
+                  {
+                    "capability": "portable-v2",
+                    "major": 1
+                  }
+                ],
+                "resolved_ref": "main",
+                "version": {
+                  "major": 1,
+                  "minor": 1
+                }
+              },
+              "refs": [
+                "main"
+              ]
+            }
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "receipt": {
+                "format": "graphforge-hub-publish/1",
+                "manifest_validator": "sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab",
+                "operation_uuid": "00000000-0000-7000-8000-000000000002",
+                "previous_revision": null,
+                "refs": [
+                  "main"
+                ],
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e",
+                "revision": "sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae"
+              },
+              "state": "complete"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000002",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "receipt": {
+                "format": "graphforge-hub-publish/1",
+                "manifest_validator": "sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab",
+                "operation_uuid": "00000000-0000-7000-8000-000000000002",
+                "previous_revision": null,
+                "refs": [
+                  "main"
+                ],
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e",
+                "revision": "sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae"
+              },
+              "state": "complete"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions/${first_session}/commit",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "expected_revision": null,
+              "manifest": {
+                "capabilities": [
+                  {
+                    "capability": "range-requests",
+                    "major": 1
+                  }
+                ],
+                "default_ref": "main",
+                "format": "graphforge-discovery/1",
+                "immutable_version": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "objects": [
+                  {
+                    "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                    "length": 47,
+                    "locations": [
+                      "https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  }
+                ],
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "package_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "requirements": [
+                  {
+                    "capability": "portable-v2",
+                    "major": 1
+                  }
+                ],
+                "resolved_ref": "main",
+                "version": {
+                  "major": 1,
+                  "minor": 1
+                }
+              },
+              "refs": [
+                "main"
+              ]
+            }
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "receipt": {
+                "format": "graphforge-hub-publish/1",
+                "manifest_validator": "sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab",
+                "operation_uuid": "00000000-0000-7000-8000-000000000002",
+                "previous_revision": null,
+                "refs": [
+                  "main"
+                ],
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e",
+                "revision": "sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae"
+              },
+              "state": "complete"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/refs"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "etag": "\"sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae\""
+            },
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":1}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "changed-content-same-operation-conflicts",
+      "description": "A different request commitment under a committed operation identity fails idempotency_conflict (GF_IDEMPOTENCY_CONFLICT) and changes nothing.",
+      "steps": [
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:openalex/demo",
+            "ttl_seconds": 900,
+            "capture": "token"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000003",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${first_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${first_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "first_session": "/session_id",
+              "first_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${first_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-46/47"
+            },
+            "body_text": "graphforge project package fixture: version one"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "47"
+            },
+            "json": {
+              "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+              "length": 47,
+              "received": 47
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions/${first_session}/commit",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "expected_revision": null,
+              "manifest": {
+                "capabilities": [
+                  {
+                    "capability": "range-requests",
+                    "major": 1
+                  }
+                ],
+                "default_ref": "main",
+                "format": "graphforge-discovery/1",
+                "immutable_version": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "objects": [
+                  {
+                    "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                    "length": 47,
+                    "locations": [
+                      "https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  }
+                ],
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "package_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "requirements": [
+                  {
+                    "capability": "portable-v2",
+                    "major": 1
+                  }
+                ],
+                "resolved_ref": "main",
+                "version": {
+                  "major": 1,
+                  "minor": 1
+                }
+              },
+              "refs": [
+                "main"
+              ]
+            }
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "receipt": {
+                "format": "graphforge-hub-publish/1",
+                "manifest_validator": "sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab",
+                "operation_uuid": "00000000-0000-7000-8000-000000000003",
+                "previous_revision": null,
+                "refs": [
+                  "main"
+                ],
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e",
+                "revision": "sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae"
+              },
+              "state": "complete"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:abc32db33c592153d62f55b02481193994ae14bbce802bc1d49e2a2cd327891f",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000003",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:4efece89d7307ba27ec22855d40c3c719c7d3f1ca224daeaee0cffb7a9ecb1cd"
+            }
+          },
+          "expect": {
+            "status": 409,
+            "error": "idempotency_conflict"
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/refs"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "etag": "\"sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae\""
+            },
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":1}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "commit-content-must-match-commitment",
+      "description": "A commit whose manifest differs from the one the request commitment bound fails idempotency_conflict; the repository is not created.",
+      "steps": [
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:openalex/demo",
+            "ttl_seconds": 900,
+            "capture": "token"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000004",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${first_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${first_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "first_session": "/session_id",
+              "first_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${first_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-46/47"
+            },
+            "body_text": "graphforge project package fixture: version one"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "47"
+            },
+            "json": {
+              "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+              "length": 47,
+              "received": 47
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions/${first_session}/commit",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "expected_revision": null,
+              "manifest": {
+                "capabilities": [
+                  {
+                    "capability": "range-requests",
+                    "major": 1
+                  }
+                ],
+                "default_ref": "main",
+                "format": "graphforge-discovery/1",
+                "immutable_version": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "objects": [
+                  {
+                    "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                    "length": 47,
+                    "locations": [
+                      "https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  }
+                ],
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "package_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                },
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "requirements": [
+                  {
+                    "capability": "portable-v2",
+                    "major": 1
+                  }
+                ],
+                "resolved_ref": "main",
+                "version": {
+                  "major": 1,
+                  "minor": 1
+                }
+              },
+              "refs": [
+                "main"
+              ]
+            }
+          },
+          "expect": {
+            "status": 409,
+            "error": "idempotency_conflict"
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/refs"
+          },
+          "expect": {
+            "status": 404,
+            "error": "invalid_input"
+          }
+        }
+      ]
+    },
+    {
+      "name": "interrupted-upload-resumes",
+      "description": "After a partial PUT, a retry at the wrong offset is refused with the retained offset, HEAD reports it, the remaining bytes append, and the commit succeeds.",
+      "steps": [
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:openalex/demo",
+            "ttl_seconds": 900,
+            "capture": "token"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000005",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${first_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${first_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "first_session": "/session_id",
+              "first_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${first_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-9/47"
+            },
+            "body_text": "graphforge"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "10"
+            },
+            "json": {
+              "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+              "length": 47,
+              "received": 10
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${first_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-46/47"
+            },
+            "body_text": "graphforge project package fixture: version one"
+          },
+          "expect": {
+            "status": 416,
+            "headers": {
+              "upload-offset": "10"
+            },
+            "error": "invalid_input"
+          }
+        },
+        {
+          "request": {
+            "method": "HEAD",
+            "url": "${first_upload_0}"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-length": "47",
+              "upload-offset": "10"
+            },
+            "body_text": ""
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000005",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "session_id": "${first_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 10,
+                  "upload_url": "${first_upload_0}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${first_upload_0}",
+            "headers": {
+              "content-range": "bytes 10-46/47"
+            },
+            "body_text": " project package fixture: version one"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "47"
+            },
+            "json": {
+              "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+              "length": 47,
+              "received": 47
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions/${first_session}/commit",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "expected_revision": null,
+              "manifest": {
+                "capabilities": [
+                  {
+                    "capability": "range-requests",
+                    "major": 1
+                  }
+                ],
+                "default_ref": "main",
+                "format": "graphforge-discovery/1",
+                "immutable_version": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "objects": [
+                  {
+                    "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                    "length": 47,
+                    "locations": [
+                      "https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  }
+                ],
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "package_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "requirements": [
+                  {
+                    "capability": "portable-v2",
+                    "major": 1
+                  }
+                ],
+                "resolved_ref": "main",
+                "version": {
+                  "major": 1,
+                  "minor": 1
+                }
+              },
+              "refs": [
+                "main"
+              ]
+            }
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "receipt": {
+                "format": "graphforge-hub-publish/1",
+                "manifest_validator": "sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab",
+                "operation_uuid": "00000000-0000-7000-8000-000000000005",
+                "previous_revision": null,
+                "refs": [
+                  "main"
+                ],
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e",
+                "revision": "sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae"
+              },
+              "state": "complete"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/refs"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "etag": "\"sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae\""
+            },
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":1}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "corrupt-upload-refused-before-ref-moves",
+      "description": "Bytes that do not hash to the declared digest are discarded at finalize; the commit fails integrity_failure and refs keep the prior revision.",
+      "steps": [
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:openalex/demo",
+            "ttl_seconds": 900,
+            "capture": "token"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000006",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${first_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${first_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "first_session": "/session_id",
+              "first_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${first_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-46/47"
+            },
+            "body_text": "graphforge project package fixture: version one"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "47"
+            },
+            "json": {
+              "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+              "length": 47,
+              "received": 47
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions/${first_session}/commit",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "expected_revision": null,
+              "manifest": {
+                "capabilities": [
+                  {
+                    "capability": "range-requests",
+                    "major": 1
+                  }
+                ],
+                "default_ref": "main",
+                "format": "graphforge-discovery/1",
+                "immutable_version": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "objects": [
+                  {
+                    "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                    "length": 47,
+                    "locations": [
+                      "https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  }
+                ],
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "package_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "requirements": [
+                  {
+                    "capability": "portable-v2",
+                    "major": 1
+                  }
+                ],
+                "resolved_ref": "main",
+                "version": {
+                  "major": 1,
+                  "minor": 1
+                }
+              },
+              "refs": [
+                "main"
+              ]
+            }
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "receipt": {
+                "format": "graphforge-hub-publish/1",
+                "manifest_validator": "sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab",
+                "operation_uuid": "00000000-0000-7000-8000-000000000006",
+                "previous_revision": null,
+                "refs": [
+                  "main"
+                ],
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e",
+                "revision": "sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae"
+              },
+              "state": "complete"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:abc32db33c592153d62f55b02481193994ae14bbce802bc1d49e2a2cd327891f",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000007",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:4efece89d7307ba27ec22855d40c3c719c7d3f1ca224daeaee0cffb7a9ecb1cd"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${second_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:abc32db33c592153d62f55b02481193994ae14bbce802bc1d49e2a2cd327891f",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${second_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "second_session": "/session_id",
+              "second_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${second_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-46/47"
+            },
+            "body_text": "fraphforge project package fixture: version two"
+          },
+          "expect": {
+            "status": 422,
+            "headers": {
+              "upload-offset": "0"
+            },
+            "error": "integrity_failure"
+          }
+        },
+        {
+          "request": {
+            "method": "HEAD",
+            "url": "${second_upload_0}"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "0"
+            },
+            "body_text": ""
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions/${second_session}/commit",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "expected_revision": "sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae",
+              "manifest": {
+                "capabilities": [
+                  {
+                    "capability": "range-requests",
+                    "major": 1
+                  }
+                ],
+                "default_ref": "main",
+                "format": "graphforge-discovery/1",
+                "immutable_version": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "objects": [
+                  {
+                    "digest": "sha256:abc32db33c592153d62f55b02481193994ae14bbce802bc1d49e2a2cd327891f",
+                    "length": 47,
+                    "locations": [
+                      "https://hub.example/openalex/demo/.gf/objects/sha256:abc32db33c592153d62f55b02481193994ae14bbce802bc1d49e2a2cd327891f"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  }
+                ],
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:abc32db33c592153d62f55b02481193994ae14bbce802bc1d49e2a2cd327891f",
+                  "package_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                },
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "requirements": [
+                  {
+                    "capability": "portable-v2",
+                    "major": 1
+                  }
+                ],
+                "resolved_ref": "main",
+                "version": {
+                  "major": 1,
+                  "minor": 1
+                }
+              },
+              "refs": [
+                "main"
+              ]
+            }
+          },
+          "expect": {
+            "status": 422,
+            "error": "integrity_failure"
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/refs"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "etag": "\"sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae\""
+            },
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":1}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "object-corrupted-after-upload-refuses-commit",
+      "description": "The commit re-verifies every inventory object; one corrupted after upload fails integrity_failure and no repository is created.",
+      "steps": [
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:openalex/demo",
+            "ttl_seconds": 900,
+            "capture": "token"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000008",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${first_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${first_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "first_session": "/session_id",
+              "first_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${first_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-46/47"
+            },
+            "body_text": "graphforge project package fixture: version one"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "47"
+            },
+            "json": {
+              "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+              "length": 47,
+              "received": 47
+            }
+          }
+        },
+        {
+          "action": {
+            "action": "corrupt_object",
+            "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions/${first_session}/commit",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "expected_revision": null,
+              "manifest": {
+                "capabilities": [
+                  {
+                    "capability": "range-requests",
+                    "major": 1
+                  }
+                ],
+                "default_ref": "main",
+                "format": "graphforge-discovery/1",
+                "immutable_version": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "objects": [
+                  {
+                    "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                    "length": 47,
+                    "locations": [
+                      "https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  }
+                ],
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "package_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "requirements": [
+                  {
+                    "capability": "portable-v2",
+                    "major": 1
+                  }
+                ],
+                "resolved_ref": "main",
+                "version": {
+                  "major": 1,
+                  "minor": 1
+                }
+              },
+              "refs": [
+                "main"
+              ]
+            }
+          },
+          "expect": {
+            "status": 422,
+            "error": "integrity_failure"
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/refs"
+          },
+          "expect": {
+            "status": 404,
+            "error": "invalid_input"
+          }
+        }
+      ]
+    },
+    {
+      "name": "stale-expected-revision-conflicts",
+      "description": "A commit whose expected_revision is no longer current fails ref_conflict and leaves refs at the newer revision.",
+      "steps": [
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:openalex/demo",
+            "ttl_seconds": 900,
+            "capture": "token"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000009",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${first_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${first_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "first_session": "/session_id",
+              "first_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${first_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-46/47"
+            },
+            "body_text": "graphforge project package fixture: version one"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "47"
+            },
+            "json": {
+              "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+              "length": 47,
+              "received": 47
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions/${first_session}/commit",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "expected_revision": null,
+              "manifest": {
+                "capabilities": [
+                  {
+                    "capability": "range-requests",
+                    "major": 1
+                  }
+                ],
+                "default_ref": "main",
+                "format": "graphforge-discovery/1",
+                "immutable_version": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "objects": [
+                  {
+                    "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                    "length": 47,
+                    "locations": [
+                      "https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  }
+                ],
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "package_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "requirements": [
+                  {
+                    "capability": "portable-v2",
+                    "major": 1
+                  }
+                ],
+                "resolved_ref": "main",
+                "version": {
+                  "major": 1,
+                  "minor": 1
+                }
+              },
+              "refs": [
+                "main"
+              ]
+            }
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "receipt": {
+                "format": "graphforge-hub-publish/1",
+                "manifest_validator": "sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab",
+                "operation_uuid": "00000000-0000-7000-8000-000000000009",
+                "previous_revision": null,
+                "refs": [
+                  "main"
+                ],
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e",
+                "revision": "sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae"
+              },
+              "state": "complete"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:abc32db33c592153d62f55b02481193994ae14bbce802bc1d49e2a2cd327891f",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-00000000000a",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:4efece89d7307ba27ec22855d40c3c719c7d3f1ca224daeaee0cffb7a9ecb1cd"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${second_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:abc32db33c592153d62f55b02481193994ae14bbce802bc1d49e2a2cd327891f",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${second_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "second_session": "/session_id",
+              "second_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${second_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-46/47"
+            },
+            "body_text": "graphforge project package fixture: version two"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "47"
+            },
+            "json": {
+              "digest": "sha256:abc32db33c592153d62f55b02481193994ae14bbce802bc1d49e2a2cd327891f",
+              "length": 47,
+              "received": 47
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions/${second_session}/commit",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "expected_revision": "sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae",
+              "manifest": {
+                "capabilities": [
+                  {
+                    "capability": "range-requests",
+                    "major": 1
+                  }
+                ],
+                "default_ref": "main",
+                "format": "graphforge-discovery/1",
+                "immutable_version": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "objects": [
+                  {
+                    "digest": "sha256:abc32db33c592153d62f55b02481193994ae14bbce802bc1d49e2a2cd327891f",
+                    "length": 47,
+                    "locations": [
+                      "https://hub.example/openalex/demo/.gf/objects/sha256:abc32db33c592153d62f55b02481193994ae14bbce802bc1d49e2a2cd327891f"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  }
+                ],
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:abc32db33c592153d62f55b02481193994ae14bbce802bc1d49e2a2cd327891f",
+                  "package_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                },
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "requirements": [
+                  {
+                    "capability": "portable-v2",
+                    "major": 1
+                  }
+                ],
+                "resolved_ref": "main",
+                "version": {
+                  "major": 1,
+                  "minor": 1
+                }
+              },
+              "refs": [
+                "main"
+              ]
+            }
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "receipt": {
+                "format": "graphforge-hub-publish/1",
+                "manifest_validator": "sha256:a1e6a734ccf8fa77308500a7d85e5a3a3bd9f4f532cb2e419df94925d0e769af",
+                "operation_uuid": "00000000-0000-7000-8000-00000000000a",
+                "previous_revision": "sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae",
+                "refs": [
+                  "main"
+                ],
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "request_commitment": "sha256:4efece89d7307ba27ec22855d40c3c719c7d3f1ca224daeaee0cffb7a9ecb1cd",
+                "revision": "sha256:73e1c93da4dd9ea1d49d1b642960a049223dfad197b02598ff49bdb29cd12156"
+              },
+              "state": "complete"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:f024779c48fe618f36dd04cd2bbbf3a44262589cf354950aa00b6a10fe11142a",
+                  "length": 49,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-00000000000b",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:f02c25a4ec87142965d3627ffb1940848843ddebbadc9b3890ad4543df0bb362"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${third_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:f024779c48fe618f36dd04cd2bbbf3a44262589cf354950aa00b6a10fe11142a",
+                  "length": 49,
+                  "received": 0,
+                  "upload_url": "${third_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "third_session": "/session_id",
+              "third_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${third_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-48/49"
+            },
+            "body_text": "graphforge project package fixture: version three"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "49"
+            },
+            "json": {
+              "digest": "sha256:f024779c48fe618f36dd04cd2bbbf3a44262589cf354950aa00b6a10fe11142a",
+              "length": 49,
+              "received": 49
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions/${third_session}/commit",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "expected_revision": "sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae",
+              "manifest": {
+                "capabilities": [
+                  {
+                    "capability": "range-requests",
+                    "major": 1
+                  }
+                ],
+                "default_ref": "main",
+                "format": "graphforge-discovery/1",
+                "immutable_version": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "objects": [
+                  {
+                    "digest": "sha256:f024779c48fe618f36dd04cd2bbbf3a44262589cf354950aa00b6a10fe11142a",
+                    "length": 49,
+                    "locations": [
+                      "https://hub.example/openalex/demo/.gf/objects/sha256:f024779c48fe618f36dd04cd2bbbf3a44262589cf354950aa00b6a10fe11142a"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  }
+                ],
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:f024779c48fe618f36dd04cd2bbbf3a44262589cf354950aa00b6a10fe11142a",
+                  "package_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                },
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "requirements": [
+                  {
+                    "capability": "portable-v2",
+                    "major": 1
+                  }
+                ],
+                "resolved_ref": "main",
+                "version": {
+                  "major": 1,
+                  "minor": 1
+                }
+              },
+              "refs": [
+                "main"
+              ]
+            }
+          },
+          "expect": {
+            "status": 412,
+            "error": "ref_conflict"
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/refs"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "etag": "\"sha256:73e1c93da4dd9ea1d49d1b642960a049223dfad197b02598ff49bdb29cd12156\""
+            },
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"validator\":\"sha256:a1e6a734ccf8fa77308500a7d85e5a3a3bd9f4f532cb2e419df94925d0e769af\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":1}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "fork-is-create-if-absent",
+      "description": "A Fork publishes a new repository identity with expected_revision null and its origin citation object stored verbatim; create-if-absent on an existing repository fails ref_conflict.",
+      "steps": [
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:openalex/demo",
+            "ttl_seconds": 900,
+            "capture": "token"
+          }
+        },
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:alice/demo-fork",
+            "ttl_seconds": 900,
+            "capture": "fork_token"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-00000000000c",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${origin_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${origin_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "origin_session": "/session_id",
+              "origin_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${origin_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-46/47"
+            },
+            "body_text": "graphforge project package fixture: version one"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "47"
+            },
+            "json": {
+              "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+              "length": 47,
+              "received": 47
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions/${origin_session}/commit",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "expected_revision": null,
+              "manifest": {
+                "capabilities": [
+                  {
+                    "capability": "range-requests",
+                    "major": 1
+                  }
+                ],
+                "default_ref": "main",
+                "format": "graphforge-discovery/1",
+                "immutable_version": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "objects": [
+                  {
+                    "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                    "length": 47,
+                    "locations": [
+                      "https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  }
+                ],
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "package_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "requirements": [
+                  {
+                    "capability": "portable-v2",
+                    "major": 1
+                  }
+                ],
+                "resolved_ref": "main",
+                "version": {
+                  "major": 1,
+                  "minor": 1
+                }
+              },
+              "refs": [
+                "main"
+              ]
+            }
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "receipt": {
+                "format": "graphforge-hub-publish/1",
+                "manifest_validator": "sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab",
+                "operation_uuid": "00000000-0000-7000-8000-00000000000c",
+                "previous_revision": null,
+                "refs": [
+                  "main"
+                ],
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e",
+                "revision": "sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae"
+              },
+              "state": "complete"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/alice/demo-fork/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${fork_token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                },
+                {
+                  "digest": "sha256:be4ac61de4ca9065a15e30ab991d699b4bdfaa3e7dd9194e3aa132eabe75845e",
+                  "length": 126,
+                  "media_type": "application/vnd.graphforge.research-lineage+json"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-00000000000d",
+              "repository": {
+                "owner": "alice",
+                "repository": "demo-fork"
+              },
+              "request_commitment": "sha256:2a287c3d060797638c793ecbc1bb127346421ee8dc66a47354ed0abae60288d5"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${fork_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${fork_upload_0}"
+                },
+                {
+                  "digest": "sha256:be4ac61de4ca9065a15e30ab991d699b4bdfaa3e7dd9194e3aa132eabe75845e",
+                  "length": 126,
+                  "received": 0,
+                  "upload_url": "${fork_upload_1}"
+                }
+              ]
+            },
+            "capture": {
+              "fork_session": "/session_id",
+              "fork_upload_0": "/uploads/0/upload_url",
+              "fork_upload_1": "/uploads/1/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${fork_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-46/47"
+            },
+            "body_text": "graphforge project package fixture: version one"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "47"
+            },
+            "json": {
+              "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+              "length": 47,
+              "received": 47
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${fork_upload_1}",
+            "headers": {
+              "content-range": "bytes 0-125/126"
+            },
+            "body_text": "{\"origin\":{\"repository\":\"openalex/demo\",\"revision\":\"sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae\"}}"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "126"
+            },
+            "json": {
+              "digest": "sha256:be4ac61de4ca9065a15e30ab991d699b4bdfaa3e7dd9194e3aa132eabe75845e",
+              "length": 126,
+              "received": 126
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/alice/demo-fork/.gf/publish/sessions/${fork_session}/commit",
+            "headers": {
+              "authorization": "Bearer ${fork_token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "expected_revision": null,
+              "manifest": {
+                "capabilities": [
+                  {
+                    "capability": "range-requests",
+                    "major": 1
+                  }
+                ],
+                "default_ref": "main",
+                "format": "graphforge-discovery/1",
+                "immutable_version": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "objects": [
+                  {
+                    "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                    "length": 47,
+                    "locations": [
+                      "https://hub.example/alice/demo-fork/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  },
+                  {
+                    "digest": "sha256:be4ac61de4ca9065a15e30ab991d699b4bdfaa3e7dd9194e3aa132eabe75845e",
+                    "length": 126,
+                    "locations": [
+                      "https://hub.example/alice/demo-fork/.gf/objects/sha256:be4ac61de4ca9065a15e30ab991d699b4bdfaa3e7dd9194e3aa132eabe75845e"
+                    ],
+                    "media_type": "application/vnd.graphforge.research-lineage+json"
+                  }
+                ],
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "package_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "repository": {
+                  "owner": "alice",
+                  "repository": "demo-fork"
+                },
+                "requirements": [
+                  {
+                    "capability": "portable-v2",
+                    "major": 1
+                  }
+                ],
+                "resolved_ref": "main",
+                "version": {
+                  "major": 1,
+                  "minor": 1
+                }
+              },
+              "refs": [
+                "main"
+              ]
+            }
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "receipt": {
+                "format": "graphforge-hub-publish/1",
+                "manifest_validator": "sha256:176967fe3b46a57b28e0480b09cfee9672ce1fe51438f0b79a052902c77b520e",
+                "operation_uuid": "00000000-0000-7000-8000-00000000000d",
+                "previous_revision": null,
+                "refs": [
+                  "main"
+                ],
+                "repository": {
+                  "owner": "alice",
+                  "repository": "demo-fork"
+                },
+                "request_commitment": "sha256:2a287c3d060797638c793ecbc1bb127346421ee8dc66a47354ed0abae60288d5",
+                "revision": "sha256:fd3d4167d8742ddab6bfe19214b44f03829ab30ade707bacf49f0bfb8bdee151"
+              },
+              "state": "complete"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/alice/demo-fork/.gf/refs"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "etag": "\"sha256:fd3d4167d8742ddab6bfe19214b44f03829ab30ade707bacf49f0bfb8bdee151\""
+            },
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:176967fe3b46a57b28e0480b09cfee9672ce1fe51438f0b79a052902c77b520e\"}],\"repository\":{\"owner\":\"alice\",\"repository\":\"demo-fork\"},\"version\":{\"major\":1,\"minor\":1}}"
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/alice/demo-fork/.gf/objects/sha256:be4ac61de4ca9065a15e30ab991d699b4bdfaa3e7dd9194e3aa132eabe75845e"
+          },
+          "expect": {
+            "status": 200,
+            "body_text": "{\"origin\":{\"repository\":\"openalex/demo\",\"revision\":\"sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae\"}}"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:5bc8b4d7d78bd840099b7f381bcd2a4ad0913f1422b4375a72ea65e3de75a426",
+                  "length": 48,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-00000000000e",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:6746233bd4834395d8faee4fab16c945c7a5dfca6ce119d166b2fe3a43398972"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${again_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:5bc8b4d7d78bd840099b7f381bcd2a4ad0913f1422b4375a72ea65e3de75a426",
+                  "length": 48,
+                  "received": 0,
+                  "upload_url": "${again_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "again_session": "/session_id",
+              "again_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${again_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-47/48"
+            },
+            "body_text": "graphforge project package fixture: fork attempt"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "48"
+            },
+            "json": {
+              "digest": "sha256:5bc8b4d7d78bd840099b7f381bcd2a4ad0913f1422b4375a72ea65e3de75a426",
+              "length": 48,
+              "received": 48
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions/${again_session}/commit",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "expected_revision": null,
+              "manifest": {
+                "capabilities": [
+                  {
+                    "capability": "range-requests",
+                    "major": 1
+                  }
+                ],
+                "default_ref": "main",
+                "format": "graphforge-discovery/1",
+                "immutable_version": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "objects": [
+                  {
+                    "digest": "sha256:5bc8b4d7d78bd840099b7f381bcd2a4ad0913f1422b4375a72ea65e3de75a426",
+                    "length": 48,
+                    "locations": [
+                      "https://hub.example/openalex/demo/.gf/objects/sha256:5bc8b4d7d78bd840099b7f381bcd2a4ad0913f1422b4375a72ea65e3de75a426"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  }
+                ],
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:5bc8b4d7d78bd840099b7f381bcd2a4ad0913f1422b4375a72ea65e3de75a426",
+                  "package_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "requirements": [
+                  {
+                    "capability": "portable-v2",
+                    "major": 1
+                  }
+                ],
+                "resolved_ref": "main",
+                "version": {
+                  "major": 1,
+                  "minor": 1
+                }
+              },
+              "refs": [
+                "main"
+              ]
+            }
+          },
+          "expect": {
+            "status": 412,
+            "error": "ref_conflict"
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/refs"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "etag": "\"sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae\""
+            },
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":1}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "unknown-required-capability-is-unsupported-future",
+      "description": "An unknown required capability or format major fails unsupported_future before any state change: the same operation then opens normally.",
+      "steps": [
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:openalex/demo",
+            "ttl_seconds": 900,
+            "capture": "token"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-00000000000f",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e",
+              "requirements": [
+                {
+                  "capability": "server-side-merge",
+                  "major": 1
+                }
+              ]
+            }
+          },
+          "expect": {
+            "status": 422,
+            "error": "unsupported_future"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/2",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-00000000000f",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e",
+              "unknown_future_member": true
+            }
+          },
+          "expect": {
+            "status": 422,
+            "error": "unsupported_future"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-00000000000f",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${first_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${first_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "first_session": "/session_id",
+              "first_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/refs"
+          },
+          "expect": {
+            "status": 404,
+            "error": "invalid_input"
+          }
+        }
+      ]
+    },
+    {
+      "name": "credentials-are-scoped-and-short-lived",
+      "description": "A missing, unknown, expired, or other-repository token fails auth_denied; nothing is opened.",
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000010",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "www-authenticate": "Bearer realm=\"graphforge-hub\""
+            },
+            "error": "auth_denied"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer not-a-token",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000010",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "www-authenticate": "Bearer error=\"invalid_token\""
+            },
+            "error": "auth_denied"
+          }
+        },
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:alice/demo",
+            "ttl_seconds": 900,
+            "capture": "other"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${other}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000010",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 403,
+            "headers": {
+              "www-authenticate": "Bearer error=\"insufficient_scope\""
+            },
+            "error": "auth_denied"
+          }
+        },
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:openalex/demo",
+            "ttl_seconds": 60,
+            "capture": "short"
+          }
+        },
+        {
+          "action": {
+            "action": "advance_clock",
+            "seconds": 60
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${short}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000010",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 401,
+            "error": "auth_denied"
+          }
+        },
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:openalex/demo",
+            "ttl_seconds": 900,
+            "capture": "token"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000010",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${first_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${first_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "first_session": "/session_id",
+              "first_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "oversized-declared-length-refused-at-open",
+      "description": "A declared object length above the advertised max_object_bytes fails at session open with 413, before any upload location exists.",
+      "steps": [
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:openalex/demo",
+            "ttl_seconds": 900,
+            "capture": "token"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 67108865,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000011",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 413,
+            "error": "invalid_input"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000011",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${first_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${first_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "first_session": "/session_id",
+              "first_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "entitlement-denied",
+      "description": "A publication beyond the owner's storage entitlement fails entitlement_denied at session open.",
+      "steps": [
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:openalex/demo",
+            "ttl_seconds": 900,
+            "capture": "token"
+          }
+        },
+        {
+          "action": {
+            "action": "set_quota",
+            "owner": "openalex",
+            "bytes": 8
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000012",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 403,
+            "error": "entitlement_denied"
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/refs"
+          },
+          "expect": {
+            "status": 404,
+            "error": "invalid_input"
+          }
+        }
+      ]
+    },
+    {
+      "name": "manifest-must-reference-admitted-objects",
+      "description": "A manifest listing an object at a location other than this Hub's is refused with invalid_input even when the commitment binds it; the repository is not created.",
+      "steps": [
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:openalex/demo",
+            "ttl_seconds": 900,
+            "capture": "token"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000013",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:1ffaf2d79e643700477dc0d43430c9f30c0f6b931f5868042431b260329c0c0b"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${first_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${first_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "first_session": "/session_id",
+              "first_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${first_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-46/47"
+            },
+            "body_text": "graphforge project package fixture: version one"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "47"
+            },
+            "json": {
+              "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+              "length": 47,
+              "received": 47
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions/${first_session}/commit",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "expected_revision": null,
+              "manifest": {
+                "capabilities": [
+                  {
+                    "capability": "range-requests",
+                    "major": 1
+                  }
+                ],
+                "default_ref": "main",
+                "format": "graphforge-discovery/1",
+                "immutable_version": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "objects": [
+                  {
+                    "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                    "length": 47,
+                    "locations": [
+                      "https://elsewhere.example/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  }
+                ],
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "package_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "requirements": [
+                  {
+                    "capability": "portable-v2",
+                    "major": 1
+                  }
+                ],
+                "resolved_ref": "main",
+                "version": {
+                  "major": 1,
+                  "minor": 1
+                }
+              },
+              "refs": [
+                "main"
+              ]
+            }
+          },
+          "expect": {
+            "status": 400,
+            "error": "invalid_input"
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/refs"
+          },
+          "expect": {
+            "status": 404,
+            "error": "invalid_input"
+          }
+        }
+      ]
+    },
+    {
+      "name": "device-authorization-flow",
+      "description": "RFC 8628: pending, slow_down, approval yielding a scoped short-lived token that opens a session, single use, expiry, and denial.",
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/.gf/oauth/device_authorization",
+            "headers": {
+              "content-type": "application/x-www-form-urlencoded"
+            },
+            "form": {
+              "client_id": "graphforge-cli",
+              "scope": "publish:openalex/demo"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "device_code": "${a_device}",
+              "expires_in": 600,
+              "interval": 5,
+              "user_code": "${a_user}",
+              "verification_uri": "https://hub.example/device",
+              "verification_uri_complete": "https://hub.example/device?user_code=${a_user}"
+            },
+            "capture": {
+              "a_device": "/device_code",
+              "a_user": "/user_code"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/.gf/oauth/token",
+            "headers": {
+              "content-type": "application/x-www-form-urlencoded"
+            },
+            "form": {
+              "client_id": "graphforge-cli",
+              "device_code": "${a_device}",
+              "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "oauth_error": "authorization_pending"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/.gf/oauth/token",
+            "headers": {
+              "content-type": "application/x-www-form-urlencoded"
+            },
+            "form": {
+              "client_id": "graphforge-cli",
+              "device_code": "${a_device}",
+              "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "oauth_error": "slow_down"
+          }
+        },
+        {
+          "action": {
+            "action": "advance_clock",
+            "seconds": 10
+          }
+        },
+        {
+          "action": {
+            "action": "approve_device",
+            "user_code": "${a_user}"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/.gf/oauth/token",
+            "headers": {
+              "content-type": "application/x-www-form-urlencoded"
+            },
+            "form": {
+              "client_id": "graphforge-cli",
+              "device_code": "${a_device}",
+              "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "access_token": "${token}",
+              "expires_in": 900,
+              "scope": "publish:openalex/demo",
+              "token_type": "Bearer"
+            },
+            "capture": {
+              "token": "/access_token"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/.gf/oauth/token",
+            "headers": {
+              "content-type": "application/x-www-form-urlencoded"
+            },
+            "form": {
+              "client_id": "graphforge-cli",
+              "device_code": "${a_device}",
+              "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "oauth_error": "invalid_grant"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000014",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:b135909ea0e2df96fc28d87f17085e2e02a315749d9b718befa7b531a27d5e7e"
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${first_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${first_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "first_session": "/session_id",
+              "first_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/.gf/oauth/device_authorization",
+            "headers": {
+              "content-type": "application/x-www-form-urlencoded"
+            },
+            "form": {
+              "client_id": "graphforge-cli",
+              "scope": "publish:openalex/demo"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "device_code": "${b_device}",
+              "expires_in": 600,
+              "interval": 5,
+              "user_code": "${b_user}",
+              "verification_uri": "https://hub.example/device",
+              "verification_uri_complete": "https://hub.example/device?user_code=${b_user}"
+            },
+            "capture": {
+              "b_device": "/device_code",
+              "b_user": "/user_code"
+            }
+          }
+        },
+        {
+          "action": {
+            "action": "advance_clock",
+            "seconds": 600
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/.gf/oauth/token",
+            "headers": {
+              "content-type": "application/x-www-form-urlencoded"
+            },
+            "form": {
+              "client_id": "graphforge-cli",
+              "device_code": "${b_device}",
+              "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "oauth_error": "expired_token"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/.gf/oauth/device_authorization",
+            "headers": {
+              "content-type": "application/x-www-form-urlencoded"
+            },
+            "form": {
+              "client_id": "graphforge-cli",
+              "scope": "publish:openalex/demo"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "device_code": "${c_device}",
+              "expires_in": 600,
+              "interval": 5,
+              "user_code": "${c_user}",
+              "verification_uri": "https://hub.example/device",
+              "verification_uri_complete": "https://hub.example/device?user_code=${c_user}"
+            },
+            "capture": {
+              "c_device": "/device_code",
+              "c_user": "/user_code"
+            }
+          }
+        },
+        {
+          "action": {
+            "action": "deny_device",
+            "user_code": "${c_user}"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/.gf/oauth/token",
+            "headers": {
+              "content-type": "application/x-www-form-urlencoded"
+            },
+            "form": {
+              "client_id": "graphforge-cli",
+              "device_code": "${c_device}",
+              "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "oauth_error": "access_denied"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/.gf/oauth/token",
+            "headers": {
+              "content-type": "application/x-www-form-urlencoded"
+            },
+            "form": {
+              "client_id": "graphforge-cli",
+              "grant_type": "password"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "oauth_error": "unsupported_grant_type"
+          }
+        }
+      ]
+    }
+  ]
+}
