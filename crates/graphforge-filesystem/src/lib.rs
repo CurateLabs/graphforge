@@ -38,7 +38,6 @@ use platform::link_count;
 use platform::path_identity_platform;
 use platform::path_link_count_platform;
 use platform::rename_no_replace_platform;
-use platform::replace_file_platform;
 use platform::stable_child_names;
 use platform::stable_child_names_bounded;
 use platform::stable_create_child_directory;
@@ -54,6 +53,7 @@ use platform::stable_open_replaceable_child_file;
 use platform::stable_remove_child_directory_if_identity;
 use platform::stable_unlink_child_if_identity;
 use platform::visit_regular_files_platform;
+use platform::{replace_file_from_platform, replace_file_platform};
 #[cfg(windows)]
 pub use windows_cas::{WindowsCasWriter, WindowsLegacyCasAdopter, WindowsSealedCasFile};
 
@@ -1021,6 +1021,39 @@ impl StableDirectory {
             Some(expected_temporary),
             Some(expected_target),
         )?;
+        self.validate_replaced_child(target, expected_temporary)
+            .map_err(ReplaceFileError::StateUnknown)
+    }
+
+    /// Atomically move an authenticated temporary from another retained
+    /// directory over this directory's exact authenticated target.
+    #[doc(hidden)]
+    pub fn replace_authenticated_child_from(
+        &self,
+        source_directory: &Self,
+        temporary: &OsStr,
+        expected_temporary: FileIdentity,
+        target: &OsStr,
+        expected_target: FileIdentity,
+    ) -> Result<(), ReplaceFileError> {
+        validate_child_name(temporary).map_err(ReplaceFileError::NotReplaced)?;
+        validate_child_name(target).map_err(ReplaceFileError::NotReplaced)?;
+        source_directory
+            .revalidate_named()
+            .map_err(ReplaceFileError::NotReplaced)?;
+        self.revalidate_named()
+            .map_err(ReplaceFileError::NotReplaced)?;
+        replace_file_from_platform(
+            &source_directory.file,
+            &self.file,
+            temporary,
+            target,
+            Some(expected_temporary),
+            Some(expected_target),
+        )?;
+        source_directory
+            .revalidate_named()
+            .map_err(ReplaceFileError::StateUnknown)?;
         self.validate_replaced_child(target, expected_temporary)
             .map_err(ReplaceFileError::StateUnknown)
     }

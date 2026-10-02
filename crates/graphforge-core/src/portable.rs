@@ -198,6 +198,11 @@ pub struct PortableV2Error {
     pub code: PortableV2ErrorCode,
     pub entry: Option<String>,
     detail: &'static str,
+    /// The sanitized underlying cause of an I/O failure: the platform error
+    /// text with every absolute host path reduced to its last two components.
+    /// Diagnostic only; `detail` stays the stable public text.
+    #[doc(hidden)]
+    pub cause: Option<String>,
     /// Content-free native allocation evidence retained only for local
     /// lifecycle qualification of an interrupted operation.
     #[doc(hidden)]
@@ -219,6 +224,7 @@ impl PortableV2Error {
             code,
             entry: None,
             detail,
+            cause: None,
             allocation_identity_allocated_bytes: std::collections::BTreeMap::new(),
             recovery_reauthentication_read_bytes: 0,
             recovery_reauthentication_read_calls: 0,
@@ -231,10 +237,18 @@ impl PortableV2Error {
             code,
             entry: Some(entry.chars().take(4096).collect()),
             detail,
+            cause: None,
             allocation_identity_allocated_bytes: std::collections::BTreeMap::new(),
             recovery_reauthentication_read_bytes: 0,
             recovery_reauthentication_read_calls: 0,
         }
+    }
+
+    /// Record the sanitized underlying cause of an I/O failure.
+    #[must_use]
+    pub fn with_cause(mut self, cause: impl Into<String>) -> Self {
+        self.cause = Some(cause.into());
+        self
     }
 
     #[must_use]

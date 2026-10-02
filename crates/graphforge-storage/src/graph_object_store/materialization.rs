@@ -353,7 +353,9 @@ fn is_mutable_artifact_control(relative_path: &str) -> bool {
     } else if relative_path.starts_with("embeddings/") {
         matches!(
             name,
-            Some("current.json" | "mutations.json" | ".writer.lock")
+            Some(
+                "catalog.json" | "active.json" | "current.json" | "mutations.json" | ".writer.lock"
+            )
         )
     } else {
         false

@@ -1880,14 +1880,13 @@ mod tests {
                 if let Some(name) = stray_name {
                     let generation =
                         graphforge_storage::resolve_project_generation(project.path()).unwrap();
-                    if let Some(inventory) = generation.declared_graph_files_inventory().unwrap() {
-                        assert!(
-                            inventory
-                                .files
-                                .iter()
-                                .all(|entry| entry.relative_path != name)
-                        );
-                    }
+                    // Resolves compact roots too: a candidate graph publishes compact.
+                    let files = generation
+                        .graph_files_inventory()
+                        .unwrap()
+                        .map(|inventory| inventory.files)
+                        .unwrap_or_default();
+                    assert!(files.iter().all(|entry| entry.relative_path != name));
                 }
             }
         }

@@ -177,6 +177,10 @@ name = "scale_g500_ladder"
 required-features = ["portable"]
 
 [[test]]
+name = "mutated_project_open"
+required-features = ["knowledge"]
+
+[[test]]
 name = "permanent_storage_budgets"
 required-features = ["knowledge", "provenance", "portable"]
 

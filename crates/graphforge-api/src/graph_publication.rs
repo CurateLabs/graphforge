@@ -11,6 +11,33 @@ pub(super) type BoundGenerationStorage = (
     Vec<(std::path::PathBuf, std::path::PathBuf)>,
 );
 
+/// Prepare the compact root for the private workspace over `parent`.
+///
+/// Every mutating commit publishes a compact graph root: only files that changed
+/// since the parent install, and the generation owns no graph tree. Topology
+/// payloads are exactly `topology`, never discovered from the directory. Keep
+/// the returned lease through `CURRENT` and publish with it.
+pub(crate) fn compact_graph_participant(
+    workspace: &std::path::Path,
+    parent: &graphforge_storage::ResolvedProjectGeneration,
+    repair_corrupt_adjacency: bool,
+    topology: &graphforge_storage::TopologyFiles,
+) -> Result<
+    (
+        graphforge_storage::ProjectParticipant,
+        graphforge_storage::GraphObjectPublicationLease,
+    ),
+    GfError,
+> {
+    if repair_corrupt_adjacency {
+        graphforge_storage::prepare_compact_graph_publication_repairing_adjacency(
+            parent, workspace, topology,
+        )
+    } else {
+        graphforge_storage::prepare_compact_graph_publication(parent, workspace, topology)
+    }
+}
+
 impl GraphForge {
     /// Take the graph object lease a publication holds from before staging
     /// through `CURRENT`, so a generation that carries a compact graph root
@@ -95,6 +122,21 @@ impl GraphForge {
             None,
             recorded_at_micros,
             candidate_bindings,
+            false,
+        )
+    }
+
+    pub(super) fn publish_graph_mutation_repairing_adjacency(&self) -> Result<(), GfError> {
+        let receipt = graphforge_exec::MutationReceipt::default();
+        let operation_uuid = uuid::Uuid::now_v7();
+        let recorded_at_micros = (self.clock.lock().expect("clock lock poisoned"))()?;
+        self.publish_graph_mutation_with_context_and_bindings(
+            &receipt,
+            operation_uuid,
+            None,
+            recorded_at_micros,
+            None,
+            true,
         )
     }
 
@@ -111,6 +153,7 @@ impl GraphForge {
             actor_uuid,
             recorded_at_micros,
             None,
+            false,
         )
     }
 
@@ -121,6 +164,7 @@ impl GraphForge {
         actor_uuid: Option<uuid::Uuid>,
         recorded_at_micros: i64,
         candidate_bindings: Option<&graphforge_storage::SemanticStorageBindings>,
+        repair_corrupt_adjacency: bool,
     ) -> Result<(), GfError> {
         use graphforge_storage::{ProjectCapability, ProjectStageOutcome};
 
@@ -147,12 +191,12 @@ impl GraphForge {
                 std::sync::Arc::clone(&self.dir().topology),
             )?;
         }
-        let graph = graphforge_storage::capture_graph_files_over_parent_with_topology(
+        let (graph, graph_objects) = compact_graph_participant(
             &self.dir(),
             &parent,
+            repair_corrupt_adjacency,
             &self.dir().topology_files()?,
-        )?
-        .1;
+        )?;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let installed_bindings = self
             .semantic_storage_bindings
@@ -189,7 +233,7 @@ impl GraphForge {
         let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
             root,
             &request,
-            Some(self.dir().path()),
+            None,
             self.lifecycle_mode,
         )? {
             ProjectStageOutcome::AlreadyPublished(receipt) => Ok(receipt),
@@ -205,7 +249,7 @@ impl GraphForge {
                         Ok(())
                     },
                 )?
-                .publish(),
+                .publish_with_graph_objects(&graph_objects),
         };
         let published = match publication {
             Ok(receipt) => receipt,
@@ -256,12 +300,8 @@ impl GraphForge {
                 std::sync::Arc::clone(&self.dir().topology),
             )?;
         }
-        let graph = graphforge_storage::capture_graph_files_over_parent_with_topology(
-            &self.dir(),
-            &parent,
-            &self.dir().topology_files()?,
-        )?
-        .1;
+        let (graph, graph_objects) =
+            compact_graph_participant(&self.dir(), &parent, false, &self.dir().topology_files()?)?;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let participants = graph_publication_participants(
             &parent,
@@ -293,7 +333,7 @@ impl GraphForge {
         let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
             root,
             &request,
-            Some(self.dir().path()),
+            None,
             self.lifecycle_mode,
         )? {
             ProjectStageOutcome::AlreadyPublished(receipt) => Ok(receipt),
@@ -309,7 +349,7 @@ impl GraphForge {
                         Ok(())
                     },
                 )?
-                .publish(),
+                .publish_with_graph_objects(&graph_objects),
         };
         let published = match publication {
             Ok(receipt) => receipt,
@@ -334,6 +374,10 @@ impl GraphForge {
 
     pub(super) fn publish_workspace_update(&self) -> Result<(), GfError> {
         self.publish_graph_mutation(&graphforge_exec::MutationReceipt::default())
+    }
+
+    pub(super) fn publish_workspace_update_repairing_adjacency(&self) -> Result<(), GfError> {
+        self.publish_graph_mutation_repairing_adjacency()
     }
 
     /// Remove all nodes and edges (in-memory instances only).

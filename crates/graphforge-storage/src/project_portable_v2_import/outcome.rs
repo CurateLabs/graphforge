@@ -78,6 +78,22 @@ pub(super) fn storage(error: &GfError) -> PortableV2Error {
         PortableV2ErrorCode::Io,
         "portable import publication failed",
     )
+    .with_cause(crate::portable_cause::sanitized_cause(&error.to_string()))
+}
+
+pub(super) fn with_io_context(
+    mut error: PortableV2Error,
+    action: &str,
+    path: &Path,
+) -> PortableV2Error {
+    if error.code == PortableV2ErrorCode::Io {
+        let cause = error.cause.clone().unwrap_or_else(|| error.to_string());
+        error.cause = Some(crate::portable_cause::sanitized_cause(&format!(
+            "{action} at {}: {cause}",
+            path.display()
+        )));
+    }
+    error
 }
 
 pub(super) fn storage_or_cancel(

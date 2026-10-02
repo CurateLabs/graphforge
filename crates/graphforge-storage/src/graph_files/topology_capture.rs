@@ -1,9 +1,9 @@
 //! Capture graph files using explicit topology membership and retained identities.
 
 use super::{
-    ARTIFACT_IDENTITY, GfError, GraphFilesInventory, KnownGraphFile, Path, PathBuf,
-    ProjectParticipant, build_inventory_for_owned_layout, collect_source_files_from,
-    encode_inventory, inventory_participant,
+    ARTIFACT_IDENTITY, GfError, GraphFilesInventory, Path, PathBuf, ProjectParticipant,
+    build_inventory_for_owned_layout, collect_source_files_from, encode_inventory,
+    inventory_participant,
 };
 
 /// Capture a writable tree using explicit topology membership.
@@ -17,25 +17,8 @@ pub fn capture_graph_files_with_topology(
         None,
         ARTIFACT_IDENTITY,
         &mut || Ok(()),
-        Some(topology),
-    )?;
-    let bytes = encode_inventory(&inventory)?;
-    let participant = inventory_participant(bytes, inventory.file_count)?;
-    Ok((inventory, participant))
-}
-
-pub(crate) fn capture_graph_files_reusing_digests_with_topology(
-    source_root: &Path,
-    known: &std::collections::HashMap<String, KnownGraphFile>,
-    domain: graphforge_core::hash_observation::HashDomain,
-    topology: &crate::TopologyFiles,
-) -> Result<(GraphFilesInventory, ProjectParticipant), GfError> {
-    let (inventory, _) = build_inventory_for_owned_layout(
-        source_root,
-        false,
-        Some(known),
-        domain,
-        &mut || Ok(()),
+        None,
+        None,
         Some(topology),
     )?;
     let bytes = encode_inventory(&inventory)?;
@@ -66,6 +49,8 @@ pub(crate) fn capture_owned_route_migration_inventory(
         None,
         ARTIFACT_IDENTITY,
         &mut || Ok(()),
+        None,
+        None,
         None,
     )
     .map(|(inventory, _)| inventory)

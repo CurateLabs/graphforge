@@ -82,6 +82,7 @@ impl Drop for SealedArtifact {
 #[derive(Debug)]
 pub struct PendingCommit {
     staged: SealedArtifact,
+    target_parent: Arc<StableDirectory>,
     target: OsString,
     allocation_recorded: bool,
     lease: NamespaceLease,
@@ -118,7 +119,7 @@ impl PendingCommit {
                 "locked atomic producer must remain retained",
             ));
         }
-        let named = self.staged.parent.open_child_file(&self.target)?;
+        let named = self.target_parent.open_child_file(&self.target)?;
         if graphforge_filesystem::file_identity(&named)? != self.staged.identity {
             return Err(io::Error::other("visible producer identity changed"));
         }
@@ -134,7 +135,7 @@ impl PendingCommit {
         let _lease = &self.lease;
         let result = (|| -> io::Result<()> {
             let allocation = allocation.or(self.staged.allocation.as_ref());
-            let installed = self.staged.parent.open_child_file(&self.target)?;
+            let installed = self.target_parent.open_child_file(&self.target)?;
             if graphforge_filesystem::file_identity(&installed)? != self.staged.identity {
                 return Err(io::Error::other(
                     "published child identity changed before acknowledgment",
@@ -142,7 +143,7 @@ impl PendingCommit {
             }
             if !self.allocation_recorded {
                 if let Some(allocation) = allocation {
-                    let target = self.staged.parent.path().join(&self.target);
+                    let target = self.target_parent.path().join(&self.target);
                     allocation
                         .remove_file_at(&target)
                         .map_err(io::Error::other)?;
@@ -161,10 +162,14 @@ impl PendingCommit {
             }
             if let Some(allocation) = allocation {
                 allocation
-                    .replace_file_at(&self.staged.parent.path().join(&self.target), &installed)
+                    .replace_file_at(&self.target_parent.path().join(&self.target), &installed)
                     .map_err(io::Error::other)?;
             }
-            acknowledge_directory(&self.staged.parent)
+            acknowledge_directory(&self.target_parent)?;
+            if self.target_parent.identity() != self.staged.parent.identity() {
+                acknowledge_directory(&self.staged.parent)?;
+            }
+            Ok(())
         })();
         match result {
             Ok(()) => Ok(()),
@@ -327,6 +332,7 @@ where
             .map_err(ReplaceFileError::StateUnknown)
     });
     let mut pending = PendingCommit {
+        target_parent: Arc::clone(&staged.parent),
         staged,
         target: target.to_owned(),
         allocation_recorded: false,
@@ -565,7 +571,57 @@ impl SealedArtifact {
                 .map_err(ReplaceFileError::StateUnknown)
         });
         let pending = PendingCommit {
+            target_parent: Arc::clone(&self.parent),
             staged: self,
+            target: target.to_owned(),
+            allocation_recorded: false,
+            lease,
+        };
+        match result {
+            Ok(()) => Ok(pending),
+            Err(ReplaceFileError::NotReplaced(cause)) => Err(CommitFailure {
+                visibility: Visibility::NotPublished,
+                cause: CommitCause::Replacement(ReplaceFileError::NotReplaced(cause)),
+                pending: None,
+            }),
+            Err(ReplaceFileError::StateUnknown(cause)) => Err(CommitFailure {
+                visibility: Visibility::StateUnknown,
+                cause: CommitCause::Replacement(ReplaceFileError::StateUnknown(cause)),
+                pending: Some(Box::new(pending)),
+            }),
+        }
+    }
+
+    /// Replace one exact authenticated target in another retained directory.
+    /// This is restricted to authenticated replacement; creation and ordinary
+    /// replacement continue to use the source's own parent authority.
+    pub(crate) fn make_visible_into(
+        self,
+        destination: &StableDirectory,
+        target: &OsStr,
+        expected_target: FileIdentity,
+        before_visible: impl FnOnce() -> io::Result<()>,
+    ) -> Result<PendingCommit, CommitFailure> {
+        let target_parent = Arc::new(destination.try_clone().map_err(unpublished)?);
+        let lease = namespace_lock(&destination.path().join(target));
+        #[cfg(test)]
+        super::fault::hit(super::fault::Point::BeforeVisible).map_err(unpublished)?;
+        before_visible().map_err(unpublished)?;
+        let result = destination.replace_authenticated_child_from(
+            &self.parent,
+            &self.temporary,
+            self.identity,
+            target,
+            expected_target,
+        );
+        #[cfg(test)]
+        let result = result.and_then(|()| {
+            super::fault::hit(super::fault::Point::NativeUnknown)
+                .map_err(ReplaceFileError::StateUnknown)
+        });
+        let pending = PendingCommit {
+            staged: self,
+            target_parent,
             target: target.to_owned(),
             allocation_recorded: false,
             lease,

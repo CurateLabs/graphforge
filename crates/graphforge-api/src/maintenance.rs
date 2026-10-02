@@ -301,8 +301,7 @@ mod tests {
                 .value(0),
             7
         );
-        let generation = graphforge_storage::resolve_project_generation(directory.path()).unwrap();
-        let nodes = graphforge_storage::read_nodes(&generation.graph_tree_root()).unwrap();
+        let nodes = graphforge_storage::read_nodes(&reopened.dir()).unwrap();
         assert_eq!(nodes.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
         let primary = nodes[0]
             .column_by_name("type_id")
@@ -438,30 +437,47 @@ mod tests {
     #[test]
     fn in_memory_compaction_cleanup_uses_ephemeral_lifecycle_mode() {
         let mut graph = GraphForge::new(None).unwrap();
-        let created = graph
-            .execute("CREATE (n:Person) RETURN n.node_uuid")
-            .unwrap();
+        let created = graph.execute("CREATE (n) RETURN n.node_uuid").unwrap();
         let ids = created.batches[0]
             .column(0)
             .as_any()
             .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
             .unwrap();
         let node = Uuid::from_slice(ids.value(0)).unwrap();
-        graph
-            .publish_composite_transaction(crate::CompositeTransactionRequest {
-                contract_version: crate::COMPOSITE_TRANSACTION_CONTRACT_VERSION,
-                context: WriteContext {
-                    operation_uuid: OperationId(Uuid::now_v7()),
-                    actor_uuid: None,
-                },
-                graph_mutations: vec![crate::CompositeGraphMutation::SetNodeProperty {
-                    node_uuid: node,
-                    property: "score".into(),
-                    value: crate::PropValue::Int(7),
+        // No commit publishes delta runs any more, but generations published
+        // before that carry them: seed one over an expanded base through the
+        // journal API, then adopt it into the facade.
+        crate::expanded_generation_test_support::expand_current_generation(&graph);
+        let root = graph.resolved_generation.container_root().to_path_buf();
+        graphforge_storage::publish_graph_delta_with_mode(
+            &root,
+            &graphforge_storage::GraphDeltaPublishRequest {
+                transaction_uuid: Uuid::now_v7(),
+                generation_uuid: Uuid::now_v7(),
+                run_uuid: Uuid::now_v7(),
+                operations: vec![graphforge_storage::GraphDeltaOp {
+                    operation_uuid: Uuid::now_v7(),
+                    kind: graphforge_storage::GraphDeltaOpKind::SetNodeProperty,
+                    payload: graphforge_storage::GraphDeltaPayload::SetNodeProperty {
+                        node_uuid: node.to_string(),
+                        property_stem: "_untyped".into(),
+                        key: "score".into(),
+                        value: graphforge_storage::encode_graph_delta_value(
+                            &graphforge_ir::IrLiteral::Int(7),
+                        )
+                        .unwrap(),
+                    },
                 }],
-                knowledge: crate::CompositeKnowledgeParticipants::default(),
-            })
-            .unwrap();
+                limits: GraphDeltaJournalLimits::default(),
+            },
+            graph.lifecycle_mode,
+        )
+        .unwrap();
+        crate::composite_publish::reconcile_workspace_to(
+            &graph,
+            &graphforge_storage::resolve_project_generation(&root).unwrap(),
+        )
+        .unwrap();
         *graph.uuid_membership_index.lock().unwrap() =
             Some(graphforge_storage::UuidMembershipIndex::open(&graph.dir()).unwrap());
         // Observe reclamation without adding another workspace owner.

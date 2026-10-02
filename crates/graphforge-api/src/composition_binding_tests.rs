@@ -80,11 +80,12 @@ fn install_composition_authority(forge: &GraphForge, context: &CompositionBindin
             .collect(),
         participants,
     };
+    let graph_objects = forge.begin_graph_object_publication().unwrap();
     match forge.stage_project_generation(&request).unwrap() {
         ProjectStageOutcome::Staged(staged) => staged
             .validate(|_| Ok(()), |_, _| Ok(()))
             .unwrap()
-            .publish()
+            .publish_with_graph_objects(&graph_objects)
             .unwrap(),
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
     };
@@ -790,12 +791,14 @@ fn facade_reopens_relation_edge_property_through_default_context() {
     reopened
         .install_generation_composition_context(&context)
         .unwrap();
-    let reopened_edge = reopened
-        .dir()
-        .join("topology/edges")
-        .join(edge_path.file_name().unwrap());
+    // A compact generation hydrates each opaque route into its own directory,
+    // so the reopened facade is asked where the route lives now.
+    let reopened_edges = reopened
+        .property_inventory_for_session()
+        .edge_files(Some(&relation.route));
+    assert_eq!(reopened_edges.len(), 1);
     assert!(
-        reopened_edge.exists(),
+        reopened_edges[0].1.exists(),
         "opaque edge route was not materialized"
     );
     let before = reopened

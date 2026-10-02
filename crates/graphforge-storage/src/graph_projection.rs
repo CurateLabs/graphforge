@@ -1139,7 +1139,23 @@ fn copy_regular_file_if_present(source: &Path, target: &Path) -> Result<(), GfEr
         .ok_or_else(|| validation("graph metadata target has no parent"))?;
     fs::create_dir_all(parent).map_err(storage)?;
     fs::copy(source, target).map_err(storage)?;
-    Ok(())
+    make_private_copy_writable(target)
+}
+
+/// `fs::copy` carries the source's read-only attribute along. A compact
+/// generation's files are sealed content-store objects, so a copy of one is
+/// read-only too, and Windows then refuses to remove or synchronize the private
+/// copy. Only the new destination needs write access.
+pub(crate) fn make_private_copy_writable(path: &Path) -> Result<(), GfError> {
+    let mut permissions = fs::metadata(path).map_err(storage)?.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        permissions.set_mode(permissions.mode() | 0o200);
+    }
+    #[cfg(not(unix))]
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions).map_err(storage)
 }
 
 fn validation(message: impl Into<String>) -> GfError {
@@ -1152,6 +1168,27 @@ fn storage(error: impl std::fmt::Display) -> GfError {
 
 #[cfg(test)]
 mod tests {
+    /// A copy of a sealed (read-only) content-store object is a private file the
+    /// caller may remove and rewrite.
+    #[test]
+    fn a_copy_of_a_sealed_object_is_writable() {
+        let directory = tempfile::tempdir().unwrap();
+        let sealed = directory.path().join("sealed.json");
+        std::fs::write(&sealed, b"{}").unwrap();
+        let mut permissions = std::fs::metadata(&sealed).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&sealed, permissions).unwrap();
+        let copy = directory.path().join("nested").join("copy.json");
+        super::copy_regular_file_if_present(&sealed, &copy).unwrap();
+        assert!(!std::fs::metadata(&copy).unwrap().permissions().readonly());
+        assert!(
+            std::fs::metadata(&sealed).unwrap().permissions().readonly(),
+            "the sealed source is untouched"
+        );
+        std::fs::write(&copy, b"rewritten").unwrap();
+        std::fs::remove_file(&copy).unwrap();
+    }
+
     fn admitted_test_path(root: &std::path::Path, semantic: &str) -> std::path::PathBuf {
         let (inventory, _) = crate::capture_graph_files(root).unwrap();
         let authority = super::TransformRoutes::from_inventory(root, inventory.clone()).unwrap();

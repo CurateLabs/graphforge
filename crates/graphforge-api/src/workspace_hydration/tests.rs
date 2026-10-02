@@ -352,7 +352,11 @@ fn compact_delta_project(project: &Path) {
         .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
         .unwrap();
     let node_uuid = uuid::Uuid::from_slice(ids.value(0)).unwrap().to_string();
-    drop(graph);
+    // No commit publishes delta runs any more, but generations published before
+    // that carry them: build one over an expanded base, as the journal API does.
+    drop(crate::expanded_generation_test_support::into_expanded(
+        graph,
+    ));
     graphforge_storage::publish_graph_delta(
         project,
         &GraphDeltaPublishRequest {
@@ -615,6 +619,9 @@ fn releasing_the_facade_releases_every_committed_generation_handle() {
     std::fs::create_dir(&project).unwrap();
     let graph = GraphForge::new(project.to_str()).expect("open persistent project");
     graph.execute("CREATE (:Person {name: 'Alice'})").unwrap();
+    // A compact root has no generation tree to hold a handle on; only an
+    // expanded generation does.
+    let graph = crate::expanded_generation_test_support::into_expanded(graph);
 
     let generation_graph_trees = std::fs::read_dir(project.join("generations"))
         .expect("read generations")
@@ -709,7 +716,29 @@ fn compact_person_project(project: &Path) {
              CREATE (a)-[:KNOWS {since: i}]->(b)",
         )
         .expect("seed payload data");
-    publish_compact_graph_workspace(project, &graph.dir());
+    // Mutating commits publish compact roots, so no conversion is needed.
+    assert_compact_graph_root(project);
+}
+
+/// The project's current graph participant is a compact (V2) root.
+fn assert_compact_graph_root(project: &Path) {
+    let record_version = graphforge_storage::resolve_project_generation(project)
+        .unwrap()
+        .participant_snapshot(
+            graphforge_storage::GRAPH_CAPABILITY_ID,
+            graphforge_storage::GRAPH_FILES_FAMILY,
+        )
+        .unwrap()
+        .expect("the project records a graph participant")
+        .record_version;
+    assert!(
+        matches!(
+            record_version,
+            graphforge_storage::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
+        ),
+        "record version {record_version} is not a compact root"
+    );
 }
 
 fn entry_at(project: &Path, prefix: &str, suffix: &str) -> graphforge_storage::GraphFileEntry {
@@ -753,7 +782,7 @@ fn compact_indexed_project(project: &Path) {
         )
         .unwrap();
     graph.index_adjacency().unwrap();
-    publish_compact_graph_workspace(project, &graph.dir());
+    assert_compact_graph_root(project);
 }
 
 /// A mutation the parser cannot notice: only a checksum can see it. JSON gets
@@ -834,11 +863,12 @@ fn hardlinked_edge_route_corruption_is_refused_on_recount() {
     );
 }
 
-/// A mutating commit republishes the whole graph tree. It must refuse a
-/// corrupted payload it would otherwise re-read and re-hash, rather than
-/// launder the corrupted bytes into a new generation under a fresh digest.
-/// One statement leaves the corrupted edge file untouched (it is only
-/// re-hashed for publication); the other appends to it.
+/// A mutating commit captures every file of the workspace, and capture admits a
+/// hydrated payload (`capture_payload_identity`, before any digest is reused or
+/// minted) that nothing has read yet. A corrupted payload is therefore refused
+/// by the commit, whether the commit leaves it untouched (it would otherwise be
+/// referenced again) or appends to it, rather than being carried into a new
+/// generation.
 #[test]
 fn a_mutating_commit_does_not_launder_a_corrupted_payload() {
     for statement in [

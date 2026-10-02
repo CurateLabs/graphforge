@@ -783,6 +783,70 @@ pub(super) fn replace_file_platform(
 }
 
 #[cfg(unix)]
+pub(super) fn replace_file_from_platform(
+    source_directory: &File,
+    target_directory: &File,
+    source_name: &OsStr,
+    target_name: &OsStr,
+    expected_source: Option<FileIdentity>,
+    expected_target: Option<FileIdentity>,
+) -> Result<(), ReplaceFileError> {
+    use rustix::fs::{AtFlags, Mode, OFlags, openat, renameat, statat};
+
+    let source = openat(
+        source_directory,
+        source_name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)
+    .map_err(ReplaceFileError::NotReplaced)?;
+    let target = openat(
+        target_directory,
+        target_name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)
+    .map_err(ReplaceFileError::NotReplaced)?;
+    verify_regular_metadata(&source.metadata().map_err(ReplaceFileError::NotReplaced)?)
+        .map_err(ReplaceFileError::NotReplaced)?;
+    let target_metadata = target.metadata().map_err(ReplaceFileError::NotReplaced)?;
+    verify_space_usage_metadata(&target_metadata).map_err(ReplaceFileError::NotReplaced)?;
+    let source_identity = unix_identity(&source).map_err(ReplaceFileError::NotReplaced)?;
+    let target_identity = unix_identity(&target).map_err(ReplaceFileError::NotReplaced)?;
+    if expected_source.is_some_and(|expected| expected != source_identity)
+        || expected_target.is_some_and(|expected| expected != target_identity)
+    {
+        return Err(ReplaceFileError::NotReplaced(io::Error::other(
+            "cross-directory replacement identity changed",
+        )));
+    }
+    renameat(source_directory, source_name, target_directory, target_name)
+        .map_err(io::Error::from)
+        .map_err(ReplaceFileError::NotReplaced)?;
+    let replaced = openat(
+        target_directory,
+        target_name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)
+    .map_err(ReplaceFileError::StateUnknown)?;
+    if unix_identity(&replaced).map_err(ReplaceFileError::StateUnknown)? != source_identity
+        || statat(source_directory, source_name, AtFlags::SYMLINK_NOFOLLOW).is_ok()
+    {
+        return Err(ReplaceFileError::StateUnknown(io::Error::other(
+            "cross-directory replacement success state did not reconcile",
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn unix_identity(file: &File) -> io::Result<FileIdentity> {
     use std::os::unix::fs::MetadataExt as _;
     let metadata = file.metadata()?;
@@ -933,6 +997,25 @@ pub(super) fn replace_file_platform(
 }
 
 #[cfg(windows)]
+pub(super) fn replace_file_from_platform(
+    source_directory: &File,
+    target_directory: &File,
+    source_name: &OsStr,
+    target_name: &OsStr,
+    expected_source: Option<FileIdentity>,
+    expected_target: Option<FileIdentity>,
+) -> Result<(), ReplaceFileError> {
+    windows::replace_file_from(
+        source_directory,
+        target_directory,
+        source_name,
+        target_name,
+        expected_source,
+        expected_target,
+    )
+}
+
+#[cfg(windows)]
 pub(super) fn install_new_file_platform(
     directory: &File,
     source_name: &OsStr,
@@ -960,6 +1043,21 @@ pub(super) fn replace_file_platform(
     Err(ReplaceFileError::NotReplaced(io::Error::new(
         io::ErrorKind::Unsupported,
         "atomic replacement is unsupported on this platform",
+    )))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+pub(super) fn replace_file_from_platform(
+    _source_directory: &File,
+    _target_directory: &File,
+    _source_name: &OsStr,
+    _target_name: &OsStr,
+    _expected_source: Option<FileIdentity>,
+    _expected_target: Option<FileIdentity>,
+) -> Result<(), ReplaceFileError> {
+    Err(ReplaceFileError::NotReplaced(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "cross-directory atomic replacement is unsupported on this platform",
     )))
 }
 

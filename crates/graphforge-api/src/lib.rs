@@ -130,6 +130,8 @@ mod graph_snapshot;
 #[cfg(test)]
 use graph_publication::participant_encoding;
 use graph_publication::{persist_runtime_catalog, system_time_micros};
+#[cfg(test)]
+mod expanded_generation_test_support;
 mod gsi_profiler;
 #[cfg(feature = "knowledge")]
 mod hypotheses;
