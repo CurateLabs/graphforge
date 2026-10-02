@@ -2,12 +2,6 @@
   "default_max_lines": 3000,
   "exemptions": [
     {
-      "path": "crates/graphforge-storage/src/adjacency.rs",
-      "max_lines": 3500,
-      "adr": "docs/adr/0031-source-size-policy.md",
-      "rationale": "The current-format CSR representation, authenticated reads, freshness inspection, and direct tests form one bounded derived-index contract; spill builder and codec have separate owners."
-    },
-    {
       "path": "crates/graphforge-storage/src/project_generation.rs",
       "max_lines": 3500,
       "adr": "docs/adr/0031-source-size-policy.md",
