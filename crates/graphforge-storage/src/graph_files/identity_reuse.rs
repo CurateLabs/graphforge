@@ -255,6 +255,46 @@ mod tests {
         }
     }
 
+    fn publish_compact(root: &Path, workspace: &Path) -> crate::ResolvedProjectGeneration {
+        use crate::{
+            GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, ProjectCapability,
+            ProjectGenerationRequest, ProjectStageOutcome, empty_workspace_participants,
+        };
+        {
+            let parent = crate::resolve_project_generation(root).unwrap();
+            let (participant, lease) =
+                crate::prepare_compact_graph_publication(&parent, workspace).unwrap();
+            let mut participants = empty_workspace_participants().unwrap();
+            participants.insert(0, participant);
+            let request = ProjectGenerationRequest {
+                transaction_uuid: uuid::Uuid::now_v7(),
+                generation_uuid: uuid::Uuid::now_v7(),
+                capabilities: vec![
+                    ProjectCapability {
+                        capability_id: GRAPH_CAPABILITY_ID.into(),
+                        capability_version: GRAPH_CAPABILITY_VERSION,
+                    },
+                    ProjectCapability {
+                        capability_id: "workspace".into(),
+                        capability_version: 1,
+                    },
+                ],
+                participants,
+            };
+            let ProjectStageOutcome::Staged(staged) =
+                crate::stage_project_generation_with_graph_tree(root, &request, None).unwrap()
+            else {
+                panic!("fresh publication replayed");
+            };
+            staged
+                .validate(|_| Ok(()), |_, _| Ok(()))
+                .unwrap()
+                .publish_with_graph_objects(&lease)
+                .unwrap();
+            crate::resolve_project_generation(root).unwrap()
+        }
+    }
+
     /// The workspace file that is the parent's own content-store object carries
     /// that object's identity: nothing was written, so nothing is read or hashed.
     /// A copy of the same bytes is a different file and is captured afresh.
@@ -301,10 +341,6 @@ mod tests {
     /// capture of them reads no byte; a new file is read once and retained.
     #[test]
     fn a_capture_over_a_compact_parent_reads_only_what_changed() {
-        use crate::{
-            GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, ProjectCapability,
-            ProjectGenerationRequest, ProjectStageOutcome, empty_workspace_participants,
-        };
         let root = tempfile::tempdir().unwrap();
         crate::open_or_initialize_project(root.path()).unwrap();
         let workspace = tempfile::tempdir_in(root.path()).unwrap();
@@ -316,42 +352,8 @@ mod tests {
         .unwrap();
         std::fs::write(workspace.path().join("topology/generation.json"), b"{}\n").unwrap();
 
-        let publish = |workspace: &Path| {
-            let parent = crate::resolve_project_generation(root.path()).unwrap();
-            let (participant, lease) =
-                crate::prepare_compact_graph_publication(&parent, workspace).unwrap();
-            let mut participants = empty_workspace_participants().unwrap();
-            participants.insert(0, participant);
-            let request = ProjectGenerationRequest {
-                transaction_uuid: uuid::Uuid::now_v7(),
-                generation_uuid: uuid::Uuid::now_v7(),
-                capabilities: vec![
-                    ProjectCapability {
-                        capability_id: GRAPH_CAPABILITY_ID.into(),
-                        capability_version: GRAPH_CAPABILITY_VERSION,
-                    },
-                    ProjectCapability {
-                        capability_id: "workspace".into(),
-                        capability_version: 1,
-                    },
-                ],
-                participants,
-            };
-            let ProjectStageOutcome::Staged(staged) =
-                crate::stage_project_generation_with_graph_tree(root.path(), &request, None)
-                    .unwrap()
-            else {
-                panic!("fresh publication replayed");
-            };
-            staged
-                .validate(|_| Ok(()), |_, _| Ok(()))
-                .unwrap()
-                .publish_with_graph_objects(&lease)
-                .unwrap();
-            crate::resolve_project_generation(root.path()).unwrap()
-        };
         // The first commit has no graph parent and still publishes compact.
-        let first = publish(workspace.path());
+        let first = publish_compact(root.path(), workspace.path());
         assert!(first.declared_graph_files_inventory().unwrap().is_none());
         let inventory = first.graph_files_inventory().unwrap().unwrap();
 
@@ -396,7 +398,7 @@ mod tests {
         );
 
         // Publishing that workspace installs the one object and keeps the rest.
-        let second = publish(hydrated.path());
+        let second = publish_compact(root.path(), hydrated.path());
         let after = second.graph_files_inventory().unwrap().unwrap();
         assert!(
             after
@@ -408,6 +410,38 @@ mod tests {
             assert!(
                 after.files.contains(&entry),
                 "{} is carried over",
+                entry.relative_path
+            );
+        }
+    }
+    /// A tree hydrated from a compact generation is made of hard links to sealed
+    /// (read-only) objects. Removing it, as every private view does when it is
+    /// dropped, must work on every platform (Windows refuses to delete a
+    /// read-only file) and must leave the sealed objects themselves intact.
+    #[test]
+    fn a_hydrated_tree_of_sealed_objects_can_be_removed_and_leaves_the_objects() {
+        let root = tempfile::tempdir().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let workspace = tempfile::tempdir_in(root.path()).unwrap();
+        std::fs::create_dir_all(workspace.path().join("topology")).unwrap();
+        std::fs::write(workspace.path().join("topology/nodes.parquet"), b"payload").unwrap();
+        let generation = publish_compact(root.path(), workspace.path());
+        let inventory = generation.graph_files_inventory().unwrap().unwrap();
+        let hydrated = tempfile::tempdir_in(root.path()).unwrap();
+        crate::materialize_graph_objects(root.path(), &inventory, hydrated.path()).unwrap();
+        let linked = hydrated.path().join("topology/nodes.parquet");
+        assert!(
+            std::fs::metadata(&linked).unwrap().permissions().readonly(),
+            "the hydrated file is the sealed object"
+        );
+        let hydrated_path = hydrated.path().to_path_buf();
+        drop(hydrated);
+        assert!(!hydrated_path.exists(), "the private tree is removable");
+        for entry in &inventory.files {
+            let object = crate::graph_object_path(root.path(), &entry.content_sha256).unwrap();
+            assert!(
+                object.is_file(),
+                "{} survives its view",
                 entry.relative_path
             );
         }
