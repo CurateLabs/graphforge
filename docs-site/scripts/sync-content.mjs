@@ -166,6 +166,7 @@ const PAGES = [
   'adr/0048-cargo-is-the-ci-build-authority.md',
   'adr/0049-published-payload-checksums.md',
   'adr/0050-read-path-fast-path-selection.md',
+  'adr/0051-discovery-project-summary-and-ontology-descriptors.md',
   // END generated ADR records
   'releases/roadmap.md',
   'legal/licensing.md',

@@ -8,6 +8,19 @@
 //! Redirect bounds, HTTPS retention across redirects, and caller-configured host
 //! policy belong to the transport/client adapter. This crate only admits each
 //! protocol-visible location as an absolute, credential-free HTTPS URL.
+//!
+//! Beyond clone, the contract carries two optional, digest-bound additions: a
+//! bounded Project summary document and an ontology inventory naming exact
+//! module identities. Package identity, module identity, and composition digest
+//! are three distinct fields; none substitutes for another.
+
+mod summary;
+
+pub use summary::{
+    ProjectSummary, SummaryAccess, SummaryCorpusSize, SummaryFacts, SummaryGeographicCoverage,
+    SummaryMetadata, SummaryOntologyComposition, SummaryOntologyModule, SummaryPackageReference,
+    SummaryTemporalCoverage,
+};
 
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -24,6 +37,14 @@ pub const DISCOVERY_FORMAT: &str = "graphforge-discovery/1";
 pub const PORTABLE_V2_FORMAT: &str = "graphforge-project/2";
 /// Media type of the immutable portable-v2 package object selected by discovery.
 pub const PORTABLE_V2_MEDIA_TYPE: &str = "application/vnd.graphforge.project";
+/// Project summary document format emitted and accepted by this release.
+pub const PROJECT_SUMMARY_FORMAT: &str = "graphforge-project-summary/1";
+/// Media type of an immutable Project summary object selected by discovery.
+pub const PROJECT_SUMMARY_MEDIA_TYPE: &str = "application/vnd.graphforge.project-summary+json";
+/// Capability that a Project summary document may require, at major version 1.
+pub const PROJECT_SUMMARY_CAPABILITY: &str = "project-summary";
+const PORTABLE_V2_CAPABILITY: &str = "portable-v2";
+const PROJECT_SUMMARY_FORMAT_NAME: &str = "graphforge-project-summary";
 
 /// Explicit resource bounds for untrusted discovery responses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,6 +61,13 @@ pub struct DiscoveryLimits {
     pub max_locations_per_object: usize,
     /// Maximum declared bytes across the object inventory.
     pub max_cumulative_object_bytes: u64,
+    /// Maximum bytes of one Project summary document, as parsed or as declared
+    /// by its manifest object descriptor.
+    pub max_summary_bytes: usize,
+    /// Maximum declared bytes of one per-module package object.
+    pub max_module_package_bytes: u64,
+    /// Maximum modules, and separately bridge sets, in one ontology inventory.
+    pub max_ontology_entries: usize,
 }
 
 impl Default for DiscoveryLimits {
@@ -51,6 +79,9 @@ impl Default for DiscoveryLimits {
             max_objects: 1_000_000,
             max_locations_per_object: 8,
             max_cumulative_object_bytes: 1024 * 1024_u64.pow(4),
+            max_summary_bytes: 1024 * 1024,
+            max_module_package_bytes: 64 * 1024 * 1024,
+            max_ontology_entries: 4096,
         }
     }
 }
@@ -89,6 +120,8 @@ pub enum DiscoveryVersionSubject {
     PortablePackage,
     /// Required protocol capability version.
     Capability,
+    /// Project summary document format version.
+    ProjectSummary,
 }
 
 /// Sanitized supported/requested version metadata for compatibility failures.
@@ -218,7 +251,7 @@ pub struct ProtocolVersion {
 
 impl ProtocolVersion {
     /// Version implemented by this crate.
-    pub const CURRENT: Self = Self { major: 1, minor: 0 };
+    pub const CURRENT: Self = Self { major: 1, minor: 1 };
 
     fn validate(self) -> Result<(), DiscoveryError> {
         if self.major != Self::CURRENT.major {
@@ -317,6 +350,85 @@ pub struct ObjectDescriptor {
     pub locations: Vec<String>,
 }
 
+/// Exact ontology identity: module or bridge-set id, authored version, and
+/// content digest. Distinct from package identity and composition digest.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExactIdentity {
+    /// Opaque ontology or bridge identifier (commonly a URI).
+    pub id: String,
+    /// Opaque authored version.
+    pub version: String,
+    /// Domain-separated canonical content digest of the module or bridge set.
+    pub content_digest: Sha256Digest,
+}
+
+/// One ontology module advertised by a manifest.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OntologyModuleDescriptor {
+    /// Opaque ontology identifier.
+    pub id: String,
+    /// Opaque authored version.
+    pub version: String,
+    /// Canonical content digest identifying this exact module.
+    pub content_digest: Sha256Digest,
+    /// Optional portable-v2 package containing exactly this module.
+    ///
+    /// Its `package_digest` identifies that package and legitimately differs
+    /// between publishing Projects; it never substitutes for `content_digest`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<PortablePackageReference>,
+}
+
+impl OntologyModuleDescriptor {
+    /// Return this module's exact identity.
+    #[must_use]
+    pub fn identity(&self) -> ExactIdentity {
+        ExactIdentity {
+            id: self.id.clone(),
+            version: self.version.clone(),
+            content_digest: self.content_digest.clone(),
+        }
+    }
+}
+
+/// One bridge set advertised by identity only.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeSetDescriptor {
+    /// Opaque bridge-set identifier.
+    pub id: String,
+    /// Opaque authored version.
+    pub version: String,
+    /// Canonical content digest identifying this exact bridge set.
+    pub content_digest: Sha256Digest,
+}
+
+/// Ontology composition inventory of the represented Project version.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OntologyInventory {
+    /// Semantic identity of the whole composition.
+    pub composition_digest: Sha256Digest,
+    /// Modules in strictly ascending `(id, version, content_digest)` order.
+    pub modules: Vec<OntologyModuleDescriptor>,
+    /// Bridge sets in strictly ascending `(id, version, content_digest)` order.
+    pub bridge_sets: Vec<BridgeSetDescriptor>,
+}
+
+/// Reference to a Project summary document carried as a transport object.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectSummaryReference {
+    /// Must be [`PROJECT_SUMMARY_FORMAT`] in discovery v1.1.
+    pub format: String,
+    /// Canonical digest of the summary document (semantic identity).
+    pub summary_digest: Sha256Digest,
+    /// Transport object digest selecting exactly one entry from `objects`.
+    pub object_digest: Sha256Digest,
+}
+
 /// Validated repository discovery manifest.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -335,6 +447,12 @@ pub struct DiscoveryManifest {
     pub immutable_version: Sha256Digest,
     /// Semantic portable-v2 package identity.
     pub package: PortablePackageReference,
+    /// Optional Project summary document reference. Clone consumers ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<ProjectSummaryReference>,
+    /// Optional ontology composition inventory. Clone consumers ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ontology: Option<OntologyInventory>,
     /// Required semantics checked before object access.
     pub requirements: Vec<ProtocolRequirement>,
     /// Optional advertised semantics.
@@ -414,10 +532,277 @@ impl DiscoveryManifest {
         }
         self.package.package_digest.validate()?;
         self.package.object_digest.validate()?;
-        validate_semantics(&self.requirements, &self.capabilities, limits)?;
+        validate_semantics(
+            &self.requirements,
+            &self.capabilities,
+            PORTABLE_V2_CAPABILITY,
+            limits,
+        )?;
         validate_extensions(&self.extensions, limits)?;
         validate_objects(&self.objects, limits)?;
-        self.package_object().map(|_| ())
+        self.package_object()?;
+        self.validate_summary_reference(limits)?;
+        self.validate_ontology(limits)
+    }
+
+    fn validate_summary_reference(&self, limits: DiscoveryLimits) -> Result<(), DiscoveryError> {
+        let Some(reference) = &self.summary else {
+            return Ok(());
+        };
+        if reference.format != PROJECT_SUMMARY_FORMAT {
+            let error = DiscoveryError::new(
+                DiscoveryErrorCode::UnsupportedFuture,
+                Some("summary.format"),
+                "project summary format is unsupported",
+            );
+            return Err(
+                match format_major(&reference.format, PROJECT_SUMMARY_FORMAT_NAME) {
+                    Some(requested_major) => error.with_version(DiscoveryVersionDetails {
+                        subject: DiscoveryVersionSubject::ProjectSummary,
+                        supported_major: Some(1),
+                        requested_major,
+                    }),
+                    None => error,
+                },
+            );
+        }
+        reference.summary_digest.validate()?;
+        reference.object_digest.validate()?;
+        let object = self.summary_object()?;
+        if object.length > u64::try_from(limits.max_summary_bytes).unwrap_or(u64::MAX) {
+            return Err(limit("summary.object_digest"));
+        }
+        Ok(())
+    }
+
+    fn validate_ontology(&self, limits: DiscoveryLimits) -> Result<(), DiscoveryError> {
+        let Some(inventory) = &self.ontology else {
+            return Ok(());
+        };
+        inventory.composition_digest.validate()?;
+        if inventory.modules.len() > limits.max_ontology_entries {
+            return Err(limit("ontology.modules"));
+        }
+        if inventory.bridge_sets.len() > limits.max_ontology_entries {
+            return Err(limit("ontology.bridge_sets"));
+        }
+        let mut prior: Option<(&str, &str, &str)> = None;
+        for module in &inventory.modules {
+            check_identity_text(&module.id, &module.version, "ontology.modules", limits)?;
+            module.content_digest.validate()?;
+            let current = (
+                module.id.as_str(),
+                module.version.as_str(),
+                module.content_digest.0.as_str(),
+            );
+            check_ascending(&mut prior, current, "ontology.modules")?;
+            if let Some(package) = &module.package {
+                self.validate_module_package(package, limits)?;
+            }
+        }
+        let mut prior: Option<(&str, &str, &str)> = None;
+        for bridge in &inventory.bridge_sets {
+            check_identity_text(&bridge.id, &bridge.version, "ontology.bridge_sets", limits)?;
+            bridge.content_digest.validate()?;
+            let current = (
+                bridge.id.as_str(),
+                bridge.version.as_str(),
+                bridge.content_digest.0.as_str(),
+            );
+            check_ascending(&mut prior, current, "ontology.bridge_sets")?;
+        }
+        Ok(())
+    }
+
+    fn validate_module_package(
+        &self,
+        package: &PortablePackageReference,
+        limits: DiscoveryLimits,
+    ) -> Result<(), DiscoveryError> {
+        const OBJECT_FIELD: &str = "ontology.modules.package.object_digest";
+        if package.format != PORTABLE_V2_FORMAT {
+            let error = DiscoveryError::new(
+                DiscoveryErrorCode::UnsupportedFuture,
+                Some("ontology.modules.package.format"),
+                "module package format is unsupported",
+            );
+            return Err(match format_major(&package.format, "graphforge-project") {
+                Some(requested_major) => error.with_version(DiscoveryVersionDetails {
+                    subject: DiscoveryVersionSubject::PortablePackage,
+                    supported_major: Some(2),
+                    requested_major,
+                }),
+                None => error,
+            });
+        }
+        package.package_digest.validate()?;
+        package.object_digest.validate()?;
+        // `validate_objects` has already proven the inventory strictly
+        // ascending by digest, so each module lookup is a binary search rather
+        // than a scan of up to `max_objects` entries per module.
+        let object = self
+            .objects
+            .binary_search_by(|object| object.digest.cmp(&package.object_digest))
+            .map(|index| &self.objects[index])
+            .map_err(|_| {
+                DiscoveryError::new(
+                    DiscoveryErrorCode::MissingObject,
+                    Some(OBJECT_FIELD),
+                    "module package object is absent",
+                )
+            })?;
+        if object.media_type != PORTABLE_V2_MEDIA_TYPE
+            || package.object_digest == self.package.object_digest
+        {
+            return Err(DiscoveryError::new(
+                DiscoveryErrorCode::MalformedResponse,
+                Some(OBJECT_FIELD),
+                "module package object is incompatible",
+            ));
+        }
+        if object.length > limits.max_module_package_bytes {
+            return Err(limit(OBJECT_FIELD));
+        }
+        Ok(())
+    }
+
+    /// Return the uniquely selected Project summary transport object.
+    ///
+    /// Like [`Self::package_object`], selection is by explicit object digest and
+    /// requires the summary media type.
+    pub fn summary_object(&self) -> Result<&ObjectDescriptor, DiscoveryError> {
+        let reference = self.summary.as_ref().ok_or_else(|| {
+            DiscoveryError::new(
+                DiscoveryErrorCode::MissingObject,
+                Some("summary"),
+                "project summary is not advertised",
+            )
+        })?;
+        let object = self
+            .objects
+            .iter()
+            .find(|object| object.digest == reference.object_digest)
+            .ok_or_else(|| {
+                DiscoveryError::new(
+                    DiscoveryErrorCode::MissingObject,
+                    Some("summary.object_digest"),
+                    "project summary object is absent",
+                )
+            })?;
+        if object.media_type != PROJECT_SUMMARY_MEDIA_TYPE {
+            return Err(DiscoveryError::new(
+                DiscoveryErrorCode::MalformedResponse,
+                Some("summary.object_digest"),
+                "project summary object media type is incompatible",
+            ));
+        }
+        Ok(object)
+    }
+
+    /// Return the descriptor and transport object of one exact ontology module.
+    ///
+    /// The module must be advertised with a per-module package; its object must
+    /// be a portable-v2 object other than the Project package object.
+    pub fn ontology_module_object(
+        &self,
+        identity: &ExactIdentity,
+    ) -> Result<(&OntologyModuleDescriptor, &ObjectDescriptor), DiscoveryError> {
+        let absent = || {
+            DiscoveryError::new(
+                DiscoveryErrorCode::MissingObject,
+                Some("ontology.modules"),
+                "ontology module package is not advertised",
+            )
+        };
+        let descriptor = self
+            .ontology
+            .as_ref()
+            .and_then(|inventory| {
+                inventory.modules.iter().find(|module| {
+                    module.id == identity.id
+                        && module.version == identity.version
+                        && module.content_digest == identity.content_digest
+                })
+            })
+            .ok_or_else(absent)?;
+        let package = descriptor.package.as_ref().ok_or_else(absent)?;
+        let object = self
+            .objects
+            .iter()
+            .find(|object| object.digest == package.object_digest)
+            .ok_or_else(|| {
+                DiscoveryError::new(
+                    DiscoveryErrorCode::MissingObject,
+                    Some("ontology.modules.package.object_digest"),
+                    "module package object is absent",
+                )
+            })?;
+        if object.media_type != PORTABLE_V2_MEDIA_TYPE
+            || package.object_digest == self.package.object_digest
+        {
+            return Err(DiscoveryError::new(
+                DiscoveryErrorCode::MalformedResponse,
+                Some("ontology.modules.package.object_digest"),
+                "module package object is incompatible",
+            ));
+        }
+        Ok((descriptor, object))
+    }
+
+    /// Verify that a summary document is the one this manifest advertises for
+    /// this exact repository version and package.
+    ///
+    /// Checks, without I/O: the summary names this manifest's repository,
+    /// `immutable_version` and `package_digest`; its canonical digest equals
+    /// `summary.summary_digest`; and its ontology composition matches the
+    /// manifest's `ontology` inventory (both absent, or identical).
+    pub fn bind_summary(&self, summary: &ProjectSummary) -> Result<(), DiscoveryError> {
+        let reference = self.summary.as_ref().ok_or_else(|| {
+            DiscoveryError::new(
+                DiscoveryErrorCode::MissingObject,
+                Some("summary"),
+                "project summary is not advertised",
+            )
+        })?;
+        let mismatch = |field: &'static str| {
+            DiscoveryError::new(
+                DiscoveryErrorCode::IntegrityFailure,
+                Some(field),
+                "project summary disagrees with manifest",
+            )
+        };
+        if summary.repository != self.repository {
+            return Err(mismatch("summary.repository"));
+        }
+        if summary.immutable_version != self.immutable_version {
+            return Err(mismatch("summary.immutable_version"));
+        }
+        if summary.package.package_digest != self.package.package_digest {
+            return Err(mismatch("summary.package.package_digest"));
+        }
+        if summary.canonical_digest()? != reference.summary_digest {
+            return Err(mismatch("summary.summary_digest"));
+        }
+        let matches = match (&self.ontology, &summary.facts.ontology_composition) {
+            (None, None) => true,
+            (Some(inventory), Some(composition)) => {
+                inventory.composition_digest == composition.composition_digest
+                    && inventory.modules.len() == composition.modules.len()
+                    && inventory.modules.iter().zip(&composition.modules).all(
+                        |(descriptor, module)| {
+                            descriptor.id == module.id
+                                && descriptor.version == module.version
+                                && descriptor.content_digest == module.content_digest
+                        },
+                    )
+                    && inventory.bridge_sets == composition.bridge_sets
+            }
+            _ => false,
+        };
+        if !matches {
+            return Err(mismatch("summary"));
+        }
+        Ok(())
     }
 
     /// Return the uniquely selected portable-v2 transport object.
@@ -454,14 +839,7 @@ impl DiscoveryManifest {
 
     /// Compute SHA-256 over [`Self::to_canonical_json`].
     pub fn canonical_digest(&self) -> Result<Sha256Digest, DiscoveryError> {
-        let digest = Sha256::digest(self.to_canonical_json()?);
-        let hex = digest
-            .iter()
-            .fold(String::with_capacity(64), |mut hex, byte| {
-                write!(hex, "{byte:02x}").expect("writing to a string cannot fail");
-                hex
-            });
-        Ok(Sha256Digest(format!("sha256:{hex}")))
+        Ok(sha256_digest(&self.to_canonical_json()?))
     }
 }
 
@@ -545,6 +923,16 @@ impl RefSet {
     }
 }
 
+fn sha256_digest(bytes: &[u8]) -> Sha256Digest {
+    let hex = Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            write!(hex, "{byte:02x}").expect("writing to a string cannot fail");
+            hex
+        });
+    Sha256Digest(format!("sha256:{hex}"))
+}
+
 fn validate_header(
     format: &str,
     version: ProtocolVersion,
@@ -581,6 +969,7 @@ fn format_major(format: &str, expected_name: &str) -> Option<u16> {
 fn validate_semantics(
     requirements: &[ProtocolRequirement],
     capabilities: &[ProtocolCapability],
+    accepted_capability: &str,
     limits: DiscoveryLimits,
 ) -> Result<(), DiscoveryError> {
     if requirements.len() > 256 || capabilities.len() > 256 {
@@ -598,10 +987,7 @@ fn validate_semantics(
             ));
         }
         prior = Some(current);
-        if !matches!(
-            (requirement.capability.as_str(), requirement.major),
-            ("portable-v2", 1)
-        ) {
+        if requirement.capability != accepted_capability || requirement.major != 1 {
             return Err(DiscoveryError::new(
                 DiscoveryErrorCode::UnsupportedFuture,
                 Some("requirements"),
@@ -609,7 +995,7 @@ fn validate_semantics(
             )
             .with_version(DiscoveryVersionDetails {
                 subject: DiscoveryVersionSubject::Capability,
-                supported_major: (requirement.capability == "portable-v2").then_some(1),
+                supported_major: (requirement.capability == accepted_capability).then_some(1),
                 requested_major: requirement.major,
             }));
         }
@@ -628,6 +1014,32 @@ fn validate_semantics(
         prior = Some(current);
     }
     Ok(())
+}
+
+fn check_ascending<'a>(
+    prior: &mut Option<(&'a str, &'a str, &'a str)>,
+    current: (&'a str, &'a str, &'a str),
+    field: &'static str,
+) -> Result<(), DiscoveryError> {
+    if prior.is_some_and(|value| value >= current) {
+        return Err(DiscoveryError::new(
+            DiscoveryErrorCode::Duplicate,
+            Some(field),
+            "entries are duplicated or not canonically ordered",
+        ));
+    }
+    *prior = Some(current);
+    Ok(())
+}
+
+fn check_identity_text(
+    id: &str,
+    version: &str,
+    field: &'static str,
+    limits: DiscoveryLimits,
+) -> Result<(), DiscoveryError> {
+    check_string(id, field, limits)?;
+    check_string(version, field, limits)
 }
 
 fn check_capability_name(value: &str, limits: DiscoveryLimits) -> Result<(), DiscoveryError> {
@@ -995,6 +1407,8 @@ mod tests {
                 media_type: "application/vnd.graphforge.project".to_owned(),
                 locations: vec!["https://data.graphforge.sh/objects/sha256/cccc".to_owned()],
             }],
+            summary: None,
+            ontology: None,
             extensions: BTreeMap::from([(
                 "x-example".to_owned(),
                 json!({"z": 1, "a": [true, "ok"]}),
