@@ -2,6 +2,7 @@
 //! workspaces and write there, never through an alias of a published
 //! generation's graph tree (#1709).
 use super::*;
+use crate::expanded_generation_test_support::into_expanded;
 use crate::pinned_workspace_tests::{
     assert_published_trees_untouched, assert_tree_backed_owner, published_generations,
 };
@@ -76,6 +77,9 @@ fn owner_with_pending_upstream() -> (
     graph
         .execute("CREATE (:Item {x:5, secret:'unselected'})")
         .unwrap();
+    // The owner's last write is done: republish its graph as an expanded tree,
+    // the only kind of generation a pinned open can alias.
+    let graph = into_expanded(graph);
     // Review every field of every Item, including the new object's.
     let fields = crate::branches::fields::read(&graph, &CancellationToken::new())
         .unwrap()
@@ -160,10 +164,11 @@ fn projection_redacts_unreviewed_properties_and_adoption_applies_only_reviewed_f
 fn adopting_a_source_preference_writes_the_private_view_and_no_published_tree() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("project");
-    let mut graph = GraphForge::new(root.to_str()).unwrap();
+    let graph = GraphForge::new(root.to_str()).unwrap();
     let cancel = CancellationToken::new();
-    // A graph with content, so the owner's generations hold graph trees.
+    // A graph with content, expanded so the owner's generations hold graph trees.
     graph.execute("CREATE (:Item {x:0, y:0})").unwrap();
+    let mut graph = into_expanded(graph);
     let context = || WriteContext {
         operation_uuid: OperationId(Uuid::now_v7()),
         actor_uuid: None,

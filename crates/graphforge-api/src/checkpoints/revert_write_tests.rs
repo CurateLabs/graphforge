@@ -2,6 +2,7 @@
 //! the checkpoint's generation tree nor the restored generation's tree may be
 //! written in place (#1709).
 use super::{CheckpointRequest, RevertCheckpointRequest};
+use crate::expanded_generation_test_support::into_expanded;
 use crate::pinned_workspace_tests::{
     TreeStamp, assert_published_trees_untouched, published_generations, tree_drift,
 };
@@ -32,8 +33,11 @@ fn names(graph: &GraphForge) -> Vec<String> {
 fn write_after_revert_succeeds_and_modifies_no_published_tree() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("project");
-    let mut graph = GraphForge::new(root.to_str()).unwrap();
+    let graph = GraphForge::new(root.to_str()).unwrap();
     graph.execute("CREATE (:Person {name:'before'})").unwrap();
+    // The hazard under test is a pinned alias of a generation tree, which only
+    // an expanded generation has; a compact root hydrates privately.
+    let mut graph = into_expanded(graph);
     graph
         .checkpoint(CheckpointRequest {
             name: "cp".into(),
@@ -82,8 +86,11 @@ fn write_after_revert_succeeds_and_modifies_no_published_tree() {
 fn checkpoint_view_trees_survive_a_revert_then_write_cycle_twice() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("project");
-    let mut graph = GraphForge::new(root.to_str()).unwrap();
+    let graph = GraphForge::new(root.to_str()).unwrap();
     graph.execute("CREATE (:Person {name:'before'})").unwrap();
+    // The hazard under test is a pinned alias of a generation tree, which only
+    // an expanded generation has; a compact root hydrates privately.
+    let mut graph = into_expanded(graph);
     graph
         .checkpoint(CheckpointRequest {
             name: "cp".into(),

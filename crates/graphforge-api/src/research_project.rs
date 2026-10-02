@@ -112,6 +112,8 @@ impl GraphForge {
                 .collect(),
             participants,
         };
+        // Carrying a compact graph root forward needs its object lease.
+        let graph_objects = graphforge_storage::begin_graph_object_publication(&root)?;
         let receipt = match graphforge_storage::stage_project_generation(&root, &publication)? {
             ProjectStageOutcome::AlreadyPublished(receipt) => {
                 if receipt.generation_uuid != expected_parent {
@@ -135,7 +137,7 @@ impl GraphForge {
                         Ok(())
                     },
                 )?
-                .publish()?,
+                .publish_with_graph_objects(&graph_objects)?,
         };
         *self
             .current_generation_uuid

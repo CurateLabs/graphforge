@@ -158,8 +158,17 @@ fn compacted_parquet_matches_base_plus_deltas_fingerprint() {
             .unwrap()
             .is_empty()
     );
+    // Compaction converts the expanded delta-bearing generation to a compact
+    // root, which owns no graph tree: replay its materialized objects instead.
+    assert!(
+        reopened.declared_graph_files_inventory().unwrap().is_none(),
+        "compaction must publish a compact root"
+    );
+    let hydrated = tempfile::tempdir_in(root.path()).unwrap();
+    graphforge_storage::materialize_graph_objects(root.path(), &inventory, hydrated.path())
+        .unwrap();
     let (post_state, post_evidence) = reconstruct_graph_state(
-        &reopened.graph_tree_root(),
+        hydrated.path(),
         &inventory,
         GraphDeltaJournalLimits::default(),
     )

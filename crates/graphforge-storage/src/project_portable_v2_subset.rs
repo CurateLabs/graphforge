@@ -67,20 +67,61 @@ pub fn portable_v2_graph_data_fingerprint(
     Ok(format!("sha256:{}", hex(digest)))
 }
 
+/// A graph tree a projection can read: the generation's own tree when it is
+/// expanded, or a private hard-linked materialization of a compact root. Every
+/// payload is admitted first, so projecting never reads unauthenticated bytes.
+struct ReadableGraphTree {
+    root: std::path::PathBuf,
+    _materialized: Option<tempfile::TempDir>,
+}
+
+impl ReadableGraphTree {
+    fn open(generation: &ResolvedProjectGeneration) -> Result<Self, PortableV2Error> {
+        let inventory = generation
+            .graph_files_inventory()
+            .map_err(storage)?
+            .ok_or_else(|| incompatible("pinned generation has no graph tree"))?;
+        if !matches!(
+            generation
+                .declared_graph_files_participant()
+                .map_err(storage)?,
+            Some(crate::GraphFilesParticipant::V2(_))
+        ) {
+            let root = generation.graph_tree_root();
+            if !root.exists() {
+                return Err(incompatible("pinned generation has no graph tree"));
+            }
+            return Ok(Self {
+                root,
+                _materialized: None,
+            });
+        }
+        let materialized = tempfile::tempdir_in(generation.container_root()).map_err(storage_io)?;
+        crate::materialize_graph_objects(
+            generation.container_root(),
+            &inventory,
+            materialized.path(),
+        )
+        .map_err(storage)?;
+        Ok(Self {
+            root: materialized.path().to_path_buf(),
+            _materialized: Some(materialized),
+        })
+    }
+
+    fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
 /// Resolve one bounded deterministic graph-data subset without writing a package.
 pub fn preview_portable_v2_graph_subset(
     generation: &ResolvedProjectGeneration,
     request: &PortableV2SubsetRequest,
     limits: PortableV2Limits,
 ) -> Result<PortableV2SubsetPlan, PortableV2Error> {
-    let graph_root = generation.graph_tree_root();
-    if !graph_root.exists() {
-        return Err(incompatible("pinned generation has no graph tree"));
-    }
-    generation
-        .graph_files_inventory()
-        .map_err(storage)?
-        .ok_or_else(|| incompatible("pinned generation has no graph inventory"))?;
+    let graph_tree = ReadableGraphTree::open(generation)?;
+    let graph_root = graph_tree.root();
 
     let selector = canonicalize_selector(&request.selector)?;
     if selector.node_uuids.is_empty() && selector.edge_uuids.is_empty() {
@@ -127,7 +168,7 @@ pub fn preview_portable_v2_graph_subset(
 
     let staging = tempfile::tempdir().map_err(storage_io)?;
     let summary =
-        materialize_portable_graph_tree_projection(&graph_root, staging.path(), &projection)
+        materialize_portable_graph_tree_projection(graph_root, staging.path(), &projection)
             .map_err(|error| map_projection(&error))?;
     let (captured, _) = capture_graph_files(staging.path()).map_err(storage)?;
     if captured.total_byte_length > limits.max_total_bytes {
@@ -173,9 +214,10 @@ pub fn plan_graph_subset_portable_v2(
     }
     validate_selection_plan(generation, &plan.selection)?;
 
+    let graph_tree = ReadableGraphTree::open(generation)?;
     let staging = tempfile::tempdir().map_err(storage_io)?;
     let summary = materialize_portable_graph_tree_projection(
-        &generation.graph_tree_root(),
+        graph_tree.root(),
         staging.path(),
         &plan.projection,
     )
@@ -386,7 +428,8 @@ fn hex(digest: [u8; 32]) -> String {
 fn map_projection(error: &crate::GfError) -> PortableV2Error {
     match error {
         crate::GfError::Validation(_) => incompatible("subset projection rejected"),
-        _ => PortableV2Error::new(PortableV2ErrorCode::Io, "subset projection failed"),
+        other => PortableV2Error::new(PortableV2ErrorCode::Io, "subset projection failed")
+            .with_cause(crate::portable_cause::sanitized_cause(&other.to_string())),
     }
 }
 fn storage(_: crate::GfError) -> PortableV2Error {

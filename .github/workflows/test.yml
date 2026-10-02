@@ -318,6 +318,7 @@ jobs:
           project_generation::tests::
           filesystem_admission::tests::
           durable_commit::windows_allocation_tests::windows_immutable_link_refreshes_native_allocation_and_preserves_reused_temporary
+          adjacency::installation::tests::csr_shard_publication_supports_long_windows_paths
           project_portable_v2_export::tests::destination_replacement_and_source_mutation_fail_closed
           project_portable_v2_export::tests::canonical_source_path_
           project_portable_v2_import::tests::authenticated_cleanup_releases_handles_before_removal

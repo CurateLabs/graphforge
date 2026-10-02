@@ -84,7 +84,10 @@ strictly ascending entries. `facts` holds verified package facts that need no
 graph payload: `ontology_mode`, a component-kind histogram (only kinds with at
 least one component), `payload_bytes`, `research_present`, `evidence_present`,
 and an optional ontology composition. The presence flags must agree with the
-histogram.
+histogram: `research_present` means the package carries a `research`-kind
+component (the research-interchange registry), and `evidence_present` an
+`evidence`-kind component. Research *metadata* presence shows up as non-null
+`metadata` fields, not as `research_present`.
 
 `DiscoveryManifest::bind_summary` requires a summary to name the manifest's
 repository, `immutable_version`, and `package_digest`, to hash to

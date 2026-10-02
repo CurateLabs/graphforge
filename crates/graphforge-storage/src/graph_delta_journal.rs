@@ -1727,6 +1727,7 @@ fn prepare_graph_delta_inner(
                 &inventory,
                 &sealed,
                 &[],
+                None,
             )?;
             files_participant = crate::graph_files::graph_files_root_participant(&root)?;
             Some(lease)

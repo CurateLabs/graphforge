@@ -762,35 +762,37 @@ fn a_shard_name_is_an_upper_bound_on_its_rows_after_a_delete() {
             )
             .unwrap();
     }
-    // The mutating commit published an expanded generation whose tree keeps
-    // the shard names; no workspace is open, so these are the retained files.
-    let generation = resolve_project_generation(&path).unwrap();
-    let tree = generation.graph_tree_root();
-    let nodes = canonical_shards(&tree, "nodes");
-    let edges = canonical_shards(&tree, "edges");
+    // Publication may retain expanded paths or compact CAS paths. Keep the
+    // manifest's logical shard names separate from their physical locations.
+    let inventory = graphforge_storage::AuthenticatedPropertyInventory::capture(&path).unwrap();
+    let nodes = inventory.node_fragments().expect("full node authority");
+    let edges = inventory.edge_fragments(None);
     assert_eq!(nodes.len(), 1, "{nodes:?}");
     assert_eq!(edges.len(), 1, "{edges:?}");
 
-    let node_rows = footer_rows(&nodes[0]);
-    let edge_rows = footer_rows(&edges[0]);
+    let node_rows = footer_rows(&nodes[0].0);
+    let edge_rows = footer_rows(&edges[0].1);
     eprintln!(
         "{} holds {node_rows} rows; {} holds {edge_rows} rows",
-        nodes[0].display(),
-        edges[0].display()
+        nodes[0].0.display(),
+        edges[0].1.display()
     );
     assert_eq!(node_rows, 511, "one node deleted");
     assert_eq!(edge_rows, 2_040, "its four out- and four in-edges deleted");
 
-    for (shard, rows) in [(&nodes[0], node_rows), (&edges[0], edge_rows)] {
-        let relative = shard
-            .strip_prefix(&tree)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned();
+    let canonical = project.path().join("retained-canonical");
+    for (shard, relative, rows) in [
+        (&nodes[0].0, &nodes[0].1, node_rows),
+        (&edges[0].1, &edges[0].2, edge_rows),
+    ] {
+        // Exercise filename-derived hints on the exact same deleted payload
+        // even when the published file is physically named by its CAS hash.
+        let named = canonical.join(relative);
+        std::fs::create_dir_all(named.parent().unwrap()).unwrap();
+        std::fs::hard_link(shard, &named).unwrap();
         for fragment in [
-            ParquetFragment::for_path(shard.clone(), true),
-            ParquetFragment::for_declared(shard.clone(), &relative, true),
+            ParquetFragment::for_path(named, true),
+            ParquetFragment::for_declared(shard.clone(), relative, true),
         ] {
             let hint = fragment.exact_rows.expect("a canonical shard has a hint");
             assert!(

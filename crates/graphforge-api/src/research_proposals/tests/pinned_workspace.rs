@@ -1,6 +1,7 @@
 //! Research flows that need a writable facade must write a private copy, never
 //! a published generation's own graph tree (#1709).
 use super::*;
+use crate::expanded_generation_test_support::into_expanded;
 use crate::pinned_workspace_tests::{
     TreeStamp, assert_published_trees_untouched, assert_tree_backed_owner, has_compact_graph_root,
     published_generations, tree_drift,
@@ -10,8 +11,10 @@ use graphforge_storage::research_versions::{ResearchMutation, ResearchOperation}
 fn project_with_branch() -> (tempfile::TempDir, std::path::PathBuf, GraphForge, Uuid) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("project");
-    let mut graph = GraphForge::new(root.to_str()).unwrap();
+    let graph = GraphForge::new(root.to_str()).unwrap();
     graph.execute("CREATE (:Character {score:0})").unwrap();
+    // An expanded owner: only a generation tree can be aliased by a pinned open.
+    let mut graph = into_expanded(graph);
     let branch = branch(&mut graph);
     (temp, root, graph, branch)
 }
@@ -157,10 +160,11 @@ fn project_restore_then_write_publishes_without_touching_any_published_tree() {
 fn proposal_field_selection_redacts_a_private_view_and_leaves_published_trees_untouched() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("project");
-    let mut graph = GraphForge::new(root.to_str()).unwrap();
+    let graph = GraphForge::new(root.to_str()).unwrap();
     graph
         .execute("CREATE (:Character {score:0, private_note:'unselected'})")
         .unwrap();
+    let mut graph = into_expanded(graph);
     let node = node(&mut graph);
     let branch = branch(&mut graph);
     let version = edit(&mut graph, branch, "MATCH (n:Character) SET n.score=1");

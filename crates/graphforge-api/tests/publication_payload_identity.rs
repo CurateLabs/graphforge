@@ -39,6 +39,15 @@ fn inodes(root: &Path) -> Inodes {
     found
 }
 
+/// Bytes of content-store objects that exist now but did not exist before.
+fn newly_installed_object_bytes(root: &Path, before: &Inodes) -> u64 {
+    inodes(&root.join("graph-objects"))
+        .into_iter()
+        .filter(|(inode, _)| !before.contains_key(inode))
+        .map(|(_, length)| length)
+        .sum()
+}
+
 /// Bytes of regular-file inodes that exist now but did not exist before.
 fn newly_published_bytes(root: &Path, before: &Inodes) -> u64 {
     inodes(root)
@@ -144,10 +153,29 @@ fn facade_mutation_does_not_rehash_the_unchanged_graph() {
         .unwrap();
     let work = capture.snapshot();
     drop(capture);
+    // A mutating commit publishes a compact root, so the new bytes are only the
+    // objects that changed (it once republished the whole tree, which made a
+    // bound on every new inode loose). Each changed file is hashed once, while it
+    // is captured, and installed against that capture (up to
+    // `MAX_RETAINED_CAPTURES` = 128 changed files; beyond that the rest are hashed
+    // again as they install, which this one-node commit never reaches): the bound is
+    // the bytes of the objects installed. The UUID-membership rebuild also describes (hashes)
+    // each of its runs once; that is a term of the rebuild, bounded here by the
+    // declared bytes of the membership controls, and is the next term to remove.
+    let membership_bytes: u64 = graphforge_storage::resolve_project_generation(root.path())
+        .unwrap()
+        .unadmitted_graph_files_inventory()
+        .unwrap()
+        .unwrap()
+        .files
+        .iter()
+        .filter(|file| file.relative_path.starts_with("topology/uuid-membership/"))
+        .map(|file| file.byte_length)
+        .sum();
     assert_bounded(
         "facade add_node",
         work,
-        newly_published_bytes(root.path(), &before),
+        newly_installed_object_bytes(root.path(), &before) + membership_bytes,
     );
     drop(graph);
     let reopened = GraphForge::new(path).unwrap();

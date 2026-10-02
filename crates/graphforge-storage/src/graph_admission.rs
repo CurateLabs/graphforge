@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
+use std::io::Seek as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
@@ -123,10 +124,19 @@ pub(crate) fn admit_now(
 /// # Errors
 /// Returns the open failure or the corruption refusal.
 pub fn open_admitted(path: &Path) -> Result<File, GfError> {
-    let file = File::open(path).map_err(|error| {
+    let mut file = File::open(path).map_err(|error| {
         GfError::Storage(format!("open graph payload {}: {error}", path.display()))
     })?;
     admit_file(&file)?;
+    // Positioned reads on Windows can advance the handle cursor. This helper
+    // returns a fresh file for its caller to decode, so restore the ordinary
+    // post-open position after admission.
+    file.seek(std::io::SeekFrom::Start(0)).map_err(|error| {
+        GfError::Storage(format!(
+            "rewind admitted graph payload {}: {error}",
+            path.display()
+        ))
+    })?;
     Ok(file)
 }
 
@@ -350,6 +360,7 @@ pub fn admit_path(path: &Path) -> Result<(), GfError> {
 }
 
 /// Admit every regular file beneath `root`; used for directory-shaped readers.
+/// A `root` that does not exist has nothing to admit.
 ///
 /// # Errors
 /// Returns the first traversal failure or corruption refusal.
@@ -359,12 +370,18 @@ pub fn admit_tree(root: &Path) -> Result<(), GfError> {
     }
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
-        let entries = std::fs::read_dir(&directory).map_err(|error| {
-            GfError::Storage(format!(
-                "read graph payload directory {}: {error}",
-                directory.display()
-            ))
-        })?;
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            // A directory that is not there holds no payload to admit: a
+            // reader that finds nothing reports an absent artifact itself.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(GfError::Storage(format!(
+                    "read graph payload directory {}: {error}",
+                    directory.display()
+                )));
+            }
+        };
         for entry in entries {
             let entry = entry.map_err(|error| {
                 GfError::Storage(format!(
@@ -519,6 +536,18 @@ mod tests {
         fixture.register();
         admit_path(&fixture.link).unwrap();
         admit_path(&fixture.object).unwrap();
+    }
+
+    #[test]
+    fn opening_an_admitted_payload_leaves_its_reader_at_the_start() {
+        let fixture = Fixture::new(PAYLOAD);
+        fixture.register();
+
+        let mut file = open_admitted(&fixture.link).unwrap();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut bytes).unwrap();
+
+        assert_eq!(bytes, PAYLOAD);
     }
 
     #[test]
@@ -781,5 +810,19 @@ mod tests {
             "eight concurrent first touches of one inode must checksum it once"
         );
         assert!(registry().get(&key_of(identity)).is_none());
+    }
+    /// A directory-shaped reader whose artifact does not exist reports it absent
+    /// itself; admission has nothing to admit and must not turn that into an
+    /// error (a compact project hydrates no empty directories).
+    #[test]
+    fn admit_tree_of_a_missing_directory_admits_nothing() {
+        let fixture = Fixture::new(b"payload");
+        fixture.register();
+        assert!(registry().len() >= 1, "admission is armed");
+        let missing = fixture.directory.path().join("workspace").join("absent");
+        admit_tree(&missing).expect("a missing directory has nothing to admit");
+        // A directory that is there is still walked: the registered link refuses.
+        fixture.flip_first_byte();
+        assert!(admit_tree(&fixture.directory.path().join("workspace")).is_err());
     }
 }

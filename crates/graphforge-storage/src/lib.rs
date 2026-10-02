@@ -95,10 +95,9 @@ pub use graph_files::{
     GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION, GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION,
     GRAPH_TREE_DIR, GraphFileEntry, GraphFileRole, GraphFilesInventory, GraphFilesOpenEvidence,
     GraphFilesOpenStrategy, GraphWorkspaceCheckpoint, GraphWorkspaceRestoration,
-    capture_graph_files, capture_graph_files_over_parent,
-    capture_graph_files_over_parent_with_topology, capture_graph_files_with_topology,
-    decode_inventory, encode_inventory, graph_tree_root, inventory_participant,
-    materialize_graph_tree, pinned_open_evidence, stage_graph_tree, verify_graph_tree,
+    capture_graph_files, capture_graph_files_with_topology, decode_inventory, encode_inventory,
+    graph_tree_root, inventory_participant, materialize_graph_tree, pinned_open_evidence,
+    stage_graph_tree, verify_graph_tree,
 };
 pub(crate) use graph_files::{GraphFilesParticipant, decode_versioned_graph_files_participant};
 pub use graph_read_inventory::{
@@ -112,6 +111,7 @@ pub use topology_files::{TopologyFileAuthority, TopologyFiles, enumerate_topolog
     reason = "private node-v2 construction is consumed by the staged #932 integration"
 )]
 mod graph_manifest;
+mod portable_cause;
 #[cfg(any(test, feature = "test-support"))]
 pub use graph_manifest::encode_root as encode_graph_files_root_v2;
 pub(crate) use graph_manifest::{
@@ -123,8 +123,8 @@ pub(crate) use graph_manifest::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use graph_manifest::{
-    GRAPH_MANIFEST_BRANCH_MAX_BYTES, GRAPH_MANIFEST_ENTRY_ENCODING_OVERHEAD_BYTES,
-    GRAPH_MANIFEST_NODE_MAX_BYTES,
+    GRAPH_MANIFEST_BRANCH_MAX_BYTES, GRAPH_MANIFEST_BUCKET_CAPACITY,
+    GRAPH_MANIFEST_ENTRY_ENCODING_OVERHEAD_BYTES, GRAPH_MANIFEST_NODE_MAX_BYTES,
 };
 
 #[allow(
@@ -139,7 +139,8 @@ pub use graph_object_store::graph_object_path;
 pub use graph_object_store::{
     AuthenticatedGraphObject, GRAPH_OBJECT_IO_BUFFER_BYTES, GraphObjectIoTotals,
     GraphObjectPublicationLease, GraphPublicationIo, begin_graph_object_publication,
-    materialize_graph_objects, open_graph_object_by_digest, prepare_graph_files_replacement,
+    materialize_graph_objects, open_graph_object_by_digest, prepare_compact_graph_publication,
+    prepare_compact_graph_publication_repairing_adjacency, prepare_graph_files_replacement,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use graph_object_store::{

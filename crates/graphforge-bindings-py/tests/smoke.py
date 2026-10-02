@@ -316,8 +316,8 @@ def _expect_lifecycle_error(call) -> None:
 
 def check_close_releases_project_handles() -> None:
     # #1363 — an open persistent instance retains OS handles on the committed
-    # generation it reads from; the authenticated property inventory holds a
-    # directory handle on ``generations/<uuid>/graph``. close() releases the
+    # generation it reads from (its private graph workspace and the committed
+    # generation's files). close() releases the
     # native engine, so the project tree is removable from this process
     # (Windows refuses to remove a directory that still has a live handle)
     # while the committed data reopens unchanged.
@@ -328,7 +328,9 @@ def check_close_releases_project_handles() -> None:
         forge.execute("CREATE (:Person {name: 'Alice'})")
         generations = [entry for entry in (project / "generations").iterdir() if entry.is_dir()]
         assert generations, "expected a published generation"
-        assert any((entry / "graph").is_dir() for entry in generations), generations
+        # A commit publishes a compact graph root, so no generation owns a graph
+        # tree; the open instance holds its handles on a private workspace.
+        assert list(project.glob("graphforge-graph-workspace-*")), "expected an open workspace"
         forge.close()
 
         # The engine is gone, but the inert attributes still answer, and every

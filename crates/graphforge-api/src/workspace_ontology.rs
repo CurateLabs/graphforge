@@ -15,6 +15,7 @@ use graphforge_storage::{
 };
 use sha2::Digest;
 
+use crate::graph_publication::compact_graph_participant;
 use crate::{GraphForge, WriteContext};
 
 /// Persistent ontology-adoption request.
@@ -552,14 +553,18 @@ fn publish_workspace_records_inner(
     if let Some(bindings) = semantic_bindings {
         participants.push(bindings.to_project_participant()?);
     }
+    // A candidate graph rewrites graph data, so it publishes a compact root over
+    // the parent like every other mutating commit: only changed files install.
+    let mut candidate_lease = None;
     if let Some(candidate_graph_root) = candidate_graph_root {
-        participants.push(
-            graphforge_storage::capture_graph_files_with_topology(
-                candidate_graph_root,
-                candidate_topology.expect("candidate graph has owned membership"),
-            )?
-            .1,
-        );
+        let (participant, lease) = compact_graph_participant(
+            candidate_graph_root,
+            &parent,
+            false,
+            candidate_topology.expect("candidate graph has owned membership"),
+        )?;
+        candidate_lease = Some(lease);
+        participants.push(participant);
     }
     participants.push(workspace_participant(
         graphforge_storage::WORKSPACE_CONFIGURATION_FAMILY,
@@ -585,15 +590,18 @@ fn publish_workspace_records_inner(
         participants,
     };
     let generation_owned = parent.declared_graph_files_inventory()?.is_some();
-    let publication_lease =
-        if candidate_graph_root.is_none() && has_graph_files && !generation_owned {
-            Some(graphforge_storage::begin_graph_object_publication(&root)?)
-        } else {
-            None
-        };
-    let selected_graph_root = candidate_graph_root
-        .map(std::path::Path::to_path_buf)
-        .or_else(|| generation_owned.then(|| parent.graph_tree_root()));
+    let publication_lease = if candidate_lease.is_some() {
+        candidate_lease
+    } else if has_graph_files && !generation_owned {
+        Some(graphforge_storage::begin_graph_object_publication(&root)?)
+    } else {
+        None
+    };
+    let selected_graph_root = if candidate_graph_root.is_some() {
+        None
+    } else {
+        generation_owned.then(|| parent.graph_tree_root())
+    };
     let mut prepared_candidate = None;
     let mut prepared_generation = None;
     let mut prepare =

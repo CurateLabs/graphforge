@@ -97,7 +97,8 @@ pub(super) fn decode_manifest(
     }
     // The shard manifest is written whole and published by rename, so bytes
     // that do not parse as one are damaged, not a partial write.
-    let header: Header = serde_json::from_slice(bytes).map_err(manifest_parse_error)?;
+    let header: Header = serde_json::from_slice(bytes)
+        .map_err(|error| manifest_parse_error(error, path, bytes.len()))?;
     if header.version != super::SHARDED_CSR_VERSION {
         return Err(GfError::Storage(format!(
             "unsupported sharded CSR format version {}; recreate the index ({})",
@@ -105,8 +106,8 @@ pub(super) fn decode_manifest(
             path.display()
         )));
     }
-    let manifest: super::CsrShardManifest =
-        serde_json::from_slice(bytes).map_err(manifest_parse_error)?;
+    let manifest: super::CsrShardManifest = serde_json::from_slice(bytes)
+        .map_err(|error| manifest_parse_error(error, path, bytes.len()))?;
     if manifest.format != "graphforge.csr-shards" {
         return Err(GfError::Storage(format!(
             "unsupported sharded CSR manifest {}",
@@ -116,8 +117,12 @@ pub(super) fn decode_manifest(
     Ok(manifest)
 }
 
-fn manifest_parse_error(error: impl std::fmt::Display) -> GfError {
-    corrupt_index(format!("CSR shard manifest does not parse: {error}"))
+fn manifest_parse_error(error: impl std::fmt::Display, path: &Path, bytes: usize) -> GfError {
+    corrupt_index(format!(
+        "CSR shard manifest {} ({} bytes) does not parse: {error}",
+        path.display(),
+        bytes
+    ))
 }
 
 fn invalid() -> GfError {

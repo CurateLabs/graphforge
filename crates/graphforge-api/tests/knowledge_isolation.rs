@@ -798,6 +798,10 @@ fn publish_future_knowledge_generation(root: &Path) {
         capabilities,
         participants,
     };
+    // The parent's graph root is compact, so publication carries it forward
+    // under a graph object lease.
+    let graph_objects = graphforge_storage::begin_graph_object_publication(root)
+        .expect("begin graph object publication");
     let ProjectStageOutcome::Staged(staged) =
         graphforge_storage::stage_project_generation(root, &request)
             .expect("stage future knowledge")
@@ -813,7 +817,7 @@ fn publish_future_knowledge_generation(root: &Path) {
             },
         )
         .expect("validate complete future generation")
-        .publish()
+        .publish_with_graph_objects(&graph_objects)
         .expect("publish future knowledge generation");
 }
 
