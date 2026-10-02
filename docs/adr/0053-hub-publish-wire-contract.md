@@ -173,12 +173,22 @@ whole next snapshot locally:
 - **Packages.** The selected Version's research package
   (`export_research`, bundled), the Project package, the Project summary, one
   component-selective package per ontology module, and the lineage document,
-  each verified after export. The Project package uses the
-  `DataComponents` profile: `export_portable_v2` with `Complete` refuses a
-  Project with research Branches (portable research cannot carry operational
-  heads), research travels only through the research interchange packages, and
-  `gf clone --ref` / `--version-uuid` fetch those Version packages, never the
-  Project package.
+  each verified after export. The Project package is every committed
+  participant of the exported generation except the `research` capability: a
+  `Custom` selection built from the `Complete` selection preview with research
+  participants removed, so participants added later are published without a
+  change here. `export_portable_v2` with `Complete` refuses a Project with
+  research Branches, because its research registry carries operational heads
+  and is not a single interchange archive (`portable_registry`). Research
+  travels only through the research interchange packages, and `gf clone --ref`
+  / `--version-uuid` fetch those Version packages, never the Project package.
+  The Project package keeps the workspace research metadata and configuration
+  that the Project summary is derived from (ADR 0051), so a published research
+  repository's summary carries its title, licence and ontology mode. Its
+  package class is `component-selective` and its summary reports
+  `research_present: false`, which is exact: research presence for a
+  repository is the manifest's `lineage` field (ADR 0052), not a Project
+  package component.
 - **Lineage.** `build_research_lineage_for_discovery` emits the selected Branch
   (named by `--ref`, matched to the local Branch label) and Version. Versions,
   Branches, and Proposals already published in the repository's lineage carry
@@ -253,4 +263,4 @@ through its HTTP adapter.
 
 ## Alternatives
 
-Embedding publish types in `graphforge-discovery` would couple read and write evolution. Keeping publish only in the CLI would forfeit shared conformance and binding parity. Letting the Hub rewrite object locations in a submitted manifest would change the manifest digest the client committed to, so locations come from the capabilities template instead. Accepting the publish token on upload URLs would send the credential to whatever data-plane host the Hub names, so upload URLs are capabilities instead.
+Embedding publish types in `graphforge-discovery` would couple read and write evolution. Keeping publish only in the CLI would forfeit shared conformance and binding parity. Letting the Hub rewrite object locations in a submitted manifest would change the manifest digest the client committed to, so locations come from the capabilities template instead. Accepting the publish token on upload URLs would send the credential to whatever data-plane host the Hub names, so upload URLs are capabilities instead. Publishing the Project package with the `DataComponents` profile dropped the workspace research metadata and configuration participants (they are `settings` components), so the derived summary of every published research repository had no title, licence or ontology mode. Exporting a `Complete` package with the research registry projected to the published Versions would put research in the Project package too, but it changes what a Project package's research component means, duplicates the Version packages, and is a storage-format decision (ADR 0044); revisit it only if a consumer needs research history from the Project package alone. Deriving the summary from the head Version's package instead would break the summary's binding to `manifest.package` (ADR 0051).
