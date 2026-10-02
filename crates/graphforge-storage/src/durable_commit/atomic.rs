@@ -700,6 +700,15 @@ where
         }
         Err(error) => return Err(error),
     };
+    if !reused && let Some(allocation) = &sealed.allocation {
+        // Native allocation can change when a small resident file gains a
+        // second name. Refresh the still-owned temporary before the content
+        // owner records the new alias of this same identity. A reused winner
+        // is a different inode; its temporary must remain charged separately.
+        allocation
+            .replace_file_at(&sealed.parent.path().join(&sealed.temporary), &installed)
+            .map_err(io::Error::other)?;
+    }
     before_destination_ack(reused, &installed)?;
     acknowledge_directory(destination)?;
     after_destination_ack(reused, &installed)?;
