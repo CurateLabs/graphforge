@@ -739,8 +739,8 @@ fn node_fragments(dir: &Path, route: &str) -> Vec<crate::property_overlay::Prope
 
 #[test]
 fn set_cuts_one_window_at_the_fragment_cap() {
+    use crate::property_overlay::MAX_PROPERTY_FRAGMENT_BYTES;
     use crate::property_overlay::fragment_cap::tests::{assert_capped_fragments, wide_value};
-    use crate::property_overlay::{MAX_PROPERTY_FRAGMENT_BYTES, PropertyRouteKind};
     let dir = TempDir::new().unwrap();
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
     w.create_node(new_v7(), EntityTypeId::decode(0).unwrap())
@@ -813,5 +813,49 @@ fn set_cuts_one_window_at_the_fragment_cap() {
         "the small write is one fragment"
     );
     assert_eq!(after.last().unwrap().id.ordinal, 0);
-    let _ = PropertyRouteKind::Node;
+}
+
+#[test]
+fn set_gives_a_row_larger_than_the_cap_a_fragment_of_its_own() {
+    use crate::property_overlay::MAX_PROPERTY_FRAGMENT_BYTES;
+    use crate::property_overlay::fragment_cap::tests::{fragment_stats, wide_value};
+    let dir = TempDir::new().unwrap();
+    let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+    w.create_node(new_v7(), EntityTypeId::decode(0).unwrap())
+        .unwrap();
+    w.flush().unwrap();
+    let huge = wide_value(7, 5 << 20);
+    let updates = [(1_u128, "small-a"), (2, ""), (3, "small-b")]
+        .into_iter()
+        .map(|(id, text)| {
+            let value = if text.is_empty() {
+                huge.clone()
+            } else {
+                text.to_owned()
+            };
+            (
+                id.to_be_bytes(),
+                HashMap::from([("payload".to_owned(), IrLiteral::Str(value))]),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    set_node_properties(dir.path(), "_untyped", &updates).unwrap();
+    let fragments = node_fragments(dir.path(), "_untyped");
+    let stats = fragments
+        .iter()
+        .map(|fragment| fragment_stats(&fragment.path))
+        .collect::<Vec<_>>();
+    // The oversize row cannot be split, so it sits alone and the rows around
+    // it are cut off from it; no other fragment is over the cap.
+    assert_eq!(
+        stats.iter().map(|stat| stat.rows).collect::<Vec<_>>(),
+        [1, 1, 1]
+    );
+    assert!(stats[1].logical_bytes > MAX_PROPERTY_FRAGMENT_BYTES);
+    assert!(stats[0].file_bytes < MAX_PROPERTY_FRAGMENT_BYTES);
+    assert!(stats[2].file_bytes < MAX_PROPERTY_FRAGMENT_BYTES);
+    let props = read_node_props(dir.path(), "_untyped");
+    for (uuid, expected) in &updates {
+        assert_eq!(&props[uuid], expected);
+    }
 }

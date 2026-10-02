@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Array, FixedSizeBinaryArray, ListArray, StringArray, UInt32Array};
+use arrow::array::{Array, ArrayRef, FixedSizeBinaryArray, ListArray, StringArray, UInt32Array};
 use arrow::compute::{concat_batches, take};
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
@@ -448,20 +448,41 @@ fn project_property_directory(
             continue;
         };
         let combined = concat_batches(&schema, &batches).map_err(storage)?;
-        project_record_batch(
-            &combined,
-            &target.join(encode_transform_path(
-                &format!("{directory}/{route}.parquet"),
-                table,
-            )?),
-            key,
-            selected,
-            exclude_properties,
-        )?;
+        let projected = select_projected_rows(&combined, key, selected, exclude_properties)?;
+        let snapshot = property_snapshot_fragment(&projected, kind, route)?;
+        let fragments = crate::property_overlay::split_into_fragments(&snapshot, 0)?;
+        if fragments.len() <= 1 {
+            // Within the fixed fragment cap: the legacy flat complete snapshot.
+            write_parquet(
+                &target.join(encode_transform_path(
+                    &format!("{directory}/{route}.parquet"),
+                    table,
+                )?),
+                &projected,
+            )?;
+            continue;
+        }
+        // Over the cap: capped immutable fragments, generation zero, so the
+        // projected route never carries one unbounded file (#1388).
+        for (ordinal, fragment) in fragments.iter().enumerate() {
+            let id = crate::PropertyFragmentId {
+                generation: 0,
+                ordinal: ordinal as u64,
+            };
+            write_parquet(
+                &target.join(encode_transform_path(
+                    &format!("{directory}/{route}/{}", id.file_name()),
+                    table,
+                )?),
+                fragment,
+            )?;
+        }
     }
     Ok(())
 }
 
+/// The selected rows of `combined` in UUID order, without excluded properties
+/// and without the source route's live-schema authority.
 fn project_record_batch(
     combined: &RecordBatch,
     target: &Path,
@@ -469,6 +490,18 @@ fn project_record_batch(
     selected: &BTreeSet<[u8; 16]>,
     exclude_properties: &BTreeSet<String>,
 ) -> Result<(), GfError> {
+    write_parquet(
+        target,
+        &select_projected_rows(combined, key, selected, exclude_properties)?,
+    )
+}
+
+fn select_projected_rows(
+    combined: &RecordBatch,
+    key: &str,
+    selected: &BTreeSet<[u8; 16]>,
+    exclude_properties: &BTreeSet<String>,
+) -> Result<RecordBatch, GfError> {
     let keys = uuid_column(combined, key)?;
     let mut rows = Vec::new();
     for row in 0..combined.num_rows() {
@@ -510,8 +543,57 @@ fn project_record_batch(
         .into_iter()
         .map(|index| take(combined.column(index).as_ref(), &indices, None).map_err(storage))
         .collect::<Result<Vec<_>, _>>()?;
-    let projected = RecordBatch::try_new(projected_schema, columns).map_err(storage)?;
-    write_parquet(target, &projected)
+    RecordBatch::try_new(projected_schema, columns).map_err(storage)
+}
+
+/// `projected` in immutable-fragment form: the tombstone column, and the
+/// format, route, kind and generation-zero identity metadata of ordinal zero.
+fn property_snapshot_fragment(
+    projected: &RecordBatch,
+    kind: crate::PropertyRouteKind,
+    route: &str,
+) -> Result<RecordBatch, GfError> {
+    use crate::property_overlay::{
+        PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
+        PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD,
+    };
+    let mut fields = projected
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    fields.insert(
+        1,
+        arrow::datatypes::Field::new(
+            PROPERTY_TOMBSTONE_FIELD,
+            arrow::datatypes::DataType::Boolean,
+            false,
+        ),
+    );
+    let mut metadata = projected.schema().metadata().clone();
+    for (key, value) in [
+        (PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_OVERLAY_FORMAT),
+        (PROPERTY_ROUTE_KEY, route),
+        (PROPERTY_KIND_KEY, kind.metadata_value()),
+        (PROPERTY_GENERATION_KEY, "0"),
+        (PROPERTY_ORDINAL_KEY, "0"),
+    ] {
+        metadata.insert(key.to_owned(), value.to_owned());
+    }
+    let mut columns = projected.columns().to_vec();
+    columns.insert(
+        1,
+        Arc::new(arrow::array::BooleanArray::from(vec![
+            false;
+            projected.num_rows()
+        ])) as ArrayRef,
+    );
+    RecordBatch::try_new(
+        Arc::new(Schema::new_with_metadata(fields, metadata)),
+        columns,
+    )
+    .map_err(storage)
 }
 
 fn copy_runtime_catalog(source: &Path, target: &Path) -> Result<(), GfError> {
@@ -1083,6 +1165,88 @@ mod tests {
             2.5
         );
         assert_eq!(crate::capture_graph_files(source.path()).unwrap().0, before);
+        assert_eq!(
+            portable_graph_data_fingerprint(source.path()).unwrap(),
+            portable_graph_data_fingerprint(target.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn projection_cuts_an_oversized_route_into_capped_fragments() {
+        use crate::property_overlay::fragment_cap::tests::{assert_capped_fragments, wide_value};
+        use crate::property_overlay::{MAX_PROPERTY_FRAGMENT_BYTES, enumerate_property_fragments};
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let mut writer =
+            GraphWriter::open_at(source.path(), OntologyMode::Exploratory, TS).unwrap();
+        // 3,000 nodes with about 4 KiB each: three times the cap in one route.
+        let rows = 3_000_u128;
+        for id in 1..=rows {
+            writer
+                .create_node(Uuid::from_u128(id), EntityTypeId::decode(0).unwrap())
+                .unwrap();
+            writer
+                .set_properties(
+                    &Uuid::from_u128(id),
+                    None,
+                    HashMap::from([(
+                        "payload".into(),
+                        IrLiteral::Str(wide_value(id as u64, 4096)),
+                    )]),
+                )
+                .unwrap();
+        }
+        writer.flush().unwrap();
+        drop(writer);
+        let summary = materialize_portable_graph_tree_projection(
+            source.path(),
+            target.path(),
+            &GraphProjectionSelection {
+                node_uuids: (1..=rows)
+                    .map(|id| *Uuid::from_u128(id).as_bytes())
+                    .collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.node_uuids.len(), rows as usize);
+        let (inventory, _) = crate::capture_graph_files(target.path()).unwrap();
+        let authority = TransformRoutes::from_inventory(target.path(), inventory).unwrap();
+        let route = authority
+            .properties
+            .routes(crate::PropertyRouteKind::Node)
+            .next()
+            .unwrap()
+            .to_owned();
+        assert!(
+            !target
+                .path()
+                .join(format!(
+                    "properties/{}.parquet",
+                    crate::route_component::component(&route)
+                ))
+                .exists()
+        );
+        let fragments = enumerate_property_fragments(
+            target.path(),
+            crate::PropertyRouteKind::Node,
+            &crate::route_component::component(&route),
+        )
+        .unwrap();
+        let stats = assert_capped_fragments(&fragments, rows as usize);
+        assert!(
+            stats.iter().map(|stat| stat.logical_bytes).sum::<u64>()
+                > 2 * MAX_PROPERTY_FRAGMENT_BYTES
+        );
+        assert!(fragments.len() >= 3, "{fragments:?}");
+        // The split is invisible to readers and to the logical fingerprint.
+        let projected = authority
+            .property_batches(target.path(), &route, false)
+            .unwrap();
+        assert_eq!(
+            projected.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            rows as usize
+        );
         assert_eq!(
             portable_graph_data_fingerprint(source.path()).unwrap(),
             portable_graph_data_fingerprint(target.path()).unwrap()
