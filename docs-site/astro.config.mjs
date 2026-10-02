@@ -408,6 +408,10 @@ export default defineConfig({
                   label: '0050 — The read path keeps its adjacency operators and chooses fast paths in the lowerer',
                   slug: 'adr/0050-read-path-fast-path-selection',
                 },
+                {
+                  label: '0051 — Discovery carries a digest-addressed Project summary and exact ontology descriptors',
+                  slug: 'adr/0051-discovery-project-summary-and-ontology-descriptors',
+                },
                 // END generated ADR records
               ],
             },

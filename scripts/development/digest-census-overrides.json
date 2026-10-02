@@ -810,7 +810,25 @@
       "role": "contract_identity",
       "input_contract": "Canonical discovery document JSON defines discovery identity.",
       "function_bodies_sha256": [
-        "391ac9a06e1879826b35e2513f10a5901a726f496907bfbab74c471ddb57d0e4"
+        "b1d3edd9ef7217d2679dba50023ad63f8344c7de1e39d59a2bcd29d148a73cb2"
+      ]
+    },
+    {
+      "path": "crates/graphforge-discovery/src/lib.rs",
+      "function": "sha256_digest",
+      "role": "contract_identity",
+      "input_contract": "Canonical discovery document JSON bytes, for a manifest or a Project summary, define discovery identity; this helper only hashes and formats them.",
+      "function_bodies_sha256": [
+        "14aa04b3bd93c883ef6802969b4d331410989603bdfbeff4fd82f0229fb82e00"
+      ]
+    },
+    {
+      "path": "crates/graphforge-discovery/src/summary.rs",
+      "function": "canonical_digest",
+      "role": "contract_identity",
+      "input_contract": "Canonical Project summary JSON defines summary identity; the manifest's summary_digest binds to it.",
+      "function_bodies_sha256": [
+        "b1d3edd9ef7217d2679dba50023ad63f8344c7de1e39d59a2bcd29d148a73cb2"
       ]
     },
     {

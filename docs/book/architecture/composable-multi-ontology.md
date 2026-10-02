@@ -182,6 +182,16 @@ Portable encoding is decided by [ADR 0022](../../adr/0022-portable-v2-multi-onto
 `ontology-composition@1`. #841 MUST consume that contract and MUST NOT invent a
 new portable component kind.
 
+Hub discovery advertises the same identities without a package download
+([ADR 0051](../../adr/0051-discovery-project-summary-and-ontology-descriptors.md)).
+A discovery manifest's optional `ontology` inventory lists each module as the
+exact identity `(id, version, content_digest)` defined here, and a Project
+summary reports the composition digest. A module may also reference a per-module
+portable package; that package's `package_digest` is source-dependent and is a
+different identity from the module's `content_digest` and from the composition
+digest, none of which substitutes for another. See
+[discovery v1](../../reference/discovery/v1/README.md).
+
 ## Worked composition and failures
 
 The canonical fixture composes six modules: research owns `Study`, documents

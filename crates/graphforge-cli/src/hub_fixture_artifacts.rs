@@ -152,6 +152,8 @@ pub fn generate(source: &Path, destination: &Path) -> Result<(), String> {
             package_digest: Sha256Digest(exported_package_digest.clone()),
             object_digest: Sha256Digest(object_digest.clone()),
         },
+        summary: None,
+        ontology: None,
         requirements: vec![ProtocolRequirement {
             capability: "portable-v2".into(),
             major: 1,
