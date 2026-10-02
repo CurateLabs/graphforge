@@ -1,0 +1,58 @@
+{
+  "schema": "graphforge-gdc-pinned-identity/1",
+  "suite_id": "graphalytics",
+  "disposition": "executable",
+  "spec": {
+    "name": "ldbc-graphalytics-specification",
+    "source": "https://github.com/ldbc/ldbc_graphalytics_docs",
+    "release": "v1.0.5",
+    "commit": "5cf6ae65d26c809f2e3e0dac4716f153c71dc639"
+  },
+  "generator": {
+    "name": "ldbc-graphalytics-published-datasets",
+    "source": "https://datasets.ldbcouncil.org/graphalytics/",
+    "release": "unversioned-pinned-by-sha256",
+    "commit": null
+  },
+  "driver": {
+    "name": "graphforge-gdc-scorecard-converter",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/runners/gdc-scorecard",
+    "release": "converter-v1",
+    "commit": null
+  },
+  "datasets": [
+    {
+      "id": "wiki-Talk",
+      "role": "dataset",
+      "checksum_sha256": "a575c04743a3511b917a7d1cbd9357b79c04b5262b3d6241ac38ca4d82e3ca60",
+      "license": "publisher-unspecified; see https://ldbcouncil.org/benchmarks/graphalytics/datasets/",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/graphalytics/wiki-Talk.tar.zst"
+    },
+    {
+      "id": "cit-Patents",
+      "role": "dataset",
+      "checksum_sha256": "6e27f218ecc9604df59f4904f71958de74da0395dd0e9d9c2f7a7d322101684c",
+      "license": "publisher-unspecified; see https://ldbcouncil.org/benchmarks/graphalytics/datasets/",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/graphalytics/cit-Patents.tar.zst"
+    },
+    {
+      "id": "datagen-7_5-fb",
+      "role": "dataset",
+      "checksum_sha256": "a097944b06cfea8bf044d083408d92bbd85457de57e204faf5af1fe0fd10ae30",
+      "license": "publisher-unspecified; see https://ldbcouncil.org/benchmarks/graphalytics/datasets/",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/graphalytics/datagen-7_5-fb.tar.zst"
+    },
+    {
+      "id": "graph500-22",
+      "role": "dataset",
+      "checksum_sha256": "d88e1cb7ca83a2348a9a90d6796991c0a780ed1e3882bd85e36c50f3346ce074",
+      "license": "publisher-unspecified; see https://ldbcouncil.org/benchmarks/graphalytics/datasets/",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/graphalytics/graph500-22.tar.zst"
+    }
+  ],
+  "references": []
+}

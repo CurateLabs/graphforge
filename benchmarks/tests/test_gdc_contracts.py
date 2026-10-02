@@ -79,9 +79,15 @@ class GdcContractTests(unittest.TestCase):
             {
                 "static": "profiles/gdc/graphalytics-static-identity.json",
                 "live": "profiles/gdc/graphalytics-live-identity.json",
+                "scorecard": "profiles/gdc/graphalytics-scorecard-identity.json",
             },
         )
         self.assertEqual(self.suite["pinned_identity"], profiles["live"])
+        scorecard_pin = load_pinned_identity(self.root / profiles["scorecard"])
+        self.assertEqual(
+            {item["id"] for item in scorecard_pin["datasets"]},
+            {"wiki-Talk", "cit-Patents", "datagen-7_5-fb", "graph500-22"},
+        )
         self.assertEqual({item["id"] for item in self.static_pin["datasets"]}, {"wiki-Talk"})
         self.assertEqual({item["id"] for item in self.live_pin["datasets"]}, {"ga-tiny"})
         self.assertEqual(self.static_pin["spec"]["release"], "historical-wiki-Talk-marker-v1")

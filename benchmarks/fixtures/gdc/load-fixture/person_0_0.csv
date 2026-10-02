@@ -1,0 +1,4 @@
+id|firstName|age|score|active
+1|Alice|30|1.5|true
+2|Bob|25|2.5|false
+3|Carol||3.5|true

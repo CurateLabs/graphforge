@@ -80,6 +80,7 @@ class GdcGraphalyticsSuiteTests(unittest.TestCase):
             {
                 "static": "profiles/gdc/graphalytics-static-identity.json",
                 "live": "profiles/gdc/graphalytics-live-identity.json",
+                "scorecard": "profiles/gdc/graphalytics-scorecard-identity.json",
             },
         )
         self.assertNotIn("graph500", json.dumps(suite))
