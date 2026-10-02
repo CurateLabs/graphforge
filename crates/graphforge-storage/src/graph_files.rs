@@ -15,7 +15,8 @@ pub use identity_reuse::{
 use read_materialization::copy_read_inventory_file;
 pub use topology_capture::capture_graph_files_with_topology;
 pub(crate) use topology_capture::{
-    capture_graph_files_reusing_digests_with_topology, collect_source_files_with_topology,
+    capture_graph_files_reusing_digests_with_topology, capture_owned_route_migration_inventory,
+    collect_source_files_with_topology,
 };
 
 use std::collections::{BTreeSet, HashSet};
@@ -792,22 +793,6 @@ fn build_inventory(source_root: &Path) -> Result<(GraphFilesInventory, u64), GfE
 
 const ARTIFACT_IDENTITY: graphforge_core::hash_observation::HashDomain =
     graphforge_core::hash_observation::HashDomain::ArtifactPayload;
-
-/// Explicit mutable-workspace admission for migration. Published inventory
-/// decoding and portable transport continue to use their versioned contracts.
-pub(crate) fn capture_owned_route_migration_inventory(
-    source_root: &Path,
-) -> Result<GraphFilesInventory, GfError> {
-    build_inventory_for_owned_layout(
-        source_root,
-        true,
-        None,
-        ARTIFACT_IDENTITY,
-        &mut || Ok(()),
-        None,
-    )
-    .map(|(inventory, _)| inventory)
-}
 
 fn build_inventory_for_owned_layout(
     source_root: &Path,

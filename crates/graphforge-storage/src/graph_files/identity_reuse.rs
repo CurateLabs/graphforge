@@ -85,7 +85,7 @@ fn capture_over_parent(
 }
 
 /// Build a canonical inventory and participant from a private workspace root,
-/// like [`capture_graph_files`], but skip hashing any file whose relative
+/// like [`super::capture_graph_files`], but skip hashing any file whose relative
 /// path appears in `known` at the same byte length and whose freshly computed
 /// XXH64 equals the known checksum — reusing that entry's already-authenticated
 /// digest instead. Every other file (new, resized, or

@@ -54,3 +54,19 @@ pub(crate) fn collect_source_files_with_topology(
     }
     Ok(())
 }
+
+/// Explicit mutable-workspace admission for migration. Published inventory
+/// decoding and portable transport continue to use their versioned contracts.
+pub(crate) fn capture_owned_route_migration_inventory(
+    source_root: &Path,
+) -> Result<GraphFilesInventory, GfError> {
+    build_inventory_for_owned_layout(
+        source_root,
+        true,
+        None,
+        ARTIFACT_IDENTITY,
+        &mut || Ok(()),
+        None,
+    )
+    .map(|(inventory, _)| inventory)
+}
