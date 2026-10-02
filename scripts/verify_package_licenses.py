@@ -36,6 +36,7 @@ CARGO_PUBLISH_CRATES = (
     "graphforge-io",
     "graphforge-observability",
     "graphforge-ast",
+    "graphforge-hub-publish",
     "graphforge-knowledge",
     "graphforge-portable-oci",
     "graphforge-provenance",

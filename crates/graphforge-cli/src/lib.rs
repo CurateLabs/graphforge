@@ -25,6 +25,8 @@ include!(concat!(env!("OUT_DIR"), "/project_skills.rs"));
 
 mod hub_clone;
 pub mod hub_fixture_artifacts;
+mod hub_http;
+mod hub_publish;
 mod maintenance_cli;
 mod ontology_cli;
 mod portable_cli;
@@ -256,8 +258,8 @@ struct Cli {
 enum Command {
     /// Validate and exercise the Rust-owned telemetry lifecycle.
     Telemetry(TelemetryArgs),
-    /// Clone a verified portable project from GraphForge Hub.
     Clone(hub_clone::CloneArgs),
+    Publish(hub_publish::PublishArgs),
     /// Initialize repository-local GraphForge definitions and state.
     Init(InitArgs),
     /// Compare or reconcile declared definitions and source digests without ingesting data.
@@ -1263,10 +1265,8 @@ fn run_with_allocation(
         )
         .map_err(Into::into);
     }
-    if let Command::Clone(args) = command {
-        return hub_clone::run_clone(args, cli.json, output)
-            .map(|()| 0)
-            .map_err(Into::into);
+    if let hub @ (Command::Clone(_) | Command::Publish(_)) = command {
+        return hub_publish::run_hub_command(hub, cli.project, cli.project_dir, cli.json, output);
     }
     if let Command::Ontology { command } = &command
         && let Some(result) = ontology_cli::run_without_project(command, cli.json, output)
@@ -1686,8 +1686,8 @@ fn error_exit_code(error: &CliRuntimeError) -> i32 {
 pub fn run_process() {
     let cli = Cli::parse();
     let json = cli.json;
-    let stdout = io::stdout();
-    let mut output = stdout.lock();
+    let mut output = io::stdout().lock();
+    hub_publish::allow_device_flow();
     match run(cli, &mut output) {
         Ok(exit_code) if exit_code != 0 => {
             let _ = output.flush();

@@ -1,0 +1,29 @@
+{
+  "$id": "https://graphforge.sh/schemas/hub-publish/v1/error.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "code": {
+      "enum": [
+        "auth_denied",
+        "entitlement_denied",
+        "idempotency_conflict",
+        "ref_conflict",
+        "unsupported_future",
+        "integrity_failure",
+        "invalid_input",
+        "internal"
+      ]
+    },
+    "message": {
+      "maxLength": 512,
+      "type": "string"
+    }
+  },
+  "required": [
+    "code",
+    "message"
+  ],
+  "title": "error",
+  "type": "object"
+}

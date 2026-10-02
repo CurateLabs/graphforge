@@ -14,6 +14,20 @@
       "exitCode": 2,
       "stdout": "",
       "stderr": "{\"error\":{\"code\":\"GF_VALIDATION\",\"message\":\"error: unrecognized subcommand 'unknown-command'\\n\\nUsage: graphforge [OPTIONS] [COMMAND]\\n\\nFor more information, try '--help'.\\n\",\"details\":{\"source\":\"argument_parser\",\"kind\":\"invalid_subcommand\"}}}\n"
+    },
+    {
+      "name": "publish without a credential is auth denied",
+      "args": ["--json", "publish", "curate/claims", "--ref", "main"],
+      "exitCode": 2,
+      "stdout": "",
+      "stderr": "{\"error\":{\"code\":\"GF_VALIDATION\",\"message\":\"validation error: hub.publish.auth_denied: no publish credential: set GRAPHFORGE_HUB_PUBLISH_TOKEN or run gf publish in a terminal\",\"details\":{\"source\":\"runtime\",\"kind\":\"validation\",\"semantic_code\":\"hub.publish.auth_denied\"}}}\n"
+    },
+    {
+      "name": "publish to an unsafe hub location",
+      "args": ["--json", "publish", "http://127.0.0.1/curate/claims", "--ref", "main"],
+      "exitCode": 2,
+      "stdout": "",
+      "stderr": "{\"error\":{\"code\":\"GF_VALIDATION\",\"message\":\"validation error: hub.unsafe_location: URL must be credential-free HTTPS\",\"details\":{\"source\":\"runtime\",\"kind\":\"validation\",\"semantic_code\":\"hub.unsafe_location\"}}}\n"
     }
   ]
 }

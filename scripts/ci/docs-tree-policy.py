@@ -49,6 +49,7 @@ SITE_SUFFIXES = frozenset({".css"})
 STRUCTURED_DATA_DIRECTORIES = (
     "docs/contracts",
     "docs/reference/discovery",
+    "docs/reference/hub-publish",
     "docs/releases/records",
 )
 STRUCTURED_DATA_FILES = frozenset(

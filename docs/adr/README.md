@@ -58,6 +58,7 @@ Roadmap-only ADRs are not retained in this tree.
 | 0050 | [The read path keeps its adjacency operators and chooses fast paths in the lowerer](0050-read-path-fast-path-selection.md) | `0050-read-path-fast-path-selection.md` |
 | 0051 | [Discovery carries a digest-addressed Project summary and exact ontology descriptors](0051-discovery-project-summary-and-ontology-descriptors.md) | `0051-discovery-project-summary-and-ontology-descriptors.md` |
 | 0052 | [Discovery carries a digest-addressed research lineage document](0052-discovery-research-lineage-document.md) | `0052-discovery-research-lineage-document.md` |
+| 0053 | [Hub publish wire contract](0053-hub-publish-wire-contract.md) | `0053-hub-publish-wire-contract.md` |
 
 ## Superseded records
 

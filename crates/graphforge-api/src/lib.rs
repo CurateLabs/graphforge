@@ -381,7 +381,9 @@ pub use graphforge_core::embedding_options::{
     GraphSageOptions, HashGnnOptions, Node2VecOptions,
 };
 pub use graphforge_core::manifest::{MANIFEST_FILE, ONTOLOGY_FILE, ProjectManifest};
-pub use graphforge_core::uuid::{hub_clone_operation, hub_research_clone_operation};
+pub use graphforge_core::uuid::{
+    hub_clone_operation, hub_publish_operation, hub_research_clone_operation,
+};
 pub use graphforge_core::{
     AlgorithmError, AnalyzeOptions, ApiErrorCode, ClusterOptions, EdgeHandle, ExplainStage,
     FindOptions, GfError, LoweringError, NodeHandle, NodeSelector, OntologyFormat, OntologyMode,

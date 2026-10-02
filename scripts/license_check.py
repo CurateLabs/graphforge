@@ -39,6 +39,7 @@ CARGO_PACKAGE_DIRS = tuple(
         "graphforge-discovery",
         "graphforge-exec",
         "graphforge-filesystem",
+        "graphforge-hub-publish",
         "graphforge-io",
         "graphforge-ir",
         "graphforge-knowledge",

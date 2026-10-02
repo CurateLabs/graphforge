@@ -2238,6 +2238,7 @@ dependencies = [
  "fs4 1.1.0",
  "graphforge-api",
  "graphforge-discovery",
+ "graphforge-hub-publish",
  "graphforge-storage",
  "libc",
  "parquet",
@@ -2321,6 +2322,18 @@ dependencies = [
  "rustix 1.1.5",
  "tempfile",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "graphforge-hub-publish"
+version = "0.5.2"
+dependencies = [
+ "graphforge-discovery",
+ "serde",
+ "serde_json",
+ "sha2",
+ "url",
+ "uuid",
 ]
 
 [[package]]

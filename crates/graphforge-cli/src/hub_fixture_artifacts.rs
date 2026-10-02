@@ -1,20 +1,21 @@
 //! Rust-owned deterministic artifact generation for the public Hub fixture.
 
+use crate::hub_publish::publication::{
+    ManifestInputs, PACKAGE_MEDIA_TYPE, build_manifest, derive_summary, digest_bytes,
+    export_module_packages, object_descriptor, summary_reference, verify_full,
+};
 use graphforge_api::{
     ActivationMode, ActivationProfileChangeRequest, DiscoveryOntologyModuleRequest, GraphForge,
     ModuleAdoptionRequest, OntologyAuthorityExpectation, OntologyDoc, OperationId,
-    PortableSelection, PortableV2ExactIdentity, PortableV2ExportRequest, PortableV2ImportRequest,
-    PortableV2Limits, PortableV2Mode, PortableV2Output, PortableV2SelectionProfile,
-    PortableVerifyRequest, ProjectSummaryRequest, ResearchAccessPolicyMetadata, ResearchCorpusSize,
+    PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest, PortableV2Limits,
+    PortableV2Output, PortableV2SelectionProfile, ResearchAccessPolicyMetadata, ResearchCorpusSize,
     UpdateResearchMetadataRequest, WorkspaceResearchMetadata, WriteContext,
     repack_verified_expanded_portable_v2, resolve_discovered_ontology_module,
-    summarize_verified_portable_v2, verify_portable_v2,
 };
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, ExactIdentity, ObjectDescriptor,
-    OntologyInventory, OntologyModuleDescriptor, PORTABLE_V2_FORMAT, PORTABLE_V2_MEDIA_TYPE,
-    PROJECT_SUMMARY_FORMAT, PROJECT_SUMMARY_MEDIA_TYPE, PortablePackageReference, ProjectSummary,
-    ProjectSummaryReference, ProtocolRequirement, ProtocolVersion, RefSet, RepositoryIdentity,
+    PORTABLE_V2_FORMAT, PORTABLE_V2_MEDIA_TYPE, PROJECT_SUMMARY_MEDIA_TYPE,
+    PortablePackageReference, ProjectSummary, ProtocolVersion, RefSet, RepositoryIdentity,
     RepositoryRef, Sha256Digest,
 };
 use serde::Serialize;
@@ -240,18 +241,6 @@ fn authority(graph: &GraphForge, operation: u128) -> Result<OntologyAuthorityExp
     })
 }
 
-fn verify_full(input: &Path) -> Result<graphforge_api::PortableVerifyResult, String> {
-    verify_portable_v2(
-        &PortableVerifyRequest {
-            input: input.to_path_buf(),
-            mode: PortableV2Mode::Full,
-            limits: PortableV2Limits::default(),
-        },
-        None,
-    )
-    .map_err(err)
-}
-
 fn location(location_base: &str, digest: &str) -> Result<String, String> {
     let hex = digest
         .strip_prefix("sha256:")
@@ -374,116 +363,56 @@ pub fn generate(source: &Path, destination: &Path, location_base: &str) -> Resul
     let immutable_version = Sha256Digest(exported_package_digest.clone());
 
     // The summary is derived from the verified bundle, never entered by hand.
-    let summary = summarize_verified_portable_v2(&ProjectSummaryRequest {
-        repository: &repository,
-        immutable_version: &immutable_version,
-        package: &object_path,
-        discovery_limits: DiscoveryLimits::default(),
-        portable_limits: limits,
-        cancelled: None,
-    })
-    .map_err(err)?;
-    let summary_bytes = summary.to_canonical_json().map_err(err)?;
-    let summary_digest = summary.canonical_digest().map_err(err)?;
-    write(destination.join(SUMMARY_PATH), &summary_bytes)?;
+    let derived = derive_summary(&repository, &immutable_version, &object_path)?;
+    write(destination.join(SUMMARY_PATH), &derived.bytes)?;
 
     // One component-selective package per advertised module, exported from the
     // Project reopened from the same checked-in source.
+    let (ontology, modules) =
+        export_module_packages(&imported_project, &derived.summary, |digest| {
+            Ok(destination.join(module_object_path(digest)?))
+        })?;
     let mut module_objects = Vec::new();
-    let mut module_descriptors = Vec::new();
     let mut module_records = Vec::new();
-    let composition = summary.facts.ontology_composition.as_ref();
-    for module in composition.map_or(&[][..], |composition| composition.modules.as_slice()) {
-        let path = module_object_path(&module.content_digest.0)?;
-        let module_path = destination.join(&path);
-        let receipt = imported_project
-            .export_portable_v2(
-                &PortableV2ExportRequest {
-                    selection: PortableSelection::Current,
-                    output_path: module_path.clone(),
-                    representation: PortableV2Output::Bundle,
-                    profile: PortableV2SelectionProfile::OntologyComposition(vec![
-                        PortableV2ExactIdentity {
-                            id: module.id.clone(),
-                            version: module.version.clone(),
-                            content_digest: module.content_digest.0.clone(),
-                        },
-                    ]),
-                    subset: None,
-                    limits,
-                },
-                None,
-                |_| {},
-            )
-            .map_err(err)?;
-        let module_report = verify_full(&module_path)?;
-        let module_bytes = fs::read(&module_path).map_err(err)?;
-        let module_object = descriptor(&module_bytes, PORTABLE_V2_MEDIA_TYPE, location_base)?;
-        if module_report.package_digest != receipt.package_digest
-            || module_report.transport_digest.as_deref() != Some(&receipt.transport_digest)
-            || module_object.digest.0 != receipt.transport_digest
-        {
-            return Err("module export and verification receipts disagree".into());
-        }
+    for module in &modules {
+        let module_object = object_descriptor(
+            module.bundle.object_digest.clone(),
+            module.bundle.length,
+            PACKAGE_MEDIA_TYPE,
+            location(location_base, &module.bundle.object_digest)?,
+        );
         module_records.push(ModuleObjectRecord {
-            ontology_id: module.id.clone(),
-            version: module.version.clone(),
-            content_digest: module.content_digest.0.clone(),
-            package_digest: receipt.package_digest.clone(),
+            ontology_id: module.descriptor.id.clone(),
+            version: module.descriptor.version.clone(),
+            content_digest: module.descriptor.content_digest.0.clone(),
+            package_digest: module.bundle.package_digest.clone(),
             object_digest: module_object.digest.0.clone(),
             object_length: module_object.length,
-            object_path: path,
-        });
-        module_descriptors.push(OntologyModuleDescriptor {
-            id: module.id.clone(),
-            version: module.version.clone(),
-            content_digest: module.content_digest.clone(),
-            package: Some(PortablePackageReference {
-                format: PORTABLE_V2_FORMAT.into(),
-                package_digest: Sha256Digest(receipt.package_digest),
-                object_digest: module_object.digest.clone(),
-            }),
+            object_path: module_object_path(&module.descriptor.content_digest.0)?,
         });
         module_objects.push(module_object);
     }
-    let ontology = composition.map(|composition| OntologyInventory {
-        composition_digest: composition.composition_digest.clone(),
-        modules: module_descriptors,
-        bridge_sets: composition.bridge_sets.clone(),
-    });
 
     let project_object = descriptor(&bytes, PORTABLE_V2_MEDIA_TYPE, location_base)?;
-    let summary_object = descriptor(&summary_bytes, PROJECT_SUMMARY_MEDIA_TYPE, location_base)?;
+    let summary_object = descriptor(&derived.bytes, PROJECT_SUMMARY_MEDIA_TYPE, location_base)?;
     let mut objects = vec![project_object.clone(), summary_object.clone()];
     objects.extend(module_objects);
-    objects.sort_by(|left, right| left.digest.0.cmp(&right.digest.0));
-    let manifest = DiscoveryManifest {
-        format: DISCOVERY_FORMAT.into(),
-        version: ProtocolVersion::CURRENT,
+    let manifest = build_manifest(ManifestInputs {
         repository: repository.clone(),
         default_ref: "main".into(),
         resolved_ref: "main".into(),
-        immutable_version: Sha256Digest(exported_package_digest.clone()),
         package: PortablePackageReference {
             format: PORTABLE_V2_FORMAT.into(),
             package_digest: Sha256Digest(exported_package_digest.clone()),
             object_digest: project_object.digest.clone(),
         },
-        summary: Some(ProjectSummaryReference {
-            format: PROJECT_SUMMARY_FORMAT.into(),
-            summary_digest: summary_digest.clone(),
-            object_digest: summary_object.digest.clone(),
-        }),
+        summary: Some(summary_reference(&derived, &summary_object)),
         ontology,
         lineage: None,
-        requirements: vec![ProtocolRequirement {
-            capability: "portable-v2".into(),
-            major: 1,
-        }],
-        capabilities: vec![],
         objects,
-        extensions: BTreeMap::new(),
-    };
+    })?;
+    let summary = derived.summary;
+    let summary_digest = derived.summary_digest;
     let manifest_bytes = manifest.to_canonical_json().map_err(err)?;
     let manifest_digest = manifest.canonical_digest().map_err(err)?.0;
     let refs = RefSet {
@@ -795,14 +724,12 @@ fn write(path: PathBuf, bytes: &[u8]) -> Result<(), String> {
     fs::write(path, bytes).map_err(err)
 }
 
-fn digest_bytes(bytes: &[u8]) -> String {
-    format!("sha256:{}", hex(&Sha256::digest(bytes)))
-}
-
 fn generator_source_digest() -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"graphforge-hub-fixture-generator-source/1\0");
     hasher.update(include_bytes!("hub_fixture_artifacts.rs"));
+    hasher.update(b"\0");
+    hasher.update(include_bytes!("hub_publish/publication.rs"));
     format!("sha256:{}", hex(&hasher.finalize()))
 }
 
@@ -871,6 +798,7 @@ fn tree_digest(root: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use graphforge_api::{PortableV2Mode, PortableVerifyRequest, verify_portable_v2};
 
     fn root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")

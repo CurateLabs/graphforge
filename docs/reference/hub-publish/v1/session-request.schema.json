@@ -1,0 +1,178 @@
+{
+  "$defs": {
+    "capability": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "major": {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "capability",
+        "major"
+      ],
+      "type": "object"
+    },
+    "digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "https_url": {
+      "format": "uri",
+      "pattern": "^https://",
+      "type": "string"
+    },
+    "identity": {
+      "additionalProperties": false,
+      "properties": {
+        "owner": {
+          "$ref": "#/$defs/slug"
+        },
+        "repository": {
+          "$ref": "#/$defs/slug"
+        }
+      },
+      "required": [
+        "owner",
+        "repository"
+      ],
+      "type": "object"
+    },
+    "object": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "length": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "media_type": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "digest",
+        "length",
+        "media_type"
+      ],
+      "type": "object"
+    },
+    "receipt": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "const": "graphforge-hub-publish/1"
+        },
+        "manifest_validator": {
+          "$ref": "#/$defs/digest"
+        },
+        "operation_uuid": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "previous_revision": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "refs": {
+          "items": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "type": "array"
+        },
+        "repository": {
+          "$ref": "#/$defs/identity"
+        },
+        "request_commitment": {
+          "$ref": "#/$defs/digest"
+        },
+        "revision": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "format",
+        "operation_uuid",
+        "request_commitment",
+        "repository",
+        "manifest_validator",
+        "refs",
+        "previous_revision",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "slug": {
+      "maxLength": 100,
+      "minLength": 1,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$",
+      "type": "string"
+    }
+  },
+  "$id": "https://graphforge.sh/schemas/hub-publish/v1/session-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "format": {
+      "const": "graphforge-hub-publish/1"
+    },
+    "intent_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "objects": {
+      "items": {
+        "$ref": "#/$defs/object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "operation_uuid": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "repository": {
+      "$ref": "#/$defs/identity"
+    },
+    "request_commitment": {
+      "$ref": "#/$defs/digest"
+    },
+    "requirements": {
+      "items": {
+        "$ref": "#/$defs/capability"
+      },
+      "maxItems": 64,
+      "type": "array"
+    }
+  },
+  "required": [
+    "format",
+    "operation_uuid",
+    "request_commitment",
+    "intent_digest",
+    "repository",
+    "objects"
+  ],
+  "title": "session-request",
+  "type": "object"
+}
