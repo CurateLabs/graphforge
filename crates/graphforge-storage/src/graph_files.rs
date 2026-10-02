@@ -7,9 +7,17 @@
 
 mod identity_reuse;
 mod read_materialization;
-pub(crate) use identity_reuse::KnownGraphFile;
-pub use identity_reuse::capture_graph_files_over_parent;
+mod topology_capture;
+pub(crate) use identity_reuse::{KnownGraphFile, capture_graph_files_reusing_digests};
+pub use identity_reuse::{
+    capture_graph_files_over_parent, capture_graph_files_over_parent_with_topology,
+};
 use read_materialization::copy_read_inventory_file;
+pub use topology_capture::capture_graph_files_with_topology;
+pub(crate) use topology_capture::{
+    capture_graph_files_reusing_digests_with_topology, capture_owned_route_migration_inventory,
+    collect_source_files_with_topology,
+};
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, File};
@@ -210,6 +218,7 @@ pub(crate) fn capture_graph_files_with_cancellation(
         None,
         ARTIFACT_IDENTITY,
         &mut check_cancelled,
+        None,
     )
     .map(|(inventory, _)| inventory)
 }
@@ -772,46 +781,18 @@ pub fn infer_role(relative: &Path) -> GraphFileRole {
 }
 
 fn build_inventory(source_root: &Path) -> Result<(GraphFilesInventory, u64), GfError> {
-    build_inventory_for_owned_layout(source_root, false, None, ARTIFACT_IDENTITY, &mut || Ok(()))
+    build_inventory_for_owned_layout(
+        source_root,
+        false,
+        None,
+        ARTIFACT_IDENTITY,
+        &mut || Ok(()),
+        None,
+    )
 }
 
 const ARTIFACT_IDENTITY: graphforge_core::hash_observation::HashDomain =
     graphforge_core::hash_observation::HashDomain::ArtifactPayload;
-
-/// Build a canonical inventory and participant from a private workspace root,
-/// like [`capture_graph_files`], but skip hashing any file whose relative
-/// path appears in `known` at the same byte length and whose freshly computed
-/// XXH64 equals the known checksum — reusing that entry's already-authenticated
-/// digest instead. Every other file (new, resized, or
-/// simply absent from `known`) is still walked, opened, and hashed exactly as
-/// `capture_graph_files` would. This never trusts a stat alone as proof of
-/// content: a reused digest is only ever one the caller already verified for
-/// that exact path (#1401 — avoids re-hashing a materialized tree's untouched
-/// files just to fingerprint the files that actually changed).
-///
-/// # Errors
-/// Rejects links, special files, unsafe relative paths, duplicates, and
-/// inventory size overflow.
-pub(crate) fn capture_graph_files_reusing_digests(
-    source_root: &Path,
-    known: &std::collections::HashMap<String, KnownGraphFile>,
-    domain: graphforge_core::hash_observation::HashDomain,
-) -> Result<(GraphFilesInventory, ProjectParticipant), GfError> {
-    let (inventory, _) =
-        build_inventory_for_owned_layout(source_root, false, Some(known), domain, &mut || Ok(()))?;
-    let bytes = encode_inventory(&inventory)?;
-    let participant = inventory_participant(bytes, inventory.file_count)?;
-    Ok((inventory, participant))
-}
-
-/// Explicit mutable-workspace admission for migration. Published inventory
-/// decoding and portable transport continue to use their versioned contracts.
-pub(crate) fn capture_owned_route_migration_inventory(
-    source_root: &Path,
-) -> Result<GraphFilesInventory, GfError> {
-    build_inventory_for_owned_layout(source_root, true, None, ARTIFACT_IDENTITY, &mut || Ok(()))
-        .map(|(inventory, _)| inventory)
-}
 
 fn build_inventory_for_owned_layout(
     source_root: &Path,
@@ -819,9 +800,10 @@ fn build_inventory_for_owned_layout(
     reuse: Option<&std::collections::HashMap<String, KnownGraphFile>>,
     domain: graphforge_core::hash_observation::HashDomain,
     check_cancelled: &mut dyn FnMut() -> Result<(), GfError>,
+    topology: Option<&crate::TopologyFiles>,
 ) -> Result<(GraphFilesInventory, u64), GfError> {
     let mut paths = Vec::new();
-    collect_source_files(source_root, &mut paths)?;
+    collect_source_files_with_topology(source_root, &mut paths, topology)?;
     if paths.len() > MAX_GRAPH_FILES {
         return Err(resource_limit("graph files count exceeds limit"));
     }
@@ -956,9 +938,14 @@ pub(crate) fn capture_rewrite_baseline(
     root: &Path,
     rewrite: &crate::RewriteBatch,
 ) -> Result<crate::GraphReadInventory, GfError> {
+    let topology = rewrite
+        .topology_authority()
+        .map(|authority| crate::enumerate_topology_files(authority, None))
+        .transpose()?;
     let inventory = crate::graph_read_inventory::capture_graph_read_inventory_excluding(
         root,
         &rewrite.retained_temporary_identities()?,
+        topology.as_ref(),
     )?;
     // Refuse unregistered or unmapped files at the baseline, as before.
     inventory.authenticate_routes(root)?;
@@ -1090,7 +1077,7 @@ pub(crate) fn collect_source_files(
     directory: &Path,
     paths: &mut Vec<PathBuf>,
 ) -> Result<(), GfError> {
-    collect_source_files_from(directory, directory, paths)
+    collect_source_files_with_topology(directory, paths, None)
 }
 
 /// Operational files that may legitimately coexist with the graph workspace
@@ -1153,6 +1140,7 @@ fn collect_source_files_from(
     root: &Path,
     directory: &Path,
     paths: &mut Vec<PathBuf>,
+    declared_topology: bool,
 ) -> Result<(), GfError> {
     let mut entries = directory
         .read_dir()
@@ -1162,6 +1150,13 @@ fn collect_source_files_from(
     entries.sort_by_key(fs::DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
+        if declared_topology
+            && path
+                .strip_prefix(root)
+                .is_ok_and(crate::topology_files::is_topology)
+        {
+            continue;
+        }
         let file_type = entry
             .file_type()
             .map_err(|error| storage("inspect graph workspace entry", &path, error))?;
@@ -1169,7 +1164,7 @@ fn collect_source_files_from(
             return Err(validation("graph workspace contains a symbolic link"));
         }
         if file_type.is_dir() {
-            collect_source_files_from(root, &path, paths)?;
+            collect_source_files_from(root, &path, paths, declared_topology)?;
         } else if file_type.is_file() {
             let relative = path
                 .strip_prefix(root)

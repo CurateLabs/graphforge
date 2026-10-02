@@ -500,6 +500,34 @@ mod tests {
     }
 
     #[test]
+    fn legacy_prefix_route_materialization_preserves_declared_membership() {
+        let source = tempfile::tempdir().unwrap();
+        write_legacy_fixture(source.path(), "Legacy");
+        std::fs::rename(
+            source.path().join("topology/edges/REL.parquet"),
+            source.path().join("topology/edges/r-old.parquet"),
+        )
+        .unwrap();
+        let admitted = crate::AuthenticatedPropertyInventory::capture(source.path()).unwrap();
+        let mut inventory = crate::capture_graph_files(source.path()).unwrap().0;
+        inventory.format_version = crate::GRAPH_FILES_CHECKSUM_RECORD_VERSION;
+        let owner = tempfile::tempdir().unwrap();
+        let target = owner.path().join("private");
+        crate::materialize_graph_tree(source.path(), &inventory, &target).unwrap();
+        let authority = crate::TopologyFileAuthority::from_inventory(&target, &admitted).unwrap();
+        let files = crate::enumerate_topology_files(&authority, None).unwrap();
+        assert_eq!(files.edge_fragments().len(), 1);
+        assert_eq!(files.edge_fragments()[0].0, "r-old");
+        assert_eq!(
+            files.edge_fragments()[0].1,
+            target
+                .join("topology/edges")
+                .join(format!("{}.parquet", super::super::component("r-old")))
+        );
+        assert!(files.edge_fragments()[0].1.is_file());
+    }
+
+    #[test]
     fn bare_writer_migrates_legacy_routes_and_reopens_exact_bytes_and_ids() {
         let root = tempfile::tempdir().unwrap();
         let original = write_legacy_fixture(root.path(), "Legacy");
@@ -823,6 +851,25 @@ pub(crate) struct PendingRoutes {
 }
 
 impl PendingRoutes {
+    pub(crate) fn semantic_relative_path(
+        &self,
+        root: &Path,
+        relative: &str,
+    ) -> Result<String, GfError> {
+        let Some(component) = super::route_position(relative)? else {
+            return Ok(relative.to_owned());
+        };
+        let directory = StableDirectory::open(root).map_err(|error| invalid(&error.to_string()))?;
+        let mut table = read_owned_layout_table(&directory)?.unwrap_or_default();
+        for route in &self.routes {
+            table.insert(route, MAX_TABLE_BYTES, MAX_ROUTES)?;
+        }
+        if component.starts_with(super::PREFIX) {
+            table.semantic_relative_path(relative)
+        } else {
+            Ok(relative.to_owned())
+        }
+    }
     pub(crate) fn is_empty(&self) -> bool {
         self.routes.is_empty()
     }

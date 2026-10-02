@@ -895,10 +895,11 @@ impl GraphForge {
             provider_refresh_runtimes: Arc::new(Mutex::new(Vec::new())),
             #[cfg(feature = "search")]
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
-            workspace_guard: Arc::new(RwLock::new(GraphWorkspace {
+            workspace_guard: Arc::new(RwLock::new(GraphWorkspace::new(
                 dir,
-                owner: workspace,
-            })),
+                workspace,
+                &property_inventory,
+            )?)),
             graph_open_evidence,
             open_io_attribution: graphforge_storage::lifecycle_io::snapshot_since(
                 open_io_before.as_ref(),
@@ -1100,17 +1101,21 @@ impl GraphForge {
                 }
                 (context, None) => context,
             };
+        let topology_authority =
+            graphforge_storage::TopologyFileAuthority::from_inventory(&dir, &property_inventory)?;
         if read_only {
-            graphforge_storage::validate_runtime_entity_label_ids(
+            graphforge_storage::validate_runtime_entity_label_ids_with_topology(
                 &dir,
                 ontology.as_ref(),
                 &runtime_catalog,
+                Arc::clone(&topology_authority),
             )?;
         } else {
-            graphforge_storage::reconcile_runtime_entity_label_ids(
+            graphforge_storage::reconcile_runtime_entity_label_ids_with_topology(
                 &dir,
                 ontology.as_ref(),
                 &runtime_catalog,
+                Arc::clone(&topology_authority),
             )?;
         }
         let heavy_query_admission = Arc::new(resource_policy::HeavyQueryAdmission::new(
@@ -1169,6 +1174,7 @@ impl GraphForge {
             workspace_guard: Arc::new(RwLock::new(GraphWorkspace {
                 dir,
                 owner: workspace,
+                topology: topology_authority,
             })),
             graph_open_evidence,
             open_io_attribution: graphforge_storage::lifecycle_io::snapshot_since(

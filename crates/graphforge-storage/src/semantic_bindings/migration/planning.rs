@@ -9,6 +9,16 @@ use super::super::{
     corrupt, hex, id_namespace, legacy_ambiguous, lineage_key, projection_key, qualified,
 };
 
+fn capture_selected(
+    root: &Path,
+    topology: Option<&crate::TopologyFiles>,
+) -> Result<crate::GraphFilesInventory, GfError> {
+    Ok(match topology {
+        Some(files) => crate::capture_graph_files_with_topology(root, files)?.0,
+        None => crate::capture_graph_files(root)?.0,
+    })
+}
+
 impl SemanticStorageBindings {
     /// Derive a complete retained-data migration plan from authored module
     /// migrations in `next`. The pinned graph is inspected for every removal;
@@ -41,11 +51,50 @@ impl SemanticStorageBindings {
         pinned_graph_root: &Path,
         identity_equivalent: &[(OntologyModuleId, OntologyModuleId)],
     ) -> Result<SemanticMigrationPlan, GfError> {
+        Self::plan_retained_data_migration_selected(
+            previous_composition,
+            next,
+            previous,
+            pinned_graph_root,
+            identity_equivalent,
+            None,
+        )
+    }
+
+    /// Plan a migration from only the selected topology payloads.
+    pub fn plan_retained_data_migration_from_files(
+        previous_composition: &CompiledComposition,
+        next: &CompiledComposition,
+        previous: &Self,
+        pinned_graph_root: &Path,
+        identity_equivalent: &[(OntologyModuleId, OntologyModuleId)],
+        topology: &crate::TopologyFiles,
+    ) -> Result<SemanticMigrationPlan, GfError> {
+        Self::plan_retained_data_migration_selected(
+            previous_composition,
+            next,
+            previous,
+            pinned_graph_root,
+            identity_equivalent,
+            Some(topology),
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn plan_retained_data_migration_selected(
+        previous_composition: &CompiledComposition,
+        next: &CompiledComposition,
+        previous: &Self,
+        pinned_graph_root: &Path,
+        identity_equivalent: &[(OntologyModuleId, OntologyModuleId)],
+        topology: Option<&crate::TopologyFiles>,
+    ) -> Result<SemanticMigrationPlan, GfError> {
         previous.validate_against(previous_composition)?;
-        let (source_inventory, _) = crate::capture_graph_files(pinned_graph_root)?;
+        let source_inventory = capture_selected(pinned_graph_root, topology)?;
         let source_inventory_sha256 =
             hex(Sha256::digest(crate::encode_inventory(&source_inventory)?).into());
-        let retained_rows_scanned = scan_retained_migration_rows(pinned_graph_root)?;
+        let retained_rows_scanned =
+            scan_retained_migration_rows(pinned_graph_root, &source_inventory)?;
         let authority = crate::graph_projection::TransformRoutes::from_inventory(
             pinned_graph_root,
             source_inventory.clone(),
@@ -378,6 +427,19 @@ impl SemanticStorageBindings {
         binding_has_retained_data(binding, graph_root)
     }
 
+    /// Inspect retained data using only the supplied generation topology.
+    pub fn binding_has_retained_data_from_files(
+        binding: &SemanticStorageBinding,
+        graph_root: &Path,
+        topology: &crate::TopologyFiles,
+    ) -> Result<bool, GfError> {
+        let authority = crate::graph_projection::TransformRoutes::from_inventory(
+            graph_root,
+            capture_selected(graph_root, Some(topology))?,
+        )?;
+        binding_has_retained_data_with_authority(binding, graph_root, &authority)
+    }
+
     /// Inspect a legacy single-module layout without mutation. Multi-module or
     /// unqualified layouts that cannot prove one owner fail closed.
     #[allow(clippy::too_many_lines)] // one bounded scan keeps projection evidence co-located
@@ -385,6 +447,29 @@ impl SemanticStorageBindings {
         composition: &CompiledComposition,
         graph_root: &Path,
     ) -> Result<LegacySemanticProjection, GfError> {
+        Self::project_legacy_selected(composition, graph_root, None)
+    }
+
+    /// Inspect only the session's declared legacy topology membership.
+    pub fn project_legacy_unambiguous_from_files(
+        composition: &CompiledComposition,
+        graph_root: &Path,
+        topology: &crate::TopologyFiles,
+    ) -> Result<LegacySemanticProjection, GfError> {
+        Self::project_legacy_selected(composition, graph_root, Some(topology))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn project_legacy_selected(
+        composition: &CompiledComposition,
+        graph_root: &Path,
+        topology: Option<&crate::TopologyFiles>,
+    ) -> Result<LegacySemanticProjection, GfError> {
+        let inventory = capture_selected(graph_root, topology)?;
+        let authority = crate::graph_projection::TransformRoutes::from_inventory(
+            graph_root,
+            inventory.clone(),
+        )?;
         let [module] = composition.modules.as_slice() else {
             return Err(legacy_ambiguous(
                 "legacy semantic projection requires exactly one ontology module",
@@ -455,7 +540,11 @@ impl SemanticStorageBindings {
             .collect::<BTreeSet<_>>();
         let mut topology_rows_scanned = 0_u64;
         let mut max_topology_batch_rows = 0_usize;
-        for topology_path in crate::mutator::node_parquet_files(graph_root)? {
+        for (topology_path, _) in authority
+            .properties
+            .node_fragments()
+            .ok_or_else(crate::topology_files::missing_authority)?
+        {
             use arrow::array::{Array, ListArray, UInt32Array};
             use arrow::datatypes::DataType;
             let reader = admitted_semantic_parquet(&topology_path)?
@@ -493,11 +582,6 @@ impl SemanticStorageBindings {
             }
         }
 
-        let (inventory, _) = crate::capture_graph_files(graph_root)?;
-        let authority = crate::graph_projection::TransformRoutes::from_inventory(
-            graph_root,
-            inventory.clone(),
-        )?;
         let logical_paths = inventory
             .files
             .iter()
@@ -559,7 +643,7 @@ impl SemanticStorageBindings {
         composition: &CompiledComposition,
         previous: Option<&Self>,
     ) -> Result<Self, GfError> {
-        Self::project_with_removal_scan(composition, previous, None, &[])
+        Self::project_with_removal_scan(composition, previous, None, &[], None)
     }
 
     /// Project while permitting removed bindings only when an exact pinned
@@ -569,7 +653,7 @@ impl SemanticStorageBindings {
         previous: Option<&Self>,
         graph_root: &Path,
     ) -> Result<Self, GfError> {
-        Self::project_with_removal_scan(composition, previous, Some(graph_root), &[])
+        Self::project_with_removal_scan(composition, previous, Some(graph_root), &[], None)
     }
 
     /// Project with graph scanning and Rust-verified schema-identical module upgrades.
@@ -584,6 +668,24 @@ impl SemanticStorageBindings {
             previous,
             Some(graph_root),
             identity_equivalent,
+            None,
+        )
+    }
+
+    /// Project with removal checks confined to selected topology files.
+    pub fn project_with_graph_scan_from_files(
+        composition: &CompiledComposition,
+        previous: Option<&Self>,
+        graph_root: &Path,
+        identity_equivalent: &[(OntologyModuleId, OntologyModuleId)],
+        topology: &crate::TopologyFiles,
+    ) -> Result<Self, GfError> {
+        Self::project_with_removal_scan(
+            composition,
+            previous,
+            Some(graph_root),
+            identity_equivalent,
+            Some(topology),
         )
     }
 
@@ -593,6 +695,7 @@ impl SemanticStorageBindings {
         previous: Option<&Self>,
         graph_root: Option<&Path>,
         identity_equivalent: &[(OntologyModuleId, OntologyModuleId)],
+        topology: Option<&crate::TopologyFiles>,
     ) -> Result<Self, GfError> {
         if let Some(previous) = previous
             && previous.composition_fingerprint == composition.fingerprint
@@ -751,7 +854,10 @@ impl SemanticStorageBindings {
                 })?;
                 if removal_authority.is_none() {
                     removal_authority =
-                        Some(crate::graph_projection::TransformRoutes::capture(root)?);
+                        Some(crate::graph_projection::TransformRoutes::from_inventory(
+                            root,
+                            capture_selected(root, topology)?,
+                        )?);
                 }
                 if binding_has_retained_data_with_authority(
                     removed,
@@ -784,10 +890,12 @@ impl SemanticStorageBindings {
     }
 }
 
-fn scan_retained_migration_rows(graph_root: &Path) -> Result<u64, GfError> {
-    let (inventory, _) = crate::capture_graph_files(graph_root)?;
+fn scan_retained_migration_rows(
+    graph_root: &Path,
+    inventory: &crate::GraphFilesInventory,
+) -> Result<u64, GfError> {
     let mut rows = 0_u64;
-    for entry in inventory.files {
+    for entry in &inventory.files {
         if Path::new(&entry.relative_path)
             .extension()
             .and_then(|value| value.to_str())
@@ -795,7 +903,7 @@ fn scan_retained_migration_rows(graph_root: &Path) -> Result<u64, GfError> {
         {
             continue;
         }
-        let path = graph_root.join(entry.relative_path);
+        let path = graph_root.join(&entry.relative_path);
         let reader = admitted_semantic_parquet(&path)?
             .with_batch_size(8_192)
             .build()
@@ -825,7 +933,11 @@ fn binding_has_retained_data_with_authority(
 ) -> Result<bool, GfError> {
     if binding.route_kind == SemanticRouteKind::Entity {
         use arrow::array::{Array, ListArray, UInt32Array};
-        for path in crate::catalog::topology_node_files(graph_root)? {
+        for (path, _) in authority
+            .properties
+            .node_fragments()
+            .ok_or_else(crate::topology_files::missing_authority)?
+        {
             let reader = admitted_semantic_parquet(&path)?
                 .with_batch_size(8192)
                 .build()

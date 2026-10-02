@@ -27,10 +27,9 @@ use graphforge_core::GfError;
 use graphforge_value::EntityTypeId;
 use uuid::Uuid;
 
-use crate::catalog::{
-    discover_parquet_schema, discover_parquet_schema_detailed, normalize_topology_nodes,
-    read_nodes, read_parquet_or_empty,
-};
+#[cfg(test)]
+use crate::catalog::{discover_parquet_schema, read_parquet_or_empty};
+use crate::catalog::{discover_parquet_schema_detailed, normalize_topology_nodes};
 use crate::schemas::TOPOLOGY_NODES_SCHEMA;
 use crate::staging::RewriteBatch;
 
@@ -65,12 +64,12 @@ where
     }
     let mut changed = 0u64;
     let mut removed = 0u64;
-    for path in node_parquet_files(dir)? {
+    for (path, _) in node_files_for_rewrite(staged, dir)?.nodes {
         let read_path = staged
             .staged_temp(&path)
             .map_or_else(|| path.clone(), Path::to_path_buf);
         let batches = normalize_topology_nodes(
-            read_parquet_or_empty(&read_path, TOPOLOGY_NODES_SCHEMA.clone()).map_err(pq_err)?,
+            crate::catalog::read_parquet_required(&read_path).map_err(pq_err)?,
         )
         .map_err(pq_err)?;
         let mut file_changed = 0u64;
@@ -194,7 +193,7 @@ fn keep_mask<S: BuildHasher>(
 
 /// Stage a rewrite of one Parquet file into `staged`, dropping rows whose
 /// `key_col` UUID is in `targets`. Returns the number of rows that will be
-/// removed once the batch commits. A missing file or no-match stages nothing.
+/// removed once the batch commits. A missing selected file is refused.
 ///
 /// Reads **through** `staged`: content already staged for this file in the
 /// same statement (an earlier SET/REMOVE or append) is the base, so the
@@ -209,10 +208,9 @@ fn stage_rewrite_dropping<S: BuildHasher>(
 ) -> Result<u64, GfError> {
     let read_path = match staged.staged_temp(path) {
         Some(tmp) => tmp.to_path_buf(),
-        None if !source.exists() => return Ok(0),
         None => source.to_path_buf(),
     };
-    let batches = read_parquet_or_empty(&read_path, schema.clone()).map_err(pq_err)?;
+    let batches = crate::catalog::read_parquet_required(&read_path).map_err(pq_err)?;
     let mut removed = 0u64;
     let mut kept: Vec<RecordBatch> = Vec::with_capacity(batches.len());
     for batch in &batches {
@@ -241,13 +239,9 @@ fn stage_rewrite_nodes_dropping<S: BuildHasher>(
 ) -> Result<u64, GfError> {
     let read_path = match staged.staged_temp(path) {
         Some(tmp) => tmp.to_path_buf(),
-        None if !path.exists() => return Ok(0),
         None => path.to_path_buf(),
     };
-    let Some(stored_schema) = discover_parquet_schema(&read_path) else {
-        return Ok(0);
-    };
-    let batches = read_parquet_or_empty(&read_path, stored_schema).map_err(pq_err)?;
+    let batches = crate::catalog::read_parquet_required(&read_path).map_err(pq_err)?;
     let batches = normalize_topology_nodes(batches).map_err(pq_err)?;
     let mut removed = 0u64;
     let mut kept = Vec::with_capacity(batches.len());
@@ -517,7 +511,7 @@ pub fn stage_delete_nodes_authenticated<S: BuildHasher>(
         )?;
     }
     let mut removed = 0_u64;
-    for path in node_parquet_files(dir)? {
+    for (path, _) in node_files_for_rewrite(staged, dir)?.nodes {
         removed = removed.saturating_add(stage_rewrite_nodes_dropping(staged, &path, node_uuids)?);
     }
     Ok(removed)
@@ -554,37 +548,55 @@ pub fn stage_delete_edges_authenticated<S: BuildHasher>(
     if edge_uuids.is_empty() {
         return Ok(0);
     }
-    let directory =
-        graphforge_filesystem::StableDirectory::open(dir).map_err(|error| io_err(&error))?;
-    let table = crate::route_component::owned::read_owned_layout_table(&directory)?;
+    let selected = if let Some(authority) = staged.topology_authority() {
+        crate::enumerate_topology_files(authority, Some(staged))?
+            .edges
+            .into_iter()
+            .map(|(_, source, relative)| (source, dir.join(relative)))
+            .collect::<Vec<_>>()
+    } else {
+        // Explicit standalone/legacy mutation entry points retain their
+        // admitted source, translating it into the owned output layout.
+        let directory =
+            graphforge_filesystem::StableDirectory::open(dir).map_err(|error| io_err(&error))?;
+        let table = crate::route_component::owned::read_owned_layout_table(&directory)?;
+        inventory
+            .edge_rewrite_files()
+            .map(|(route, source, relative)| {
+                let component = match &table {
+                    Some(table) => {
+                        let component = crate::route_component::component(route);
+                        if table.route(&component)? != route {
+                            return Err(GfError::Storage(
+                                "owned edge route differs from admitted source".into(),
+                            ));
+                        }
+                        component
+                    }
+                    None => route.to_owned(),
+                };
+                let route_tail = relative.strip_prefix("topology/edges/").ok_or_else(|| {
+                    GfError::Storage("admitted edge path has no topology namespace".into())
+                })?;
+                let destination = match route_tail.split_once('/') {
+                    Some((_, fragment)) => {
+                        dir.join("topology/edges").join(component).join(fragment)
+                    }
+                    None => dir
+                        .join("topology/edges")
+                        .join(format!("{component}.parquet")),
+                };
+                Ok((source.to_path_buf(), destination))
+            })
+            .collect::<Result<Vec<_>, GfError>>()?
+    };
     let mut removed = 0u64;
-    for (route, source, relative) in inventory.edge_rewrite_files() {
-        let component = match &table {
-            Some(table) => {
-                let component = crate::route_component::component(route);
-                if table.route(&component)? != route {
-                    return Err(GfError::Storage(
-                        "owned edge route differs from admitted source".into(),
-                    ));
-                }
-                component
-            }
-            None => route.to_owned(),
-        };
-        let route_tail = relative.strip_prefix("topology/edges/").ok_or_else(|| {
-            GfError::Storage("admitted edge path has no topology namespace".into())
-        })?;
-        let destination = match route_tail.split_once('/') {
-            Some((_, fragment)) => dir.join("topology/edges").join(component).join(fragment),
-            None => dir
-                .join("topology/edges")
-                .join(format!("{component}.parquet")),
-        };
-        let schema = discover_parquet_schema_detailed(source).map_err(pq_err)?;
+    for (source, destination) in selected {
+        let schema = discover_parquet_schema_detailed(&source).map_err(pq_err)?;
         removed += stage_rewrite_dropping(
             staged,
             &destination,
-            source,
+            &source,
             schema,
             "edge_uuid",
             edge_uuids,
@@ -706,8 +718,21 @@ pub fn delete_nodes_and_edges<S: BuildHasher>(
     node_uuids: &HashSet<[u8; 16], S>,
     edge_uuids: &HashSet<[u8; 16], S>,
 ) -> Result<(u64, u64), GfError> {
-    crate::uuid_membership::ensure_uuid_membership_migrated(dir)?;
+    delete_nodes_and_edges_with_topology(dir, node_uuids, edge_uuids, None)
+}
+
+/// Atomically delete within an explicit session topology authority.
+pub fn delete_nodes_and_edges_with_topology<S: BuildHasher>(
+    dir: &Path,
+    node_uuids: &HashSet<[u8; 16], S>,
+    edge_uuids: &HashSet<[u8; 16], S>,
+    topology: Option<std::sync::Arc<crate::TopologyFileAuthority>>,
+) -> Result<(u64, u64), GfError> {
+    crate::uuid_membership::ensure_uuid_membership_migrated_with_topology(dir, topology.clone())?;
     let mut staged = RewriteBatch::new();
+    if let Some(topology) = topology {
+        staged.bind_topology_authority(topology)?;
+    }
     let edges_removed = stage_delete_edges(&mut staged, dir, edge_uuids)?;
     let nodes_removed = stage_delete_nodes(&mut staged, dir, node_uuids)?;
     let mut snapshot = None;
@@ -772,19 +797,26 @@ pub fn incident_edge_uuids<S: BuildHasher>(
     dir: &Path,
     node_uuids: &HashSet<[u8; 16], S>,
 ) -> Result<Vec<[u8; 16]>, GfError> {
+    incident_edge_uuids_from_files(&crate::TopologyFiles::discover_legacy(dir)?, node_uuids)
+}
+
+/// Resolve incident edges only within the selected topology membership.
+pub fn incident_edge_uuids_from_files<S: BuildHasher>(
+    files: &crate::TopologyFiles,
+    node_uuids: &HashSet<[u8; 16], S>,
+) -> Result<Vec<[u8; 16]>, GfError> {
     if node_uuids.is_empty() {
         return Ok(Vec::new());
     }
     // node_uuid → node_id for the targets.
-    let target_ids = node_ids_for(dir, node_uuids)?;
+    let target_ids = node_ids_for(files, node_uuids)?;
     if target_ids.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut out = Vec::new();
-    for (_, path) in edge_parquet_files(dir, None)? {
-        let schema = discover_parquet_schema_detailed(&path).map_err(pq_err)?;
-        for batch in read_parquet_or_empty(&path, schema).map_err(pq_err)? {
+    for (_, path, _) in files.edge_fragments() {
+        for batch in crate::catalog::read_parquet_required(path).map_err(pq_err)? {
             let edge_uuid = batch
                 .column_by_name("edge_uuid")
                 .and_then(|c| c.as_any().downcast_ref::<FixedSizeBinaryArray>())
@@ -804,11 +836,11 @@ pub fn incident_edge_uuids<S: BuildHasher>(
 /// Resolve the `node_id` surrogates of the given `node_uuid`s from
 /// `topology/nodes.parquet`.
 fn node_ids_for<S: BuildHasher>(
-    dir: &Path,
+    files: &crate::TopologyFiles,
     node_uuids: &HashSet<[u8; 16], S>,
 ) -> Result<HashSet<u64>, GfError> {
     let mut ids = HashSet::new();
-    for batch in read_nodes(dir).map_err(pq_err)? {
+    for batch in crate::read_nodes_from_files(files).map_err(pq_err)? {
         let uuid = batch
             .column_by_name("node_uuid")
             .and_then(|c| c.as_any().downcast_ref::<FixedSizeBinaryArray>())
@@ -1483,5 +1515,16 @@ mod tests {
         );
         assert_eq!(logical_property_rows(dir.path(), "_untyped", false), 1);
         assert_eq!(logical_property_rows(dir.path(), "KNOWS", true), 1);
+    }
+}
+
+fn node_files_for_rewrite(
+    staged: &RewriteBatch,
+    legacy_root: &Path,
+) -> Result<crate::TopologyFiles, GfError> {
+    match staged.topology_authority() {
+        Some(authority) => crate::enumerate_topology_files(authority, Some(staged))
+            .map(|files| files.at_root(legacy_root)),
+        None => crate::TopologyFiles::discover_legacy(legacy_root),
     }
 }

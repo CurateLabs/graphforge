@@ -344,7 +344,11 @@ impl GraphForge {
                 prepared.files_participant.clone()
             } else {
                 let (inventory, participant) =
-                    graphforge_storage::capture_graph_files_over_parent(&dir, parent)?;
+                    graphforge_storage::capture_graph_files_over_parent_with_topology(
+                        &dir,
+                        parent,
+                        &self.dir().topology_files()?,
+                    )?;
                 if routes.requires_canonical {
                     let (participant, lease) = graphforge_storage::prepare_graph_files_replacement(
                         parent, &dir, &inventory,
@@ -450,7 +454,10 @@ impl GraphForge {
                 // the validation or conflict that caused publication to abort.
                 if let Ok(durable) = graphforge_storage::resolve_project_generation(root) {
                     if durable.generation_uuid() == expected_parent {
-                        if crate::rematerialize_graph_workspace(&prior_generation, &dir).is_ok() {
+                        if crate::rematerialize_graph_workspace(&prior_generation, &dir)
+                            .and_then(|()| self.install_property_generation(&prior_generation))
+                            .is_ok()
+                        {
                             *self
                                 .runtime_catalog
                                 .lock()
@@ -670,7 +677,7 @@ fn build_validation_snapshot(
             .map(str::to_owned)
             .collect();
     }
-    for batch in graphforge_storage::read_nodes(&graph.dir())
+    for batch in graphforge_storage::read_nodes_from_files(&graph.dir().topology_files()?)
         .map_err(|error| GfError::Storage(format!("failed to read node topology: {error}")))?
     {
         let Some(column) = batch.column_by_name("node_uuid") else {
@@ -950,13 +957,17 @@ fn apply_graph_mutations(
     if request.graph_mutations.is_empty() {
         return Ok(());
     }
-    let mut writer =
-        graphforge_storage::GraphWriter::open_at(&graph.dir(), graph.ontology_mode, recorded_at)?
-            .with_semantic_composition_fingerprint(
-                graph
-                    .default_composition_snapshot()
-                    .map(|context| context.fingerprint().to_owned()),
-            );
+    let mut writer = graphforge_storage::GraphWriter::open_at_with_topology(
+        &graph.dir(),
+        graph.ontology_mode,
+        recorded_at,
+        Some(std::sync::Arc::clone(&graph.dir().topology)),
+    )?
+    .with_semantic_composition_fingerprint(
+        graph
+            .default_composition_snapshot()
+            .map(|context| context.fingerprint().to_owned()),
+    );
     let endpoints = request
         .graph_mutations
         .iter()

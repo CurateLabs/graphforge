@@ -399,7 +399,7 @@ pub(crate) fn match_requested_node_uuids(
     if pending.is_empty() {
         return Ok(());
     }
-    let batches = graphforge_storage::read_nodes(&graph.dir())
+    let batches = graphforge_storage::read_nodes_from_files(&graph.dir().topology_files()?)
         .map_err(|error| GfError::Storage(error.to_string()))?;
     match_requested_uuids(batches, "node_uuid", pending)
 }

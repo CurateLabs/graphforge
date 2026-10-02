@@ -21,6 +21,9 @@ pub(crate) struct SourceRetirement {
 }
 
 impl SourceRetirement {
+    pub(crate) fn relative_path(&self) -> String {
+        self.components.join("/")
+    }
     pub(crate) fn is_reserved_authority(&self) -> bool {
         let relative: PathBuf = self.components.iter().collect();
         crate::staging::is_reserved_authority(&relative)

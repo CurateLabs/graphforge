@@ -2,7 +2,7 @@
 
 use super::{
     ARTIFACT_IDENTITY, GfError, GraphFileEntry, GraphFilesInventory, GraphFilesParticipant, Path,
-    ProjectParticipant, capture_graph_files_reusing_digests,
+    ProjectParticipant,
 };
 
 /// An already-authenticated graph file identity that a later capture may reuse.
@@ -35,6 +35,23 @@ pub fn capture_graph_files_over_parent(
     source_root: &Path,
     parent: &crate::ResolvedProjectGeneration,
 ) -> Result<(GraphFilesInventory, ProjectParticipant), GfError> {
+    capture_over_parent(source_root, parent, None)
+}
+
+/// Publish only topology selected by the session's manifest/owned-write authority.
+pub fn capture_graph_files_over_parent_with_topology(
+    source_root: &Path,
+    parent: &crate::ResolvedProjectGeneration,
+    topology: &crate::TopologyFiles,
+) -> Result<(GraphFilesInventory, ProjectParticipant), GfError> {
+    capture_over_parent(source_root, parent, Some(topology))
+}
+
+fn capture_over_parent(
+    source_root: &Path,
+    parent: &crate::ResolvedProjectGeneration,
+    topology: Option<&crate::TopologyFiles>,
+) -> Result<(GraphFilesInventory, ProjectParticipant), GfError> {
     // Reuse needs only the parent's authenticated declared identities: every
     // reuse is gated by a fresh checksum of the new bytes, so the parent's
     // payload files are never read here.
@@ -56,5 +73,45 @@ pub fn capture_graph_files_over_parent(
         .iter()
         .map(|entry| (entry.relative_path.clone(), KnownGraphFile::from(entry)))
         .collect::<std::collections::HashMap<_, _>>();
-    capture_graph_files_reusing_digests(source_root, &known, ARTIFACT_IDENTITY)
+    match topology {
+        Some(files) => super::capture_graph_files_reusing_digests_with_topology(
+            source_root,
+            &known,
+            ARTIFACT_IDENTITY,
+            files,
+        ),
+        None => capture_graph_files_reusing_digests(source_root, &known, ARTIFACT_IDENTITY),
+    }
+}
+
+/// Build a canonical inventory and participant from a private workspace root,
+/// like [`super::capture_graph_files`], but skip hashing any file whose relative
+/// path appears in `known` at the same byte length and whose freshly computed
+/// XXH64 equals the known checksum — reusing that entry's already-authenticated
+/// digest instead. Every other file (new, resized, or
+/// simply absent from `known`) is still walked, opened, and hashed exactly as
+/// `capture_graph_files` would. This never trusts a stat alone as proof of
+/// content: a reused digest is only ever one the caller already verified for
+/// that exact path (#1401 — avoids re-hashing a materialized tree's untouched
+/// files just to fingerprint the files that actually changed).
+///
+/// # Errors
+/// Rejects links, special files, unsafe relative paths, duplicates, and
+/// inventory size overflow.
+pub(crate) fn capture_graph_files_reusing_digests(
+    source_root: &Path,
+    known: &std::collections::HashMap<String, KnownGraphFile>,
+    domain: graphforge_core::hash_observation::HashDomain,
+) -> Result<(GraphFilesInventory, ProjectParticipant), GfError> {
+    let (inventory, _) = super::build_inventory_for_owned_layout(
+        source_root,
+        false,
+        Some(known),
+        domain,
+        &mut || Ok(()),
+        None,
+    )?;
+    let bytes = super::encode_inventory(&inventory)?;
+    let participant = super::inventory_participant(bytes, inventory.file_count)?;
+    Ok((inventory, participant))
 }

@@ -164,7 +164,21 @@ pub fn materialize_graph_projection(
     target: &Path,
     selection: &GraphProjectionSelection,
 ) -> Result<GraphProjectionSummary, GfError> {
-    materialize_graph_projection_with_options(source, target, selection, true)
+    materialize_graph_projection_with_options(source, target, selection, true, None)
+        .map(|(summary, _)| summary)
+}
+
+/// Materialize using the source session's explicit topology membership.
+///
+/// # Errors
+/// Same as [`materialize_graph_projection`].
+pub fn materialize_graph_projection_from_files(
+    source: &Path,
+    target: &Path,
+    selection: &GraphProjectionSelection,
+    topology: &crate::TopologyFiles,
+) -> Result<(GraphProjectionSummary, crate::TopologyFiles), GfError> {
+    materialize_graph_projection_with_options(source, target, selection, true, Some(topology))
 }
 
 /// Materialize a portable graph-tree projection without copying ontology files.
@@ -176,7 +190,8 @@ pub fn materialize_portable_graph_tree_projection(
     target: &Path,
     selection: &GraphProjectionSelection,
 ) -> Result<GraphProjectionSummary, GfError> {
-    materialize_graph_projection_with_options(source, target, selection, false)
+    materialize_graph_projection_with_options(source, target, selection, false, None)
+        .map(|(summary, _)| summary)
 }
 
 /// Compact effective rows without retaining deleted property bases or indexes.
@@ -218,17 +233,31 @@ fn materialize_graph_projection_with_options(
     target: &Path,
     selection: &GraphProjectionSelection,
     copy_ontology_files: bool,
-) -> Result<GraphProjectionSummary, GfError> {
+    topology: Option<&crate::TopologyFiles>,
+) -> Result<(GraphProjectionSummary, crate::TopologyFiles), GfError> {
     validate_distinct_paths(source, target)?;
     validate_graph_empty_target(target)?;
 
-    let routes = TransformRoutes::capture(source)?;
+    let topology = projection_topology(source, topology)?;
+    let routes = TransformRoutes::from_inventory(
+        source,
+        crate::capture_graph_files_with_topology(source, &topology)?.0,
+    )?;
     let mut output_table = crate::route_component::RouteTable::default();
-    let node_paths = crate::mutator::node_parquet_files(source).map_err(storage)?;
+    let mut written = crate::TopologyFiles::default();
+    let node_paths = topology
+        .nodes
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
     let node_ids = uuid_rows_files(&node_paths, "node_uuid")?;
     require_present(&selection.node_uuids, &node_ids, "node")?;
 
-    let edge_files = sorted_parquet_files(&source.join("topology/edges"))?;
+    let edge_files = topology
+        .edges
+        .iter()
+        .map(|(_, path, _)| path.clone())
+        .collect::<Vec<_>>();
     let edges = edge_endpoints(&edge_files)?;
     let edge_ids = edges.keys().copied().collect::<BTreeSet<_>>();
     require_present(&selection.edge_uuids, &edge_ids, "edge")?;
@@ -242,16 +271,14 @@ fn materialize_graph_projection_with_options(
 
     clear_graph_empty_target(target)?;
     fs::create_dir_all(target).map_err(storage)?;
-    for path in node_paths {
-        let relative = path.strip_prefix(source).map_err(storage)?;
-        project_parquet_file(
-            &path,
-            &target.join(relative),
-            "node_uuid",
-            &selected_nodes,
-            &selection.exclude_properties,
-        )?;
-    }
+    project_node_fragments(
+        source,
+        target,
+        node_paths,
+        &selected_nodes,
+        &selection.exclude_properties,
+        &mut written,
+    )?;
     for path in edge_files {
         let relative = path
             .strip_prefix(source)
@@ -263,11 +290,17 @@ fn materialize_graph_projection_with_options(
         let destination = encode_transform_path(&semantic, &mut output_table)?;
         project_parquet_file(
             &path,
-            &target.join(destination),
+            &target.join(&destination),
             "edge_uuid",
             &selected_edges,
             &BTreeSet::new(),
         )?;
+        let route = crate::route_component::route_position(&semantic)?
+            .ok_or_else(|| validation("projected edge lacks route"))?
+            .to_owned();
+        written
+            .edges
+            .push((route, target.join(&destination), destination));
     }
     project_property_directory(
         source,
@@ -290,6 +323,66 @@ fn materialize_graph_projection_with_options(
         &selection.exclude_properties,
     )?;
     install_transform_table(target, &output_table)?;
+    copy_projection_metadata(source, target, copy_ontology_files)?;
+    let graph_content_fingerprint = projected_graph_fingerprint(target)?;
+
+    Ok((
+        GraphProjectionSummary {
+            node_uuids: selected_nodes.into_iter().collect(),
+            edge_uuids: selected_edges.into_iter().collect(),
+            endpoint_node_uuids,
+            graph_content_fingerprint,
+        },
+        written,
+    ))
+}
+
+fn projection_topology<'a>(
+    source: &Path,
+    topology: Option<&'a crate::TopologyFiles>,
+) -> Result<std::borrow::Cow<'a, crate::TopologyFiles>, GfError> {
+    match topology {
+        Some(files) => Ok(std::borrow::Cow::Borrowed(files)),
+        // Only the public standalone wrappers supply no selected membership.
+        None => Ok(std::borrow::Cow::Owned(
+            crate::TopologyFiles::discover_legacy(source)?,
+        )),
+    }
+}
+
+fn project_node_fragments(
+    source: &Path,
+    target: &Path,
+    node_paths: Vec<PathBuf>,
+    selected_nodes: &BTreeSet<GraphUuid>,
+    exclude_properties: &BTreeSet<String>,
+    written: &mut crate::TopologyFiles,
+) -> Result<(), GfError> {
+    for path in node_paths {
+        let relative = path.strip_prefix(source).map_err(storage)?;
+        project_parquet_file(
+            &path,
+            &target.join(relative),
+            "node_uuid",
+            selected_nodes,
+            exclude_properties,
+        )?;
+        written.nodes.push((
+            target.join(relative),
+            relative
+                .to_str()
+                .ok_or_else(|| validation("graph path is not UTF-8"))?
+                .replace('\\', "/"),
+        ));
+    }
+    Ok(())
+}
+
+fn copy_projection_metadata(
+    source: &Path,
+    target: &Path,
+    copy_ontology_files: bool,
+) -> Result<(), GfError> {
     copy_runtime_catalog(source, target)?;
     if copy_ontology_files {
         for file in [
@@ -299,14 +392,7 @@ fn materialize_graph_projection_with_options(
             copy_regular_file_if_present(&source.join(file), &target.join(file))?;
         }
     }
-    let graph_content_fingerprint = projected_graph_fingerprint(target)?;
-
-    Ok(GraphProjectionSummary {
-        node_uuids: selected_nodes.into_iter().collect(),
-        edge_uuids: selected_edges.into_iter().collect(),
-        endpoint_node_uuids,
-        graph_content_fingerprint,
-    })
+    Ok(())
 }
 
 fn resolve_projection_closure(

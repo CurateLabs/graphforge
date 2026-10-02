@@ -127,6 +127,8 @@ async fn delete_exec_enforces_bound_edge_and_detach_semantics() {
         let input = MemorySourceConfig::try_new_from_batches(schema, vec![batch]).unwrap();
         let summary = GraphDeleteNode::summary_schema();
         let exec: Arc<dyn ExecutionPlan> = Arc::new(GraphDeleteExec {
+            topology: graphforge_storage::TopologyFileAuthority::discover_legacy(dir.path())
+                .unwrap(),
             mutation_health: mutation::MutationHealth::default(),
             input,
             cols: if include_edge {

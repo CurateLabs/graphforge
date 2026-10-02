@@ -144,7 +144,7 @@ impl GraphReadInventory {
 /// # Errors
 /// Refuses unsafe or ambiguous paths, changed files, excess work, and I/O failures.
 pub fn capture_graph_read_inventory(root: &Path) -> Result<GraphReadInventory, GfError> {
-    capture_graph_read_inventory_excluding(root, &std::collections::BTreeMap::new())
+    capture_graph_read_inventory_excluding(root, &std::collections::BTreeMap::new(), None)
 }
 
 /// Capture read authority for a private tree while a rewrite retains staged
@@ -154,8 +154,9 @@ pub fn capture_graph_read_inventory(root: &Path) -> Result<GraphReadInventory, G
 pub(crate) fn capture_graph_read_inventory_excluding(
     root: &Path,
     excluded: &Exclusions,
+    topology: Option<&crate::TopologyFiles>,
 ) -> Result<GraphReadInventory, GfError> {
-    let paths = paths_outside_exclusions(root, excluded)?;
+    let paths = paths_outside_exclusions(root, excluded, topology)?;
     if paths.len() > crate::graph_files::MAX_GRAPH_FILES {
         return Err(invalid("graph read file count exceeds limit"));
     }
@@ -266,9 +267,10 @@ type Exclusions =
 fn paths_outside_exclusions(
     root: &Path,
     excluded: &Exclusions,
+    topology: Option<&crate::TopologyFiles>,
 ) -> Result<Vec<std::path::PathBuf>, GfError> {
     let mut paths = Vec::new();
-    crate::graph_files::collect_source_files(root, &mut paths)?;
+    crate::graph_files::collect_source_files_with_topology(root, &mut paths, topology)?;
     let mut retained = Vec::with_capacity(paths.len());
     for path in paths {
         match excluded.get(&path) {
@@ -364,4 +366,12 @@ mod tests {
         std::os::unix::fs::symlink(root.path().join("file"), root.path().join("alias")).unwrap();
         assert!(capture_graph_read_inventory(root.path()).is_err());
     }
+}
+
+/// Capture current bytes using topology membership supplied by the session.
+pub fn capture_graph_read_inventory_with_topology(
+    root: &Path,
+    topology: &crate::TopologyFiles,
+) -> Result<GraphReadInventory, GfError> {
+    capture_graph_read_inventory_excluding(root, &std::collections::BTreeMap::new(), Some(topology))
 }

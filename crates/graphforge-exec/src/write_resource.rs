@@ -23,6 +23,7 @@ pub struct BoundWriteResource {
     contract: GraphReadContract,
     pub(crate) composition: Option<String>,
     pub(crate) type_map: HashMap<EntityTypeId, String>,
+    pub(crate) topology: Arc<graphforge_storage::TopologyFileAuthority>,
 }
 
 impl BoundWriteResource {
@@ -96,6 +97,12 @@ impl BoundWriteResource {
     pub fn directory(&self) -> &Path {
         &self.dir
     }
+
+    /// The target's explicit topology membership, separate from its output path.
+    #[must_use]
+    pub fn topology_authority(&self) -> Arc<graphforge_storage::TopologyFileAuthority> {
+        Arc::clone(&self.topology)
+    }
 }
 
 pub(crate) fn required(
@@ -133,6 +140,11 @@ pub(crate) fn required(
     )
     .map_err(|e| DataFusionError::Plan(e.to_string()))?;
     Ok(BoundWriteResource {
+        topology: binding
+            .resource
+            .catalog
+            .topology_authority()
+            .ok_or_else(|| DataFusionError::Execution("GF_TOPOLOGY_AUTHORITY_MISSING".into()))?,
         health: binding.resource.health.clone(),
         dir: binding.resource.dir.clone(),
         mode: binding.resource.mode,

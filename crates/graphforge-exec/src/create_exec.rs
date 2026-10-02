@@ -41,6 +41,7 @@ use graphforge_rel::scalar_to_ir_literal;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
+#[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -71,6 +72,7 @@ pub struct GraphCreateExec {
     /// row-dependent computed property values (#814).
     in_df_schema: DFSchemaRef,
     dir: PathBuf,
+    topology: Arc<graphforge_storage::TopologyFileAuthority>,
     mutation_health: mutation::MutationHealth,
     mode: OntologyMode,
     semantic_composition_fingerprint: Option<String>,
@@ -229,6 +231,7 @@ impl GraphCreateExec {
             ref_cols,
             in_df_schema: in_schema.clone(),
             dir: resource.dir.clone(),
+            topology: resource.topology_authority(),
             mutation_health: resource.health.clone(),
             mode: resource.mode,
             semantic_composition_fingerprint: node.semantic_composition_fingerprint.clone(),
@@ -260,6 +263,7 @@ impl GraphCreateExec {
             ref_cols: self.ref_cols.clone(),
             in_df_schema: self.in_df_schema.clone(),
             dir: self.dir.clone(),
+            topology: Some(Arc::clone(&self.topology)),
             mode: self.mode,
             semantic_composition_fingerprint: self.semantic_composition_fingerprint.clone(),
             out_schema: self.schema.clone(),
@@ -317,6 +321,7 @@ impl ExecutionPlan for GraphCreateExec {
             ref_cols: self.ref_cols.clone(),
             in_df_schema: self.in_df_schema.clone(),
             dir: self.dir.clone(),
+            topology: Arc::clone(&self.topology),
             mutation_health: self.mutation_health.clone(),
             mode: self.mode,
             semantic_composition_fingerprint: self.semantic_composition_fingerprint.clone(),
@@ -364,14 +369,27 @@ impl ExecutionPlan for GraphCreateExec {
                 .ref_cols
                 .iter()
                 .any(|cols| cols.node_id_idx.is_none())
-                .then(|| persisted_node_ids(&cfg.dir))
+                .then(|| {
+                    let files = match &cfg.topology {
+                        Some(authority) => {
+                            graphforge_storage::enumerate_topology_files(authority, None)?
+                        }
+                        None => graphforge_storage::TopologyFiles::discover_legacy(&cfg.dir)?,
+                    };
+                    persisted_node_ids_from_files(&files)
+                })
                 .transpose()
                 .map_err(to_df_err)?;
-            let mut writer = graphforge_storage::GraphWriter::open(&cfg.dir, cfg.mode)
-                .map_err(to_df_err)?
-                .with_semantic_composition_fingerprint(
-                    cfg.semantic_composition_fingerprint.clone(),
-                );
+            let mut writer = match &cfg.topology {
+                Some(authority) => graphforge_storage::GraphWriter::open_with_topology(
+                    &cfg.dir,
+                    cfg.mode,
+                    Arc::clone(authority),
+                ),
+                None => graphforge_storage::GraphWriter::open(&cfg.dir, cfg.mode),
+            }
+            .map_err(to_df_err)?
+            .with_semantic_composition_fingerprint(cfg.semantic_composition_fingerprint.clone());
             let mut tally = CreateTally::default();
             let mut emitted: Vec<RecordBatch> = Vec::new();
 
@@ -452,6 +470,7 @@ pub(crate) struct CreateConfig {
     /// row-dependent computed property values (#814).
     pub(crate) in_df_schema: DFSchemaRef,
     pub(super) dir: PathBuf,
+    pub(super) topology: Option<Arc<graphforge_storage::TopologyFileAuthority>>,
     pub(super) mode: OntologyMode,
     pub(super) semantic_composition_fingerprint: Option<String>,
     pub(super) out_schema: SchemaRef,
@@ -526,11 +545,20 @@ pub(super) fn build_ref_by_var(cfg: &CreateConfig) -> std::collections::HashMap<
     cfg.ref_cols.iter().map(|r| (r.var, r)).collect()
 }
 
+#[cfg(test)]
 pub(super) fn persisted_node_ids(
     dir: &Path,
 ) -> Result<std::collections::HashMap<[u8; 16], u64>, GfError> {
+    persisted_node_ids_from_files(&graphforge_storage::TopologyFiles::discover_legacy(dir)?)
+}
+
+fn persisted_node_ids_from_files(
+    files: &graphforge_storage::TopologyFiles,
+) -> Result<std::collections::HashMap<[u8; 16], u64>, GfError> {
     let mut ids = std::collections::HashMap::new();
-    for batch in graphforge_storage::read_nodes(dir).map_err(|e| GfError::Storage(e.to_string()))? {
+    for batch in graphforge_storage::read_nodes_from_files(files)
+        .map_err(|e| GfError::Storage(e.to_string()))?
+    {
         let uuids = batch
             .column_by_name("node_uuid")
             .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())

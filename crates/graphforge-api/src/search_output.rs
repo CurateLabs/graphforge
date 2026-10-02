@@ -9,7 +9,9 @@ use arrow::array::{
 use arrow::compute::concat;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use graphforge_search::{FusedSearchHit, VectorLifecycleLimits, project_label_members};
+use graphforge_search::{
+    FusedSearchHit, VectorLifecycleLimits, project_label_members_snapshot_with_topology,
+};
 use graphforge_storage::{
     AuthenticatedPropertyInventory, PropertyRouteKind, read_properties_from_inventory,
 };
@@ -65,13 +67,16 @@ pub(crate) fn shape_search_output_with_members(
     let eligible = if let Some(members) = admitted {
         members
     } else {
-        captured = project_label_members(
+        captured = project_label_members_snapshot_with_topology(
             project_dir,
+            Some(&graphforge_storage::TopologyFiles::from_inventory(
+                inventory,
+            )?),
             label_id,
             VectorLifecycleLimits::default(),
             || Ok(()),
         )?;
-        &captured
+        captured.members()
     };
     if let Some(hit) = hits.iter().find(|hit| !eligible.contains(&hit.node_uuid)) {
         return Err(storage(format!(

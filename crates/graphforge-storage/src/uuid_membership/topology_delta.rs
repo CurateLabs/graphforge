@@ -62,7 +62,7 @@ use super::ordinal_artifacts::write_v4_tombstone_artifact;
 use super::ordinal_compaction::compact_v4_binary_carry;
 use super::ordinal_compaction::read_v4_forward_record;
 use super::rebuild::build_surrogate_run;
-use super::rebuild::ensure_uuid_membership_migrated;
+
 use super::rebuild::flush_entity_surrogate_run;
 use super::rebuild::merge_node_surrogate_runs;
 #[cfg(test)]
@@ -115,7 +115,10 @@ pub(crate) fn commit_uuid_topology_rewrite(
     if delta_is_empty && staged.is_empty() {
         return Ok(CommittedUuidTopologyRewrite::NoTopologyChange);
     }
-    ensure_uuid_membership_migrated(project_dir)?;
+    super::rebuild::ensure_uuid_membership_migrated_with_topology(
+        project_dir,
+        staged.topology_authority().cloned(),
+    )?;
     let selected = selected_generation_for_graph_root(project_dir)?;
     let ordinal_authority = selected
         .as_ref()
@@ -297,6 +300,15 @@ pub(crate) fn commit_uuid_topology_rewrite(
             }
             Ok(receipt)
         });
+    // Retain this batch's exact membership before the rewrite consumes it.
+    // UUID participants stage only their reserved namespace; a reconciled
+    // durable commit must install the same topology as ordinary success.
+    let topology = staged.topology_authority().cloned();
+    let topology_candidate = topology
+        .as_ref()
+        .map(|authority| authority.prepare_installed(&staged))
+        .transpose()?;
+    let mut reconciled = false;
     let commit =
         crate::generation::commit_topology_aware_with_participant(staged, &root, participant);
     let token = prepared.borrow_mut().take();
@@ -323,7 +335,10 @@ pub(crate) fn commit_uuid_topology_rewrite(
                 Ok(Some((
                     crate::durable_rewrite::AuxiliaryReconcileOutcome::Committed,
                     generation,
-                ))) => Some(generation),
+                ))) => {
+                    reconciled = true;
+                    Some(generation)
+                }
                 Ok(Some((crate::durable_rewrite::AuxiliaryReconcileOutcome::NotCommitted, _))) => {
                     if let Some(value) = snapshot.as_mut()
                         && let Err(restore) = value.restore_owned_manifest()
@@ -368,6 +383,9 @@ pub(crate) fn commit_uuid_topology_rewrite(
         }) {
             *snapshot = None;
             return Err(error);
+        }
+        if reconciled && let (Some(topology), Some(candidate)) = (topology, topology_candidate) {
+            topology.install(candidate);
         }
         committed_metrics = token.metrics().clone();
         let refresh = injected_snapshot_refresh_failure().map_or_else(

@@ -9,6 +9,7 @@ use graphforge_ir::ExprArena;
 use graphforge_ir::IrExpr;
 use graphforge_ir::{IrLiteral, PropId, RemovePropItem, SetPropItem, VarId};
 use graphforge_rel::GraphPlanLowerer;
+use std::path::Path;
 
 use super::*;
 
