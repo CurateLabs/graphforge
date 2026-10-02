@@ -99,10 +99,71 @@ fn build(dir: &Path, nodes: usize, fan_out: usize) {
 }
 
 /// [`build`] with edge `e` typed `relations[e % relations.len()]`, so several
-/// routes share each construction window.
+/// routes share each construction window. Without an ontology every type
+/// shares the `_exploratory` route; `typed` adopts one declaring `Entity` and
+/// each relation, so construction splits the window per route.
 fn build_with_relations(dir: &Path, nodes: usize, fan_out: usize, relations: &[&str]) {
+    build_graph(dir, nodes, fan_out, relations, false);
+}
+
+fn build_graph(dir: &Path, nodes: usize, fan_out: usize, relations: &[&str], typed: bool) {
     assert!(nodes > 2 * fan_out, "the ring must not wrap onto itself");
-    let forge = GraphForge::new(Some(dir.to_str().expect("utf-8 path"))).unwrap();
+    let mut forge = GraphForge::new(Some(dir.to_str().expect("utf-8 path"))).unwrap();
+    if typed {
+        use graphforge_api::{AdoptOntologyRequest, OntologyMode, OperationId, WriteContext};
+        let mut document = String::from(
+            "ontology_id: https://example.test/shapes\nversion: \"1\"\nentity_types:\n  - name: Entity\n    abstract: false\nrelation_types:\n",
+        );
+        for relation in relations {
+            document.push_str(&format!(
+                "  - name: {relation}\n    src: Entity\n    dst: Entity\n"
+            ));
+        }
+        document.push_str(
+            "properties:\n  - owner: Entity\n    name: name\n    type: utf8\n    nullable: true\n",
+        );
+        let ontology = dir
+            .parent()
+            .expect("project parent")
+            .join("shapes-ontology.yaml");
+        std::fs::write(&ontology, document).unwrap();
+        forge
+            .adopt_ontology(AdoptOntologyRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(Uuid::now_v7()),
+                    actor_uuid: None,
+                },
+                path: ontology,
+                mode: OntologyMode::Advisory,
+            })
+            .unwrap();
+        // Construction binds the published semantic composition: publish the
+        // adopted ontology's composition, then reopen so the facade loads it.
+        drop(forge);
+        let mut adopted = GraphForge::new(Some(dir.to_str().expect("utf-8 path"))).unwrap();
+        let candidate = adopted.workspace_ontology_composition().unwrap().unwrap();
+        let request = graphforge_api::CompositionChangeRequest {
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            expected_project_generation_uuid: resolve_project_generation(dir)
+                .unwrap()
+                .generation_uuid(),
+            expected_composition_fingerprint: Some(candidate.composition_fingerprint.clone()),
+            candidate,
+            data_disposition: graphforge_api::CompositionDataDisposition::RequireConforming,
+        };
+        let preview = adopted
+            .preview_ontology_composition_change(&request, None)
+            .unwrap();
+        assert!(preview.diagnostics.is_empty(), "{:?}", preview.diagnostics);
+        adopted
+            .publish_ontology_composition_change(&request, &preview, None)
+            .unwrap();
+        drop(adopted);
+        forge = GraphForge::new(Some(dir.to_str().expect("utf-8 path"))).unwrap();
+    }
     let mut session = forge
         .begin_graph_construction(GraphConstructionBudgets {
             max_batch_rows: WRITE_WINDOW,
@@ -173,6 +234,28 @@ fn build_with_relations(dir: &Path, nodes: usize, fan_out: usize, relations: &[&
     session.seal_and_publish().unwrap();
 }
 
+/// The top-level UUID-membership files hydration copies into single-link
+/// private files and verifies (`requires_single_link_materialization`): the
+/// manifests, receipts and lock, and the published `*-v4-<generation>-<digest>.uuidx`
+/// identity artifacts. Runs and everything beneath a subdirectory are linked.
+fn is_copied_identity_control(path: &str) -> bool {
+    let Some(name) = path.strip_prefix("topology/uuid-membership/") else {
+        return false;
+    };
+    !name.contains('/')
+        && (matches!(
+            name,
+            "manifest.json"
+                | "topology-receipt.json"
+                | "ordinal-v4-manifest.json"
+                | "ordinal-v4-receipt.json"
+                | "ordinal-v4.lock"
+        ) || (name.ends_with(".uuidx")
+            && ["forward-v4-", "ordinal-v4-", "tombstones-v4-"]
+                .iter()
+                .any(|prefix| name.starts_with(prefix))))
+}
+
 /// What the layout declares, read from the manifest without admitting a byte.
 struct Layout {
     node_bytes: u64,
@@ -195,11 +278,7 @@ fn layout(inventory: &GraphFilesInventory) -> Layout {
     let mut copied_control_bytes = 0;
     for file in &inventory.files {
         let path = file.relative_path.as_str();
-        if path == "semantic-routes.json"
-            || path
-                .strip_prefix("topology/uuid-membership/")
-                .is_some_and(|name| !name.contains('/'))
-        {
+        if path == "semantic-routes.json" || is_copied_identity_control(path) {
             copied_control_bytes += file.byte_length;
         }
         if path.contains(".csr.shards-") && path.ends_with(".csr") {
@@ -485,10 +564,12 @@ fn query_shapes_cost_their_result_not_their_graph_across_a_4x_node_range() {
                 size.layout.copied_control_bytes,
                 size.layout.property_bytes
             );
-            // The bound must be tighter than the payload it forbids.
+            // Beyond the copied controls and the property fragments the bound
+            // allows only the slack, and the slack is smaller than the node
+            // and edge payload: reading one object at open fails this gate.
             assert!(
-                open_bound < size.layout.node_bytes + size.layout.edge_bytes,
-                "{name} nodes={nodes}: the open bound {open_bound} admits the payload"
+                CONTROL_SLACK_BYTES < size.layout.node_bytes + size.layout.edge_bytes,
+                "{name} nodes={nodes}: the slack admits the payload"
             );
             let (bound, _) = (shape.bound)(&size.layout);
             assert!(
@@ -764,13 +845,20 @@ fn edge_fragment_hints_are_per_route_upper_bounds() {
     let path = project.path().join("state");
     let nodes = 1 << 10;
     let fan_out = 4;
-    build_with_relations(&path, nodes, fan_out, &["LINK", "KNOWS"]);
+    build_graph(&path, nodes, fan_out, &["LINK", "KNOWS"], true);
     let generation = resolve_project_generation(&path).unwrap();
     let inventory = AuthenticatedPropertyInventory::from_resolved_generation(&generation).unwrap();
 
     let all = inventory.edge_fragments(None);
+    let routes: std::collections::BTreeSet<_> =
+        all.iter().map(|(route, _, _)| route.clone()).collect();
+    eprintln!("declared edge routes: {routes:?}");
+    // Construction keys typed routes by their semantic route id; the catalog
+    // resolves relation names to them through the published bindings, which
+    // the counts below exercise.
+    assert_eq!(routes.len(), 2, "one route per relation type: {routes:?}");
     let mut seen = std::collections::BTreeSet::new();
-    for route in ["LINK", "KNOWS"] {
+    for route in &routes {
         let fragments = inventory.edge_fragments(Some(route));
         assert!(!fragments.is_empty(), "{route}: no fragments");
         let mut rows = 0;
