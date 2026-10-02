@@ -27,14 +27,16 @@
 //!
 //! What a query reads is the lifecycle attribution (application read bytes),
 //! never wall time, which a shared runner cannot hold steady; wall time is
-//! printed. Open is bounded from the manifest: hydration copies the
-//! single-link controls (the route table and the top-level UUID-membership
-//! identity controls, about 40 bytes a node) into private files and verifies
-//! the copy, so it reads each of those bytes twice (source read plus the
-//! verification re-read, both attributed since #1717), authenticates the
-//! property fragments in full (#1716, "not in this PR"), and reads the
-//! manifest, sidecars and footers within a fixed slack. Neither term is this
-//! change's; the bound names them so a regression into payload bytes fails.
+//! printed. Open is bounded from what it copies: hydration copies only the
+//! small mutable controls (the route table and the UUID-membership manifests,
+//! receipts, lock and tombstones) into private files and verifies the copy,
+//! reading each twice; the node-linear forward and ordinal runs are
+//! hard-linked and read nothing at open (#1719). The copied bytes come from
+//! the open evidence and are capped at what the manifest declares for that
+//! set; the property fragments are authenticated in full (#1716, "not in this
+//! PR"); manifest, sidecars and footers fit a fixed slack. Execution also
+//! reads the 64 KiB ordinal blocks holding the destinations it resolves plus
+//! the two ends of the range (#1719), once per handle.
 //!
 //! Criterion 4 (same-inode, same-length flip refused) for the path this change
 //! touches: a flipped node object is refused by the generic scan on first
@@ -66,6 +68,7 @@ use graphforge_api::{
     IrLiteral, LifecycleIoCapture, lifecycle_io_snapshot,
 };
 use graphforge_core::uuid::Uuid;
+use graphforge_storage::ordinal_identity_v4::{ORDINAL_BLOCK_BYTES, ORDINAL_BLOCK_RECORDS};
 use graphforge_storage::{GraphFilesInventory, graph_object_path, resolve_project_generation};
 
 const SMALL_NODES: usize = 1 << 14;
@@ -236,8 +239,8 @@ fn build_graph(dir: &Path, nodes: usize, fan_out: usize, relations: &[&str], typ
 
 /// The top-level UUID-membership files hydration copies into single-link
 /// private files and verifies (`requires_single_link_materialization`): the
-/// manifests, receipts and lock, and the published `*-v4-<generation>-<digest>.uuidx`
-/// identity artifacts. Runs and everything beneath a subdirectory are linked.
+/// manifests, receipts and lock, and the published tombstone runs. The
+/// node-linear forward and ordinal runs are hard-linked (#1719).
 fn is_copied_identity_control(path: &str) -> bool {
     let Some(name) = path.strip_prefix("topology/uuid-membership/") else {
         return false;
@@ -250,10 +253,7 @@ fn is_copied_identity_control(path: &str) -> bool {
                 | "ordinal-v4-manifest.json"
                 | "ordinal-v4-receipt.json"
                 | "ordinal-v4.lock"
-        ) || (name.ends_with(".uuidx")
-            && ["forward-v4-", "ordinal-v4-", "tombstones-v4-"]
-                .iter()
-                .any(|prefix| name.starts_with(prefix))))
+        ) || (name.starts_with("tombstones-v4-") && name.ends_with(".uuidx")))
 }
 
 /// What the layout declares, read from the manifest without admitting a byte.
@@ -312,6 +312,8 @@ fn layout(inventory: &GraphFilesInventory) -> Layout {
 #[derive(Debug)]
 struct Measured {
     open_read: u64,
+    /// Declared bytes of the controls open copied (`GraphFilesOpenEvidence`).
+    copied_bytes: u64,
     execution_read: u64,
     open_wall: Duration,
     execution_wall: Duration,
@@ -379,6 +381,7 @@ fn measure(path: &Path, query: &str, params: &HashMap<String, IrLiteral>) -> Mea
     }
     Measured {
         open_read: open.totals.read_bytes,
+        copied_bytes: forge.graph_open_evidence().bytes_copied,
         execution_read: execution.totals.read_bytes,
         open_wall,
         execution_wall,
@@ -395,6 +398,19 @@ struct Shape {
     /// unbounded by design, bounded at the whole class it must scan.
     bound: fn(&Layout) -> (u64, bool),
     rows: fn(usize) -> usize,
+    /// Paths ending at one destination, per unit of fan-out; with the rows it
+    /// gives the destinations resolved, so the ordinal blocks read.
+    paths_per_destination: fn(usize) -> usize,
+}
+
+/// Ordinal blocks an execution reads to resolve its destinations: the blocks
+/// holding them (a block read once per handle, then held) plus the two ends
+/// of the one ordinal range construction publishes (#1719).
+fn identity_bound(shape: &Shape, fan_out: usize) -> u64 {
+    const RANGE_END_BLOCKS: u64 = 2;
+    let destinations =
+        ((shape.rows)(fan_out).div_ceil((shape.paths_per_destination)(fan_out)) + 1) as u64;
+    (destinations.div_ceil(ORDINAL_BLOCK_RECORDS) + RANGE_END_BLOCKS) * ORDINAL_BLOCK_BYTES
 }
 
 const SHAPES: [Shape; 5] = [
@@ -403,6 +419,7 @@ const SHAPES: [Shape; 5] = [
         text: "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000",
         bound: |layout| (layout.largest_shard_bytes + EXECUTION_RESIDUAL_BYTES, true),
         rows: |_| LIMIT,
+        paths_per_destination: |fan| fan,
     },
     Shape {
         name: "ordered two-hop LIMIT 1000",
@@ -414,12 +431,14 @@ const SHAPES: [Shape; 5] = [
             )
         },
         rows: |_| LIMIT,
+        paths_per_destination: |fan| fan * fan,
     },
     Shape {
         name: "ordered one-hop LIMIT 10",
         text: "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 10",
         bound: |layout| (layout.largest_shard_bytes + EXECUTION_RESIDUAL_BYTES, true),
         rows: |_| 10,
+        paths_per_destination: |fan| fan,
     },
     Shape {
         name: "lookup by node_uuid",
@@ -427,6 +446,7 @@ const SHAPES: [Shape; 5] = [
         // Unbounded pending an index probe: the scan ignores its filters.
         bound: |layout| (layout.node_bytes + EXECUTION_RESIDUAL_BYTES, false),
         rows: |_| 1,
+        paths_per_destination: |_| 1,
     },
     Shape {
         name: "one-hop with a property projection",
@@ -441,6 +461,7 @@ const SHAPES: [Shape; 5] = [
             )
         },
         rows: |_| LIMIT,
+        paths_per_destination: |fan| fan,
     },
 ];
 
@@ -484,10 +505,12 @@ fn run_size(nodes: usize) -> Size {
         .map(|shape| {
             let measured = measure(&path, shape.text, &lookup);
             let (bound, bounded) = (shape.bound)(&layout);
+            let bound = bound + identity_bound(shape, FAN_OUT);
             eprintln!(
-                "  {}: open_read={} exec_read={} bound={bound} ({}) rows={} open_ms={:.1} exec_ms={:.1}",
+                "  {}: open_read={} copied={} exec_read={} bound={bound} ({}) rows={} open_ms={:.1} exec_ms={:.1}",
                 shape.name,
                 measured.open_read,
+                measured.copied_bytes,
                 measured.execution_read,
                 if bounded {
                     "bounded"
@@ -533,6 +556,7 @@ fn query_shapes_cost_their_result_not_their_graph_across_a_4x_node_range() {
         let open_bound = OPEN_CONTROL_READS * size.layout.copied_control_bytes
             + size.layout.property_bytes
             + CONTROL_SLACK_BYTES;
+        let copied_cap = size.layout.copied_control_bytes;
         for (shape, measured) in SHAPES.iter().zip(&size.results) {
             let name = shape.name;
             assert_eq!(
@@ -556,6 +580,13 @@ fn query_shapes_cost_their_result_not_their_graph_across_a_4x_node_range() {
                 assert_eq!(measured.names.len(), LIMIT, "{name}: names");
                 assert_eq!(measured.names[0], node_name(0), "{name}: first name");
             }
+            // Open copies only the declared mutable controls, each read twice.
+            assert!(
+                measured.copied_bytes <= copied_cap,
+                "{name} nodes={nodes}: open copied {} bytes against the {copied_cap} the \
+                 manifest declares for the single-link controls",
+                measured.copied_bytes
+            );
             assert!(
                 measured.open_read <= open_bound,
                 "{name} nodes={nodes}: open read {} against a control bound of {open_bound} \
@@ -572,6 +603,7 @@ fn query_shapes_cost_their_result_not_their_graph_across_a_4x_node_range() {
                 "{name} nodes={nodes}: the slack admits the payload"
             );
             let (bound, _) = (shape.bound)(&size.layout);
+            let bound = bound + identity_bound(shape, FAN_OUT);
             assert!(
                 measured.execution_read <= bound,
                 "{name} nodes={nodes}: execution read {} bytes against a structural bound of {bound}",
