@@ -714,7 +714,12 @@ pub(super) fn verify_participant_file(
     path: &Path,
     expected: &StagedParticipant,
 ) -> Result<(), GfError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(publication_io)?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        GfError::Storage(format!(
+            "inspect staged participant at {}: {error}",
+            path.display()
+        ))
+    })?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(project_error(
             ProjectErrorCode::PublicationFailed,
@@ -740,7 +745,12 @@ pub(super) fn verify_participant_file(
     // The participant's SHA-256 identity was captured from the exact bytes
     // that staging wrote. Later boundaries refuse corruption by exact length
     // and the mandatory XXH64 recorded beside that identity.
-    let file = File::open(path).map_err(publication_io)?;
+    let file = File::open(path).map_err(|error| {
+        GfError::Storage(format!(
+            "open staged participant at {}: {error}",
+            path.display()
+        ))
+    })?;
     let bound = expected.byte_length.checked_add(1).ok_or_else(|| {
         project_error(
             ProjectErrorCode::PublicationFailed,

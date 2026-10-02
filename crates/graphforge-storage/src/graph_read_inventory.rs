@@ -192,6 +192,8 @@ pub(crate) fn capture_graph_read_inventory_excluding(
         // hydrated payload nothing has read yet is admitted first: corruption
         // must be refused here, not blessed (#1388).
         crate::graph_admission::admit_file(&file)?;
+        // Windows admission advances the file cursor before this sequential read.
+        file.rewind().map_err(|error| io_error(&error))?;
         let identity =
             graphforge_filesystem::file_identity(&file).map_err(|error| io_error(&error))?;
         let length = file.metadata().map_err(|error| io_error(&error))?.len();
@@ -325,6 +327,26 @@ fn io_error(error: &std::io::Error) -> GfError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_touch_read_capture_checksums_the_complete_payload() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("topology")).unwrap();
+        let path = root.path().join("topology/nodes.parquet");
+        std::fs::write(&path, b"capture this nonempty payload after admission").unwrap();
+        let published = crate::capture_graph_files(root.path()).unwrap().0;
+        crate::graph_admission::AdmissionBatch::begin().register(
+            graphforge_filesystem::path_identity(&path).unwrap(),
+            &published.files[0],
+            path.clone(),
+            root.path(),
+            path.clone(),
+        );
+
+        let actual = capture_graph_read_inventory(root.path()).unwrap();
+        assert!(actual.agrees_with(&GraphReadInventory::from_published(&published).unwrap()));
+        resolve_entry_retained(root.path(), &actual.files[0]).unwrap();
+    }
 
     #[test]
     fn private_capture_has_no_payload_identity_and_refuses_same_inode_mutation() {

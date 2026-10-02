@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::io::Seek;
 use std::path::PathBuf;
 
 use super::{
@@ -91,6 +92,9 @@ pub(crate) fn capture_payload_identity(
     // name a new identity: a corrupted hard-linked object must be refused, not
     // republished under a fresh digest (#1388).
     crate::graph_admission::admit_file(&file)?;
+    // Windows admission uses seek_read, which advances this handle's cursor.
+    file.rewind()
+        .map_err(|error| super::storage("rewind admitted graph file", path, error))?;
     let mut prior_calls = 0;
     if let Some(known) = reused {
         // The workspace file is the parent's own content-store object: nothing
@@ -241,6 +245,28 @@ pub(crate) fn capture_workspace_over_parent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_touch_capture_hashes_the_complete_payload() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("topology")).unwrap();
+        let path = root.path().join("topology/nodes.parquet");
+        std::fs::write(&path, b"capture this nonempty payload after admission").unwrap();
+        let expected = crate::capture_graph_files(root.path()).unwrap().0;
+        let entry = &expected.files[0];
+        crate::graph_admission::AdmissionBatch::begin().register(
+            graphforge_filesystem::path_identity(&path).unwrap(),
+            entry,
+            path.clone(),
+            root.path(),
+            path.clone(),
+        );
+
+        let actual = crate::capture_graph_files(root.path()).unwrap().0;
+        assert_eq!(actual, expected);
+        crate::graph_files::resolve_v1_inventory_entry_retained(root.path(), &actual.files[0])
+            .unwrap();
+    }
 
     fn known_for(
         path: &Path,

@@ -1174,7 +1174,8 @@ fn import_materialized(
         stage_entry_count,
         allocation,
         Some(&participant_captures),
-    )?;
+    )
+    .map_err(|error| outcome::with_io_context(error, "prepare compact import graph", target))?;
     let (graph_object_lease, compact_root_capture) =
         prepared_graph.map_or((None, None), |prepared| {
             (
@@ -1232,24 +1233,39 @@ fn import_materialized(
         graph_object_lease.as_ref(),
         Some(&participant_captures),
     )
-    .map_err(|error| storage_or_cancel(&error, cancelled))?
-    {
+    .map_err(|error| {
+        outcome::with_io_context(
+            storage_or_cancel(&error, cancelled),
+            "stage imported generation",
+            target,
+        )
+    })? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => {
             let validated = staged
                 .validate(|_| Ok(()), |_, _| Ok(()))
-                .map_err(|error| storage(&error))?;
+                .map_err(|error| {
+                    outcome::with_io_context(
+                        storage(&error),
+                        "validate imported generation",
+                        target,
+                    )
+                })?;
             let published = match graph_object_lease.as_ref() {
                 Some(lease) => validated.publish_with_graph_objects(lease),
                 None => validated.publish(),
             };
             published.map_err(|error| {
-                outcome::publication_error(
+                outcome::with_io_context(
+                    outcome::publication_error(
+                        target,
+                        transaction_uuid,
+                        generation_uuid,
+                        &report.package_digest,
+                        &error,
+                    ),
+                    "publish imported generation",
                     target,
-                    transaction_uuid,
-                    generation_uuid,
-                    &report.package_digest,
-                    &error,
                 )
             })?
         }
