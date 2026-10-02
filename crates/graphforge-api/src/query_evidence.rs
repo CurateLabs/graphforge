@@ -25,7 +25,8 @@ pub struct QueryExecutionEvidence {
     pub sorts: Vec<QuerySortEvidence>,
     /// Sanitized operator RSS samples.
     pub operator_rss: Vec<QueryOperatorRssEvidence>,
-    /// Adjacency rebuilds performed because an index was missing or stale.
+    /// Adjacency rebuild attempts because an index was missing or stale,
+    /// including attempts that fail after starting rebuild work.
     /// Construction-published generations serve their current index with zero.
     pub adjacency_rebuilds: u64,
     /// Maximum concurrent filtered reads.
@@ -326,7 +327,7 @@ impl From<graphforge_exec::demand::DemandSnapshot> for QueryExecutionEvidence {
             .max()
             .unwrap_or(0);
         Self {
-            contract: "graphforge-query-evidence/1",
+            contract: "graphforge-query-evidence/2",
             hops,
             sorts,
             operator_rss,

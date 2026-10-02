@@ -222,8 +222,13 @@ cancellation.
 
 Ordinary streaming result sinks retain the same aggregate evidence through the
 terminal stream boundary. `gf --json query` emits `graphforge-result-sink/2`
-with nested `graphforge-query-evidence/1`: named hop reader, logical-row,
+with nested `graphforge-query-evidence/2`: named hop reader, logical-row,
 projection, identity-byte, TopK/spill, memory-release, and operator-RSS fields.
+Version 2 adds `adjacency_rebuilds`, counting rebuild attempts for missing or stale
+indexes, including failed attempts so their linear work remains visible. Fresh
+construction-published indexes report zero. Certification consumers also accept
+the closed eleven-field version 1 shape from archived receipts; version 2 has
+twelve fields and requires the unsigned rebuild-attempt counter.
 The receipt also includes the SHA-256 of a bounded logical Arrow encoding of the
 published result and an optional `scalar_u64` only for an exact one-row integer
 result representable as `u64`. Evidence is content-free: it contains no graph

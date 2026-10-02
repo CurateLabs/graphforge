@@ -1621,12 +1621,11 @@ fn sanitize_result_sink(
 }
 
 fn sanitized_query_evidence(value: &serde_json::Value) -> bool {
-    const KEYS: [&str; 12] = [
+    const KEYS: [&str; 11] = [
         "contract",
         "hops",
         "sorts",
         "operator_rss",
-        "adjacency_rebuilds",
         "max_in_flight_reads",
         "memory_reserved_before",
         "memory_reserved_after",
@@ -1639,10 +1638,23 @@ fn sanitized_query_evidence(value: &serde_json::Value) -> bool {
         Some(object) => object,
         None => return false,
     };
-    object.len() == KEYS.len()
-        && object.keys().all(|key| KEYS.contains(&key.as_str()))
-        && object.get("contract").and_then(serde_json::Value::as_str)
-            == Some("graphforge-query-evidence/1")
+    let version_shape = match object.get("contract").and_then(serde_json::Value::as_str) {
+        Some("graphforge-query-evidence/1") => {
+            object.len() == KEYS.len() && object.keys().all(|key| KEYS.contains(&key.as_str()))
+        }
+        Some("graphforge-query-evidence/2") => {
+            object.len() == KEYS.len() + 1
+                && object
+                    .keys()
+                    .all(|key| KEYS.contains(&key.as_str()) || key == "adjacency_rebuilds")
+                && object
+                    .get("adjacency_rebuilds")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some()
+        }
+        _ => false,
+    };
+    version_shape
         && sanitized_numeric_fields(value, &KEYS[4..])
         && sanitized_query_records(object.get("hops"), &QUERY_HOP_KEYS, None)
         && sanitized_query_records(object.get("sorts"), &QUERY_SORT_KEYS, Some("fetch_rows"))
@@ -2514,7 +2526,7 @@ mod tests {
             "scalar_u64": 7,
             "application_io": lifecycle_application_io(),
             "query_evidence": {
-                "contract": "graphforge-query-evidence/1",
+                "contract": "graphforge-query-evidence/2",
                 "hops": [],
                 "sorts": [],
                 "operator_rss": [],
@@ -2557,6 +2569,28 @@ mod tests {
     }
 
     #[test]
+    fn archived_query_receipts_keep_the_closed_legacy_shape() {
+        let archived: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/rungs/integrated-storage/s20-graphforge.json"
+        ))
+        .unwrap();
+        let mut count = 0;
+        for phase in archived["phases"].as_array().unwrap() {
+            for receipt in phase["receipts"].as_array().into_iter().flatten() {
+                if receipt["contract"] != "graphforge-result-sink/2" {
+                    continue;
+                }
+                assert!(sanitized_query_evidence(&receipt["query_evidence"]));
+                let mut with_counter = receipt["query_evidence"].clone();
+                with_counter["adjacency_rebuilds"] = serde_json::json!(0);
+                assert!(!sanitized_query_evidence(&with_counter));
+                count += 1;
+            }
+        }
+        assert_eq!(count, 8);
+    }
+
+    #[test]
     fn query_receipts_preserve_typed_adjacency_probe_evidence() {
         let query = serde_json::json!({
             "contract": "graphforge-result-sink/2",
@@ -2565,7 +2599,7 @@ mod tests {
             "complete": true, "result_sha256": "a".repeat(64), "scalar_u64": null,
             "application_io": lifecycle_application_io(),
             "query_evidence": {
-                "contract": "graphforge-query-evidence/1",
+                "contract": "graphforge-query-evidence/2",
                 "hops": [{
                     "ordinal": 0, "input_batches": 0, "input_rows": 0,
                     "candidates_generated": 2, "adjacency_rows_examined": 3,
@@ -2595,6 +2629,14 @@ mod tests {
         let accepted = parse_receipts(&serde_json::to_vec(&query).unwrap(), true).unwrap();
         assert_eq!(accepted[0]["query_evidence"], query["query_evidence"]);
         assert!(accepted[0].get("destination").is_none());
+        let mut legacy = query.clone();
+        legacy["query_evidence"]["contract"] = serde_json::json!("graphforge-query-evidence/1");
+        legacy["query_evidence"]
+            .as_object_mut()
+            .unwrap()
+            .remove("adjacency_rebuilds");
+        let accepted = parse_receipts(&serde_json::to_vec(&legacy).unwrap(), true).unwrap();
+        assert_eq!(accepted[0]["query_evidence"], legacy["query_evidence"]);
         for bad_value in [
             serde_json::json!(-1),
             serde_json::json!("1"),

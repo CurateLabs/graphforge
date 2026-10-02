@@ -176,7 +176,20 @@ def sink(digest: str, *, rows: int, scalar: int | None = None) -> dict:
         "bytes": 64,
         "complete": True,
         "result_sha256": digest,
-        "query_evidence": {"contract": "graphforge-query-evidence/1"},
+        "query_evidence": {
+            "contract": "graphforge-query-evidence/2",
+            "hops": [],
+            "sorts": [],
+            "operator_rss": [],
+            "adjacency_rebuilds": 0,
+            "max_in_flight_reads": 0,
+            "memory_reserved_before": 0,
+            "memory_reserved_after": 0,
+            "returned_batch_bytes": 0,
+            "execution_batch_rows": 8192,
+            "peak_rss_bytes": 0,
+            "rss_after_release_bytes": 0,
+        },
         "application_io": lifecycle_application_io(),
     }
     if scalar is not None:
@@ -799,6 +812,37 @@ class ProgressiveRunControllerTests(unittest.TestCase):
             assemble_rung_evidence(
                 root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
             )
+
+    def test_query_evidence_versions_keep_their_closed_shapes(self) -> None:
+        for version in (1, 2):
+            with self.subTest(version=version):
+                receipts = authoritative_receipts(18)
+                evidence = receipts["query"][0]["query_evidence"]
+                evidence["contract"] = f"graphforge-query-evidence/{version}"
+                if version == 1:
+                    del evidence["adjacency_rebuilds"]
+                gf = graphforge(18, receipts)
+                rung = assemble_rung_evidence(
+                    root=ROOT, scale=18, graphforge=gf, benchexec=benchexec(gf)
+                )
+                self.assertEqual(rung["status"], "passed")
+                if version == 1:
+                    evidence["adjacency_rebuilds"] = 0
+                else:
+                    del evidence["adjacency_rebuilds"]
+                with self.assertRaisesRegex(ControllerError, "query receipt is incomplete"):
+                    assemble_rung_evidence(
+                        root=ROOT, scale=18, graphforge=gf, benchexec=benchexec(gf)
+                    )
+        for invalid in (-1, "1", None, True, 1 << 64):
+            with self.subTest(counter=invalid):
+                receipts = authoritative_receipts(18)
+                receipts["query"][0]["query_evidence"]["adjacency_rebuilds"] = invalid
+                gf = graphforge(18, receipts)
+                with self.assertRaisesRegex(ControllerError, "query receipt is incomplete"):
+                    assemble_rung_evidence(
+                        root=ROOT, scale=18, graphforge=gf, benchexec=benchexec(gf)
+                    )
 
     def test_named_authorities_assemble_true_passed_evidence_and_refuse_gaps(self) -> None:
         receipts = authoritative_receipts(18)

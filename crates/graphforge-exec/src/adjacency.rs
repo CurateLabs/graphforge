@@ -1185,6 +1185,7 @@ impl PersistentAdjacencyProvider {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
+        // Count attempts before starting so failed linear rebuild work is visible.
         crate::demand::record_adjacency_rebuild();
         match self.rebuild(now) {
             Ok(rows) => {

@@ -233,9 +233,10 @@ pub struct DemandSnapshot {
     /// Statement-wide owner-resolution and replacement-key work. Decoder peaks
     /// and identity counts are logical accounting, not process-memory bounds.
     pub property_writes: BTreeMap<String, u64>,
-    /// Adjacency index rebuilds the query performed because the index was
-    /// missing or stale. A published generation ships a current index, so this
-    /// is zero there; a nonzero count is an O(E) rebuild inside the query that
+    /// Adjacency index rebuild attempts because the index was missing or stale,
+    /// including attempts that fail after starting rebuild work. A published
+    /// generation ships a current index, so this is zero there; a nonzero count
+    /// is an O(E) rebuild inside the query that
     /// would otherwise go unreported (#1388). Rebuilds are never a response to
     /// corruption, which the query refuses instead.
     pub adjacency_rebuilds: u64,
