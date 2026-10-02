@@ -603,7 +603,27 @@ fn open_attribute_writer(path: &Path) -> io::Result<File> {
 }
 
 fn set_readonly_attribute(file: &File, readonly: bool) -> io::Result<()> {
-    let mut basic = information(file)?;
+    let mut basic = FILE_BASIC_INFO {
+        CreationTime: 0,
+        LastAccessTime: 0,
+        LastWriteTime: 0,
+        ChangeTime: 0,
+        FileAttributes: 0,
+    };
+    // SAFETY: `file` is a live regular-file handle and `basic` is the
+    // fixed-size output structure required by FileBasicInfo.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileBasicInfo,
+            (&raw mut basic).cast(),
+            u32::try_from(std::mem::size_of::<FILE_BASIC_INFO>())
+                .expect("FILE_BASIC_INFO size fits u32"),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
     if readonly {
         basic.FileAttributes |= FILE_ATTRIBUTE_READONLY;
     } else {
