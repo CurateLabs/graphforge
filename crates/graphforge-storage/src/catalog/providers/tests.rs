@@ -394,15 +394,29 @@ fn declared_node_files_are_ordered_and_validated_like_a_listing() {
         vec![legacy, shard]
     );
 
+    // A staged temporary or any non-Parquet name beside the shards is
+    // ignored, as the listing ignores it; a Parquet file with a non-canonical
+    // name or an overlapping range is refused.
+    for ignored in [
+        "topology/nodes/00000000000000000002-00000000000000000003.parquet.a1b2c3.tmp",
+        "topology/nodes/00000000000000000005-00000000000000000006.arrow",
+    ] {
+        write_nodes_parquet_value(&dir.path().join(ignored), 2, 2);
+        let inventory = crate::AuthenticatedPropertyInventory::from_entries_at_root(
+            dir.path(),
+            vec![
+                topology_entry(dir.path(), shard),
+                topology_entry(dir.path(), ignored),
+            ],
+        )
+        .unwrap();
+        assert_eq!(inventory.node_fragments().unwrap().len(), 1, "{ignored}");
+    }
     for (name, message) in [
         ("topology/nodes/nodes-extra.parquet", "canonical"),
         (
             "topology/nodes/00000000000000000003-00000000000000000004.parquet",
             "overlap",
-        ),
-        (
-            "topology/nodes/00000000000000000005-00000000000000000006.arrow",
-            "canonical node shard",
         ),
     ] {
         write_nodes_parquet_value(&dir.path().join(name), 3, 3);
