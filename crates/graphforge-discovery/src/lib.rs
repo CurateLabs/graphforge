@@ -78,8 +78,6 @@ pub struct DiscoveryLimits {
     pub max_lineage_bytes: usize,
     /// Maximum Versions, Branches, or Proposals in one lineage document.
     pub max_lineage_entries: usize,
-    /// Maximum declared bytes of one per-Version research package object.
-    pub max_research_package_bytes: u64,
 }
 
 impl Default for DiscoveryLimits {
@@ -96,7 +94,6 @@ impl Default for DiscoveryLimits {
             max_ontology_entries: 4096,
             max_lineage_bytes: 2 * 1024 * 1024,
             max_lineage_entries: 10_000,
-            max_research_package_bytes: 1024 * 1024 * 1024,
         }
     }
 }
@@ -905,32 +902,23 @@ impl DiscoveryManifest {
             return Err(mismatch("lineage.lineage_digest"));
         }
         let limits = DiscoveryLimits::default();
+        // One lineage document describes every Branch head of exactly one
+        // repository snapshot. A Branch ref that targets another snapshot names a
+        // head this document does not describe, so it fails closed rather than
+        // resolving to this snapshot's (possibly older) head.
         for branch in &lineage.branches {
-            if !refs.refs.iter().any(|item| item.name == branch.ref_name) {
+            let Some(item) = refs.refs.iter().find(|item| item.name == branch.ref_name) else {
                 return Err(DiscoveryError::new(
                     DiscoveryErrorCode::MissingRef,
                     Some("lineage.branches.ref_name"),
                     "branch ref is absent from refs snapshot",
                 ));
-            }
-        }
-        if let Some(branch) = lineage
-            .branches
-            .iter()
-            .find(|branch| branch.ref_name == self.resolved_ref)
-        {
-            let Some(item) = refs.refs.iter().find(|item| item.name == branch.ref_name) else {
-                return Err(DiscoveryError::new(
-                    DiscoveryErrorCode::MissingRef,
-                    Some("resolved_ref"),
-                    "resolved ref is absent from refs snapshot",
-                ));
             };
             if item.target != self.immutable_version {
                 return Err(DiscoveryError::new(
                     DiscoveryErrorCode::IntegrityFailure,
-                    Some("resolved_ref"),
-                    "resolved branch ref target disagrees with manifest",
+                    Some("lineage.branches.ref_name"),
+                    "branch ref targets a different repository snapshot than the lineage",
                 ));
             }
         }
@@ -941,16 +929,6 @@ impl DiscoveryManifest {
         }
         for proposal in &lineage.proposals {
             self.validate_lineage_package(&proposal.package, "proposals.package", limits)?;
-            let payload = lineage
-                .version(&proposal.payload_version_uuid)
-                .ok_or_else(|| mismatch("proposals.payload_version_uuid"))?;
-            if payload.kind != "projection" {
-                return Err(DiscoveryError::new(
-                    DiscoveryErrorCode::MalformedResponse,
-                    Some("proposals.payload_version_uuid"),
-                    "proposal payload is not a projection Version",
-                ));
-            }
         }
         Ok(())
     }
@@ -1060,9 +1038,9 @@ impl DiscoveryManifest {
                 "research package object is incompatible",
             ));
         }
-        if object.length > limits.max_research_package_bytes {
-            return Err(limit(object_field));
-        }
+        // Research package objects follow the Project package rule: they count
+        // toward `max_cumulative_object_bytes` like every inventory object, and
+        // no separate, smaller cap applies.
         Ok(())
     }
 

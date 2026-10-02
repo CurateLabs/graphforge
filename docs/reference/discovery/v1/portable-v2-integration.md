@@ -86,9 +86,17 @@ A Hub reads research lineage without Project package I/O:
 4. Parse with `ResearchLineage::from_json`. An unknown required capability or
    format major fails `unsupported_future` here, before any Version entry is read.
 5. Call `DiscoveryManifest::bind_lineage` with the refs snapshot. It requires
-   repository and `immutable_version` agreement, digest match, every branch
-   `ref_name` to appear in refs, and resolved-ref target agreement when the
-   resolved ref names a branch.
+   repository and `immutable_version` agreement, digest match, and every branch
+   `ref_name` to appear in refs with a `target` equal to the manifest's
+   `immutable_version`. One lineage document describes every Branch head of one
+   repository snapshot, so a Branch ref that targets another snapshot fails
+   `integrity_failure` instead of resolving to this snapshot's head.
+
+`ResearchLineage::from_json` also enforces the cross-entry rules JSON Schema
+cannot express: a `projection` never cites itself as `source_version_uuid`; a
+Proposal's payload Version is listed, is a `projection`, has the Proposal's
+`source_version_uuid` as its source, and (when it carries a package) carries the
+Proposal's package; and a Proposal's `source_branch_uuid` names a listed Branch.
 
 Failure at any step returns no lineage. Listing Branches, Versions, Fork origins,
 and Proposals uses only this document plus refs; it never reads the Project
@@ -104,8 +112,9 @@ without using the Project package object:
    version_uuid)`. It requires a per-Version `package` reference and resolves its
    object to a `application/vnd.graphforge.project` entry other than the Project
    package object.
-3. Download that object, bounded by `max_research_package_bytes`, and require the
-   bytes to hash to the object's `digest`.
+3. Download that object under the same rules as the Project package (it counts
+   toward `max_cumulative_object_bytes`, and `gf clone` applies its Project
+   bundle bound), and require the bytes to hash to the object's `digest`.
 4. Pass the complete local package to the portable-v2 verifier. Require the
    semantic `package_digest` to equal the Version's `package.package_digest`.
 

@@ -166,15 +166,16 @@ impl ResearchLineage {
             );
         }
         self.version.validate()?;
-        self.repository.validate()?;
-        self.immutable_version.validate()?;
-        check_uuid(&self.project_uuid, "project_uuid", limits)?;
+        // Required semantics are negotiated before any other content is read.
         validate_semantics(
             &self.requirements,
             &self.capabilities,
             RESEARCH_LINEAGE_CAPABILITY,
             limits,
         )?;
+        self.repository.validate()?;
+        self.immutable_version.validate()?;
+        check_uuid(&self.project_uuid, "project_uuid", limits)?;
         validate_extensions(&self.extensions, limits)?;
         if let Some(fork) = &self.fork {
             fork.origin_repository.validate()?;
@@ -201,6 +202,7 @@ impl ResearchLineage {
         }
         let mut prior = None;
         let mut branch_refs = BTreeSet::new();
+        let mut branch_uuids = BTreeSet::new();
         for branch in &self.branches {
             check_uuid(&branch.branch_uuid, "branches.branch_uuid", limits)?;
             validate_ref_name(&branch.ref_name, limits)?;
@@ -233,6 +235,7 @@ impl ResearchLineage {
                 ));
             }
             prior = Some(branch.branch_uuid.as_str());
+            branch_uuids.insert(branch.branch_uuid.as_str());
             if !branch_refs.insert(branch.ref_name.as_str()) {
                 return Err(DiscoveryError::new(
                     DiscoveryErrorCode::Duplicate,
@@ -242,7 +245,7 @@ impl ResearchLineage {
             }
         }
         let mut prior = None;
-        let mut version_ids = BTreeSet::new();
+        let mut version_ids = BTreeMap::new();
         for version in &self.versions {
             check_uuid(&version.version_uuid, "versions.version_uuid", limits)?;
             version.identity_digest.validate()?;
@@ -263,6 +266,13 @@ impl ResearchLineage {
                     ));
                 };
                 check_uuid(source, "versions.source_version_uuid", limits)?;
+                if *source == version.version_uuid {
+                    return Err(DiscoveryError::new(
+                        DiscoveryErrorCode::MalformedResponse,
+                        Some("versions.source_version_uuid"),
+                        "projection must not cite itself as its source Version",
+                    ));
+                }
             } else if version.source_version_uuid.is_some() {
                 return Err(DiscoveryError::new(
                     DiscoveryErrorCode::MalformedResponse,
@@ -281,7 +291,7 @@ impl ResearchLineage {
                 ));
             }
             prior = Some(version.version_uuid.as_str());
-            version_ids.insert(version.version_uuid.as_str());
+            version_ids.insert(version.version_uuid.as_str(), version);
         }
         let mut prior = None;
         for proposal in &self.proposals {
@@ -310,16 +320,49 @@ impl ResearchLineage {
                 ));
             }
             prior = Some(proposal.proposal_uuid.as_str());
-            if !version_ids.contains(proposal.payload_version_uuid.as_str()) {
+            let Some(payload) = version_ids.get(proposal.payload_version_uuid.as_str()) else {
                 return Err(DiscoveryError::new(
                     DiscoveryErrorCode::MalformedResponse,
                     Some("proposals.payload_version_uuid"),
                     "proposal payload Version is absent from versions",
                 ));
+            };
+            if payload.kind != "projection" {
+                return Err(DiscoveryError::new(
+                    DiscoveryErrorCode::MalformedResponse,
+                    Some("proposals.payload_version_uuid"),
+                    "proposal payload is not a projection Version",
+                ));
+            }
+            if payload.source_version_uuid.as_deref() != Some(proposal.source_version_uuid.as_str())
+            {
+                return Err(DiscoveryError::new(
+                    DiscoveryErrorCode::MalformedResponse,
+                    Some("proposals.source_version_uuid"),
+                    "proposal source Version disagrees with its payload projection",
+                ));
+            }
+            if payload
+                .package
+                .as_ref()
+                .is_some_and(|package| *package != proposal.package)
+            {
+                return Err(DiscoveryError::new(
+                    DiscoveryErrorCode::MalformedResponse,
+                    Some("proposals.package"),
+                    "proposal package disagrees with its payload Version package",
+                ));
+            }
+            if !branch_uuids.contains(proposal.source_branch_uuid.as_str()) {
+                return Err(DiscoveryError::new(
+                    DiscoveryErrorCode::MalformedResponse,
+                    Some("proposals.source_branch_uuid"),
+                    "proposal source Branch is absent from branches",
+                ));
             }
         }
         for branch in &self.branches {
-            if !version_ids.contains(branch.head_version_uuid.as_str()) {
+            if !version_ids.contains_key(branch.head_version_uuid.as_str()) {
                 return Err(DiscoveryError::new(
                     DiscoveryErrorCode::MalformedResponse,
                     Some("branches.head_version_uuid"),

@@ -72,8 +72,6 @@ struct Limits {
     max_lineage_bytes: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_lineage_entries: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_research_package_bytes: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -855,6 +853,62 @@ fn lineage_cases() -> Vec<Case> {
             "malformed_response",
             Some("versions.source_version_uuid"),
         ),
+        invalid(
+            "lineage-projection-cites-itself",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["versions"][3]["source_version_uuid"] = json!(LINEAGE_VERSION_PROJECTION);
+                v
+            },
+            "malformed_response",
+            Some("versions.source_version_uuid"),
+        ),
+        invalid(
+            "lineage-proposal-source-disagrees-with-projection",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["proposals"][0]["source_version_uuid"] = json!(LINEAGE_VERSION_MAIN);
+                v
+            },
+            "malformed_response",
+            Some("proposals.source_version_uuid"),
+        ),
+        invalid(
+            "lineage-proposal-source-branch-unlisted",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["proposals"][0]["source_branch_uuid"] =
+                    json!("01900000-0000-7000-8000-000000000012");
+                v
+            },
+            "malformed_response",
+            Some("proposals.source_branch_uuid"),
+        ),
+        invalid(
+            "lineage-proposal-payload-is-complete",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["proposals"][0]["payload_version_uuid"] = json!(LINEAGE_VERSION_FEATURE);
+                v
+            },
+            "malformed_response",
+            Some("proposals.payload_version_uuid"),
+        ),
+        invalid(
+            "lineage-proposal-package-disagrees-with-payload",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["proposals"][0]["package"]["package_digest"] = json!(digest('7'));
+                v
+            },
+            "malformed_response",
+            Some("proposals.package"),
+        ),
     ];
     cases.push(invalid_version(
         "lineage-unknown-required-capability",
@@ -1282,9 +1336,6 @@ fn limits(overrides: Option<Limits>) -> DiscoveryLimits {
         if let Some(x) = v.max_lineage_entries {
             limits.max_lineage_entries = x
         }
-        if let Some(x) = v.max_research_package_bytes {
-            limits.max_research_package_bytes = x
-        }
     }
     limits
 }
@@ -1655,6 +1706,16 @@ fn bind_lineage_rejects_identity_and_ref_mismatches() {
     assert_eq!(
         bind_lineage_error(&manifest, &refs, &parse_lineage(&other)),
         (integrity, Some("lineage.lineage_digest"))
+    );
+
+    // A Branch ref pointing at another repository snapshot names a head this
+    // lineage does not describe; it must not resolve to this snapshot's head.
+    let mut moved = refs_with_research_branches();
+    moved["refs"][0]["target"] = json!(digest('9'));
+    assert_eq!(moved["refs"][0]["name"], "feature/claims");
+    assert_eq!(
+        bind_lineage_error(&manifest, &moved, &parse_lineage(&base_lineage())),
+        (integrity, Some("lineage.branches.ref_name"))
     );
 
     let mut refs = refs_with_research_branches();

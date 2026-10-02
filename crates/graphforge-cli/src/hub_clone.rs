@@ -2275,6 +2275,8 @@ mod tests {
                 repository: "openalex/openalex".into(),
                 destination: Some(destination.clone()),
                 telemetry_endpoint: None,
+                git_ref: None,
+                version_uuid: None,
             },
             true,
             &mut output,
