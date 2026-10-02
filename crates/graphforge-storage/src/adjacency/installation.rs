@@ -2,11 +2,37 @@
 
 use super::storage_err;
 use graphforge_core::GfError;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
+
+#[cfg(all(test, windows))]
+#[path = "installation/windows_tests.rs"]
+mod tests;
 
 fn csr_io_error(action: &str, path: &Path, error: impl std::fmt::Display) -> GfError {
     storage_err(format!("{action} at {}: {error}", path.display()))
+}
+
+#[cfg_attr(
+    not(windows),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the shared caller contract propagates Windows path normalization failures"
+    )
+)]
+pub(super) fn csr_temporary_parent(parent: &Path) -> Result<PathBuf, GfError> {
+    // tempfile's Windows keep operation clears FILE_ATTRIBUTE_TEMPORARY with
+    // SetFileAttributesW. Give it the verbatim path that Rust's canonicalize
+    // returns, so this step supports the same long paths as file creation.
+    #[cfg(windows)]
+    {
+        std::fs::canonicalize(parent)
+            .map_err(|error| csr_io_error("resolve CSR temporary parent", parent, error))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(parent.to_path_buf())
+    }
 }
 
 pub(super) fn observe_csr_barriers<T>(
@@ -51,7 +77,7 @@ pub(super) fn write_csr_shard_bytes_observed(
     let tmp = tempfile::Builder::new()
         .prefix(&format!("{file_name}."))
         .suffix(".tmp")
-        .tempfile_in(parent)
+        .tempfile_in(csr_temporary_parent(parent)?)
         .map_err(|error| csr_io_error("create CSR temporary", path, error))?;
     tmp.as_file()
         .write_all(bytes)
@@ -75,9 +101,6 @@ fn persist_sealed_temp(
     allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), GfError> {
     let temporary = tmp.path().to_path_buf();
-    if let Some(allocation) = allocation {
-        allocation.replace_file_at(&temporary, tmp.as_file())?;
-    }
     let parent = graphforge_filesystem::StableDirectory::open(
         path.parent()
             .ok_or_else(|| storage_err("CSR path has no parent"))?,
@@ -89,6 +112,11 @@ fn persist_sealed_temp(
         .file_name()
         .ok_or_else(|| storage_err("CSR temporary has no name"))?
         .to_owned();
+    if let Some(allocation) = allocation {
+        // Use the retained destination authority's spelling throughout the
+        // owner lifecycle; the Win32 verbatim spelling is only for tempfile.
+        allocation.replace_file_at(&parent.path().join(&name), tmp.as_file())?;
+    }
     let (file, retained_path) = tmp
         .keep()
         .map_err(|error| csr_io_error("retain CSR temporary", &temporary, error.error))?;

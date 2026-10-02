@@ -50,7 +50,8 @@ pub(crate) use builder::{
 };
 use codec::{corrupt_index, corrupt_index_from, corrupt_structure, shard_io_error};
 use installation::{
-    observe_csr_barriers, persist_temp_observed, promote_shards, write_csr_shard_bytes_observed,
+    csr_temporary_parent, observe_csr_barriers, persist_temp_observed, promote_shards,
+    write_csr_shard_bytes_observed,
 };
 
 use std::path::{Path, PathBuf};
@@ -623,7 +624,7 @@ impl ShardedCsrWriter {
         let mut temp = tempfile::Builder::new()
             .prefix(stem)
             .suffix(".json.tmp")
-            .tempfile_in(parent)
+            .tempfile_in(csr_temporary_parent(parent)?)
             .map_err(storage_err)?;
         temp.write_all(&bytes).map_err(storage_err)?;
         // The CSR manifest barrier is attributed to its shard phase (#1449).
@@ -633,7 +634,8 @@ impl ShardedCsrWriter {
             1,
         );
         if let Some(allocation) = &self.allocation {
-            allocation.replace_file_at(temp.path(), temp.as_file())?;
+            let temporary = parent.join(temp.path().file_name().expect("named CSR temporary"));
+            allocation.replace_file_at(&temporary, temp.as_file())?;
         }
         persist_temp_observed(
             temp,
