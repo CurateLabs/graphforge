@@ -3266,6 +3266,30 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// Writes an executable script from a child process. A write descriptor
+    /// opened in this multi-threaded test process can be inherited by a child
+    /// that another test forks concurrently, and it stays open until that
+    /// child execs; executing the script during that window fails with
+    /// `ETXTBSY` (#1722). Writing it from a separate process keeps every write
+    /// descriptor out of this process.
+    #[cfg(unix)]
+    fn write_executable_script(path: &Path, script: &str) {
+        use std::io::Write as _;
+        let mut writer = Command::new("/bin/sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writer
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        assert!(writer.wait().unwrap().success(), "script writer failed");
+    }
+
     fn shell_ingest_profile(script: &Path) -> Profile {
         let mut profile = tiny_profile();
         profile.executable = "/bin/sh".to_owned();
@@ -3412,11 +3436,9 @@ fi
     #[cfg(unix)]
     #[test]
     fn failed_phase_carries_the_bounded_child_error_tail() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("gf");
-        fs::write(
+        write_executable_script(
             &executable,
             concat!(
                 "#!/bin/sh\n",
@@ -3424,9 +3446,7 @@ fi
                 "printf '%s\\n' '{\"error\":{\"code\":\"GF_IO\",\"message\":\"storage error: graph construction session: control record exceeds bound\"}}' >&2\n",
                 "exit 3\n"
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let mut profile = tiny_profile();
         profile.executable = executable.to_string_lossy().into_owned();
         let mut executor = PublicProcessExecutor::default();
@@ -3458,16 +3478,12 @@ fi
     #[cfg(unix)]
     #[test]
     fn passing_phase_publishes_no_error_tail_and_a_chatty_child_cannot_block() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("gf");
-        fs::write(
+        write_executable_script(
             &executable,
             "#!/bin/sh\ni=0\nwhile [ $i -lt 4000 ]; do printf '%s\\n' \"diagnostic chatter line $i\" >&2; i=$((i + 1)); done\n",
-        )
-        .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let mut profile = tiny_profile();
         profile.executable = executable.to_string_lossy().into_owned();
         let execution = PublicProcessExecutor::default()
