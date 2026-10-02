@@ -218,8 +218,8 @@ pub(crate) struct WriteTimeouts {
 /// Production write bounds. With 1 MiB upload chunks, five minutes per chunk
 /// body admits any uplink of at least about 3.5 KB/s.
 pub(crate) const WRITE_TIMEOUTS: WriteTimeouts = WriteTimeouts {
-    send_body: Duration::from_secs(300),
-    response: Duration::from_secs(60),
+    send_body: Duration::from_mins(5),
+    response: Duration::from_mins(1),
 };
 
 /// Agent configuration for Hub writes: per-phase bounds, no global deadline.

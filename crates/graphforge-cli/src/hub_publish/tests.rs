@@ -1205,8 +1205,8 @@ fn device_flow_waits_are_bounded_whatever_the_hub_advertises() {
     let error = result.unwrap_err();
     assert_eq!(error_code(&error), "hub.publish.auth_denied", "{error}");
     assert!(error.to_string().contains("fifteen minutes"), "{error}");
-    assert!(waits.iter().all(|wait| *wait <= Duration::from_secs(60)));
-    assert_eq!(waits.iter().sum::<Duration>(), Duration::from_secs(15 * 60));
+    assert!(waits.iter().all(|wait| *wait <= Duration::from_mins(1)));
+    assert_eq!(waits.iter().sum::<Duration>(), Duration::from_mins(15));
 }
 
 #[test]
