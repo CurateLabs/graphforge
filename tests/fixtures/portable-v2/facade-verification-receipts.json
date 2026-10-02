@@ -2,34 +2,106 @@
   "full": {
     "contract": "graphforge-portable-verify/2",
     "representation": "bundle",
-    "package_digest": "sha256:fbbf2d07c8b10790b2023cbfba6c6ca70ca58b8df68eceb9bdf3fafd8637e57e",
+    "package_digest": "sha256:492188fb9c3ac96b06b5373f571b47b6c6fc703c12800da1d02585001203fb35",
     "package_class": "complete",
-    "component_count": 3,
-    "entry_count": 8,
-    "payload_bytes": 3624,
+    "component_count": 7,
+    "entry_count": 12,
+    "payload_bytes": 10235,
     "integrity": "verified",
     "compatibility": "supported",
     "authenticity": "unsigned",
-    "transport_digest": "sha256:f11322419e4c10c33365f07b28f24d6a348a105e61a152f6e5fcd6750daaea35",
-    "ontology_composition": null,
-    "ontology_composition_entries": [],
+    "transport_digest": "sha256:52cbffc43ab2bd081aefa297970a4f060fb52b8a8ab601b77e2bca9ca6dda54d",
+    "ontology_composition": {
+      "contract": "graphforge-ontology-composition/1",
+      "activation_profile": {
+        "profile_default": "advisory",
+        "overrides": []
+      },
+      "modules": [
+        {
+          "ontology_id": "https://openalex.org/ontology/works",
+          "version": "2026.01",
+          "content_digest": "sha256:f1f475dfcf01bdfe7a578afb0203bac26831dc0b48f4cd009bdc418b506981b4",
+          "dialect": "graphforge-ontology",
+          "profile": "advisory"
+        }
+      ],
+      "bridge_sets": [],
+      "required_features": [
+        "provenance-bridges@1",
+        "qualified-symbols@1"
+      ],
+      "optional_features": [],
+      "composition_digest": "sha256:6cdf031b7bc21eea652e116ecede2e0922e90b50fb5e327e8ca5dbcbb66ab1e5"
+    },
+    "ontology_composition_entries": [
+      {
+        "kind": "ontology",
+        "identity": {
+          "id": "https://openalex.org/ontology/works",
+          "version": "2026.01",
+          "content_digest": "sha256:f1f475dfcf01bdfe7a578afb0203bac26831dc0b48f4cd009bdc418b506981b4"
+        },
+        "path": "data/components/ontology/ontology-module-f1f475dfcf01bdfe7a578afb0203bac26831dc0b48f4cd009bdc418b506981b4/module.json",
+        "media_type": "application/vnd.graphforge.ontology+json",
+        "length": 444,
+        "sha256": "7d0c5018d4bd4abca09e268900412020317100af4ecdc11f81ad29b0296d6a94",
+        "required_dependencies": []
+      }
+    ],
     "research_interchange": false,
     "research_entries": []
   },
   "structure_only": {
     "contract": "graphforge-portable-verify/2",
     "representation": "bundle",
-    "package_digest": "sha256:fbbf2d07c8b10790b2023cbfba6c6ca70ca58b8df68eceb9bdf3fafd8637e57e",
+    "package_digest": "sha256:492188fb9c3ac96b06b5373f571b47b6c6fc703c12800da1d02585001203fb35",
     "package_class": "complete",
-    "component_count": 3,
-    "entry_count": 8,
-    "payload_bytes": 3624,
+    "component_count": 7,
+    "entry_count": 12,
+    "payload_bytes": 10235,
     "integrity": "not_checked",
     "compatibility": "supported",
     "authenticity": "unsigned",
-    "transport_digest": "sha256:f11322419e4c10c33365f07b28f24d6a348a105e61a152f6e5fcd6750daaea35",
-    "ontology_composition": null,
-    "ontology_composition_entries": [],
+    "transport_digest": "sha256:52cbffc43ab2bd081aefa297970a4f060fb52b8a8ab601b77e2bca9ca6dda54d",
+    "ontology_composition": {
+      "contract": "graphforge-ontology-composition/1",
+      "activation_profile": {
+        "profile_default": "advisory",
+        "overrides": []
+      },
+      "modules": [
+        {
+          "ontology_id": "https://openalex.org/ontology/works",
+          "version": "2026.01",
+          "content_digest": "sha256:f1f475dfcf01bdfe7a578afb0203bac26831dc0b48f4cd009bdc418b506981b4",
+          "dialect": "graphforge-ontology",
+          "profile": "advisory"
+        }
+      ],
+      "bridge_sets": [],
+      "required_features": [
+        "provenance-bridges@1",
+        "qualified-symbols@1"
+      ],
+      "optional_features": [],
+      "composition_digest": "sha256:6cdf031b7bc21eea652e116ecede2e0922e90b50fb5e327e8ca5dbcbb66ab1e5"
+    },
+    "ontology_composition_entries": [
+      {
+        "kind": "ontology",
+        "identity": {
+          "id": "https://openalex.org/ontology/works",
+          "version": "2026.01",
+          "content_digest": "sha256:f1f475dfcf01bdfe7a578afb0203bac26831dc0b48f4cd009bdc418b506981b4"
+        },
+        "path": "data/components/ontology/ontology-module-f1f475dfcf01bdfe7a578afb0203bac26831dc0b48f4cd009bdc418b506981b4/module.json",
+        "media_type": "application/vnd.graphforge.ontology+json",
+        "length": 444,
+        "sha256": "7d0c5018d4bd4abca09e268900412020317100af4ecdc11f81ad29b0296d6a94",
+        "required_dependencies": []
+      }
+    ],
     "research_interchange": false,
     "research_entries": []
   }

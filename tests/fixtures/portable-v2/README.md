@@ -43,6 +43,19 @@ by the same-build `gf --json portable verify --mode full` and `--mode inspect`
 commands; `structure_only` is the binding/API spelling of inspect mode. The CLI
 integration test independently compares both actual facade and CLI results to
 this golden. Native Python and Node tests compare every field, using an explicit
-Node naming/BigInt adapter with safe-integer roundtrip checks. Nonempty composition
-and projected preview entries are separately exercised against actual exported
-multi-ontology packages in the native lifecycle suites.
+Node naming/BigInt adapter with safe-integer roundtrip checks. The bundle carries
+a one-module ontology composition; bridge sets and projected preview entries are
+separately exercised against actual exported multi-ontology packages in the
+native lifecycle suites.
+
+Regenerate the receipts whenever the Hub fixture bundle changes. After
+`generate_hub_fixture -- --update` (see `tests/fixtures/hub/README.md`), copy the
+bundle to a private directory, run both commands against the copy, and store the
+results under the keys `full` and `structure_only`. The Rust, Python, and Node
+tests compare receipt values, not bytes, so pretty-printing the compact
+`gf --json` output is not a hand edit:
+
+```bash
+gf --json portable verify --mode full --input <copy of openalex-openalex.gfpb>
+gf --json portable verify --mode inspect --input <copy of openalex-openalex.gfpb>
+```

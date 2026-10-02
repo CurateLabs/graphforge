@@ -1951,6 +1951,88 @@ mod tests {
         ])
     }
 
+    /// Scripted responses that also record every requested URL.
+    struct RecordingTransport {
+        inner: Scripted,
+        requested: Mutex<Vec<String>>,
+    }
+
+    impl Transport for RecordingTransport {
+        fn get(
+            &self,
+            url: &Url,
+            range: Option<u64>,
+            if_range: Option<&str>,
+            limit: u64,
+        ) -> Result<HttpResponse, graphforge_api::GfError> {
+            self.requested.lock().unwrap().push(url.as_str().to_owned());
+            self.inner.get(url, range, if_range, limit)
+        }
+    }
+
+    #[test]
+    fn clone_succeeds_against_the_checked_in_hub_fixture() {
+        macro_rules! fixture {
+            ($name:literal) => {
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../tests/fixtures/hub/generated/v1/",
+                    $name
+                ))
+            };
+        }
+        let refs = fixture!("refs.json");
+        let manifest_bytes = fixture!("manifest.json");
+        let project = fixture!("objects/openalex-openalex.gfpb");
+        let manifest = graphforge_discovery::DiscoveryManifest::from_json(
+            manifest_bytes,
+            graphforge_discovery::DiscoveryLimits::default(),
+        )
+        .unwrap();
+        // The fixture advertises a summary and a module package besides the
+        // Project package; clone needs neither and must not fetch them.
+        assert!(manifest.summary.is_some());
+        assert!(manifest.ontology.is_some());
+        assert!(manifest.objects.len() > 1);
+        let transport = RecordingTransport {
+            inner: Scripted::new(vec![
+                response(200, None, refs),
+                response(200, None, manifest_bytes),
+                response(200, None, project),
+            ]),
+            requested: Mutex::new(Vec::new()),
+        };
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("openalex");
+        let mut output = Vec::new();
+        run_clone_with(
+            &transport,
+            CloneArgs {
+                repository: "openalex/openalex".into(),
+                destination: Some(destination.clone()),
+                telemetry_endpoint: None,
+            },
+            true,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(transport.inner.remaining(), 0);
+        let requested = transport.requested.lock().unwrap().clone();
+        assert_eq!(requested.len(), 3, "{requested:?}");
+        assert_eq!(
+            requested[2],
+            manifest.package_object().unwrap().locations[0],
+            "only the Project package object is downloaded"
+        );
+        let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(result["contract"], "graphforge-hub-clone/1");
+        assert_eq!(result["package_digest"], manifest.package.package_digest.0);
+        let cloned = GraphForge::new(destination.to_str()).expect("clone reopens");
+        let metadata = cloned.research_project_metadata().unwrap();
+        assert_eq!(metadata.title.as_deref(), Some("OpenAlex"));
+        assert_eq!(metadata.license.as_deref(), Some("CC0-1.0"));
+    }
+
     #[test]
     fn interrupted_clone_retains_resumed_and_transferred_bytes_once() {
         let bundle = b"0123456789abcdef";
