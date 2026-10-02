@@ -2329,6 +2329,7 @@ version = "0.5.2"
 dependencies = [
  "serde",
  "sha2",
+ "uuid",
 ]
 
 [[package]]

@@ -1,13 +1,19 @@
 //! Provider-neutral GraphForge Hub publish wire contract.
 //!
-//! This crate owns publish error classification, transport traits, and an
-//! in-memory Hub for tests. It deliberately contains no HTTP client, project
-//! I/O, portable verification, or discovery parsing.
+//! This crate owns publish error classification, transport traits, resumable
+//! upload, idempotent session receipts, and in-memory Hub types for tests. It
+//! deliberately contains no HTTP client, project I/O, portable verification, or
+//! discovery parsing.
 
 #![forbid(unsafe_code)]
 
+mod session;
+mod upload;
+
+pub use session::{MemoryPublishSession, PublishReceipt, request_commitment};
+pub use upload::{ResumableUploadHub, UploadSessionId};
+
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Mutex;
@@ -140,7 +146,7 @@ impl MemoryHub {
 impl HubPublishTransport for MemoryHub {
     fn put_object(&self, object_digest: &str, bytes: &[u8]) -> Result<(), HubPublishError> {
         validate_object_digest(object_digest)?;
-        let actual = digest_sha256(bytes);
+        let actual = upload::digest_sha256(bytes);
         if actual != object_digest {
             return Err(HubPublishError::new(
                 HubPublishErrorCode::IntegrityFailure,
@@ -188,7 +194,7 @@ impl HubPublishTransport for MemoryHub {
     }
 }
 
-fn validate_object_digest(object_digest: &str) -> Result<(), HubPublishError> {
+pub(crate) fn validate_object_digest(object_digest: &str) -> Result<(), HubPublishError> {
     if !object_digest.starts_with("sha256:") {
         return Err(HubPublishError::new(
             HubPublishErrorCode::InvalidInput,
@@ -208,22 +214,6 @@ fn validate_object_digest(object_digest: &str) -> Result<(), HubPublishError> {
     Ok(())
 }
 
-fn digest_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    format!("sha256:{}", encode_hex(digest))
-}
-
-fn encode_hex(bytes: impl AsRef<[u8]>) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let bytes = bytes.as_ref();
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,7 +222,7 @@ mod tests {
     fn memory_hub_stores_one_object() {
         let hub = MemoryHub::new();
         let bytes = b"graphforge-hub-publish-fixture";
-        let digest = digest_sha256(bytes);
+        let digest = upload::digest_sha256(bytes);
 
         assert!(!hub.object_exists(&digest).expect("exists"));
         hub.put_object(&digest, bytes).expect("put");
