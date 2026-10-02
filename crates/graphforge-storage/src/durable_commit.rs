@@ -13,6 +13,8 @@ pub use barrier_observation::observe_barriers;
 #[cfg(test)]
 pub(crate) mod fault;
 mod namespace;
+#[cfg(all(test, windows))]
+mod windows_allocation_tests;
 pub use atomic::{
     AtomicHooks, CommitCause, CommitFailure, GroupCommitFailure, PendingCommit, PublishMode,
     SealedArtifact, Visibility, install_immutable, publish_atomic, publish_atomic_in,
