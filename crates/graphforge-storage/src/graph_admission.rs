@@ -123,10 +123,20 @@ pub(crate) fn admit_now(
 /// # Errors
 /// Returns the open failure or the corruption refusal.
 pub fn open_admitted(path: &Path) -> Result<File, GfError> {
-    let file = File::open(path).map_err(|error| {
+    let mut file = File::open(path).map_err(|error| {
         GfError::Storage(format!("open graph payload {}: {error}", path.display()))
     })?;
     admit_file(&file)?;
+    // Positioned reads on Windows can advance the handle cursor. This helper
+    // returns a fresh file for its caller to decode, so restore the ordinary
+    // post-open position after admission.
+    use std::io::Seek as _;
+    file.seek(std::io::SeekFrom::Start(0)).map_err(|error| {
+        GfError::Storage(format!(
+            "rewind admitted graph payload {}: {error}",
+            path.display()
+        ))
+    })?;
     Ok(file)
 }
 
@@ -526,6 +536,18 @@ mod tests {
         fixture.register();
         admit_path(&fixture.link).unwrap();
         admit_path(&fixture.object).unwrap();
+    }
+
+    #[test]
+    fn opening_an_admitted_payload_leaves_its_reader_at_the_start() {
+        let fixture = Fixture::new(PAYLOAD);
+        fixture.register();
+
+        let mut file = open_admitted(&fixture.link).unwrap();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut bytes).unwrap();
+
+        assert_eq!(bytes, PAYLOAD);
     }
 
     #[test]
