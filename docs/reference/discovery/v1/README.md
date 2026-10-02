@@ -116,6 +116,9 @@ A module package's `package_digest` therefore differs between two Projects that
 publish the same module, while the module's `content_digest` does not. Module
 packages use the `component-selective` package class.
 
+`gf ontology module fetch` is the command-line client of this exact-module
+selection; it never requests the Project package.
+
 ### Locations are transport
 
 The summary has no location field. Locations appear only in

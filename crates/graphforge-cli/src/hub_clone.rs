@@ -34,6 +34,9 @@ use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver
 use ureq::unversioned::transport::DefaultConnector;
 use url::Url;
 
+mod module_fetch;
+pub(crate) use module_fetch::{ModuleFetchArgs, run_module_fetch};
+
 const DEFAULT_HUB: &str = "https://graphforge.sh";
 const MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
 const MAX_BUNDLE_BYTES: u64 = 100 * 1024 * 1024 * 1024;
@@ -532,15 +535,35 @@ fn read_bounded(
 }
 
 fn parse_input(value: &str) -> Result<(RepositoryIdentity, Url), graphforge_api::GfError> {
+    parse_input_at(value, None)
+}
+
+/// Resolve a repository argument against `hub`, which only applies to the
+/// `owner/repository` form; an explicit repository URL names its own Hub.
+fn parse_input_at(
+    value: &str,
+    hub: Option<&str>,
+) -> Result<(RepositoryIdentity, Url), graphforge_api::GfError> {
     if !value.contains("://") {
         let identity = RepositoryIdentity::parse(value)
             .map_err(|_| validation("hub.invalid_identity", "invalid repository identity"))?;
-        let base = Url::parse(&format!(
-            "{DEFAULT_HUB}/{}/{}",
-            identity.owner, identity.repository
-        ))
-        .unwrap();
+        let hub = Url::parse(hub.unwrap_or(DEFAULT_HUB))
+            .map_err(|_| validation("hub.invalid_identity", "invalid Hub URL"))?;
+        validate_url(&hub)?;
+        let mut base = hub.clone();
+        base.set_path(&format!(
+            "{}/{}/{}",
+            hub.path().trim_end_matches('/'),
+            identity.owner,
+            identity.repository
+        ));
         return Ok((identity, base));
+    }
+    if hub.is_some() {
+        return Err(validation(
+            "hub.invalid_identity",
+            "--hub applies only to an owner/repository name",
+        ));
     }
     let base = Url::parse(value)
         .map_err(|_| validation("hub.invalid_identity", "invalid repository URL"))?;
@@ -1456,14 +1479,14 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
 
-    struct Scripted(Mutex<VecDeque<HttpResponse>>);
+    pub(super) struct Scripted(Mutex<VecDeque<HttpResponse>>);
 
     impl Scripted {
-        fn new(responses: Vec<HttpResponse>) -> Self {
+        pub(super) fn new(responses: Vec<HttpResponse>) -> Self {
             Self(Mutex::new(responses.into()))
         }
 
-        fn remaining(&self) -> usize {
+        pub(super) fn remaining(&self) -> usize {
             self.0.lock().unwrap().len()
         }
 
@@ -1564,7 +1587,7 @@ mod tests {
         }
     }
 
-    fn response(status: u16, content_range: Option<&str>, body: &[u8]) -> HttpResponse {
+    pub(super) fn response(status: u16, content_range: Option<&str>, body: &[u8]) -> HttpResponse {
         HttpResponse {
             status,
             location: None,
@@ -1952,9 +1975,9 @@ mod tests {
     }
 
     /// Scripted responses that also record every requested URL.
-    struct RecordingTransport {
-        inner: Scripted,
-        requested: Mutex<Vec<String>>,
+    pub(super) struct RecordingTransport {
+        pub(super) inner: Scripted,
+        pub(super) requested: Mutex<Vec<String>>,
     }
 
     impl Transport for RecordingTransport {
