@@ -246,11 +246,9 @@ impl PayloadTicket {
                 registry.remove(&key_of(identity));
             }
         }
-        outcome
-            .clone()
-            .map(|()| Admission::Settled {
-                calls: performed.get(),
-            })
+        outcome.clone().map(|()| Admission::Settled {
+            calls: performed.get(),
+        })
     }
 }
 

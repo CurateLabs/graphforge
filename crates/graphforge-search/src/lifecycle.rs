@@ -426,7 +426,7 @@ where
 
     loop {
         let projection = project_text_source_with(
-        request.inventory,
+            request.inventory,
             project_dir,
             request.label_id,
             explicit_properties.as_deref(),
@@ -550,7 +550,7 @@ where
             }
             if projection.borrow().is_none() {
                 *projection.borrow_mut() = Some(project_text_source_with(
-        request.inventory,
+                    request.inventory,
                     project_dir,
                     request.label_id,
                     Some(&properties),
@@ -618,7 +618,7 @@ where
 {
     if projection.borrow().is_none() {
         *projection.borrow_mut() = Some(project_text_source_with(
-        request.inventory,
+            request.inventory,
             project_dir,
             request.label_id,
             Some(properties),
@@ -765,7 +765,7 @@ where
 
     loop {
         let projection = project_text_source_with(
-        request.inventory,
+            request.inventory,
             project_dir,
             request.label_id,
             None,

@@ -9,12 +9,12 @@ use super::{AtomicU64, Mutex, Ordering};
 use super::{
     AdmittedEdgeFile, Arc, AuthenticatedPropertyFragment, AuthenticatedPropertyInventory, BTreeMap,
     BTreeSet, Deserialize, File, FragmentAdmission, FragmentFooter, FragmentHandleGuard, GfError,
-    HashMap, OnceLock, OpenPropertyFragment, RouteSummary, RouteSummaryOutcome,
-    PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_LIVE_SCHEMA_FORMAT,
-    PROPERTY_LIVE_SCHEMA_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT_KEY,
-    PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD, ParquetRecordBatchReaderBuilder, Path, PathBuf,
-    PropertyFragment, PropertyFragmentId, PropertyFragmentLayout, PropertyInventoryOpenMetrics,
-    PropertyRouteKind, PropertySnapshotRow, Read, Seek, Serialize, Write, corrupt, fs, io_error,
+    HashMap, OnceLock, OpenPropertyFragment, PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY,
+    PROPERTY_LIVE_SCHEMA_FORMAT, PROPERTY_LIVE_SCHEMA_KEY, PROPERTY_ORDINAL_KEY,
+    PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD,
+    ParquetRecordBatchReaderBuilder, Path, PathBuf, PropertyFragment, PropertyFragmentId,
+    PropertyFragmentLayout, PropertyInventoryOpenMetrics, PropertyRouteKind, PropertySnapshotRow,
+    Read, RouteSummary, RouteSummaryOutcome, Seek, Serialize, Write, corrupt, fs, io_error,
     json_error, parquet_error, retained_read_at, validate_fragment_schema,
 };
 
@@ -425,14 +425,13 @@ impl AuthenticatedPropertyInventory {
             }
             entries.push((entry, relative));
         }
-        let mut admitted =
-            Self::admit_read_entries(
-                root,
-                entries,
-                requested_route,
-                table.as_ref(),
-                FragmentAdmission::Eager,
-            )?;
+        let mut admitted = Self::admit_read_entries(
+            root,
+            entries,
+            requested_route,
+            table.as_ref(),
+            FragmentAdmission::Eager,
+        )?;
         admitted.edge_routes = edge_routes;
         Ok(admitted)
     }
@@ -485,31 +484,36 @@ impl AuthenticatedPropertyInventory {
         Self::from_resolved_generation_route(generation, Some((kind, route)))
     }
 
+    /// An inventory for a generation that declares no graph-files participant.
+    fn without_graph_files(generation: &crate::ResolvedProjectGeneration) -> Self {
+        Self {
+            root: None,
+            root_path: None,
+            generation_lease: Some(generation.clone()),
+            routes: BTreeMap::new(),
+            edge_routes: BTreeMap::new(),
+            schemas: BTreeMap::new(),
+            route_summaries: BTreeMap::new(),
+            admission: FragmentAdmission::Eager,
+            node_topology_files: Some(Vec::new()),
+            authority_bytes: 0,
+            authority_block_equivalents: 0,
+            authority_read_calls: 0,
+            #[cfg(test)]
+            handle_counts: Arc::new(FragmentHandleCounts::default()),
+            #[cfg(test)]
+            late_decoder_failure_row_countdown: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            mutation_barrier: Mutex::new(None),
+        }
+    }
+
     pub(super) fn from_resolved_generation_route(
         generation: &crate::ResolvedProjectGeneration,
         requested_route: Option<(PropertyRouteKind, &str)>,
     ) -> Result<Self, GfError> {
         let Some(participant) = generation.declared_graph_files_participant()? else {
-            return Ok(Self {
-                root: None,
-                root_path: None,
-                generation_lease: Some(generation.clone()),
-                routes: BTreeMap::new(),
-                edge_routes: BTreeMap::new(),
-                schemas: BTreeMap::new(),
-                route_summaries: BTreeMap::new(),
-                admission: FragmentAdmission::Eager,
-                node_topology_files: Some(Vec::new()),
-                authority_bytes: 0,
-                authority_block_equivalents: 0,
-                authority_read_calls: 0,
-                #[cfg(test)]
-                handle_counts: Arc::new(FragmentHandleCounts::default()),
-                #[cfg(test)]
-                late_decoder_failure_row_countdown: Arc::new(AtomicU64::new(0)),
-                #[cfg(test)]
-                mutation_barrier: Mutex::new(None),
-            });
+            return Ok(Self::without_graph_files(generation));
         };
         // Payload content is admitted on first touch (or, for property
         // fragments, when each fragment is admitted below).
@@ -708,39 +712,19 @@ impl AuthenticatedPropertyInventory {
             if requested_route.is_some_and(|requested| (kind, route.as_str()) != requested) {
                 continue;
             }
-            let file = open_retained_under(&root, &physical_relative)?;
             let _handle = FragmentHandleGuard::acquired(
                 #[cfg(test)]
                 &handle_counts,
             );
-            let identity = graphforge_filesystem::file_identity(&file).map_err(io_error)?;
-            let footer = OnceLock::new();
-            let mut authentication = (0, 0, 0);
-            match admission {
-                FragmentAdmission::Eager => {
-                    authentication = authenticate_inventory_file(&file, &entry)?;
-                    let decoded = decode_fragment_footer(file, id, layout, kind, &route)?;
-                    footer
-                        .set(Ok(decoded))
-                        .expect("a fresh footer cell is unset");
-                }
-                FragmentAdmission::FirstTouch => {
-                    // Open reads no payload and no footer: the exact length is
-                    // all the manifest can prove without a read. Content is
-                    // admitted when a reader first opens this fragment.
-                    let metadata = file.metadata().map_err(io_error)?;
-                    if !metadata.is_file() || metadata.len() != entry.byte_length {
-                        return Err(corrupt(
-                            "property handle length or kind conflicts with inventory",
-                        ));
-                    }
-                }
-            }
-            let (
-                authentication_bytes,
-                authentication_block_equivalents,
-                authentication_read_calls,
-            ) = authentication;
+            let (identity, footer, authentication) = admit_fragment_entry(
+                &root,
+                &physical_relative,
+                &entry,
+                (id, layout, kind, &route),
+                admission,
+            )?;
+            let (authentication_bytes, authentication_block_equivalents, authentication_read_calls) =
+                authentication;
             let fragments = routes.entry((kind, route)).or_default();
             if fragments.iter().any(|fragment| fragment.id == id) {
                 return Err(corrupt("property inventory contains duplicate authority"));
@@ -848,20 +832,18 @@ impl AuthenticatedPropertyInventory {
             if self.route_summaries.contains_key(&key) {
                 continue;
             }
-            self.schemas
-                .entry(key)
-                .or_insert_with(|| {
-                    let schema = arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
-                        kind.uuid_field(),
-                        arrow::datatypes::DataType::FixedSizeBinary(16),
-                        false,
-                    )]);
-                    Arc::new(crate::schemas::with_semantic_route_metadata(
-                        &schema,
-                        &binding.route,
-                        &bindings.composition_fingerprint,
-                    ))
-                });
+            self.schemas.entry(key).or_insert_with(|| {
+                let schema = arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
+                    kind.uuid_field(),
+                    arrow::datatypes::DataType::FixedSizeBinary(16),
+                    false,
+                )]);
+                Arc::new(crate::schemas::with_semantic_route_metadata(
+                    &schema,
+                    &binding.route,
+                    &bindings.composition_fingerprint,
+                ))
+            });
         }
         Ok(())
     }
@@ -1250,6 +1232,54 @@ fn resolve_versioned_property_entries_for_route(
         selected.push((entry, relative));
     }
     Ok(selected)
+}
+
+type FragmentFooterCell = OnceLock<Result<FragmentFooter, GfError>>;
+type AdmittedFragmentEntry = (
+    graphforge_filesystem::FileIdentity,
+    FragmentFooterCell,
+    (u64, u64, u64),
+);
+
+/// Open one manifest entry's fragment and admit it by the inventory's policy.
+/// Returns its identity, its footer when it was read, and the bytes spent.
+fn admit_fragment_entry(
+    root: &graphforge_filesystem::StableDirectory,
+    physical_relative: &Path,
+    entry: &crate::GraphReadFileEntry,
+    (id, layout, kind, route): (
+        PropertyFragmentId,
+        PropertyFragmentLayout,
+        PropertyRouteKind,
+        &str,
+    ),
+    admission: FragmentAdmission,
+) -> Result<AdmittedFragmentEntry, GfError> {
+    let file = open_retained_under(root, physical_relative)?;
+    let identity = graphforge_filesystem::file_identity(&file).map_err(io_error)?;
+    let footer = OnceLock::new();
+    let mut authentication = (0, 0, 0);
+    match admission {
+        FragmentAdmission::Eager => {
+            authentication = authenticate_inventory_file(&file, entry)?;
+            let decoded = decode_fragment_footer(file, id, layout, kind, route)?;
+            footer
+                .set(Ok(decoded))
+                .expect("a fresh footer cell is unset");
+        }
+        FragmentAdmission::FirstTouch => {
+            // Open reads no payload and no footer: the exact length is all the
+            // manifest can prove without a read. Content is admitted when a
+            // reader first opens this fragment.
+            let metadata = file.metadata().map_err(io_error)?;
+            if !metadata.is_file() || metadata.len() != entry.byte_length {
+                return Err(corrupt(
+                    "property handle length or kind conflicts with inventory",
+                ));
+            }
+        }
+    }
+    Ok((identity, footer, authentication))
 }
 
 /// Decode the footer-derived facts of one fragment and validate its schema.

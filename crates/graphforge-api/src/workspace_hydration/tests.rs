@@ -1343,7 +1343,12 @@ fn property_fragment_corruption_is_refused_by_every_touching_read() {
         ("properties/", node_reads.as_slice()),
         ("edge_properties/", edge_reads.as_slice()),
     ] {
-        let entry = compact_entry(project.path(), GraphFileRole::Properties, prefix, ".parquet");
+        let entry = compact_entry(
+            project.path(),
+            GraphFileRole::Properties,
+            prefix,
+            ".parquet",
+        );
         eprintln!("corrupting {}", entry.relative_path);
         let _corruption = InPlaceCorruption::apply(project.path(), &entry);
         for (name, read) in reads {

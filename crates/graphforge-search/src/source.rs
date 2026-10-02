@@ -322,7 +322,7 @@ where
     Ok(eligible)
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn project_properties<C>(
     inventory: Option<&AuthenticatedPropertyInventory>,
     project_dir: &Path,

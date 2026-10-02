@@ -227,7 +227,9 @@ fn measured<T>(region: impl FnOnce() -> T) -> (T, Cost) {
         value,
         Cost {
             attributed: delta.totals.read_bytes,
-            rchar: rchar_after.zip(rchar_before).map(|(after, before)| after - before),
+            rchar: rchar_after
+                .zip(rchar_before)
+                .map(|(after, before)| after - before),
         },
     )
 }
@@ -238,7 +240,9 @@ fn open(path: &Path) -> GraphForge {
 
 #[test]
 fn open_reads_no_property_payload_whatever_its_size() {
-    let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _capture = LifecycleIoCapture::install();
     let rchar = process_rchar().is_some();
     if !rchar {
@@ -266,7 +270,11 @@ fn open_reads_no_property_payload_whatever_its_size() {
         );
         runs.push((layout, cost, copied));
     }
-    let [(small_layout, small, _), (large_layout, large, large_copied)] = &runs[..] else {
+    let [
+        (small_layout, small, _),
+        (large_layout, large, large_copied),
+    ] = &runs[..]
+    else {
         unreachable!("two runs")
     };
     // The comparison is meaningful only if the property payload really grew.
@@ -330,7 +338,9 @@ fn build_indexed_project(path: &Path, fan_out: usize) {
 
 #[test]
 fn text_find_does_not_read_the_graph_across_a_16x_edge_range() {
-    let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _capture = LifecycleIoCapture::install();
     if process_rchar().is_none() {
         eprintln!(
@@ -366,8 +376,10 @@ fn text_find_does_not_read_the_graph_across_a_16x_edge_range() {
         );
         runs.push((layout, first, second));
     }
-    let [(small_layout, small_first, small_second), (large_layout, large_first, large_second)] =
-        &runs[..]
+    let [
+        (small_layout, small_first, small_second),
+        (large_layout, large_first, large_second),
+    ] = &runs[..]
     else {
         unreachable!("two runs")
     };
@@ -406,7 +418,10 @@ fn text_find_does_not_read_the_graph_across_a_16x_edge_range() {
         // `find_does_not_read_edge_payloads` in
         // `workspace_hydration/tests.rs`, which answers a `find` with every
         // edge object corrupted.
-        eprintln!("{name}: process reads {:?} -> {:?}", small.rchar, large.rchar);
+        eprintln!(
+            "{name}: process reads {:?} -> {:?}",
+            small.rchar, large.rchar
+        );
     }
     let sources =
         large_layout.node_bytes + large_layout.node_property_bytes + large_layout.index_bytes;
