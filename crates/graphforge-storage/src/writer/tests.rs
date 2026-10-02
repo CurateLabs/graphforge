@@ -100,19 +100,21 @@ fn assert_adoption_retires_property_source(legacy: bool) {
             fs::remove_file(path).unwrap();
         }
         drop(inventory);
-        let batch = RecordBatch::try_from_iter([
-            (
-                "edge_uuid",
+        // Legacy property writers declare payload fields nullable even when
+        // the current batch has no nulls (property_codec::build_property_columns_keyed).
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                uuid_field("edge_uuid"),
+                Field::new("payload", DataType::Utf8, true),
+            ])),
+            vec![
                 Arc::new(
                     FixedSizeBinaryArray::try_from_iter([edge.as_bytes().as_slice()].into_iter())
                         .unwrap(),
                 ) as ArrayRef,
-            ),
-            (
-                "payload",
                 Arc::new(arrow::array::StringArray::from(vec![value.as_str()])) as ArrayRef,
-            ),
-        ])
+            ],
+        )
         .unwrap();
         let path = candidate.path().join("edge_properties").join(format!(
             "{}.parquet",

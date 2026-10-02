@@ -170,6 +170,18 @@ fn fingerprint_graph_paths_with_runtime_names(
             // Parquet fragment. Fingerprints describe decoded graph values,
             // using the same authenticated property authority as queries.
             batches = authority.property_batches(root, route, edge)?;
+            if batches.is_empty() {
+                let kind = if edge {
+                    crate::PropertyRouteKind::Edge
+                } else {
+                    crate::PropertyRouteKind::Node
+                };
+                let schema = authority
+                    .properties
+                    .route_schema(kind, route)
+                    .ok_or_else(|| validation("property fingerprint route has no schema"))?;
+                batches.push(RecordBatch::new_empty(schema));
+            }
         } else {
             for path in table_paths {
                 let fragments = read_parquet(&path)?;

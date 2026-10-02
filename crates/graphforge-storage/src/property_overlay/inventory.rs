@@ -551,11 +551,13 @@ impl AuthenticatedPropertyInventory {
         admit_resources: bool,
         cancelled: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<Self, GfError> {
+        check_import_cancelled(cancelled)?;
         let table = crate::route_component::authenticate_manifest_routes(
             inventory.format_version,
             &inventory.files,
             |entry| {
                 use std::io::{Read, Seek};
+                check_import_cancelled(cancelled)?;
                 let mut retained =
                     crate::graph_files::resolve_v1_inventory_entry_retained(root, entry)?;
                 retained.file.rewind().map_err(io_error)?;
@@ -574,12 +576,14 @@ impl AuthenticatedPropertyInventory {
             table.as_ref(),
             false,
             requested_route,
+            cancelled,
         )?;
         let entries = resolve_versioned_property_entries_for_route(
             root,
             inventory.files,
             requested_route,
             table.as_ref(),
+            cancelled,
         )?;
         let mut admitted = Self::admit_entries_with_admission(
             root,
@@ -664,12 +668,14 @@ impl AuthenticatedPropertyInventory {
                     route_table.as_ref(),
                     false,
                     requested_route,
+                    None,
                 )?;
                 let entries = resolve_versioned_property_entries_for_route(
                     &root,
                     inventory.files,
                     requested_route,
                     route_table.as_ref(),
+                    None,
                 )?;
                 let mut admitted =
                     Self::admit_entries(&root, entries, requested_route, route_table.as_ref())?;
@@ -696,6 +702,7 @@ impl AuthenticatedPropertyInventory {
                     route_table.as_ref(),
                     true,
                     requested_route,
+                    None,
                 )?;
                 let entries = inventory
                     .files
@@ -724,7 +731,7 @@ impl AuthenticatedPropertyInventory {
         root: &Path,
         entries: Vec<crate::GraphFileEntry>,
     ) -> Result<Self, GfError> {
-        let node_files = admit_node_paths(root, &entries, false)?;
+        let node_files = admit_node_paths(root, &entries, false, None)?;
         let entries = entries
             .into_iter()
             .map(|entry| {
@@ -1239,6 +1246,7 @@ fn topology_authority(
     table: Option<&crate::route_component::RouteTable>,
     cas: bool,
     requested_route: Option<(PropertyRouteKind, &str)>,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<TopologyAuthority, GfError> {
     if requested_route.is_some() {
         return Ok(TopologyAuthority {
@@ -1247,8 +1255,8 @@ fn topology_authority(
         });
     }
     Ok(TopologyAuthority {
-        edge_routes: admit_edge_route_paths(root, entries, table, cas)?,
-        node_files: Some(admit_node_paths(root, entries, cas)?),
+        edge_routes: admit_edge_route_paths(root, entries, table, cas, cancelled)?,
+        node_files: Some(admit_node_paths(root, entries, cas, cancelled)?),
     })
 }
 
@@ -1292,9 +1300,11 @@ fn admit_node_paths(
     root: &Path,
     entries: &[crate::GraphFileEntry],
     cas: bool,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<Vec<AdmittedEdgeFile>, GfError> {
     let mut files = Vec::new();
     for entry in entries {
+        check_import_cancelled(cancelled)?;
         if !is_node_topology_path(&entry.relative_path) {
             continue;
         }
@@ -1320,9 +1330,11 @@ fn admit_edge_route_paths(
     entries: &[crate::GraphFileEntry],
     table: Option<&crate::route_component::RouteTable>,
     cas: bool,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<BTreeMap<String, Vec<AdmittedEdgeFile>>, GfError> {
     let mut routes = BTreeMap::<String, Vec<AdmittedEdgeFile>>::new();
     for entry in entries {
+        check_import_cancelled(cancelled)?;
         if !entry.relative_path.starts_with("topology/edges/") {
             continue;
         }
@@ -1357,7 +1369,7 @@ pub(super) fn resolve_v1_property_entries_for_route(
     entries: Vec<crate::GraphFileEntry>,
     requested_route: Option<(PropertyRouteKind, &str)>,
 ) -> Result<Vec<(crate::GraphFileEntry, PathBuf)>, GfError> {
-    resolve_versioned_property_entries_for_route(root, entries, requested_route, None)
+    resolve_versioned_property_entries_for_route(root, entries, requested_route, None, None)
 }
 
 fn resolve_versioned_property_entries_for_route(
@@ -1365,9 +1377,11 @@ fn resolve_versioned_property_entries_for_route(
     entries: Vec<crate::GraphFileEntry>,
     requested_route: Option<(PropertyRouteKind, &str)>,
     route_table: Option<&crate::route_component::RouteTable>,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<Vec<(crate::GraphFileEntry, PathBuf)>, GfError> {
     let mut selected = Vec::new();
     for mut entry in entries {
+        check_import_cancelled(cancelled)?;
         let canonical = match route_table {
             Some(_) => {
                 crate::graph_files::wire_relative_path(&entry.relative_path)?;

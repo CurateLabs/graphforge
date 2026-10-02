@@ -7,6 +7,64 @@ use std::collections::{BTreeSet, HashMap};
 use tempfile::TempDir;
 
 #[test]
+fn cancelled_import_stops_before_topology_and_property_resolution_hashes() {
+    let root = TempDir::new().unwrap();
+    fs::create_dir_all(root.path().join("properties")).unwrap();
+    fs::create_dir_all(root.path().join("topology/edges")).unwrap();
+    let paths = [
+        "properties/Person.parquet",
+        "topology/edges/R.parquet",
+        "topology/nodes.parquet",
+    ];
+    for path in paths {
+        fs::write(root.path().join(path), b"captured payload").unwrap();
+    }
+    let (inventory, _) = crate::capture_graph_files(root.path()).unwrap();
+    // Cancellation arrives after initial capture. Corruption would win if
+    // either resolution pass authenticated a file before polling again.
+    for path in paths {
+        fs::write(root.path().join(path), b"changed payload!").unwrap();
+    }
+    let cancelled = std::sync::atomic::AtomicBool::new(true);
+    let assert_cancelled = |error: GfError| {
+        assert!(matches!(
+            error,
+            GfError::Api {
+                code: graphforge_core::ApiErrorCode::Cancelled,
+                ..
+            }
+        ));
+    };
+    assert_cancelled(
+        admit_edge_route_paths(root.path(), &inventory.files, None, false, Some(&cancelled))
+            .unwrap_err(),
+    );
+    assert_cancelled(
+        admit_node_paths(root.path(), &inventory.files, false, Some(&cancelled)).unwrap_err(),
+    );
+    assert_cancelled(
+        resolve_versioned_property_entries_for_route(
+            root.path(),
+            inventory.files.clone(),
+            None,
+            None,
+            Some(&cancelled),
+        )
+        .unwrap_err(),
+    );
+    assert_cancelled(
+        AuthenticatedPropertyInventory::from_inventory_at_root_with_admission(
+            root.path(),
+            inventory,
+            None,
+            true,
+            Some(&cancelled),
+        )
+        .unwrap_err(),
+    );
+}
+
+#[test]
 fn logical_fragment_stream_preserves_decoded_column_admission() {
     use arrow::array::StringArray;
 
