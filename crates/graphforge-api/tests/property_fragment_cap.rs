@@ -336,10 +336,6 @@ fn assert_bounded_objects(path: &std::path::Path) -> Vec<graphforge_storage::Gra
 
 #[test]
 fn oversized_property_values_round_trip_through_bounded_objects() {
-    use graphforge_api::{
-        OperationId, PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest,
-        PortableV2Limits, PortableV2Output, PortableV2SelectionProfile,
-    };
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("source");
     let payload = large_payload();
@@ -357,7 +353,17 @@ fn oversized_property_values_round_trip_through_bounded_objects() {
     assert_mutations_persisted(&forge);
     assert_bounded_objects(&path);
 
-    let package = root.path().join("large-values.gfpb");
+    #[cfg(feature = "portable")]
+    assert_portable_large_round_trip(root.path(), &forge, &payload);
+}
+
+#[cfg(feature = "portable")]
+fn assert_portable_large_round_trip(root: &std::path::Path, forge: &GraphForge, payload: &str) {
+    use graphforge_api::{
+        OperationId, PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest,
+        PortableV2Limits, PortableV2Output, PortableV2SelectionProfile,
+    };
+    let package = root.join("large-values.gfpb");
     forge
         .export_portable_v2(
             &PortableV2ExportRequest {
@@ -372,7 +378,7 @@ fn oversized_property_values_round_trip_through_bounded_objects() {
             |_| {},
         )
         .unwrap();
-    let imported = root.path().join("imported");
+    let imported = root.join("imported");
     GraphForge::import_portable_v2(
         &imported,
         &PortableV2ImportRequest {
@@ -385,7 +391,7 @@ fn oversized_property_values_round_trip_through_bounded_objects() {
     .unwrap();
     assert_bounded_objects(&imported);
     let imported = GraphForge::new(imported.to_str()).unwrap();
-    assert_large_answers(&imported, &payload);
+    assert_large_answers(&imported, payload);
     assert_mutations_persisted(&imported);
 }
 
