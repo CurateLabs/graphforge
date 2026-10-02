@@ -7,7 +7,7 @@
       "files": ["graph.v"],
       "label": "Vertex",
       "id_column": "id",
-      "properties": [{"column": "id", "name": "vertex_id", "type": "int64"}]
+      "properties": [{"column": "id", "type": "int64"}]
     },
     {
       "id": "person",
