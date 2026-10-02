@@ -273,7 +273,17 @@ fn two_projects_adopting_the_same_exact_module_resolve_to_the_same_module() {
         .into_iter()
         .map(|published| {
             let documents = discovery(&exact, &published.bundle, &published.package_digest, None);
-            let resolved = resolve(&documents, &exact, &published.bundle).expect("resolve module");
+            let resolved = resolve_discovered_ontology_module(&DiscoveryOntologyModuleRequest {
+                manifest_json: &documents.manifest_json,
+                refs_json: &documents.refs_json,
+                expected_repository: &documents.repository,
+                module: &exact,
+                package: &published.bundle,
+                discovery_limits: DiscoveryLimits::default(),
+                portable_limits: PortableV2Limits::default(),
+                cancelled: None,
+            })
+            .expect("resolve module");
             assert_eq!(resolved.package_digest, published.package_digest);
             resolved
         })

@@ -205,8 +205,26 @@ fn keys(value: &Value, found: &mut BTreeSet<String>) {
 #[test]
 fn summary_bytes_are_identical_for_bundle_and_expanded_and_facts_are_verified() {
     let exported = exported_project();
-    let from_bundle = summarize(&exported.bundle).unwrap();
-    let from_directory = summarize(&exported.expanded).unwrap();
+    let repository = repository();
+    let immutable_version = marker('a');
+    let from_bundle = summarize_verified_portable_v2(&ProjectSummaryRequest {
+        repository: &repository,
+        immutable_version: &immutable_version,
+        package: &exported.bundle,
+        discovery_limits: DiscoveryLimits::default(),
+        portable_limits: PortableV2Limits::default(),
+        cancelled: None,
+    })
+    .unwrap();
+    let from_directory = summarize_verified_portable_v2(&ProjectSummaryRequest {
+        repository: &repository,
+        immutable_version: &immutable_version,
+        package: &exported.expanded,
+        discovery_limits: DiscoveryLimits::default(),
+        portable_limits: PortableV2Limits::default(),
+        cancelled: None,
+    })
+    .unwrap();
     assert_eq!(from_bundle, from_directory);
     let bytes = from_bundle.to_canonical_json().unwrap();
     assert_eq!(bytes, from_directory.to_canonical_json().unwrap());
