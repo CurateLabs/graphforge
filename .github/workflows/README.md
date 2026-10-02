@@ -22,8 +22,8 @@ operational control plane.
 
 **Speed is a first-class value alongside honesty.** Surfaces shed work that is
 not required for their objective. The **Coverage** workflow runs
-`llvm-cov` on every merge to `main` and enforces the floors there; a policy test
-refuses it in any pull-request-triggered workflow.
+`llvm-cov` nightly against `main` and enforces the floors there; it never runs
+in a pull-request-triggered workflow.
 Wall-clock targets live in
 [`docs/engineering/TESTING.md`](../../docs/engineering/TESTING.md).
 
@@ -59,8 +59,13 @@ These rules apply (the earlier GitHub Actions cache-era bans blocked build speed
 Every Linux Test Suite job that compiles the workspace (Rust Tests, the
 harness/doc/feature job, the feature boundary, the bindings, and the benchmark
 harness) mounts its own sticky `target/` disk, keyed by job and toolchain. The
-Windows and macOS storage jobs do not. macOS/Windows release build cells use
-larger Blacksmith runners + colocated registry cache.
+Windows storage job does not. macOS/Windows release build cells use larger
+Blacksmith runners + colocated registry cache.
+
+macOS runners cost forty times Linux runners per minute (`$0.16` against
+`$0.004` for 4 vCPU), so no recurring workflow uses one. `publish.yaml` builds
+the macOS wheel and addons only on a release tag or a pull request that touches
+the release path.
 
 ## Pull-request contract
 
@@ -76,12 +81,14 @@ larger Blacksmith runners + colocated registry cache.
   `cargo test --workspace --locked`). Rust test data (TCK features, goldens,
   snapshots, fixtures, reference docs) also runs `Rust Tests`. The
   same Rust classification also runs native filesystem publication/admission
-  tests on `blacksmith-4vcpu-windows-2025` and
-  `blacksmith-12vcpu-macos-15`; Windows retains the existing project-root lock
-  tests. Both native lanes also exercise mapped semantic routes, legacy CAS
+  tests on `blacksmith-4vcpu-windows-2025`, including the project-root lock
+  tests. The Windows lane also exercises mapped semantic routes, legacy CAS
   translation, reserved-route adjacency/deletion, lazy stream isolation, and full
   and projected portable export/import/reopen through the Rust facade. Linux
-  Rust Tests cannot execute those host-specific contracts.
+  Rust Tests cannot execute those host-specific contracts. There is no macOS
+  lane (#1760): the `target_os = "macos"` admission code in
+  `graphforge-storage` compiles in the release wheel and addon lanes and is
+  otherwise unexercised in CI.
 - Python, Gherkin, public binding, agent-skills, Pulumi static-validation, and
   Terraform static-validation gates run only when their owned surfaces change.
   Shared GraphForge configuration and infrastructure contract fixtures run both
@@ -106,8 +113,8 @@ self-tests), **Rust Tests** (nextest over the workspace), **Rust Harness, Doc,
 and Feature Tests** (custom-harness targets, doctests, feature-gated tests),
 **API and Executor Feature Boundary**, **Python and Node Bindings** (full
 binding suites on Linux, same-SHA wheel and addon), **Windows Storage**,
-**macOS Storage**, **Benchmark Harness**, **Agent Skills**, **Pulumi Static
-Validation**, **Terraform Static Validation**, and **CI Gate**.
+**Benchmark Harness**, **Agent Skills**, **Pulumi Static Validation**,
+**Terraform Static Validation**, and **CI Gate**.
 
 Pull-request native binding acceptance is Linux-only and uses Cargo's `dev`
 profile for maturin/napi assembly; `Python and Node Bindings` builds, installs,
@@ -118,11 +125,9 @@ harness tests and the tiny and ownership-growth lifecycle producer against a
 Cargo-built `gf`. When any crate changes, `Windows Storage`
 runs the native project-root lock, exact filesystem primitive, NTFS admission,
 and real publication-kill/fault-oracle cross-checks on
-`blacksmith-4vcpu-windows-2025`. `macOS Storage` runs the
-corresponding native APFS primitive, admission, and publication-kill
-cross-checks. Linux executes the same storage unit suite through `Rust Tests`.
-These platform jobs record actual subprocess/handle observations; the simulator
-does not stand in for native evidence.
+`blacksmith-4vcpu-windows-2025`. Linux executes the same storage unit suite
+through `Rust Tests`. These platform jobs record actual subprocess/handle
+observations; the simulator does not stand in for native evidence.
 
 ### Behavioral acceptance
 

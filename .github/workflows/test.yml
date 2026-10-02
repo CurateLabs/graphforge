@@ -1,7 +1,10 @@
 name: Test Suite
 
 # The whole PR gate: lint, the Rust suite, the bindings built from the same
-# tree, and the platform-specific storage tests. `CI Gate` is the one required
+# tree, and the Windows storage tests. There is no macOS lane (#1760): a macOS
+# runner minute costs forty Linux minutes. The `target_os = "macos"` admission
+# code in graphforge-storage runs in CI only where publish.yaml's macOS wheel
+# lane opens a durable project, on a release tag or a release-path PR. `CI Gate` is the one required
 # status. The merge queue runs this same workflow on the tree that will land.
 on:
   pull_request:
@@ -360,61 +363,6 @@ jobs:
           workspace_hydration::tests::releasing_the_facade_releases_every_committed_generation_handle
           workspace_hydration::tests::retained_generation_handles_outlive_reads_and_survive_reopen
 
-  macos-storage:
-    name: macOS Storage
-    runs-on: blacksmith-12vcpu-macos-15
-    needs: changes
-    if: needs.changes.outputs.platform == 'true'
-    timeout-minutes: 30
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
-        with:
-          toolchain: "1.96.0"
-      - name: Cache Cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
-
-      - name: Filesystem primitives
-        run: cargo test -p graphforge-filesystem --lib --no-fail-fast
-
-      - name: Storage admission, mapped routes, and portable lifecycle
-        run: >-
-          cargo test -p graphforge-storage --lib --no-fail-fast --
-          filesystem_admission::tests::
-          project_portable_v2_export::tests::canonical_source_path_
-          project_portable_v2_import::tests::authenticated_cleanup_releases_handles_before_removal
-          graph_object_store::materialization::tests::materialization_gives_mutable_uuid_controls_private_single_link_inodes
-          runtime_entity_labels::tests::catalog_persistence_replaces_read_only_cas_aliases
-          route_component::tests::
-          route_component::owned::tests::legacy_cas_materialization_translates_routes_before_creating_paths
-          uuid_membership::tests::owned_manifest_
-          uuid_membership::tests::readonly_shared_runs_preserve_uuid_snapshot_authentication
-          graph_files::tests::graph_file_copy_
-          adjacency::builder::tests::admitted_reserved_relations_build_portable_distinct_indexes
-          mutator::tests::mapped_reserved_delete_preserves_other_routes_and_reopens
-          project_publication::tests::commit_lock_guard_unlocks_before_a_cloned_descriptor_closes
-          project_checkpoints::tests::checkpoint_read_guard_unlocks_before_a_cloned_descriptor_closes
-
-      - name: Publication kill matrix and injected errors
-        run: >-
-          cargo test -p graphforge-storage --features test-failpoints --lib --no-fail-fast --
-          project_recovery::tests::subprocess_kill_matrix_never_exposes_a_partial_generation
-          project_recovery::tests::injected_operation_errors_report_exact_commit_state
-
-      - name: API mapped routes
-        run: >-
-          cargo test -p graphforge-api --lib --no-fail-fast --
-          mapped_portable_tests::
-          mapped_stream_tests::
-          maintenance::tests::in_memory_compaction_cleanup_uses_ephemeral_lifecycle_mode
-
   # One wheel and one addon built from this tree, then every binding suite
   # against them. Python and Node are thin bindings, so a binding failure is a
   # binding bug or a Rust bug the Rust lane missed; either blocks the merge.
@@ -767,7 +715,6 @@ jobs:
       - feature-boundary
       - bindings
       - windows-storage
-      - macos-storage
       - benchmarks
       - agent-skills
       - pulumi-static

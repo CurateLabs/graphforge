@@ -10,8 +10,8 @@ retries-as-green, and weakened assertions do not satisfy gates (`AGENTS.md`,
 has a wall-clock target, sheds work that is not required for its objective, and
 parallelizes the rest. Full `llvm-cov` / `make coverage-rust` is a
 local (or coverage-sensitive) honesty tool — **PR CI does not run full coverage**.
-The **Coverage** workflow runs the same ledger on every merge to `main` and fails
-on a breached floor, so drift surfaces within one merge rather than at release
+The **Coverage** workflow runs the same ledger nightly against `main` and fails
+on a breached floor, so drift surfaces within a day rather than at release
 time. Repository policy keeps full `llvm-cov` out of pull-request CI, where its
 cost would be paid on every review cycle; coverage is excluded from
 pull-request workflows by the `coverage-baseline.yml` trigger condition.
@@ -113,9 +113,11 @@ checks for the **changed surface**. They do **not** require a release run; see
   (`Rust Tests`: nextest over the workspace, then the custom-harness targets and
   doctests; ADR 0048) plus Cargo fmt/clippy, and also runs
   native filesystem publication/admission tests on
-  `blacksmith-4vcpu-windows-2025` and `blacksmith-12vcpu-macos-15`. Windows
-  also retains the `graphforge-storage` project-root lock unit tests that Linux
-  CI cannot execute. Both host-native jobs are aggregated by `CI Gate`.
+  `blacksmith-4vcpu-windows-2025`, including the `graphforge-storage`
+  project-root lock unit tests that Linux CI cannot execute. `CI Gate`
+  aggregates it. There is no macOS lane: macOS minutes cost forty times Linux
+  minutes, and the macOS artifacts are built and smoke-tested only by
+  `publish.yaml`.
 - Repository policy always validates workflow syntax, the classifier, domain
   dependency directions, and license compliance.
 
@@ -583,10 +585,10 @@ coverage honesty.
 The floors are enforced by the **Coverage** workflow
 (`.github/workflows/coverage-baseline.yml`).
 
-It runs on every push to `main`, enforces every floor, and records the baseline.
-Its patch total compares `HEAD` against the previous `main` commit rather than a
-merge base, because post-merge the merge base with `origin/main` is `HEAD` itself
-and would measure an empty patch.
+It runs nightly against `main`, enforces every floor, and records the baseline.
+Its patch total compares `HEAD` against the last `main` commit at least 24 hours
+old, so one run covers the day's merges as a single patch. A day without merges
+measures an empty patch and still judges the total floors.
 
 Runs never cancel. An earlier draft cancelled in-progress runs, which on a day
 with 21 merges would have left the baseline unmeasured entirely.
