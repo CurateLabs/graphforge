@@ -412,6 +412,10 @@ export default defineConfig({
                   label: '0051 — Discovery carries a digest-addressed Project summary and exact ontology descriptors',
                   slug: 'adr/0051-discovery-project-summary-and-ontology-descriptors',
                 },
+                {
+                  label: '0053 — Hub publish wire contract',
+                  slug: 'adr/0053-hub-publish-wire-contract',
+                },
                 // END generated ADR records
               ],
             },

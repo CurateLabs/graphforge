@@ -104,6 +104,7 @@ the CI Lint job (#1390).
 | 0049 | Versioned checksums for published graph payload admission | Accepted | The same-identity adversary assumption changes, or published graph payloads move to a substrate with authoritative data checksums | [`../../adr/0049-published-payload-checksums.md`](../../adr/0049-published-payload-checksums.md) |
 | 0050 | The read path keeps its adjacency operators and chooses fast paths in the lowerer | Accepted | DataFusion gains a lookup join over a TableProvider index, a query shape that only the physical rewrites caught is found after migration, or a paired timing shows lowerer selection costs more than physical selection | [`../../adr/0050-read-path-fast-path-selection.md`](../../adr/0050-read-path-fast-path-selection.md) |
 | 0051 | Discovery carries a digest-addressed Project summary and exact ontology descriptors | Accepted | A summary field needs required interpretation by readers, module packages must become independent of the publishing Project (which requires a portable-v2 manifest change), or a Hub needs summary data that cannot be derived from a verified package | [`../../adr/0051-discovery-project-summary-and-ontology-descriptors.md`](../../adr/0051-discovery-project-summary-and-ontology-descriptors.md) |
+| 0053 | Hub publish wire contract | Proposed | The control-plane publish session shape, data-plane upload URL policy, or ref precondition encoding needs a breaking wire change | [`../../adr/0053-hub-publish-wire-contract.md`](../../adr/0053-hub-publish-wire-contract.md) |
 
 ### Superseded
 

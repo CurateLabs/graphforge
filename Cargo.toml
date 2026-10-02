@@ -12,6 +12,7 @@ members = [
   "crates/graphforge-search",
   "crates/graphforge-storage",
   "crates/graphforge-discovery",
+  "crates/graphforge-hub-publish",
   "crates/graphforge-filesystem",
   "crates/graphforge-io",
   "crates/graphforge-provenance",

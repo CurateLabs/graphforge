@@ -2324,6 +2324,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "graphforge-hub-publish"
+version = "0.5.2"
+dependencies = [
+ "serde",
+ "sha2",
+]
+
+[[package]]
 name = "graphforge-io"
 version = "0.5.2"
 dependencies = [

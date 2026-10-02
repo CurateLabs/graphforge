@@ -1,0 +1,15 @@
+[package]
+name = "graphforge-hub-publish"
+description = "Rust-owned GraphForge Hub publish wire contract and test transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true
