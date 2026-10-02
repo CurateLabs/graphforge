@@ -44,24 +44,27 @@ pub fn property_demand<S: BuildHasher>(
     }
 }
 
-/// Node variables visible in `plan`: its own and those an `OPTIONAL` child
-/// binds into it. An `EXISTS` or pattern-comprehension child's variables stay in
-/// that child, and the binder may reuse their numbers for later variables of
-/// this plan; a `UNION` branch is bound afresh and numbers its variables from
-/// zero. Neither is this plan's.
+/// Node variables an `OPTIONAL` child binds into the enclosing plan.
 fn collect_node_vars(plan: &GraphPlan, vars: &mut HashSet<VarId>) {
     for op in &plan.ops {
-        match op {
-            GraphOp::NodeScan { var, .. } => {
-                vars.insert(*var);
-            }
-            GraphOp::Expand { src, dst, .. } => {
-                vars.insert(*src);
-                vars.insert(*dst);
-            }
-            GraphOp::Optional { child } => collect_node_vars(child, vars),
-            _ => {}
+        bind_node_vars(op, vars);
+    }
+}
+
+/// Add the node variables `op` binds to `vars`. An `EXISTS` or
+/// pattern-comprehension child's variables stay in that child, and a `UNION`
+/// branch is bound afresh, so none of them enter the enclosing scope.
+fn bind_node_vars(op: &GraphOp, vars: &mut HashSet<VarId>) {
+    match op {
+        GraphOp::NodeScan { var, .. } => {
+            vars.insert(*var);
         }
+        GraphOp::Expand { src, dst, .. } => {
+            vars.insert(*src);
+            vars.insert(*dst);
+        }
+        GraphOp::Optional { child } => collect_node_vars(child, vars),
+        _ => {}
     }
 }
 
@@ -70,52 +73,61 @@ struct DemandAnalysis<'a, S> {
 }
 
 impl<S: BuildHasher> DemandAnalysis<'_, S> {
-    /// `inherited` holds the enclosing plan's node variables that are in scope
-    /// inside `plan`.
+    /// `inherited` holds the enclosing plan's node variables in scope where
+    /// `plan` runs. A variable is in scope from the operator that binds it
+    /// onward: an expression or child plan only references variables bound
+    /// before it, so a number the binder reuses for a later variable, or one a
+    /// child scope reused, never reaches it.
     fn plan_is_value_free(&self, plan: &GraphPlan, inherited: &HashSet<VarId>) -> bool {
         let mut node_vars = inherited.clone();
-        collect_node_vars(plan, &mut node_vars);
         let exprs = &plan.exprs;
-        let free = |id: &ExprId| self.expr_is_value_free(exprs, &node_vars, *id);
-        plan.ops.iter().all(|op| match op {
-            GraphOp::NodeScan { .. }
-            | GraphOp::EdgeScan { .. }
-            | GraphOp::TypedEdgeScan { .. }
-            | GraphOp::Expand { .. }
-            | GraphOp::RelationshipUnique { .. }
-            | GraphOp::Limit { .. }
-            | GraphOp::LimitParam { .. }
-            | GraphOp::Skip { .. }
-            | GraphOp::SkipParam { .. } => true,
-            GraphOp::Filter { predicate } => free(predicate),
-            GraphOp::Project { items, .. } => items.iter().all(|item| free(&item.expr)),
-            GraphOp::With {
-                items,
-                where_predicate,
-                ..
-            } => items.iter().all(|item| free(&item.expr)) && where_predicate.iter().all(free),
-            GraphOp::Aggregate { group_by, aggs, .. } => {
-                group_by.iter().all(free)
-                    && aggs
-                        .iter()
-                        .all(|agg| agg.arg.iter().all(free) && agg.percentile.iter().all(free))
+        for op in &plan.ops {
+            let free = |id: &ExprId| self.expr_is_value_free(exprs, &node_vars, *id);
+            let value_free = match op {
+                GraphOp::NodeScan { .. }
+                | GraphOp::EdgeScan { .. }
+                | GraphOp::TypedEdgeScan { .. }
+                | GraphOp::Expand { .. }
+                | GraphOp::RelationshipUnique { .. }
+                | GraphOp::Limit { .. }
+                | GraphOp::LimitParam { .. }
+                | GraphOp::Skip { .. }
+                | GraphOp::SkipParam { .. } => true,
+                GraphOp::Filter { predicate } => free(predicate),
+                GraphOp::Project { items, .. } => items.iter().all(|item| free(&item.expr)),
+                GraphOp::With {
+                    items,
+                    where_predicate,
+                    ..
+                } => items.iter().all(|item| free(&item.expr)) && where_predicate.iter().all(free),
+                GraphOp::Aggregate { group_by, aggs, .. } => {
+                    group_by.iter().all(free)
+                        && aggs
+                            .iter()
+                            .all(|agg| agg.arg.iter().all(free) && agg.percentile.iter().all(free))
+                }
+                GraphOp::Sort { keys } => keys.iter().all(|key| free(&key.expr)),
+                GraphOp::LimitExpr { expr } | GraphOp::SkipExpr { expr } => free(expr),
+                GraphOp::Unwind { list_expr, .. } => free(list_expr),
+                GraphOp::Optional { child }
+                | GraphOp::Exists { child, .. }
+                | GraphOp::PatternComprehension { child, .. } => {
+                    self.plan_is_value_free(child, &node_vars)
+                }
+                // Each branch numbers its own variables; none is this plan's.
+                GraphOp::Union { inputs, .. } => inputs
+                    .iter()
+                    .all(|input| self.plan_is_value_free(input, &HashSet::new())),
+                // Writes, procedure calls, graph-valued list comprehensions and
+                // any operator added later read or write entities whole.
+                _ => false,
+            };
+            if !value_free {
+                return false;
             }
-            GraphOp::Sort { keys } => keys.iter().all(|key| free(&key.expr)),
-            GraphOp::LimitExpr { expr } | GraphOp::SkipExpr { expr } => free(expr),
-            GraphOp::Unwind { list_expr, .. } => free(list_expr),
-            GraphOp::Optional { child }
-            | GraphOp::Exists { child, .. }
-            | GraphOp::PatternComprehension { child, .. } => {
-                self.plan_is_value_free(child, &node_vars)
-            }
-            // Each branch numbers its own variables; none is this plan's.
-            GraphOp::Union { inputs, .. } => inputs
-                .iter()
-                .all(|input| self.plan_is_value_free(input, &HashSet::new())),
-            // Writes, procedure calls, graph-valued list comprehensions and any
-            // operator added later read or write entities whole.
-            _ => false,
-        })
+            bind_node_vars(op, &mut node_vars);
+        }
+        true
     }
 
     fn expr_is_value_free(
@@ -492,6 +504,75 @@ mod tests {
         ];
         plan.exprs = exprs;
         assert_eq!(property_demand(&plan, &names), PropertyDemand::Complete);
+    }
+
+    /// A predicate's anonymous edge may share its number with a node the
+    /// enclosing plan binds later. Inside the predicate that node is not yet in
+    /// scope, so the edge's topology-named property still demands every schema,
+    /// and a value-free enclosing plan stays value-free.
+    #[test]
+    fn variables_bound_later_are_not_in_scope_of_an_earlier_predicate() {
+        let mut names = names();
+        names.insert(property(UPDATED_AT), "updated_at".to_owned());
+        let mut predicate_exprs = ExprArena::new();
+        let edge_read = read(&mut predicate_exprs, 1, UPDATED_AT);
+        let mut predicate = GraphPlan::builder("openCypher").build();
+        predicate.ops = vec![
+            GraphOp::Expand {
+                src: VarId(0),
+                edge: VarId(1),
+                dst: VarId(2),
+                rel_ty: None,
+                dir: crate::Direction::Out,
+                min_hops: 1,
+                max_hops: Some(1),
+            },
+            GraphOp::Filter {
+                predicate: edge_read,
+            },
+        ];
+        predicate.exprs = predicate_exprs;
+        let mut plan = GraphPlan::builder("openCypher").build();
+        plan.ops = vec![
+            scan(0),
+            GraphOp::Exists {
+                child: Box::new(predicate),
+                negated: false,
+            },
+            scan(1),
+            count(None),
+        ];
+        assert_eq!(property_demand(&plan, &names), PropertyDemand::Complete);
+
+        let mut topology_exprs = ExprArena::new();
+        let node_read = read(&mut topology_exprs, 2, NODE_UUID);
+        let mut topology_predicate = GraphPlan::builder("openCypher").build();
+        topology_predicate.ops = vec![
+            GraphOp::Expand {
+                src: VarId(0),
+                edge: VarId(1),
+                dst: VarId(2),
+                rel_ty: None,
+                dir: crate::Direction::Out,
+                min_hops: 1,
+                max_hops: Some(1),
+            },
+            GraphOp::Filter {
+                predicate: node_read,
+            },
+        ];
+        topology_predicate.exprs = topology_exprs;
+        let mut value_free = GraphPlan::builder("openCypher").build();
+        value_free.ops = vec![
+            scan(0),
+            GraphOp::Exists {
+                child: Box::new(topology_predicate),
+                negated: false,
+            },
+            scan(1),
+            count(None),
+        ];
+        assert_eq!(property_demand(&value_free, &names), PropertyDemand::None);
     }
 
     #[test]

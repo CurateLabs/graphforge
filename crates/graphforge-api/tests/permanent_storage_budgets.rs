@@ -7666,6 +7666,34 @@ fn edge_property_named_like_node_topology_after_a_pattern_predicate_is_read() {
     assert_eq!(values, vec![Some(42)]);
 }
 
+/// A pattern predicate's anonymous edge may share its number with a node bound
+/// after the predicate. The predicate's edge property is still read, and the
+/// query still answers.
+#[test]
+fn pattern_predicate_edge_property_beside_a_later_node_is_read() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    graph
+        .execute("CREATE (:A)-[:T {updated_at: 42}]->(:B)")
+        .unwrap();
+    let count = |query: &str| {
+        let result = graph.execute(query).unwrap();
+        result
+            .batches
+            .iter()
+            .find(|batch| batch.num_rows() == 1)
+            .and_then(|batch| int_at(batch, 0, 0))
+    };
+    assert_eq!(
+        count("MATCH (a) WHERE (a)-[{updated_at: 42}]->() MATCH (b) RETURN count(*) AS v"),
+        Some(2)
+    );
+    assert_eq!(
+        count("MATCH (a) WHERE (a)-[{updated_at: 7}]->() MATCH (b) RETURN count(*) AS v"),
+        Some(0)
+    );
+}
+
 fn count_marker_rows(batches: &[RecordBatch]) -> Vec<(Uuid, Option<i64>, Option<String>)> {
     let mut rows = Vec::new();
     for batch in batches {
