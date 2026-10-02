@@ -396,7 +396,42 @@ impl GraphForge {
             .expect("procedure registry lock")
             .clear();
         self.adjacency_provider_for_session().invalidate();
-        cleanup_result
+        // The session's read authority still declares the generation's node and
+        // edge files, content-store objects the workspace wipe does not touch,
+        // and every later catalog lists node files from it (#1388). Re-establish
+        // it from the emptied workspace, as a same-session commit does.
+        let authority_result = self.reset_read_authority_from_workspace();
+        cleanup_result.and(authority_result)
+    }
+
+    /// Replace the session's read authority with what the workspace holds now.
+    fn reset_read_authority_from_workspace(&self) -> Result<(), GfError> {
+        let generation = self.generation_for_read()?;
+        let (captured, _) = graphforge_storage::capture_graph_files(&self.dir())?;
+        let inventory = std::sync::Arc::new(
+            graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
+                &generation,
+                &self.dir(),
+                captured,
+            )?,
+        );
+        let adjacency = std::sync::Arc::new(crate::adjacency_provider_for_graph(
+            &self.dir(),
+            self.ontology_mode,
+            std::sync::Arc::clone(&inventory),
+        )?);
+        *self
+            .property_authority
+            .lock()
+            .expect("property authority lock poisoned") = crate::GenerationPropertyAuthority {
+            generation_uuid: generation.generation_uuid(),
+            inventory,
+        };
+        *self
+            .adjacency_provider
+            .write()
+            .expect("adjacency provider lock poisoned") = adjacency;
+        Ok(())
     }
 }
 

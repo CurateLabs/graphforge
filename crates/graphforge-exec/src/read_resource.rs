@@ -54,9 +54,7 @@ impl GraphReadContext {
             ));
         }
         let table: Arc<dyn TableProvider> = match &source.table {
-            GraphReadTable::Nodes => Arc::new(graphforge_storage::TopologyNodeTable::open_project(
-                &self.dir,
-            )?),
+            GraphReadTable::Nodes => Arc::new(self.catalog.node_table(&self.dir)?),
             GraphReadTable::Edges(stem)
                 if stem == "_exploratory" && self.mode != OntologyMode::Exploratory =>
             {
