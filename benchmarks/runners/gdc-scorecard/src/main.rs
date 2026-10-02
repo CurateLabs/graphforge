@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: graphforge-benchmark-gdc-scorecard convert --mapping FILE --input-root DIR --output-dir DIR"
+        "usage: graphforge-benchmark-gdc-scorecard convert --mapping FILE --input-root DIR --output-dir DIR [--memory-budget-bytes N]"
     );
     ExitCode::from(1)
 }
@@ -16,6 +16,7 @@ fn main() -> ExitCode {
         return usage();
     }
     let (mut mapping, mut input_root, mut output_dir) = (None, None, None);
+    let mut budget = gdc_scorecard::DEFAULT_MEMORY_BUDGET_BYTES;
     while let Some(flag) = args.next() {
         let Some(value) = args.next() else {
             return usage();
@@ -24,6 +25,10 @@ fn main() -> ExitCode {
             "--mapping" => mapping = Some(PathBuf::from(value)),
             "--input-root" => input_root = Some(PathBuf::from(value)),
             "--output-dir" => output_dir = Some(PathBuf::from(value)),
+            "--memory-budget-bytes" => match value.parse() {
+                Ok(bytes) => budget = bytes,
+                Err(_) => return usage(),
+            },
             _ => return usage(),
         }
     }
@@ -41,7 +46,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match gdc_scorecard::convert(&bytes, &input_root, &output_dir) {
+    match gdc_scorecard::convert_with_budget(&bytes, &input_root, &output_dir, budget) {
         Ok(conversion) => {
             println!("{}", conversion.manifest_path.display());
             ExitCode::SUCCESS

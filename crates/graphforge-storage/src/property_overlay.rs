@@ -185,6 +185,13 @@ pub struct AuthenticatedPropertyInventory {
     root_path: Option<PathBuf>,
     routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>>,
     edge_routes: BTreeMap<String, Vec<AdmittedEdgeFile>>,
+    /// Node topology files the inventory declares (`topology/nodes.parquet`
+    /// and `topology/nodes/<range>.parquet`), in canonical order. `None` for
+    /// a route-scoped inventory, which carries no topology authority; a reader
+    /// then falls back to the directory listing. #1388: the node table reads
+    /// only declared files, so an unregistered file in the hydrated directory
+    /// is never opened.
+    node_files: Option<Vec<AdmittedEdgeFile>>,
     schemas: BTreeMap<(PropertyRouteKind, String), arrow::datatypes::SchemaRef>,
     authority_bytes: u64,
     authority_block_equivalents: u64,

@@ -620,6 +620,20 @@ def _plan_wall_seconds(plan: Mapping[str, Any]) -> int:
     return value
 
 
+def _host_swap_counters() -> dict[str, int]:
+    """Use the same host-wide counters as BenchExec's SwapCheck."""
+    counters = {}
+    for line in Path("/proc/vmstat").read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        if fields and fields[0] in {"pswpin", "pswpout"}:
+            if len(fields) != 2 or not fields[1].isdigit():
+                raise ControllerError("host swap counters are malformed")
+            counters[fields[0]] = int(fields[1])
+    if counters.keys() != {"pswpin", "pswpout"}:
+        raise ControllerError("host swap counters are missing")
+    return counters
+
+
 def run(
     *,
     root: Path,
@@ -657,6 +671,7 @@ def run(
                 work_root=work_root,
                 wall_seconds=_plan_wall_seconds(plan),
             )
+            swap_before = _host_swap_counters()
             status = _run_benchexec(
                 stage,
                 executables,
@@ -664,6 +679,38 @@ def run(
                 durable_root=work_root,
                 home=work_root,
             )
+            try:
+                swap_after = _host_swap_counters()
+            except (ControllerError, OSError, ValueError) as error:
+                _preserve_failure_artifacts(stage, output_dir, scale)
+                failed = _result(plan, "failed", "host_swap_unavailable")
+                _validate(root, "progressive-host-run-result.json", failed)
+                publish_json_no_clobber(result_path, failed)
+                raise HostRunError("host_swap_unavailable") from error
+            # BenchExec logs unreliable measurements but still exits zero.
+            # Reject host interference before publishing a usable rung; occupied
+            # swap alone is not a failure and does not imply GraphForge swapped.
+            if any(swap_after[key] > value for key, value in swap_before.items()):
+                (stage / "raw" / "host-swap.json").write_text(
+                    json.dumps({"before": swap_before, "after": swap_after}, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                _preserve_failure_artifacts(stage, output_dir, scale)
+                # Keep a known execution failure as the primary cause. The
+                # retained counters still record concurrent host interference.
+                phase_failure = _certify_phase_failure(stage)
+                if phase_failure is not None:
+                    code = "rung_phase_failed"
+                elif _benchexec_hit_wall(stage):
+                    code = "rung_wall_exceeded"
+                elif status != 0:
+                    code = "benchexec_failed"
+                else:
+                    code = "host_swapped"
+                failed = _result(plan, "failed", code, phase_failure=phase_failure)
+                _validate(root, "progressive-host-run-result.json", failed)
+                publish_json_no_clobber(result_path, failed)
+                raise HostRunError(code)
             if status != 0:
                 _preserve_failure_artifacts(stage, output_dir, scale)
                 phase_failure = _certify_phase_failure(stage)

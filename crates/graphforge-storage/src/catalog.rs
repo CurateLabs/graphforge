@@ -1314,7 +1314,10 @@ impl GraphCatalog {
         // ---- topology nodes ----
         schema.register(
             "topology_nodes",
-            Arc::new(TopologyNodeTable::open_project(dir)?),
+            Arc::new(TopologyNodeTable::open_with_inventory(
+                dir,
+                inventory.as_deref(),
+            )?),
         );
 
         // ---- typed edge tables ----
@@ -1511,6 +1514,15 @@ impl GraphCatalog {
         self.lowering_property_inventory()
     }
 
+    /// Node provider over the files this catalog's admitted inventory
+    /// declares (#1388); a catalog without that authority lists the directory.
+    ///
+    /// # Errors
+    /// Returns the directory listing failure when no inventory is retained.
+    pub fn node_table(&self, dir: &Path) -> Result<TopologyNodeTable, DataFusionError> {
+        TopologyNodeTable::open_with_inventory(dir, self.lowering_property_inventory().as_deref())
+    }
+
     /// Relation provider pinned to this catalog's admitted route authority.
     #[must_use]
     pub fn edge_table(&self, dir: &Path, route: &str) -> TypedEdgeTable {
@@ -1653,6 +1665,17 @@ impl GraphCatalog {
                 ),
             );
         }
+        // The node table lists the files the inventory declares, so it must
+        // follow the inventory: a write in this session (or a `clear()`
+        // followed by one) changes the node files, and a table frozen at open
+        // would miss new ones or keep listing removed ones (#1388).
+        authority.tables.insert(
+            "topology_nodes".to_owned(),
+            Arc::new(TopologyNodeTable::open_with_inventory(
+                dir,
+                Some(&inventory),
+            )?),
+        );
         authority.property_inventory = Some(inventory);
         Ok(())
     }
