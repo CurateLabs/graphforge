@@ -17,6 +17,7 @@ from graphforge_bench.progressive_host_run import (
     RungWall,
     _benchexec_hit_wall,
     _certify_phase_failure,
+    _host_swap_counters,
     _result,
     _validate,
     build_plan,
@@ -32,7 +33,7 @@ from graphforge_bench.progressive_host_run import (
 from graphforge_bench.progressive_host_run import (
     run as host_run,
 )
-from graphforge_bench.progressive_run import Executables
+from graphforge_bench.progressive_run import ControllerError, Executables
 
 from tests.host_run_fixture import executables as fixture_executables
 from tests.host_run_fixture import write_host_bundle
@@ -427,6 +428,138 @@ class RungPhaseFailureTests(unittest.TestCase):
             "claim": "engineering_evidence_only",
         }
 
+    def test_swapping_rejects_completed_measurements_before_ingestion(self) -> None:
+        for counter in ("pswpin", "pswpout"):
+            with (
+                self.subTest(counter=counter),
+                tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary,
+            ):
+                parent = Path(temporary)
+                work_root = parent / "work"
+                work_root.mkdir()
+                output = parent / "evidence"
+                output.mkdir()
+                plan = self.plan(22)
+                (output / "s22-plan.json").write_text(json.dumps(plan))
+                stage = parent / "stage"
+                (stage / "raw").mkdir(parents=True)
+                bin_dir = parent / "bin"
+                bin_dir.mkdir()
+                before = {"pswpin": 100, "pswpout": 200}
+                after = before | {counter: before[counter] + 1}
+                with (
+                    patch("graphforge_bench.progressive_host_run._native_authority"),
+                    patch(
+                        "graphforge_bench.progressive_host_run._safe_stage_host", return_value=stage
+                    ),
+                    patch("graphforge_bench.progressive_host_run._run_benchexec", return_value=0),
+                    patch(
+                        "graphforge_bench.progressive_host_run._host_swap_counters",
+                        side_effect=[before, after],
+                    ),
+                    patch(
+                        "graphforge_bench.progressive_host_run.ingest_benchexec_result",
+                        return_value=({}, {}, {}),
+                    ) as ingest,
+                    self.assertRaisesRegex(HostRunError, "host_swapped"),
+                ):
+                    host_run(
+                        root=ROOT,
+                        output_dir=output,
+                        work_root=work_root,
+                        scale=22,
+                        plan=plan,
+                        executables=fixture_executables(bin_dir),
+                    )
+                ingest.assert_not_called()
+                result = json.loads((output / "s22-result.json").read_text())
+                self.assertEqual(result["failure"], "host_swapped")
+                self.assertEqual(result["status"], "failed")
+                self.assertIsNone(result["artifacts"])
+                counters = json.loads((output / "s22-failure-raw/host-swap.json").read_text())
+                self.assertEqual(counters, {"before": before, "after": after})
+                self.assertFalse((output / "s22-rung.json").exists())
+
+    def test_unchanged_swap_counters_allow_measurements(self) -> None:
+        with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
+            parent = Path(temporary)
+            work_root = parent / "work"
+            work_root.mkdir()
+            output = parent / "evidence"
+            output.mkdir()
+            plan = self.plan(22)
+            (output / "s22-plan.json").write_text(json.dumps(plan))
+            stage = self.stage(parent)
+            bin_dir = parent / "bin"
+            bin_dir.mkdir()
+            with (
+                patch("graphforge_bench.progressive_host_run._native_authority"),
+                patch("graphforge_bench.progressive_host_run._safe_stage_host", return_value=stage),
+                patch("graphforge_bench.progressive_host_run._run_benchexec", return_value=0),
+                patch(
+                    "graphforge_bench.progressive_host_run._host_swap_counters",
+                    return_value={"pswpin": 1_000_000, "pswpout": 2_000_000},
+                ),
+                patch(
+                    "graphforge_bench.progressive_host_run.ingest_benchexec_result",
+                    return_value=({}, {}, {}),
+                ) as ingest,
+            ):
+                host_run(
+                    root=ROOT,
+                    output_dir=output,
+                    work_root=work_root,
+                    scale=22,
+                    plan=plan,
+                    executables=fixture_executables(bin_dir),
+                )
+            ingest.assert_called_once()
+            self.assertEqual(
+                json.loads((output / "s22-result.json").read_text())["status"], "passed"
+            )
+
+    def test_host_swap_counters_require_both_kernel_fields(self) -> None:
+        with patch.object(Path, "read_text", return_value="pswpin 12\npswpout 34\npgfault 99\n"):
+            self.assertEqual(_host_swap_counters(), {"pswpin": 12, "pswpout": 34})
+        for malformed in ("pswpin 12\n", "pswpin bad\npswpout 34\n"):
+            with (
+                self.subTest(malformed=malformed),
+                patch.object(Path, "read_text", return_value=malformed),
+                self.assertRaises(ControllerError),
+            ):
+                _host_swap_counters()
+
+    def test_post_run_counter_read_failure_retains_raw_evidence(self) -> None:
+        with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
+            parent = Path(temporary)
+            work_root = parent / "work"
+            work_root.mkdir()
+            output = parent / "evidence"
+            stage = self.stage(parent)
+            bin_dir = parent / "bin"
+            bin_dir.mkdir()
+            with (
+                patch("graphforge_bench.progressive_host_run._native_authority"),
+                patch("graphforge_bench.progressive_host_run._safe_stage_host", return_value=stage),
+                patch("graphforge_bench.progressive_host_run._run_benchexec", return_value=0),
+                patch(
+                    "graphforge_bench.progressive_host_run._host_swap_counters",
+                    side_effect=[{"pswpin": 100, "pswpout": 200}, OSError("unreadable")],
+                ),
+                self.assertRaisesRegex(HostRunError, "host_swap_unavailable"),
+            ):
+                host_run(
+                    root=ROOT,
+                    output_dir=output,
+                    work_root=work_root,
+                    scale=22,
+                    plan=self.plan(22),
+                    executables=fixture_executables(bin_dir),
+                )
+            result = json.loads((output / "s22-result.json").read_text())
+            self.assertEqual(result["failure"], "host_swap_unavailable")
+            self.assertTrue(list((output / "s22-failure-raw").rglob("*.log")))
+
     def test_certify_phase_failure_reads_the_staged_stream(self) -> None:
         with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
             parent = Path(temporary)
@@ -496,6 +629,12 @@ class RungPhaseFailureTests(unittest.TestCase):
             )
 
     def test_run_reports_the_failed_phase_instead_of_staging_failed(self) -> None:
+        self.check_failed_phase(swapped=False)
+
+    def test_swap_does_not_hide_a_failed_phase(self) -> None:
+        self.check_failed_phase(swapped=True)
+
+    def check_failed_phase(self, *, swapped: bool) -> None:
         plan = self.plan(22)
         with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
             parent = Path(temporary)
@@ -509,6 +648,13 @@ class RungPhaseFailureTests(unittest.TestCase):
                 patch("graphforge_bench.progressive_host_run._native_authority"),
                 patch("graphforge_bench.progressive_host_run._safe_stage_host", return_value=stage),
                 patch("graphforge_bench.progressive_host_run._run_benchexec", return_value=0),
+                patch(
+                    "graphforge_bench.progressive_host_run._host_swap_counters",
+                    side_effect=[
+                        {"pswpin": 100, "pswpout": 200},
+                        {"pswpin": 101 if swapped else 100, "pswpout": 200},
+                    ],
+                ),
                 self.assertRaisesRegex(HostRunError, "rung_phase_failed"),
             ):
                 host_run(
