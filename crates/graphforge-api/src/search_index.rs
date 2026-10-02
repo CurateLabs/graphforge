@@ -146,6 +146,7 @@ impl GraphForge {
                 properties,
                 rebuild,
             } => {
+                let inventory = self.property_inventory_for_session();
                 prepare_search_index(
                     &self.dir(),
                     SearchIndexRequest::Text {
@@ -153,6 +154,7 @@ impl GraphForge {
                         label_id,
                         properties: properties.as_deref(),
                         rebuild,
+                        inventory: Some(&inventory),
                     },
                     SearchIndexLimits::default(),
                     || Ok(()),
@@ -203,9 +205,14 @@ impl GraphForge {
         properties: Option<&[String]>,
     ) -> Result<TextIndexInspection, GfError> {
         let label_id = self.search_label_id(label)?;
+        let inventory = self.property_inventory_for_session();
         let inspection = inspect_text_index_freshness(
             &self.dir(),
-            LazyTextRequest { label, label_id },
+            LazyTextRequest {
+                label,
+                label_id,
+                inventory: Some(&inventory),
+            },
             properties,
             graphforge_search::TextLifecycleLimits::default(),
             || Ok(()),

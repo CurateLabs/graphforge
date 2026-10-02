@@ -208,9 +208,9 @@ impl PayloadTicket {
         self: &Arc<Self>,
         file: &File,
         identity: graphforge_filesystem::FileIdentity,
-    ) -> Result<(), GfError> {
+    ) -> Result<Admission, GfError> {
         if let Some(outcome) = self.outcome.get() {
-            return outcome.clone();
+            return outcome.clone().map(|()| Admission::Settled { calls: 0 });
         }
         if !self.describes(identity) {
             let mut registry = registry();
@@ -220,7 +220,7 @@ impl PayloadTicket {
             {
                 registry.remove(&key_of(identity));
             }
-            return Ok(());
+            return Ok(Admission::NotRegistered);
         }
         // The lock is not held while checksumming: concurrent first touches of
         // this inode wait on the one computation, every other inode proceeds.
@@ -229,10 +229,13 @@ impl PayloadTicket {
         // precedes rather than in the open-time hydration row.
         let _phase = (!crate::lifecycle_io::phase_override_active())
             .then(|| crate::lifecycle_io::PhaseScope::enter(crate::StorageIoPhase::ReadPathScan));
+        let performed = std::cell::Cell::new(0_u64);
         let outcome = self.outcome.get_or_init(|| {
             #[cfg(test)]
             self.checksum_runs.fetch_add(1, Ordering::Relaxed);
-            checksum_handle(file, &self.entry, &self.cas_object).map(|_| ())
+            checksum_handle(file, &self.entry, &self.cas_object).map(|calls| {
+                performed.set(calls);
+            })
         });
         if outcome.is_ok() {
             let mut registry = registry();
@@ -243,8 +246,31 @@ impl PayloadTicket {
                 registry.remove(&key_of(identity));
             }
         }
-        outcome.clone()
+        outcome
+            .clone()
+            .map(|()| Admission::Settled {
+                calls: performed.get(),
+            })
     }
+}
+
+/// What a ticket did for one admission request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    /// No ticket describes this handle; the caller decides what that means.
+    NotRegistered,
+    /// A ticket settled the handle. `calls` is the number of reads this call
+    /// spent; zero when an earlier touch already paid and memoized it.
+    Settled { calls: u64 },
+}
+
+/// Work one admission request performed, so a caller can report it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct AdmissionWork {
+    /// Payload bytes read by this request; zero when it was already settled.
+    pub bytes: u64,
+    /// Reads issued by this request.
+    pub read_calls: u64,
 }
 
 /// Admit an opened payload handle. A handle that is not a registered
@@ -261,9 +287,51 @@ pub fn admit_file(file: &File) -> Result<(), GfError> {
     })?;
     let ticket = registry().get(&key_of(identity)).cloned();
     match ticket {
-        Some(ticket) => ticket.admit(file, identity),
+        Some(ticket) => ticket.admit(file, identity).map(|_| ()),
         None => Ok(()),
     }
+}
+
+/// Admit `file` for a caller that holds the manifest entry itself, such as the
+/// property inventory, and so must not rely on a hydration having registered a
+/// ticket for this inode. A registered ticket is honoured (shared and
+/// memoized with every other reader of the inode); without one the entry is
+/// checked directly. Either way the handle is verified or refused, never
+/// accepted unchecked. The caller memoizes the outcome for its own lifetime.
+///
+/// # Errors
+/// Returns the length or checksum refusal.
+pub(crate) fn admit_against(
+    file: &File,
+    byte_length: u64,
+    content_xxh64: u64,
+    diagnostic: &Path,
+) -> Result<AdmissionWork, GfError> {
+    if !registry().is_empty() {
+        let identity = graphforge_filesystem::file_identity(file).map_err(|error| {
+            GfError::Storage(format!("identify graph payload for admission: {error}"))
+        })?;
+        let ticket = registry().get(&key_of(identity)).cloned();
+        if let Some(ticket) = ticket {
+            match ticket.admit(file, identity)? {
+                Admission::Settled { calls: 0 } => return Ok(AdmissionWork::default()),
+                Admission::Settled { calls } => {
+                    return Ok(AdmissionWork {
+                        bytes: byte_length,
+                        read_calls: calls,
+                    });
+                }
+                Admission::NotRegistered => {}
+            }
+        }
+    }
+    let _phase = (!crate::lifecycle_io::phase_override_active())
+        .then(|| crate::lifecycle_io::PhaseScope::enter(crate::StorageIoPhase::ReadPathScan));
+    let calls = checksum_bytes(file, byte_length, content_xxh64, diagnostic)?;
+    Ok(AdmissionWork {
+        bytes: byte_length,
+        read_calls: calls,
+    })
 }
 
 /// Admit the payload at `path` (following no link beyond the open) before a
@@ -354,30 +422,36 @@ fn checksum_handle(
     entry: &crate::GraphFileEntry,
     diagnostic: &Path,
 ) -> Result<u64, GfError> {
+    checksum_bytes(file, entry.byte_length, entry.content_xxh64, diagnostic)
+}
+
+fn checksum_bytes(
+    file: &File,
+    byte_length: u64,
+    content_xxh64: u64,
+    diagnostic: &Path,
+) -> Result<u64, GfError> {
     let metadata = file.metadata().map_err(|error| {
         GfError::Storage(format!(
             "inspect graph payload {}: {error}",
             diagnostic.display()
         ))
     })?;
-    if !metadata.is_file() || metadata.len() != entry.byte_length {
+    if !metadata.is_file() || metadata.len() != byte_length {
         return Err(GfError::Validation(
             "graph payload length does not match checksum inventory".into(),
         ));
     }
-    let mut reader = std::io::Read::take(
-        ReadAt { file, offset: 0 },
-        entry.byte_length.saturating_add(1),
-    );
+    let mut reader = std::io::Read::take(ReadAt { file, offset: 0 }, byte_length.saturating_add(1));
     let (actual, calls) = crate::graph_files::checksum_reader(&mut reader, diagnostic)?;
-    if actual != entry.content_xxh64 {
+    if actual != content_xxh64 {
         return Err(GfError::Validation(
             "graph payload XXH64 checksum does not match its inventory".into(),
         ));
     }
     crate::lifecycle_io::record_read(
         crate::StorageIoPhase::HydrationVerification,
-        entry.byte_length,
+        byte_length,
         calls,
     );
     crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);

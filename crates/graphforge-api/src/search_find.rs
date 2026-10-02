@@ -137,6 +137,7 @@ impl GraphForge {
         limit: usize,
         projection: Option<&LabelMemberProjection>,
     ) -> Result<Vec<FusedSearchHit>, GfError> {
+        let inventory = self.property_inventory_for_session();
         let text = query
             .map(|query| {
                 search_graph_native(
@@ -148,6 +149,7 @@ impl GraphForge {
                         vector: None,
                         space: None,
                         limit,
+                        inventory: Some(&inventory),
                     },
                     FindSearchLimits::default(),
                     || Ok(()),

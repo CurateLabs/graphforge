@@ -395,6 +395,7 @@ fn artifact_outcome(error: &SearchArtifactError) -> EmbeddingRefreshOutcomeStatu
         SearchArtifactError::InvalidSelector { .. } => EmbeddingRefreshFailureClass::Incompatible,
         SearchArtifactError::CorruptManifest { .. }
         | SearchArtifactError::CorruptDerivedIndex { .. }
+        | SearchArtifactError::PayloadRefused { .. }
         | SearchArtifactError::CorruptPrimaryVectors { .. } => {
             EmbeddingRefreshFailureClass::Corrupt
         }

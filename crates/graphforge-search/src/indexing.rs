@@ -32,6 +32,9 @@ pub enum SearchIndexRequest<'a> {
         properties: Option<&'a [String]>,
         /// Force atomic replacement even when an exact fresh artifact exists.
         rebuild: bool,
+        /// The caller's admitted property inventory; see
+        /// [`TextIndexRequest::inventory`].
+        inventory: Option<&'a graphforge_storage::AuthenticatedPropertyInventory>,
     },
     /// Insert or replace one UUID-keyed vector.
     Vector {
@@ -84,6 +87,7 @@ where
             label_id,
             properties,
             rebuild,
+            inventory,
         } => {
             let mode = if rebuild {
                 SearchPublicationMode::Replace
@@ -97,6 +101,7 @@ where
                         label,
                         label_id,
                         properties,
+                        inventory,
                     },
                     mode,
                     limits.text,
@@ -104,7 +109,11 @@ where
                 )?),
                 None => prepare_default_text_index(
                     project_dir,
-                    LazyTextRequest { label, label_id },
+                    LazyTextRequest {
+                        label,
+                        label_id,
+                        inventory,
+                    },
                     mode,
                     limits.text,
                     checkpoint,
@@ -196,6 +205,7 @@ mod tests {
             ),
             properties,
             rebuild,
+            inventory: None,
         }
     }
 

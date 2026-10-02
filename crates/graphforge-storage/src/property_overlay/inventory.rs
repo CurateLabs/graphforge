@@ -8,7 +8,8 @@ use super::{AtomicU64, Mutex, Ordering};
 
 use super::{
     AdmittedEdgeFile, Arc, AuthenticatedPropertyFragment, AuthenticatedPropertyInventory, BTreeMap,
-    BTreeSet, Deserialize, File, FragmentHandleGuard, GfError, HashMap, OpenPropertyFragment,
+    BTreeSet, Deserialize, File, FragmentAdmission, FragmentFooter, FragmentHandleGuard, GfError,
+    HashMap, OnceLock, OpenPropertyFragment, RouteSummary, RouteSummaryOutcome,
     PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_LIVE_SCHEMA_FORMAT,
     PROPERTY_LIVE_SCHEMA_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT_KEY,
     PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD, ParquetRecordBatchReaderBuilder, Path, PathBuf,
@@ -72,6 +73,19 @@ impl AuthenticatedPropertyInventory {
         files
     }
 
+    /// Every node-topology and node-property source the manifest names, with its
+    /// declared length and XXH64, sorted by name. Nothing is read: this is the
+    /// freshness identity of the text-search source, and it equals the evidence a
+    /// full read of the same files would produce. `None` when this inventory was
+    /// narrowed to one route and so does not name the node topology.
+    #[must_use]
+    pub fn text_source_files(&self) -> Option<Vec<crate::catalog::AdmittedSourceFile>> {
+        let mut files = self.node_topology_files.clone()?;
+        files.extend(self.admitted_source_files(PropertyRouteKind::Node));
+        files.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        Some(files)
+    }
+
     #[cfg(test)]
     pub(super) fn live_fragment_handles(&self) -> u64 {
         self.handle_counts.live.load(Ordering::SeqCst)
@@ -125,6 +139,27 @@ impl AuthenticatedPropertyInventory {
             return Err(corrupt(
                 "property fragment identity changed after admission",
             ));
+        }
+        if self.admission == FragmentAdmission::FirstTouch {
+            // A generation-leased compact inventory reads the read-only
+            // content-store inode itself, so there is no private copy to make:
+            // the first touch checks the handle's exact length and XXH64, and
+            // the identity is re-checked after, so a replaced object is refused.
+            let work = admit_fragment(fragment, &file)?;
+            if graphforge_filesystem::file_identity(&file).map_err(io_error)? != fragment.identity
+                || file.metadata().map_err(io_error)?.len() != fragment.entry.byte_length
+            {
+                return Err(corrupt(
+                    "property fragment identity changed during admission",
+                ));
+            }
+            return Ok(OpenPropertyFragment {
+                file: Arc::new(file),
+                authentication_bytes: work.bytes,
+                authentication_block_equivalents: work.bytes.div_ceil(64 * 1024),
+                authentication_read_calls: work.read_calls,
+                handle,
+            });
         }
         #[cfg(test)]
         let mutation_barrier = self
@@ -192,9 +227,15 @@ impl AuthenticatedPropertyInventory {
         &mut self,
         paths: &std::collections::HashSet<PathBuf>,
     ) {
-        let Some(root) = &self.root_path else {
+        let Some(root) = self.root_path.clone() else {
             return;
         };
+        // A lazily admitted route summarizes all of its fragments; resolve it
+        // before narrowing so the schema authority does not depend on the subset.
+        let keys = self.routes.keys().cloned().collect::<Vec<_>>();
+        for (kind, route) in keys {
+            let _ = self.route_summary(kind, &route);
+        }
         self.routes.retain(|_, fragments| {
             fragments.retain(|fragment| paths.contains(&root.join(&fragment.physical_relative)));
             !fragments.is_empty()
@@ -385,7 +426,13 @@ impl AuthenticatedPropertyInventory {
             entries.push((entry, relative));
         }
         let mut admitted =
-            Self::admit_read_entries(root, entries, requested_route, table.as_ref())?;
+            Self::admit_read_entries(
+                root,
+                entries,
+                requested_route,
+                table.as_ref(),
+                FragmentAdmission::Eager,
+            )?;
         admitted.edge_routes = edge_routes;
         Ok(admitted)
     }
@@ -450,6 +497,9 @@ impl AuthenticatedPropertyInventory {
                 routes: BTreeMap::new(),
                 edge_routes: BTreeMap::new(),
                 schemas: BTreeMap::new(),
+                route_summaries: BTreeMap::new(),
+                admission: FragmentAdmission::Eager,
+                node_topology_files: Some(Vec::new()),
                 authority_bytes: 0,
                 authority_block_equivalents: 0,
                 authority_read_calls: 0,
@@ -532,8 +582,13 @@ impl AuthenticatedPropertyInventory {
                         Ok((entry, relative.to_path_buf()))
                     })
                     .collect::<Result<Vec<_>, GfError>>()?;
-                let mut admitted =
-                    Self::admit_entries(root, entries, requested_route, route_table.as_ref())?;
+                let mut admitted = Self::admit_entries_as(
+                    root,
+                    entries,
+                    requested_route,
+                    route_table.as_ref(),
+                    FragmentAdmission::FirstTouch,
+                )?;
                 admitted.edge_routes = edge_routes;
                 Ok::<Self, GfError>(admitted)
             }
@@ -580,6 +635,22 @@ impl AuthenticatedPropertyInventory {
         requested_route: Option<(PropertyRouteKind, &str)>,
         route_table: Option<&crate::route_component::RouteTable>,
     ) -> Result<Self, GfError> {
+        Self::admit_entries_as(
+            root_path,
+            entries,
+            requested_route,
+            route_table,
+            FragmentAdmission::Eager,
+        )
+    }
+
+    fn admit_entries_as(
+        root_path: &Path,
+        entries: Vec<(crate::GraphFileEntry, PathBuf)>,
+        requested_route: Option<(PropertyRouteKind, &str)>,
+        route_table: Option<&crate::route_component::RouteTable>,
+        admission: FragmentAdmission,
+    ) -> Result<Self, GfError> {
         let entries = entries
             .into_iter()
             .map(|(entry, path)| {
@@ -594,7 +665,7 @@ impl AuthenticatedPropertyInventory {
                 )
             })
             .collect();
-        Self::admit_read_entries(root_path, entries, requested_route, route_table)
+        Self::admit_read_entries(root_path, entries, requested_route, route_table, admission)
     }
 
     fn admit_read_entries(
@@ -602,12 +673,14 @@ impl AuthenticatedPropertyInventory {
         entries: Vec<(crate::GraphReadFileEntry, PathBuf)>,
         requested_route: Option<(PropertyRouteKind, &str)>,
         route_table: Option<&crate::route_component::RouteTable>,
+        admission: FragmentAdmission,
     ) -> Result<Self, GfError> {
         let root = graphforge_filesystem::StableDirectory::open(root_path).map_err(io_error)?;
         #[cfg(test)]
         let handle_counts = Arc::new(FragmentHandleCounts::default());
         let mut routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>> =
             BTreeMap::new();
+        let mut node_topology_files = Vec::new();
         for (entry, physical_relative) in entries {
             let semantic_path = match route_table {
                 Some(table) => table.semantic_relative_path(&entry.relative_path)?,
@@ -617,6 +690,15 @@ impl AuthenticatedPropertyInventory {
             if entry.role != crate::GraphFileRole::Properties {
                 if parsed.is_some() {
                     return Err(corrupt("property inventory entry has the wrong role"));
+                }
+                if semantic_path == "topology/nodes.parquet"
+                    || semantic_path.starts_with("topology/nodes/")
+                {
+                    node_topology_files.push(crate::catalog::AdmittedSourceFile {
+                        name: semantic_path,
+                        byte_length: entry.byte_length,
+                        content_xxh64: entry.content_xxh64,
+                    });
                 }
                 continue;
             }
@@ -632,13 +714,33 @@ impl AuthenticatedPropertyInventory {
                 &handle_counts,
             );
             let identity = graphforge_filesystem::file_identity(&file).map_err(io_error)?;
-            let (authentication_bytes, authentication_block_equivalents, authentication_read_calls) =
-                authenticate_inventory_file(&file, &entry)?;
-            let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_error)?;
-            let physical_rows = usize::try_from(builder.metadata().file_metadata().num_rows())
-                .map_err(|_| corrupt("property fragment row count is not representable"))?;
-            validate_fragment_schema(builder.schema().as_ref(), id, layout, kind, &route)?;
-            let schema = builder.schema().clone();
+            let footer = OnceLock::new();
+            let mut authentication = (0, 0, 0);
+            match admission {
+                FragmentAdmission::Eager => {
+                    authentication = authenticate_inventory_file(&file, &entry)?;
+                    let decoded = decode_fragment_footer(file, id, layout, kind, &route)?;
+                    footer
+                        .set(Ok(decoded))
+                        .expect("a fresh footer cell is unset");
+                }
+                FragmentAdmission::FirstTouch => {
+                    // Open reads no payload and no footer: the exact length is
+                    // all the manifest can prove without a read. Content is
+                    // admitted when a reader first opens this fragment.
+                    let metadata = file.metadata().map_err(io_error)?;
+                    if !metadata.is_file() || metadata.len() != entry.byte_length {
+                        return Err(corrupt(
+                            "property handle length or kind conflicts with inventory",
+                        ));
+                    }
+                }
+            }
+            let (
+                authentication_bytes,
+                authentication_block_equivalents,
+                authentication_read_calls,
+            ) = authentication;
             let fragments = routes.entry((kind, route)).or_default();
             if fragments.iter().any(|fragment| fragment.id == id) {
                 return Err(corrupt("property inventory contains duplicate authority"));
@@ -649,50 +751,40 @@ impl AuthenticatedPropertyInventory {
                 entry,
                 physical_relative,
                 identity,
-                physical_rows,
-                schema,
+                footer,
+                admitted: OnceLock::new(),
                 authentication_bytes,
                 authentication_block_equivalents,
                 authentication_read_calls,
             });
         }
-        let mut schemas = BTreeMap::new();
+        let mut route_summaries = BTreeMap::new();
         for ((kind, route), fragments) in &mut routes {
             fragments.sort_unstable_by_key(|fragment| fragment.id);
             validate_fragment_id_sequence(fragments.iter().map(|fragment| fragment.id))?;
-            let summary_inputs = fragments
-                .iter()
-                .map(|fragment| (fragment.schema.as_ref(), fragment.physical_rows))
-                .collect::<Vec<_>>();
-            validate_live_schema_sequence(&summary_inputs)?;
-            for fragment in fragments {
-                merge_route_schema(&mut schemas, *kind, route, fragment.schema.as_ref())?;
-            }
-        }
-        let schemas = schemas
-            .into_iter()
-            .map(|(key, mut schema): (_, RouteSchemaBuilder)| {
-                if let Some(latest) = routes.get(&key).and_then(|fragments| fragments.last()) {
-                    apply_authenticated_live_schema(&mut schema, latest.schema.as_ref())?;
+            let summary = OnceLock::new();
+            if admission == FragmentAdmission::Eager {
+                // Footers are already decoded; summarize now so a conflicting
+                // route is refused at admission exactly as before.
+                summary
+                    .set(summarize_route(&root, *kind, route, fragments))
+                    .expect("a fresh summary cell is unset");
+                if let Some(Err(error)) = summary.get() {
+                    return Err(error.clone());
                 }
-                let mut fields = vec![schema.uuid];
-                fields.extend(schema.fields.into_values());
-                Ok((
-                    key,
-                    Arc::new(arrow::datatypes::Schema::new_with_metadata(
-                        fields,
-                        schema.metadata,
-                    )),
-                ))
-            })
-            .collect::<Result<_, GfError>>()?;
+            }
+            route_summaries.insert((*kind, route.clone()), summary);
+        }
         Ok(Self {
             generation_lease: None,
             root: Some(root),
             root_path: Some(root_path.to_path_buf()),
             routes,
             edge_routes: BTreeMap::new(),
-            schemas,
+            schemas: BTreeMap::new(),
+            route_summaries,
+            admission,
+            node_topology_files: requested_route.is_none().then_some(node_topology_files),
             authority_bytes: 0,
             authority_block_equivalents: 0,
             authority_read_calls: 0,
@@ -703,6 +795,27 @@ impl AuthenticatedPropertyInventory {
             #[cfg(test)]
             mutation_barrier: Mutex::new(None),
         })
+    }
+
+    /// The footer-derived summary of one route, computed on first use when the
+    /// route's fragments are admitted lazily and memoized (failures too).
+    pub(super) fn route_summary(
+        &self,
+        kind: PropertyRouteKind,
+        route: &str,
+    ) -> Result<Option<Arc<RouteSummary>>, GfError> {
+        let key = (kind, route.to_owned());
+        let Some(cell) = self.route_summaries.get(&key) else {
+            return Ok(None);
+        };
+        let root = self
+            .root
+            .as_ref()
+            .ok_or_else(|| corrupt("property inventory lacks its retained root capability"))?;
+        let fragments = self.routes.get(&key).map_or(&[][..], Vec::as_slice);
+        cell.get_or_init(|| summarize_route(root, kind, route, fragments))
+            .clone()
+            .map(Some)
     }
 
     /// Admit the writable workspace's current property rows and statistics,
@@ -731,8 +844,12 @@ impl AuthenticatedPropertyInventory {
                 crate::SemanticRouteKind::EdgeProperty => PropertyRouteKind::Edge,
                 _ => continue,
             };
+            let key = (kind, binding.route.clone());
+            if self.route_summaries.contains_key(&key) {
+                continue;
+            }
             self.schemas
-                .entry((kind, binding.route.clone()))
+                .entry(key)
                 .or_insert_with(|| {
                     let schema = arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
                         kind.uuid_field(),
@@ -750,13 +867,21 @@ impl AuthenticatedPropertyInventory {
     }
 
     /// Canonical logical schema authenticated across every fragment in a route.
+    ///
+    /// A route whose footers cannot be summarized has no schema here. That is
+    /// never a silent downgrade: every read of the route resolves the same
+    /// memoized summary through [`Self::route_summary`] and returns its error.
     #[must_use]
     pub fn route_schema(
         &self,
         kind: PropertyRouteKind,
         route: &str,
     ) -> Option<arrow::datatypes::SchemaRef> {
-        self.schemas.get(&(kind, route.to_owned())).cloned()
+        match self.route_summary(kind, route) {
+            Ok(Some(summary)) => Some(Arc::clone(&summary.schema)),
+            Ok(None) => self.schemas.get(&(kind, route.to_owned())).cloned(),
+            Err(_) => None,
+        }
     }
 
     /// Sound upper bound on logical rows for one route.
@@ -766,13 +891,20 @@ impl AuthenticatedPropertyInventory {
     /// is deliberately not advertised as an exact logical count.
     #[must_use]
     pub fn route_row_upper_bound(&self, kind: PropertyRouteKind, route: &str) -> usize {
-        self.routes
-            .get(&(kind, route.to_owned()))
-            .map_or(0, |fragments| {
-                fragments.iter().fold(0usize, |rows, fragment| {
-                    rows.saturating_add(fragment.physical_rows)
-                })
-            })
+        let key = (kind, route.to_owned());
+        let Some(fragments) = self.routes.get(&key) else {
+            return 0;
+        };
+        let Some(root) = self.root.as_ref() else {
+            return 0;
+        };
+        fragments.iter().fold(0usize, |rows, fragment| {
+            // An unreadable footer cannot bound the route; the read that follows
+            // refuses it, so the planning estimate only has to stay sound.
+            let physical_rows = fragment_footer(root, fragment, kind, route)
+                .map_or(usize::MAX, |footer| footer.physical_rows);
+            rows.saturating_add(physical_rows)
+        })
     }
 }
 
@@ -1118,6 +1250,118 @@ fn resolve_versioned_property_entries_for_route(
         selected.push((entry, relative));
     }
     Ok(selected)
+}
+
+/// Decode the footer-derived facts of one fragment and validate its schema.
+fn decode_fragment_footer(
+    file: File,
+    id: PropertyFragmentId,
+    layout: PropertyFragmentLayout,
+    kind: PropertyRouteKind,
+    route: &str,
+) -> Result<FragmentFooter, GfError> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_error)?;
+    let physical_rows = usize::try_from(builder.metadata().file_metadata().num_rows())
+        .map_err(|_| corrupt("property fragment row count is not representable"))?;
+    validate_fragment_schema(builder.schema().as_ref(), id, layout, kind, route)?;
+    Ok(FragmentFooter {
+        physical_rows,
+        schema: builder.schema().clone(),
+    })
+}
+
+/// Footer facts of one fragment, read on first use and memoized with failures.
+///
+/// Only the footer is read, from a handle whose identity and exact length match
+/// the manifest. The bytes are not yet admitted, so a footer that cannot be
+/// decoded is attributed to the content check first: corruption is refused as
+/// corruption, and only a fragment that verifies and still cannot be decoded
+/// reports the decode error.
+fn fragment_footer<'a>(
+    root: &graphforge_filesystem::StableDirectory,
+    fragment: &'a AuthenticatedPropertyFragment,
+    kind: PropertyRouteKind,
+    route: &str,
+) -> Result<&'a FragmentFooter, GfError> {
+    fragment
+        .footer
+        .get_or_init(|| {
+            let file = open_retained_under(root, &fragment.physical_relative)?;
+            if graphforge_filesystem::file_identity(&file).map_err(io_error)? != fragment.identity
+                || file.metadata().map_err(io_error)?.len() != fragment.entry.byte_length
+            {
+                return Err(corrupt(
+                    "property fragment identity changed after admission",
+                ));
+            }
+            let probe = file.try_clone().map_err(io_error)?;
+            decode_fragment_footer(file, fragment.id, fragment.layout, kind, route).or_else(
+                |error| {
+                    admit_fragment(fragment, &probe)?;
+                    Err(error)
+                },
+            )
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+/// First-touch content check of one fragment, memoized for the inventory's life.
+/// Reports the work only to the call that performed it.
+fn admit_fragment(
+    fragment: &AuthenticatedPropertyFragment,
+    file: &File,
+) -> Result<crate::graph_admission::AdmissionWork, GfError> {
+    let mut work = crate::graph_admission::AdmissionWork::default();
+    let outcome = fragment.admitted.get_or_init(|| {
+        crate::graph_admission::admit_against(
+            file,
+            fragment.entry.byte_length,
+            fragment.entry.content_xxh64,
+            &fragment.physical_relative,
+        )
+        .map(|performed| {
+            work = performed;
+        })
+    });
+    outcome.clone().map(|()| work)
+}
+
+/// Merge the footers of one route into its canonical schema, validating the
+/// live-schema sequence and cross-fragment compatibility.
+fn summarize_route(
+    root: &graphforge_filesystem::StableDirectory,
+    kind: PropertyRouteKind,
+    route: &str,
+    fragments: &[AuthenticatedPropertyFragment],
+) -> RouteSummaryOutcome {
+    let footers = fragments
+        .iter()
+        .map(|fragment| fragment_footer(root, fragment, kind, route))
+        .collect::<Result<Vec<_>, GfError>>()?;
+    let inputs = footers
+        .iter()
+        .map(|footer| (footer.schema.as_ref(), footer.physical_rows))
+        .collect::<Vec<_>>();
+    validate_live_schema_sequence(&inputs)?;
+    let mut schemas = BTreeMap::new();
+    for footer in &footers {
+        merge_route_schema(&mut schemas, kind, route, footer.schema.as_ref())?;
+    }
+    let mut schema: RouteSchemaBuilder = schemas
+        .remove(&(kind, route.to_owned()))
+        .ok_or_else(|| corrupt("property route has no schema authority"))?;
+    if let Some(latest) = footers.last() {
+        apply_authenticated_live_schema(&mut schema, latest.schema.as_ref())?;
+    }
+    let mut fields = vec![schema.uuid];
+    fields.extend(schema.fields.into_values());
+    Ok(Arc::new(RouteSummary {
+        schema: Arc::new(arrow::datatypes::Schema::new_with_metadata(
+            fields,
+            schema.metadata,
+        )),
+    }))
 }
 
 fn open_retained_under(

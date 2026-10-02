@@ -51,7 +51,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use arrow::array::{Array, BooleanArray, FixedSizeBinaryArray, RecordBatch};
 use bytes::Bytes;
@@ -178,7 +178,17 @@ pub struct AuthenticatedPropertyInventory {
     root_path: Option<PathBuf>,
     routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>>,
     edge_routes: BTreeMap<String, Vec<AdmittedEdgeFile>>,
+    /// Semantic owners that have no fragment yet; routes with fragments are
+    /// described by `route_summaries`.
     schemas: BTreeMap<(PropertyRouteKind, String), arrow::datatypes::SchemaRef>,
+    /// Footer-derived schema and row bound of each route that has fragments.
+    /// Filled at admission when fragments are authenticated eagerly, and on the
+    /// first touch of the route when they are admitted lazily.
+    route_summaries: BTreeMap<(PropertyRouteKind, String), OnceLock<RouteSummaryOutcome>>,
+    admission: FragmentAdmission,
+    /// Node-topology objects named by the manifest. Present only when the
+    /// inventory covers the whole graph rather than one requested route.
+    node_topology_files: Option<Vec<crate::catalog::AdmittedSourceFile>>,
     authority_bytes: u64,
     authority_block_equivalents: u64,
     authority_read_calls: u64,
@@ -220,6 +230,33 @@ pub struct PropertyInventoryOpenMetrics {
     pub authentication_read_calls: u64,
 }
 
+/// When a fragment's bytes are checked against the manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FragmentAdmission {
+    /// At admission, and again by a private snapshot copy on every read. Raw
+    /// workspaces, whose files writers replace in place of an immutable object.
+    Eager,
+    /// Admission checks exact length only. Content (exact length and XXH64) is
+    /// checked on the first read of each fragment, memoized for the life of the
+    /// inventory, and a read-only content-store inode is read directly.
+    FirstTouch,
+}
+
+/// Footer facts of one fragment, which the manifest does not carry.
+#[derive(Debug)]
+struct FragmentFooter {
+    physical_rows: usize,
+    schema: arrow::datatypes::SchemaRef,
+}
+
+/// Schema and row bound of one route, derived from its fragments' footers.
+#[derive(Debug)]
+struct RouteSummary {
+    schema: arrow::datatypes::SchemaRef,
+}
+
+type RouteSummaryOutcome = Result<Arc<RouteSummary>, GfError>;
+
 #[derive(Debug)]
 struct AuthenticatedPropertyFragment {
     id: PropertyFragmentId,
@@ -227,8 +264,9 @@ struct AuthenticatedPropertyFragment {
     entry: crate::GraphReadFileEntry,
     physical_relative: PathBuf,
     identity: graphforge_filesystem::FileIdentity,
-    physical_rows: usize,
-    schema: arrow::datatypes::SchemaRef,
+    footer: OnceLock<Result<FragmentFooter, GfError>>,
+    /// First-touch content check; unused when admitted eagerly.
+    admitted: OnceLock<Result<(), GfError>>,
     authentication_bytes: u64,
     authentication_block_equivalents: u64,
     authentication_read_calls: u64,
