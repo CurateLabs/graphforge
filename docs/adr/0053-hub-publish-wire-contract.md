@@ -1,7 +1,7 @@
 ---
 title: "ADR 0053: Hub publish wire contract"
 adr: "0053"
-status: "Proposed"
+status: "Accepted"
 date: "2026-10-02"
 superseded_by: null
 revisit_when: "The control-plane publish session shape, data-plane upload URL policy, or ref precondition encoding needs a breaking wire change"
@@ -9,12 +9,15 @@ revisit_when: "The control-plane publish session shape, data-plane upload URL po
 
 # ADR 0053: Hub publish wire contract
 
-**Status:** Proposed. It becomes Accepted when `gf publish` ships on this contract.
+**Status:** Accepted. `gf publish` ships on this contract.
 
 **Implementation:** `graphforge-hub-publish` holds the `graphforge-hub-publish/1`
 documents, error classification, request commitment, and `ReferenceHub`, an
-in-memory implementation of the whole mapping below. The CLI, Python, and Node
-surfaces follow.
+in-memory implementation of the whole mapping below. `gf publish`
+(`crates/graphforge-cli/src/hub_publish.rs`) is the client; it shares HTTPS
+plumbing with `gf clone` (`hub_http.rs`) and discovery derivation with the Hub
+fixture generator (`hub_publication.rs`). Python and Node reach it through the
+same Rust CLI entry point as `gf clone`.
 
 **Related:** #1749, #1748, #906, ADR 0021 (portable project v2), ADR 0030 (portable OCI boundary), ADR 0038 (determinism at the publication boundary), ADR 0039 (research version publication), ADR 0045 (ingest authentication regime), ADR 0049 (published payload checksums), `graphforge-discovery` (clone/read contract).
 
@@ -39,6 +42,7 @@ Schemas for every document are in
 | Request | Auth | Success | Purpose |
 | --- | --- | --- | --- |
 | `GET {repo}/.gf/publish` | none | `200` capabilities | Format, required capabilities, credential endpoints, object location template, limits |
+| `GET {repo}/.gf/publish/operations/{operation_uuid}` | bearer | `200` operation status, `404` unknown | Classify a retry before deriving any package |
 | `POST {repo}/.gf/publish/sessions` | bearer | `201` open, `200` resumed open or complete | Open (or resume, or replay) a publish session |
 | `HEAD <upload_url>` | capability URL | `200`, `Upload-Offset`, `Upload-Length` | Bytes the Hub retained |
 | `PUT <upload_url>` + `Content-Range: bytes a-b/len` | capability URL | `200` upload status, `Upload-Offset` | Append at the retained offset |
@@ -57,8 +61,16 @@ implement), `capabilities` (optional), `authorization`
 paths. A client fails `unsupported_future` on an unknown format major or
 required capability before any other request.
 
+**Operation status.** `{format, operation_uuid, repository, intent_digest,
+receipt}` for an operation opened in this repository; `receipt` is `null` until
+the operation commits, then the original receipt. A client calls it before
+deriving any package: a different `intent_digest` is `idempotency_conflict`, and
+a present receipt is the result of a retry, so a rerun of a committed
+publication uploads nothing.
+
 **Session open.** The body is `{format, operation_uuid, request_commitment,
-repository, objects: [{digest, length, media_type}], requirements?}` with objects
+intent_digest, repository, objects: [{digest, length, media_type}],
+requirements?}` with objects
 strictly ascending by canonical lowercase digest. The Hub checks, in order and
 before any state change: bearer token; body size; `format` and `requirements`
 (unknown → `unsupported_future`); structure; repository equals the URL; declared
@@ -99,11 +111,23 @@ create an absent repository. Under one critical section the Hub:
 Any failure leaves refs, objects, and receipts unchanged.
 
 **Request commitment.** `request_commitment` is the SHA-256 of the canonical
-JSON (compact, members sorted) of `{format, repository, objects,
+JSON (compact, members sorted) of `{format, repository, intent_digest, objects,
 manifest_validator, refs, expected_revision}`, where `manifest_validator` is the
 discovery manifest's canonical digest. `PublishIntent::request_commitment`
 computes it. The client derives it before opening, so the object location
 template comes from the capabilities document.
+
+**Intent digest.** The commitment binds bytes and the expected revision, which a
+retry after a commit cannot reproduce (the revision has moved). `intent_digest`
+is a client-defined digest of *what* the operation publishes, independent of
+package bytes; the Hub stores it per operation, the commitment binds it, and the
+operation status returns it. `gf publish` uses the SHA-256 of the canonical JSON
+`{format: "graphforge-hub-publish-intent/1", repository, ref, version_uuid,
+version_identity, project_uuid, fork_of}`. Its default operation UUID is
+`hub_publish_operation(repository, ref, version_uuid)`, so publishing the same
+Version to the same ref again replays the original receipt, and an explicit
+`--operation-uuid` reused for another Version fails `GF_IDEMPOTENCY_CONFLICT`
+before any export.
 
 **Revision.** A repository's revision is the SHA-256 of its canonical `.gf/refs`
 document. It is the `ETag` of `.gf/refs` and the value of `expected_revision`.
@@ -116,7 +140,33 @@ manifest_validator, refs, previous_revision, revision}`.
 `expected_revision: null`; create-if-absent never overwrites. Its origin citation
 travels in the research lineage document (#1748), uploaded as an ordinary
 inventory object and referenced by the manifest. The Hub stores it verbatim and never
-interprets it.
+interprets it. Before uploading, `gf publish --fork-of` reads the origin
+repository's published lineage and fails `integrity_failure` unless it lists the
+cited origin Version with the same Project and identity digest.
+
+### Client snapshot
+
+`gf publish <owner/repo> (--ref <branch> | --version-uuid <uuid>)` derives the
+whole next snapshot locally:
+
+- **Packages.** The selected Version's research package
+  (`export_research`, bundled), the Project package, the Project summary, one
+  component-selective package per ontology module, and the lineage document,
+  each verified after export. The Project package uses the
+  `DataComponents` profile: `export_portable_v2` with `Complete` refuses a
+  Project with research Branches (portable research cannot carry operational
+  heads), research travels only through the research interchange packages, and
+  `gf clone --ref` / `--version-uuid` fetch those Version packages, never the
+  Project package.
+- **Lineage.** `build_research_lineage_for_discovery` emits the selected Branch
+  (named by `--ref`, matched to the local Branch label) and Version. Versions,
+  Branches, and Proposals already published in the repository's lineage carry
+  forward unchanged; their objects are already admitted, so they upload nothing.
+- **Refs.** Every Branch ref the lineage describes, the default ref, and the
+  resolved ref advance together to the new manifest, because one lineage
+  document describes exactly one snapshot. `expected_revision` is the revision
+  the client read, or `null` when the repository is absent. A first publication
+  needs `--ref`; its ref becomes the default ref.
 
 ### Credentials
 
@@ -131,13 +181,23 @@ RFC 6749 `{error}` bodies; every other endpoint uses `{code, message}`.
 The token is held only in memory (`PublishToken` has no `Display`, `Serialize`,
 or revealing `Debug`). It is never written to project files, configuration
 participants, or logs. A CI job passes a token in `GRAPHFORGE_HUB_PUBLISH_TOKEN`
-instead of running the device flow. Every control-plane write checks the bearer
-token's expiry and its scope against the URL repository.
+instead of running the device flow. `gf publish` runs the device flow only when
+standard input and standard error are terminals; a captured invocation (the
+Python and Node CLI shims) without that variable fails `auth_denied` before any
+network request. The client sends the bearer only to the repository's own origin,
+never to OAuth endpoints, upload URLs, or public reads. Every control-plane
+request checks the bearer token's expiry and its scope against the URL
+repository.
 
 ### Errors
 
 Every non-OAuth error body is `{code, message}`. `message` is a fixed string
-chosen by the Hub; it never echoes request input, tokens, or upload URLs.
+chosen by the Hub; it never echoes request input, tokens, or upload URLs. `gf
+publish` branches only on `code` and prints its own fixed text, so a Hub message
+never reaches CLI output. `GF_IDEMPOTENCY_CONFLICT` exits 1, `internal` and
+transport failures (`hub.network`) exit 3, and every other code exits 2 with the
+`hub.publish.*` code as the JSON `semantic_code`; an unsafe Hub, OAuth, or upload
+URL is `hub.unsafe_location`.
 
 | `code` | Default status | Other statuses | GraphForge code |
 | --- | --- | --- | --- |

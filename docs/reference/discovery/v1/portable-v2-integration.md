@@ -128,7 +128,9 @@ does not publish or materialize a project, so a failed cross-contract check cann
 leave partially accepted project state. `gf clone --ref <branch>` and
 `gf clone --version-uuid <uuid>` run it before importing, then derive the import
 operation from the repository snapshot, the selected Version UUID, and its
-identity digest.
+identity digest. `gf publish` (see the
+[publish reference](../../hub-publish/v1/README.md#gf-publish)) produces these
+documents and packages.
 
 ## Exact module fetch
 

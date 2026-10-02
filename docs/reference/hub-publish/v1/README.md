@@ -22,6 +22,43 @@ The schemas describe wire shape. Rules a schema cannot express (canonical
 ordering, the request commitment, the commit order, limits, and the closed
 required-capability set) stay authoritative in Rust.
 
+## `gf publish`
+
+```bash
+gf --project <dir> publish <owner/repository | https://hub/owner/repository> \
+    (--ref <branch-label> | --version-uuid <uuid>) \
+    [--fork-of <owner/repository | URL>] [--operation-uuid <uuid>] [--json]
+```
+
+`--ref` publishes the head of the local research Branch with that label under
+the same discovery ref; `--version-uuid` publishes one exact retained Version
+into an existing repository. `--fork-of` creates a new repository for a Fork
+Project and cites its origin, after checking that the origin repository
+publishes the cited Version with the same identity. The repository argument
+follows `gf clone`: `owner/repository` resolves against `https://graphforge.sh`,
+or pass the HTTPS repository URL.
+
+Credentials come from `GRAPHFORGE_HUB_PUBLISH_TOKEN` or, in a terminal, the
+device flow (instructions on standard error). The token is never written to the
+Project, configuration, or output. Rerunning a publication replays its original
+receipt without uploading; an interrupted upload resumes from the Hub's offset.
+`--json` prints the receipt.
+
+| Failure | Code | Exit |
+| --- | --- | --- |
+| Missing, refused, or denied credential | `hub.publish.auth_denied` | 2 |
+| Quota or entitlement refused | `hub.publish.entitlement_denied` | 2 |
+| Operation reused for another publication | `GF_IDEMPOTENCY_CONFLICT` | 1 |
+| Repository moved since it was read; Fork target exists | `hub.publish.ref_conflict` | 2 |
+| Unsupported protocol major or capability | `hub.publish.unsupported_future` | 2 |
+| Bytes disagree with digest or length; Fork origin not published | `hub.publish.integrity_failure` | 2 |
+| Invalid selection or request | `hub.publish.invalid_input` | 2 |
+| Non-HTTPS, credentialed, or private-address URL | `hub.unsafe_location` | 2 |
+| Transport failure or Hub internal error | `hub.network`, `hub.publish.internal` | 3 |
+
+[ADR 0053](../../../adr/0053-hub-publish-wire-contract.md#client-snapshot)
+records how the client builds the snapshot.
+
 ## Conformance corpus
 
 `conformance.json` (`graphforge-hub-publish-conformance/1`) lists cases. Each
