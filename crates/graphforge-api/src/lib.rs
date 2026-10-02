@@ -309,13 +309,13 @@ mod write_modes;
 
 pub use graphforge_core::portable::{
     PortableV2Authenticity, PortableV2Compatibility, PortableV2Error, PortableV2ErrorCode,
-    PortableV2ExportProgress, PortableV2GraphSelector, PortableV2GraphSubsetMeta,
-    PortableV2Integrity, PortableV2Limits, PortableV2Mode, PortableV2Output,
-    PortableV2PackageClass, PortableV2ParticipantId, PortableV2PropertyProjection,
-    PortableV2Representation, PortableV2SelectionEntry, PortableV2SelectionPlan,
-    PortableV2SelectionProfile, PortableV2SelectionReason, PortableV2SelectionRequest,
-    PortableV2SubsetClosure, PortableV2SubsetPreview as PortableV2SubsetPlan,
-    PortableV2SubsetRequest,
+    PortableV2ExactIdentity, PortableV2ExportProgress, PortableV2GraphSelector,
+    PortableV2GraphSubsetMeta, PortableV2Integrity, PortableV2Limits, PortableV2Mode,
+    PortableV2Output, PortableV2PackageClass, PortableV2ParticipantId,
+    PortableV2PropertyProjection, PortableV2Representation, PortableV2SelectionEntry,
+    PortableV2SelectionPlan, PortableV2SelectionProfile, PortableV2SelectionReason,
+    PortableV2SelectionRequest, PortableV2SubsetClosure,
+    PortableV2SubsetPreview as PortableV2SubsetPlan, PortableV2SubsetRequest,
 };
 pub use graphforge_core::storage_receipt::{
     ArtifactCategory, ArtifactStorageTotals, StorageAttributionReceipt,
