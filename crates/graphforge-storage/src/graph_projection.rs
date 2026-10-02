@@ -431,6 +431,7 @@ fn project_property_directory(
     selected: &BTreeSet<[u8; 16]>,
     exclude_properties: &BTreeSet<String>,
 ) -> Result<(), GfError> {
+    let target = fs::canonicalize(target).map_err(storage)?;
     let kind = if edge {
         crate::PropertyRouteKind::Edge
     } else {
@@ -450,17 +451,28 @@ fn project_property_directory(
         let combined = concat_batches(&schema, &batches).map_err(storage)?;
         let projected = select_projected_rows(&combined, key, selected, exclude_properties)?;
         let snapshot = property_snapshot_fragment(&projected, kind, route)?;
-        let fragments = crate::property_overlay::split_into_fragments(&snapshot, 0)?;
+        let mut fragments = crate::property_overlay::split_into_fragments(&snapshot, 0)?;
         if fragments.len() <= 1 {
-            // Within the fixed fragment cap: the legacy flat complete snapshot.
-            write_parquet(
-                &target.join(encode_transform_path(
-                    &format!("{directory}/{route}.parquet"),
-                    table,
-                )?),
-                &projected,
-            )?;
-            continue;
+            // Decide from the complete encoding, including schema and footer.
+            // A large flat snapshot uses the canonical nested route before
+            // framing, so sidecar names cannot collide with legacy route names.
+            let path = target.join(encode_transform_path(
+                &format!("{directory}/{route}.parquet"),
+                table,
+            )?);
+            let mut staged = crate::staging::RewriteBatch::new();
+            staged.stage_batches(&path, projected.schema(), std::iter::once(Ok(projected)))?;
+            let bytes = fs::metadata(staged.staged_temp(&path).expect("staged projection"))
+                .map_err(storage)?
+                .len();
+            if bytes <= crate::property_overlay::bounded_object::MAX_PROPERTY_OBJECT_BYTES as u64 {
+                staged.commit_at(&target)?;
+                continue;
+            }
+            drop(staged);
+            if fragments.is_empty() {
+                fragments.push(snapshot);
+            }
         }
         // Over the cap: capped immutable fragments, generation zero, so the
         // projected route never carries one unbounded file (#1388).
@@ -469,13 +481,17 @@ fn project_property_directory(
                 generation: 0,
                 ordinal: ordinal as u64,
             };
-            write_parquet(
-                &target.join(encode_transform_path(
-                    &format!("{directory}/{route}/{}", id.file_name()),
-                    table,
-                )?),
-                fragment,
+            let path = target.join(encode_transform_path(
+                &format!("{directory}/{route}/{}", id.file_name()),
+                table,
+            )?);
+            let mut staged = crate::staging::RewriteBatch::new();
+            staged.stage_property_batches(
+                &path,
+                fragment.schema(),
+                std::iter::once(Ok(fragment.clone())),
             )?;
+            staged.commit_at(&target)?;
         }
     }
     Ok(())
@@ -721,9 +737,12 @@ fn selected_catalog_rows(target: &Path, catalog: &RecordBatch) -> Result<Vec<usi
     }
 
     let mut property_names = BTreeSet::new();
-    for directory in ["properties", "edge_properties"] {
-        for path in sorted_parquet_files(&target.join(directory))? {
-            let batches = read_parquet(&path)?;
+    for (kind, edge) in [
+        (crate::PropertyRouteKind::Node, false),
+        (crate::PropertyRouteKind::Edge, true),
+    ] {
+        for route in authority.properties.routes(kind) {
+            let batches = authority.property_batches(target, route, edge)?;
             if batches.iter().all(|batch| batch.num_rows() == 0) {
                 continue;
             }

@@ -197,6 +197,23 @@ pub fn capture_graph_files(
     Ok((inventory, participant))
 }
 
+/// Capture private graph files while polling the caller before each file's
+/// authentication. Existing callers retain their uncancelled capture behavior.
+pub(crate) fn capture_graph_files_with_cancellation(
+    source_root: &Path,
+    mut check_cancelled: impl FnMut() -> Result<(), GfError>,
+) -> Result<GraphFilesInventory, GfError> {
+    check_cancelled()?;
+    build_inventory_for_owned_layout(
+        source_root,
+        false,
+        None,
+        ARTIFACT_IDENTITY,
+        &mut check_cancelled,
+    )
+    .map(|(inventory, _)| inventory)
+}
+
 /// Encode inventory bytes as the registered `graph`/`files` participant.
 pub fn inventory_participant(
     bytes: Vec<u8>,
@@ -755,7 +772,7 @@ pub fn infer_role(relative: &Path) -> GraphFileRole {
 }
 
 fn build_inventory(source_root: &Path) -> Result<(GraphFilesInventory, u64), GfError> {
-    build_inventory_for_owned_layout(source_root, false, None, ARTIFACT_IDENTITY)
+    build_inventory_for_owned_layout(source_root, false, None, ARTIFACT_IDENTITY, &mut || Ok(()))
 }
 
 const ARTIFACT_IDENTITY: graphforge_core::hash_observation::HashDomain =
@@ -780,7 +797,8 @@ pub(crate) fn capture_graph_files_reusing_digests(
     known: &std::collections::HashMap<String, KnownGraphFile>,
     domain: graphforge_core::hash_observation::HashDomain,
 ) -> Result<(GraphFilesInventory, ProjectParticipant), GfError> {
-    let (inventory, _) = build_inventory_for_owned_layout(source_root, false, Some(known), domain)?;
+    let (inventory, _) =
+        build_inventory_for_owned_layout(source_root, false, Some(known), domain, &mut || Ok(()))?;
     let bytes = encode_inventory(&inventory)?;
     let participant = inventory_participant(bytes, inventory.file_count)?;
     Ok((inventory, participant))
@@ -791,7 +809,7 @@ pub(crate) fn capture_graph_files_reusing_digests(
 pub(crate) fn capture_owned_route_migration_inventory(
     source_root: &Path,
 ) -> Result<GraphFilesInventory, GfError> {
-    build_inventory_for_owned_layout(source_root, true, None, ARTIFACT_IDENTITY)
+    build_inventory_for_owned_layout(source_root, true, None, ARTIFACT_IDENTITY, &mut || Ok(()))
         .map(|(inventory, _)| inventory)
 }
 
@@ -800,6 +818,7 @@ fn build_inventory_for_owned_layout(
     admit_raw_routes: bool,
     reuse: Option<&std::collections::HashMap<String, KnownGraphFile>>,
     domain: graphforge_core::hash_observation::HashDomain,
+    check_cancelled: &mut dyn FnMut() -> Result<(), GfError>,
 ) -> Result<(GraphFilesInventory, u64), GfError> {
     let mut paths = Vec::new();
     collect_source_files(source_root, &mut paths)?;
@@ -825,6 +844,7 @@ fn build_inventory_for_owned_layout(
     let mut read_calls = 0_u64;
     let mut seen = HashSet::new();
     for (relative_text, path) in paths {
+        check_cancelled()?;
         let relative = path
             .strip_prefix(source_root)
             .map_err(|_| validation("graph file path escaped workspace"))?;
@@ -1774,6 +1794,37 @@ fn storage(action: &str, path: &Path, error: impl std::fmt::Display) -> GfError 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cancellable_capture_stops_between_payload_files() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("properties")).unwrap();
+        fs::write(root.path().join("properties/A.parquet"), b"first").unwrap();
+        fs::write(root.path().join("properties/B.parquet"), b"second").unwrap();
+        crate::payload_digest::take_hashed_bytes();
+        let mut polls = 0;
+        let error = capture_graph_files_with_cancellation(root.path(), || {
+            polls += 1;
+            if polls == 3 {
+                Err(GfError::Api {
+                    code: graphforge_core::ApiErrorCode::Cancelled,
+                    message: "verification cancelled".to_owned(),
+                })
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            GfError::Api {
+                code: graphforge_core::ApiErrorCode::Cancelled,
+                ..
+            }
+        ));
+        assert_eq!(polls, 3);
+        assert_eq!(crate::payload_digest::take_hashed_bytes(), 5);
+    }
+
     #[test]
     fn checksum_inventory_requires_versioned_metadata_and_admits_without_payload_sha256() {
         let root = tempfile::tempdir().unwrap();

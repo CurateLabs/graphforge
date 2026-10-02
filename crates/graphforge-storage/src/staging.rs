@@ -379,6 +379,80 @@ impl RewriteBatch {
         Ok(())
     }
 
+    /// Stage one logical property fragment as bounded physical objects.
+    pub(crate) fn stage_property_batches<I>(
+        &mut self,
+        final_path: &Path,
+        schema: SchemaRef,
+        batches: I,
+    ) -> Result<(), GfError>
+    where
+        I: IntoIterator<Item = Result<RecordBatch, GfError>>,
+    {
+        let tmp = stage_parquet_batches_temp(final_path, schema, batches)?;
+        if tmp
+            .as_file()
+            .metadata()
+            .map_err(|error| io_err(&error))?
+            .len()
+            <= crate::property_overlay::bounded_object::MAX_PROPERTY_OBJECT_BYTES as u64
+        {
+            if self.staged.iter().any(|(_, path)| path == final_path) {
+                return Err(GfError::Storage(format!(
+                    "destination staged twice in one rewrite batch: {}",
+                    final_path.display()
+                )));
+            }
+            self.staged.push((tmp, final_path.to_path_buf()));
+            return Ok(());
+        }
+        self.stage_property_file(final_path, tmp.path())
+    }
+
+    /// Reframe a closed property file without exposing its oversized encoding.
+    pub(crate) fn stage_property_file(
+        &mut self,
+        final_path: &Path,
+        source: &Path,
+    ) -> Result<(), GfError> {
+        use crate::property_overlay::bounded_object::{
+            MAX_PROPERTY_OBJECT_BYTES, encode_parts, part_path,
+        };
+        let mut input = std::fs::File::open(source).map_err(|error| io_err(&error))?;
+        let length = input.metadata().map_err(|error| io_err(&error))?.len();
+        if length <= MAX_PROPERTY_OBJECT_BYTES as u64 {
+            return self.stage_file(final_path, source);
+        }
+        let parent = final_path
+            .parent()
+            .ok_or_else(|| GfError::Storage("staged property file has no parent".into()))?;
+        std::fs::create_dir_all(parent).map_err(|error| io_err(&error))?;
+        let mut parts = Vec::new();
+        encode_parts(&mut input, length, |index, bytes| {
+            let destination = part_path(final_path, index);
+            self.refuse_move_replacement(&destination)?;
+            if self.staged.iter().any(|(_, path)| path == &destination) {
+                return Err(GfError::Storage(format!(
+                    "destination staged twice in one rewrite batch: {}",
+                    destination.display()
+                )));
+            }
+            let name = destination.file_name().ok_or_else(|| {
+                GfError::Storage("staged property object has no file name".into())
+            })?;
+            let mut temporary = tempfile::Builder::new()
+                .prefix(&format!("{}.", name.to_string_lossy()))
+                .suffix(".tmp")
+                .tempfile_in(parent)
+                .map_err(|error| io_err(&error))?;
+            std::io::Write::write_all(&mut temporary, &bytes).map_err(|error| io_err(&error))?;
+            parts.push((temporary, destination));
+            Ok(())
+        })?;
+        self.staged.extend(parts);
+        Ok(())
+    }
+
     /// Stage `batch` for `final_path`, **replacing** any prior staged content
     /// for the same destination at its original commit position; stages like
     /// [`stage`](Self::stage) when the destination is new to this batch.

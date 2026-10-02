@@ -2185,7 +2185,7 @@ fn write_surrogate_tails(
     .map_err(storage)?;
     let cache_window =
         graphforge_filesystem::cache_release_window_for_streams(1).map_err(storage)?;
-    artifacts.push(write_parquet(
+    artifacts.extend(write_parquet(
         output,
         "topology/surrogate_tails.parquet",
         &batch,
@@ -2203,7 +2203,7 @@ fn write_parquet(
     cache_window: std::num::NonZeroU64,
     evidence: &mut GraphConstructionEncodingEvidence,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<ConstructionEncodedArtifact, GfError> {
+) -> Result<Vec<ConstructionEncodedArtifact>, GfError> {
     lanes::write_parquet_chunks(
         root,
         relative,

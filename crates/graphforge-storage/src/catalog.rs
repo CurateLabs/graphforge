@@ -797,14 +797,20 @@ fn preflight_parquet_handle(file: &mut File, length: u64) -> Result<(), DataFusi
     file.seek(SeekFrom::Start(0)).map_err(|e| io_err(&e))?;
     let mut leading = [0_u8; 4];
     file.read_exact(&mut leading).map_err(|e| io_err(&e))?;
-    if &leading != b"PAR1" {
+    file.seek(SeekFrom::End(-8)).map_err(|e| io_err(&e))?;
+    let mut footer = [0_u8; 8];
+    file.read_exact(&mut footer).map_err(|e| io_err(&e))?;
+    admit_parquet_edges(&leading, &footer, length)?;
+    file.seek(SeekFrom::Start(0)).map_err(|e| io_err(&e))?;
+    Ok(())
+}
+
+fn admit_parquet_edges(leading: &[u8], footer: &[u8], length: u64) -> Result<(), DataFusionError> {
+    if leading != b"PAR1" {
         return Err(DataFusionError::Execution(
             "Parquet leading magic is invalid".into(),
         ));
     }
-    file.seek(SeekFrom::End(-8)).map_err(|e| io_err(&e))?;
-    let mut footer = [0_u8; 8];
-    file.read_exact(&mut footer).map_err(|e| io_err(&e))?;
     let metadata_len = u64::from(u32::from_le_bytes(footer[..4].try_into().unwrap()));
     if &footer[4..] != b"PAR1"
         || metadata_len > MAX_ADMITTED_PARQUET_METADATA_BYTES
@@ -816,8 +822,26 @@ fn preflight_parquet_handle(file: &mut File, length: u64) -> Result<(), DataFusi
             "Parquet metadata exceeds admission limit".into(),
         ));
     }
-    file.seek(SeekFrom::Start(0)).map_err(|e| io_err(&e))?;
     Ok(())
+}
+
+/// Apply the same storage admission policy to a logical Parquet source whose
+/// authenticated physical objects may be segmented.
+pub(crate) fn admitted_parquet_source<T: parquet::file::reader::ChunkReader + 'static>(
+    source: T,
+) -> Result<ParquetRecordBatchReaderBuilder<T>, DataFusionError> {
+    let length = source.len();
+    if length < 12 {
+        return Err(DataFusionError::Execution(
+            "Parquet footer is truncated".into(),
+        ));
+    }
+    let leading = source.get_bytes(0, 4).map_err(parquet_err)?;
+    let footer = source.get_bytes(length - 8, 8).map_err(parquet_err)?;
+    admit_parquet_edges(&leading, &footer, length)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_err)?;
+    admit_decoded_parquet(&builder)?;
+    Ok(builder)
 }
 
 fn admit_decoded_parquet<T: parquet::file::reader::ChunkReader + 'static>(

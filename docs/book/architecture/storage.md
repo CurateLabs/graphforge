@@ -435,23 +435,39 @@ authenticated targeted batch lookup for the window's UUID set, with the same
 zero-per-record-seek scanner; sealing consumes those complete staged rows and
 does not read historical fragments again.
 
-A fragment has a fixed maximum size, set at write time like a CSR shard: at
-most `MAX_PROPERTY_FRAGMENT_ROWS` (65,536) rows and `MAX_PROPERTY_FRAGMENT_BYTES`
-(4 MiB) of logical bytes, counted as Arrow value, offset and presence bytes of
-the rows, a pure function of the rows and not of the encoder. Zstd output is no
-larger than its input, so first-touch admission of one fragment reads
-approximately that much (page headers, dictionary pages, zstd framing and the
-footer add a little); typical property data encodes to about half, the size of
-one full CSR shard (about 1.7 MiB). Construction, ordinary SET/REMOVE windows,
-delta replay and graph projection (research-version, subset-export and
-interchange repack; a route that fits stays one flat snapshot, a larger one
-becomes generation-zero fragments) all cut at the cap in UUID order, giving dense ordinals from
-zero within a generation and disjoint UUID ranges per fragment, so the same
-rows always cut at the same places. A single row larger than the cap is a
-fragment of its own. The cap is a format constant, not a session budget.
-Readers do not enforce it: a project written before the cap keeps its oversized
-fragments readable, and they stay as written until a later write supersedes
-their UUIDs, because no operation re-cuts a historical property fragment.
+Writers cut logical fragments in UUID order at `MAX_PROPERTY_FRAGMENT_ROWS`
+(65,536) and `MAX_PROPERTY_FRAGMENT_BYTES` (4 MiB of Arrow value, offset and
+presence bytes). These boundaries give dense ordinals and disjoint UUID ranges
+within a generation. A row larger than the logical target stays intact: the
+target does not impose a new limit on valid property values.
+
+The separate physical bound is `MAX_PROPERTY_OBJECT_BYTES` (4 MiB), including
+all Parquet headers, pages, schema metadata and footer. Writers check the final
+encoded size; compression is not assumed to shrink its input. An oversized
+logical Parquet stream is split into fixed-size byte segments, each stored in
+a valid Parquet envelope with the `graphforge.property_object=1` marker,
+logical length, part count and part index. The first object uses the canonical
+fragment filename; later objects append `.part-<20-digit-index>.parquet`.
+The envelope has a fixed schema and is uncompressed, so it adds no second
+compression pass. Every completed envelope is checked against the physical
+bound before publication.
+
+Parts share one logical fragment identity. The authenticated inventory owns
+the complete ordered part set, and the shared property byte reader exposes the
+original Parquet stream to existing Arrow decoders. It loads only requested
+ranges, retains at most one decoded part, and verifies every physical object
+through existing manifest checksums. Missing, duplicate or inconsistent parts
+are corruption. Logical fingerprints and query results use decoded values,
+never envelope rows. Reading a large requested value necessarily reads all of
+its parts; storage chunking does not remove existing query resource budgets.
+
+Construction, SET/REMOVE windows, delta replay and graph projection use this
+publication boundary. Oversized projected flat snapshots become canonical
+generation-zero fragments. Existing plain Parquet files remain readable,
+including oversized files written before the cap; portable copies preserve
+their representation. Newly encoded objects use the bounded representation.
+Projects containing envelopes require an envelope-aware reader; older readers
+do not interpret the envelope's binary payload as property values.
 
 Each fragment also carries the authenticated `graphforge-property-live-schema/1`
 route summary: an exact live-UUID count for every currently present property

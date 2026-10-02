@@ -1,8 +1,8 @@
-//! Fixed maximum size of one property fragment, set at write time (#1388).
+//! Deterministic logical property-fragment boundaries (#1388).
 //!
 //! First-touch admission authenticates a property fragment whole, so an
 //! unbounded fragment makes a bounded property read unbounded. Every writer
-//! therefore cuts its output at this cap, the way the CSR shard writer clamps
+//! therefore cuts its rows at this target, the way the CSR shard writer clamps
 //! at `DEFAULT_CSR_SHARD_EDGES`. The cap is a format constant: it is recorded
 //! in no manifest and does not vary with a session budget, so the same logical
 //! rows always cut at the same places (ADR 0038).
@@ -15,16 +15,17 @@
 //! counted on **logical** bytes, the Arrow value, offset and presence bytes of
 //! the rows, because that measure is a pure function of the rows: it does not
 //! depend on the Parquet encoder, the compression codec or the writer version,
-//! so the cut is reproducible. Zstd output is not larger than its input, so the
-//! encoded fragment stays within the same cap plus the footer; typical property
-//! data encodes to about half of it, which puts one fragment at the size of one
-//! CSR shard. The row cap equals the default construction batch
+//! so the cut is reproducible. It is not an encoded-size bound: compression,
+//! Parquet pages and schema/footer metadata can expand the representation.
+//! `bounded_object` enforces the separate complete physical-object bound after
+//! encoding, preserving large values across authenticated objects. The row cap
+//! equals the default construction batch
 //! (`GraphConstructionBudgets::max_batch_rows`) and bounds the UUID range, the
 //! merge scratch and the decoder state of narrow rows whose byte count alone
 //! would admit hundreds of thousands of them.
 //!
 //! A single row larger than the byte cap cannot be split and becomes a
-//! fragment of its own.
+//! logical fragment of its own; its physical representation is still bounded.
 //!
 //! Fragments written before this cap existed may exceed it. Readers do not
 //! enforce the cap; it constrains only what writers produce.

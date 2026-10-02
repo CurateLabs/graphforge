@@ -151,7 +151,8 @@ fn encode_seam_subprocess() {
             assert_eq!(evidence.output_write_bytes, 0);
         }
         _ => {
-            let artifact = result.unwrap();
+            let artifacts = result.unwrap();
+            let artifact = &artifacts[0];
             assert_eq!(
                 artifact.bytes,
                 std::fs::metadata(path.join("graph/result.parquet"))
