@@ -227,12 +227,31 @@ fn validate_partition_count(partition_count: u32) -> Result<(), GfError> {
     Ok(())
 }
 
-/// Deterministic systematic sampler over the staged identity domain.
+/// Deterministic jittered systematic sampler over the staged identity domain.
 ///
 /// The stride is a pure function of the recorded chunk receipts (the total
 /// staged identity record count) and the recorded partition count, so the
 /// retained sample depends only on the input, never on timing, buffer sizes or
 /// the order in which files happened to be read.
+///
+/// # Why each stride window is sampled at a hashed offset
+///
+/// Positions index the staged domain in receipt order, and every staged chunk
+/// is sorted on its own. A position at a *fixed* offset in each window is
+/// therefore a fixed rank inside each chunk, and when keys are spread over the
+/// whole key space in every chunk (content-derived UUIDs, as the GDC converter
+/// and most real imports produce) that rank lands near the same key in every
+/// chunk. The sample then clumps at a grid of chunk quantiles instead of
+/// following the key distribution, and the partition spanning the gap between
+/// two clumps holds every row in it: graph500-22's 1,016 chunks of 65,536 rows
+/// put 198,060 rows, 12x the mean, in one partition (#1731). Input that arrives
+/// globally sorted, as the Graph500 generator's does, hides this, because
+/// systematic positions over a sorted domain are already even quantiles.
+///
+/// Drawing each window's offset from a fixed hash of the window index keeps
+/// the sample stratified and reproducible while making the rank taken inside a
+/// chunk independent of the chunk's layout, so the sample follows the keys
+/// whatever the run structure.
 ///
 /// Sampling is index-driven rather than streaming: the positions are known
 /// before a byte is read, so the pass seeks to the sample points instead of
@@ -240,7 +259,6 @@ fn validate_partition_count(partition_count: u32) -> Result<(), GfError> {
 /// `O(rows)`.
 pub(crate) struct IdentitySampler {
     stride: u64,
-    offset: u64,
     total: u64,
     cut: u32,
     sample: Vec<[u8; 16]>,
@@ -278,24 +296,24 @@ impl IdentitySampler {
             .saturating_mul(SAMPLE_POINTS_PER_PARTITION)
             .clamp(1, MAX_SAMPLE_POINTS);
         let stride = total_records.div_ceil(target).max(1);
-        // Sample the middle of each stride window rather than its first row, so
-        // a stride that happens to align with chunk boundaries does not bias
-        // the sample toward chunk minima.
-        let offset = stride / 2;
         Ok(Self {
             stride,
-            offset,
             total: total_records,
             cut,
             sample: Vec::new(),
         })
     }
 
-    /// Global record indices to sample, ascending.
+    /// Global record indices to sample, ascending: one per stride window, at
+    /// an offset hashed from the window index (see the type documentation).
+    ///
+    /// Each position lies inside its own window, so the sequence is strictly
+    /// increasing; the first position at or past the domain ends it, because
+    /// every later window starts beyond it.
     pub(crate) fn positions(&self) -> impl Iterator<Item = u64> + use<> {
-        let (offset, stride, total) = (self.offset, self.stride, self.total);
+        let (stride, total) = (self.stride, self.total);
         (0..)
-            .map(move |step| offset + step * stride)
+            .map(move |step| step * stride + window_offset(step) % stride)
             .take_while(move |index| *index < total)
     }
 
@@ -338,6 +356,17 @@ impl IdentitySampler {
     pub(crate) const fn source_records(&self) -> u64 {
         self.total
     }
+}
+
+/// The fixed per-window offset hash behind [`IdentitySampler::positions`]:
+/// the SplitMix64 finalizer, a bijection on `u64`. It is part of how a fresh
+/// shape chooses its splitters, not of any recorded format: a resumed shape
+/// replays the splitters recorded in its intent.
+const fn window_offset(step: u64) -> u64 {
+    let mut value = step.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
 }
 
 /// Measured row counts per partition.

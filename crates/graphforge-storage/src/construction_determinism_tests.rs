@@ -839,6 +839,44 @@ mod determinism {
         );
     }
 
+    /// #1731 end to end: content-derived identities (a SHA-256 prefix with the
+    /// UUIDv7 version and variant bits, as the GDC converter mints them) are
+    /// uniform over the key space, so every staged chunk spans all of it once
+    /// intake sorts the chunk. Eight partitions over 16,384 nodes sample at a
+    /// stride of 32, and chunks of 16 rows put a fixed in-window offset on the
+    /// first, smallest key of every other chunk: the splitters crowded into the
+    /// bottom of the key space and shaping refused the import as skewed.
+    #[test]
+    fn content_derived_identities_staged_in_sorted_chunks_shape_balanced() {
+        use sha2::{Digest, Sha256};
+        let nodes = (0..16_384_u64)
+            .map(|index| {
+                let digest = Sha256::digest(index.to_be_bytes());
+                let mut uuid = [0_u8; 16];
+                uuid.copy_from_slice(&digest[..16]);
+                uuid[6] = (uuid[6] & 0x0f) | 0x70;
+                uuid[8] = (uuid[8] & 0x3f) | 0x80;
+                uuid
+            })
+            .collect::<Vec<_>>();
+        let root = TempDir::new().unwrap();
+        let mut session = pinned_session(&root, 8);
+        append_all(&mut session, &nodes, &[], 16);
+        session.seal().unwrap();
+        session
+            .shape_canonical_with_cancellation(|| false)
+            .expect("balanced content-derived identities must shape");
+        let layout = layout(&session);
+        assert_eq!(layout.partitions, 8);
+        assert_eq!(layout.partitioned_identity_rows, nodes.len() as u64);
+        let mean = layout.partitioned_identity_rows / layout.partitions;
+        assert!(
+            layout.max_partition_identity_rows <= mean * 2,
+            "max={} mean={mean}",
+            layout.max_partition_identity_rows
+        );
+    }
+
     #[test]
     fn identity_partitioning_is_measured_and_balanced_end_to_end() {
         let nodes = node_ids(4_096);
