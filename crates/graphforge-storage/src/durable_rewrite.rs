@@ -1066,6 +1066,11 @@ thread_local! {
     static FAIL_AFTER_DURABLE_INTENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(test)]
+pub(crate) fn inject_error_after_durable_intent() {
+    FAIL_AFTER_DURABLE_INTENT.set(true);
+}
+
 /// Execute bounded maintenance under the same recovered project rewrite lock.
 pub(crate) fn with_rewrite_lock<T>(
     root: &Path,

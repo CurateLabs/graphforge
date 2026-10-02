@@ -254,6 +254,48 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     #[test]
+    fn authenticated_roll_forward_installs_committed_topology_membership() {
+        let root = tempfile::tempdir().unwrap();
+        let authority = TopologyFileAuthority::discover_legacy(root.path()).unwrap();
+        let mut writer = crate::GraphWriter::open_with_topology(
+            root.path(),
+            graphforge_core::OntologyMode::Strict,
+            Arc::clone(&authority),
+        )
+        .unwrap();
+        writer
+            .create_node(Uuid::from_u128(1), EntityTypeId::decode(1).unwrap())
+            .unwrap();
+        writer.flush().unwrap();
+        assert_eq!(
+            enumerate_topology_files(&authority, None)
+                .unwrap()
+                .node_fragments()
+                .len(),
+            1
+        );
+
+        writer
+            .create_node(Uuid::from_u128(2), EntityTypeId::decode(1).unwrap())
+            .unwrap();
+        crate::durable_rewrite::inject_error_after_durable_intent();
+        // The UUID participant authenticates the durable intent and rolls it
+        // forward. Successful reconciliation must publish this exact membership.
+        writer.flush().unwrap();
+        assert_eq!(crate::read_topology_generation(root.path()).unwrap(), 2);
+        let selected = enumerate_topology_files(&authority, None).unwrap();
+        assert_eq!(selected.node_fragments().len(), 2);
+        assert_eq!(
+            crate::read_nodes_from_files(&selected)
+                .unwrap()
+                .iter()
+                .map(arrow::array::RecordBatch::num_rows)
+                .sum::<usize>(),
+            2
+        );
+    }
+
+    #[test]
     fn staged_node_destinations_participate_in_label_and_delete_reads() {
         let root = tempfile::tempdir().unwrap();
         let authority = TopologyFileAuthority::discover_legacy(root.path()).unwrap();

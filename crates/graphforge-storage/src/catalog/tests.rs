@@ -51,6 +51,43 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 #[test]
+fn absent_standalone_target_has_empty_authority_without_creating_directory() {
+    let parent = TempDir::new().unwrap();
+    let target = parent.path().join("new-graph");
+    let catalog = GraphCatalog::open(&target, None, &RuntimeCatalog::new()).unwrap();
+    assert!(!target.exists());
+    assert!(catalog.topology_authority().is_some());
+    let files = catalog.topology_files().unwrap();
+    assert!(files.node_fragments().is_empty());
+    assert!(files.edge_fragments().is_empty());
+    assert!(!target.exists());
+}
+
+#[test]
+fn authenticated_catalog_without_full_topology_authority_refuses_legacy_discovery() {
+    let parent = TempDir::new().unwrap();
+    let generation =
+        crate::open_or_initialize_ephemeral_project(parent.path().join("project")).unwrap();
+    let root = generation.graph_tree_root();
+    std::fs::create_dir_all(root.join("topology")).unwrap();
+    write_nodes_parquet(&root.join("topology/nodes.parquet"));
+    let inventory = crate::AuthenticatedPropertyInventory::from_resolved_generation_for_route(
+        &generation,
+        crate::PropertyRouteKind::Node,
+        "_untyped",
+    )
+    .unwrap();
+    assert!(inventory.node_fragments().is_none());
+    let error =
+        GraphCatalog::open_authenticated(&root, None, &RuntimeCatalog::new(), Arc::new(inventory))
+            .unwrap_err();
+    assert!(
+        error.to_string().contains("GF_TOPOLOGY_AUTHORITY_MISSING"),
+        "{error}"
+    );
+}
+
+#[test]
 fn admitted_topology_requires_payload_except_empty_selection() {
     let dir = TempDir::new().unwrap();
     let node = graphforge_core::uuid::new_v7();

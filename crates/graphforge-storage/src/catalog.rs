@@ -1536,6 +1536,14 @@ impl GraphCatalog {
                 crate::TopologyFileAuthority::from_inventory(dir, inventory)
                     .map_err(|error| DataFusionError::Execution(error.to_string()))?,
             )
+        } else if legacy_topology {
+            // The explicit standalone constructor also accepts an absent
+            // target. Establish empty membership without creating its root;
+            // the writer remains responsible for creation after evaluation.
+            Some(
+                crate::TopologyFileAuthority::discover_legacy(dir)
+                    .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+            )
         } else {
             None
         };

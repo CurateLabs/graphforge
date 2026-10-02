@@ -2037,8 +2037,18 @@ impl GraphWriter {
         let batch = self.pending_nodes_batch()?;
 
         let legacy = topology.join("nodes.parquet");
-        let files = self.topology_files()?;
-        let path = if files.nodes.is_empty() {
+        // Legacy node staging must not inspect unrelated edge paths before
+        // the node prefix is consumed. Owned sessions use only their selected
+        // membership, without discovering additional files.
+        let nodes = match &self.topology {
+            Some(authority) => crate::enumerate_topology_files(authority, None)?
+                .nodes
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect(),
+            None => crate::mutator::node_parquet_files(&self.dir)?,
+        };
+        let path = if nodes.is_empty() {
             legacy.clone()
         } else {
             let first = self.nodes.first().map_or(0, |row| row.node_id);
@@ -2047,10 +2057,7 @@ impl GraphWriter {
                 .join("nodes")
                 .join(format!("{first:020}-{last:020}.parquet"))
         };
-        if path != legacy
-            && (files.nodes.iter().any(|(owned, _)| owned == &path)
-                || staged.staged_temp(&path).is_some())
-        {
+        if path != legacy && (nodes.contains(&path) || staged.staged_temp(&path).is_some()) {
             return Err(GfError::Storage(
                 "node shard surrogate range already exists".into(),
             ));
