@@ -219,43 +219,62 @@ impl PayloadTicket {
         file: &File,
         identity: graphforge_filesystem::FileIdentity,
     ) -> Result<(), GfError> {
-        // A native identity may be recycled after both authoritative names
-        // disappear. Cached refusals belong only to the original payload.
-        if !self.describes(identity) {
-            let mut registry = registry();
-            if registry
-                .get(&key_of(identity))
-                .is_some_and(|current| Arc::ptr_eq(current, self))
-            {
-                registry.remove(&key_of(identity));
+        const MAX_TICKET_CHECKS: usize = 32;
+        let mut ticket = Arc::clone(self);
+        // Continuous hydration must not make one reader spin indefinitely.
+        // Follow replacements without recursion, then fail closed on churn.
+        for _ in 0..MAX_TICKET_CHECKS {
+            // A native identity may be recycled after both authoritative names
+            // disappear. Cached refusals belong only to the original payload.
+            if !ticket.describes(identity) {
+                let Some(replacement) = ticket.retire_and_get_replacement(identity) else {
+                    return Ok(());
+                };
+                ticket = replacement;
+                continue;
             }
-            return Ok(());
-        }
-        if let Some(outcome) = self.outcome.get() {
+            if let Some(outcome) = ticket.outcome.get() {
+                return outcome.clone();
+            }
+            // No registry lock covers metadata or checksumming. Concurrent
+            // first touches wait on this ticket's one computation; unrelated
+            // inodes proceed. Replacements never nest checksum locks.
+            let _phase = (!crate::lifecycle_io::phase_override_active()).then(|| {
+                crate::lifecycle_io::PhaseScope::enter(crate::StorageIoPhase::ReadPathScan)
+            });
+            let outcome = ticket.outcome.get_or_init(|| {
+                #[cfg(test)]
+                ticket.checksum_runs.fetch_add(1, Ordering::Relaxed);
+                checksum_handle(file, &ticket.entry, &ticket.cas_object).map(|_| ())
+            });
+            if outcome.is_ok() {
+                let mut registry = registry();
+                if registry
+                    .get(&key_of(identity))
+                    .is_some_and(|current| Arc::ptr_eq(current, &ticket))
+                {
+                    registry.remove(&key_of(identity));
+                }
+            }
             return outcome.clone();
         }
-        // The lock is not held while checksumming: concurrent first touches of
-        // this inode wait on the one computation, every other inode proceeds.
-        // A first touch is a read of committed data. Unless a caller scoped the
-        // work to another phase, it lands in `read_path_scan` with the read it
-        // precedes rather than in the open-time hydration row.
-        let _phase = (!crate::lifecycle_io::phase_override_active())
-            .then(|| crate::lifecycle_io::PhaseScope::enter(crate::StorageIoPhase::ReadPathScan));
-        let outcome = self.outcome.get_or_init(|| {
-            #[cfg(test)]
-            self.checksum_runs.fetch_add(1, Ordering::Relaxed);
-            checksum_handle(file, &self.entry, &self.cas_object).map(|_| ())
-        });
-        if outcome.is_ok() {
-            let mut registry = registry();
-            if registry
-                .get(&key_of(identity))
-                .is_some_and(|current| Arc::ptr_eq(current, self))
-            {
-                registry.remove(&key_of(identity));
-            }
+        Err(GfError::Validation(
+            "graph payload admission authority changed too often before authentication".into(),
+        ))
+    }
+
+    fn retire_and_get_replacement(
+        self: &Arc<Self>,
+        identity: graphforge_filesystem::FileIdentity,
+    ) -> Option<Arc<Self>> {
+        let mut registry = registry();
+        let current = registry.get(&key_of(identity))?;
+        if Arc::ptr_eq(current, self) {
+            registry.remove(&key_of(identity));
+            None
+        } else {
+            Some(Arc::clone(current))
         }
-        outcome.clone()
     }
 }
 
@@ -568,17 +587,46 @@ mod tests {
         let identity = graphforge_filesystem::file_identity(&file).unwrap();
         let replacement = registry().get(&key_of(identity)).cloned().unwrap();
         assert!(!stale.describes(identity));
+        unrelated.flip_first_byte();
         // An in-flight reader may still hold the retired Arc after a newer
-        // hydration has replaced its entry at this identity key.
-        stale.admit(&file, identity).unwrap();
+        // hydration has replaced its entry at this identity key. Its very next
+        // access must authenticate the replacement before returning any bytes.
+        let error = stale.admit(&file, identity).unwrap_err();
+        assert!(error.to_string().contains("XXH64 checksum"), "{error}");
         assert!(Arc::ptr_eq(
             registry().get(&key_of(identity)).unwrap(),
             &replacement
         ));
-        assert_eq!(replacement.checksum_runs.load(Ordering::Relaxed), 0);
-        admit_file(&file).unwrap();
+        let memoized = admit_file(&file).unwrap_err();
+        assert_eq!(error.to_string(), memoized.to_string());
         assert_eq!(replacement.checksum_runs.load(Ordering::Relaxed), 1);
         assert_eq!(stale.checksum_runs.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn stale_and_current_readers_share_replacement_admission() {
+        let (_departed, stale) = departed_refusal();
+        let unrelated = Fixture::new(&vec![7_u8; 4 << 20]);
+        unrelated.register();
+        let file = File::open(&unrelated.object).unwrap();
+        let identity = graphforge_filesystem::file_identity(&file).unwrap();
+        let replacement = registry().get(&key_of(identity)).cloned().unwrap();
+        std::thread::scope(|scope| {
+            for reader in 0..8 {
+                let stale = &stale;
+                let file = &file;
+                scope.spawn(move || {
+                    if reader % 2 == 0 {
+                        stale.admit(file, identity).unwrap();
+                    } else {
+                        admit_file(file).unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(replacement.checksum_runs.load(Ordering::Relaxed), 1);
+        assert_eq!(stale.checksum_runs.load(Ordering::Relaxed), 1);
+        assert!(!registry().contains_key(&key_of(identity)));
     }
 
     #[test]
