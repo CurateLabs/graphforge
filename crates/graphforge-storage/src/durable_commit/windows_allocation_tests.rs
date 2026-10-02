@@ -57,10 +57,12 @@ fn windows_immutable_link_refreshes_native_allocation_and_preserves_reused_tempo
             assert_eq!(file_link_count(file).unwrap(), 2);
             let usage = file_space_usage(file).unwrap();
             assert_eq!(usage.logical_bytes, 536);
-            eprintln!(
+            writeln!(
+                std::io::stderr().lock(),
                 "native immutable link allocation: before={before_link} after={}",
                 usage.allocated_bytes
-            );
+            )
+            .unwrap();
             assert!(
                 usage.allocated_bytes > before_link,
                 "fixture must exercise real native allocation growth"
