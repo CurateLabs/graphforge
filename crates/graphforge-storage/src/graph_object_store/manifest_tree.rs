@@ -548,6 +548,13 @@ pub(crate) fn append_captured_mapped_graph_files(
     Ok((root, evidence))
 }
 
+fn manifest_relative_path_text(relative: &Path) -> Result<String, GfError> {
+    let text = relative
+        .to_str()
+        .ok_or_else(|| validation("sealed graph path is not UTF-8"))?;
+    crate::graph_files::canonical_inventory_relative_text(text)
+}
+
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn append_graph_files_v2_inner(
     lease: &GraphObjectPublicationLease,
@@ -679,10 +686,10 @@ fn append_graph_files_v2_inner(
             .ok_or_else(|| validation("graph payload SHA bytes overflow"))?;
         evidence.publication_io.payload.add_install(&installed)?;
         evidence.publication_io.payload.add_read(prehash_io)?;
-        let relative_path = relative
-            .to_str()
-            .ok_or_else(|| validation("sealed graph path is not UTF-8"))?
-            .to_owned();
+        // Manifest routes use platform-independent forward-slash paths. A
+        // native Windows PathBuf string uses backslashes, which would hide
+        // every routed file from semantic route closure validation.
+        let relative_path = manifest_relative_path_text(relative)?;
         let entry = crate::GraphFileEntry {
             content_xxh64: installed.content_xxh64.ok_or_else(|| {
                 validation("graph object installation omitted its payload checksum")
