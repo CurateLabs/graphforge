@@ -52,17 +52,31 @@ const DELETED_EDGE_OFFSET: usize = 3;
 /// The node whose property a composite transaction sets last.
 const COMPOSITE_NODE: usize = 11;
 
-/// Identity controls copied while hydrating are about 40 bytes a node; the open
-/// cost test (`open_reads_control_bytes_not_payload_bytes`) bounds them at 64.
-const COPIED_CONTROL_BYTES_PER_NODE: u64 = 64;
+/// The mutable controls hydration still copies privately whatever the node
+/// count (UUID-membership and ordinal manifests, receipts, lock, tombstones):
+/// the node-linear identity runs are hard-linked and read nothing at open.
+const COPIED_CONTROL_BYTES: u64 = 16 * 1024;
+/// A declared file costs open at most one manifest row, one route-table row and
+/// a stat; a JSON row is a few hundred bytes. The copied manifest and route table
+/// therefore grow with the file count, never with the data.
+const OPEN_BYTES_PER_FILE: u64 = 1024;
 /// Manifest, route table and sidecar reads that do not scale with either axis.
 const CONTROL_SLACK_BYTES: u64 = 64 * 1024;
 /// Each copied control is read twice by hydration (to copy it and to verify the
 /// private copy).
 const HYDRATION_PASSES: u64 = 2;
-/// The ordinal-v4 and forward-v4 identity readers make about four unreported
-/// passes over the copied identity controls at open; this allows six.
-const UNATTRIBUTED_PASSES: u64 = 6;
+/// Footer reads and catalog sidecars no reader reports to the attribution.
+const UNATTRIBUTED_SLACK_BYTES: u64 = 64 * 1024;
+
+/// What an open may copy and read, from the manifest alone: the fixed controls
+/// plus a row per declared file, each read twice, plus the fixed slack.
+fn copied_bound(files: u64) -> u64 {
+    COPIED_CONTROL_BYTES + OPEN_BYTES_PER_FILE * files
+}
+
+fn attributed_bound(files: u64) -> u64 {
+    HYDRATION_PASSES * copied_bound(files) + CONTROL_SLACK_BYTES
+}
 
 fn uuid_param(index: usize) -> IrLiteral {
     IrLiteral::Uuid(*bulk_fixture::fixture_node_uuid(index).as_bytes())
@@ -304,16 +318,17 @@ fn assert_open_bounded(measured: &Measured) {
         layout.delta_runs, 0,
         "{nodes} nodes: a delta run is published"
     );
-    // Hydration copies the small controls and nothing else: the copied bytes are
-    // identity controls, at most `COPIED_CONTROL_BYTES_PER_NODE` a node.
+    // Hydration copies the small controls and nothing else: a fixed set plus the
+    // manifest and route-table rows of the declared files.
     assert!(
-        open.copied <= COPIED_CONTROL_BYTES_PER_NODE * *nodes as u64,
-        "{nodes} nodes: {} control bytes copied",
-        open.copied
+        open.copied <= copied_bound(layout.files),
+        "{nodes} nodes: {} control bytes copied against a bound of {}",
+        open.copied,
+        copied_bound(layout.files)
     );
     // The open reads each copied control twice, plus the manifest, route table
     // and sidecars. Never a payload.
-    let attributed_bound = HYDRATION_PASSES * open.copied + CONTROL_SLACK_BYTES;
+    let attributed_bound = attributed_bound(layout.files);
     assert!(
         open.attributed <= attributed_bound,
         "{nodes} nodes: open read {} attributed bytes against a bound of {attributed_bound}",
@@ -327,7 +342,7 @@ fn assert_open_bounded(measured: &Measured) {
     if let Some(rchar) = open.rchar {
         // Whole-process reads include readers that report nothing to the
         // attribution (the identity readers); they too read controls only.
-        let rchar_bound = UNATTRIBUTED_PASSES * open.copied + CONTROL_SLACK_BYTES;
+        let rchar_bound = attributed_bound + UNATTRIBUTED_SLACK_BYTES;
         assert!(
             rchar <= rchar_bound,
             "{nodes} nodes: open read {rchar} bytes (rchar) against a bound of {rchar_bound}"
@@ -684,11 +699,10 @@ fn every_mutating_commit_publishes_a_compact_root() {
                 "{label}: nothing was hard-linked at open"
             );
             assert!(
-                evidence.bytes_checksummed
-                    <= HYDRATION_PASSES * evidence.bytes_copied + CONTROL_SLACK_BYTES,
-                "{label}: open checksummed {} bytes for {} copied",
+                evidence.bytes_checksummed <= attributed_bound(inventory.files.len() as u64),
+                "{label}: open checksummed {} bytes for {} declared files",
                 evidence.bytes_checksummed,
-                evidence.bytes_copied
+                inventory.files.len()
             );
         }
     }
