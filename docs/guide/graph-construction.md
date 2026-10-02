@@ -187,6 +187,12 @@ assert nodes.num_rows == 2 and edges.num_rows == 1
 `dst_id`) to `source_uuid` / `target_uuid` before publication. Endpoint UUIDs
 must already identify committed nodes.
 
+Bulk property columns, here and in import sessions, may use narrower or large
+Arrow types: `Int8`–`Int32`, `UInt8`–`UInt32`, `Float32`, `LargeUtf8` and
+`LargeList`, also as list elements. They are widened losslessly and stored and
+returned as `Int64`, `Float64`, `Utf8` and `List`, so filters and ordering
+behave exactly as for data supplied in those types. `UInt64` is not accepted.
+
 For pandas / Polars / Arrow inputs and the full receipt schema, see the
 [API Reference](../reference/api.md#construction).
 
