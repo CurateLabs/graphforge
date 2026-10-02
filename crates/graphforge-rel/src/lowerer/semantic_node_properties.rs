@@ -44,6 +44,32 @@ impl GraphPlanLowerer {
         selected
     }
 
+    /// [`Self::join_semantic_node_properties`] for a snapshot without property
+    /// schemas: join each stored route by `node_uuid` alone.
+    fn join_semantic_route_keys(
+        &self,
+        alias: &str,
+        scan: LogicalPlan,
+    ) -> Result<LogicalPlan, LoweringError> {
+        let snapshot = self.read_snapshot().expect("admitted semantic snapshot");
+        let mut joined = scan;
+        for (index, stem) in snapshot.node_properties.keys().enumerate() {
+            joined = super::scans::join_route_keys(
+                joined,
+                &super::scans::RouteKeys {
+                    entity_alias: alias,
+                    keys_alias: format!("{alias}__primary_props_{index}"),
+                    table: graphforge_plan::GraphReadTable::PropertyKeys(stem.clone()),
+                    composition: snapshot
+                        .semantic_composition_fingerprint()
+                        .map(str::to_owned),
+                    route_filter: Some(self.primary_property_route(alias, stem)),
+                },
+            )?;
+        }
+        Ok(joined)
+    }
+
     pub(super) fn join_semantic_node_properties(
         &self,
         var: VarId,
@@ -52,6 +78,9 @@ impl GraphPlanLowerer {
     ) -> Result<LogicalPlan, LoweringError> {
         let snapshot = self.read_snapshot().expect("admitted semantic snapshot");
         let alias = var_alias(var);
+        if snapshot.property_schemas_omitted {
+            return self.join_semantic_route_keys(&alias, scan);
+        }
         let mut projections: Vec<Expr> = scan
             .schema()
             .iter()

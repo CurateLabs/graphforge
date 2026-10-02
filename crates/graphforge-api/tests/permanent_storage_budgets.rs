@@ -7471,14 +7471,11 @@ fn construct_count_marker_fixture(source: &Path) -> (Vec<Node>, Vec<Option<Strin
     (nodes, payloads)
 }
 
-#[test]
-fn count_row_marker_rejects_property_corruption_after_facade_open() {
+/// Flip one byte of the count-marker fixture's `z_payload` property fragment
+/// in place, as hostile damage to an immutable object after facade open.
+fn corrupt_count_marker_payload(source: &Path) {
     use std::io::{Read, Seek, SeekFrom, Write};
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("source");
-    construct_count_marker_fixture(&source);
-    let graph = GraphForge::new(source.to_str()).unwrap();
-    let selected = graphforge_storage::resolve_project_generation(&source).unwrap();
+    let selected = graphforge_storage::resolve_project_generation(source).unwrap();
     let generation_owned = selected.declared_graph_files_inventory().unwrap().is_some();
     let inventory = selected.graph_files_inventory().unwrap().unwrap();
     let path = inventory
@@ -7489,7 +7486,7 @@ fn count_row_marker_rejects_property_corruption_after_facade_open() {
             let path = if generation_owned {
                 selected.graph_tree_root().join(&entry.relative_path)
             } else {
-                graphforge_storage::graph_object_path(&source, &entry.content_sha256).unwrap()
+                graphforge_storage::graph_object_path(source, &entry.content_sha256).unwrap()
             };
             let reader =
                 ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
@@ -7524,6 +7521,15 @@ fn count_row_marker_rejects_property_corruption_after_facade_open() {
     file.write_all(&byte).unwrap();
     file.sync_all().unwrap();
     drop(file);
+}
+
+#[test]
+fn count_row_marker_rejects_property_corruption_after_facade_open() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    construct_count_marker_fixture(&source);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    corrupt_count_marker_payload(&source);
     // An unknown route is resolved without demanding this property's payload.
     // A demanded route must authenticate even when its predicate yields no rows.
     let absent = graph
@@ -7564,6 +7570,53 @@ fn count_row_marker_rejects_property_corruption_after_facade_open() {
             "{query}: {error}"
         );
     }
+}
+
+/// A query that reads no property value plans without admitting the corrupted
+/// route, in the same session as queries that read values, whole nodes or
+/// write properties; each of those refuses the corruption, before planning
+/// (`LIMIT 0`) as much as at execution.
+#[test]
+fn value_free_queries_plan_beside_refused_property_reads_in_one_session() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    construct_count_marker_fixture(&source);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    corrupt_count_marker_payload(&source);
+    let value_free = |graph: &GraphForge| {
+        let result = graph
+            .execute("MATCH (n:Missing) RETURN count(*) AS value")
+            .unwrap();
+        let batch = result
+            .batches
+            .iter()
+            .find(|batch| batch.num_rows() == 1)
+            .unwrap();
+        assert_eq!(int_at(batch, 0, 0), Some(0));
+    };
+    value_free(&graph);
+    for query in [
+        "MATCH (n) RETURN n",
+        "MATCH (n) RETURN keys(n) AS value",
+        "MATCH (n) RETURN properties(n) AS value",
+        "MATCH p = (n) RETURN p",
+        "MATCH (n) RETURN n.score AS value LIMIT 0",
+        "MATCH (n) SET n.score = 1",
+        "MATCH (n) REMOVE n.score",
+    ] {
+        let error = graph.execute(query).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                graphforge_core::GfError::Project {
+                    code: graphforge_core::ProjectErrorCode::ProjectCorrupt,
+                    ..
+                }
+            ),
+            "{query}: {error}"
+        );
+    }
+    value_free(&graph);
 }
 
 fn count_marker_rows(batches: &[RecordBatch]) -> Vec<(Uuid, Option<i64>, Option<String>)> {

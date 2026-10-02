@@ -357,6 +357,17 @@ impl GraphPlanLowerer {
     ///
     /// Returns [`GfError`] if any operator in the pipeline cannot be lowered.
     pub fn lower_plan(&self, plan: &GraphPlan) -> Result<LogicalPlan, GfError> {
+        // A snapshot without property schemas cannot describe a plan that
+        // reads property values: refuse rather than plan absent values as NULL.
+        if let Some(snapshot) = self.catalog.as_ref()
+            && snapshot.property_schemas_omitted
+            && graphforge_ir::property_demand(plan, snapshot.prop_names())
+                != graphforge_ir::PropertyDemand::None
+        {
+            return Err(GfError::Plan(
+                "lowering snapshot omits the property schemas this plan reads".into(),
+            ));
+        }
         // Seed node shapes for bare-node-value materialization (#785) from the
         // plan's NodeScans before lowering its expressions.
         *self.node_shapes.write().expect("node shapes lock poisoned") =

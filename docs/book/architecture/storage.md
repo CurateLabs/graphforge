@@ -330,7 +330,13 @@ chosen by path in `graphforge_storage::graph_admission`:
   first time a route is used, after checking the content directly on the
   read-only content-store inode. Schema and row-count failures propagate
   through planning; only an absent route receives a base-schema default.
-  Footer admission is memoized for the inventory's life. Each property payload
+  Footer admission is memoized for the inventory's life. A route is "used" only
+  by a plan that reads property values: the catalog names property tables
+  without opening them, and a read plan that references no property value
+  (`graphforge_ir::property_demand` returns `None`) compiles against key-only
+  route schemas. Its scans still join each route by `node_uuid`/`edge_uuid`, so
+  a route such a plan actually reads is admitted and authenticated at execution.
+  Each property payload
   read copies and authenticates its bytes into a private snapshot before decoding,
   so an in-place change after a successful read is refused and a concurrent change
   cannot alter the bytes already authenticated for the decoder. A checksum refusal under `indexes/search/`

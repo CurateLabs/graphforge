@@ -1512,6 +1512,9 @@ impl ExecutionSession {
         // session cannot read persisted data, so reject scan plans up front
         // (mirroring `execute_create`'s write-target guard) and lower the rest
         // schema-only so pure computed/`RETURN` plans still run.
+        // A plan that reads no property value compiles without admitting any
+        // property route; its key-only joins authenticate what they read.
+        let demand = graphforge_ir::property_demand(plan, self.catalog.prop_names());
         let lowerer = if self.dir.as_os_str().is_empty() {
             if plan_reads_persisted_data(plan) {
                 return Err(GfError::Execution(
@@ -1521,15 +1524,20 @@ impl ExecutionSession {
                 ));
             }
             GraphPlanLowerer::new(
-                Some(&graphforge_storage::lowering_snapshot(
+                Some(&graphforge_storage::lowering_snapshot_for(
                     Some(&self.catalog),
                     None,
+                    demand,
                 )?),
                 self.ontology.as_ref(),
             )?
         } else {
             GraphPlanLowerer::new_for_reads(
-                &graphforge_storage::lowering_snapshot(Some(&self.catalog), Some(&self.dir))?,
+                &graphforge_storage::lowering_snapshot_for(
+                    Some(&self.catalog),
+                    Some(&self.dir),
+                    demand,
+                )?,
                 self.ontology.as_ref(),
                 self.mode,
             )?
