@@ -600,9 +600,8 @@ fn promote_edge_properties(dir: &Path) -> Result<HashSet<std::path::PathBuf>, Gf
                         dir, kind, &name,
                     )?;
                 let prior_paths = prior_destination
-                    .property_fragments(kind, &name)
+                    .property_object_paths(kind, &name)
                     .into_iter()
-                    .map(|fragment| fragment.path)
                     .collect::<HashSet<_>>();
                 let mut staged = RewriteBatch::new();
                 crate::writer::stage_promoted_properties(
@@ -634,9 +633,8 @@ fn promote_edge_properties(dir: &Path) -> Result<HashSet<std::path::PathBuf>, Gf
                     )?;
                 transferred.extend(
                     current_destination
-                        .property_fragments(kind, &name)
+                        .property_object_paths(kind, &name)
                         .into_iter()
-                        .map(|fragment| fragment.path)
                         .filter(|path| !prior_paths.contains(path)),
                 );
             }
@@ -647,15 +645,16 @@ fn promote_edge_properties(dir: &Path) -> Result<HashSet<std::path::PathBuf>, Gf
 
 // Tombstones remain property ownership evidence. Remove every physical source
 // occurrence after transferring that ownership, including old snapshots.
+#[allow(clippy::too_many_lines)] // schema conversion, filtering and declared retirement share one inventory
 fn stage_retired_edge_property_owners(
     dir: &Path,
     transferred: &HashSet<std::path::PathBuf>,
     staged: &mut RewriteBatch,
-) -> Result<(), GfError> {
+) -> Result<Vec<RetiredPropertyObject>, GfError> {
     use arrow::array::{BooleanArray, FixedSizeBinaryArray};
     use std::collections::BTreeSet;
     if transferred.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let inventory =
         crate::property_overlay::authenticated_property_inventory_for_rewrite(dir, staged)?;
@@ -673,21 +672,23 @@ fn stage_retired_edge_property_owners(
                 .cloned()
         });
     let fragments = inventory.property_fragments(kind, "_exploratory");
+    let prior_objects = inventory.property_object_paths(kind, "_exploratory");
     let last_fragment = fragments.last().map(|fragment| fragment.path.clone());
+    let scratch = inventory.create_snapshot_scratch()?;
     if routes.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     for fragment in fragments {
-        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            crate::graph_admission::open_admitted(&fragment.path)?,
-        )
-        .map_err(pq_err)?
-        .with_batch_size(4096)
-        .build()
-        .map_err(pq_err)?;
+        let (fragment_schema, reader) = inventory.open_property_fragment_batches(
+            kind,
+            "_exploratory",
+            fragment.id,
+            scratch.path(),
+            false,
+        )?;
         // Historical summaries counted the removed ownership. Preserve the
         // current cumulative summary only on the newest source fragment.
-        let mut metadata = reader.schema().metadata().clone();
+        let mut metadata = fragment_schema.metadata().clone();
         metadata.remove(crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY);
         if Some(&fragment.path) == last_fragment.as_ref()
             && let Some(summary) = &final_summary
@@ -717,9 +718,25 @@ fn stage_retired_edge_property_owners(
             crate::property_overlay::PROPERTY_ORDINAL_KEY.into(),
             fragment.id.ordinal.to_string(),
         );
-        let schema = Arc::new(reader.schema().as_ref().clone().with_metadata(metadata));
+        let add_tombstone = fragment_schema
+            .index_of(crate::property_overlay::PROPERTY_TOMBSTONE_FIELD)
+            .is_err();
+        let mut fields = fragment_schema.fields().to_vec();
+        if add_tombstone {
+            fields.insert(
+                1,
+                Arc::new(Field::new(
+                    crate::property_overlay::PROPERTY_TOMBSTONE_FIELD,
+                    DataType::Boolean,
+                    false,
+                )),
+            );
+        }
+        let schema = Arc::new(arrow::datatypes::Schema::new_with_metadata(
+            fields, metadata,
+        ));
         let batches = reader.map(|batch| {
-            let batch = batch.map_err(pq_err)?;
+            let batch = batch?;
             let uuids = batch
                 .column_by_name("edge_uuid")
                 .and_then(|a| a.as_any().downcast_ref::<FixedSizeBinaryArray>())
@@ -747,11 +764,73 @@ fn stage_retired_edge_property_owners(
                     .collect::<Vec<_>>(),
             );
             let filtered = arrow::compute::filter_record_batch(&batch, &keep).map_err(pq_err)?;
-            RecordBatch::try_new(schema.clone(), filtered.columns().to_vec()).map_err(pq_err)
+            let mut columns = filtered.columns().to_vec();
+            if add_tombstone {
+                columns.insert(
+                    1,
+                    Arc::new(BooleanArray::from(vec![false; filtered.num_rows()])),
+                );
+            }
+            RecordBatch::try_new(schema.clone(), columns).map_err(pq_err)
         });
-        staged.stage_batches(&fragment.path, schema.clone(), batches)?;
+        let destination = if fragment.path.parent() == Some(dir.join("edge_properties").as_path()) {
+            // Legacy flat routes must move to the canonical nested shape
+            // before framing, keeping continuation names out of route names.
+            dir.join("edge_properties")
+                .join(staged.route_component(dir, "_exploratory")?)
+                .join(fragment.id.file_name())
+        } else {
+            fragment.path
+        };
+        staged.stage_property_batches(&destination, schema.clone(), batches)?;
     }
-    Ok(())
+    let root = graphforge_filesystem::StableDirectory::open(dir).map_err(pq_err)?;
+    prior_objects
+        .into_iter()
+        .filter(|path| !staged.staged_paths().any(|destination| destination == path))
+        .map(|path| RetiredPropertyObject::capture(dir, &root, &path))
+        .collect()
+}
+
+struct RetiredPropertyObject {
+    parent: graphforge_filesystem::StableDirectory,
+    name: std::ffi::OsString,
+    identity: graphforge_filesystem::FileIdentity,
+}
+
+impl RetiredPropertyObject {
+    fn capture(
+        root_path: &Path,
+        root: &graphforge_filesystem::StableDirectory,
+        path: &Path,
+    ) -> Result<Self, GfError> {
+        let relative = path.strip_prefix(root_path).map_err(pq_err)?;
+        let mut parent = root.try_clone().map_err(pq_err)?;
+        let mut components = relative.components().peekable();
+        while let Some(component) = components.next() {
+            let std::path::Component::Normal(name) = component else {
+                return Err(storage_err(
+                    "retired property object path is not normalized",
+                ));
+            };
+            if components.peek().is_none() {
+                let file = parent.open_child_file(name).map_err(pq_err)?;
+                let identity = graphforge_filesystem::file_identity(&file).map_err(pq_err)?;
+                return Ok(Self {
+                    parent,
+                    name: name.to_owned(),
+                    identity,
+                });
+            }
+            parent = parent.open_child_directory(name).map_err(pq_err)?;
+        }
+        Err(storage_err("retired property object has no file name"))
+    }
+
+    fn retire(self) -> Result<(), GfError> {
+        crate::durable_commit::retire_files(&self.parent, [(self.name.as_os_str(), self.identity)])
+            .map_err(pq_err)
+    }
 }
 
 fn stage_promoted_edges(dir: &Path, staged: &mut RewriteBatch) -> Result<bool, GfError> {
@@ -917,19 +996,30 @@ fn reconcile_inner(
     {
         promote_node_properties(dir, ontology, runtime_catalog)?;
     }
+    let mut retired_property_objects = Vec::new();
     let edges_changed = if promotion
         && rewrite
         && ontology.is_some()
         && (remapped_label_values > 0 || promotes_relations)
     {
         let transferred = promote_edge_properties(dir)?;
-        stage_retired_edge_property_owners(dir, &transferred, &mut staged)?;
+        retired_property_objects =
+            stage_retired_edge_property_owners(dir, &transferred, &mut staged)?;
         stage_promoted_edges(dir, &mut staged)?
     } else {
         false
     };
     if remapped_label_values > 0 || edges_changed {
         crate::uuid_membership::commit_uuid_neutral_topology_rewrite(dir, staged)?;
+        // Promotion operates exclusively on the unpublished adoption candidate
+        // (workspace_ontology hydrates it before calling this function). The
+        // topology commit refreshes only UUID authority, so obsolete declared
+        // objects can be retired here before any property inventory is captured
+        // for publication. A failure discards the candidate; the live generation
+        // stays unchanged. Never infer removals from a directory listing.
+        for object in retired_property_objects {
+            object.retire()?;
+        }
     }
 
     if rewrite && !marked {

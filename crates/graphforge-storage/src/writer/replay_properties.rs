@@ -137,6 +137,7 @@ fn parse_replay_property_uuids(
 }
 
 struct ReplayPropertyFragmentWriter {
+    path: std::path::PathBuf,
     extra_metadata_bytes: usize,
     generation: u64,
     ordinal: u64,
@@ -168,6 +169,38 @@ struct ReplayPropertyRouteContext<'a> {
 }
 
 impl ReplayPropertyRouteContext<'_> {
+    fn bound_closed_fragment(&self, path: &Path, retained_bytes: usize) -> Result<(), GfError> {
+        if fs::metadata(path).map_err(|error| io_err(&error))?.len()
+            <= crate::property_overlay::bounded_object::MAX_PROPERTY_OBJECT_BYTES as u64
+        {
+            return Ok(());
+        }
+        // close() consumed the logical writer and its footer. Shared schemas
+        // remain with the context/current Arrow chunk, so retain their existing
+        // reservation without charging the freed column writers and buffers.
+        let schema_bytes = crate::permanent_parquet::replay_schema_bytes(
+            &replay_property_resource_schema(&self.logical_schema),
+        )?;
+        let memory = self
+            .overlay_bytes
+            .checked_add(self.retained_target_bytes)
+            .and_then(|bytes| bytes.checked_add(schema_bytes))
+            .and_then(|bytes| bytes.checked_add(retained_bytes))
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    crate::property_overlay::bounded_object::PROPERTY_OBJECT_ENCODER_MEMORY_BYTES,
+                )
+            });
+        if memory.is_none_or(|bytes| bytes > self.limits.max_replay_memory_bytes) {
+            return Err(replay_resource_limit(
+                "property replay object encoding memory bound exceeded",
+            ));
+        }
+        let mut staged = RewriteBatch::new();
+        staged.stage_property_file(path, path)?;
+        staged.commit_at(self.target)
+    }
+
     fn fragment_writer<'a>(
         &self,
         fragment: &'a mut Option<ReplayPropertyFragmentWriter>,
@@ -203,6 +236,7 @@ impl ReplayPropertyRouteContext<'_> {
     fn roll_fragment(
         &self,
         fragment: &mut Option<ReplayPropertyFragmentWriter>,
+        retained_bytes: usize,
     ) -> Result<(), GfError> {
         let full = fragment
             .take()
@@ -212,6 +246,7 @@ impl ReplayPropertyRouteContext<'_> {
             .checked_add(1)
             .ok_or_else(|| GfError::Storage("property fragment ordinal overflows".into()))?;
         full.writer.close().map_err(pq_err)?;
+        self.bound_closed_fragment(&full.path, retained_bytes)?;
         let mut next = open_replay_property_fragment(
             self.target,
             self.kind,
@@ -305,7 +340,7 @@ impl ReplayPropertyRouteContext<'_> {
                 .first()
                 .is_some_and(|piece| piece.opens_fragment);
             if opens_fragment && output.has_rows {
-                self.roll_fragment(fragment)?;
+                self.roll_fragment(fragment, output_bytes)?;
             }
             let output = self.fragment_writer(fragment)?;
             output.has_rows = true;
@@ -483,6 +518,7 @@ fn open_replay_property_fragment(
     )
     .map_err(pq_err)?;
     Ok(ReplayPropertyFragmentWriter {
+        path,
         extra_metadata_bytes: 0,
         generation,
         ordinal,
@@ -595,12 +631,9 @@ fn stream_replay_property_route_with_table(
     if fragment.is_none() {
         return Ok(());
     }
-    fragment
-        .take()
-        .expect("property replay writer exists")
-        .writer
-        .close()
-        .map_err(pq_err)?;
+    let fragment = fragment.take().expect("property replay writer exists");
+    fragment.writer.close().map_err(pq_err)?;
+    context.bound_closed_fragment(&fragment.path, 0)?;
     route_table.insert(route, 64 * 1024 * 1024, 100_000)?;
     Ok(())
 }

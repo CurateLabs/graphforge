@@ -1353,7 +1353,7 @@ impl CappedFragmentWriter<'_> {
         let batches = std::mem::take(&mut self.pending)
             .into_iter()
             .map(|batch| crate::property_overlay::with_fragment_ordinal(&batch, ordinal));
-        staged.stage_batches(&destination, schema, batches)
+        staged.stage_property_batches(&destination, schema, batches)
     }
 }
 

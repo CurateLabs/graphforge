@@ -9,6 +9,8 @@ pub(crate) use fragment_cap::{
     FragmentSplitter, row_charges, split_into_fragments, with_fragment_ordinal,
 };
 pub use fragment_cap::{MAX_PROPERTY_FRAGMENT_BYTES, MAX_PROPERTY_FRAGMENT_ROWS};
+pub(crate) mod bounded_object;
+pub use bounded_object::MAX_PROPERTY_OBJECT_BYTES;
 mod inventory;
 #[cfg(test)]
 use inventory::digest_hex;
@@ -239,11 +241,116 @@ struct AuthenticatedPropertyFragment {
     entry: crate::GraphReadFileEntry,
     physical_relative: PathBuf,
     identity: graphforge_filesystem::FileIdentity,
+    parts: Vec<PropertyObjectPart>,
+    envelope: Option<bounded_object::EnvelopeLayout>,
+    logical_length: u64,
     physical_rows: usize,
     schema: arrow::datatypes::SchemaRef,
     authentication_bytes: u64,
     authentication_block_equivalents: u64,
     authentication_read_calls: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PropertyObjectPart {
+    entry: crate::GraphReadFileEntry,
+    physical_relative: PathBuf,
+    identity: graphforge_filesystem::FileIdentity,
+}
+
+#[derive(Debug, Default)]
+struct PartAuthentication {
+    bytes: AtomicU64,
+    blocks: AtomicU64,
+    calls: AtomicU64,
+    read_bytes: AtomicU64,
+    read_calls: AtomicU64,
+}
+
+impl PartAuthentication {
+    fn add(&self, bytes: u64, blocks: u64, calls: u64) {
+        self.bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.blocks.fetch_add(blocks, Ordering::Relaxed);
+        self.calls.fetch_add(calls, Ordering::Relaxed);
+    }
+
+    fn values(&self) -> (u64, u64, u64) {
+        (
+            self.bytes.load(Ordering::Relaxed),
+            self.blocks.load(Ordering::Relaxed),
+            self.calls.load(Ordering::Relaxed),
+        )
+    }
+}
+
+#[derive(Debug)]
+enum PropertyFile {
+    Plain(File),
+    Segmented {
+        source: bounded_object::SegmentedSource,
+        authentication: Arc<PartAuthentication>,
+    },
+}
+
+impl PropertyFile {
+    fn authentication(&self) -> (u64, u64, u64) {
+        match self {
+            Self::Plain(_) => (0, 0, 0),
+            Self::Segmented { authentication, .. } => authentication.values(),
+        }
+    }
+
+    fn physical_reads(&self) -> (u64, u64) {
+        match self {
+            Self::Plain(_) => (0, 0),
+            Self::Segmented { authentication, .. } => (
+                authentication.read_bytes.load(Ordering::Relaxed),
+                authentication.read_calls.load(Ordering::Relaxed),
+            ),
+        }
+    }
+
+    fn reservation_bytes(&self) -> u64 {
+        match self {
+            Self::Plain(_) => 0,
+            Self::Segmented { .. } => 2 * bounded_object::MAX_PROPERTY_OBJECT_BYTES as u64,
+        }
+    }
+}
+
+trait PropertyRead: std::fmt::Debug {
+    fn read_at(&self, buffer: &mut [u8], offset: u64) -> std::io::Result<usize>;
+    fn length(&self) -> std::io::Result<u64>;
+    fn physical(&self) -> bool {
+        true
+    }
+}
+
+impl PropertyRead for File {
+    fn read_at(&self, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+        retained_read_at(self, buffer, offset)
+    }
+    fn length(&self) -> std::io::Result<u64> {
+        self.metadata().map(|metadata| metadata.len())
+    }
+}
+
+impl PropertyRead for PropertyFile {
+    fn physical(&self) -> bool {
+        matches!(self, Self::Plain(_))
+    }
+    fn read_at(&self, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(file) => retained_read_at(file, buffer, offset),
+            Self::Segmented { source, .. } => source.read_at(buffer, offset),
+        }
+    }
+    fn length(&self) -> std::io::Result<u64> {
+        match self {
+            Self::Plain(file) => file.length(),
+            Self::Segmented { source, .. } => Ok(source.len()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,11 +363,26 @@ enum PropertyFragmentLayout {
 /// directory capability and immutable identity/digest authority; this guard
 /// keeps the corresponding OS handle scoped to one decoder.
 struct OpenPropertyFragment {
-    file: Arc<File>,
+    file: Arc<PropertyFile>,
     authentication_bytes: u64,
     authentication_block_equivalents: u64,
     authentication_read_calls: u64,
     handle: FragmentHandleGuard,
+}
+
+/// Streaming logical property fragment decoder retaining authenticated capabilities.
+pub(crate) struct PropertyFragmentBatches {
+    reader: ParquetRecordBatchReader,
+    _opened: OpenPropertyFragment,
+}
+
+impl Iterator for PropertyFragmentBatches {
+    type Item = Result<RecordBatch, GfError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.reader
+            .next()
+            .map(|batch| batch.map_err(authenticated_arrow_error))
+    }
 }
 
 struct FragmentHandleGuard {

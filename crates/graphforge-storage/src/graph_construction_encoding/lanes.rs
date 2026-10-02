@@ -6,8 +6,8 @@ use super::{
     write_parquet,
 };
 use super::{
-    CountingWriter, EncodingTempGuard, IoCounter, account_cache_release, add_evidence_counter,
-    directory_for, hex,
+    CountingInput, CountingWriter, EncodingTempGuard, IoCounter, account_cache_release,
+    add_evidence_counter, directory_for, hex,
 };
 use crate::graph_construction::cpu_admission::{ConstructionCpuAdmission, ConstructionCpuLease};
 use arrow::record_batch::RecordBatch;
@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsStr;
 use std::io::Write;
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
@@ -156,7 +157,7 @@ impl ParquetLanes {
         artifacts: &mut Vec<ConstructionEncodedArtifact>,
     ) -> Result<(), GfError> {
         let Some(pool) = &self.pool else {
-            artifacts.push(write_parquet(
+            artifacts.extend(write_parquet(
                 root,
                 path,
                 batch,
@@ -225,14 +226,14 @@ impl ParquetLanes {
         let job = self.jobs.pop_front().expect("queued job");
         self.bytes -= job.batch.get_array_memory_size();
         let chunks = self.completed.remove(&job.index).expect("completed job")?;
-        artifacts.push(write_parquet_chunks(
+        artifacts.extend(write_parquet_chunks(
             root,
             &job.path,
             &job.batch,
             job.cache_window,
             evidence,
             cancelled,
-            Some(chunks),
+            Some(Encoded::Chunks(chunks)),
         )?);
         Ok(())
     }
@@ -282,7 +283,12 @@ fn compress(batch: &RecordBatch, stop: &AtomicBool) -> Result<Vec<Vec<u8>>, GfEr
     Ok(writer.into_inner().map_err(storage)?.writes)
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(super) enum Encoded {
+    Chunks(Vec<Vec<u8>>),
+    Object(bytes::Bytes),
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn write_parquet_chunks(
     root: &StableDirectory,
     relative: &str,
@@ -290,8 +296,8 @@ pub(super) fn write_parquet_chunks(
     cache_window: std::num::NonZeroU64,
     evidence: &mut GraphConstructionEncodingEvidence,
     cancelled: &mut impl FnMut() -> bool,
-    chunks: Option<Vec<Vec<u8>>>,
-) -> Result<ConstructionEncodedArtifact, GfError> {
+    chunks: Option<Encoded>,
+) -> Result<Vec<ConstructionEncodedArtifact>, GfError> {
     #[cfg(not(any(test, feature = "test-support")))]
     let _ = cancelled;
     let (directory, name) = directory_for(root, relative)?;
@@ -314,13 +320,23 @@ pub(super) fn write_parquet_chunks(
         digest: Sha256::new(),
         checksum: crate::corruption_checksum::Checksum::new(),
     };
-    let mut writer = if let Some(chunks) = chunks {
+    let mut writer = if let Some(encoded) = chunks {
         let mut sink = sink;
-        for chunk in chunks {
-            if cancelled() {
-                return Err(storage("construction encoding cancelled"));
+        match encoded {
+            Encoded::Chunks(chunks) => {
+                for chunk in chunks {
+                    if cancelled() {
+                        return Err(storage("construction encoding cancelled"));
+                    }
+                    sink.write_all(&chunk).map_err(storage)?;
+                }
             }
-            sink.write_all(&chunk).map_err(storage)?;
+            Encoded::Object(bytes) => {
+                if cancelled() {
+                    return Err(storage("construction encoding cancelled"));
+                }
+                sink.write_all(&bytes).map_err(storage)?;
+            }
         }
         sink
     } else {
@@ -353,6 +369,87 @@ pub(super) fn write_parquet_chunks(
         "encode.parquet.after_temp_fsync.{relative}"
     ));
     let (written, operations) = counter.values();
+    add_evidence_counter(
+        &mut evidence.output_write_bytes,
+        written,
+        "output write bytes",
+    )?;
+    add_evidence_counter(
+        &mut evidence.output_write_operations,
+        operations,
+        "output write operations",
+    )?;
+    add_evidence_counter(
+        &mut evidence.fsync_operations,
+        cache_release.sync_operations,
+        "file fsync operations",
+    )?;
+    if (relative.starts_with("properties/") || relative.starts_with("edge_properties/"))
+        && written > crate::property_overlay::bounded_object::MAX_PROPERTY_OBJECT_BYTES as u64
+    {
+        // The complete logical Parquet stream remains private. Its bounded
+        // physical objects receive their own hashes and publication receipts.
+        drop(writer);
+        let file = directory
+            .open_child_file(OsStr::new(&temporary))
+            .map_err(storage)?;
+        let reader = graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
+            file,
+            cache_window,
+            graphforge_filesystem::FileCacheReleaseTracker::default(),
+        )
+        .map_err(storage)?;
+        let reads = IoCounter::default();
+        let mut input = CountingInput {
+            inner: reader,
+            counter: reads.clone(),
+        };
+        let mut artifacts = Vec::new();
+        let encoded = crate::property_overlay::bounded_object::encode_parts(
+            &mut input,
+            written,
+            |index, bytes| {
+                let path =
+                    crate::property_overlay::bounded_object::part_path(Path::new(relative), index);
+                let path = path
+                    .to_str()
+                    .ok_or_else(|| storage("property object path is not UTF-8"))?
+                    .replace('\\', "/");
+                artifacts.extend(write_parquet_chunks(
+                    root,
+                    &path,
+                    batch,
+                    cache_window,
+                    evidence,
+                    cancelled,
+                    Some(Encoded::Object(bytes)),
+                )?);
+                Ok(())
+            },
+        );
+        let released = input.inner.finish().map_err(storage);
+        let (read_bytes, read_operations) = reads.values();
+        add_evidence_counter(
+            &mut evidence.input_read_bytes,
+            read_bytes,
+            "object encoding read bytes",
+        )?;
+        add_evidence_counter(
+            &mut evidence.input_read_operations,
+            read_operations,
+            "object encoding read operations",
+        )?;
+        match (encoded, released) {
+            (Ok(_), Ok(released)) => account_cache_release(released, evidence)?,
+            (Err(primary), Ok(_)) | (Ok(_), Err(primary)) => return Err(primary),
+            (Err(primary), Err(release)) => {
+                return Err(storage(format!(
+                    "{primary}; object source cache release also failed: {release}"
+                )));
+            }
+        }
+        return Ok(artifacts);
+    }
     let artifact = ConstructionEncodedArtifact {
         path: relative.to_owned(),
         bytes: written,
@@ -368,24 +465,9 @@ pub(super) fn write_parquet_chunks(
         "encode.parquet.after_install.{relative}"
     ));
     add_evidence_counter(
-        &mut evidence.output_write_bytes,
-        written,
-        "output write bytes",
-    )?;
-    add_evidence_counter(
-        &mut evidence.output_write_operations,
-        operations,
-        "output write operations",
-    )?;
-    add_evidence_counter(
         &mut evidence.fsync_operations,
         1,
         "namespace fsync operations",
     )?;
-    add_evidence_counter(
-        &mut evidence.fsync_operations,
-        cache_release.sync_operations,
-        "file fsync operations",
-    )?;
-    Ok(artifact)
+    Ok(vec![artifact])
 }

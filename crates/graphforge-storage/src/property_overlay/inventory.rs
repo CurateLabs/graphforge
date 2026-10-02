@@ -3,18 +3,20 @@
 #[cfg(test)]
 use super::{FragmentHandleCounts, TestMutationBarrier};
 
+use super::Ordering;
 #[cfg(test)]
-use super::{AtomicU64, Mutex, Ordering};
+use super::{AtomicU64, Mutex};
 
 use super::{
     AdmittedEdgeFile, Arc, AuthenticatedPropertyFragment, AuthenticatedPropertyInventory, BTreeMap,
-    BTreeSet, Deserialize, File, FragmentHandleGuard, GfError, HashMap, OpenPropertyFragment,
-    PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_LIVE_SCHEMA_FORMAT,
+    BTreeSet, Bytes, Deserialize, File, FragmentHandleGuard, GfError, HashMap,
+    OpenPropertyFragment, PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_LIVE_SCHEMA_FORMAT,
     PROPERTY_LIVE_SCHEMA_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT_KEY,
-    PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD, ParquetRecordBatchReaderBuilder, Path, PathBuf,
-    PropertyFragment, PropertyFragmentId, PropertyFragmentLayout, PropertyInventoryOpenMetrics,
-    PropertyRouteKind, PropertySnapshotRow, Read, Seek, Serialize, Write, corrupt, fs, io_error,
-    json_error, parquet_error, retained_read_at, validate_fragment_schema,
+    PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD, ParquetRecordBatchReaderBuilder,
+    PartAuthentication, Path, PathBuf, PropertyFile, PropertyFragment, PropertyFragmentId,
+    PropertyFragmentLayout, PropertyInventoryOpenMetrics, PropertyObjectPart, PropertyRouteKind,
+    PropertySnapshotRow, Read, Seek, Serialize, Write, corrupt, fs, io_error, json_error,
+    parquet_error, retained_read_at, validate_fragment_schema,
 };
 
 impl AuthenticatedPropertyInventory {
@@ -22,6 +24,19 @@ impl AuthenticatedPropertyInventory {
     /// workspace. Sessions should retain and share the resulting inventory.
     pub fn capture(project: &Path) -> Result<Self, GfError> {
         authenticated_property_inventory(project)
+    }
+
+    /// Capture an unpublished portable graph with the importer's existing
+    /// Parquet resource policy applied before any property metadata is decoded.
+    pub(crate) fn capture_for_import(
+        graph_tree: &Path,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Self, GfError> {
+        let inventory =
+            crate::graph_files::capture_graph_files_with_cancellation(graph_tree, || {
+                check_import_cancelled(cancelled)
+            })?;
+        Self::from_inventory_at_root_with_admission(graph_tree, inventory, None, true, cancelled)
     }
 
     /// Return semantic relation names and their admitted physical payload paths.
@@ -91,11 +106,13 @@ impl AuthenticatedPropertyInventory {
                 continue;
             }
             for fragment in fragments {
-                files.push(crate::catalog::AdmittedSourceFile {
-                    name: fragment.entry.relative_path.clone(),
-                    byte_length: fragment.entry.byte_length,
-                    content_xxh64: fragment.entry.content_xxh64,
-                });
+                for part in &fragment.parts {
+                    files.push(crate::catalog::AdmittedSourceFile {
+                        name: part.entry.relative_path.clone(),
+                        byte_length: part.entry.byte_length,
+                        content_xxh64: part.entry.content_xxh64,
+                    });
+                }
             }
         }
         files.sort_unstable_by(|left, right| left.name.cmp(&right.name));
@@ -146,6 +163,28 @@ impl AuthenticatedPropertyInventory {
             .root
             .as_ref()
             .ok_or_else(|| corrupt("property inventory lacks its retained root capability"))?;
+        if let Some(layout) = fragment.envelope {
+            return Ok(OpenPropertyFragment {
+                file: Arc::new(segmented_file(
+                    root,
+                    &fragment.parts,
+                    layout,
+                    scratch,
+                    #[cfg(test)]
+                    self.mutation_barrier
+                        .lock()
+                        .expect("mutation barrier lock")
+                        .take(),
+                )?),
+                authentication_bytes: 0,
+                authentication_block_equivalents: 0,
+                authentication_read_calls: 0,
+                handle: FragmentHandleGuard::acquired(
+                    #[cfg(test)]
+                    &self.handle_counts,
+                ),
+            });
+        }
         let file = open_retained_under(root, &fragment.physical_relative)?;
         let handle = FragmentHandleGuard::acquired(
             #[cfg(test)]
@@ -176,7 +215,7 @@ impl AuthenticatedPropertyInventory {
             mutation_barrier,
         )?;
         Ok(OpenPropertyFragment {
-            file: Arc::new(snapshot),
+            file: Arc::new(PropertyFile::Plain(snapshot)),
             authentication_bytes,
             authentication_block_equivalents,
             authentication_read_calls,
@@ -251,6 +290,70 @@ impl AuthenticatedPropertyInventory {
                 path: root.join(&fragment.physical_relative),
             })
             .collect()
+    }
+
+    /// Physical objects owned by a route, including continuation objects.
+    pub(crate) fn property_object_paths(
+        &self,
+        kind: PropertyRouteKind,
+        route: &str,
+    ) -> Vec<PathBuf> {
+        let Some(root) = &self.root_path else {
+            return Vec::new();
+        };
+        self.routes
+            .get(&(kind, route.to_owned()))
+            .into_iter()
+            .flatten()
+            .flat_map(|fragment| {
+                fragment
+                    .parts
+                    .iter()
+                    .map(|part| root.join(&part.physical_relative))
+            })
+            .collect()
+    }
+
+    /// Stream one logical fragment without exposing its physical envelope schema.
+    pub(crate) fn open_property_fragment_batches(
+        &self,
+        kind: PropertyRouteKind,
+        route: &str,
+        id: PropertyFragmentId,
+        scratch: &Path,
+        admit_resources: bool,
+    ) -> Result<(arrow::datatypes::SchemaRef, super::PropertyFragmentBatches), GfError> {
+        let fragment = self
+            .routes
+            .get(&(kind, route.to_owned()))
+            .and_then(|fragments| fragments.iter().find(|fragment| fragment.id == id))
+            .ok_or_else(|| corrupt("property fragment is not in retained authority"))?;
+        let opened = self.open_fragment(fragment, scratch)?;
+        let source = super::CountingChunkReader {
+            file: Arc::clone(&opened.file),
+            length: fragment.logical_length,
+            counts: super::ReadCounts::new(false),
+        };
+        // Portable import already enforced this storage policy. Other callers
+        // retain their own resource contracts rather than gaining new refusals.
+        let builder = if admit_resources {
+            crate::catalog::admitted_parquet_source(source)
+                .map_err(|error| GfError::Storage(error.to_string()))?
+        } else {
+            ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_error)?
+        };
+        let schema = builder.schema().clone();
+        let reader = builder
+            .with_batch_size(4096)
+            .build()
+            .map_err(parquet_error)?;
+        Ok((
+            schema,
+            super::PropertyFragmentBatches {
+                reader,
+                _opened: opened,
+            },
+        ))
     }
 
     /// Canonical property routes admitted into this immutable snapshot.
@@ -427,7 +530,7 @@ impl AuthenticatedPropertyInventory {
         validate_declared_node_files(&mut declared_nodes)?;
         let node_files = requested_route.is_none().then_some(declared_nodes);
         let mut admitted =
-            Self::admit_read_entries(root, entries, requested_route, table.as_ref())?;
+            Self::admit_read_entries(root, entries, requested_route, table.as_ref(), false, None)?;
         admitted.edge_routes = edge_routes;
         admitted.node_files = node_files;
         Ok(admitted)
@@ -438,11 +541,23 @@ impl AuthenticatedPropertyInventory {
         inventory: crate::GraphFilesInventory,
         requested_route: Option<(PropertyRouteKind, &str)>,
     ) -> Result<Self, GfError> {
+        Self::from_inventory_at_root_with_admission(root, inventory, requested_route, false, None)
+    }
+
+    fn from_inventory_at_root_with_admission(
+        root: &Path,
+        inventory: crate::GraphFilesInventory,
+        requested_route: Option<(PropertyRouteKind, &str)>,
+        admit_resources: bool,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Self, GfError> {
+        check_import_cancelled(cancelled)?;
         let table = crate::route_component::authenticate_manifest_routes(
             inventory.format_version,
             &inventory.files,
             |entry| {
                 use std::io::{Read, Seek};
+                check_import_cancelled(cancelled)?;
                 let mut retained =
                     crate::graph_files::resolve_v1_inventory_entry_retained(root, entry)?;
                 retained.file.rewind().map_err(io_error)?;
@@ -461,14 +576,23 @@ impl AuthenticatedPropertyInventory {
             table.as_ref(),
             false,
             requested_route,
+            cancelled,
         )?;
         let entries = resolve_versioned_property_entries_for_route(
             root,
             inventory.files,
             requested_route,
             table.as_ref(),
+            cancelled,
         )?;
-        let mut admitted = Self::admit_entries(root, entries, requested_route, table.as_ref())?;
+        let mut admitted = Self::admit_entries_with_admission(
+            root,
+            entries,
+            requested_route,
+            table.as_ref(),
+            admit_resources,
+            cancelled,
+        )?;
         admitted.edge_routes = topology.edge_routes;
         admitted.node_files = topology.node_files;
         Ok(admitted)
@@ -544,12 +668,14 @@ impl AuthenticatedPropertyInventory {
                     route_table.as_ref(),
                     false,
                     requested_route,
+                    None,
                 )?;
                 let entries = resolve_versioned_property_entries_for_route(
                     &root,
                     inventory.files,
                     requested_route,
                     route_table.as_ref(),
+                    None,
                 )?;
                 let mut admitted =
                     Self::admit_entries(&root, entries, requested_route, route_table.as_ref())?;
@@ -576,6 +702,7 @@ impl AuthenticatedPropertyInventory {
                     route_table.as_ref(),
                     true,
                     requested_route,
+                    None,
                 )?;
                 let entries = inventory
                     .files
@@ -604,7 +731,7 @@ impl AuthenticatedPropertyInventory {
         root: &Path,
         entries: Vec<crate::GraphFileEntry>,
     ) -> Result<Self, GfError> {
-        let node_files = admit_node_paths(root, &entries, false)?;
+        let node_files = admit_node_paths(root, &entries, false, None)?;
         let entries = entries
             .into_iter()
             .map(|entry| {
@@ -640,6 +767,24 @@ impl AuthenticatedPropertyInventory {
         requested_route: Option<(PropertyRouteKind, &str)>,
         route_table: Option<&crate::route_component::RouteTable>,
     ) -> Result<Self, GfError> {
+        Self::admit_entries_with_admission(
+            root_path,
+            entries,
+            requested_route,
+            route_table,
+            false,
+            None,
+        )
+    }
+
+    fn admit_entries_with_admission(
+        root_path: &Path,
+        entries: Vec<(crate::GraphFileEntry, PathBuf)>,
+        requested_route: Option<(PropertyRouteKind, &str)>,
+        route_table: Option<&crate::route_component::RouteTable>,
+        admit_resources: bool,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Self, GfError> {
         let entries = entries
             .into_iter()
             .map(|(entry, path)| {
@@ -654,7 +799,14 @@ impl AuthenticatedPropertyInventory {
                 )
             })
             .collect();
-        Self::admit_read_entries(root_path, entries, requested_route, route_table)
+        Self::admit_read_entries(
+            root_path,
+            entries,
+            requested_route,
+            route_table,
+            admit_resources,
+            cancelled,
+        )
     }
 
     fn admit_read_entries(
@@ -662,59 +814,30 @@ impl AuthenticatedPropertyInventory {
         entries: Vec<(crate::GraphReadFileEntry, PathBuf)>,
         requested_route: Option<(PropertyRouteKind, &str)>,
         route_table: Option<&crate::route_component::RouteTable>,
+        admit_resources: bool,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<Self, GfError> {
         let root = graphforge_filesystem::StableDirectory::open(root_path).map_err(io_error)?;
         #[cfg(test)]
         let handle_counts = Arc::new(FragmentHandleCounts::default());
+        let groups = group_property_entries(entries, requested_route, route_table)?;
+        let admission_scratch = tempfile::Builder::new()
+            .prefix(".gf-property-admission-")
+            .tempdir_in(root_path.parent().unwrap_or(root_path))
+            .map_err(io_error)?;
         let mut routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>> =
             BTreeMap::new();
-        for (entry, physical_relative) in entries {
-            let semantic_path = match route_table {
-                Some(table) => table.semantic_relative_path(&entry.relative_path)?,
-                None => entry.relative_path.clone(),
-            };
-            let parsed = parse_inventory_property_path(&semantic_path)?;
-            if entry.role != crate::GraphFileRole::Properties {
-                if parsed.is_some() {
-                    return Err(corrupt("property inventory entry has the wrong role"));
-                }
-                continue;
-            }
-            let Some((kind, route, id, layout)) = parsed else {
-                return Err(corrupt("properties role names a non-property path"));
-            };
-            if requested_route.is_some_and(|requested| (kind, route.as_str()) != requested) {
-                continue;
-            }
-            let file = open_retained_under(&root, &physical_relative)?;
-            let _handle = FragmentHandleGuard::acquired(
-                #[cfg(test)]
-                &handle_counts,
-            );
-            let identity = graphforge_filesystem::file_identity(&file).map_err(io_error)?;
-            let (authentication_bytes, authentication_block_equivalents, authentication_read_calls) =
-                authenticate_inventory_file(&file, &entry)?;
-            let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_error)?;
-            let physical_rows = usize::try_from(builder.metadata().file_metadata().num_rows())
-                .map_err(|_| corrupt("property fragment row count is not representable"))?;
-            validate_fragment_schema(builder.schema().as_ref(), id, layout, kind, &route)?;
-            let schema = builder.schema().clone();
-            let fragments = routes.entry((kind, route)).or_default();
-            if fragments.iter().any(|fragment| fragment.id == id) {
-                return Err(corrupt("property inventory contains duplicate authority"));
-            }
-            fragments.push(AuthenticatedPropertyFragment {
-                id,
-                layout,
-                entry,
-                physical_relative,
-                identity,
-                physical_rows,
-                schema,
-                authentication_bytes,
-                authentication_block_equivalents,
-                authentication_read_calls,
-            });
+        let admission = PropertyAdmission {
+            root: &root,
+            scratch: admission_scratch.path(),
+            admit_resources,
+            cancelled,
+            #[cfg(test)]
+            handle_counts: &handle_counts,
+        };
+        for ((kind, route, id), group) in groups {
+            let fragment = admission.admit_fragment(kind, &route, id, group)?;
+            routes.entry((kind, route)).or_default().push(fragment);
         }
         let mut schemas = BTreeMap::new();
         for ((kind, route), fragments) in &mut routes {
@@ -1032,7 +1155,8 @@ fn parse_inventory_property_path(
     )>,
     GfError,
 > {
-    let parts = relative.split('/').collect::<Vec<_>>();
+    let (anchor, _) = canonical_part_anchor(relative)?;
+    let parts = anchor.split('/').collect::<Vec<_>>();
     let kind = match parts.first().copied() {
         Some("properties") => PropertyRouteKind::Node,
         Some("edge_properties") => PropertyRouteKind::Edge,
@@ -1122,6 +1246,7 @@ fn topology_authority(
     table: Option<&crate::route_component::RouteTable>,
     cas: bool,
     requested_route: Option<(PropertyRouteKind, &str)>,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<TopologyAuthority, GfError> {
     if requested_route.is_some() {
         return Ok(TopologyAuthority {
@@ -1130,8 +1255,8 @@ fn topology_authority(
         });
     }
     Ok(TopologyAuthority {
-        edge_routes: admit_edge_route_paths(root, entries, table, cas)?,
-        node_files: Some(admit_node_paths(root, entries, cas)?),
+        edge_routes: admit_edge_route_paths(root, entries, table, cas, cancelled)?,
+        node_files: Some(admit_node_paths(root, entries, cas, cancelled)?),
     })
 }
 
@@ -1175,9 +1300,11 @@ fn admit_node_paths(
     root: &Path,
     entries: &[crate::GraphFileEntry],
     cas: bool,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<Vec<AdmittedEdgeFile>, GfError> {
     let mut files = Vec::new();
     for entry in entries {
+        check_import_cancelled(cancelled)?;
         if !is_node_topology_path(&entry.relative_path) {
             continue;
         }
@@ -1203,9 +1330,11 @@ fn admit_edge_route_paths(
     entries: &[crate::GraphFileEntry],
     table: Option<&crate::route_component::RouteTable>,
     cas: bool,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<BTreeMap<String, Vec<AdmittedEdgeFile>>, GfError> {
     let mut routes = BTreeMap::<String, Vec<AdmittedEdgeFile>>::new();
     for entry in entries {
+        check_import_cancelled(cancelled)?;
         if !entry.relative_path.starts_with("topology/edges/") {
             continue;
         }
@@ -1240,7 +1369,7 @@ pub(super) fn resolve_v1_property_entries_for_route(
     entries: Vec<crate::GraphFileEntry>,
     requested_route: Option<(PropertyRouteKind, &str)>,
 ) -> Result<Vec<(crate::GraphFileEntry, PathBuf)>, GfError> {
-    resolve_versioned_property_entries_for_route(root, entries, requested_route, None)
+    resolve_versioned_property_entries_for_route(root, entries, requested_route, None, None)
 }
 
 fn resolve_versioned_property_entries_for_route(
@@ -1248,9 +1377,11 @@ fn resolve_versioned_property_entries_for_route(
     entries: Vec<crate::GraphFileEntry>,
     requested_route: Option<(PropertyRouteKind, &str)>,
     route_table: Option<&crate::route_component::RouteTable>,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<Vec<(crate::GraphFileEntry, PathBuf)>, GfError> {
     let mut selected = Vec::new();
     for mut entry in entries {
+        check_import_cancelled(cancelled)?;
         let canonical = match route_table {
             Some(_) => {
                 crate::graph_files::wire_relative_path(&entry.relative_path)?;
@@ -1277,6 +1408,332 @@ fn resolve_versioned_property_entries_for_route(
         selected.push((entry, relative));
     }
     Ok(selected)
+}
+
+type PropertyPartEntry = (
+    u64,
+    PropertyFragmentLayout,
+    crate::GraphReadFileEntry,
+    PathBuf,
+);
+type PropertyEntryGroups =
+    BTreeMap<(PropertyRouteKind, String, PropertyFragmentId), Vec<PropertyPartEntry>>;
+
+fn group_property_entries(
+    entries: Vec<(crate::GraphReadFileEntry, PathBuf)>,
+    requested_route: Option<(PropertyRouteKind, &str)>,
+    route_table: Option<&crate::route_component::RouteTable>,
+) -> Result<PropertyEntryGroups, GfError> {
+    let mut groups = PropertyEntryGroups::new();
+    for (entry, physical_relative) in entries {
+        let semantic_path = match route_table {
+            Some(table) => table.semantic_relative_path(&entry.relative_path)?,
+            None => entry.relative_path.clone(),
+        };
+        let (anchor, index) = canonical_part_anchor(&semantic_path)?;
+        let parsed = parse_inventory_property_path(&anchor)?;
+        if entry.role != crate::GraphFileRole::Properties {
+            if parsed.is_some() {
+                return Err(corrupt("property inventory entry has the wrong role"));
+            }
+            continue;
+        }
+        let Some((kind, route, id, layout)) = parsed else {
+            return Err(corrupt("properties role names a non-property path"));
+        };
+        if requested_route.is_some_and(|requested| (kind, route.as_str()) != requested) {
+            continue;
+        }
+        groups.entry((kind, route, id)).or_default().push((
+            index,
+            layout,
+            entry,
+            physical_relative,
+        ));
+    }
+    Ok(groups)
+}
+
+struct PropertyAdmission<'a> {
+    root: &'a graphforge_filesystem::StableDirectory,
+    scratch: &'a Path,
+    admit_resources: bool,
+    cancelled: Option<&'a std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    handle_counts: &'a Arc<FragmentHandleCounts>,
+}
+
+fn check_import_cancelled(
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<(), GfError> {
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        Err(GfError::Api {
+            code: graphforge_core::ApiErrorCode::Cancelled,
+            message: "verification cancelled".to_owned(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+struct AdmittedPropertyParts {
+    layout: PropertyFragmentLayout,
+    parts: Vec<PropertyObjectPart>,
+    envelope: Option<super::bounded_object::EnvelopeLayout>,
+    plain_source: Option<File>,
+    authentication_bytes: u64,
+    authentication_block_equivalents: u64,
+    authentication_read_calls: u64,
+}
+
+impl PropertyAdmission<'_> {
+    fn admit_parts(
+        &self,
+        mut group: Vec<PropertyPartEntry>,
+    ) -> Result<AdmittedPropertyParts, GfError> {
+        group.sort_unstable_by_key(|part| part.0);
+        if group.first().is_none_or(|part| part.0 != 0)
+            || group.windows(2).any(|pair| pair[0].0 == pair[1].0)
+        {
+            return Err(corrupt("property fragment anchor missing or duplicated"));
+        }
+        let layout = group[0].1;
+        let indices = group.iter().map(|part| part.0).collect::<Vec<_>>();
+        let mut parts = Vec::new();
+        let mut plain_source = None;
+        let mut envelope = None;
+        let mut authentication_bytes = 0;
+        let mut authentication_block_equivalents = 0;
+        let mut authentication_read_calls = 0;
+        for (index, _, entry, physical_relative) in group {
+            check_import_cancelled(self.cancelled)?;
+            let file = open_retained_under(self.root, &physical_relative)?;
+            let _handle = FragmentHandleGuard::acquired(
+                #[cfg(test)]
+                self.handle_counts,
+            );
+            let identity = graphforge_filesystem::file_identity(&file).map_err(io_error)?;
+            let (snapshot, bytes, blocks, calls) = authenticated_snapshot_file(
+                &file,
+                identity,
+                &entry,
+                self.scratch,
+                #[cfg(test)]
+                None,
+            )?;
+            crate::lifecycle_io::record_read(
+                crate::StorageIoPhase::HydrationVerification,
+                bytes,
+                calls,
+            );
+            crate::lifecycle_io::record_blocks(
+                crate::StorageIoPhase::HydrationVerification,
+                blocks,
+            );
+            authentication_bytes += bytes;
+            authentication_block_equivalents += blocks;
+            authentication_read_calls += calls;
+            if self.admit_resources {
+                crate::catalog::admitted_parquet_source(snapshot.try_clone().map_err(io_error)?)
+                    .map_err(|error| GfError::Storage(error.to_string()))?;
+            }
+            let inspected =
+                super::bounded_object::inspect_envelope(snapshot.try_clone().map_err(io_error)?)?;
+            if index == 0 && inspected.is_none() {
+                plain_source = Some(snapshot);
+            }
+            if index == 0 {
+                envelope = inspected.map(|(layout, _)| layout);
+                if inspected.is_some_and(|(_, actual)| actual != 0) {
+                    return Err(corrupt("property anchor has wrong part index"));
+                }
+            } else if inspected != envelope.map(|layout| (layout, index)) || envelope.is_none() {
+                return Err(corrupt("property fragment parts have conflicting layouts"));
+            }
+            parts.push(PropertyObjectPart {
+                entry,
+                physical_relative,
+                identity,
+            });
+        }
+        if let Some(envelope) = envelope {
+            super::bounded_object::validate_parts(envelope, &indices)?;
+        } else if parts.len() != 1 {
+            return Err(corrupt("plain property fragment has unexpected parts"));
+        }
+        Ok(AdmittedPropertyParts {
+            layout,
+            parts,
+            envelope,
+            plain_source,
+            authentication_bytes,
+            authentication_block_equivalents,
+            authentication_read_calls,
+        })
+    }
+
+    fn admit_fragment(
+        &self,
+        kind: PropertyRouteKind,
+        route: &str,
+        id: PropertyFragmentId,
+        group: Vec<PropertyPartEntry>,
+    ) -> Result<AuthenticatedPropertyFragment, GfError> {
+        check_import_cancelled(self.cancelled)?;
+        let AdmittedPropertyParts {
+            layout,
+            parts,
+            envelope,
+            plain_source,
+            mut authentication_bytes,
+            mut authentication_block_equivalents,
+            mut authentication_read_calls,
+        } = self.admit_parts(group)?;
+        let anchor = &parts[0];
+        let logical_length =
+            envelope.map_or(anchor.entry.byte_length, |layout| layout.logical_length);
+        let source = if let Some(layout) = envelope {
+            segmented_file(
+                self.root,
+                &parts,
+                layout,
+                self.scratch,
+                #[cfg(test)]
+                None,
+            )?
+        } else {
+            PropertyFile::Plain(plain_source.expect("plain anchor snapshot"))
+        };
+        let source = Arc::new(source);
+        let reader = super::CountingChunkReader {
+            file: Arc::clone(&source),
+            length: logical_length,
+            counts: super::ReadCounts::new(false),
+        };
+        let builder = if self.admit_resources {
+            crate::catalog::admitted_parquet_source(reader)
+                .map_err(|error| GfError::Storage(error.to_string()))?
+        } else {
+            ParquetRecordBatchReaderBuilder::try_new(reader).map_err(parquet_error)?
+        };
+        let physical_rows = usize::try_from(builder.metadata().file_metadata().num_rows())
+            .map_err(|_| corrupt("property fragment row count is not representable"))?;
+        validate_fragment_schema(builder.schema().as_ref(), id, layout, kind, route)?;
+        let schema = builder.schema().clone();
+        let (bytes, blocks, calls) = source.authentication();
+        let (read_bytes, read_calls) = source.physical_reads();
+        crate::lifecycle_io::record_read(
+            crate::StorageIoPhase::HydrationVerification,
+            bytes.saturating_add(read_bytes),
+            calls.saturating_add(read_calls),
+        );
+        crate::lifecycle_io::record_blocks(crate::StorageIoPhase::HydrationVerification, blocks);
+        authentication_bytes += bytes;
+        authentication_block_equivalents += blocks;
+        authentication_read_calls += calls;
+        Ok(AuthenticatedPropertyFragment {
+            id,
+            layout,
+            entry: anchor.entry.clone(),
+            physical_relative: anchor.physical_relative.clone(),
+            identity: anchor.identity,
+            parts,
+            envelope,
+            logical_length,
+            physical_rows,
+            schema,
+            authentication_bytes,
+            authentication_block_equivalents,
+            authentication_read_calls,
+        })
+    }
+}
+
+fn canonical_part_anchor(relative: &str) -> Result<(String, u64), GfError> {
+    let components = relative.split('/').collect::<Vec<_>>();
+    if matches!(
+        components.as_slice(),
+        ["properties" | "edge_properties", _, _]
+    ) && let Some((anchor, index)) = super::bounded_object::split_part_path(Path::new(relative))
+    {
+        let name = anchor
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| corrupt("property anchor is not UTF-8"))?;
+        PropertyFragmentId::parse(name)?;
+        return Ok((
+            anchor
+                .to_str()
+                .ok_or_else(|| corrupt("property anchor is not UTF-8"))?
+                .to_owned(),
+            index,
+        ));
+    }
+    Ok((relative.to_owned(), 0))
+}
+
+fn segmented_file(
+    root: &graphforge_filesystem::StableDirectory,
+    parts: &[PropertyObjectPart],
+    layout: super::bounded_object::EnvelopeLayout,
+    scratch: &Path,
+    #[cfg(test)] mutation_barrier: Option<Arc<TestMutationBarrier>>,
+) -> Result<PropertyFile, GfError> {
+    let root = root.try_clone().map_err(io_error)?;
+    let parts = parts.to_vec();
+    let scratch = scratch.to_path_buf();
+    let authentication = Arc::new(PartAuthentication::default());
+    let counts = Arc::clone(&authentication);
+    #[cfg(test)]
+    let mutation_barrier = Mutex::new(mutation_barrier);
+    let source = super::bounded_object::SegmentedSource::new(
+        layout,
+        Arc::new(move |index| {
+            let part = parts
+                .get(usize::try_from(index).map_err(|_| corrupt("property part index overflows"))?)
+                .ok_or_else(|| corrupt("property part missing from authority"))?;
+            if part.entry.byte_length > super::bounded_object::MAX_PROPERTY_OBJECT_BYTES as u64 {
+                return Err(corrupt("property object exceeds physical cap"));
+            }
+            let file = open_retained_under(&root, &part.physical_relative)?;
+            if graphforge_filesystem::file_identity(&file).map_err(io_error)? != part.identity {
+                return Err(corrupt(
+                    "property fragment identity changed after admission",
+                ));
+            }
+            let (mut snapshot, bytes, blocks, calls) = authenticated_snapshot_file(
+                &file,
+                part.identity,
+                &part.entry,
+                &scratch,
+                #[cfg(test)]
+                mutation_barrier
+                    .lock()
+                    .expect("mutation barrier lock")
+                    .take(),
+            )?;
+            counts.add(bytes, blocks, calls);
+            let mut data = Vec::with_capacity(
+                usize::try_from(part.entry.byte_length)
+                    .map_err(|_| corrupt("property part length overflows"))?,
+            );
+            let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+            loop {
+                let read = snapshot.read(&mut buffer).map_err(io_error)?;
+                if read == 0 {
+                    break;
+                }
+                counts.read_bytes.fetch_add(read as u64, Ordering::Relaxed);
+                counts.read_calls.fetch_add(1, Ordering::Relaxed);
+                data.extend_from_slice(&buffer[..read]);
+            }
+            Ok(Bytes::from(data))
+        }),
+    )?;
+    Ok(PropertyFile::Segmented {
+        source,
+        authentication,
+    })
 }
 
 fn open_retained_under(
@@ -1731,6 +2188,7 @@ pub fn enumerate_property_fragments(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(fragments),
         Err(error) => return Err(GfError::Storage(error.to_string())),
     };
+    let mut continuation_paths = BTreeMap::<PathBuf, Vec<u64>>::new();
     for entry in entries {
         let entry = entry.map_err(|error| GfError::Storage(error.to_string()))?;
         if crate::staging::is_staged_temp_name(&entry.file_name()) {
@@ -1745,10 +2203,42 @@ pub fn enumerate_property_fragments(
             .file_name()
             .into_string()
             .map_err(|_| corrupt("property fragment identity is not canonical UTF-8"))?;
-        fragments.push(PropertyFragment {
-            id: PropertyFragmentId::parse(&name)?,
-            path: entry.path(),
-        });
+        if let Some((anchor, index)) = super::bounded_object::split_part_path(&entry.path()) {
+            PropertyFragmentId::parse(
+                anchor
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| corrupt("property anchor is not UTF-8"))?,
+            )?;
+            continuation_paths.entry(anchor).or_default().push(index);
+        } else {
+            fragments.push(PropertyFragment {
+                id: PropertyFragmentId::parse(&name)?,
+                path: entry.path(),
+            });
+        }
+    }
+    for (anchor, mut indices) in continuation_paths {
+        if !fragments.iter().any(|fragment| fragment.path == anchor) {
+            return Err(corrupt("property continuation has no anchor"));
+        }
+        let retained =
+            graphforge_filesystem::StableDirectory::open(&directory).map_err(io_error)?;
+        let file = retained
+            .open_child_file(
+                anchor
+                    .file_name()
+                    .ok_or_else(|| corrupt("property anchor has no filename"))?,
+            )
+            .map_err(io_error)?;
+        let (layout, index) = super::bounded_object::inspect_envelope(file)?
+            .ok_or_else(|| corrupt("property continuation belongs to a plain fragment"))?;
+        if index != 0 {
+            return Err(corrupt("property anchor has wrong part index"));
+        }
+        indices.push(0);
+        indices.sort_unstable();
+        super::bounded_object::validate_parts(layout, &indices)?;
     }
     fragments.sort_unstable_by_key(|fragment| fragment.id);
     if fragments.windows(2).any(|pair| pair[0].id == pair[1].id) {

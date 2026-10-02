@@ -832,3 +832,23 @@ fn wave12_max_edge_id_ignores_non_parquet_but_rejects_corrupt_canonical_shards()
     std::fs::write(edges.join("broken.parquet"), b"not parquet").unwrap();
     assert!(max_edge_id(dir.path()).is_err());
 }
+#[test]
+fn logical_parquet_source_rejects_oversized_footer_before_decode() {
+    let metadata_length = u32::try_from(super::MAX_ADMITTED_PARQUET_METADATA_BYTES + 1).unwrap();
+    let mut encoded = b"PAR1".to_vec();
+    encoded.extend_from_slice(&metadata_length.to_le_bytes());
+    encoded.extend_from_slice(b"PAR1");
+    let error = match super::admitted_parquet_source(bytes::Bytes::from(encoded)) {
+        Ok(_) => panic!("logical reader accepted an oversized footer"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        super::DataFusionError::ResourcesExhausted(_)
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains("Parquet metadata exceeds admission limit")
+    );
+}

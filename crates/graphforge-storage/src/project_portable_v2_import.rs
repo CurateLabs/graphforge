@@ -1368,26 +1368,48 @@ fn validate_import_property_values(
         .saturating_mul(2)
         .saturating_add(1024);
     collect_portable_graph_paths(&directory, Path::new(""), &mut paths, &mut remaining)?;
-    for path in paths {
-        check_identity_validation_cancelled(cancelled)?;
-        if !(path.starts_with("properties") || path.starts_with("edge_properties"))
-            || path
-                .extension()
-                .is_none_or(|extension| extension != "parquet")
-        {
-            continue;
-        }
-        let reader = crate::catalog::admitted_parquet(&graph_tree.join(path))
-            .map_err(invalid_import_identity)?
-            .with_batch_size(IMPORT_IDENTITY_BATCH_ROWS)
-            .build()
-            .map_err(invalid_import_identity)?;
-        for batch in reader {
-            check_identity_validation_cancelled(cancelled)?;
-            crate::writer::validate_property_values(&batch.map_err(invalid_import_identity)?)
-                .map_err(|error| {
-                    PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, error.code())
-                })?;
+    if !paths
+        .iter()
+        .any(|path| path.starts_with("properties") || path.starts_with("edge_properties"))
+    {
+        return Ok(());
+    }
+    // Validate logical values, not the binary envelope used to keep an
+    // oversized property fragment in bounded physical objects. Every historical
+    // fragment still passes validation before this private candidate publishes.
+    let inventory = crate::AuthenticatedPropertyInventory::capture_for_import(
+        graph_tree, cancelled,
+    )
+    .map_err(|error| match error {
+        GfError::Api {
+            code: graphforge_core::ApiErrorCode::Cancelled,
+            ..
+        } => PortableV2Error::new(PortableV2ErrorCode::Cancelled, "verification cancelled"),
+        error => invalid_import_identity(error),
+    })?;
+    let scratch = inventory
+        .create_snapshot_scratch()
+        .map_err(invalid_import_identity)?;
+    for kind in [
+        crate::PropertyRouteKind::Node,
+        crate::PropertyRouteKind::Edge,
+    ] {
+        for route in inventory.routes(kind) {
+            for fragment in inventory.property_fragments(kind, route) {
+                check_identity_validation_cancelled(cancelled)?;
+                let (_, reader) = inventory
+                    .open_property_fragment_batches(kind, route, fragment.id, scratch.path(), true)
+                    .map_err(invalid_import_identity)?;
+                for batch in reader {
+                    check_identity_validation_cancelled(cancelled)?;
+                    crate::writer::validate_property_values(
+                        &batch.map_err(invalid_import_identity)?,
+                    )
+                    .map_err(|error| {
+                        PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, error.code())
+                    })?;
+                }
+            }
         }
     }
     Ok(())
@@ -1835,6 +1857,20 @@ fn parse_digest(value: &str) -> Result<[u8; 32], PortableV2Error> {
 mod tests {
     use super::*;
     mod returned_errors;
+
+    #[test]
+    fn property_validation_preserves_cancelled_before_inventory_capture() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("properties")).unwrap();
+        fs::write(
+            root.path().join("properties/Person.parquet"),
+            b"not parquet",
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(true);
+        let error = validate_import_property_values(root.path(), 1, Some(&cancelled)).unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::Cancelled);
+    }
 
     const HELPER: &str = "project_portable_v2_import::tests::subprocess_crash_import";
     const COOKIE: &str = "graphforge-internal-subprocess-v1";
