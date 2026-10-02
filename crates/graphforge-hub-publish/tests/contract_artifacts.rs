@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const HUB: &str = "https://hub.example";
-const ARTIFACTS: [(&str, &str); 7] = [
+const ARTIFACTS: [(&str, &str); 8] = [
     (
         "capabilities.schema.json",
         include_str!("../../../docs/reference/hub-publish/v1/capabilities.schema.json"),
@@ -43,6 +43,10 @@ const ARTIFACTS: [(&str, &str); 7] = [
     (
         "commit-request.schema.json",
         include_str!("../../../docs/reference/hub-publish/v1/commit-request.schema.json"),
+    ),
+    (
+        "operation-status.schema.json",
+        include_str!("../../../docs/reference/hub-publish/v1/operation-status.schema.json"),
     ),
     (
         "upload-status.schema.json",
@@ -297,6 +301,7 @@ impl Publication {
     fn commitment(&self) -> String {
         PublishIntent {
             repository: self.repository.clone(),
+            intent_digest: self.intent_digest(),
             objects: self.declarations(),
             manifest_validator: self.manifest_validator(),
             refs: self.refs.clone(),
@@ -305,11 +310,17 @@ impl Publication {
         .request_commitment()
     }
 
+    /// The corpus models one intent per operation identity.
+    fn intent_digest(&self) -> String {
+        sha256_digest(format!("publish intent {}", self.operation).as_bytes())
+    }
+
     fn open_body(&self) -> Value {
         json!({
             "format": "graphforge-hub-publish/1",
             "operation_uuid": self.operation,
             "request_commitment": self.commitment(),
+            "intent_digest": self.intent_digest(),
             "repository": self.repository,
             "objects": self.declarations(),
         })
@@ -759,6 +770,45 @@ fn corpus() -> Corpus {
         cases.push(case(
             "same-publication-twice-returns-original-receipt",
             "Reopening and recommitting the same operation with the same commitment returns the original receipt before any upload; the repository revision does not change.",
+            steps,
+        ));
+    }
+
+    // Operation status before and after commit.
+    {
+        let publication = v1(21);
+        let mut model = RepoModel::default();
+        let status_url = format!(
+            "{}/.gf/publish/operations/{}",
+            repo_url(&repository),
+            publication.operation
+        );
+        let mut steps = vec![
+            token(&repository, "token"),
+            send(
+                request(HubMethod::Get, &status_url).bearer("token"),
+                error(404, "invalid_input"),
+            ),
+        ];
+        steps.extend(publish(&publication, "token", "first", &mut model));
+        let revision = model.revision(&repository);
+        steps.push(send(
+            request(HubMethod::Get, &status_url).bearer("token"),
+            status(200).json(json!({
+                "format": "graphforge-hub-publish/1",
+                "operation_uuid": publication.operation,
+                "repository": repository,
+                "intent_digest": publication.intent_digest(),
+                "receipt": publication.receipt(&revision),
+            })),
+        ));
+        steps.push(send(
+            request(HubMethod::Get, &status_url),
+            error(401, "auth_denied"),
+        ));
+        cases.push(case(
+            "operation-status-returns-intent-and-original-receipt",
+            "An authorized operation lookup is 404 before the operation opens and afterwards returns its intent digest and, once committed, the original receipt, so a retry is classified before any package is derived.",
             steps,
         ));
     }
@@ -1307,11 +1357,12 @@ fn session_request_schema() -> Value {
         "session-request",
         json!({
             "type": "object", "additionalProperties": false,
-            "required": ["format", "operation_uuid", "request_commitment", "repository", "objects"],
+            "required": ["format", "operation_uuid", "request_commitment", "intent_digest", "repository", "objects"],
             "properties": {
                 "format": {"const": "graphforge-hub-publish/1"},
                 "operation_uuid": {"type": "string", "format": "uuid"},
                 "request_commitment": {"$ref": "#/$defs/digest"},
+                "intent_digest": {"$ref": "#/$defs/digest"},
                 "repository": {"$ref": "#/$defs/identity"},
                 "objects": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/object"}},
                 "requirements": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/capability"}}
@@ -1352,6 +1403,24 @@ fn commit_request_schema() -> Value {
                 "refs": {"type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true,
                     "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
                 "expected_revision": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]}
+            },
+            "$defs": defs(),
+        }),
+    )
+}
+
+fn operation_status_schema() -> Value {
+    schema(
+        "operation-status",
+        json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["format", "operation_uuid", "repository", "intent_digest", "receipt"],
+            "properties": {
+                "format": {"const": "graphforge-hub-publish/1"},
+                "operation_uuid": {"type": "string", "format": "uuid"},
+                "repository": {"$ref": "#/$defs/identity"},
+                "intent_digest": {"$ref": "#/$defs/digest"},
+                "receipt": {"oneOf": [{"$ref": "#/$defs/receipt"}, {"type": "null"}]}
             },
             "$defs": defs(),
         }),
@@ -1419,6 +1488,10 @@ fn generated() -> Vec<(&'static str, Vec<u8>)> {
             "commit-request.schema.json",
             pretty(&commit_request_schema()),
         ),
+        (
+            "operation-status.schema.json",
+            pretty(&operation_status_schema()),
+        ),
         ("upload-status.schema.json", pretty(&upload_status_schema())),
         ("error.schema.json", pretty(&error_schema())),
         ("conformance.json", pretty(&corpus())),
@@ -1436,6 +1509,7 @@ fn checked_in_contract_artifacts_match_rust_authority() {
         }
         return;
     }
+    assert_eq!(expected.len(), ARTIFACTS.len());
     for ((name, expected), (checked_name, actual)) in expected.iter().zip(ARTIFACTS) {
         assert_eq!(name, &checked_name);
         assert_eq!(
@@ -1563,7 +1637,7 @@ fn check(
 
 #[test]
 fn every_conformance_case_replays_through_the_reference_hub() {
-    let corpus: Corpus = serde_json::from_str(ARTIFACTS[6].1).unwrap();
+    let corpus: Corpus = serde_json::from_str(ARTIFACTS[ARTIFACTS.len() - 1].1).unwrap();
     assert_eq!(corpus.format, "graphforge-hub-publish-conformance/1");
     assert_eq!(corpus.hub, HUB);
     assert!(corpus.cases.len() >= 15, "corpus lost cases");

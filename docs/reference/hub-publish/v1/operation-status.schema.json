@@ -130,7 +130,7 @@
       "type": "string"
     }
   },
-  "$id": "https://graphforge.sh/schemas/hub-publish/v1/session-request.schema.json",
+  "$id": "https://graphforge.sh/schemas/hub-publish/v1/operation-status.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -140,39 +140,31 @@
     "intent_digest": {
       "$ref": "#/$defs/digest"
     },
-    "objects": {
-      "items": {
-        "$ref": "#/$defs/object"
-      },
-      "minItems": 1,
-      "type": "array"
-    },
     "operation_uuid": {
       "format": "uuid",
       "type": "string"
     },
+    "receipt": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/receipt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "repository": {
       "$ref": "#/$defs/identity"
-    },
-    "request_commitment": {
-      "$ref": "#/$defs/digest"
-    },
-    "requirements": {
-      "items": {
-        "$ref": "#/$defs/capability"
-      },
-      "maxItems": 64,
-      "type": "array"
     }
   },
   "required": [
     "format",
     "operation_uuid",
-    "request_commitment",
-    "intent_digest",
     "repository",
-    "objects"
+    "intent_digest",
+    "receipt"
   ],
-  "title": "session-request",
+  "title": "operation-status",
   "type": "object"
 }

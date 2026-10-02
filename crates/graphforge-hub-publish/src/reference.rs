@@ -11,9 +11,9 @@ use crate::exchange::{HubExchange, HubMethod, HubRequest, HubResponse};
 use crate::wire::{
     Capability, CommitRequest, DEVICE_CODE_GRANT_TYPE, DIGEST_PLACEHOLDER,
     DeviceAuthorizationResponse, HUB_PUBLISH_FORMAT, OAuthErrorBody, OpenSessionRequest,
-    PublishAuthorization, PublishCapabilities, PublishIntent, PublishLimits, PublishReceipt,
-    PublishSessionId, SessionResponse, TokenResponse, UPLOAD_LENGTH_HEADER, UPLOAD_OFFSET_HEADER,
-    UploadStatus, UploadTarget, parse_content_range, publish_scope,
+    OperationStatus, PublishAuthorization, PublishCapabilities, PublishIntent, PublishLimits,
+    PublishReceipt, PublishSessionId, SessionResponse, TokenResponse, UPLOAD_LENGTH_HEADER,
+    UPLOAD_OFFSET_HEADER, UploadStatus, UploadTarget, parse_content_range, publish_scope,
 };
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, ProtocolVersion,
@@ -290,6 +290,9 @@ impl ReferenceHub {
                     (HubMethod::Post, ["publish", "sessions", id, "commit"]) => {
                         self.commit(state, &identity, id, request)
                     }
+                    (HubMethod::Get, ["publish", "operations", id]) => {
+                        Self::operation_status(state, &identity, id, request)
+                    }
                     (HubMethod::Get, ["refs"]) => read_refs(state, &identity),
                     (HubMethod::Get, ["manifest"]) => read_manifest(state, &identity),
                     (HubMethod::Get, ["objects", digest]) => {
@@ -480,6 +483,34 @@ impl ReferenceHub {
         Ok(json_response(201, &response))
     }
 
+    /// Report an operation's intent and, once committed, its original receipt.
+    fn operation_status(
+        state: &State,
+        repository: &RepositoryIdentity,
+        operation: &str,
+        request: &HubRequest,
+    ) -> Handled {
+        Self::authorize(state, request, repository)?;
+        let unknown = || not_found("publish operation is unknown");
+        let operation_uuid = Uuid::parse_str(operation).map_err(|_| unknown())?;
+        let session = state
+            .operations
+            .get(&operation_uuid)
+            .and_then(|session_id| state.sessions.get(session_id))
+            .filter(|session| &session.request.repository == repository)
+            .ok_or_else(unknown)?;
+        Ok(json_response(
+            200,
+            &OperationStatus {
+                format: HUB_PUBLISH_FORMAT.to_owned(),
+                operation_uuid,
+                repository: repository.clone(),
+                intent_digest: session.request.intent_digest.clone(),
+                receipt: session.receipt.clone(),
+            },
+        ))
+    }
+
     fn open_response(&self, session_id: &str, session: &Session) -> SessionResponse {
         SessionResponse::Open {
             session_id: PublishSessionId::parse(session_id).expect("hub ids are valid"),
@@ -612,6 +643,7 @@ impl ReferenceHub {
         let manifest_validator = sha256_digest(&manifest_document);
         let intent = PublishIntent {
             repository: repository.clone(),
+            intent_digest: session.request.intent_digest.clone(),
             objects: session.request.objects.clone(),
             manifest_validator: manifest_validator.clone(),
             refs: commit.refs.clone(),

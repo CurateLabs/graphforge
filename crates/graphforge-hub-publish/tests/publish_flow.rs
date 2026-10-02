@@ -7,9 +7,9 @@ use graphforge_discovery::{
 };
 use graphforge_hub_publish::{
     CommitRequest, DevicePoll, HUB_PUBLISH_FORMAT, HubErrorBody, HubMethod, HubPublishErrorCode,
-    HubRequest, HubResponse, ObjectDeclaration, OpenSessionRequest, PublishCapabilities,
-    PublishIntent, PublishReceipt, PublishToken, ReferenceHub, ReferenceHubConfig, SessionResponse,
-    UploadTarget, content_range, sha256_digest,
+    HubRequest, HubResponse, ObjectDeclaration, OpenSessionRequest, OperationStatus,
+    PublishCapabilities, PublishIntent, PublishReceipt, PublishToken, ReferenceHub,
+    ReferenceHubConfig, SessionResponse, UploadTarget, content_range, sha256_digest,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -34,6 +34,7 @@ struct Client<'a> {
 
 struct Plan {
     operation: Uuid,
+    intent_digest: String,
     bytes: Vec<u8>,
     package_digest: String,
     expected_revision: Option<String>,
@@ -43,6 +44,7 @@ impl Plan {
     fn new(text: &str, package: char, expected_revision: Option<String>) -> Self {
         Self {
             operation: Uuid::now_v7(),
+            intent_digest: sha256_digest(format!("intent of {text}").as_bytes()),
             bytes: text.as_bytes().to_vec(),
             package_digest: format!("sha256:{}", package.to_string().repeat(64)),
             expected_revision,
@@ -103,6 +105,7 @@ impl<'a> Client<'a> {
         .unwrap();
         PublishIntent {
             repository: self.repository.clone(),
+            intent_digest: plan.intent_digest.clone(),
             objects: vec![plan.declaration()],
             manifest_validator: manifest.canonical_digest().unwrap().0,
             refs: vec!["main".into()],
@@ -115,6 +118,7 @@ impl<'a> Client<'a> {
             format: HUB_PUBLISH_FORMAT.into(),
             operation_uuid: plan.operation,
             request_commitment: self.intent(plan).request_commitment(),
+            intent_digest: plan.intent_digest.clone(),
             repository: self.repository.clone(),
             objects: vec![plan.declaration()],
             requirements: Vec::new(),
@@ -187,6 +191,19 @@ impl<'a> Client<'a> {
         receipt(&self.commit(plan, &session))
     }
 
+    fn operation(&self, operation: Uuid) -> HubResponse {
+        self.hub.handle(
+            &HubRequest::new(
+                HubMethod::Get,
+                format!(
+                    "{}/.gf/publish/operations/{operation}",
+                    self.hub.repository_url(&self.repository)
+                ),
+            )
+            .with_header("authorization", self.token.authorization()),
+        )
+    }
+
     fn refs(&self) -> Option<Vec<u8>> {
         let response = self.hub.handle(&HubRequest::new(
             HubMethod::Get,
@@ -228,6 +245,40 @@ fn same_publication_twice_yields_one_version_and_the_original_receipt() {
     assert_eq!(client.refs().unwrap(), refs);
     assert_eq!(sha256_digest(&refs), first.revision);
     assert_eq!(first.previous_revision, None);
+}
+
+#[test]
+fn operation_status_reports_intent_and_original_receipt_without_a_session() {
+    let hub = ReferenceHub::new();
+    let client = Client::new(&hub, demo());
+    let plan = Plan::new("package v1", 'b', None);
+    let unknown = client.operation(plan.operation);
+    assert_eq!(unknown.status, 404);
+    assert_eq!(error_code(&unknown), HubPublishErrorCode::InvalidInput);
+
+    let (session, upload) = client.opened(&plan);
+    let open = OperationStatus::from_json(&client.operation(plan.operation).body).unwrap();
+    assert_eq!(open.intent_digest, plan.intent_digest);
+    assert_eq!(open.receipt, None);
+
+    assert_eq!(client.put(&upload, 0, &plan.bytes).status, 200);
+    let first = receipt(&client.commit(&plan, &session));
+    let done = OperationStatus::from_json(&client.operation(plan.operation).body).unwrap();
+    assert_eq!(done.receipt, Some(first));
+    assert_eq!(done.operation_uuid, plan.operation);
+
+    // The lookup is authorized and repository-scoped.
+    let anonymous = hub.handle(&HubRequest::new(
+        HubMethod::Get,
+        format!(
+            "{}/.gf/publish/operations/{}",
+            hub.repository_url(&demo()),
+            plan.operation
+        ),
+    ));
+    assert_eq!(error_code(&anonymous), HubPublishErrorCode::AuthDenied);
+    let other = Client::new(&hub, RepositoryIdentity::parse("openalex/other").unwrap());
+    assert_eq!(other.operation(plan.operation).status, 404);
 }
 
 #[test]
@@ -363,6 +414,7 @@ fn unknown_required_capability_fails_before_any_state_change() {
         format: HUB_PUBLISH_FORMAT.into(),
         operation_uuid: plan.operation,
         request_commitment: client.intent(&plan).request_commitment(),
+        intent_digest: plan.intent_digest.clone(),
         repository: demo(),
         objects: vec![plan.declaration()],
         requirements: vec![graphforge_hub_publish::Capability::new(
@@ -426,6 +478,7 @@ fn oversized_declared_length_is_refused_at_open() {
         format: HUB_PUBLISH_FORMAT.into(),
         operation_uuid: plan.operation,
         request_commitment: client.intent(&plan).request_commitment(),
+        intent_digest: plan.intent_digest.clone(),
         repository: demo(),
         objects: vec![declaration],
         requirements: Vec::new(),

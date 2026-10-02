@@ -14,6 +14,7 @@ The read side (`.gf/refs`, `.gf/manifest`, objects) reuses
 | Session request | `session-request.schema.json` | `POST {repo}/.gf/publish/sessions` |
 | Session response and receipt | `session-response.schema.json` | session open and commit responses |
 | Commit request | `commit-request.schema.json` | `POST {repo}/.gf/publish/sessions/{id}/commit` |
+| Operation status | `operation-status.schema.json` | `GET {repo}/.gf/publish/operations/{operation_uuid}` |
 | Upload status | `upload-status.schema.json` | `PUT <upload_url>` response |
 | Error | `error.schema.json` | every non-OAuth error response |
 

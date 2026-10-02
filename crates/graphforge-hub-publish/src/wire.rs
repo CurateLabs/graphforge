@@ -324,6 +324,11 @@ pub struct OpenSessionRequest {
     pub operation_uuid: Uuid,
     /// [`PublishIntent::request_commitment`] of the whole publication.
     pub request_commitment: String,
+    /// Client-defined digest of what this operation publishes, independent of
+    /// package bytes. The Hub stores it with the operation and returns it from
+    /// the operation status lookup, so a retry is classified before the client
+    /// derives any package.
+    pub intent_digest: String,
     /// Repository to publish into; must equal the URL repository.
     pub repository: RepositoryIdentity,
     /// Object inventory, strictly ascending by digest.
@@ -349,6 +354,7 @@ impl OpenSessionRequest {
         check_format(&self.format)?;
         check_requirements(&self.requirements)?;
         validate_digest(&self.request_commitment)?;
+        validate_digest(&self.intent_digest)?;
         self.repository
             .validate()
             .map_err(|_| invalid("repository identity is invalid"))?;
@@ -494,6 +500,8 @@ pub struct PublishReceipt {
 pub struct PublishIntent {
     /// Target repository.
     pub repository: RepositoryIdentity,
+    /// [`OpenSessionRequest::intent_digest`] of the operation.
+    pub intent_digest: String,
     /// Object inventory, strictly ascending by digest.
     pub objects: Vec<ObjectDeclaration>,
     /// Canonical digest of the discovery manifest.
@@ -511,6 +519,7 @@ impl PublishIntent {
         canonical_json(&json!({
             "format": HUB_PUBLISH_FORMAT,
             "repository": {"owner": self.repository.owner, "repository": self.repository.repository},
+            "intent_digest": self.intent_digest,
             "objects": self.objects,
             "manifest_validator": self.manifest_validator,
             "refs": self.refs,
@@ -522,6 +531,48 @@ impl PublishIntent {
     #[must_use]
     pub fn request_commitment(&self) -> String {
         sha256_digest(&self.canonical_bytes())
+    }
+}
+
+/// `GET {repository}/.gf/publish/operations/{operation_uuid}` response body.
+///
+/// Lets a client classify a retry before deriving any package: a different
+/// `intent_digest` is an idempotency conflict, and a present `receipt` is the
+/// original result of the committed operation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationStatus {
+    /// Must equal [`HUB_PUBLISH_FORMAT`].
+    pub format: String,
+    /// Operation identity.
+    pub operation_uuid: Uuid,
+    /// Repository the operation publishes into.
+    pub repository: RepositoryIdentity,
+    /// Intent digest the operation was opened with.
+    pub intent_digest: String,
+    /// Original receipt once the operation committed; `null` while open.
+    pub receipt: Option<PublishReceipt>,
+}
+
+impl OperationStatus {
+    /// Parse and validate an untrusted operation status document.
+    pub fn from_json(bytes: &[u8]) -> Result<Self, HubPublishError> {
+        let value = parse_unique_json(bytes)?;
+        check_header(&value)?;
+        let status: Self =
+            serde_json::from_value(value).map_err(|_| invalid("operation status is malformed"))?;
+        validate_digest(&status.intent_digest)?;
+        status
+            .repository
+            .validate()
+            .map_err(|_| invalid("repository identity is invalid"))?;
+        if let Some(receipt) = &status.receipt
+            && (receipt.operation_uuid != status.operation_uuid
+                || receipt.repository != status.repository)
+        {
+            return Err(invalid("operation receipt does not match its status"));
+        }
+        Ok(status)
     }
 }
 
