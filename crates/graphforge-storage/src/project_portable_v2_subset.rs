@@ -428,7 +428,8 @@ fn hex(digest: [u8; 32]) -> String {
 fn map_projection(error: &crate::GfError) -> PortableV2Error {
     match error {
         crate::GfError::Validation(_) => incompatible("subset projection rejected"),
-        _ => PortableV2Error::new(PortableV2ErrorCode::Io, "subset projection failed"),
+        other => PortableV2Error::new(PortableV2ErrorCode::Io, "subset projection failed")
+            .with_cause(crate::portable_cause::sanitized_cause(&other.to_string())),
     }
 }
 fn storage(_: crate::GfError) -> PortableV2Error {

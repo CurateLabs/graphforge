@@ -107,6 +107,7 @@ pub use graph_read_inventory::{
     reason = "private node-v2 construction is consumed by the staged #932 integration"
 )]
 mod graph_manifest;
+mod portable_cause;
 #[cfg(any(test, feature = "test-support"))]
 pub use graph_manifest::encode_root as encode_graph_files_root_v2;
 pub(crate) use graph_manifest::{

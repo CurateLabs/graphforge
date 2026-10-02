@@ -78,6 +78,7 @@ pub(super) fn storage(error: &GfError) -> PortableV2Error {
         PortableV2ErrorCode::Io,
         "portable import publication failed",
     )
+    .with_cause(crate::portable_cause::sanitized_cause(&error.to_string()))
 }
 
 pub(super) fn storage_or_cancel(
