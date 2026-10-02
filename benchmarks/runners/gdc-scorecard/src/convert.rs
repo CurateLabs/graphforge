@@ -56,8 +56,8 @@ pub fn convert(
 /// `output_dir`, which must not exist or must be empty.
 ///
 /// Rows stream in input order. Identity checks spill sorted key runs to
-/// `output_dir/.spill/` so memory stays within `memory_budget_bytes` whatever
-/// the input size. Row-level errors (malformed input, invalid values, missing
+/// `output_dir/.spill/`, so the memory they use stays within
+/// `memory_budget_bytes` whatever the input size. Row-level errors (malformed input, invalid values, missing
 /// columns) are reported as each row is read. A duplicate (label, id) is
 /// reported once every node table has been read, and a dangling endpoint once
 /// every edge table has been read; each reports the occurrence the earliest in
