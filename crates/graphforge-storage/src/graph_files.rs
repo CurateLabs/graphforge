@@ -798,6 +798,7 @@ fn build_inventory(source_root: &Path) -> Result<(GraphFilesInventory, u64), GfE
 const ARTIFACT_IDENTITY: graphforge_core::hash_observation::HashDomain =
     graphforge_core::hash_observation::HashDomain::ArtifactPayload;
 
+#[allow(clippy::too_many_arguments)]
 fn build_inventory_for_owned_layout(
     source_root: &Path,
     admit_raw_routes: bool,
