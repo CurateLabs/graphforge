@@ -1835,6 +1835,7 @@ version = "0.0.0"
 dependencies = [
  "arrow",
  "parquet",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "sha2",

@@ -12,6 +12,7 @@ pub enum Cause {
     DuplicateNodeIdentity,
     DanglingEndpoint,
     OutputExists,
+    InvalidMemoryBudget,
     Io,
 }
 
@@ -27,6 +28,7 @@ impl Cause {
             Self::DuplicateNodeIdentity => "duplicate_node_identity",
             Self::DanglingEndpoint => "dangling_endpoint",
             Self::OutputExists => "output_exists",
+            Self::InvalidMemoryBudget => "invalid_memory_budget",
             Self::Io => "io_error",
         }
     }

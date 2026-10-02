@@ -1,7 +1,6 @@
 //! Mapping-driven conversion into the `gf import-session register-parquet`
 //! layout: one Parquet file per table, plus `conversion-manifest.json`.
 
-use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Read};
 use std::path::{Path, PathBuf};
@@ -21,6 +20,10 @@ use crate::error::{Cause, ConvertError, io_error};
 use crate::identity::{Uuid, edge_uuid, hex, node_uuid};
 use crate::mapping::{EdgeTable, Mapping, NodeTable, Property, PropertyType};
 use crate::source::read_table;
+use crate::spill::{
+    Budget, DEFAULT_MEMORY_BUDGET_BYTES, Duplicate, Key, KeySorter, SpillDir, check_nodes,
+    find_dangling,
+};
 
 pub const MANIFEST_FILE: &str = "conversion-manifest.json";
 pub const MANIFEST_SCHEMA: &str = "graphforge-gdc-conversion-manifest/1";
@@ -32,37 +35,114 @@ pub struct Conversion {
     pub manifest: Value,
 }
 
-/// Converts the files named by `mapping_bytes` under `input_root` into
-/// `output_dir`, which must not exist or must be empty.
+/// Converts with [`DEFAULT_MEMORY_BUDGET_BYTES`]; see [`convert_with_budget`].
 ///
 /// # Errors
-/// Any typed [`ConvertError`]; nothing is published under its final name
-/// unless its table converted completely, and the manifest is written last.
+/// As [`convert_with_budget`].
 pub fn convert(
     mapping_bytes: &[u8],
     input_root: &Path,
     output_dir: &Path,
 ) -> Result<Conversion, ConvertError> {
+    convert_with_budget(
+        mapping_bytes,
+        input_root,
+        output_dir,
+        DEFAULT_MEMORY_BUDGET_BYTES,
+    )
+}
+
+/// Converts the files named by `mapping_bytes` under `input_root` into
+/// `output_dir`, which must not exist or must be empty.
+///
+/// Rows stream in input order. Identity checks spill sorted key runs to
+/// `output_dir/.spill/`, so the memory they use stays within
+/// `memory_budget_bytes` whatever the input size. Row-level errors (malformed input, invalid values, missing
+/// columns) are reported as each row is read. A duplicate (label, id) is
+/// reported once every node table has been read, and a dangling endpoint once
+/// every edge table has been read; each reports the occurrence the earliest in
+/// input order (mapping table order, then file order, then row; a source
+/// endpoint before the target on the same row).
+///
+/// # Errors
+/// Any typed [`ConvertError`]. Tables are written to `*.partial` and renamed
+/// only after both identity checks pass, the manifest is written last, and
+/// the spill directory is removed on success and on failure.
+pub fn convert_with_budget(
+    mapping_bytes: &[u8],
+    input_root: &Path,
+    output_dir: &Path,
+    memory_budget_bytes: u64,
+) -> Result<Conversion, ConvertError> {
+    let budget = Budget::new(memory_budget_bytes)?;
     let mapping = Mapping::parse(mapping_bytes)?;
     prepare_output(output_dir)?;
+    let spill = SpillDir::create(output_dir)?;
     let mut inputs = Vec::new();
-    let mut outputs = Vec::new();
-    let mut keys: HashMap<(u32, i64), Uuid> = HashMap::new();
-    let mut label_index: HashMap<&str, u32> = HashMap::new();
+    let mut files = Vec::new();
+    let mut pending = Vec::new();
+    let mut labels: Vec<&str> = Vec::new();
     for table in &mapping.node_tables {
-        let next = u32::try_from(label_index.len())
-            .map_err(|_| ConvertError::new(Cause::InvalidMapping, "too many labels"))?;
-        label_index.entry(table.label.as_str()).or_insert(next);
+        if !labels.contains(&table.label.as_str()) {
+            labels.push(table.label.as_str());
+        }
     }
+    u32::try_from(labels.len())
+        .map_err(|_| ConvertError::new(Cause::InvalidMapping, "too many labels"))?;
+    let label_index = |label: &str| {
+        let index = labels.iter().position(|known| *known == label);
+        u32::try_from(index.expect("mapping validated every label")).expect("label count fits u32")
+    };
+
+    let mut node_keys = KeySorter::new(&spill, budget, false);
     for table in &mapping.node_tables {
         record_inputs(&table.id, &table.files, input_root, &mut inputs)?;
-        let output = convert_nodes(table, input_root, output_dir, &label_index, &mut keys)?;
-        outputs.push(output);
+        let label = label_index(&table.label);
+        pending.push(convert_nodes(
+            table,
+            label,
+            input_root,
+            output_dir,
+            &mut files,
+            &mut node_keys,
+        )?);
     }
+    let node_runs = node_keys.finish()?;
+    let (defined, duplicate) = check_nodes(&node_runs)?;
+    if let Some(duplicate) = duplicate {
+        return Err(duplicate_error(&duplicate, &files, &labels));
+    }
+
+    let mut endpoint_keys = KeySorter::new(&spill, budget, true);
     for table in &mapping.edge_tables {
         record_inputs(&table.id, &table.files, input_root, &mut inputs)?;
-        let output = convert_edges(table, input_root, output_dir, &label_index, &keys)?;
-        outputs.push(output);
+        let endpoints = (
+            label_index(&table.source.label),
+            label_index(&table.target.label),
+        );
+        pending.push(convert_edges(
+            table,
+            endpoints,
+            input_root,
+            output_dir,
+            &mut files,
+            &mut endpoint_keys,
+        )?);
+    }
+    let endpoint_runs = endpoint_keys.finish()?;
+    if let Some(dangling) = find_dangling(&endpoint_runs, &defined)? {
+        return Err(dangling_error(&dangling, &files));
+    }
+    let spill_record = json!({
+        "budget": budget.describe(),
+        "node_keys": node_runs.stats().describe(),
+        "endpoint_keys": endpoint_runs.stats().describe(),
+    });
+    spill.close()?;
+
+    let mut outputs = Vec::with_capacity(pending.len());
+    for table in pending {
+        outputs.push(table.publish(output_dir)?);
     }
     let manifest = json!({
         "schema": MANIFEST_SCHEMA,
@@ -74,6 +154,7 @@ pub fn convert(
         "mapping_sha256": hex(&Sha256::digest(mapping_bytes)),
         "inputs": inputs,
         "outputs": outputs,
+        "spill": spill_record,
     });
     let manifest_path = output_dir.join(MANIFEST_FILE);
     let mut text = serde_json::to_string_pretty(&manifest)
@@ -84,6 +165,58 @@ pub fn convert(
         manifest_path,
         manifest,
     })
+}
+
+/// One (table, file) occurrence in mapping order; a [`Key`] names it by index.
+struct InputFile {
+    table: String,
+    path: PathBuf,
+}
+
+fn file_index(files: &mut Vec<InputFile>, table: &str, path: &Path) -> Result<u32, ConvertError> {
+    let index = u32::try_from(files.len())
+        .map_err(|_| ConvertError::new(Cause::InvalidMapping, "too many input files"))?;
+    files.push(InputFile {
+        table: table.to_owned(),
+        path: path.to_path_buf(),
+    });
+    Ok(index)
+}
+
+fn duplicate_error(duplicate: &Duplicate, files: &[InputFile], labels: &[&str]) -> ConvertError {
+    let second = &files[duplicate.second.file as usize];
+    let first = &files[duplicate.first.file as usize];
+    row_error(
+        Cause::DuplicateNodeIdentity,
+        &second.path,
+        duplicate.second.position,
+        &format!(
+            "node ({}, {}) appears more than once (table {}); first defined at {} row {} (table {})",
+            labels[duplicate.second.label as usize],
+            duplicate.second.id,
+            second.table,
+            first.path.display(),
+            duplicate.first.position,
+            first.table,
+        ),
+    )
+}
+
+fn dangling_error(endpoint: &Key, files: &[InputFile]) -> ConvertError {
+    let side = if endpoint.position & 1 == 0 {
+        "source"
+    } else {
+        "target"
+    };
+    row_error(
+        Cause::DanglingEndpoint,
+        &files[endpoint.file as usize].path,
+        endpoint.position >> 1,
+        &format!(
+            "{side} node {} is not defined by any node table",
+            endpoint.id
+        ),
+    )
 }
 
 fn prepare_output(output_dir: &Path) -> Result<(), ConvertError> {
@@ -333,8 +466,9 @@ impl TableWriter {
             .map_err(|error| ConvertError::new(Cause::Io, error.to_string()))
     }
 
-    /// Finishes the footer, syncs, and renames to the final name.
-    fn finish(self) -> Result<(PathBuf, u64), ConvertError> {
+    /// Finishes the footer and syncs; the table keeps its `.partial` name
+    /// until [`PendingTable::publish`].
+    fn finish(self, description: Description) -> Result<PendingTable, ConvertError> {
         let buffered = self
             .writer
             .into_inner()
@@ -344,42 +478,59 @@ impl TableWriter {
             .map_err(|error| io_error(&self.partial.display().to_string(), error.error()))?;
         file.sync_all()
             .map_err(|error| io_error(&self.partial.display().to_string(), &error))?;
-        fs::rename(&self.partial, &self.path)
-            .map_err(|error| io_error(&self.path.display().to_string(), &error))?;
-        Ok((self.path, self.rows))
+        Ok(PendingTable {
+            partial: self.partial,
+            path: self.path,
+            rows: self.rows,
+            description,
+        })
     }
 }
 
-fn describe(
-    kind: &str,
-    table: &str,
-    label_key: &str,
-    label: &str,
-    path: &Path,
-    root: &Path,
+/// Manifest fields of one output table.
+struct Description {
+    kind: &'static str,
+    table: String,
+    label_key: &'static str,
+    label: String,
+}
+
+/// A complete table still under its `.partial` name.
+struct PendingTable {
+    partial: PathBuf,
+    path: PathBuf,
     rows: u64,
-) -> Result<Value, ConvertError> {
-    let (sha256, bytes) = sha256_file(path)?;
-    let relative = path.strip_prefix(root).unwrap_or(path);
-    Ok(json!({
-        "table": table,
-        "kind": kind,
-        label_key: label,
-        "path": relative.to_string_lossy(),
-        "rows": rows,
-        "bytes": bytes,
-        "sha256": sha256,
-    }))
+    description: Description,
+}
+
+impl PendingTable {
+    /// Renames to the final name and describes the published file.
+    fn publish(self, root: &Path) -> Result<Value, ConvertError> {
+        fs::rename(&self.partial, &self.path)
+            .map_err(|error| io_error(&self.path.display().to_string(), &error))?;
+        let (sha256, bytes) = sha256_file(&self.path)?;
+        let relative = self.path.strip_prefix(root).unwrap_or(&self.path);
+        let description = self.description;
+        Ok(json!({
+            "table": description.table,
+            "kind": description.kind,
+            description.label_key: description.label,
+            "path": relative.to_string_lossy(),
+            "rows": self.rows,
+            "bytes": bytes,
+            "sha256": sha256,
+        }))
+    }
 }
 
 fn convert_nodes(
     table: &NodeTable,
+    label: u32,
     input_root: &Path,
     output_dir: &Path,
-    labels: &HashMap<&str, u32>,
-    keys: &mut HashMap<(u32, i64), Uuid>,
-) -> Result<Value, ConvertError> {
-    let label_id = labels[table.label.as_str()];
+    files: &mut Vec<InputFile>,
+    keys: &mut KeySorter<'_>,
+) -> Result<PendingTable, ConvertError> {
     let properties = sorted_properties(&table.properties);
     let mut fields = vec![
         Field::new("node_uuid", DataType::FixedSizeBinary(16), true),
@@ -401,25 +552,20 @@ fn convert_nodes(
     );
     for file in &table.files {
         let path = input_root.join(file);
+        let file = file_index(files, &table.id, &path)?;
         read_table(table.format, &path, &required, &mut |batch, first_row| {
             let ids = text_column(batch, &table.id_column);
             let mut uuids = Vec::with_capacity(batch.num_rows());
             for index in 0..batch.num_rows() {
                 let row = first_row + index as u64;
                 let id = id_value(ids, index, &table.id_column, &path, row)?;
-                let uuid = node_uuid(&table.label, id);
-                if keys.insert((label_id, id), uuid).is_some() {
-                    return Err(row_error(
-                        Cause::DuplicateNodeIdentity,
-                        &path,
-                        row,
-                        &format!(
-                            "node ({}, {id}) appears more than once (table {})",
-                            table.label, table.id
-                        ),
-                    ));
-                }
-                uuids.push(uuid);
+                keys.push(Key {
+                    label,
+                    id,
+                    file,
+                    position: row,
+                })?;
+                uuids.push(node_uuid(&table.label, id));
             }
             let mut columns = vec![
                 uuid_array(&uuids)?,
@@ -429,28 +575,23 @@ fn convert_nodes(
             writer.write(columns)
         })?;
     }
-    let (path, rows) = writer.finish()?;
-    describe(
-        "nodes",
-        &table.id,
-        "label",
-        &table.label,
-        &path,
-        output_dir,
-        rows,
-    )
+    writer.finish(Description {
+        kind: "nodes",
+        table: table.id.clone(),
+        label_key: "label",
+        label: table.label.clone(),
+    })
 }
 
 fn convert_edges(
     table: &EdgeTable,
+    (source_label, target_label): (u32, u32),
     input_root: &Path,
     output_dir: &Path,
-    labels: &HashMap<&str, u32>,
-    keys: &HashMap<(u32, i64), Uuid>,
-) -> Result<Value, ConvertError> {
+    files: &mut Vec<InputFile>,
+    keys: &mut KeySorter<'_>,
+) -> Result<PendingTable, ConvertError> {
     let properties = sorted_properties(&table.properties);
-    let source_label = labels[table.source.label.as_str()];
-    let target_label = labels[table.target.label.as_str()];
     let mut fields = vec![
         Field::new("edge_uuid", DataType::FixedSizeBinary(16), true),
         Field::new("rel_type", DataType::Utf8, false),
@@ -474,6 +615,7 @@ fn convert_edges(
     let mut ordinal = 0_u64;
     for file in &table.files {
         let path = input_root.join(file);
+        let file = file_index(files, &table.id, &path)?;
         read_table(table.format, &path, &required, &mut |batch, first_row| {
             let sources = text_column(batch, &table.source.column);
             let targets = text_column(batch, &table.target.column);
@@ -487,18 +629,16 @@ fn convert_edges(
                 let row = first_row + index as u64;
                 let source = id_value(sources, index, &table.source.column, &path, row)?;
                 let target = id_value(targets, index, &table.target.column, &path, row)?;
-                let lookup = |label: u32, name: &str, id: i64| {
-                    keys.get(&(label, id)).copied().ok_or_else(|| {
-                        row_error(
-                            Cause::DanglingEndpoint,
-                            &path,
-                            row,
-                            &format!("{name} node {id} is not defined by any node table"),
-                        )
-                    })
-                };
-                source_ids.push(lookup(source_label, "source", source)?);
-                target_ids.push(lookup(target_label, "target", target)?);
+                for (label, id, side) in [(source_label, source, 0), (target_label, target, 1)] {
+                    keys.push(Key {
+                        label,
+                        id,
+                        file,
+                        position: row << 1 | side,
+                    })?;
+                }
+                source_ids.push(node_uuid(&table.source.label, source));
+                target_ids.push(node_uuid(&table.target.label, target));
                 edge_ids.push(edge_uuid(&table.id, ordinal));
                 ordinal += 1;
             }
@@ -512,14 +652,10 @@ fn convert_edges(
             writer.write(columns)
         })?;
     }
-    let (path, rows) = writer.finish()?;
-    describe(
-        "edges",
-        &table.id,
-        "rel_type",
-        &table.rel_type,
-        &path,
-        output_dir,
-        rows,
-    )
+    writer.finish(Description {
+        kind: "edges",
+        table: table.id.clone(),
+        label_key: "rel_type",
+        label: table.rel_type.clone(),
+    })
 }
