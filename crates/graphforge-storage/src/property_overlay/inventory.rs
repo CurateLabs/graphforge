@@ -1353,6 +1353,15 @@ fn admit_fragment(
         .map(|performed| {
             work = performed;
         })
+        // A property fragment that fails its manifest entry is project
+        // corruption, as it was when the inventory checked it at open.
+        .map_err(|error| match error {
+            GfError::Validation(reason) => corrupt(&format!(
+                "property fragment {} is refused: {reason}",
+                fragment.physical_relative.display()
+            )),
+            other => other,
+        })
     });
     outcome.clone().map(|()| work)
 }

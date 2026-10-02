@@ -7509,7 +7509,6 @@ fn count_row_marker_avoids_property_values_through_public_lifecycle() {
     let source = root.path().join("source");
     let (nodes, mut payloads) = construct_count_marker_fixture(&source);
     let graph = GraphForge::new(source.to_str()).unwrap();
-    let initial = verify_count_marker_graph(&graph, &nodes, &payloads);
     let capture = |query: &str, expected: i64| {
         let (result, captured) = graphforge_exec::demand::capture(|| graph.execute(query));
         let result = result.unwrap();
@@ -7535,8 +7534,24 @@ fn count_row_marker_avoids_property_values_through_public_lifecycle() {
         "MATCH (n) RETURN count(n.z_payload) AS value",
         payloads.iter().filter(|payload| payload.is_some()).count() as i64,
     );
-    assert!(counted.authentication_bytes > 0);
-    assert_eq!(counted.authentication_bytes, values.authentication_bytes);
+    // Property fragments are admitted on the first read of each, not at open and
+    // not per read (#1388): the first query, a bare `count(*)`, pays for every
+    // node-property fragment it must admit, whole and once, and the query that
+    // then reads the values pays nothing more.
+    let declared_property_bytes = graphforge_storage::resolve_project_generation(&source)
+        .unwrap()
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap()
+        .files
+        .iter()
+        .filter(|entry| entry.relative_path.starts_with("properties/"))
+        .map(|entry| entry.byte_length)
+        .sum::<u64>();
+    assert!(declared_property_bytes > 0);
+    assert_eq!(counted.authentication_bytes, declared_property_bytes);
+    assert_eq!(values.authentication_bytes, 0);
+    let initial = verify_count_marker_graph(&graph, &nodes, &payloads);
     assert!(counted.physical_rows > 0);
     assert_eq!(counted.physical_rows, values.physical_rows);
     let unrequested_bytes = payloads.iter().flatten().map(String::len).sum::<usize>() as u64;
