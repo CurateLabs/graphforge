@@ -173,11 +173,31 @@ LDBC pipe-delimited CSV and Graphalytics `.v`/`.e` files into the Parquet layout
   value or a missing column fails with a typed `cause` on stderr and exit code
   2, and no manifest is written;
 - `conversion-manifest.json` records every input and output with row counts and
-  SHA-256, the mapping digest and the converter version. Outputs are written to
-  `*.partial` and renamed, and the output directory must start empty.
+  SHA-256, the mapping digest, the converter version and the spill statistics.
+  Tables are written to `*.partial` and renamed only after the identity checks
+  pass, and the output directory must start empty.
 
-The converter keeps one 16-byte UUID per node in memory to resolve edge
-endpoints, which bounds it well beyond Graphalytics sizes but not to SNB SF100.
+Conversion runs out of core. Endpoint UUIDs are computed from (label, id), so
+no identity map is kept. The two identity checks run over 24-byte
+`(label, id, file, row)` keys buffered up to `--memory-budget-bytes` (default
+256 MiB, minimum 72 bytes), sorted, and spilled as runs under
+`<output-dir>/.spill/`: a k-way merge of node keys finds duplicates and a merge
+join of edge-endpoint keys against node keys finds dangling endpoints. Runs
+beyond the merge fan-in are merged in groups first, so the key buffer or the
+open run buffers fit the budget at every phase. The spill directory is removed
+on success and on failure; it needs up to 24 bytes per node plus 24 bytes per
+distinct endpoint per run of free space. The input batch and the Parquet
+writer's row group are fixed-size and outside the budget.
+
+Row-level errors are reported as rows are read. A duplicate is reported after
+every node table is read and a dangling endpoint after every edge table is
+read, so a row-level error anywhere in a phase's tables is reported ahead of
+a duplicate or dangling endpoint in the same phase. Each reports its earliest occurrence in input order
+(mapping table order, file order, row, then source before target), so the
+duplicate and dangling endpoint named are independent of the budget. The
+manifest's `spill` object records the budget, merge fan-in, and per key kind
+the records, records spilled, runs, peak buffered records and intermediate
+merges.
 
 ```bash
 PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_dataset_cache tests.test_gdc_scorecard_load

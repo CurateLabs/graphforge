@@ -134,7 +134,7 @@ class ScorecardLoadTests(unittest.TestCase):
         self.addCleanup(scratch.cleanup)
         self.scratch = Path(scratch.name)
 
-    def convert(self, mapping: Path, input_root: Path, output: Path):
+    def convert(self, mapping: Path, input_root: Path, output: Path, *extra: str):
         return subprocess.run(
             [
                 str(self.converter),
@@ -145,6 +145,7 @@ class ScorecardLoadTests(unittest.TestCase):
                 str(input_root),
                 "--output-dir",
                 str(output),
+                *extra,
             ],
             check=False,
             capture_output=True,
@@ -255,14 +256,25 @@ class ScorecardLoadTests(unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("duplicate identity", refused.stdout + refused.stderr)
 
-    def test_conversion_is_reproducible_across_runs(self) -> None:
+    def test_conversion_is_reproducible_across_runs_and_memory_budgets(self) -> None:
         digests = []
-        for name in ("one", "two"):
+        for name, extra in (("one", ()), ("two", ()), ("tiny", ("--memory-budget-bytes", "72"))):
             out = self.scratch / name
-            self.assertEqual(self.convert(FIXTURE / "mapping.json", FIXTURE, out).returncode, 0)
+            completed = self.convert(FIXTURE / "mapping.json", FIXTURE, out, *extra)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
             manifest = json.loads((out / "conversion-manifest.json").read_text())
             digests.append((manifest["mapping_sha256"], manifest["inputs"], manifest["outputs"]))
+            self.assertFalse((out / ".spill").exists())
         self.assertEqual(digests[0], digests[1])
+        self.assertEqual(digests[0], digests[2])
+        self.assertEqual(manifest["spill"]["budget"]["memory_budget_bytes"], 72)
+        self.assertGreater(manifest["spill"]["node_keys"]["runs"], 1)
+
+        refused = self.convert(
+            FIXTURE / "mapping.json", FIXTURE, self.scratch / "low", "--memory-budget-bytes", "71"
+        )
+        self.assertEqual(refused.returncode, 2)
+        self.assertEqual(json.loads(refused.stderr)["error"]["cause"], "invalid_memory_budget")
 
 
 if __name__ == "__main__":
