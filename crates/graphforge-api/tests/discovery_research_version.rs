@@ -2,7 +2,7 @@
 
 use graphforge_api::{
     DiscoveryPortableV2Mismatch, DiscoveryResearchVersionError, DiscoveryResearchVersionRequest,
-    PortableV2ErrorCode, PortableV2Limits, PortableV2Mode, verify_discovered_research_version,
+    PortableV2Limits, PortableV2Mode, verify_discovered_research_version,
 };
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor, PORTABLE_V2_FORMAT,

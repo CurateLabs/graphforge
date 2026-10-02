@@ -250,23 +250,27 @@ mod tests {
                 &format!("sha256:{}", "e".repeat(64)),
             ),
         );
-        let lineage = build_research_lineage_from_registry(
-            &BuildResearchLineageRequest {
-                repository: RepositoryIdentity {
-                    owner: "openalex".into(),
-                    repository: "demo".into(),
-                },
-                immutable_version: immutable.clone(),
-                project_uuid,
-                branch_ref_names,
-                version_packages,
-                fork: None,
-                proposals: vec![],
+        let request = BuildResearchLineageRequest {
+            repository: RepositoryIdentity {
+                owner: "openalex".into(),
+                repository: "demo".into(),
             },
-            &registry,
-            DiscoveryLimits::default(),
-        )
-        .unwrap();
+            immutable_version: immutable.clone(),
+            project_uuid,
+            branch_ref_names,
+            version_packages,
+            fork: None,
+            proposals: vec![],
+        };
+        let lineage =
+            build_research_lineage_from_registry(&request, &registry, DiscoveryLimits::default())
+                .unwrap();
+        assert_eq!(
+            graph
+                .build_research_lineage_for_discovery(&request, &cancellation)
+                .unwrap(),
+            lineage
+        );
         assert_eq!(lineage.branches.len(), 1);
         assert_eq!(lineage.branches[0].head_version_uuid, head.to_string());
         assert_eq!(lineage.branches[0].ref_name, "main");

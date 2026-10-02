@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "cd0510a357fd4b48b8120c7f22397ac26dda862e612576e2a8bf7ee6678b1d7e",
+  "public_method_digest": "29a9d064b8ac863d01ddf711ae433006077d8831ef2a86e3d073e12f600cf36e",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -1073,6 +1073,9 @@
         "PortableV2ImportResult.transient_peak_allocated_bytes",
         "PortableV2ExportFacadeResult.receipt",
         "crate.verify_discovered_portable_v2",
+        "crate.verify_discovered_research_version",
+        "crate.build_research_lineage_from_registry",
+        "GraphForge.build_research_lineage_for_discovery",
         "crate.repack_verified_expanded_portable_v2",
         "crate.summarize_verified_portable_v2",
         "crate.resolve_discovered_ontology_module"
@@ -1109,6 +1112,18 @@
         {
           "path": "crates/graphforge-api/tests/discovery_ontology_module.rs",
           "symbol": "two_projects_adopting_the_same_exact_module_resolve_to_the_same_module"
+        },
+        {
+          "path": "crates/graphforge-api/tests/discovery_research_version.rs",
+          "symbol": "valid_lineage_version_maps_to_the_storage_verified_package"
+        },
+        {
+          "path": "crates/graphforge-api/src/discovery_research_lineage.rs",
+          "symbol": "build_lineage_advertises_branch_heads_and_projection_kind"
+        },
+        {
+          "path": "crates/graphforge-api/tests/discovery_lineage_import.rs",
+          "symbol": "distinct_imports_reopen_with_identical_version_lineage"
         }
       ]
     },
