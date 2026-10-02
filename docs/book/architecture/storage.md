@@ -324,6 +324,16 @@ chosen by path in `graphforge_storage::graph_admission`:
   refused rather than republished under a fresh digest. (The identity handle
   authenticates the blocks it reads itself, so for the identity runs only that
   capture check applies.)
+  The property inventory of a compact generation holds each fragment's
+  manifest entry and reads nothing at open: the exact length is checked, the
+  footer (schema and row count, which the manifest does not carry) is read the
+  first time a route is used, and the content is checked the first time a
+  reader opens the fragment, directly on the read-only content-store inode and
+  memoized for the inventory's life. A checksum refusal under `indexes/search/`
+  is a hard validation error, never a reason to rebuild the index. Text `find`
+  takes its freshness identity from the same manifest (node and node-property
+  objects by name, length and XXH64), so it reads no edge object and re-reads no
+  source to recheck freshness.
 - **Self-authenticating.** UUID-membership runs (block checksums in their
   manifest), CSR shards (per-shard XXH64) and delta runs (verified at replay)
   carry their own authority; hydration neither reads nor registers them.
@@ -351,7 +361,7 @@ real adjacency and search index publications:
 | Role | Inventory source | Corruption coverage |
 | --- | --- | --- |
 | Topology | `topology/`, including the current `topology/runtime_catalog.parquet` | Nodes and edges are refused on first touch (open or the first query/recount); sidecars (generation counters, label encoding, surrogate tails, runtime catalog) are refused at open; a mutating commit refuses a corrupted edge payload instead of republishing it |
-| Properties | `properties/` and `edge_properties/` | Real property payload; the property overlay checks route lengths and XXH64 checksums at open |
+| Properties | `properties/` and `edge_properties/` | Real property payload; open checks each fragment's exact length only, and every read (projection, filter, `find`, portable export, `SET`) refuses a corrupted fragment on first touch |
 | Index | Published `indexes/adjacency/` CSR and `indexes/search/` artifacts | Both real build paths reach the compact inventory; adjacency build records and shard manifests are refused at open, CSR shards by their own checksum on read, search artifacts on first touch |
 | Delta | `deltas/` journal runs | Role-level full-admission test uses an opaque fixture; journal replay has separate validation |
 | Catalog | Top-level `semantic-routes.json` | Real control payload, authenticated by SHA-256 with the manifest |
