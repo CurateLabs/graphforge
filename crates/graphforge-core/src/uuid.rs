@@ -97,19 +97,28 @@ pub fn hub_research_clone_operation(
     )
 }
 
-/// Derive the default `gf publish` operation for one exact research Version.
+/// Derive the default `gf publish` operation for one exact research Version
+/// of one exact Project state.
 ///
 /// `repository` is the canonical `owner/repository`, `git_ref` the published
 /// Branch ref (absent when an exact Version is published without a Branch),
-/// and `version_uuid` the published Version. NUL cannot occur in any
-/// component, so the encoding is unambiguous. Publishing the same Version to
-/// the same ref again therefore reuses the operation and replays its receipt.
+/// `version_uuid` the published Version, and `project_content` the identity of
+/// the exported Project state (the committed generation's manifest digest).
+/// NUL cannot occur in any component, so the encoding is unambiguous.
+/// Publishing the same Version of an unchanged Project to the same ref again
+/// reuses the operation and replays its receipt; a changed Project gets a new
+/// operation.
 #[must_use]
-pub fn hub_publish_operation(repository: &str, git_ref: Option<&str>, version_uuid: &str) -> Uuid {
+pub fn hub_publish_operation(
+    repository: &str,
+    git_ref: Option<&str>,
+    version_uuid: &str,
+    project_content: &str,
+) -> Uuid {
     new_v5(
         &Uuid::NAMESPACE_URL,
         format!(
-            "graphforge-hub-publish/1\0{repository}\0{}\0{version_uuid}",
+            "graphforge-hub-publish/1\0{repository}\0{}\0{version_uuid}\0{project_content}",
             git_ref.unwrap_or("")
         )
         .as_bytes(),
@@ -247,24 +256,36 @@ mod tests {
                     "curatelabs/demo",
                     Some("main"),
                     "01900000-0000-7000-8000-000000000021",
+                    &format!("sha256:{}", "e".repeat(64)),
                 ),
-                "a9f6fc0f-890a-5065-b356-f449c7af4e60",
+                "d93f3756-aea3-568b-b2b6-984835743c81",
             ),
             (
                 hub_publish_operation(
                     "curatelabs/demo",
                     None,
                     "01900000-0000-7000-8000-000000000021",
+                    &format!("sha256:{}", "e".repeat(64)),
                 ),
-                "750b3ed6-142b-5b65-abb6-f75ccbb6c893",
+                "b8c6df3d-28dc-589b-bf90-2378b9a388fc",
             ),
             (
                 hub_publish_operation(
                     "curatelabs/demo",
                     Some("main"),
                     "01900000-0000-7000-8000-000000000022",
+                    &format!("sha256:{}", "e".repeat(64)),
                 ),
-                "4e3b41e1-b798-57d6-91ad-ae61b08d1d0c",
+                "7f331a69-7ea4-5ceb-9280-9f44b8db5a2d",
+            ),
+            (
+                hub_publish_operation(
+                    "curatelabs/demo",
+                    Some("main"),
+                    "01900000-0000-7000-8000-000000000021",
+                    &format!("sha256:{}", "f".repeat(64)),
+                ),
+                "e0a6d8fd-b812-5603-ba77-b694e25648c9",
             ),
             (
                 new_v5(&PROVENANCE_NAMESPACE, b"graphforge"),

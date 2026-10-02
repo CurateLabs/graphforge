@@ -201,6 +201,93 @@ impl Transport for HttpTransport {
     }
 }
 
+/// Bounds for Hub writes (`POST`, `PUT`).
+///
+/// A whole-request deadline would fail every upload chunk on a slow uplink no
+/// matter how steadily it progresses, and resume could never help. Writes
+/// therefore bound each phase instead: the body of one chunk may take
+/// `send_body`, and every other phase (request head, response head, response
+/// body) `response`.
+pub(crate) struct WriteTimeouts {
+    /// Sending one request body (one upload chunk or one commit document).
+    pub(crate) send_body: Duration,
+    /// Each other request and response phase.
+    pub(crate) response: Duration,
+}
+
+/// Production write bounds. With 1 MiB upload chunks, five minutes per chunk
+/// body admits any uplink of at least about 3.5 KB/s.
+pub(crate) const WRITE_TIMEOUTS: WriteTimeouts = WriteTimeouts {
+    send_body: Duration::from_secs(300),
+    response: Duration::from_secs(60),
+};
+
+/// Agent configuration for Hub writes: per-phase bounds, no global deadline.
+pub(crate) fn write_agent_config(
+    https_only: bool,
+    timeouts: &WriteTimeouts,
+) -> ureq::config::Config {
+    ureq::Agent::config_builder()
+        .https_only(https_only)
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .proxy(None)
+        .timeout_global(None)
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .timeout_send_request(Some(timeouts.response))
+        .timeout_send_body(Some(timeouts.send_body))
+        .timeout_recv_response(Some(timeouts.response))
+        .timeout_recv_body(Some(timeouts.response))
+        .build()
+}
+
+/// Transport for `gf publish`: reads keep clone's whole-request bound, while
+/// writes use [`write_agent_config`].
+pub(crate) struct HubTransport {
+    read: HttpTransport,
+    write: ureq::Agent,
+}
+
+impl HubTransport {
+    pub(crate) fn new() -> Self {
+        Self::with_agents(
+            HttpTransport::new(),
+            ureq::Agent::with_parts(
+                write_agent_config(true, &WRITE_TIMEOUTS),
+                DefaultConnector::new(),
+                PublicResolver(DefaultResolver::default()),
+            ),
+        )
+    }
+
+    pub(crate) fn with_agents(read: HttpTransport, write: ureq::Agent) -> Self {
+        Self { read, write }
+    }
+}
+
+impl Transport for HubTransport {
+    fn get(
+        &self,
+        url: &Url,
+        range: Option<u64>,
+        if_range: Option<&str>,
+        limit: u64,
+    ) -> Result<HttpResponse, graphforge_api::GfError> {
+        self.read.get(url, range, if_range, limit)
+    }
+
+    fn exchange(
+        &self,
+        request: &HubRequest,
+        limit: usize,
+    ) -> Result<HubResponse, graphforge_api::GfError> {
+        match request.method {
+            HubMethod::Post | HubMethod::Put => send_with_agent(&self.write, request, limit),
+            HubMethod::Get | HubMethod::Head => self.read.exchange(request, limit),
+        }
+    }
+}
+
 /// Send one request through `agent`; redirects are returned, never followed.
 pub(crate) fn send_with_agent(
     agent: &ureq::Agent,

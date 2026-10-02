@@ -57,7 +57,13 @@ pub(crate) fn allow_device_flow() {
 /// OAuth client identifier the CLI presents to device authorization.
 const CLIENT_ID: &str = "graphforge-cli";
 /// Largest upload chunk the client sends, whatever the Hub allows.
-const MAX_CLIENT_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+/// Smaller chunks bound the progress a dropped connection loses and, with
+/// [`crate::hub_http::WRITE_TIMEOUTS`], the slowest uplink that completes one.
+const MAX_CLIENT_CHUNK_BYTES: u64 = 1024 * 1024;
+/// Longest the client waits for a device authorization, whatever the Hub allows.
+const MAX_DEVICE_WAIT_SECONDS: u64 = 15 * 60;
+/// Longest pause between device-flow polls, whatever the Hub asks for.
+const MAX_POLL_INTERVAL_SECONDS: u64 = 60;
 /// Largest control-plane response the client reads.
 const MAX_CONTROL_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 /// Format of the canonical intent whose digest identifies what an operation publishes.
@@ -186,7 +192,7 @@ fn run_command(
         notices: &mut notices,
     };
     let outcome = publish(
-        &crate::hub_http::HttpTransport::new(),
+        &crate::hub_http::HubTransport::new(),
         &graph,
         args,
         &mut environment,
@@ -257,21 +263,14 @@ const fn code_detail(code: HubPublishErrorCode) -> &'static str {
     }
 }
 
-/// Classify an unsuccessful Hub response from its `{code, message}` body, or
-/// from its status when the body is not a publish error.
+/// Classify an unsuccessful Hub response from its `{code, message}` body only.
+///
+/// A status without a publish error body (for example from a proxy) never
+/// implies a publish outcome such as an idempotency conflict.
 fn hub_failure(response: &HubResponse) -> GfError {
-    let code = serde_json::from_slice::<HubErrorBody>(&response.body)
-        .map(|body| body.code)
-        .ok()
-        .or(match response.status {
-            401 | 403 => Some(HubPublishErrorCode::AuthDenied),
-            409 => Some(HubPublishErrorCode::IdempotencyConflict),
-            412 => Some(HubPublishErrorCode::RefConflict),
-            _ => None,
-        });
-    match code {
-        Some(code) => publish_error(code, code_detail(code)),
-        None => network("Hub returned an unsuccessful status"),
+    match serde_json::from_slice::<HubErrorBody>(&response.body) {
+        Ok(body) => publish_error(body.code, code_detail(body.code)),
+        Err(_) => network("Hub returned an unsuccessful status"),
     }
 }
 
@@ -429,17 +428,25 @@ fn obtain_token(
     )
     .map_err(io)?;
     environment.notices.flush().map_err(io)?;
-    let mut interval = device.interval.max(1);
+    // Hub-supplied timings are bounded: the interval to [1, 60] seconds and the
+    // whole wait to fifteen minutes.
+    let mut interval = device.interval.clamp(1, MAX_POLL_INTERVAL_SECONDS);
+    let deadline = device.expires_in.min(MAX_DEVICE_WAIT_SECONDS);
     let mut elapsed = 0_u64;
     loop {
-        if elapsed >= device.expires_in {
+        if elapsed >= deadline {
             return Err(publish_error(
                 HubPublishErrorCode::AuthDenied,
-                "device authorization expired before approval",
+                if deadline < device.expires_in {
+                    "device authorization did not complete within fifteen minutes"
+                } else {
+                    "device authorization expired before approval"
+                },
             ));
         }
-        (environment.wait)(Duration::from_secs(interval));
-        elapsed = elapsed.saturating_add(interval);
+        let pause = interval.min(deadline - elapsed);
+        (environment.wait)(Duration::from_secs(pause));
+        elapsed = elapsed.saturating_add(pause);
         let response = hub.oauth(
             &authorization.token_endpoint,
             &[
@@ -453,7 +460,9 @@ fn obtain_token(
         {
             DevicePoll::Granted(token) => return Ok(token),
             DevicePoll::Pending => {}
-            DevicePoll::SlowDown => interval = interval.saturating_add(5),
+            DevicePoll::SlowDown => {
+                interval = interval.saturating_add(5).min(MAX_POLL_INTERVAL_SECONDS);
+            }
         }
     }
 }
@@ -467,6 +476,11 @@ struct Selection {
     version_uuid: Uuid,
     identity: Sha256Digest,
     project_uuid: Uuid,
+    /// Manifest digest of the committed generation the Project package is
+    /// exported from. Component-selective packages record their exporting
+    /// generation (`source_generation`), so the Project package changes exactly
+    /// when the generation does, and exports of one generation are identical.
+    project_content: String,
 }
 
 fn hex_digest(bytes: &[u8; 32]) -> Sha256Digest {
@@ -524,7 +538,12 @@ fn select(graph: &GraphForge, args: &PublishArgs) -> Result<Selection, GfError> 
         version_uuid,
         identity: hex_digest(identity),
         project_uuid: reference.project_uuid,
+        project_content: project_content(graph)?,
     })
+}
+
+fn project_content(graph: &GraphForge) -> Result<String, GfError> {
+    Ok(hex_digest(&graph.committed_generation_identity()?.manifest_sha256).0)
 }
 
 fn check_ref_name(name: &str) -> Result<(), GfError> {
@@ -565,6 +584,7 @@ fn intent_digest(
         "version_uuid": selection.version_uuid.to_string(),
         "version_identity": selection.identity.0,
         "project_uuid": selection.project_uuid.to_string(),
+        "project_content": selection.project_content,
         "fork_of": fork_of.map(RepositoryIdentity::canonical_name),
     })))
 }
@@ -1155,6 +1175,7 @@ pub(crate) fn publish(
             &identity.canonical_name(),
             selection.git_ref.as_deref(),
             &selection.version_uuid.to_string(),
+            &selection.project_content,
         )
     });
     let intent_digest = intent_digest(&identity, &selection, fork.as_ref().map(|(id, _)| id));
@@ -1241,6 +1262,13 @@ pub(crate) fn publish(
         fork_origin_repository,
         scratch.path(),
     )?;
+    // The packages must come from the generation the intent names.
+    if project_content(graph)? != selection.project_content {
+        return Err(publish_error(
+            HubPublishErrorCode::InvalidInput,
+            "the Project changed while it was being published; publish again",
+        ));
+    }
     if let Some((_, origin_base)) = &fork {
         let cited = lineage.fork.as_ref().ok_or_else(|| {
             publish_error(

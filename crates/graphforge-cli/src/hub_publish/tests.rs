@@ -7,13 +7,16 @@
 
 use super::*;
 use crate::hub_clone::{CloneArgs, run_clone_with};
-use crate::hub_http::{HttpResponse, HttpTransport, send_with_agent};
+use crate::hub_http::{
+    HttpResponse, HttpTransport, HubTransport, WriteTimeouts, write_agent_config,
+};
 use graphforge_api::{
     BranchSource, CreateResearchBranchRequest, ExecuteResearchBranchRequest, ForkResearchRequest,
     ResearchReference, WorkspaceResearchMetadata,
 };
 use graphforge_hub_publish::{ReferenceHub, ReferenceHubConfig};
 use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead as _, BufReader};
 use std::net::{TcpListener, TcpStream};
 use std::rc::Rc;
@@ -31,6 +34,8 @@ struct Logged {
     bearer: Option<String>,
     content_range: Option<String>,
     body_len: usize,
+    /// Object a successful `PUT` appended to.
+    digest: Option<String>,
 }
 
 /// Server-side fault injected into the next matching request.
@@ -43,8 +48,10 @@ enum Fault {
     /// Corrupt the retained copy of the most recently uploaded object just
     /// before the next commit.
     CorruptBeforeCommit,
-    /// Answer the next refs and manifest reads with these earlier documents.
-    Stale { refs: Vec<u8>, manifest: Vec<u8> },
+    /// Answer the next `GET` of each listed path with these bytes instead.
+    Serve(BTreeMap<String, Vec<u8>>),
+    /// Delay the response to the next `PUT`.
+    SlowPut(Duration),
 }
 
 struct LoopbackHub {
@@ -96,21 +103,31 @@ impl LoopbackHub {
     }
 
     fn transport(&self) -> LoopbackTransport {
-        let config = ureq::Agent::config_builder()
+        self.transport_with(Duration::from_secs(30), &crate::hub_http::WRITE_TIMEOUTS)
+    }
+
+    /// The product transport over plain loopback HTTP: reads keep a global
+    /// deadline of `read_deadline`; writes use the product write configuration.
+    fn transport_with(&self, read_deadline: Duration, writes: &WriteTimeouts) -> LoopbackTransport {
+        let agent = |config| {
+            ureq::Agent::with_parts(
+                config,
+                ureq::unversioned::transport::DefaultConnector::new(),
+                ureq::unversioned::resolver::DefaultResolver::default(),
+            )
+        };
+        let read = ureq::Agent::config_builder()
             .https_only(false)
             .http_status_as_error(false)
             .max_redirects(0)
             .proxy(None)
-            .timeout_global(Some(Duration::from_secs(30)))
+            .timeout_global(Some(read_deadline))
             .build();
         LoopbackTransport {
-            inner: HttpTransport {
-                agent: ureq::Agent::with_parts(
-                    config,
-                    ureq::unversioned::transport::DefaultConnector::new(),
-                    ureq::unversioned::resolver::DefaultResolver::default(),
-                ),
-            },
+            inner: HubTransport::with_agents(
+                HttpTransport { agent: agent(read) },
+                agent(write_agent_config(false, writes)),
+            ),
             port: self.port,
         }
     }
@@ -180,6 +197,7 @@ fn serve(state: &ServerState, stream: TcpStream) {
         bearer: header("authorization"),
         content_range: header("content-range"),
         body_len: request.body.len(),
+        digest: None,
     });
     if cut {
         // The Hub retains the prefix that arrived; the client never hears back.
@@ -207,19 +225,17 @@ fn serve(state: &ServerState, stream: TcpStream) {
         assert!(hub.corrupt_object(&digest) > 0, "corrupted a retained copy");
     }
     let replayed_body = match injected.as_mut() {
-        Some(Fault::Stale { refs, manifest }) if hub_method == HubMethod::Get => {
-            if path.ends_with("/.gf/refs") {
-                Some(std::mem::take(refs))
-            } else if path.ends_with("/.gf/manifest") {
-                Some(std::mem::take(manifest))
-            } else {
-                None
-            }
-        }
+        Some(Fault::Serve(documents)) if hub_method == HubMethod::Get => documents.remove(&path),
         _ => None,
     };
-    if matches!(injected.as_ref(), Some(Fault::Stale { refs, manifest }) if refs.is_empty() && manifest.is_empty())
-    {
+    if matches!(injected.as_ref(), Some(Fault::Serve(documents)) if documents.is_empty()) {
+        injected.take();
+    }
+    let delay = match injected.as_ref() {
+        Some(Fault::SlowPut(delay)) if hub_method == HubMethod::Put => Some(*delay),
+        _ => None,
+    };
+    if delay.is_some() {
         injected.take();
     }
     drop(injected);
@@ -233,7 +249,11 @@ fn serve(state: &ServerState, stream: TcpStream) {
     };
     if hub_method == HubMethod::Put && response.status == 200 {
         let status: UploadStatus = serde_json::from_slice(&response.body).unwrap();
+        log.lock().unwrap().last_mut().unwrap().digest = Some(status.digest.clone());
         *state.last_upload.lock().unwrap() = Some(status.digest);
+    }
+    if let Some(delay) = delay {
+        std::thread::sleep(delay);
     }
     let mut stream = stream;
     let body: &[u8] = if hub_method == HubMethod::Head {
@@ -252,7 +272,7 @@ fn serve(state: &ServerState, stream: TcpStream) {
 
 /// Routes `https://hub.test` to the loopback server after product validation.
 struct LoopbackTransport {
-    inner: HttpTransport,
+    inner: HubTransport,
     port: u16,
 }
 
@@ -284,7 +304,7 @@ impl Transport for LoopbackTransport {
     fn exchange(&self, request: &HubRequest, limit: usize) -> Result<HubResponse, GfError> {
         let mut routed = request.clone();
         routed.url = self.route(&request.url)?.to_string();
-        send_with_agent(&self.inner.agent, &routed, limit)
+        self.inner.exchange(&routed, limit)
     }
 }
 
@@ -744,6 +764,32 @@ fn published_fork_clones_back_with_origin_citation() {
     );
     assert_eq!(refs_document(&hub, "curate/claims-fork").status, 404);
 
+    // An origin repository that publishes the cited Version UUID with another
+    // identity digest fails closed too. Serve consistent documents whose
+    // lineage differs from the published one only in that identity.
+    hub.inject(Fault::Serve(tampered_origin(
+        &hub,
+        "curate/claims",
+        origin.head,
+    )));
+    let mut tampered = on_ref("curate/claims-fork", "main");
+    tampered.fork_of = Some(repository_url("curate/claims"));
+    let refused = run_publish_with(
+        &hub,
+        &fork,
+        &tampered,
+        Credential::Token(token(&hub, "curate/claims-fork")),
+    );
+    assert_eq!(
+        error_code(&refused.result.unwrap_err()),
+        "hub.publish.integrity_failure"
+    );
+    assert!(
+        hub.fault.lock().unwrap().is_none(),
+        "the tampered documents were read"
+    );
+    assert_eq!(refs_document(&hub, "curate/claims-fork").status, 404);
+
     let mut fork_args = on_ref("curate/claims-fork", "main");
     fork_args.fork_of = Some(repository_url("curate/claims"));
     let published = publish_ok(&hub, &fork, &fork_args);
@@ -813,6 +859,66 @@ fn published_fork_clones_back_with_origin_citation() {
             source.origin_project_uuid
         );
     }
+}
+
+/// Consistent refs, manifest, and lineage for `repository` whose lineage lists
+/// `version` with a different identity digest, keyed by request path.
+fn tampered_origin(
+    hub: &LoopbackHub,
+    repository: &str,
+    version: Uuid,
+) -> BTreeMap<String, Vec<u8>> {
+    let (mut manifest, mut lineage) = served_lineage(hub, repository);
+    let entry = lineage
+        .versions
+        .iter_mut()
+        .find(|entry| entry.version_uuid == version.to_string())
+        .unwrap();
+    assert_ne!(entry.identity_digest.0, sha256_digest(b"another Version"));
+    entry.identity_digest = Sha256Digest(sha256_digest(b"another Version"));
+    let lineage_bytes = lineage.to_canonical_json().unwrap();
+    let lineage_object = digest_bytes(&lineage_bytes);
+    let old_object = manifest.lineage.as_ref().unwrap().object_digest.clone();
+    manifest
+        .objects
+        .retain(|object| object.digest != old_object);
+    manifest.objects.push(object_descriptor(
+        lineage_object.clone(),
+        lineage_bytes.len() as u64,
+        RESEARCH_LINEAGE_MEDIA_TYPE,
+        format!(
+            "{}/.gf/objects/{lineage_object}",
+            repository_url(repository)
+        ),
+    ));
+    manifest
+        .objects
+        .sort_by(|left, right| left.digest.0.cmp(&right.digest.0));
+    manifest.lineage = Some(ResearchLineageReference {
+        format: RESEARCH_LINEAGE_FORMAT.into(),
+        lineage_digest: lineage.canonical_digest().unwrap(),
+        object_digest: Sha256Digest(lineage_object.clone()),
+    });
+    let manifest_bytes = manifest.to_canonical_json().unwrap();
+    let mut refs = RefSet::from_json(
+        &refs_document(hub, repository).body,
+        DiscoveryLimits::default(),
+    )
+    .unwrap();
+    for item in &mut refs.refs {
+        item.validator = Sha256Digest(digest_bytes(&manifest_bytes));
+    }
+    BTreeMap::from([
+        (
+            format!("/{repository}/.gf/refs"),
+            refs.to_canonical_json().unwrap(),
+        ),
+        (format!("/{repository}/.gf/manifest"), manifest_bytes),
+        (
+            format!("/{repository}/.gf/objects/{lineage_object}"),
+            lineage_bytes,
+        ),
+    ])
 }
 
 // ------------------------------------------------------------ supporting
@@ -907,7 +1013,7 @@ fn publish_token_never_leaves_the_control_plane() {
 }
 
 #[test]
-fn stale_expected_revision_is_a_ref_conflict() {
+fn stale_expected_revision_is_a_ref_conflict_and_a_rerun_lands_on_top() {
     let mut history = history();
     let hub = LoopbackHub::start();
     let identity = RepositoryIdentity::parse("curate/claims").unwrap();
@@ -916,23 +1022,24 @@ fn stale_expected_revision_is_a_ref_conflict() {
     let stale_manifest = hub
         .get(&format!("{}/.gf/manifest", repository_url("curate/claims")))
         .body;
-    edit(&mut history.graph, history.branch, 5);
+    let main_head = edit(&mut history.graph, history.branch, 5);
     publish_ok(&hub, &history.graph, &on_ref("curate/claims", "main"));
     let current = refs_document(&hub, "curate/claims").body;
     assert_ne!(current, stale_refs);
 
     // Another publisher moved the repository after this client read it.
-    let (_, _) = create_branch(
+    let (feature, _) = create_branch(
         &mut history.graph,
         "feature",
         BranchSource::Branch {
             branch_uuid: history.branch,
         },
     );
-    hub.inject(Fault::Stale {
-        refs: stale_refs,
-        manifest: stale_manifest,
-    });
+    hub.inject(Fault::Serve(BTreeMap::from([
+        ("/curate/claims/.gf/refs".to_owned(), stale_refs),
+        ("/curate/claims/.gf/manifest".to_owned(), stale_manifest),
+    ])));
+    let logged = hub.log().len();
     let run = run_publish_with(
         &hub,
         &history.graph,
@@ -943,6 +1050,182 @@ fn stale_expected_revision_is_a_ref_conflict() {
     assert_eq!(error_code(&error), "hub.publish.ref_conflict", "{error}");
     assert_eq!(refs_document(&hub, "curate/claims").body, current);
     assert_eq!(hub.hub.revisions(&identity).len(), 2);
+    let conflicted: BTreeSet<String> = puts(&hub.log()[logged..])
+        .iter()
+        .filter_map(|entry| entry.digest.clone())
+        .collect();
+    assert!(!conflicted.is_empty());
+
+    // A plain rerun reads the new revision and lands on top of it, carrying
+    // both earlier publications forward; bytes the conflicted attempt already
+    // sent are not sent again.
+    let logged = hub.log().len();
+    let rerun = publish_ok(&hub, &history.graph, &on_ref("curate/claims", "feature"));
+    let receipt = rerun.result.unwrap().receipt;
+    assert_eq!(receipt.previous_revision, Some(sha256_digest(&current)));
+    assert_eq!(hub.hub.revisions(&identity).len(), 3);
+    let rerun_log = hub.log();
+    let resent: Vec<_> = puts(&rerun_log[logged..])
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .digest
+                .as_ref()
+                .is_some_and(|digest| conflicted.contains(digest))
+        })
+        .collect();
+    assert!(resent.is_empty(), "{resent:?}");
+    let (_, lineage) = served_lineage(&hub, "curate/claims");
+    let heads: BTreeMap<_, _> = lineage
+        .branches
+        .iter()
+        .map(|branch| (branch.ref_name.clone(), branch.head_version_uuid.clone()))
+        .collect();
+    assert_eq!(heads["main"], main_head.to_string());
+    assert!(heads.contains_key("feature"));
+    assert_eq!(
+        lineage
+            .branches
+            .iter()
+            .find(|branch| branch.ref_name == "feature")
+            .unwrap()
+            .branch_uuid,
+        feature.to_string()
+    );
+    for version in [history.head, main_head] {
+        assert!(lineage.version(&version.to_string()).is_some());
+    }
+}
+
+#[test]
+fn a_changed_project_publishes_a_new_snapshot_and_conflicts_under_a_reused_operation() {
+    let history = history();
+    let hub = LoopbackHub::start();
+    let identity = RepositoryIdentity::parse("curate/claims").unwrap();
+    let first = publish_ok(&hub, &history.graph, &on_ref("curate/claims", "main"));
+    let first = first.result.unwrap().receipt;
+    let (first_manifest, _) = served_lineage(&hub, "curate/claims");
+
+    // New data in the Project, same Branch head: the next publication is new.
+    history.graph.execute("CREATE (:Item {score:9})").unwrap();
+    let second = publish_ok(&hub, &history.graph, &on_ref("curate/claims", "main"));
+    let second = second.result.unwrap();
+    assert!(
+        !second.replayed,
+        "a changed Project never replays a stale receipt"
+    );
+    assert_ne!(second.receipt.operation_uuid, first.operation_uuid);
+    assert_eq!(hub.hub.revisions(&identity).len(), 2);
+    let (second_manifest, lineage) = served_lineage(&hub, "curate/claims");
+    assert_ne!(
+        second_manifest.package.package_digest, first_manifest.package.package_digest,
+        "the Hub received the new Project package"
+    );
+    assert_eq!(
+        lineage.branches[0].head_version_uuid,
+        history.head.to_string()
+    );
+
+    // Reusing an operation explicitly with changed content conflicts.
+    history.graph.execute("CREATE (:Item {score:10})").unwrap();
+    let refs = refs_document(&hub, "curate/claims").body;
+    let reused = run_publish_with(
+        &hub,
+        &history.graph,
+        &PublishArgs {
+            operation_uuid: Some(second.receipt.operation_uuid.to_string()),
+            ..on_ref("curate/claims", "main")
+        },
+        Credential::Token(token(&hub, "curate/claims")),
+    );
+    assert_eq!(reused.result.unwrap_err().code(), "GF_IDEMPOTENCY_CONFLICT");
+    assert_eq!(refs_document(&hub, "curate/claims").body, refs);
+}
+
+#[test]
+fn a_slow_but_progressing_upload_succeeds_in_bounded_chunks() {
+    let history = history();
+    let hub = LoopbackHub::with_config(ReferenceHubConfig {
+        base_url: HUB.into(),
+        limits: graphforge_hub_publish::PublishLimits {
+            max_chunk_bytes: 4096,
+            ..ReferenceHubConfig::default().limits
+        },
+        ..ReferenceHubConfig::default()
+    });
+    // Scaled down: reads keep a one-second whole-request deadline, a write
+    // waits two seconds for its response, and writes bound phases instead.
+    let transport = hub.transport_with(
+        Duration::from_secs(1),
+        &WriteTimeouts {
+            send_body: Duration::from_secs(10),
+            response: Duration::from_secs(10),
+        },
+    );
+    hub.inject(Fault::SlowPut(Duration::from_secs(2)));
+    let mut notices = Vec::new();
+    let mut environment = PublishEnvironment {
+        credential: Credential::Token(token(&hub, "curate/claims")),
+        wait: &|_| panic!("no device flow expected"),
+        notices: &mut notices,
+    };
+    let outcome = publish(
+        &transport,
+        &history.graph,
+        &on_ref("curate/claims", "main"),
+        &mut environment,
+    )
+    .unwrap();
+    assert!(!outcome.replayed);
+    let log = hub.log();
+    let chunks = puts(&log);
+    assert!(chunks.iter().all(|entry| entry.body_len <= 4096));
+    assert!(
+        chunks.iter().any(|entry| !entry
+            .content_range
+            .as_deref()
+            .unwrap()
+            .starts_with("bytes 0-")),
+        "an object larger than one chunk uploads in several"
+    );
+}
+
+#[test]
+fn device_flow_waits_are_bounded_whatever_the_hub_advertises() {
+    let history = history();
+    let hub = LoopbackHub::with_config(ReferenceHubConfig {
+        base_url: HUB.into(),
+        device_code_ttl_seconds: 1_000_000,
+        device_poll_interval_seconds: 1_000,
+        ..ReferenceHubConfig::default()
+    });
+    let (result, waits, _) = device_flow(&hub, &history.graph, |_, hub, _| {
+        hub.advance_clock(60);
+    });
+    let error = result.unwrap_err();
+    assert_eq!(error_code(&error), "hub.publish.auth_denied", "{error}");
+    assert!(error.to_string().contains("fifteen minutes"), "{error}");
+    assert!(waits.iter().all(|wait| *wait <= Duration::from_secs(60)));
+    assert_eq!(waits.iter().sum::<Duration>(), Duration::from_secs(15 * 60));
+}
+
+#[test]
+fn a_status_without_a_publish_error_body_is_a_hub_failure() {
+    for status in [401, 409, 412] {
+        let error = hub_failure(&HubResponse {
+            status,
+            headers: vec![("content-type".into(), "text/html".into())],
+            body: b"<html>proxy error</html>".to_vec(),
+        });
+        assert_ne!(error.code(), "GF_IDEMPOTENCY_CONFLICT");
+        assert!(error.to_string().contains("hub.network"), "{error}");
+    }
+    let conflict = hub_failure(&HubResponse {
+        status: 409,
+        headers: Vec::new(),
+        body: br#"{"code":"idempotency_conflict","message":"x"}"#.to_vec(),
+    });
+    assert_eq!(conflict.code(), "GF_IDEMPOTENCY_CONFLICT");
 }
 
 /// A `Write` the device-flow waiter can read while the publish holds it.
