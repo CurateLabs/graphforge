@@ -438,10 +438,11 @@ does not read historical fragments again.
 A fragment has a fixed maximum size, set at write time like a CSR shard: at
 most `MAX_PROPERTY_FRAGMENT_ROWS` (65,536) rows and `MAX_PROPERTY_FRAGMENT_BYTES`
 (4 MiB) of logical bytes, counted as Arrow value, offset and presence bytes of
-the rows, a pure function of the rows and not of the encoder. Zstd output is no
-larger than its input, so first-touch admission of one fragment reads
-approximately that much (page headers, dictionary pages, zstd framing and the
-footer add a little); typical property data encodes to about half, the size of
+the rows, a pure function of the rows and not of the encoder. Encoded bytes also
+include page headers, dictionary pages, compression framing and the footer;
+compression can expand its input, so the logical cap is not an exact encoded-size
+limit. First-touch admission reads the manifest's declared file length. Typical
+property data encodes to about half the logical bytes, the size of
 one full CSR shard (about 1.7 MiB). Construction, ordinary SET/REMOVE windows,
 delta replay and graph projection (research-version, subset-export and
 interchange repack; a route that fits stays one flat snapshot, a larger one

@@ -15,9 +15,11 @@
 //! counted on **logical** bytes, the Arrow value, offset and presence bytes of
 //! the rows, because that measure is a pure function of the rows: it does not
 //! depend on the Parquet encoder, the compression codec or the writer version,
-//! so the cut is reproducible. Zstd output is not larger than its input, so the
-//! encoded fragment stays within the same cap plus the footer; typical property
-//! data encodes to about half of it, which puts one fragment at the size of one
+//! so the cut is reproducible. Encoded bytes also include Parquet pages,
+//! dictionaries, compression framing and the footer; compression can expand
+//! its input, so this logical cap is not an exact encoded-size limit. Admission
+//! uses the manifest's declared file length. Typical property data encodes to
+//! about half the logical bytes, which puts one fragment at the size of one
 //! CSR shard. The row cap equals the default construction batch
 //! (`GraphConstructionBudgets::max_batch_rows`) and bounds the UUID range, the
 //! merge scratch and the decoder state of narrow rows whose byte count alone

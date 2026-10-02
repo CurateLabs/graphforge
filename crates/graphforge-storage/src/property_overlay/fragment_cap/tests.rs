@@ -71,9 +71,12 @@ pub(crate) fn wide_value(seed: u64, bytes: usize) -> String {
 
 /// Assert the cap invariants of one route's fragments, in `(generation,
 /// ordinal)` order, and return what each holds: every fragment is within both
-/// caps (a lone oversize row excepted), ordinals are dense per generation, the
-/// UUID ranges are disjoint and ascending within a generation, and `rows`
-/// rows are present in total.
+/// logical caps (a lone oversize row excepted), ordinals are dense per
+/// generation, the UUID ranges are disjoint and ascending within a generation,
+/// and `rows` rows are present in total. These fixtures also encode below the byte cap;
+/// the physical-size assertion proves that fixture property, not a format
+/// limit. Oversized logical rows are covered separately by the dedicated
+/// oversized-row test, which places no encoded-size ceiling on that row.
 pub(crate) fn assert_capped_fragments(
     fragments: &[crate::property_overlay::PropertyFragment],
     rows: usize,

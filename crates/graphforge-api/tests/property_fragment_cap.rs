@@ -5,8 +5,9 @@
 //! publishes several fragments per route. Queries over it are checked against
 //! answers computed from the input alone, covering projection, a filter on a
 //! property, ORDER BY a property and aggregation. The manifest's declared
-//! lengths bound what first-touch admission of any one fragment reads, so a
-//! bounded property read costs at most touched fragments times the cap.
+//! lengths bound what first-touch admission of any one fragment reads. The
+//! logical write-time cap limits the rows and value bytes per fragment;
+//! admission's exact byte bound is the sum of the touched declared lengths.
 
 use std::sync::Arc;
 
