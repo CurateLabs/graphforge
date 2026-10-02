@@ -140,27 +140,9 @@ impl AuthenticatedPropertyInventory {
                 "property fragment identity changed after admission",
             ));
         }
-        if self.admission == FragmentAdmission::FirstTouch {
-            // A generation-leased compact inventory reads the read-only
-            // content-store inode itself, so there is no private copy to make:
-            // the first touch checks the handle's exact length and XXH64, and
-            // the identity is re-checked after, so a replaced object is refused.
-            let work = admit_fragment(fragment, &file)?;
-            if graphforge_filesystem::file_identity(&file).map_err(io_error)? != fragment.identity
-                || file.metadata().map_err(io_error)?.len() != fragment.entry.byte_length
-            {
-                return Err(corrupt(
-                    "property fragment identity changed during admission",
-                ));
-            }
-            return Ok(OpenPropertyFragment {
-                file: Arc::new(file),
-                authentication_bytes: work.bytes,
-                authentication_block_equivalents: work.bytes.div_ceil(64 * 1024),
-                authentication_read_calls: work.read_calls,
-                handle,
-            });
-        }
+        // Authenticate exactly the bytes the decoder will use. A retained
+        // inode and a cached first-touch checksum cannot prove that later
+        // reads still contain the published bytes.
         #[cfg(test)]
         let mutation_barrier = self
             .mutation_barrier
@@ -495,7 +477,6 @@ impl AuthenticatedPropertyInventory {
             edge_routes: BTreeMap::new(),
             schemas: BTreeMap::new(),
             route_summaries: BTreeMap::new(),
-            admission: FragmentAdmission::Eager,
             node_topology_files: Some(Vec::new()),
             authority_bytes: 0,
             authority_block_equivalents: 0,
@@ -768,7 +749,6 @@ impl AuthenticatedPropertyInventory {
             edge_routes: BTreeMap::new(),
             schemas: BTreeMap::new(),
             route_summaries,
-            admission,
             node_topology_files: requested_route.is_none().then_some(node_topology_files),
             authority_bytes: 0,
             authority_block_equivalents: 0,
@@ -1445,7 +1425,7 @@ fn authenticate_inventory_file(
         digest.update(&buffer[..read]);
     }
     if bytes != entry.byte_length || digest.finish() != entry.content_xxh64 {
-        return Err(corrupt("property handle digest conflicts with inventory"));
+        return Err(corrupt("property checksum digest conflicts with inventory"));
     }
     // #1449: these reads were computed and counted here but never reached the
     // lifecycle phase counters, so property-bearing opens under-reported the
@@ -1539,7 +1519,7 @@ fn authenticated_snapshot_file(
         }
     }
     if bytes != entry.byte_length || digest.finish() != entry.content_xxh64 {
-        return Err(corrupt("property handle digest conflicts with inventory"));
+        return Err(corrupt("property checksum digest conflicts with inventory"));
     }
     if graphforge_filesystem::file_identity(source).map_err(io_error)? != expected_identity
         || source.metadata().map_err(io_error)?.len() != entry.byte_length

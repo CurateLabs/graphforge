@@ -1254,6 +1254,49 @@ const PROJECT_SINCE: &str = "MATCH ()-[r:KNOWS]->() RETURN r.since AS v";
 const FILTER_SINCE: &str = "MATCH ()-[r:KNOWS]->() WHERE r.since = 5 RETURN r.since AS v";
 const SET_SINCE: &str = "MATCH ()-[r:KNOWS {since: 1}]->() SET r.since = 0";
 
+/// A successful first read cannot authorize later reads of changed bytes.
+/// The decoder ignores the leading magic; only authentication can refuse it.
+#[test]
+fn property_reads_refuse_same_inode_corruption_after_a_successful_read() {
+    let project = tempfile::tempdir().unwrap();
+    compact_person_project(project.path());
+    for (prefix, queries) in [
+        ("properties/", [PROJECT_NAMES, FILTER_NAMES]),
+        ("edge_properties/", [PROJECT_SINCE, FILTER_SINCE]),
+    ] {
+        let entry = compact_entry(
+            project.path(),
+            graphforge_storage::GraphFileRole::Properties,
+            prefix,
+            ".parquet",
+        );
+        for query in queries {
+            let graph = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+            let rows = |result: graphforge_exec::ExecutionResult| {
+                result
+                    .batches
+                    .iter()
+                    .map(|batch| batch.num_rows())
+                    .sum::<usize>()
+            };
+            let original_rows = rows(graph.execute(query).unwrap());
+            assert!(original_rows > 0, "{query}: fixture must read properties");
+            {
+                let _corruption = InPlaceCorruption::apply(project.path(), &entry);
+                let error = graph
+                    .execute(query)
+                    .expect_err("a prior admission cannot authorize changed bytes");
+                assert_eq!(error.code(), "GF_PROJECT_CORRUPT", "{query}: {error}");
+                assert!(
+                    error.to_string().to_lowercase().contains("checksum"),
+                    "{query}: {error}"
+                );
+            }
+            assert_eq!(rows(graph.execute(query).unwrap()), original_rows);
+        }
+    }
+}
+
 /// A failed footer load must remain an integrity error through schema discovery.
 /// It must not become a base-only schema that plans the property as NULL.
 #[test]

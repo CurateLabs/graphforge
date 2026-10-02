@@ -330,7 +330,10 @@ chosen by path in `graphforge_storage::graph_admission`:
   first time a route is used, after checking the content directly on the
   read-only content-store inode. Schema and row-count failures propagate
   through planning; only an absent route receives a base-schema default.
-  Content admission is memoized for the inventory's life. A checksum refusal under `indexes/search/`
+  Footer admission is memoized for the inventory's life. Each property payload
+  read copies and authenticates its bytes into a private snapshot before decoding,
+  so an in-place change after a successful read is refused and a concurrent change
+  cannot alter the bytes already authenticated for the decoder. A checksum refusal under `indexes/search/`
   is a hard validation error, never a reason to rebuild the index. Text `find`
   takes its freshness identity from the same manifest (node and node-property
   objects by name, length and XXH64), so it reads no edge object and re-reads no

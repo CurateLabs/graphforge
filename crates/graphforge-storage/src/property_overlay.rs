@@ -185,7 +185,6 @@ pub struct AuthenticatedPropertyInventory {
     /// Filled at admission when fragments are authenticated eagerly, and on the
     /// first touch of the route when they are admitted lazily.
     route_summaries: BTreeMap<(PropertyRouteKind, String), OnceLock<RouteSummaryOutcome>>,
-    admission: FragmentAdmission,
     /// Node-topology objects named by the manifest. Present only when the
     /// inventory covers the whole graph rather than one requested route.
     node_topology_files: Option<Vec<crate::catalog::AdmittedSourceFile>>,
@@ -237,8 +236,8 @@ enum FragmentAdmission {
     /// workspaces, whose files writers replace in place of an immutable object.
     Eager,
     /// Admission checks exact length only. Content (exact length and XXH64) is
-    /// checked on the first read of each fragment, memoized for the life of the
-    /// inventory, and a read-only content-store inode is read directly.
+    /// checked when its footer is first needed. Payload reads always authenticate
+    /// a private snapshot, including reads after successful footer admission.
     FirstTouch,
 }
 
