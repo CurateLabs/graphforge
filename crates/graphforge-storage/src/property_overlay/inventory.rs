@@ -265,16 +265,18 @@ impl AuthenticatedPropertyInventory {
     // Authenticated snapshots require the source volume. Keep their temporary
     // files outside immutable generations and outside enumerated graph trees.
     pub(crate) fn create_snapshot_scratch(&self) -> Result<tempfile::TempDir, GfError> {
-        let parent = self
-            .generation_lease
+        tempfile::Builder::new()
+            .prefix(".gf-property-scratch-")
+            .tempdir_in(self.scratch_parent()?)
+            .map_err(io_error)
+    }
+
+    fn scratch_parent(&self) -> Result<&Path, GfError> {
+        self.generation_lease
             .as_ref()
             .map(crate::ResolvedProjectGeneration::container_root)
             .or_else(|| self.root_path.as_deref().and_then(Path::parent))
-            .ok_or_else(|| corrupt("property inventory lacks a project-volume scratch parent"))?;
-        tempfile::Builder::new()
-            .prefix(".gf-property-scratch-")
-            .tempdir_in(parent)
-            .map_err(io_error)
+            .ok_or_else(|| corrupt("property inventory lacks a project-volume scratch parent"))
     }
 
     /// Narrow an already authenticated inventory to transaction-owned property
@@ -915,7 +917,14 @@ impl AuthenticatedPropertyInventory {
             if admission == FragmentAdmission::Eager {
                 // Footers are already decoded; summarize now so a conflicting
                 // route is refused at admission exactly as before.
-                let outcome = summarize_route(&root, root_path, *kind, route, fragments);
+                // The scratch parent is unused: eager admission decoded every footer.
+                let outcome = summarize_route(
+                    &root,
+                    root_path.parent().unwrap_or(root_path),
+                    *kind,
+                    route,
+                    fragments,
+                );
                 if let Err(error) = &outcome {
                     return Err(error.clone());
                 }
@@ -956,20 +965,18 @@ impl AuthenticatedPropertyInventory {
         let Some(cell) = self.route_summaries.get(&key) else {
             return Ok(None);
         };
-        let (root, root_path) = self.retained_root()?;
+        let root = self.retained_root()?;
+        let scratch_parent = self.scratch_parent()?;
         let fragments = self.routes.get(&key).map_or(&[][..], Vec::as_slice);
-        cell.get_or_init(|| summarize_route(root, root_path, kind, route, fragments))
+        cell.get_or_init(|| summarize_route(root, scratch_parent, kind, route, fragments))
             .clone()
             .map(Some)
     }
 
-    fn retained_root(&self) -> Result<(&graphforge_filesystem::StableDirectory, &Path), GfError> {
-        match (&self.root, &self.root_path) {
-            (Some(root), Some(root_path)) => Ok((root, root_path)),
-            _ => Err(corrupt(
-                "property inventory lacks its retained root capability",
-            )),
-        }
+    fn retained_root(&self) -> Result<&graphforge_filesystem::StableDirectory, GfError> {
+        self.root
+            .as_ref()
+            .ok_or_else(|| corrupt("property inventory lacks its retained root capability"))
     }
 
     /// Admit the writable workspace's current property rows and statistics,
@@ -1064,10 +1071,11 @@ impl AuthenticatedPropertyInventory {
         let Some(fragments) = self.routes.get(&(kind, route.to_owned())) else {
             return Ok(0);
         };
-        let (root, root_path) = self.retained_root()?;
+        let root = self.retained_root()?;
+        let scratch_parent = self.scratch_parent()?;
         fragments.iter().try_fold(0usize, |rows, fragment| {
             let physical_rows =
-                fragment_footer(root, root_path, fragment, kind, route)?.physical_rows;
+                fragment_footer(root, scratch_parent, fragment, kind, route)?.physical_rows;
             Ok(rows.saturating_add(physical_rows))
         })
     }
@@ -1949,7 +1957,7 @@ fn decode_fragment_footer<R: parquet::file::reader::ChunkReader + 'static>(
 /// refused before it influences planning.
 fn fragment_footer<'a>(
     root: &graphforge_filesystem::StableDirectory,
-    root_path: &Path,
+    scratch_parent: &Path,
     fragment: &'a AuthenticatedPropertyFragment,
     kind: PropertyRouteKind,
     route: &str,
@@ -1973,23 +1981,36 @@ fn fragment_footer<'a>(
                 }
                 Some(layout) => {
                     let scratch = tempfile::Builder::new()
-                        .prefix(".gf-property-admission-")
-                        .tempdir_in(root_path.parent().unwrap_or(root_path))
+                        .prefix(".gf-property-scratch-")
+                        .tempdir_in(scratch_parent)
                         .map_err(io_error)?;
-                    let source = segmented_file(
+                    let source = Arc::new(segmented_file(
                         root,
                         &fragment.parts,
                         layout,
                         scratch.path(),
                         #[cfg(test)]
                         None,
-                    )?;
+                    )?);
                     let reader = super::CountingChunkReader {
-                        file: Arc::new(source),
+                        file: Arc::clone(&source),
                         length: object.logical_length,
                         counts: super::ReadCounts::new(false),
                     };
-                    decode_fragment_footer(reader, fragment, kind, route)
+                    let footer = decode_fragment_footer(reader, fragment, kind, route);
+                    // Account the authenticated part reads as eager admission does.
+                    let (bytes, blocks, calls) = source.authentication();
+                    let (read_bytes, read_calls) = source.physical_reads();
+                    crate::lifecycle_io::record_read(
+                        crate::StorageIoPhase::HydrationVerification,
+                        bytes.saturating_add(read_bytes),
+                        calls.saturating_add(read_calls),
+                    );
+                    crate::lifecycle_io::record_blocks(
+                        crate::StorageIoPhase::HydrationVerification,
+                        blocks,
+                    );
+                    footer
                 }
             }
         })
@@ -2001,14 +2022,14 @@ fn fragment_footer<'a>(
 /// live-schema sequence and cross-fragment compatibility.
 fn summarize_route(
     root: &graphforge_filesystem::StableDirectory,
-    root_path: &Path,
+    scratch_parent: &Path,
     kind: PropertyRouteKind,
     route: &str,
     fragments: &[AuthenticatedPropertyFragment],
 ) -> RouteSummaryOutcome {
     let footers = fragments
         .iter()
-        .map(|fragment| fragment_footer(root, root_path, fragment, kind, route))
+        .map(|fragment| fragment_footer(root, scratch_parent, fragment, kind, route))
         .collect::<Result<Vec<_>, GfError>>()?;
     let inputs = footers
         .iter()
