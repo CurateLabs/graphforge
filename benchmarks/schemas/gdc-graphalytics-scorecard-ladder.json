@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-gdc-graphalytics-scorecard-ladder-schema/1",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "graphforge-gdc-graphalytics-scorecard-ladder/1"
+    },
+    "suite_id": {
+      "const": "graphalytics"
+    },
+    "counts_source": {
+      "type": "string",
+      "pattern": "^https://"
+    },
+    "edge_storage": {
+      "const": "one_edge_per_listed_pair"
+    },
+    "datasets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]{1,80}$"
+          },
+          "order": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "archive_url": {
+            "type": "string",
+            "pattern": "^https://datasets\\.ldbcouncil\\.org/graphalytics/[A-Za-z0-9_.-]+\\.tar\\.zst$"
+          },
+          "directed": {
+            "type": "boolean"
+          },
+          "weighted": {
+            "type": "boolean"
+          },
+          "vertices": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "edges": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "load_mapping": {
+            "type": "string",
+            "pattern": "^profiles/gdc/[A-Za-z0-9_.-]+\\.json$"
+          }
+        },
+        "required": [
+          "id",
+          "order",
+          "archive_url",
+          "directed",
+          "weighted",
+          "vertices",
+          "edges",
+          "load_mapping"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "suite_id",
+    "counts_source",
+    "edge_storage",
+    "datasets"
+  ],
+  "additionalProperties": false
+}
