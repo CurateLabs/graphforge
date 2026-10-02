@@ -90,6 +90,12 @@ fn node_name(index: usize) -> String {
 /// Ring graph through the construction session: node `s` links to the next
 /// `fan` nodes, every node carries a `name` property.
 fn build(dir: &Path, nodes: usize, fan_out: usize) {
+    build_with_relations(dir, nodes, fan_out, &["LINK"]);
+}
+
+/// [`build`] with edge `e` typed `relations[e % relations.len()]`, so several
+/// routes share each construction window.
+fn build_with_relations(dir: &Path, nodes: usize, fan_out: usize, relations: &[&str]) {
     assert!(nodes > 2 * fan_out, "the ring must not wrap onto itself");
     let forge = GraphForge::new(Some(dir.to_str().expect("utf-8 path"))).unwrap();
     let mut session = forge
@@ -143,7 +149,11 @@ fn build(dir: &Path, nodes: usize, fan_out: usize) {
             Arc::clone(&CONSTRUCTION_EDGE_SCHEMA),
             vec![
                 Arc::new(identities.finish()) as ArrayRef,
-                Arc::new(StringArray::from(vec!["LINK"; rows])),
+                Arc::new(StringArray::from(
+                    (start..end)
+                        .map(|edge| relations[edge % relations.len()])
+                        .collect::<Vec<_>>(),
+                )),
                 Arc::new(sources.finish()),
                 Arc::new(targets.finish()),
             ],
@@ -222,6 +232,19 @@ fn measure(path: &Path, query: &str, params: &HashMap<String, IrLiteral>) -> Mea
     let after_open = lifecycle_io_snapshot().expect("requested observation");
     let open = after_open.since(&before_open).expect("open attribution");
     open.validate_for_qualification().expect("open reconciles");
+    let mut open_phases: Vec<_> = open
+        .phases
+        .iter()
+        .filter(|(_, totals)| totals.read_bytes != 0)
+        .map(|(phase, totals)| {
+            format!(
+                "{phase:?}={}B/{}calls",
+                totals.read_bytes, totals.read_calls
+            )
+        })
+        .collect();
+    open_phases.sort();
+    eprintln!("    open phases: {open_phases:?}");
 
     let started = Instant::now();
     let result = forge.execute_with_params(query, params).unwrap();
@@ -700,4 +723,84 @@ fn an_unregistered_file_in_the_hydrated_node_directory_is_never_read() {
             .sum::<usize>(),
         10
     );
+}
+
+/// Construction allocates edge surrogates per window and then splits the
+/// rows by route, so each route's shard spans a range it only half fills:
+/// the hint is an upper bound per route, inexact, and the fragments of one
+/// route are exactly that route's objects.
+#[test]
+fn edge_fragment_hints_are_per_route_upper_bounds() {
+    use graphforge_storage::{AuthenticatedPropertyInventory, ParquetFragment};
+
+    let project = tempfile::tempdir().expect("project directory");
+    let path = project.path().join("state");
+    let nodes = 1 << 10;
+    let fan_out = 4;
+    build_with_relations(&path, nodes, fan_out, &["LINK", "KNOWS"]);
+    let generation = resolve_project_generation(&path).unwrap();
+    let inventory = AuthenticatedPropertyInventory::from_resolved_generation(&generation).unwrap();
+
+    let all = inventory.edge_fragments(None);
+    let mut seen = std::collections::BTreeSet::new();
+    for route in ["LINK", "KNOWS"] {
+        let fragments = inventory.edge_fragments(Some(route));
+        assert!(!fragments.is_empty(), "{route}: no fragments");
+        let mut rows = 0;
+        let mut bound = 0;
+        for (fragment_route, object, relative) in &fragments {
+            assert_eq!(fragment_route, route);
+            assert!(
+                seen.insert(relative.clone()),
+                "{relative} listed for two routes"
+            );
+            let footer = footer_rows(object);
+            let fragment = ParquetFragment::for_declared(object.clone(), relative, false);
+            let hint = fragment
+                .exact_rows
+                .expect("a canonical edge shard has a hint");
+            assert!(
+                hint as i64 >= footer,
+                "{relative}: hint {hint} below {footer} rows"
+            );
+            assert!(
+                !fragment.rows_exact,
+                "{relative}: a per-route bound is not exact"
+            );
+            rows += footer;
+            bound += hint as i64;
+        }
+        assert_eq!(
+            rows as usize,
+            nodes * fan_out / 2,
+            "{route}: rows across its shards"
+        );
+        assert!(
+            bound > rows,
+            "{route}: the interleaved window must make the bound exceed the rows ({bound} vs {rows})"
+        );
+    }
+    assert_eq!(
+        seen.len(),
+        all.len(),
+        "every declared edge object belongs to one route"
+    );
+
+    // The providers resolve each route to its own objects.
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    for route in ["LINK", "KNOWS"] {
+        let result = forge
+            .execute(&format!(
+                "MATCH ()-[r:{route}]->() RETURN count(r) AS total"
+            ))
+            .unwrap();
+        let total = result.batches[0]
+            .column_by_name("total")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(total as usize, nodes * fan_out / 2, "{route}: count");
+    }
 }

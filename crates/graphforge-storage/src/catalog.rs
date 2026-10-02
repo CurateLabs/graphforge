@@ -1641,6 +1641,17 @@ impl GraphCatalog {
                 ),
             );
         }
+        // The node table lists the files the inventory declares, so it must
+        // follow the inventory: a write in this session (or a `clear()`
+        // followed by one) changes the node files, and a table frozen at open
+        // would miss new ones or keep listing removed ones (#1388).
+        authority.tables.insert(
+            "topology_nodes".to_owned(),
+            Arc::new(TopologyNodeTable::open_with_inventory(
+                dir,
+                Some(&inventory),
+            )?),
+        );
         authority.property_inventory = Some(inventory);
         Ok(())
     }

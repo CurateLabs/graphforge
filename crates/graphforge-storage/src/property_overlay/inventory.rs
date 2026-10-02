@@ -424,6 +424,7 @@ impl AuthenticatedPropertyInventory {
             }
             entries.push((entry, relative));
         }
+        validate_declared_node_files(&mut declared_nodes)?;
         let node_files = requested_route.is_none().then_some(declared_nodes);
         let mut admitted =
             Self::admit_read_entries(root, entries, requested_route, table.as_ref())?;
@@ -603,6 +604,7 @@ impl AuthenticatedPropertyInventory {
         root: &Path,
         entries: Vec<crate::GraphFileEntry>,
     ) -> Result<Self, GfError> {
+        let node_files = admit_node_paths(root, &entries, false)?;
         let entries = entries
             .into_iter()
             .map(|entry| {
@@ -610,7 +612,9 @@ impl AuthenticatedPropertyInventory {
                 (entry, relative)
             })
             .collect();
-        Self::admit_entries(root, entries, None, None)
+        let mut admitted = Self::admit_entries(root, entries, None, None)?;
+        admitted.node_files = Some(node_files);
+        Ok(admitted)
     }
 
     #[cfg(test)]
@@ -1135,6 +1139,34 @@ fn is_node_topology_path(relative: &str) -> bool {
     relative == "topology/nodes.parquet" || relative.starts_with("topology/nodes/")
 }
 
+/// The declared node set must satisfy what `mutator::node_parquet_files`
+/// requires of a directory listing: the legacy flat file first, then
+/// `topology/nodes/<first>-<last>.parquet` shards with canonical padded
+/// ranges that do not overlap. Anything else is refused, never read.
+fn validate_declared_node_files(files: &mut [AdmittedEdgeFile]) -> Result<(), GfError> {
+    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    let mut prior_end = None;
+    for file in files.iter() {
+        if file.relative_path == "topology/nodes.parquet" {
+            continue;
+        }
+        let relative = Path::new(&file.relative_path);
+        if relative.parent() != Some(Path::new("topology/nodes"))
+            || relative
+                .extension()
+                .is_none_or(|extension| extension != "parquet")
+        {
+            return Err(corrupt("declared node file is not a canonical node shard"));
+        }
+        let (first, last) = crate::mutator::canonical_topology_shard_range(relative, "node")?;
+        if prior_end.is_some_and(|end| first <= end) {
+            return Err(corrupt("declared node shard ranges overlap"));
+        }
+        prior_end = Some(last);
+    }
+    Ok(())
+}
+
 /// The node topology files an inventory declares, resolved like edge routes:
 /// the CAS object for a compact root, the tree file for an expanded one.
 fn admit_node_paths(
@@ -1160,6 +1192,7 @@ fn admit_node_paths(
             relative_path: entry.relative_path.clone(),
         });
     }
+    validate_declared_node_files(&mut files)?;
     Ok(files)
 }
 
