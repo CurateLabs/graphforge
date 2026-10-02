@@ -38,7 +38,8 @@ requires them but nothing here proves they are set.
   on crates.io so later releases use OIDC.
   Five names had never been published when this workflow was written:
   `graphforge-discovery`, `graphforge-filesystem`, `graphforge-observability`,
-  `graphforge-portable-oci`, and `graphforge-value`. New crates are rate limited to one per ten minutes;
+  `graphforge-portable-oci`, and `graphforge-value`. `graphforge-hub-publish` was
+  added later and is also new to crates.io. New crates are rate limited to one per ten minutes;
   the script sleeps until the time crates.io names (at most two hours in total).
 
 ## Cut a release
