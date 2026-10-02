@@ -1,6 +1,6 @@
 //! Rust-owned deterministic artifact generation for the public Hub fixture.
 
-use crate::hub_publication::{
+use crate::hub_publish::publication::{
     ManifestInputs, PACKAGE_MEDIA_TYPE, build_manifest, derive_summary, digest_bytes,
     export_module_packages, object_descriptor, summary_reference, verify_full,
 };
@@ -729,7 +729,7 @@ fn generator_source_digest() -> String {
     hasher.update(b"graphforge-hub-fixture-generator-source/1\0");
     hasher.update(include_bytes!("hub_fixture_artifacts.rs"));
     hasher.update(b"\0");
-    hasher.update(include_bytes!("hub_publication.rs"));
+    hasher.update(include_bytes!("hub_publish/publication.rs"));
     format!("sha256:{}", hex(&hasher.finalize()))
 }
 

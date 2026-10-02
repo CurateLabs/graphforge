@@ -128,6 +128,7 @@ impl LoopbackHub {
     }
 }
 
+#[allow(clippy::too_many_lines)] // one in-process HTTP exchange with its fault hooks
 fn serve(state: &ServerState, stream: TcpStream) {
     let (hub, log, fault) = (&state.hub, &state.log, &state.fault);
     let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -205,7 +206,7 @@ fn serve(state: &ServerState, stream: TcpStream) {
         let digest = state.last_upload.lock().unwrap().clone().unwrap();
         assert!(hub.corrupt_object(&digest) > 0, "corrupted a retained copy");
     }
-    let stale = match injected.as_mut() {
+    let replayed_body = match injected.as_mut() {
         Some(Fault::Stale { refs, manifest }) if hub_method == HubMethod::Get => {
             if path.ends_with("/.gf/refs") {
                 Some(std::mem::take(refs))
@@ -222,7 +223,7 @@ fn serve(state: &ServerState, stream: TcpStream) {
         injected.take();
     }
     drop(injected);
-    let response = match stale {
+    let response = match replayed_body {
         Some(body) => HubResponse {
             status: 200,
             headers: vec![("etag".into(), format!("\"{}\"", sha256_digest(&body)))],
@@ -242,12 +243,9 @@ fn serve(state: &ServerState, stream: TcpStream) {
     };
     let mut head = format!("HTTP/1.1 {} Hub\r\n", response.status);
     for (name, value) in &response.headers {
-        head.push_str(&format!("{name}: {value}\r\n"));
+        head = head + name + ": " + value + "\r\n";
     }
-    head.push_str(&format!(
-        "content-length: {}\r\nconnection: close\r\n\r\n",
-        body.len()
-    ));
+    head = head + "content-length: " + &body.len().to_string() + "\r\nconnection: close\r\n\r\n";
     stream.write_all(head.as_bytes()).unwrap();
     stream.write_all(body).unwrap();
 }
@@ -700,6 +698,7 @@ fn corrupt_object_is_refused_before_ref_moves() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn published_fork_clones_back_with_origin_citation() {
     let cancellation = CancellationToken::new();
     let origin = history();

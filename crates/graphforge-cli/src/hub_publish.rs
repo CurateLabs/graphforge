@@ -11,11 +11,6 @@ use crate::hub_http::{
     MAX_METADATA_BYTES, MAX_REDIRECTS, Transport, endpoint, network, parse_input,
     validate_upload_url, validate_url, validation,
 };
-use crate::hub_publication::{
-    DerivationError, ManifestInputs, PACKAGE_MEDIA_TYPE, SUMMARY_MEDIA_TYPE, VerifiedBundle,
-    build_manifest, derive_summary, digest_bytes, export_module_packages, export_verified_bundle,
-    object_descriptor, summary_reference, verify_exported_bundle,
-};
 use clap::{ArgGroup, Args};
 use graphforge_api::{
     BuildResearchLineageRequest, CancellationToken, ExportResearchRequest, GfError, GraphForge,
@@ -33,14 +28,31 @@ use graphforge_hub_publish::{
     PublishReceipt, PublishToken, SessionResponse, UPLOAD_OFFSET_HEADER, UploadStatus,
     UploadTarget, canonical_json, content_range, publish_scope, sha256_digest,
 };
+use publication::{
+    ManifestInputs, PACKAGE_MEDIA_TYPE, SUMMARY_MEDIA_TYPE, VerifiedBundle, build_manifest,
+    derive_summary, digest_bytes, export_module_packages, export_verified_bundle,
+    object_descriptor, summary_reference, verify_exported_bundle,
+};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use url::Url;
 use uuid::Uuid;
+
+pub(crate) mod publication;
+
+/// Set once by the streaming `gf` process; captured invocations (bindings,
+/// tests) never prompt.
+static DEVICE_FLOW_ALLOWED: AtomicBool = AtomicBool::new(false);
+
+/// Allow the device flow when this process is attached to a terminal.
+pub(crate) fn allow_device_flow() {
+    DEVICE_FLOW_ALLOWED.store(true, Ordering::Relaxed);
+}
 
 /// OAuth client identifier the CLI presents to device authorization.
 const CLIENT_ID: &str = "graphforge-cli";
@@ -51,6 +63,7 @@ const MAX_CONTROL_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 /// Format of the canonical intent whose digest identifies what an operation publishes.
 const INTENT_FORMAT: &str = "graphforge-hub-publish-intent/1";
 
+/// Publish a research Branch head or exact Version to a GraphForge Hub.
 #[derive(Args)]
 #[command(group(ArgGroup::new("selection").required(true).args(["git_ref", "version_uuid"])))]
 pub(crate) struct PublishArgs {
@@ -101,14 +114,33 @@ pub(crate) struct PublishOutcome {
 }
 
 /// `gf publish` entry point used by the CLI dispatcher.
-pub(crate) fn run_publish(
-    args: PublishArgs,
+///
+/// The device flow runs only in the streaming `gf` process with standard input
+/// and standard error on a terminal; otherwise a missing token is `auth_denied`
+/// before any network request.
+pub(crate) fn run(
+    args: &PublishArgs,
     project: Option<PathBuf>,
     project_dir: Option<PathBuf>,
     json: bool,
     output: &mut dyn Write,
-    interactive: bool,
+) -> Result<i32, crate::CliRuntimeError> {
+    run_command(args, project, project_dir, json, output)
+        .map(|()| 0)
+        .map_err(Into::into)
+}
+
+fn run_command(
+    args: &PublishArgs,
+    project: Option<PathBuf>,
+    project_dir: Option<PathBuf>,
+    json: bool,
+    output: &mut dyn Write,
 ) -> Result<(), GfError> {
+    use std::io::IsTerminal as _;
+    let interactive = DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed)
+        && std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal();
     // Locations and arguments are validated before any credential or network use.
     parse_input(&args.repository)?;
     if let Some(origin) = &args.fork_of {
@@ -139,7 +171,7 @@ pub(crate) fn run_publish(
     let outcome = publish(
         &crate::hub_http::HttpTransport::new(),
         &graph,
-        &args,
+        args,
         &mut environment,
     )?;
     write_outcome(&outcome, json, output)
@@ -230,7 +262,7 @@ fn protocol(error: &graphforge_hub_publish::HubPublishError) -> GfError {
     publish_error(error.code, error.detail())
 }
 
-fn derivation(error: DerivationError) -> GfError {
+fn derivation(error: &str) -> GfError {
     GfError::Validation(format!("hub.publish.derivation: {error}"))
 }
 
@@ -249,6 +281,9 @@ fn discovery(error: &graphforge_discovery::DiscoveryError) -> GfError {
 
 // --------------------------------------------------------------- transport
 
+/// A fetched document body and its `ETag`.
+type Document = (Vec<u8>, Option<String>);
+
 /// Control-plane and data-plane exchange over one transport.
 struct Hub<'a> {
     transport: &'a dyn Transport,
@@ -258,7 +293,7 @@ struct Hub<'a> {
 impl Hub<'_> {
     /// Public, redirect-bounded read of a repository document or object.
     /// `None` on 404. Every hop is validated; no credential is sent.
-    fn read(&self, url: &Url, limit: usize) -> Result<Option<(Vec<u8>, Option<String>)>, GfError> {
+    fn read(&self, url: &Url, limit: usize) -> Result<Option<Document>, GfError> {
         let mut url = url.clone();
         for hop in 0..=MAX_REDIRECTS {
             self.transport.validate(&url)?;
@@ -418,13 +453,15 @@ struct Selection {
 }
 
 fn hex_digest(bytes: &[u8; 32]) -> Sha256Digest {
-    Sha256Digest(format!(
-        "sha256:{}",
+    Sha256Digest(
         bytes
             .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    ))
+            .fold(String::from("sha256:"), |mut output, byte| {
+                use std::fmt::Write as _;
+                write!(output, "{byte:02x}").expect("writing to a string cannot fail");
+                output
+            }),
+    )
 }
 
 fn select(graph: &GraphForge, args: &PublishArgs) -> Result<Selection, GfError> {
@@ -749,7 +786,7 @@ fn build_snapshot(
             .map_err(|error| GfError::Validation(format!("hub.publish.derivation: {error}")))?;
         let bundle =
             verify_exported_bundle(&path, &receipt.package_digest, &receipt.transport_digest)
-                .map_err(derivation)?;
+                .map_err(|error| derivation(&error))?;
         add_bundle(&mut objects, &mut sources, &bundle, &location);
         bundle.package_reference()
     };
@@ -762,12 +799,12 @@ fn build_snapshot(
         PortableV2SelectionProfile::DataComponents,
         &scratch.join("project.gfpb"),
     )
-    .map_err(derivation)?;
+    .map_err(|error| derivation(&error))?;
     add_bundle(&mut objects, &mut sources, &project, &location);
     let immutable_version = Sha256Digest(project.package_digest.clone());
 
-    let summary =
-        derive_summary(identity, &immutable_version, &project.path).map_err(derivation)?;
+    let summary = derive_summary(identity, &immutable_version, &project.path)
+        .map_err(|error| derivation(&error))?;
     let summary_object = object_descriptor(
         digest_bytes(&summary.bytes),
         summary.bytes.len() as u64,
@@ -786,7 +823,7 @@ fn build_snapshot(
             digest.trim_start_matches("sha256:")
         )))
     })
-    .map_err(derivation)?;
+    .map_err(|error| derivation(&error))?;
     for module in &modules {
         add_bundle(&mut objects, &mut sources, &module.bundle, &location);
     }
@@ -890,7 +927,7 @@ fn build_snapshot(
         }),
         objects,
     })
-    .map_err(derivation)?;
+    .map_err(|error| derivation(&error))?;
     manifest
         .bind_summary(&summary.summary)
         .map_err(|error| discovery(&error))?;

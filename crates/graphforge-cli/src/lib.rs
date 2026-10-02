@@ -26,7 +26,6 @@ include!(concat!(env!("OUT_DIR"), "/project_skills.rs"));
 mod hub_clone;
 pub mod hub_fixture_artifacts;
 mod hub_http;
-mod hub_publication;
 mod hub_publish;
 mod maintenance_cli;
 mod ontology_cli;
@@ -261,7 +260,6 @@ enum Command {
     Telemetry(TelemetryArgs),
     /// Clone a verified portable project from GraphForge Hub.
     Clone(hub_clone::CloneArgs),
-    /// Publish a research Branch head or exact Version to a GraphForge Hub.
     Publish(hub_publish::PublishArgs),
     /// Initialize repository-local GraphForge definitions and state.
     Init(InitArgs),
@@ -1197,10 +1195,7 @@ impl From<graphforge_api::MultiOntologyError> for CliRuntimeError {
 }
 
 #[allow(clippy::too_many_lines)]
-/// `interactive` is true only for the streaming `gf` process attached to a
-/// terminal; it gates prompts such as the Hub publish device flow. Captured
-/// invocations (bindings, tests) are never interactive.
-fn run(cli: Cli, output: &mut dyn Write, interactive: bool) -> Result<i32, CliRuntimeError> {
+fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
     let _capture = storage_attribution_cli::capture(&cli)?;
     let allocation = if cli.diagnostics.allocation_diagnostics {
         if !cli.json {
@@ -1215,7 +1210,7 @@ fn run(cli: Cli, output: &mut dyn Write, interactive: bool) -> Result<i32, CliRu
     } else {
         None
     };
-    let result = run_with_allocation(cli, output, allocation.as_ref(), interactive)?;
+    let result = run_with_allocation(cli, output, allocation.as_ref())?;
     if let Some(allocation) = allocation {
         let (current, peak) = allocation.totals()?;
         // The composition sums to `peak_allocated_bytes`, so a consumer can
@@ -1246,7 +1241,6 @@ fn run_with_allocation(
     cli: Cli,
     output: &mut dyn Write,
     allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
-    interactive: bool,
 ) -> Result<i32, CliRuntimeError> {
     if cli.info {
         writeln!(output, "graphforge {}", env!("CARGO_PKG_VERSION"))
@@ -1273,21 +1267,10 @@ fn run_with_allocation(
         .map_err(Into::into);
     }
     if let Command::Clone(args) = command {
-        return hub_clone::run_clone(args, cli.json, output)
-            .map(|()| 0)
-            .map_err(Into::into);
+        return Ok(hub_clone::run_clone(args, cli.json, output).map(|()| 0)?);
     }
     if let Command::Publish(args) = command {
-        return hub_publish::run_publish(
-            args,
-            cli.project,
-            cli.project_dir,
-            cli.json,
-            output,
-            interactive,
-        )
-        .map(|()| 0)
-        .map_err(Into::into);
+        return hub_publish::run(&args, cli.project, cli.project_dir, cli.json, output);
     }
     // Repository-independent portable commands must not call RepositoryContext::discover.
     if let Command::Portable { command } = command {
@@ -1513,7 +1496,7 @@ where
         }
     };
     let json = cli.json;
-    let exit_code = match run(cli, &mut stdout, false) {
+    let exit_code = match run(cli, &mut stdout) {
         Ok(exit_code) => exit_code,
         Err(error) => {
             write_runtime_error(&error, json, &mut stderr).expect("writing to Vec cannot fail");
@@ -1702,13 +1685,9 @@ fn error_exit_code(error: &CliRuntimeError) -> i32 {
 pub fn run_process() {
     let cli = Cli::parse();
     let json = cli.json;
-    let stdout = io::stdout();
-    let mut output = stdout.lock();
-    let interactive = {
-        use std::io::IsTerminal as _;
-        io::stdin().is_terminal() && io::stderr().is_terminal()
-    };
-    match run(cli, &mut output, interactive) {
+    let mut output = io::stdout().lock();
+    hub_publish::allow_device_flow();
+    match run(cli, &mut output) {
         Ok(exit_code) if exit_code != 0 => {
             let _ = output.flush();
             std::process::exit(exit_code);
