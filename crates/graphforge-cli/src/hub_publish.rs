@@ -14,7 +14,9 @@ use crate::hub_http::{
 use clap::{ArgGroup, Args};
 use graphforge_api::{
     BuildResearchLineageRequest, CancellationToken, ExportResearchRequest, GfError, GraphForge,
-    PortableV2SelectionProfile, ProjectErrorCode, ResearchReferenceTarget,
+    PortableSelection, PortableV2Limits, PortableV2SelectionPreviewRequest,
+    PortableV2SelectionProfile, PortableV2SelectionRequest, ProjectErrorCode,
+    ResearchReferenceTarget,
 };
 use graphforge_discovery::{
     DiscoveryLimits, DiscoveryManifest, ObjectDescriptor, RESEARCH_LINEAGE_FORMAT,
@@ -280,6 +282,33 @@ fn protocol(error: &graphforge_hub_publish::HubPublishError) -> GfError {
 
 fn derivation(error: &str) -> GfError {
     GfError::Validation(format!("hub.publish.derivation: {error}"))
+}
+
+/// Selection for the Project package: every committed participant except the
+/// `research` component kind.
+///
+/// A `Complete` export refuses a Project with research Branches, because its
+/// research registry carries operational heads. The workspace metadata and
+/// configuration participants stay in the package, since the Project summary is
+/// derived from them (ADR 0051).
+fn project_package_profile(graph: &GraphForge) -> Result<PortableV2SelectionProfile, GfError> {
+    let plan = graph
+        .preview_portable_v2_selection(&PortableV2SelectionPreviewRequest {
+            selection: PortableSelection::Current,
+            request: PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::Complete,
+                strict: true,
+            },
+            limits: PortableV2Limits::default(),
+        })
+        .map_err(|error| derivation(&error.to_string()))?;
+    Ok(PortableV2SelectionProfile::Custom(
+        plan.included
+            .into_iter()
+            .filter(|entry| entry.kind != "research")
+            .map(|entry| entry.identity)
+            .collect(),
+    ))
 }
 
 fn discovery(error: &graphforge_discovery::DiscoveryError) -> GfError {
@@ -828,12 +857,11 @@ fn build_snapshot(
         bundle.package_reference()
     };
 
-    // The Project package. A Project with research Branches carries research
-    // only through the research interchange, so the Project package is its
-    // graph data components (ADR 0053).
+    // The Project package: every participant except research, which travels
+    // only through the research interchange packages (ADR 0053).
     let project = export_verified_bundle(
         graph,
-        PortableV2SelectionProfile::DataComponents,
+        project_package_profile(graph)?,
         &scratch.join("project.gfpb"),
     )
     .map_err(|error| derivation(&error))?;
