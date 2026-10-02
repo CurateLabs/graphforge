@@ -208,16 +208,18 @@ impl GraphConstructionSession<'_> {
         self.session_uuid
     }
 
-    /// Append one canonical node Arrow chunk.
+    /// Append one node Arrow chunk. Accepted property columns are normalized
+    /// to their canonical persisted types first.
     pub fn append_nodes(
         &mut self,
         chunk_id: &str,
         batch: &RecordBatch,
     ) -> Result<ConstructionChunkReceipt, GfError> {
-        self.inner.append(
+        self.append(
             graphforge_storage::ConstructionChunkKind::Node,
             chunk_id,
             batch,
+            None,
         )
     }
 
@@ -228,24 +230,26 @@ impl GraphConstructionSession<'_> {
         batch: &RecordBatch,
         cancellation: &crate::CancellationToken,
     ) -> Result<ConstructionChunkReceipt, GfError> {
-        self.inner.append_with_cancellation(
+        self.append(
             graphforge_storage::ConstructionChunkKind::Node,
             chunk_id,
             batch,
-            || cancellation.is_cancelled(),
+            Some(cancellation),
         )
     }
 
-    /// Append one canonical edge Arrow chunk after all node chunks.
+    /// Append one edge Arrow chunk after all node chunks. Accepted property
+    /// columns are normalized to their canonical persisted types first.
     pub fn append_edges(
         &mut self,
         chunk_id: &str,
         batch: &RecordBatch,
     ) -> Result<ConstructionChunkReceipt, GfError> {
-        self.inner.append(
+        self.append(
             graphforge_storage::ConstructionChunkKind::Edge,
             chunk_id,
             batch,
+            None,
         )
     }
 
@@ -256,12 +260,30 @@ impl GraphConstructionSession<'_> {
         batch: &RecordBatch,
         cancellation: &crate::CancellationToken,
     ) -> Result<ConstructionChunkReceipt, GfError> {
-        self.inner.append_with_cancellation(
+        self.append(
             graphforge_storage::ConstructionChunkKind::Edge,
             chunk_id,
             batch,
-            || cancellation.is_cancelled(),
+            Some(cancellation),
         )
+    }
+
+    /// The single construction boundary every bulk producer crosses: import
+    /// sessions (CLI, Python, Node) and direct Rust construction alike.
+    fn append(
+        &mut self,
+        kind: graphforge_storage::ConstructionChunkKind,
+        chunk_id: &str,
+        batch: &RecordBatch,
+        cancellation: Option<&crate::CancellationToken>,
+    ) -> Result<ConstructionChunkReceipt, GfError> {
+        let batch = canonical_property_columns(kind, batch)?;
+        match cancellation {
+            Some(token) => self
+                .inner
+                .append_with_cancellation(kind, chunk_id, &batch, || token.is_cancelled()),
+            None => self.inner.append(kind, chunk_id, &batch),
+        }
     }
 
     /// Return durable content-free lifecycle and bounded-work progress.
@@ -557,6 +579,76 @@ fn refresh_boundary(boundary: RefreshBoundary) -> Result<(), GfError> {
 #[cfg(test)]
 thread_local! {
     static REFRESH_FAILURE: std::cell::Cell<Option<RefreshBoundary>> = const { std::cell::Cell::new(None) };
+}
+
+/// Rewrite every accepted property column into its canonical persisted type
+/// (`graphforge_storage::schemas::canonical_property_data_type`): narrower
+/// integers to `Int64`, `Float32` to `Float64`, `LargeUtf8` to `Utf8` and
+/// `LargeList` to `List`, recursively. Each conversion is lossless and keeps
+/// nulls, field names, nullability and metadata. Columns that are already
+/// canonical, required topology columns, and columns no canonical form exists
+/// for are passed through unchanged, so storage refuses the last.
+fn canonical_property_columns(
+    kind: graphforge_storage::ConstructionChunkKind,
+    batch: &RecordBatch,
+) -> Result<RecordBatch, GfError> {
+    let required = match kind {
+        graphforge_storage::ConstructionChunkKind::Node => {
+            graphforge_storage::CONSTRUCTION_NODE_SCHEMA.fields().len()
+        }
+        graphforge_storage::ConstructionChunkKind::Edge => {
+            graphforge_storage::CONSTRUCTION_EDGE_SCHEMA.fields().len()
+        }
+    };
+    let schema = batch.schema();
+    let target = |field: &arrow::datatypes::Field| {
+        graphforge_storage::schemas::canonical_property_data_type(field.data_type())
+            .filter(|canonical| canonical != field.data_type())
+    };
+    if schema
+        .fields()
+        .iter()
+        .skip(required)
+        .all(|field| target(field).is_none())
+    {
+        return Ok(batch.clone());
+    }
+    let lossless = arrow::compute::CastOptions {
+        safe: false,
+        ..arrow::compute::CastOptions::default()
+    };
+    let mut fields = Vec::with_capacity(schema.fields().len());
+    let mut columns = Vec::with_capacity(batch.num_columns());
+    for (index, (field, column)) in schema.fields().iter().zip(batch.columns()).enumerate() {
+        match (index >= required).then(|| target(field)).flatten() {
+            Some(canonical) => {
+                let normalized = arrow::compute::cast_with_options(column, &canonical, &lossless)
+                    .map_err(|error| {
+                    validation(format!(
+                        "property column {} cannot be normalized from {} to {canonical}: {error}",
+                        field.name(),
+                        field.data_type()
+                    ))
+                })?;
+                fields.push(std::sync::Arc::new(
+                    field.as_ref().clone().with_data_type(canonical),
+                ));
+                columns.push(normalized);
+            }
+            None => {
+                fields.push(std::sync::Arc::clone(field));
+                columns.push(std::sync::Arc::clone(column));
+            }
+        }
+    }
+    RecordBatch::try_new(
+        std::sync::Arc::new(arrow::datatypes::Schema::new_with_metadata(
+            fields,
+            schema.metadata().clone(),
+        )),
+        columns,
+    )
+    .map_err(|error| validation(error.to_string()))
 }
 
 fn derived_uuid(operation: Uuid, domain: &[u8]) -> Uuid {
