@@ -130,13 +130,12 @@ where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
     let discovered;
-    let topology = match topology {
-        Some(files) => files,
-        None => {
-            discovered = graphforge_storage::TopologyFiles::discover_legacy(project_dir)
-                .map_err(|error| source(error.to_string()))?;
-            &discovered
-        }
+    let topology = if let Some(files) = topology {
+        files
+    } else {
+        discovered = graphforge_storage::TopologyFiles::discover_legacy(project_dir)
+            .map_err(|error| source(error.to_string()))?;
+        &discovered
     };
     project_text_source_selected(
         inventory,
