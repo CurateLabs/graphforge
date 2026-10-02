@@ -113,6 +113,14 @@ name = "discovery_ontology_module"
 required-features = ["discovery", "portable", "research"]
 
 [[test]]
+name = "discovery_research_version"
+required-features = ["discovery", "portable", "research"]
+
+[[test]]
+name = "discovery_lineage_import"
+required-features = ["discovery", "research", "portable"]
+
+[[test]]
 name = "algorithm_public_surface"
 required-features = ["knowledge", "provenance", "search"]
 

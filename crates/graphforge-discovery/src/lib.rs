@@ -14,8 +14,14 @@
 //! module identities. Package identity, module identity, and composition digest
 //! are three distinct fields; none substitutes for another.
 
+mod lineage;
 mod summary;
 
+pub use lineage::{
+    LineageBranch, LineageForkOrigin, LineageProposal, LineageVersion, RESEARCH_LINEAGE_CAPABILITY,
+    RESEARCH_LINEAGE_FORMAT, RESEARCH_LINEAGE_MEDIA_TYPE, ResearchLineage,
+    ResearchLineageReference,
+};
 pub use summary::{
     ProjectSummary, SummaryAccess, SummaryCorpusSize, SummaryFacts, SummaryGeographicCoverage,
     SummaryMetadata, SummaryOntologyComposition, SummaryOntologyModule, SummaryPackageReference,
@@ -68,6 +74,10 @@ pub struct DiscoveryLimits {
     pub max_module_package_bytes: u64,
     /// Maximum modules, and separately bridge sets, in one ontology inventory.
     pub max_ontology_entries: usize,
+    /// Maximum bytes of one research lineage document.
+    pub max_lineage_bytes: usize,
+    /// Maximum Versions, Branches, or Proposals in one lineage document.
+    pub max_lineage_entries: usize,
 }
 
 impl Default for DiscoveryLimits {
@@ -82,6 +92,8 @@ impl Default for DiscoveryLimits {
             max_summary_bytes: 1024 * 1024,
             max_module_package_bytes: 64 * 1024 * 1024,
             max_ontology_entries: 4096,
+            max_lineage_bytes: 2 * 1024 * 1024,
+            max_lineage_entries: 10_000,
         }
     }
 }
@@ -122,6 +134,8 @@ pub enum DiscoveryVersionSubject {
     Capability,
     /// Project summary document format version.
     ProjectSummary,
+    /// Research lineage document format version.
+    ResearchLineage,
 }
 
 /// Sanitized supported/requested version metadata for compatibility failures.
@@ -453,6 +467,9 @@ pub struct DiscoveryManifest {
     /// Optional ontology composition inventory. Clone consumers ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ontology: Option<OntologyInventory>,
+    /// Optional research lineage document reference. Clone consumers ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<ResearchLineageReference>,
     /// Required semantics checked before object access.
     pub requirements: Vec<ProtocolRequirement>,
     /// Optional advertised semantics.
@@ -542,7 +559,8 @@ impl DiscoveryManifest {
         validate_objects(&self.objects, limits)?;
         self.package_object()?;
         self.validate_summary_reference(limits)?;
-        self.validate_ontology(limits)
+        self.validate_ontology(limits)?;
+        self.validate_lineage_reference(limits)
     }
 
     fn validate_summary_reference(&self, limits: DiscoveryLimits) -> Result<(), DiscoveryError> {
@@ -820,6 +838,209 @@ impl DiscoveryManifest {
         if !matches {
             return Err(mismatch("summary"));
         }
+        Ok(())
+    }
+
+    /// Return the uniquely selected research lineage transport object.
+    pub fn lineage_object(&self) -> Result<&ObjectDescriptor, DiscoveryError> {
+        let reference = self.lineage.as_ref().ok_or_else(|| {
+            DiscoveryError::new(
+                DiscoveryErrorCode::MissingObject,
+                Some("lineage"),
+                "research lineage is not advertised",
+            )
+        })?;
+        let object = self
+            .objects
+            .iter()
+            .find(|object| object.digest == reference.object_digest)
+            .ok_or_else(|| {
+                DiscoveryError::new(
+                    DiscoveryErrorCode::MissingObject,
+                    Some("lineage.object_digest"),
+                    "research lineage object is absent",
+                )
+            })?;
+        if object.media_type != RESEARCH_LINEAGE_MEDIA_TYPE {
+            return Err(DiscoveryError::new(
+                DiscoveryErrorCode::MalformedResponse,
+                Some("lineage.object_digest"),
+                "research lineage object media type is incompatible",
+            ));
+        }
+        Ok(object)
+    }
+
+    /// Verify that a lineage document matches this manifest and refs snapshot.
+    #[allow(clippy::too_many_lines)]
+    pub fn bind_lineage(
+        &self,
+        refs: &RefSet,
+        lineage: &ResearchLineage,
+    ) -> Result<(), DiscoveryError> {
+        let reference = self.lineage.as_ref().ok_or_else(|| {
+            DiscoveryError::new(
+                DiscoveryErrorCode::MissingObject,
+                Some("lineage"),
+                "research lineage is not advertised",
+            )
+        })?;
+        let mismatch = |field: &'static str| {
+            DiscoveryError::new(
+                DiscoveryErrorCode::IntegrityFailure,
+                Some(field),
+                "research lineage disagrees with manifest",
+            )
+        };
+        if lineage.repository != self.repository {
+            return Err(mismatch("lineage.repository"));
+        }
+        if lineage.immutable_version != self.immutable_version {
+            return Err(mismatch("lineage.immutable_version"));
+        }
+        if lineage.canonical_digest()? != reference.lineage_digest {
+            return Err(mismatch("lineage.lineage_digest"));
+        }
+        let limits = DiscoveryLimits::default();
+        // One lineage document describes every Branch head of exactly one
+        // repository snapshot. A Branch ref that targets another snapshot names a
+        // head this document does not describe, so it fails closed rather than
+        // resolving to this snapshot's (possibly older) head.
+        for branch in &lineage.branches {
+            let Some(item) = refs.refs.iter().find(|item| item.name == branch.ref_name) else {
+                return Err(DiscoveryError::new(
+                    DiscoveryErrorCode::MissingRef,
+                    Some("lineage.branches.ref_name"),
+                    "branch ref is absent from refs snapshot",
+                ));
+            };
+            if item.target != self.immutable_version {
+                return Err(DiscoveryError::new(
+                    DiscoveryErrorCode::IntegrityFailure,
+                    Some("lineage.branches.ref_name"),
+                    "branch ref targets a different repository snapshot than the lineage",
+                ));
+            }
+        }
+        for version in &lineage.versions {
+            if let Some(package) = &version.package {
+                self.validate_lineage_package(package, "versions.package", limits)?;
+            }
+        }
+        for proposal in &lineage.proposals {
+            self.validate_lineage_package(&proposal.package, "proposals.package", limits)?;
+        }
+        Ok(())
+    }
+
+    /// Select the portable package object for one research Version UUID.
+    pub fn research_version_object<'l>(
+        &self,
+        lineage: &'l ResearchLineage,
+        version_uuid: &str,
+    ) -> Result<(&'l LineageVersion, &ObjectDescriptor), DiscoveryError> {
+        let version = lineage.version(version_uuid).ok_or_else(|| {
+            DiscoveryError::new(
+                DiscoveryErrorCode::MissingObject,
+                Some("lineage.versions"),
+                "research Version is absent from lineage",
+            )
+        })?;
+        let package = version.package.as_ref().ok_or_else(|| {
+            DiscoveryError::new(
+                DiscoveryErrorCode::MissingObject,
+                Some("lineage.versions.package"),
+                "research Version package is not advertised",
+            )
+        })?;
+        let object = self
+            .objects
+            .iter()
+            .find(|object| object.digest == package.object_digest)
+            .ok_or_else(|| {
+                DiscoveryError::new(
+                    DiscoveryErrorCode::MissingObject,
+                    Some("lineage.versions.package.object_digest"),
+                    "research Version package object is absent",
+                )
+            })?;
+        if object.media_type != PORTABLE_V2_MEDIA_TYPE
+            || package.object_digest == self.package.object_digest
+        {
+            return Err(DiscoveryError::new(
+                DiscoveryErrorCode::MalformedResponse,
+                Some("lineage.versions.package.object_digest"),
+                "research Version package object is incompatible",
+            ));
+        }
+        Ok((version, object))
+    }
+
+    fn validate_lineage_reference(&self, limits: DiscoveryLimits) -> Result<(), DiscoveryError> {
+        let Some(reference) = &self.lineage else {
+            return Ok(());
+        };
+        if reference.format != RESEARCH_LINEAGE_FORMAT {
+            let error = DiscoveryError::new(
+                DiscoveryErrorCode::UnsupportedFuture,
+                Some("lineage.format"),
+                "research lineage format is unsupported",
+            );
+            return Err(
+                match format_major(&reference.format, "graphforge-research-lineage") {
+                    Some(requested_major) => error.with_version(DiscoveryVersionDetails {
+                        subject: DiscoveryVersionSubject::ResearchLineage,
+                        supported_major: Some(1),
+                        requested_major,
+                    }),
+                    None => error,
+                },
+            );
+        }
+        reference.lineage_digest.validate()?;
+        reference.object_digest.validate()?;
+        let object = self.lineage_object()?;
+        if object.length > u64::try_from(limits.max_lineage_bytes).unwrap_or(u64::MAX) {
+            return Err(limit("lineage.object_digest"));
+        }
+        Ok(())
+    }
+
+    fn validate_lineage_package(
+        &self,
+        package: &PortablePackageReference,
+        field: &'static str,
+        limits: DiscoveryLimits,
+    ) -> Result<(), DiscoveryError> {
+        lineage::validate_package_reference(package, field, limits)?;
+        let object_field = match field {
+            "versions.package" => "lineage.versions.package.object_digest",
+            "proposals.package" => "lineage.proposals.package.object_digest",
+            _ => "lineage.package.object_digest",
+        };
+        let object = self
+            .objects
+            .iter()
+            .find(|object| object.digest == package.object_digest)
+            .ok_or_else(|| {
+                DiscoveryError::new(
+                    DiscoveryErrorCode::MissingObject,
+                    Some(object_field),
+                    "research package object is absent",
+                )
+            })?;
+        if object.media_type != PORTABLE_V2_MEDIA_TYPE
+            || package.object_digest == self.package.object_digest
+        {
+            return Err(DiscoveryError::new(
+                DiscoveryErrorCode::MalformedResponse,
+                Some(object_field),
+                "research package object is incompatible",
+            ));
+        }
+        // Research package objects follow the Project package rule: they count
+        // toward `max_cumulative_object_bytes` like every inventory object, and
+        // no separate, smaller cap applies.
         Ok(())
     }
 
@@ -1175,7 +1396,10 @@ fn validate_media_type(value: &str, limits: DiscoveryLimits) -> Result<(), Disco
     Ok(())
 }
 
-fn validate_ref_name(value: &str, limits: DiscoveryLimits) -> Result<(), DiscoveryError> {
+pub(crate) fn validate_ref_name(
+    value: &str,
+    limits: DiscoveryLimits,
+) -> Result<(), DiscoveryError> {
     check_string(value, "ref", limits)?;
     if value.starts_with('/')
         || value.ends_with('/')
@@ -1427,6 +1651,7 @@ mod tests {
             }],
             summary: None,
             ontology: None,
+            lineage: None,
             extensions: BTreeMap::from([(
                 "x-example".to_owned(),
                 json!({"z": 1, "a": [true, "ok"]}),

@@ -413,6 +413,10 @@ export default defineConfig({
                   slug: 'adr/0051-discovery-project-summary-and-ontology-descriptors',
                 },
                 {
+                  label: '0052 — Discovery carries a digest-addressed research lineage document',
+                  slug: 'adr/0052-discovery-research-lineage-document',
+                },
+                {
                   label: '0053 — Hub publish wire contract',
                   slug: 'adr/0053-hub-publish-wire-contract',
                 },

@@ -166,6 +166,7 @@ fn discovery(
             object_digest: project_object.clone(),
         },
         summary: None,
+        lineage: None,
         ontology: Some(OntologyInventory {
             composition_digest: marker('2'),
             modules: vec![OntologyModuleDescriptor {

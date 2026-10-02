@@ -475,6 +475,7 @@ pub fn generate(source: &Path, destination: &Path, location_base: &str) -> Resul
             object_digest: summary_object.digest.clone(),
         }),
         ontology,
+        lineage: None,
         requirements: vec![ProtocolRequirement {
             capability: "portable-v2".into(),
             major: 1,

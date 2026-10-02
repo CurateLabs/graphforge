@@ -167,6 +167,7 @@ const PAGES = [
   'adr/0049-published-payload-checksums.md',
   'adr/0050-read-path-fast-path-selection.md',
   'adr/0051-discovery-project-summary-and-ontology-descriptors.md',
+  'adr/0052-discovery-research-lineage-document.md',
   'adr/0053-hub-publish-wire-contract.md',
   // END generated ADR records
   'releases/roadmap.md',

@@ -70,6 +70,66 @@ metadata field does not compile until a maintainer decides whether it is public.
 `access.collaborators`, `extensions`, and `discovery_facets` are never included,
 and local paths and Project identity are never consulted.
 
+## Lineage read
+
+A Hub reads research lineage without Project package I/O:
+
+1. Parse and validate manifest and refs bytes with `graphforge-discovery`, using
+   explicit response limits; require the requested repository identity and bind
+   `resolved_ref` through refs, exactly as in steps 1-3 above.
+2. Select the lineage object with `DiscoveryManifest::lineage_object()`. It
+   resolves `lineage.object_digest` to exactly one inventory entry with media type
+   `application/vnd.graphforge.research-lineage+json`. A manifest without `lineage`
+   has no lineage to read.
+3. Download that object using a caller-owned HTTP transport, bounded by
+   `max_lineage_bytes`. Require the downloaded bytes to hash to `object_digest`.
+4. Parse with `ResearchLineage::from_json`. An unknown required capability or
+   format major fails `unsupported_future` here, before any Version entry is read.
+5. Call `DiscoveryManifest::bind_lineage` with the refs snapshot. It requires
+   repository and `immutable_version` agreement, digest match, and every branch
+   `ref_name` to appear in refs with a `target` equal to the manifest's
+   `immutable_version`. One lineage document describes every Branch head of one
+   repository snapshot, so a Branch ref that targets another snapshot fails
+   `integrity_failure` instead of resolving to this snapshot's head.
+
+`ResearchLineage::from_json` also enforces the cross-entry rules JSON Schema
+cannot express: a `projection` never cites itself as `source_version_uuid`; a
+Proposal's payload Version is listed, is a `projection`, has the Proposal's
+`source_version_uuid` as its source, and (when it carries a package) carries the
+Proposal's package; and a Proposal's `source_branch_uuid` names a listed Branch.
+
+Failure at any step returns no lineage. Listing Branches, Versions, Fork origins,
+and Proposals uses only this document plus refs; it never reads the Project
+package or any graph data. A `projection` Version is not a `complete` Version.
+
+## Research Version fetch
+
+A consumer clones one exact research Version (Branch head or immutable Version UUID)
+without using the Project package object:
+
+1. Steps 1-5 of the lineage read sequence.
+2. Select the Version with `DiscoveryManifest::research_version_object(&lineage,
+   version_uuid)`. It requires a per-Version `package` reference and resolves its
+   object to a `application/vnd.graphforge.project` entry other than the Project
+   package object.
+3. Download that object under the same rules as the Project package (it counts
+   toward `max_cumulative_object_bytes`, and `gf clone` applies its Project
+   bundle bound), and require the bytes to hash to the object's `digest`.
+4. Pass the complete local package to the portable-v2 verifier. Require the
+   semantic `package_digest` to equal the Version's `package.package_digest`.
+5. Require the package to carry research interchange whose registry holds the
+   selected Version with the lineage `identity_digest` (both the registry
+   commitment and the record's recomputed identity) and the same kind and
+   `source_version_uuid`. A projection package therefore never verifies as its
+   source Version, and a package without research never verifies as any Version.
+
+`graphforge_api::verify_discovered_research_version` implements this sequence. It
+does not publish or materialize a project, so a failed cross-contract check cannot
+leave partially accepted project state. `gf clone --ref <branch>` and
+`gf clone --version-uuid <uuid>` run it before importing, then derive the import
+operation from the repository snapshot, the selected Version UUID, and its
+identity digest.
+
 ## Exact module fetch
 
 A consumer resolves one exact ontology module from any publishing Project:

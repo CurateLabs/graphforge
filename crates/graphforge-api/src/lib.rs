@@ -182,6 +182,10 @@ mod discovery_ontology_module;
 mod discovery_portable_v2;
 #[cfg(all(feature = "discovery", feature = "portable"))]
 mod discovery_project_summary;
+#[cfg(all(feature = "discovery", feature = "research"))]
+mod discovery_research_lineage;
+#[cfg(all(feature = "discovery", feature = "portable"))]
+mod discovery_research_version;
 mod paging;
 #[cfg(all(feature = "discovery", feature = "portable"))]
 pub use discovery_ontology_module::{
@@ -194,6 +198,15 @@ pub use discovery_portable_v2::{
 };
 #[cfg(all(feature = "discovery", feature = "portable"))]
 pub use discovery_project_summary::{ProjectSummaryRequest, summarize_verified_portable_v2};
+#[cfg(all(feature = "discovery", feature = "research"))]
+pub use discovery_research_lineage::{
+    BuildResearchLineageRequest, build_research_lineage_from_registry,
+};
+#[cfg(all(feature = "discovery", feature = "portable"))]
+pub use discovery_research_version::{
+    DiscoveredResearchVersion, DiscoveryResearchVersionError, DiscoveryResearchVersionRequest,
+    verify_discovered_research_version,
+};
 #[cfg(feature = "research")]
 pub use research_project::{DiscoverResearchProjectsRequest, UpdateResearchMetadataRequest};
 #[cfg(feature = "research")]
@@ -368,7 +381,7 @@ pub use graphforge_core::embedding_options::{
     GraphSageOptions, HashGnnOptions, Node2VecOptions,
 };
 pub use graphforge_core::manifest::{MANIFEST_FILE, ONTOLOGY_FILE, ProjectManifest};
-pub use graphforge_core::uuid::hub_clone_operation;
+pub use graphforge_core::uuid::{hub_clone_operation, hub_research_clone_operation};
 pub use graphforge_core::{
     AlgorithmError, AnalyzeOptions, ApiErrorCode, ClusterOptions, EdgeHandle, ExplainStage,
     FindOptions, GfError, LoweringError, NodeHandle, NodeSelector, OntologyFormat, OntologyMode,
