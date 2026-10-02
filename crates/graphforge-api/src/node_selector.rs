@@ -114,7 +114,7 @@ impl GraphForge {
     fn node_uuids(&self, label_id: Option<EntityTypeId>) -> Result<HashSet<Uuid>, GfError> {
         let mut uuids = HashSet::new();
         let mut scanned = 0usize;
-        for batch in graphforge_storage::read_nodes(&self.dir())
+        for batch in graphforge_storage::read_nodes_from_files(&self.dir().topology_files()?)
             .map_err(|error| GfError::Storage(error.to_string()))?
         {
             let uuid_column = batch

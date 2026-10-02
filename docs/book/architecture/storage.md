@@ -355,8 +355,10 @@ chosen by path in `graphforge_storage::graph_admission`:
 `bytes_checksummed` is content actually read and checksummed while hydrating.
 `ResolvedProjectGeneration::graph_files_inventory` still checks every payload
 (memoized); `unadmitted_graph_files_inventory` is the length-only form an open
-uses. Expanded (V1) generations, which every mutating commit publishes today,
-still verify the whole tree at open.
+uses. Every mutating commit publishes a compact root, so a mutated project opens
+as cheaply as a constructed one. Expanded (V1) and delta-bearing generations
+that already exist are still readable: they verify and copy the whole tree at
+open, and convert to a compact root on their next commit.
 
 The same-inode, same-length corruption tests in
 `graphforge-api/src/workspace_hydration/tests.rs` cover every role, including
@@ -448,6 +450,40 @@ prior-fragment rewrite. A PATCH/REMOVE producer performs at most one
 authenticated targeted batch lookup for the window's UUID set, with the same
 zero-per-record-seek scanner; sealing consumes those complete staged rows and
 does not read historical fragments again.
+
+Writers cut logical fragments in UUID order at `MAX_PROPERTY_FRAGMENT_ROWS`
+(65,536) and `MAX_PROPERTY_FRAGMENT_BYTES` (4 MiB of Arrow value, offset and
+presence bytes). These boundaries give dense ordinals and disjoint UUID ranges
+within a generation. A row larger than the logical target stays intact: the
+target does not impose a new limit on valid property values.
+
+The separate physical bound is `MAX_PROPERTY_OBJECT_BYTES` (4 MiB), including
+all Parquet headers, pages, schema metadata and footer. Writers check the final
+encoded size; compression is not assumed to shrink its input. An oversized
+logical Parquet stream is split into fixed-size byte segments, each stored in
+a valid Parquet envelope with the `graphforge.property_object=1` marker,
+logical length, part count and part index. The first object uses the canonical
+fragment filename; later objects append `.part-<20-digit-index>.parquet`.
+The envelope has a fixed schema and is uncompressed, so it adds no second
+compression pass. Every completed envelope is checked against the physical
+bound before publication.
+
+Parts share one logical fragment identity. The authenticated inventory owns
+the complete ordered part set, and the shared property byte reader exposes the
+original Parquet stream to existing Arrow decoders. It loads only requested
+ranges, retains at most one decoded part, and verifies every physical object
+through existing manifest checksums. Missing, duplicate or inconsistent parts
+are corruption. Logical fingerprints and query results use decoded values,
+never envelope rows. Reading a large requested value necessarily reads all of
+its parts; storage chunking does not remove existing query resource budgets.
+
+Construction, SET/REMOVE windows, delta replay and graph projection use this
+publication boundary. Oversized projected flat snapshots become canonical
+generation-zero fragments. Existing plain Parquet files remain readable,
+including oversized files written before the cap; portable copies preserve
+their representation. Newly encoded objects use the bounded representation.
+Projects containing envelopes require an envelope-aware reader; older readers
+do not interpret the envelope's binary payload as property values.
 
 Each fragment also carries the authenticated `graphforge-property-live-schema/1`
 route summary: an exact live-UUID count for every currently present property
@@ -567,7 +603,10 @@ checksums; version-1 framing is refused. Control-chain identities and publicatio
 SHA-256 names remain required, while default replay performs corruption checks
 without cryptographic payload rehashing.
 
-Authoritative small-write delta runs, when present, live under
+No commit publishes delta runs any longer (#1388): a delta-bearing open verifies,
+copies and re-streams the whole graph, which a bounded open cannot afford. Runs
+that generations already carry stay readable and compactable. Authoritative
+small-write delta runs, when present, live under
 `graph/deltas/` inside the same generation and are inventory-verified
 ([ADR 0019](../../adr/0019-authoritative-graph-delta-journal.md)). GFDR's
 binary framing and JSON payload schema are a permanent, versioned exception to
@@ -855,6 +894,22 @@ shards; only `row_chunk` bounds the returned row portion by its limit.
 - **Fallback.** On mismatch (or absent index), the provider scans the typed edge tables and
   builds the adjacency in memory — yielding identical results, only slower. A stale or missing
   index can therefore never cause incorrect output.
+- **Corruption is refused, not rebuilt (#1388).** An index object that fails its
+  checksum or length (a CSR shard against its shard manifest; `index_manifest.parquet`
+  and each `*.csr.json` against the project manifest on first touch), or whose
+  checksummed bytes do not decode, is refused by the query that touches it with
+  `GF_VALIDATION`. Nothing is rebuilt or written: a rebuild would answer by scanning
+  the edge table, so a bounded query would silently cost O(E) and the damage would
+  never be reported. An index in a format this release does not read, or an I/O
+  failure, is a storage error. The explicit `index_adjacency` rebuilds from the
+  authenticated edges and replaces a corrupted index.
+- **Explain and query evidence.** Traversal plans retain `adjacency=hit`,
+  `miss`, or `building`. A stale index adds `adjacency_rebuild=stale`, including
+  the ordered one-hop and two-hop plans. Explain observes the pending rebuild
+  without performing it. Public query execution evidence records
+  `adjacency_rebuilds`: a construction-published generation reads its current
+  index with zero rebuilds; the first traversal after a stale-making mutation
+  records the rebuild it performs. Corruption refuses rather than rebuilding.
 - **Rebuild triggers.** Lazy on first traversal when the `indexes/adjacency/` capability is
   present, or explicit via `forge.index("adjacency", ...)`. Append-only commits
   publish bounded delta segments; a full rebuild compacts them into sharded bases.
@@ -881,10 +936,12 @@ shards; only `row_chunk` bounds the returned row portion by its limit.
   (`adjacency=hit`); stale or torn ⇒ lazy rebuild, then serve; fresh but **no
   row** for the requested relation ⇒ scan-build *without* rebuild (rebuilding
   cannot add an unknown relation — prevents a rebuild-per-query loop); a
-  corrupt accelerator ⇒ always-stale scan-build; capability absent ⇒ scan-build
+  missing shard manifest for a manifest row, or one that disagrees with the index
+  manifest's counts ⇒ lazy rebuild; a corrupt accelerator ⇒ `GF_VALIDATION`, never a
+  rebuild; an unreadable generation counter ⇒ scan-build; capability absent ⇒ scan-build
   (`adjacency=building`). Typed-mode `"*"` bypasses the index entirely
-  (reported as `building`, never a false miss). A build or load failure never
-  fails the query — only its speed.
+  (reported as `building`, never a false miss). A failure to *write* a missing or
+  stale index never fails the query — only its speed.
 - **Direction.** `out` and `in` CSRs are stored separately; undirected traversal unions them.
   In exploratory mode, `_exploratory.parquet` rows are routed by their `rel_type_name` column.
 
@@ -1245,7 +1302,7 @@ Every applicable graph publisher preserves these authorities together:
 | --- | --- |
 | Public construction → canonical graph generation → facade/reopen | Typed/exploratory topology and properties, sharded nodes, routes, all graph identity authorities and continuation tails. Construction, CAS ownership and publishing-budget facade regressions cover exact reopening and portable interchange. |
 | Ordinary Cypher/analyst mutation → MutationTransaction/GraphWriter → generation readers | Canonical topology and property mutation; complete participant publication. Public CREATE/DELETE/SET, active streams, fault recovery and next-ID tests apply. |
-| Composite property mutation → GFDR preparation → verified replay/compaction | Only the four property operations are admitted. Qualified/constructed ownership fixtures cover sparse latest values, removals, nulls, route identity and shared immutable base payloads. Canonical property publication remains available when eligibility requires it. |
+| Composite property mutation → compact root publication (GFDR preparation retained for existing generations) | Composite property mutation publishes a compact root and no delta run (#1388). The GFDR storage APIs and their verified replay/compaction remain for generations that already carry runs: only the four property operations are admitted, and ownership fixtures cover sparse latest values, removals, nulls, route identity and shared immutable base payloads. |
 | Composite topology mutation → canonical GraphWriter publication → facade | Never GFDR. Qualified create and owner-routing regressions cover identities and subsequent property mutation. |
 | Storage GFDR APIs → framed runs → direct replay, open, checkpoint, compaction/import | All topology operations are unsupported, including checksum-valid records, duplicate operation IDs and matching transaction retries. Refusal precedes authority changes; direct replay leaves the entire supplied state unchanged. |
 | Public compaction → complete new generation → refreshed facade | Full verified property chain, same-facade subsequent mutation, exact retry, retained streams and imported continuation. Private hydration and selected permanent ownership are measured separately. |
@@ -1385,6 +1442,23 @@ temporary-disk bounds. The separate point census includes retained generations.
 See [`bounded-csr-1205.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/bounded-csr-1205.json)
 for frozen source/executable hashes, exact observations, commands, decoded bounds,
 CPU/I/O costs and limitations, including the superseded incomplete baseline trace.
+
+### Topology file membership
+
+A compact session retains an explicit topology authority from its generation's
+manifest. `enumerate_topology_files` returns those node and edge files together
+with the session's own staged replacements and appends. Payload readers receive
+that file list; directory discovery is confined to the explicit standalone
+legacy boundary. A route-scoped property inventory cannot authorize a complete
+topology scan. A newly created generation without graph participants has an
+explicit empty authority.
+
+The same authority governs mutation preparation, UUID rebuilding, publication,
+and reopen. Publication captures only selected topology files, so an unrelated
+well-formed file placed in a node or edge directory cannot become authenticated
+through a refresh. A staged commit prepares its candidate membership before
+installing files and swaps the authority after successful installation; rollback
+restores the session's prior membership along with its files.
 
 ### Ordinary Cypher property ownership
 

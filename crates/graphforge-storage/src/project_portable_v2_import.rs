@@ -1094,7 +1094,10 @@ fn import_materialized(
             cancelled,
             allocation,
             limits.max_entry_bytes,
-        )?;
+        )
+        .map_err(|error| {
+            outcome::with_io_context(error, "capture imported adjacency", graph_tree)
+        })?;
         *added_stage_entries = added;
         derived_captures = derived;
     }
@@ -1116,34 +1119,55 @@ fn import_materialized(
         crate::filesystem_admission::ProjectLifecycleMode::Durable,
         crate::filesystem_admission::ProjectRootRequirement::CreateIfMissing,
     )
-    .map_err(|error| storage(&error))?;
-    admission
-        .revalidate_identity()
-        .map_err(|error| storage(&error))?;
+    .map_err(|error| outcome::with_io_context(storage(&error), "admit import target", target))?;
+    admission.revalidate_identity().map_err(|error| {
+        outcome::with_io_context(storage(&error), "revalidate import target", target)
+    })?;
     let replay = crate::published_project_transaction(admission.root(), transaction_uuid)
-        .map_err(|error| storage(&error))?
+        .map_err(|error| {
+            outcome::with_io_context(storage(&error), "inspect import replay", admission.root())
+        })?
         .is_some();
     let existing = if replay {
-        Some(crate::resolve_project_generation(admission.root()).map_err(|error| storage(&error))?)
+        Some(
+            crate::resolve_project_generation(admission.root()).map_err(|error| {
+                outcome::with_io_context(storage(&error), "resolve import replay", admission.root())
+            })?,
+        )
     } else if owned_retry
-        || outcome::aborted_retry(admission.root(), transaction_uuid, generation_uuid)?
+        || outcome::aborted_retry(admission.root(), transaction_uuid, generation_uuid).map_err(
+            |error| outcome::with_io_context(error, "inspect aborted import", admission.root()),
+        )?
     {
-        let generation =
-            semantically_pristine_generation(admission.root()).map_err(|error| storage(&error))?;
+        let generation = semantically_pristine_generation(admission.root()).map_err(|error| {
+            outcome::with_io_context(
+                storage(&error),
+                "inspect import retry target",
+                admission.root(),
+            )
+        })?;
         if generation.is_none() {
             return Err(PortableV2Error::new(
                 PortableV2ErrorCode::Io,
                 "owned retry target is not pristine",
             ));
         }
-        Some(crate::resolve_project_generation(admission.root()).map_err(|error| storage(&error))?)
+        Some(
+            crate::resolve_project_generation(admission.root()).map_err(|error| {
+                outcome::with_io_context(storage(&error), "resolve import retry", admission.root())
+            })?,
+        )
     } else {
-        prepare_import_target(admission.root()).map_err(|error| storage(&error))?
+        prepare_import_target(admission.root()).map_err(|error| {
+            outcome::with_io_context(storage(&error), "prepare import target", admission.root())
+        })?
     };
     // Only admitted retained authorities join this operation; other attempts'
     // private preparation remains outside its resource ownership.
     if let Some(allocation) = allocation {
-        allocation::observe_destination(allocation, admission.root(), existing.as_ref())?;
+        allocation::observe_destination(allocation, admission.root(), existing.as_ref()).map_err(
+            |error| outcome::with_io_context(error, "observe import destination", admission.root()),
+        )?;
     }
     let parent = match existing {
         Some(parent) => parent,
@@ -1151,7 +1175,13 @@ fn import_materialized(
             admission.root(),
             allocation,
         )
-        .map_err(|error| storage(&error))?,
+        .map_err(|error| {
+            outcome::with_io_context(
+                storage(&error),
+                "initialize import target",
+                admission.root(),
+            )
+        })?,
     };
     let mut participant_captures = captures
         .iter()
@@ -1174,7 +1204,8 @@ fn import_materialized(
         stage_entry_count,
         allocation,
         Some(&participant_captures),
-    )?;
+    )
+    .map_err(|error| outcome::with_io_context(error, "prepare compact import graph", target))?;
     let (graph_object_lease, compact_root_capture) =
         prepared_graph.map_or((None, None), |prepared| {
             (
@@ -1232,24 +1263,39 @@ fn import_materialized(
         graph_object_lease.as_ref(),
         Some(&participant_captures),
     )
-    .map_err(|error| storage_or_cancel(&error, cancelled))?
-    {
+    .map_err(|error| {
+        outcome::with_io_context(
+            storage_or_cancel(&error, cancelled),
+            "stage imported generation",
+            target,
+        )
+    })? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => {
             let validated = staged
                 .validate(|_| Ok(()), |_, _| Ok(()))
-                .map_err(|error| storage(&error))?;
+                .map_err(|error| {
+                    outcome::with_io_context(
+                        storage(&error),
+                        "validate imported generation",
+                        target,
+                    )
+                })?;
             let published = match graph_object_lease.as_ref() {
                 Some(lease) => validated.publish_with_graph_objects(lease),
                 None => validated.publish(),
             };
             published.map_err(|error| {
-                outcome::publication_error(
+                outcome::with_io_context(
+                    outcome::publication_error(
+                        target,
+                        transaction_uuid,
+                        generation_uuid,
+                        &report.package_digest,
+                        &error,
+                    ),
+                    "publish imported generation",
                     target,
-                    transaction_uuid,
-                    generation_uuid,
-                    &report.package_digest,
-                    &error,
                 )
             })?
         }
@@ -1368,26 +1414,48 @@ fn validate_import_property_values(
         .saturating_mul(2)
         .saturating_add(1024);
     collect_portable_graph_paths(&directory, Path::new(""), &mut paths, &mut remaining)?;
-    for path in paths {
-        check_identity_validation_cancelled(cancelled)?;
-        if !(path.starts_with("properties") || path.starts_with("edge_properties"))
-            || path
-                .extension()
-                .is_none_or(|extension| extension != "parquet")
-        {
-            continue;
-        }
-        let reader = crate::catalog::admitted_parquet(&graph_tree.join(path))
-            .map_err(invalid_import_identity)?
-            .with_batch_size(IMPORT_IDENTITY_BATCH_ROWS)
-            .build()
-            .map_err(invalid_import_identity)?;
-        for batch in reader {
-            check_identity_validation_cancelled(cancelled)?;
-            crate::writer::validate_property_values(&batch.map_err(invalid_import_identity)?)
-                .map_err(|error| {
-                    PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, error.code())
-                })?;
+    if !paths
+        .iter()
+        .any(|path| path.starts_with("properties") || path.starts_with("edge_properties"))
+    {
+        return Ok(());
+    }
+    // Validate logical values, not the binary envelope used to keep an
+    // oversized property fragment in bounded physical objects. Every historical
+    // fragment still passes validation before this private candidate publishes.
+    let inventory = crate::AuthenticatedPropertyInventory::capture_for_import(
+        graph_tree, cancelled,
+    )
+    .map_err(|error| match error {
+        GfError::Api {
+            code: graphforge_core::ApiErrorCode::Cancelled,
+            ..
+        } => PortableV2Error::new(PortableV2ErrorCode::Cancelled, "verification cancelled"),
+        error => invalid_import_identity(error),
+    })?;
+    let scratch = inventory
+        .create_snapshot_scratch()
+        .map_err(invalid_import_identity)?;
+    for kind in [
+        crate::PropertyRouteKind::Node,
+        crate::PropertyRouteKind::Edge,
+    ] {
+        for route in inventory.routes(kind) {
+            for fragment in inventory.property_fragments(kind, route) {
+                check_identity_validation_cancelled(cancelled)?;
+                let (_, reader) = inventory
+                    .open_property_fragment_batches(kind, route, fragment.id, scratch.path(), true)
+                    .map_err(invalid_import_identity)?;
+                for batch in reader {
+                    check_identity_validation_cancelled(cancelled)?;
+                    crate::writer::validate_property_values(
+                        &batch.map_err(invalid_import_identity)?,
+                    )
+                    .map_err(|error| {
+                        PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, error.code())
+                    })?;
+                }
+            }
         }
     }
     Ok(())
@@ -1835,6 +1903,20 @@ fn parse_digest(value: &str) -> Result<[u8; 32], PortableV2Error> {
 mod tests {
     use super::*;
     mod returned_errors;
+
+    #[test]
+    fn property_validation_preserves_cancelled_before_inventory_capture() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("properties")).unwrap();
+        fs::write(
+            root.path().join("properties/Person.parquet"),
+            b"not parquet",
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(true);
+        let error = validate_import_property_values(root.path(), 1, Some(&cancelled)).unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::Cancelled);
+    }
 
     const HELPER: &str = "project_portable_v2_import::tests::subprocess_crash_import";
     const COOKIE: &str = "graphforge-internal-subprocess-v1";

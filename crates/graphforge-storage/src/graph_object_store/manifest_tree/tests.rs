@@ -16,6 +16,19 @@ use crate::graph_object_store::read_graph_object_by_digest;
 use crate::graph_object_store::verify_graph_object;
 
 #[test]
+fn manifest_route_closure_normalizes_windows_path_separators() {
+    let route = "knows";
+    let component = crate::route_component::component(route);
+    let mut routes = crate::route_component::RouteTable::default();
+    routes.insert(route, 1024, 10).unwrap();
+
+    let relative = PathBuf::from(format!("topology\\edges\\{component}\\part.parquet"));
+    let wire = super::manifest_relative_path_text(&relative).unwrap();
+    assert_eq!(wire, format!("topology/edges/{component}/part.parquet"));
+    routes.validate_paths([wire.as_str()]).unwrap();
+}
+
+#[test]
 fn typed_manifest_install_and_reuse_keep_control_hashing_in_inclusive_totals() {
     use graphforge_core::hash_observation::operation::{Capture, Snapshot};
     use graphforge_core::hash_observation::{HashObservation, totals};

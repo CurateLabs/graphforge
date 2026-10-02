@@ -332,36 +332,16 @@ pub(super) fn read_property_targets(
     for fragment in fragments.iter().rev() {
         let counts = ReadCounts::new(collect);
         let opened = inventory.open_fragment(fragment, targeted_scratch.path())?;
-        if let Some(metrics) = &mut metrics {
-            metrics.authentication_bytes = metrics
-                .authentication_bytes
-                .saturating_add(opened.authentication_bytes);
-            metrics.authentication_block_equivalents = metrics
-                .authentication_block_equivalents
-                .saturating_add(opened.authentication_block_equivalents);
-            metrics.authentication_read_calls = metrics
-                .authentication_read_calls
-                .saturating_add(opened.authentication_read_calls);
-            metrics.property_authentication_bytes = metrics
-                .property_authentication_bytes
-                .saturating_add(opened.authentication_bytes);
-            metrics.authenticated_snapshot_bytes = metrics
-                .authenticated_snapshot_bytes
-                .saturating_add(opened.authentication_bytes);
-            metrics.authenticated_snapshot_peak_bytes = metrics
-                .authenticated_snapshot_peak_bytes
-                .max(fragment.entry.byte_length);
-            metrics.property_authentication_block_equivalents = metrics
-                .property_authentication_block_equivalents
-                .saturating_add(opened.authentication_block_equivalents);
-            metrics.property_authentication_read_calls = metrics
-                .property_authentication_read_calls
-                .saturating_add(opened.authentication_read_calls);
+        let source_reservation = opened.file.reservation_bytes();
+        if source_reservation > limits.max_buffered_bytes {
+            return Err(replay_decoder_limit(
+                "property object buffers exceed memory budget",
+            ));
         }
         if let Some(bytes) = replay_budget {
-            admit_target_footer(&opened.file, fragment.entry.byte_length, bytes)?;
+            admit_target_footer(opened.file.as_ref(), opened.logical_length, bytes)?;
         }
-        let builder = open_counted_retained_property_builder(fragment, &opened, counts.clone())?;
+        let builder = open_counted_retained_property_builder(&opened, counts.clone())?;
         validate_fragment_schema(
             builder.schema().as_ref(),
             fragment.id,
@@ -395,6 +375,7 @@ pub(super) fn read_property_targets(
                 None,
             )?
         };
+        let page_reservation_bytes = page_reservation_bytes.saturating_add(source_reservation);
         let admission = TargetReadAdmission {
             limits,
             page_reservation_bytes,
@@ -420,7 +401,15 @@ pub(super) fn read_property_targets(
             targeted_batch_rows,
             retained_bytes,
         )?;
-        let validation = metrics.as_ref().map(|_| counts.values());
+        let validation = metrics.as_ref().map(|_| {
+            let (bytes, calls, seeks) = counts.values();
+            let (part_bytes, part_calls) = opened.file.physical_reads();
+            (
+                bytes.saturating_add(part_bytes),
+                calls.saturating_add(part_calls),
+                seeks,
+            )
+        });
         if !row_groups.is_empty() {
             if let Some(metrics) = &mut metrics {
                 metrics.row_groups_selected = metrics
@@ -429,7 +418,6 @@ pub(super) fn read_property_targets(
             }
             decode_target_row_groups(
                 TargetDecodeOptions {
-                    fragment,
                     opened: &opened,
                     kind,
                     row_groups,
@@ -442,6 +430,46 @@ pub(super) fn read_property_targets(
                 &mut retained_bytes,
                 metrics.as_mut(),
             )?;
+        }
+        let (part_read_bytes, part_read_calls) = opened.file.physical_reads();
+        counts.record_physical(part_read_bytes, part_read_calls);
+        let (part_bytes, part_blocks, part_calls) = opened.file.authentication();
+        let authentication_bytes = opened.authentication_bytes.saturating_add(part_bytes);
+        let authentication_block_equivalents = opened
+            .authentication_block_equivalents
+            .saturating_add(part_blocks);
+        let authentication_read_calls = opened.authentication_read_calls.saturating_add(part_calls);
+        if let Some(metrics) = &mut metrics {
+            metrics.authentication_bytes = metrics
+                .authentication_bytes
+                .saturating_add(authentication_bytes);
+            metrics.authentication_block_equivalents = metrics
+                .authentication_block_equivalents
+                .saturating_add(authentication_block_equivalents);
+            metrics.authentication_read_calls = metrics
+                .authentication_read_calls
+                .saturating_add(authentication_read_calls);
+            metrics.property_authentication_bytes = metrics
+                .property_authentication_bytes
+                .saturating_add(authentication_bytes);
+            metrics.authenticated_snapshot_bytes = metrics
+                .authenticated_snapshot_bytes
+                .saturating_add(authentication_bytes);
+            metrics.authenticated_snapshot_peak_bytes =
+                metrics.authenticated_snapshot_peak_bytes.max(
+                    fragment
+                        .parts
+                        .iter()
+                        .map(|part| part.entry.byte_length)
+                        .max()
+                        .unwrap_or(0),
+                );
+            metrics.property_authentication_block_equivalents = metrics
+                .property_authentication_block_equivalents
+                .saturating_add(authentication_block_equivalents);
+            metrics.property_authentication_read_calls = metrics
+                .property_authentication_read_calls
+                .saturating_add(authentication_read_calls);
         }
         if let Some(metrics) = &mut metrics {
             let (total_bytes, total_read_calls, range_seeks) = counts.values();
@@ -462,7 +490,7 @@ pub(super) fn read_property_targets(
                 .saturating_add(total_read_calls.saturating_sub(validation_read_calls));
             metrics.physical_blocks = metrics
                 .physical_blocks
-                .saturating_add(total_read_calls.saturating_add(opened.authentication_read_calls));
+                .saturating_add(total_read_calls.saturating_add(authentication_read_calls));
             metrics.range_seeks = metrics.range_seeks.saturating_add(range_seeks);
         }
     }
@@ -502,11 +530,11 @@ fn select_target_row_groups(
     targeted_batch_rows: usize,
     retained_bytes: u64,
 ) -> Result<Vec<usize>, GfError> {
-    let builder = open_counted_retained_property_builder(fragment, opened, counts.clone())?;
+    let builder = open_counted_retained_property_builder(opened, counts.clone())?;
     let mut selected_groups = Vec::new();
     let mut prior_uuid = None;
     for index in 0..builder.metadata().num_row_groups() {
-        let validation = open_counted_retained_property_builder(fragment, opened, counts.clone())?
+        let validation = open_counted_retained_property_builder(opened, counts.clone())?
             .with_row_groups(vec![index])
             .with_batch_size(targeted_batch_rows)
             .build()
@@ -571,7 +599,6 @@ fn select_target_row_groups(
 }
 
 struct TargetDecodeOptions<'a> {
-    fragment: &'a AuthenticatedPropertyFragment,
     opened: &'a OpenPropertyFragment,
     kind: PropertyRouteKind,
     row_groups: Vec<usize>,
@@ -587,12 +614,11 @@ fn decode_target_row_groups(
     retained_bytes: &mut u64,
     mut metrics: Option<&mut PropertyOverlayMetrics>,
 ) -> Result<(), GfError> {
-    let reader =
-        open_counted_retained_property_builder(options.fragment, options.opened, counts.clone())?
-            .with_row_groups(options.row_groups)
-            .with_batch_size(options.batch_rows)
-            .build()
-            .map_err(parquet_error)?;
+    let reader = open_counted_retained_property_builder(options.opened, counts.clone())?
+        .with_row_groups(options.row_groups)
+        .with_batch_size(options.batch_rows)
+        .build()
+        .map_err(parquet_error)?;
     for batch in reader {
         let batch = batch.map_err(authenticated_arrow_error)?;
         charge_target_batch(

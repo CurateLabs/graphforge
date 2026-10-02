@@ -147,6 +147,17 @@ Each entry gains one fixed-width checksum, and newly written versions require a
 reader that understands them. Retired formats are rejected rather than
 rewritten or migrated in place.
 
+Every mutating commit publishes a compact root (#1388): the first commit on an
+empty project, ordinary CREATE, SET and DELETE, composite transactions and
+`index_adjacency` all install only the files that changed since the parent and
+carry no graph tree into the generation. Delta runs are no longer published.
+Current expanded (V1) generations and delta-bearing generations that already
+exist stay readable unchanged, through the expanded open and the replay and
+compaction paths, so opening one still verifies and copies the whole tree. An
+expanded parent converts to a compact root on its next commit; a compaction of
+a delta-bearing generation publishes compact as well. Opening a project
+therefore costs the same whether it was constructed, imported or mutated.
+
 XXH64 has neither cryptographic collision resistance nor adversarial
 authentication. This decision inherits ADR 0013 and ADR 0045's exclusion of
 an active same-identity adversary. The product offers no whole-store proof

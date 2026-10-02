@@ -80,11 +80,12 @@ fn install_composition_authority(forge: &GraphForge, context: &CompositionBindin
             .collect(),
         participants,
     };
+    let graph_objects = forge.begin_graph_object_publication().unwrap();
     match forge.stage_project_generation(&request).unwrap() {
         ProjectStageOutcome::Staged(staged) => staged
             .validate(|_| Ok(()), |_, _| Ok(()))
             .unwrap()
-            .publish()
+            .publish_with_graph_objects(&graph_objects)
             .unwrap(),
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
     };
@@ -329,8 +330,13 @@ fn facade_migrates_legacy_routes_with_atomic_participants_and_plain_reopen() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("project");
     let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
-    let mut writer =
-        graphforge_storage::GraphWriter::open_at(&forge.dir(), OntologyMode::Strict, 1).unwrap();
+    let mut writer = graphforge_storage::GraphWriter::open_at_with_topology(
+        &forge.dir(),
+        OntologyMode::Strict,
+        1,
+        Some(Arc::clone(&forge.dir().topology)),
+    )
+    .unwrap();
     let left = graphforge_core::uuid::new_v7();
     let right = graphforge_core::uuid::new_v7();
     writer
@@ -785,12 +791,14 @@ fn facade_reopens_relation_edge_property_through_default_context() {
     reopened
         .install_generation_composition_context(&context)
         .unwrap();
-    let reopened_edge = reopened
-        .dir()
-        .join("topology/edges")
-        .join(edge_path.file_name().unwrap());
+    // A compact generation hydrates each opaque route into its own directory,
+    // so the reopened facade is asked where the route lives now.
+    let reopened_edges = reopened
+        .property_inventory_for_session()
+        .edge_files(Some(&relation.route));
+    assert_eq!(reopened_edges.len(), 1);
     assert!(
-        reopened_edge.exists(),
+        reopened_edges[0].1.exists(),
         "opaque edge route was not materialized"
     );
     let before = reopened

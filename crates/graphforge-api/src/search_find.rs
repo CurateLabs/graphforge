@@ -14,7 +14,8 @@ use super::search_output::shape_search_output_with_members;
 use super::{FindOptions, GfError, GraphForge};
 use graphforge_search::embedding_query::search_embedding_generation_with_projection;
 use graphforge_search::vector_lifecycle::{
-    LabelMemberProjection, project_label_members_snapshot, search_graph_vectors_with_projection,
+    LabelMemberProjection, project_label_members_snapshot_with_topology,
+    search_graph_vectors_with_projection,
 };
 
 enum VectorQuery {
@@ -75,13 +76,15 @@ impl GraphForge {
         if query.is_none() && vector_query.is_none() {
             return Err(validation("find requires text or vector retrieval"));
         }
+        let topology = self.dir().topology_files()?;
         for attempt in 1_u8..=2 {
             let before = read_search_generation(dir)?;
             let projection = vector_query
                 .as_ref()
                 .map(|_| {
-                    project_label_members_snapshot(
+                    project_label_members_snapshot_with_topology(
                         dir,
+                        Some(&topology),
                         label_id,
                         VectorLifecycleLimits::default(),
                         || Ok(()),
@@ -138,11 +141,13 @@ impl GraphForge {
         projection: Option<&LabelMemberProjection>,
     ) -> Result<Vec<FusedSearchHit>, GfError> {
         let inventory = self.property_inventory_for_session();
+        let topology = self.dir().topology_files()?;
         let text = query
             .map(|query| {
                 search_graph_native(
                     dir,
                     FindSearchRequest {
+                        topology: Some(&topology),
                         label,
                         label_id,
                         query: Some(query),
@@ -224,6 +229,7 @@ impl GraphForge {
                     return soft_dimension_miss(search_graph_vectors_with_projection(
                         dir,
                         VectorIndexRequest {
+                            topology: Some(&self.dir().topology_files()?),
                             label,
                             label_id,
                             space,

@@ -105,6 +105,14 @@ name = "discovery_portable_v2"
 required-features = ["discovery", "portable"]
 
 [[test]]
+name = "discovery_project_summary"
+required-features = ["discovery", "portable", "research"]
+
+[[test]]
+name = "discovery_ontology_module"
+required-features = ["discovery", "portable", "research"]
+
+[[test]]
 name = "algorithm_public_surface"
 required-features = ["knowledge", "provenance", "search"]
 
@@ -167,6 +175,10 @@ required-features = ["portable", "knowledge", "provenance"]
 [[test]]
 name = "scale_g500_ladder"
 required-features = ["portable"]
+
+[[test]]
+name = "mutated_project_open"
+required-features = ["knowledge"]
 
 [[test]]
 name = "permanent_storage_budgets"

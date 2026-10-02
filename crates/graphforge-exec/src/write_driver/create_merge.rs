@@ -87,6 +87,7 @@ pub(super) fn run_create_phase(
     }
     env.lowerer.register_created_node_shapes(&nodes);
     let cfg = CreateConfig {
+        topology: ctx.writer.topology_authority(),
         ref_cols: nodes
             .iter()
             .filter(|n| n.is_reference)
@@ -190,8 +191,8 @@ pub(super) fn run_merge_phase(
     // through `writer.find_pending_nodes` inside `find_matching_merge_nodes`,
     // exactly as before. This mirrors `run_relationship_merge_phase`, which
     // hoists `edge_batches` the same way.
-    let node_batches =
-        graphforge_storage::read_nodes(env.dir).map_err(|e| GfError::Storage(e.to_string()))?;
+    let node_batches = graphforge_storage::read_nodes_from_files(&ctx.writer.topology_files()?)
+        .map_err(|e| GfError::Storage(e.to_string()))?;
     // Every row of one MERGE clause shares the same label set (only literal
     // property values vary per row via `computed_properties`), so the
     // property-partition stem is invariant across rows too. Read that whole

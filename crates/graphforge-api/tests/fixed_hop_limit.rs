@@ -1263,7 +1263,7 @@ fn ordinary_streaming_sink_exposes_deterministic_query_evidence() {
                 None,
             )
             .unwrap();
-        assert_eq!(receipt.evidence.contract, "graphforge-query-evidence/1");
+        assert_eq!(receipt.evidence.contract, "graphforge-query-evidence/2");
         assert_eq!(receipt.evidence.hops.len(), 1);
         assert!(receipt.evidence.sorts.is_empty());
         assert_eq!(receipt.evidence.operator_rss.len(), 1);

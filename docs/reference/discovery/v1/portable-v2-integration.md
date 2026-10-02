@@ -29,9 +29,79 @@ bytes; they do not replace `package.package_digest`, the portable-v2 semantic
 identity established by the storage verifier. Likewise, an immutable repository
 version identifies a repository snapshot and is not a portable package identity.
 
-`graphforge-storage::verify_discovered_portable_v2` implements this sequence.
-It does not publish or materialize a project, so a failed cross-contract check
-cannot leave partially accepted project state.
+`graphforge_api::verify_discovered_portable_v2`
+(`crates/graphforge-api/src/discovery_portable_v2.rs`) implements this sequence
+over the `graphforge-storage` portable-v2 verifier. It does not publish or
+materialize a project, so a failed cross-contract check cannot leave partially
+accepted project state.
+
+## Summary read
+
+A Hub reads a Project summary without package I/O:
+
+1. Parse and validate manifest and refs bytes with `graphforge-discovery`, using
+   explicit response limits; require the requested repository identity and bind
+   `resolved_ref` through refs, exactly as in steps 1-3 above.
+2. Select the summary object with `DiscoveryManifest::summary_object()`. It
+   resolves `summary.object_digest` to exactly one inventory entry with media type
+   `application/vnd.graphforge.project-summary+json`. A manifest without `summary`
+   has no summary to read.
+3. Download that object using a caller-owned HTTP transport, bounded by
+   `max_summary_bytes`. Require the downloaded bytes to hash to `object_digest`.
+4. Parse with `ProjectSummary::from_json`. An unknown required capability or
+   format major fails `unsupported_future` here, before any metadata is read.
+5. Call `DiscoveryManifest::bind_summary`. It requires the summary's repository,
+   `immutable_version`, and `package_digest` to equal the manifest's, its
+   canonical digest to equal `summary.summary_digest`, and its ontology
+   composition to match the manifest's `ontology` inventory.
+
+Failure at any step returns no summary. Nothing in this sequence reads the Project
+package or any graph data.
+
+Publishers derive summary bytes with
+`graphforge_api::summarize_verified_portable_v2`
+(`crates/graphforge-api/src/discovery_project_summary.rs`). It fully verifies the
+package, then reads only the `workspace/research_metadata` and
+`workspace/configuration` participants through the storage-owned authenticated
+reader (`PortableV2PackageIndex`), so a verifier that runs it on the same package
+obtains the same canonical bytes for a bundle and for an expanded directory. The
+public-safe projection is one exhaustive destructuring function: a new Project
+metadata field does not compile until a maintainer decides whether it is public.
+`access.collaborators`, `extensions`, and `discovery_facets` are never included,
+and local paths and Project identity are never consulted.
+
+## Exact module fetch
+
+A consumer resolves one exact ontology module from any publishing Project:
+
+1. Steps 1-3 of the required order, then build the `ExactIdentity`
+   `(id, version, content_digest)` the caller wants.
+2. Select the module package with
+   `DiscoveryManifest::ontology_module_object(&identity)`. It requires the module
+   to be advertised with a `package`, and its object to be a
+   `application/vnd.graphforge.project` object other than the Project package
+   object. It never selects by position, host, or media type alone.
+3. Download that object, bounded by `max_module_package_bytes`, and require the
+   bytes to hash to the object's `digest`.
+4. Pass the complete local package to the portable-v2 verifier. Require the
+   semantic `package_digest` to equal the module descriptor's
+   `package.package_digest`, and require the verified ontology composition to
+   contain a module with the requested exact identity.
+5. Accept the module bytes only after their canonical content digest equals the
+   requested `content_digest`.
+
+The module package's `package_digest` identifies that package and differs between
+Projects that publish the same module. Module identity, not package digest, is
+what two Projects have in common. The Project package is never downloaded.
+
+`graphforge_api::resolve_discovered_ontology_module`
+(`crates/graphforge-api/src/discovery_ontology_module.rs`) implements steps 1, 2,
+4 and 5 over a downloaded package: discovery parsing, repository and refs binding,
+and descriptor selection complete before any package path is read. It returns the
+module identity, the carrying `package_digest`, the module document bytes, and the
+document's file SHA-256 (the same for every Project that publishes the module).
+The document is read through the manifest-authenticated storage reader and its
+domain-separated canonical digest is recomputed, never trusted from the package.
 
 ## Hub and TypeScript consumption
 

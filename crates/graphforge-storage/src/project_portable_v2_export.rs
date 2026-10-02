@@ -737,6 +737,7 @@ fn storage(e: impl std::fmt::Display) -> ExportError {
 
 #[cfg(test)]
 mod tests {
+    mod participant_files;
     mod semantic_refusals;
     use super::planning::exact_identity;
     use super::transport::open_planned_source;
@@ -839,10 +840,22 @@ mod tests {
         let tree = tempfile::tempdir().unwrap();
         fs::write(tree.path().join("a.parquet"), b"graph-a").unwrap();
         fs::create_dir(tree.path().join("properties")).unwrap();
-        let properties = RecordBatch::try_from_iter(vec![(
-            "name",
-            std::sync::Arc::new(StringArray::from(vec!["person"])) as arrow::array::ArrayRef,
-        )])
+        let property_schema = std::sync::Arc::new(arrow::datatypes::Schema::new(vec![
+            crate::schemas::uuid_field("node_uuid"),
+            arrow::datatypes::Field::new("name", arrow::datatypes::DataType::Utf8, true),
+        ]));
+        let properties = RecordBatch::try_new(
+            property_schema,
+            vec![
+                std::sync::Arc::new(
+                    arrow::array::FixedSizeBinaryArray::try_from_iter(std::iter::once(
+                        graphforge_core::uuid::new_v7().into_bytes(),
+                    ))
+                    .unwrap(),
+                ),
+                std::sync::Arc::new(StringArray::from(vec!["person"])),
+            ],
+        )
         .unwrap();
         let mut writer = ArrowWriter::try_new(
             fs::File::create(tree.path().join("properties/Person.parquet")).unwrap(),

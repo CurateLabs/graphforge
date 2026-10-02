@@ -156,6 +156,7 @@ impl GraphForge {
     ) -> Result<Option<TextIndexInspection>, GfError> {
         let visibility = self.graph_visibility.lock()?;
         let label_id = self.search_label_id(label)?;
+        let topology = self.dir().topology_files()?;
         let mut text_properties = None;
         match options {
             SearchIndexOptions::Text {
@@ -168,6 +169,7 @@ impl GraphForge {
                 prepare_search_index(
                     &self.dir(),
                     SearchIndexRequest::Text {
+                        topology: Some(&topology),
                         label,
                         label_id,
                         properties: properties.as_deref(),
@@ -188,6 +190,7 @@ impl GraphForge {
                 prepare_search_index(
                     &self.dir(),
                     SearchIndexRequest::Vector {
+                        topology: Some(&topology),
                         label,
                         label_id,
                         node_uuid: *node_uuid.as_bytes(),
@@ -229,9 +232,11 @@ impl GraphForge {
         let inventory = self.property_inventory_for_session();
         #[cfg(test)]
         after_text_inventory_capture();
+        let topology = self.dir().topology_files()?;
         let inspection = inspect_text_index_freshness(
             &self.dir(),
             LazyTextRequest {
+                topology: Some(&topology),
                 label,
                 label_id,
                 inventory: Some(&inventory),
@@ -363,7 +368,7 @@ impl GraphForge {
             .current_generation_uuid
             .lock()
             .expect("generation UUID lock poisoned");
-        let publication = self.publish_workspace_update();
+        let publication = self.publish_workspace_update_repairing_adjacency();
         let observed_generation = *self
             .current_generation_uuid
             .lock()

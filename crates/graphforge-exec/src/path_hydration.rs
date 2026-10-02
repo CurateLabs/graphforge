@@ -334,68 +334,76 @@ fn gather_path_node_labels(
     let mut label_ids_of: HashMap<[u8; 16], Vec<graphforge_value::EntityTypeId>> =
         HashMap::with_capacity(unique.len());
 
-    graphforge_storage::visit_nodes_batched(&h.resource.graph.dir, batch_size, |b| {
-        h.resource.check()?;
-        h.resource.record("node_batches", 1);
-        h.resource.record("node_rows", b.num_rows() as u64);
-        if remaining.is_empty() {
-            return Ok(false);
-        }
-        let uuids = hydration_fsb16(b, "node_uuid")?;
-        let type_ids = b
-            .column_by_name("type_ids")
-            .and_then(|c| c.as_any().downcast_ref::<ListArray>())
-            .ok_or_else(|| exec_err("cypher_path_nodes: no List type_ids column".into()))?;
-        for r in 0..b.num_rows() {
-            if uuids.is_null(r) || type_ids.is_null(r) {
-                continue;
+    graphforge_storage::visit_nodes_batched_from_files(
+        &h.resource
+            .graph
+            .catalog
+            .topology_files()
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+        batch_size,
+        |b| {
+            h.resource.check()?;
+            h.resource.record("node_batches", 1);
+            h.resource.record("node_rows", b.num_rows() as u64);
+            if remaining.is_empty() {
+                return Ok(false);
             }
-            let mut u = [0u8; 16];
-            u.copy_from_slice(uuids.value(r));
-            if !remaining.remove(&u) {
-                continue;
-            }
-            let values = type_ids.value(r);
-            let values = values
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .ok_or_else(|| {
-                    exec_err("cypher_path_nodes: type_ids values are not UInt32".into())
-                })?;
-            h.reserve(
-                values
-                    .len()
-                    .checked_mul(std::mem::size_of::<graphforge_value::EntityTypeId>())
+            let uuids = hydration_fsb16(b, "node_uuid")?;
+            let type_ids = b
+                .column_by_name("type_ids")
+                .and_then(|c| c.as_any().downcast_ref::<ListArray>())
+                .ok_or_else(|| exec_err("cypher_path_nodes: no List type_ids column".into()))?;
+            for r in 0..b.num_rows() {
+                if uuids.is_null(r) || type_ids.is_null(r) {
+                    continue;
+                }
+                let mut u = [0u8; 16];
+                u.copy_from_slice(uuids.value(r));
+                if !remaining.remove(&u) {
+                    continue;
+                }
+                let values = type_ids.value(r);
+                let values = values
+                    .as_any()
+                    .downcast_ref::<UInt32Array>()
                     .ok_or_else(|| {
-                        DataFusionError::ResourcesExhausted(
-                            "path hydration label allocation overflow".into(),
-                        )
-                    })?,
-            )?;
-            let mut ids = Vec::with_capacity(values.len());
-            for i in 0..values.len() {
-                if !values.is_null(i) {
-                    ids.push(
-                        graphforge_value::EntityTypeId::decode(values.value(i)).map_err(
-                            |error| {
-                                exec_err(format!(
-                                    "cypher_path_nodes: invalid membership identity: {error}"
-                                ))
-                            },
-                        )?,
-                    );
+                        exec_err("cypher_path_nodes: type_ids values are not UInt32".into())
+                    })?;
+                h.reserve(
+                    values
+                        .len()
+                        .checked_mul(std::mem::size_of::<graphforge_value::EntityTypeId>())
+                        .ok_or_else(|| {
+                            DataFusionError::ResourcesExhausted(
+                                "path hydration label allocation overflow".into(),
+                            )
+                        })?,
+                )?;
+                let mut ids = Vec::with_capacity(values.len());
+                for i in 0..values.len() {
+                    if !values.is_null(i) {
+                        ids.push(
+                            graphforge_value::EntityTypeId::decode(values.value(i)).map_err(
+                                |error| {
+                                    exec_err(format!(
+                                        "cypher_path_nodes: invalid membership identity: {error}"
+                                    ))
+                                },
+                            )?,
+                        );
+                    }
+                }
+                label_ids_of.insert(u, ids);
+                h.resource.record("node_gathered", 1);
+                h.resource
+                    .record("gathered_entries", label_ids_of.len() as u64);
+                if remaining.is_empty() {
+                    break;
                 }
             }
-            label_ids_of.insert(u, ids);
-            h.resource.record("node_gathered", 1);
-            h.resource
-                .record("gathered_entries", label_ids_of.len() as u64);
-            if remaining.is_empty() {
-                break;
-            }
-        }
-        Ok(!remaining.is_empty())
-    })?;
+            Ok(!remaining.is_empty())
+        },
+    )?;
     h.resource.record("resolved", label_ids_of.len() as u64);
     Ok(label_ids_of)
 }

@@ -1,0 +1,39 @@
+{
+  "schema": "graphforge-gdc-load-mapping/1",
+  "node_tables": [
+    {
+      "id": "vertex",
+      "format": "graphalytics-vertices",
+      "files": [
+        "wiki-Talk.v"
+      ],
+      "label": "Vertex",
+      "id_column": "id",
+      "properties": [
+        {
+          "column": "id",
+          "type": "int64"
+        }
+      ]
+    }
+  ],
+  "edge_tables": [
+    {
+      "id": "edge",
+      "format": "graphalytics-edges",
+      "files": [
+        "wiki-Talk.e"
+      ],
+      "rel_type": "EDGE",
+      "source": {
+        "label": "Vertex",
+        "column": "source"
+      },
+      "target": {
+        "label": "Vertex",
+        "column": "target"
+      },
+      "properties": []
+    }
+  ]
+}

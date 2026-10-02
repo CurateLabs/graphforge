@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
+use std::io::Seek as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
@@ -46,7 +47,7 @@ pub(crate) enum PayloadClass {
     SelfAuthenticating,
     /// Everything else: small metadata and sidecar files whose many readers
     /// open them by name (generation counters, label encoding, catalogs,
-    /// adjacency build records, CSR shard manifests). Hydration checks exact
+    /// adjacency build records). Hydration checks exact
     /// length and XXH64 as it links them, so an unclassified or unforeseen
     /// payload fails closed instead of being opened unchecked. These reads
     /// are attributed to `read_path_scan` like every other open-time decode of
@@ -71,13 +72,23 @@ fn is_hard_linked_identity_artifact(relative_path: &str) -> bool {
 
 /// Classify a payload by its workspace-relative path.
 pub(crate) fn classify(relative_path: &str) -> PayloadClass {
+    // The adjacency index manifest and each CSR shard manifest are the
+    // authority for the shards they name, and the adjacency provider is their
+    // only reader (`adjacency::read_manifest`, `ShardedCsrIndex::open`), both
+    // admitting before they decode. Checked on first touch, a flipped byte is
+    // refused by the query that reads it instead of being read as a stale index.
+    let adjacency_manifest = relative_path.starts_with("indexes/adjacency/")
+        && !relative_path.contains("/deltas/")
+        && (relative_path.ends_with("/index_manifest.parquet")
+            || relative_path.ends_with(".csr.json"));
     let first_touch = relative_path == "topology/nodes.parquet"
         || relative_path.starts_with("topology/nodes/")
         || relative_path.starts_with("topology/edges/")
         || relative_path.starts_with("properties/")
         || relative_path.starts_with("edge_properties/")
         || relative_path.starts_with("indexes/search/")
-        || is_hard_linked_identity_artifact(relative_path);
+        || is_hard_linked_identity_artifact(relative_path)
+        || adjacency_manifest;
     let self_authenticating = relative_path.starts_with("topology/uuid-membership/")
         || relative_path.starts_with("deltas/")
         || (relative_path.starts_with("indexes/adjacency/")
@@ -113,10 +124,19 @@ pub(crate) fn admit_now(
 /// # Errors
 /// Returns the open failure or the corruption refusal.
 pub fn open_admitted(path: &Path) -> Result<File, GfError> {
-    let file = File::open(path).map_err(|error| {
+    let mut file = File::open(path).map_err(|error| {
         GfError::Storage(format!("open graph payload {}: {error}", path.display()))
     })?;
     admit_file(&file)?;
+    // Positioned reads on Windows can advance the handle cursor. This helper
+    // returns a fresh file for its caller to decode, so restore the ordinary
+    // post-open position after admission.
+    file.seek(std::io::SeekFrom::Start(0)).map_err(|error| {
+        GfError::Storage(format!(
+            "rewind admitted graph payload {}: {error}",
+            path.display()
+        ))
+    })?;
     Ok(file)
 }
 
@@ -209,46 +229,101 @@ impl PayloadTicket {
         file: &File,
         identity: graphforge_filesystem::FileIdentity,
     ) -> Result<Admission, GfError> {
-        if let Some(outcome) = self.outcome.get() {
-            return outcome.clone().map(|()| Admission::Settled { calls: 0 });
-        }
-        if !self.describes(identity) {
-            let mut registry = registry();
-            if registry
-                .get(&key_of(identity))
-                .is_some_and(|current| Arc::ptr_eq(current, self))
-            {
-                registry.remove(&key_of(identity));
+        const MAX_TICKET_CHECKS: usize = 32;
+        let mut ticket = Arc::clone(self);
+        // Continuous hydration must not make one reader spin indefinitely.
+        // Follow replacements without recursion, then fail closed on churn.
+        for _ in 0..MAX_TICKET_CHECKS {
+            // A newer hydration may have registered this same native identity
+            // while an older reader still holds its ticket. Follow that ticket
+            // before deciding whether this ticket still describes the inode.
+            let replacement = {
+                let registry = registry();
+                match registry.get(&key_of(identity)) {
+                    Some(current) if !Arc::ptr_eq(current, &ticket) => Some(Arc::clone(current)),
+                    _ => None,
+                }
+            };
+            if let Some(replacement) = replacement {
+                ticket = replacement;
+                continue;
             }
-            return Ok(Admission::NotRegistered);
-        }
-        // The lock is not held while checksumming: concurrent first touches of
-        // this inode wait on the one computation, every other inode proceeds.
-        // A first touch is a read of committed data. Unless a caller scoped the
-        // work to another phase, it lands in `read_path_scan` with the read it
-        // precedes rather than in the open-time hydration row.
-        let _phase = (!crate::lifecycle_io::phase_override_active())
-            .then(|| crate::lifecycle_io::PhaseScope::enter(crate::StorageIoPhase::ReadPathScan));
-        let performed = std::cell::Cell::new(0_u64);
-        let outcome = self.outcome.get_or_init(|| {
-            #[cfg(test)]
-            self.checksum_runs.fetch_add(1, Ordering::Relaxed);
-            checksum_handle(file, &self.entry, &self.cas_object).map(|calls| {
-                performed.set(calls);
-            })
-        });
-        if outcome.is_ok() {
-            let mut registry = registry();
-            if registry
-                .get(&key_of(identity))
-                .is_some_and(|current| Arc::ptr_eq(current, self))
-            {
-                registry.remove(&key_of(identity));
+            // A native identity may be recycled after both authoritative names
+            // disappear. Cached refusals belong only to the original payload.
+            if !ticket.describes(identity) {
+                let Some(replacement) = ticket.retire_and_get_replacement(identity) else {
+                    return Ok(Admission::NotRegistered);
+                };
+                ticket = replacement;
+                continue;
             }
+            // Recheck after `describes`: a replacement could have been
+            // registered while that path metadata was read. Both tickets can
+            // still describe the same linked inode, so pointer identity is the
+            // discriminator for whether the cached outcome is current.
+            let (replacement, cached_outcome) = {
+                let registry = registry();
+                match registry.get(&key_of(identity)) {
+                    Some(current) if !Arc::ptr_eq(current, &ticket) => {
+                        (Some(Arc::clone(current)), None)
+                    }
+                    _ => (None, ticket.outcome.get().cloned()),
+                }
+            };
+            if let Some(replacement) = replacement {
+                ticket = replacement;
+                continue;
+            }
+            if let Some(outcome) = cached_outcome {
+                return outcome.map(|()| Admission::Settled { calls: 0 });
+            }
+            if let Some(outcome) = ticket.outcome.get() {
+                return outcome.clone().map(|()| Admission::Settled { calls: 0 });
+            }
+            // No registry lock covers metadata or checksumming. Concurrent
+            // first touches wait on this ticket's one computation; unrelated
+            // inodes proceed. Replacements never nest checksum locks.
+            let _phase = (!crate::lifecycle_io::phase_override_active()).then(|| {
+                crate::lifecycle_io::PhaseScope::enter(crate::StorageIoPhase::ReadPathScan)
+            });
+            let performed = std::cell::Cell::new(0_u64);
+            let outcome = ticket.outcome.get_or_init(|| {
+                #[cfg(test)]
+                ticket.checksum_runs.fetch_add(1, Ordering::Relaxed);
+                checksum_handle(file, &ticket.entry, &ticket.cas_object).map(|calls| {
+                    performed.set(calls);
+                })
+            });
+            if outcome.is_ok() {
+                let mut registry = registry();
+                if registry
+                    .get(&key_of(identity))
+                    .is_some_and(|current| Arc::ptr_eq(current, &ticket))
+                {
+                    registry.remove(&key_of(identity));
+                }
+            }
+            return outcome.clone().map(|()| Admission::Settled {
+                calls: performed.get(),
+            });
         }
-        outcome.clone().map(|()| Admission::Settled {
-            calls: performed.get(),
-        })
+        Err(GfError::Validation(
+            "graph payload admission authority changed too often before authentication".into(),
+        ))
+    }
+
+    fn retire_and_get_replacement(
+        self: &Arc<Self>,
+        identity: graphforge_filesystem::FileIdentity,
+    ) -> Option<Arc<Self>> {
+        let mut registry = registry();
+        let current = registry.get(&key_of(identity))?;
+        if Arc::ptr_eq(current, self) {
+            registry.remove(&key_of(identity));
+            None
+        } else {
+            Some(Arc::clone(current))
+        }
     }
 }
 
@@ -351,6 +426,7 @@ pub fn admit_path(path: &Path) -> Result<(), GfError> {
 }
 
 /// Admit every regular file beneath `root`; used for directory-shaped readers.
+/// A `root` that does not exist has nothing to admit.
 ///
 /// # Errors
 /// Returns the first traversal failure or corruption refusal.
@@ -360,12 +436,18 @@ pub fn admit_tree(root: &Path) -> Result<(), GfError> {
     }
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
-        let entries = std::fs::read_dir(&directory).map_err(|error| {
-            GfError::Storage(format!(
-                "read graph payload directory {}: {error}",
-                directory.display()
-            ))
-        })?;
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            // A directory that is not there holds no payload to admit: a
+            // reader that finds nothing reports an absent artifact itself.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(GfError::Storage(format!(
+                    "read graph payload directory {}: {error}",
+                    directory.display()
+                )));
+            }
+        };
         for entry in entries {
             let entry = entry.map_err(|error| {
                 GfError::Storage(format!(
@@ -529,6 +611,18 @@ mod tests {
     }
 
     #[test]
+    fn opening_an_admitted_payload_leaves_its_reader_at_the_start() {
+        let fixture = Fixture::new(PAYLOAD);
+        fixture.register();
+
+        let mut file = open_admitted(&fixture.link).unwrap();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut bytes).unwrap();
+
+        assert_eq!(bytes, PAYLOAD);
+    }
+
+    #[test]
     fn same_inode_same_length_corruption_is_refused_on_first_touch_via_either_name() {
         for through_link in [true, false] {
             let fixture = Fixture::new(PAYLOAD);
@@ -551,14 +645,149 @@ mod tests {
 
     #[test]
     fn a_refusal_is_memoized_and_never_downgraded() {
+        for remove_object in [false, true] {
+            let fixture = Fixture::new(PAYLOAD);
+            fixture.register();
+            fixture.flip_first_byte();
+            let identity = graphforge_filesystem::path_identity(&fixture.object).unwrap();
+            let ticket = registry().get(&key_of(identity)).cloned().unwrap();
+            let first = admit_path(&fixture.link).unwrap_err();
+            // Restoring the byte does not reopen the question for this hydration,
+            // even when only one of the original authoritative names remains.
+            fixture.flip_first_byte();
+            let (removed, retained) = if remove_object {
+                (&fixture.object, &fixture.link)
+            } else {
+                (&fixture.link, &fixture.object)
+            };
+            std::fs::remove_file(removed).unwrap();
+            let second = admit_path(retained).unwrap_err();
+            assert_eq!(first.to_string(), second.to_string());
+            assert_eq!(ticket.checksum_runs.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    fn departed_refusal() -> (Fixture, Arc<PayloadTicket>) {
         let fixture = Fixture::new(PAYLOAD);
         fixture.register();
         fixture.flip_first_byte();
-        let first = admit_path(&fixture.link).unwrap_err();
-        // Restoring the byte does not reopen the question for this hydration.
+        let identity = graphforge_filesystem::path_identity(&fixture.object).unwrap();
+        let ticket = registry().get(&key_of(identity)).cloned().unwrap();
+        let error = admit_path(&fixture.link).unwrap_err();
+        assert!(error.to_string().contains("XXH64 checksum"), "{error}");
+        // Pin the old identity until its exact registry entry is removed, so
+        // another parallel fixture cannot recycle it during this teardown.
+        let retained = File::open(&fixture.object).unwrap();
+        std::fs::remove_file(&fixture.object).unwrap();
+        std::fs::remove_file(&fixture.link).unwrap();
+        assert!(ticket.workspace_root.exists());
+        assert!(Arc::ptr_eq(
+            &registry().remove(&key_of(identity)).unwrap(),
+            &ticket
+        ));
+        drop(retained);
+        (fixture, ticket)
+    }
+
+    #[test]
+    fn a_departed_cached_refusal_does_not_poison_a_reused_identity() {
+        // Keep the old workspace directory alive so another hydration batch
+        // cannot prune this ticket merely because its root disappeared.
+        let (_departed, ticket) = departed_refusal();
+        let unrelated = Fixture::new(b"an unrelated clean payload");
+        unrelated.register();
+        let file = File::open(&unrelated.object).unwrap();
+        let identity = graphforge_filesystem::file_identity(&file).unwrap();
+        let unrelated_ticket = registry().get(&key_of(identity)).cloned().unwrap();
+        assert!(!ticket.describes(identity));
+        // Model native identity recycling directly, without asking the OS to
+        // recycle any particular inode number or clearing other tickets.
+        assert!(Arc::ptr_eq(
+            &registry()
+                .insert(key_of(identity), Arc::clone(&ticket))
+                .unwrap(),
+            &unrelated_ticket
+        ));
+        admit_file(&file).expect("a departed refusal must not apply to unrelated bytes");
+        assert!(!registry().contains_key(&key_of(identity)));
+        assert_eq!(ticket.checksum_runs.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn retiring_a_departed_refusal_preserves_a_replacement_ticket() {
+        let (_departed, stale) = departed_refusal();
+        let unrelated = Fixture::new(b"a newly admitted payload");
+        unrelated.register();
+        let file = File::open(&unrelated.object).unwrap();
+        let identity = graphforge_filesystem::file_identity(&file).unwrap();
+        let replacement = registry().get(&key_of(identity)).cloned().unwrap();
+        assert!(!stale.describes(identity));
+        unrelated.flip_first_byte();
+        // An in-flight reader may still hold the retired Arc after a newer
+        // hydration has replaced its entry at this identity key. Its very next
+        // access must authenticate the replacement before returning any bytes.
+        let error = stale.admit(&file, identity).unwrap_err();
+        assert!(error.to_string().contains("XXH64 checksum"), "{error}");
+        assert!(Arc::ptr_eq(
+            registry().get(&key_of(identity)).unwrap(),
+            &replacement
+        ));
+        let memoized = admit_file(&file).unwrap_err();
+        assert_eq!(error.to_string(), memoized.to_string());
+        assert_eq!(replacement.checksum_runs.load(Ordering::Relaxed), 1);
+        assert_eq!(stale.checksum_runs.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_stale_cached_success_authenticates_a_same_identity_replacement() {
+        let fixture = Fixture::new(PAYLOAD);
+        fixture.register();
+        let identity = graphforge_filesystem::path_identity(&fixture.object).unwrap();
+        let stale = registry().get(&key_of(identity)).cloned().unwrap();
+        let file = File::open(&fixture.link).unwrap();
+        stale.admit(&file, identity).unwrap();
+        assert!(stale.outcome.get().unwrap().is_ok());
+
+        fixture.register();
+        let replacement = registry().get(&key_of(identity)).cloned().unwrap();
+        assert!(!Arc::ptr_eq(&stale, &replacement));
+        assert!(stale.describes(identity));
         fixture.flip_first_byte();
-        let second = admit_path(&fixture.link).unwrap_err();
-        assert_eq!(first.to_string(), second.to_string());
+
+        let error = stale.admit(&file, identity).unwrap_err();
+        assert!(error.to_string().contains("XXH64 checksum"), "{error}");
+        assert_eq!(stale.checksum_runs.load(Ordering::Relaxed), 1);
+        assert_eq!(replacement.checksum_runs.load(Ordering::Relaxed), 1);
+        assert!(Arc::ptr_eq(
+            registry().get(&key_of(identity)).unwrap(),
+            &replacement
+        ));
+    }
+
+    #[test]
+    fn stale_and_current_readers_share_replacement_admission() {
+        let (_departed, stale) = departed_refusal();
+        let unrelated = Fixture::new(&vec![7_u8; 4 << 20]);
+        unrelated.register();
+        let file = File::open(&unrelated.object).unwrap();
+        let identity = graphforge_filesystem::file_identity(&file).unwrap();
+        let replacement = registry().get(&key_of(identity)).cloned().unwrap();
+        std::thread::scope(|scope| {
+            for reader in 0..8 {
+                let stale = &stale;
+                let file = &file;
+                scope.spawn(move || {
+                    if reader % 2 == 0 {
+                        stale.admit(file, identity).unwrap();
+                    } else {
+                        admit_file(file).unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(replacement.checksum_runs.load(Ordering::Relaxed), 1);
+        assert_eq!(stale.checksum_runs.load(Ordering::Relaxed), 1);
+        assert!(!registry().contains_key(&key_of(identity)));
     }
 
     #[test]
@@ -653,5 +882,19 @@ mod tests {
             "eight concurrent first touches of one inode must checksum it once"
         );
         assert!(registry().get(&key_of(identity)).is_none());
+    }
+    /// A directory-shaped reader whose artifact does not exist reports it absent
+    /// itself; admission has nothing to admit and must not turn that into an
+    /// error (a compact project hydrates no empty directories).
+    #[test]
+    fn admit_tree_of_a_missing_directory_admits_nothing() {
+        let fixture = Fixture::new(b"payload");
+        fixture.register();
+        assert!(registry().len() >= 1, "admission is armed");
+        let missing = fixture.directory.path().join("workspace").join("absent");
+        admit_tree(&missing).expect("a missing directory has nothing to admit");
+        // A directory that is there is still walked: the registered link refuses.
+        fixture.flip_first_byte();
+        assert!(admit_tree(&fixture.directory.path().join("workspace")).is_err());
     }
 }

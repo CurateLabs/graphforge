@@ -66,6 +66,7 @@ fn create_writer_covers_typed_edges_properties_recording_and_persisted_lookup() 
         computed_properties: vec![],
     };
     let cfg = CreateConfig {
+        topology: None,
         semantic_composition_fingerprint: None,
         nodes: nodes.clone(),
         edges: vec![edge.clone()],
@@ -102,6 +103,7 @@ fn create_writer_covers_typed_edges_properties_recording_and_persisted_lookup() 
     assert_eq!(persisted_node_ids(dir.path()).unwrap().len(), 4);
 
     let invalid_untyped = CreateConfig {
+        topology: None,
         semantic_composition_fingerprint: None,
         nodes: nodes.clone(),
         edges: vec![ResolvedEdgeSpec {
@@ -122,6 +124,7 @@ fn create_writer_covers_typed_edges_properties_recording_and_persisted_lookup() 
             .contains("relationship type")
     );
     let invalid_undirected = CreateConfig {
+        topology: None,
         semantic_composition_fingerprint: None,
         nodes,
         edges: vec![ResolvedEdgeSpec {
@@ -269,6 +272,7 @@ fn create_writer_fails_closed_for_unbound_or_unpersisted_references() {
     let mut writer =
         graphforge_storage::GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 1).unwrap();
     let cfg = CreateConfig {
+        topology: None,
         semantic_composition_fingerprint: None,
         nodes: vec![reference.clone()],
         edges: vec![],
@@ -344,6 +348,7 @@ fn create_writer_fails_closed_for_unbound_or_unpersisted_references() {
         computed_properties: vec![],
     };
     let mut edge_cfg = CreateConfig {
+        topology: None,
         semantic_composition_fingerprint: None,
         nodes: vec![],
         edges: vec![edge.clone()],
@@ -409,6 +414,7 @@ fn emit_rows_create_runs_the_writer_and_shapes_created_identity_columns() {
         arrow::datatypes::Field::new("name", arrow::datatypes::DataType::Utf8, false),
     ]));
     let cfg = CreateConfig {
+        topology: None,
         semantic_composition_fingerprint: None,
         nodes: vec![ResolvedNodeSpec {
             var: 1,

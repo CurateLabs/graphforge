@@ -354,7 +354,11 @@ fn compact_delta_project(project: &Path) {
         .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
         .unwrap();
     let node_uuid = uuid::Uuid::from_slice(ids.value(0)).unwrap().to_string();
-    drop(graph);
+    // No commit publishes delta runs any more, but generations published before
+    // that carry them: build one over an expanded base, as the journal API does.
+    drop(crate::expanded_generation_test_support::into_expanded(
+        graph,
+    ));
     graphforge_storage::publish_graph_delta(
         project,
         &GraphDeltaPublishRequest {
@@ -617,6 +621,9 @@ fn releasing_the_facade_releases_every_committed_generation_handle() {
     std::fs::create_dir(&project).unwrap();
     let graph = GraphForge::new(project.to_str()).expect("open persistent project");
     graph.execute("CREATE (:Person {name: 'Alice'})").unwrap();
+    // A compact root has no generation tree to hold a handle on; only an
+    // expanded generation does.
+    let graph = crate::expanded_generation_test_support::into_expanded(graph);
 
     let generation_graph_trees = std::fs::read_dir(project.join("generations"))
         .expect("read generations")
@@ -711,7 +718,29 @@ fn compact_person_project(project: &Path) {
              CREATE (a)-[:KNOWS {since: i}]->(b)",
         )
         .expect("seed payload data");
-    publish_compact_graph_workspace(project, &graph.dir());
+    // Mutating commits publish compact roots, so no conversion is needed.
+    assert_compact_graph_root(project);
+}
+
+/// The project's current graph participant is a compact (V2) root.
+fn assert_compact_graph_root(project: &Path) {
+    let record_version = graphforge_storage::resolve_project_generation(project)
+        .unwrap()
+        .participant_snapshot(
+            graphforge_storage::GRAPH_CAPABILITY_ID,
+            graphforge_storage::GRAPH_FILES_FAMILY,
+        )
+        .unwrap()
+        .expect("the project records a graph participant")
+        .record_version;
+    assert!(
+        matches!(
+            record_version,
+            graphforge_storage::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
+        ),
+        "record version {record_version} is not a compact root"
+    );
 }
 
 fn entry_at(project: &Path, prefix: &str, suffix: &str) -> graphforge_storage::GraphFileEntry {
@@ -755,7 +784,7 @@ fn compact_indexed_project(project: &Path) {
         )
         .unwrap();
     graph.index_adjacency().unwrap();
-    publish_compact_graph_workspace(project, &graph.dir());
+    assert_compact_graph_root(project);
 }
 
 /// A mutation the parser cannot notice: only a checksum can see it. JSON gets
@@ -836,11 +865,12 @@ fn hardlinked_edge_route_corruption_is_refused_on_recount() {
     );
 }
 
-/// A mutating commit republishes the whole graph tree. It must refuse a
-/// corrupted payload it would otherwise re-read and re-hash, rather than
-/// launder the corrupted bytes into a new generation under a fresh digest.
-/// One statement leaves the corrupted edge file untouched (it is only
-/// re-hashed for publication); the other appends to it.
+/// A mutating commit captures every file of the workspace, and capture admits a
+/// hydrated payload (`capture_payload_identity`, before any digest is reused or
+/// minted) that nothing has read yet. A corrupted payload is therefore refused
+/// by the commit, whether the commit leaves it untouched (it would otherwise be
+/// referenced again) or appends to it, rather than being carried into a new
+/// generation.
 #[test]
 fn a_mutating_commit_does_not_launder_a_corrupted_payload() {
     for statement in [
@@ -880,8 +910,9 @@ fn a_mutating_commit_does_not_launder_a_corrupted_payload() {
 /// leaving it to be decoded later by whichever reader happens to touch it
 /// first. These are the files the old open-time sweep protected that nothing at
 /// open reads by content: the topology generation counters, the runtime entity
-/// label marker, the surrogate tails, the runtime catalog, the adjacency build
-/// record and every CSR shard manifest.
+/// label marker, the surrogate tails and the runtime catalog. The adjacency
+/// index manifest and the CSR shard manifests are checked on first touch
+/// instead (`corrupted_adjacency_manifests_are_refused_on_first_touch`).
 #[test]
 fn corrupted_sidecars_are_refused_at_open() {
     let project = tempfile::tempdir().unwrap();
@@ -893,8 +924,6 @@ fn corrupted_sidecars_are_refused_at_open() {
         ("topology/runtime_entity_label_encoding.json", ""),
         ("topology/surrogate_tails.parquet", ""),
         ("topology/runtime_catalog.parquet", ""),
-        ("indexes/adjacency/index_manifest.parquet", ""),
-        ("indexes/adjacency/", ".csr.json"),
     ] {
         let entry = entry_at(project.path(), prefix, suffix);
         let _corruption = semantically_inert_corruption(project.path(), &entry);
@@ -902,6 +931,58 @@ fn corrupted_sidecars_are_refused_at_open() {
         assert!(
             GraphForge::new(Some(project.path().to_str().unwrap())).is_err(),
             "{} was accepted at open after in-place corruption",
+            entry.relative_path
+        );
+    }
+}
+
+/// Whether reading the adjacency index manifest and every CSR shard manifest of
+/// the open project is refused.
+fn adjacency_manifests_refused(graph: &GraphForge) -> bool {
+    let directory = graph.dir().join("indexes/adjacency");
+    let manifest_refused = matches!(
+        graphforge_storage::adjacency::read_manifest(&graph.dir()),
+        Err(GfError::Validation(_))
+    );
+    let shard_manifest_refused = std::fs::read_dir(directory)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.to_string_lossy().ends_with(".csr.json"))
+        .any(|path| {
+            matches!(
+                graphforge_storage::adjacency::ShardedCsrIndex::open(&path.with_extension("")),
+                Err(GfError::Validation(_))
+            )
+        });
+    manifest_refused || shard_manifest_refused
+}
+
+/// The derived adjacency index's manifests authenticate its shards, and only the
+/// adjacency provider reads them, so they are checked when it first does
+/// rather than at open: a project whose index is corrupt still opens and
+/// answers queries that never touch the index, and the query that does is
+/// refused with `GF_VALIDATION` (#1388).
+#[test]
+fn corrupted_adjacency_manifests_are_refused_on_first_touch() {
+    let project = tempfile::tempdir().unwrap();
+    compact_indexed_project(project.path());
+    let clean = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    drop(clean);
+    for (prefix, suffix) in [
+        ("indexes/adjacency/index_manifest.parquet", ""),
+        ("indexes/adjacency/", ".csr.json"),
+    ] {
+        let entry = entry_at(project.path(), prefix, suffix);
+        let _corruption = semantically_inert_corruption(project.path(), &entry);
+        assert_open_inventory_defers_content_to_first_touch(project.path(), &entry);
+        assert!(
+            !assert_refused_by_open_or_first_touch(
+                project.path(),
+                &entry,
+                &adjacency_manifests_refused
+            ),
+            "{} must open and be refused on first touch",
             entry.relative_path
         );
     }
@@ -981,8 +1062,9 @@ fn corrupted_search_artifact_is_refused_on_first_touch() {
 /// without requiring a journal replay or a consumer for an unknown file.
 ///
 /// Each payload is refused before any result is returned. Bulk data (nodes,
-/// edges, search segments) is refused on its first touch; the route table is
-/// authenticated by SHA-256 with the manifest; everything else is checked while
+/// edges, search segments, the adjacency manifests) is refused on its first
+/// touch; the route table is authenticated by SHA-256 with the manifest;
+/// everything else is checked while
 /// hydrating, so even a payload no reader opens (`Other`) fails the open.
 #[test]
 #[cfg(feature = "search")]
@@ -1030,7 +1112,7 @@ fn compact_graph_root_refuses_same_inode_corruption_for_every_role() {
         (
             GraphFileRole::Index,
             "indexes/adjacency/index_manifest.parquet",
-            None,
+            Some(&adjacency_manifests_refused),
         ),
         (GraphFileRole::Index, "indexes/search/", Some(&find)),
         (GraphFileRole::Catalog, "semantic-routes.json", None),

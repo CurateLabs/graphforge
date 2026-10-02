@@ -15,6 +15,8 @@ use crate::vector_lifecycle::{VectorIndexRequest, VectorLifecycleLimits, search_
 /// Complete backend request after the public facade resolves a required label.
 #[derive(Clone, Copy, Debug)]
 pub struct FindSearchRequest<'a> {
+    /// Explicit topology membership; absent only for standalone legacy callers.
+    pub topology: Option<&'a graphforge_storage::TopologyFiles>,
     /// Normalized graph label.
     pub label: &'a str,
     /// Local catalog identity used only for graph membership projection.
@@ -175,6 +177,7 @@ where
             let text = search_default_text(
                 project_dir,
                 LazyTextRequest {
+                    topology: request.topology,
                     label: request.label,
                     label_id: request.label_id,
                     inventory: request.inventory,
@@ -188,6 +191,7 @@ where
             let vector = search_graph_vectors(
                 project_dir,
                 VectorIndexRequest {
+                    topology: request.topology,
                     label: request.label,
                     label_id: request.label_id,
                     space,
@@ -229,6 +233,7 @@ where
     search_default_text(
         project_dir,
         LazyTextRequest {
+            topology: request.topology,
             label: request.label,
             label_id: request.label_id,
             inventory: request.inventory,
@@ -263,6 +268,7 @@ where
     search_graph_vectors(
         project_dir,
         VectorIndexRequest {
+            topology: request.topology,
             label: request.label,
             label_id: request.label_id,
             space,
@@ -319,6 +325,7 @@ mod tests {
         limit: usize,
     ) -> FindSearchRequest<'a> {
         FindSearchRequest {
+            topology: None,
             label: LABEL,
             label_id: graphforge_value::EntityTypeSelection::Known(
                 graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
@@ -353,6 +360,7 @@ mod tests {
             upsert_graph_vector(
                 dir.path(),
                 VectorIndexRequest {
+                    topology: None,
                     label: LABEL,
                     label_id: graphforge_value::EntityTypeSelection::Known(
                         graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
@@ -472,6 +480,7 @@ mod tests {
             .is_empty()
         );
         let empty_label = FindSearchRequest {
+            topology: None,
             label: "Empty",
             label_id: graphforge_value::EntityTypeSelection::Known(
                 graphforge_value::EntityTypeId::decode(44).unwrap(),

@@ -89,6 +89,7 @@ pub struct VarLenExpandExec {
     /// Adjacency source for the BFS — the session-scoped provider injected
     /// by the extension planner (#761).
     provider: Arc<dyn AdjacencyProvider>,
+    capture_epoch: u64,
 }
 
 impl VarLenExpandExec {
@@ -131,6 +132,7 @@ impl VarLenExpandExec {
             schema,
             props,
             provider,
+            capture_epoch: demand::stamp_capture_epoch().unwrap_or(0),
         }
     }
 }
@@ -158,8 +160,7 @@ impl DisplayAs for VarLenExpandExec {
             self.min_hops,
             max,
             self.provider
-                .status(&self.rel_type_name, self.direction)
-                .as_str()
+                .explain_status(&self.rel_type_name, self.direction)
         )
     }
 }
@@ -197,6 +198,7 @@ impl ExecutionPlan for VarLenExpandExec {
             schema: self.schema.clone(),
             props: self.props.clone(),
             provider: self.provider.clone(),
+            capture_epoch: self.capture_epoch,
         }))
     }
 
@@ -224,6 +226,7 @@ impl ExecutionPlan for VarLenExpandExec {
             src_col_idx: self.src_col_idx,
             out_schema: self.schema.clone(),
             provider: self.provider.clone(),
+            capture_epoch: self.capture_epoch,
         };
         let schema = self.schema.clone();
         let fut = async move {
@@ -343,6 +346,7 @@ pub(super) struct ExpandConfig {
     pub(super) out_schema: SchemaRef,
     /// Adjacency source (#762) — moved into the `'static` execute future.
     pub(super) provider: Arc<dyn AdjacencyProvider>,
+    pub(super) capture_epoch: u64,
 }
 
 /// One in-progress path during the variable-length BFS.
@@ -393,8 +397,12 @@ fn expand_bfs(cfg: &ExpandConfig, input_batches: &[RecordBatch]) -> Result<Recor
     let src_ids = u64_column(&input, cfg.src_col_idx)?;
 
     // --- Obtain the directed adjacency the traversal needs (#762). ---
-    let mut adjacency =
-        adjacency::AdjacencyReader::new(cfg.provider.as_ref(), &cfg.rel_type_name, cfg.direction)?;
+    let mut adjacency = adjacency::AdjacencyReader::for_capture(
+        cfg.provider.as_ref(),
+        &cfg.rel_type_name,
+        cfg.direction,
+        cfg.capture_epoch,
+    )?;
 
     // --- BFS per source row, with per-path edge deduplication. ---
     // Run the traversal BEFORE any edge-file read: the BFS needs only the
@@ -441,8 +449,11 @@ fn expand_bfs(cfg: &ExpandConfig, input_batches: &[RecordBatch]) -> Result<Recor
     // row's seed, which is in `emissions`), so an index Hit no longer scans the
     // whole node table. Source columns come from the input batch, not here.
     let reached: std::collections::HashSet<u64> = emissions.iter().map(|(_, id, _)| *id).collect();
-    let node_batches = graphforge_storage::read_nodes_filtered(&cfg.dir, &reached)
-        .map_err(|e| exec_err(e.to_string()))?;
+    let node_batches = graphforge_storage::read_nodes_filtered_from_files(
+        &topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?,
+        &reached,
+    )
+    .map_err(|e| exec_err(e.to_string()))?;
     // `read_nodes_filtered` always returns at least one (possibly empty) batch,
     // but guard defensively: with no node batch there is nothing to reach, so
     // emit zero rows rather than indexing into an empty Vec.
@@ -1255,8 +1266,7 @@ impl DisplayAs for ExpandExec {
             "ExpandExec: rel={}, dir={arrow}, adjacency={}, identity={}, fetch={}, demand_batch={}, projection={}, cancel={}",
             self.rel_type_name,
             self.provider
-                .status(&self.rel_type_name, self.direction)
-                .as_str(),
+                .explain_status(&self.rel_type_name, self.direction),
             if self.ordinal_identities.is_some() {
                 "v4"
             } else if self.ordinal_identity_required {
@@ -1587,8 +1597,12 @@ fn expand_single_hop_chunk(
 
     // The adjacency view: directional for Out/In, merged for Undirected
     // (dedup per input row happens in the emit pass below).
-    let mut adjacency =
-        adjacency::AdjacencyReader::new(cfg.provider.as_ref(), &cfg.rel_type_name, cfg.direction)?;
+    let mut adjacency = adjacency::AdjacencyReader::for_capture(
+        cfg.provider.as_ref(),
+        &cfg.rel_type_name,
+        cfg.direction,
+        cfg.capture_epoch,
+    )?;
 
     // Pass 1: walk the frontier collecting (input row, edge_id, neighbor)
     // triples and the distinct traversed edge ids, so the edge read below
@@ -1899,14 +1913,18 @@ fn expand_single_hop_chunk(
             .saturating_add(1_usize.saturating_sub(node_key_already_demanded)),
     );
     let node_batches = if required.is_some() {
-        graphforge_storage::read_nodes_filtered_projected_observed(
-            &cfg.dir,
+        graphforge_storage::read_nodes_filtered_projected_observed_from_files(
+            &topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?,
             &reached,
             &node_projection,
             node_observer.as_ref(),
         )
     } else {
-        graphforge_storage::read_nodes_filtered_observed(&cfg.dir, &reached, node_observer.as_ref())
+        graphforge_storage::read_nodes_filtered_observed_from_files(
+            &topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?,
+            &reached,
+            node_observer.as_ref(),
+        )
     }
     .map_err(|e| exec_err(e.to_string()))?;
     drop(node_permit);
@@ -2049,3 +2067,13 @@ fn expand_single_hop_chunk(
 
 #[cfg(test)]
 mod tests;
+
+fn topology_for_provider(
+    provider: &dyn AdjacencyProvider,
+    legacy_root: &Path,
+) -> Result<graphforge_storage::TopologyFiles, GfError> {
+    match provider.admitted_inventory() {
+        Some(inventory) => graphforge_storage::TopologyFiles::from_inventory(&inventory),
+        None => graphforge_storage::TopologyFiles::discover_legacy(legacy_root),
+    }
+}

@@ -108,8 +108,8 @@ pub use text_index::{
     search_text_index, validate_text_index,
 };
 pub use vector_lifecycle::{
-    VectorIndexRequest, VectorLifecycleLimits, project_label_members, search_graph_vectors,
-    upsert_graph_vector,
+    VectorIndexRequest, VectorLifecycleLimits, project_label_members,
+    project_label_members_snapshot_with_topology, search_graph_vectors, upsert_graph_vector,
 };
 
 /// Named resource bounds shared by text projection, indexing, and search.

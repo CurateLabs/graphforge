@@ -60,7 +60,8 @@ pub use generation::{
 pub mod graph_projection;
 pub use graph_projection::{
     GraphProjectionClosure, GraphProjectionSelection, GraphProjectionSummary,
-    materialize_graph_projection, materialize_portable_graph_tree_projection,
+    materialize_graph_projection, materialize_graph_projection_from_files,
+    materialize_portable_graph_tree_projection,
 };
 
 mod construction_detail_codec;
@@ -85,6 +86,7 @@ pub use graph_construction::{
 pub mod graph_admission;
 pub mod graph_files;
 mod graph_read_inventory;
+mod topology_files;
 #[cfg(test)]
 pub(crate) use graph_files::graph_files_root_participant;
 pub use graph_files::{
@@ -93,20 +95,23 @@ pub use graph_files::{
     GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION, GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION,
     GRAPH_TREE_DIR, GraphFileEntry, GraphFileRole, GraphFilesInventory, GraphFilesOpenEvidence,
     GraphFilesOpenStrategy, GraphWorkspaceCheckpoint, GraphWorkspaceRestoration,
-    capture_graph_files, capture_graph_files_over_parent, decode_inventory, encode_inventory,
+    capture_graph_files, capture_graph_files_with_topology, decode_inventory, encode_inventory,
     graph_tree_root, inventory_participant, materialize_graph_tree, pinned_open_evidence,
     stage_graph_tree, verify_graph_tree,
 };
 pub(crate) use graph_files::{GraphFilesParticipant, decode_versioned_graph_files_participant};
 pub use graph_read_inventory::{
     GraphReadFileEntry, GraphReadInventory, capture_graph_read_inventory,
+    capture_graph_read_inventory_with_topology,
 };
+pub use topology_files::{TopologyFileAuthority, TopologyFiles, enumerate_topology_files};
 
 #[allow(
     dead_code,
     reason = "private node-v2 construction is consumed by the staged #932 integration"
 )]
 mod graph_manifest;
+mod portable_cause;
 #[cfg(any(test, feature = "test-support"))]
 pub use graph_manifest::encode_root as encode_graph_files_root_v2;
 pub(crate) use graph_manifest::{
@@ -118,8 +123,8 @@ pub(crate) use graph_manifest::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use graph_manifest::{
-    GRAPH_MANIFEST_BRANCH_MAX_BYTES, GRAPH_MANIFEST_ENTRY_ENCODING_OVERHEAD_BYTES,
-    GRAPH_MANIFEST_NODE_MAX_BYTES,
+    GRAPH_MANIFEST_BRANCH_MAX_BYTES, GRAPH_MANIFEST_BUCKET_CAPACITY,
+    GRAPH_MANIFEST_ENTRY_ENCODING_OVERHEAD_BYTES, GRAPH_MANIFEST_NODE_MAX_BYTES,
 };
 
 #[allow(
@@ -134,7 +139,8 @@ pub use graph_object_store::graph_object_path;
 pub use graph_object_store::{
     AuthenticatedGraphObject, GRAPH_OBJECT_IO_BUFFER_BYTES, GraphObjectIoTotals,
     GraphObjectPublicationLease, GraphPublicationIo, begin_graph_object_publication,
-    materialize_graph_objects, open_graph_object_by_digest, prepare_graph_files_replacement,
+    materialize_graph_objects, open_graph_object_by_digest, prepare_compact_graph_publication,
+    prepare_compact_graph_publication_repairing_adjacency, prepare_graph_files_replacement,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use graph_object_store::{
@@ -167,7 +173,8 @@ pub use semantic_bindings::{
     SEMANTIC_COMPOSITION_METADATA_KEY, SEMANTIC_ROUTE_METADATA_KEY, SemanticMigrationEvidence,
     SemanticMigrationLimits, SemanticMigrationOperation, SemanticMigrationPlan,
     SemanticMigrationPropertySchema, SemanticRouteKind, SemanticStorageBinding,
-    SemanticStorageBindings, apply_legacy_route_moves, materialize_semantic_migration,
+    SemanticStorageBindings, apply_legacy_route_moves, apply_legacy_route_moves_with_topology,
+    materialize_semantic_migration, materialize_semantic_migration_from_files,
     require_atomic_legacy_migration, semantic_storage_bindings,
 };
 
@@ -283,9 +290,9 @@ pub mod project_portable_v2;
 pub use project_portable_v2::{
     PortableV2ActivationOverride, PortableV2ActivationProfile, PortableV2Authenticity,
     PortableV2BridgeSet, PortableV2Compatibility, PortableV2CompositionEntry, PortableV2Error,
-    PortableV2ErrorCode, PortableV2ExactIdentity, PortableV2Integrity, PortableV2Limits,
-    PortableV2Mode, PortableV2OntologyComposition, PortableV2OntologyModule,
-    PortableV2PackageClass, PortableV2Report, PortableV2Representation,
+    PortableV2ErrorCode, PortableV2ExactIdentity, PortableV2FileRef, PortableV2Integrity,
+    PortableV2Limits, PortableV2Mode, PortableV2OntologyComposition, PortableV2OntologyModule,
+    PortableV2PackageClass, PortableV2PackageIndex, PortableV2Report, PortableV2Representation,
     materialize_verified_portable_v2, verify_portable_v2,
 };
 
@@ -433,7 +440,8 @@ pub use uuid_membership::{
     AuthenticatedUuidIndexSnapshot, UuidIndexAppendMetrics, UuidIndexBuildLimits,
     UuidIndexBuildMetrics, UuidIndexKind, UuidIndexOrphanGcWork, UuidMembershipIndex,
     UuidProbeMetrics, V4OrdinalRebuildDisposition, V4OrdinalRebuildEvidence,
-    maintain_uuid_membership_orphans, rebuild_uuid_membership_indexes, rebuild_v4_ordinal_identity,
+    maintain_uuid_membership_orphans, rebuild_uuid_membership_indexes,
+    rebuild_uuid_membership_indexes_with_topology, rebuild_v4_ordinal_identity,
     rebuild_v4_ordinal_identity_with_evidence, uuid_membership_index_is_fresh,
     uuid_membership_index_present,
 };
@@ -474,9 +482,12 @@ pub use catalog::{
     read_edges_filtered_from_inventory, read_edges_filtered_observed,
     read_edges_filtered_observed_from_inventory, read_edges_filtered_projected_from_inventory,
     read_edges_filtered_projected_observed, read_edges_from_inventory, read_nodes,
-    read_nodes_filtered, read_nodes_filtered_observed, read_nodes_filtered_projected_observed,
-    read_properties, read_properties_batched, read_properties_from_inventory, topology_node_files,
-    visit_node_fragments_admitted, visit_node_property_overlay_admitted, visit_nodes_batched,
+    read_nodes_filtered, read_nodes_filtered_from_files, read_nodes_filtered_observed,
+    read_nodes_filtered_observed_from_files, read_nodes_filtered_projected_observed,
+    read_nodes_filtered_projected_observed_from_files, read_nodes_from_files, read_properties,
+    read_properties_batched, read_properties_from_inventory, topology_node_files,
+    visit_node_fragments_admitted, visit_node_fragments_admitted_from_files,
+    visit_node_property_overlay_admitted, visit_nodes_batched, visit_nodes_batched_from_files,
     visit_properties_batched, visit_property_fragments_admitted,
 };
 
@@ -484,8 +495,10 @@ pub mod runtime_entity_labels;
 pub use runtime_entity_labels::{
     RUNTIME_ENTITY_LABEL_ENCODING_VERSION, RuntimeEntityLabelReconcile,
     has_runtime_entity_label_encoding_marker, promote_runtime_graph_for_ontology,
-    reconcile_runtime_entity_label_ids, runtime_entity_plan_id_is_disjoint_from_ontology,
-    validate_runtime_entity_label_ids, write_runtime_entity_label_encoding_marker,
+    promote_runtime_graph_for_ontology_with_topology, reconcile_runtime_entity_label_ids,
+    reconcile_runtime_entity_label_ids_with_topology,
+    runtime_entity_plan_id_is_disjoint_from_ontology, validate_runtime_entity_label_ids,
+    validate_runtime_entity_label_ids_with_topology, write_runtime_entity_label_encoding_marker,
 };
 
 pub mod parquet_scan;
@@ -517,9 +530,10 @@ pub use writer::{
 
 pub mod mutator;
 pub use mutator::{
-    delete_edges, delete_nodes, delete_nodes_and_edges, incident_edge_uuids, stage_add_node_labels,
-    stage_delete_edges, stage_delete_edges_authenticated, stage_delete_nodes,
-    stage_delete_nodes_authenticated, stage_mutate_node_labels,
+    delete_edges, delete_nodes, delete_nodes_and_edges, delete_nodes_and_edges_with_topology,
+    incident_edge_uuids, incident_edge_uuids_from_files, stage_add_node_labels, stage_delete_edges,
+    stage_delete_edges_authenticated, stage_delete_nodes, stage_delete_nodes_authenticated,
+    stage_mutate_node_labels,
 };
 
 pub mod staging;

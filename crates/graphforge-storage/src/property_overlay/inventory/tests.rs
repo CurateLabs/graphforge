@@ -7,6 +7,184 @@ use std::collections::{BTreeSet, HashMap};
 use tempfile::TempDir;
 
 #[test]
+fn cancelled_import_stops_before_topology_and_property_resolution_hashes() {
+    let root = TempDir::new().unwrap();
+    fs::create_dir_all(root.path().join("properties")).unwrap();
+    fs::create_dir_all(root.path().join("topology/edges")).unwrap();
+    let paths = [
+        "properties/Person.parquet",
+        "topology/edges/R.parquet",
+        "topology/nodes.parquet",
+    ];
+    for path in paths {
+        fs::write(root.path().join(path), b"captured payload").unwrap();
+    }
+    let (inventory, _) = crate::capture_graph_files(root.path()).unwrap();
+    // Cancellation arrives after initial capture. Corruption would win if
+    // either resolution pass authenticated a file before polling again.
+    for path in paths {
+        fs::write(root.path().join(path), b"changed payload!").unwrap();
+    }
+    let cancelled = std::sync::atomic::AtomicBool::new(true);
+    let assert_cancelled = |error: GfError| {
+        assert!(matches!(
+            error,
+            GfError::Api {
+                code: graphforge_core::ApiErrorCode::Cancelled,
+                ..
+            }
+        ));
+    };
+    assert_cancelled(
+        admit_edge_route_paths(root.path(), &inventory.files, None, false, Some(&cancelled))
+            .unwrap_err(),
+    );
+    assert_cancelled(
+        admit_node_paths(root.path(), &inventory.files, false, Some(&cancelled)).unwrap_err(),
+    );
+    assert_cancelled(
+        resolve_versioned_property_entries_for_route(
+            root.path(),
+            inventory.files.clone(),
+            None,
+            None,
+            Some(&cancelled),
+        )
+        .unwrap_err(),
+    );
+    assert_cancelled(
+        AuthenticatedPropertyInventory::from_inventory_at_root_with_admission(
+            root.path(),
+            inventory,
+            None,
+            true,
+            Some(&cancelled),
+        )
+        .unwrap_err(),
+    );
+}
+
+#[test]
+fn logical_fragment_stream_preserves_decoded_column_admission() {
+    use arrow::array::StringArray;
+
+    for batches in [1_u128, 65] {
+        let root = TempDir::new().unwrap();
+        fs::create_dir_all(root.path().join("properties")).unwrap();
+        let path = root.path().join("properties/Person.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("payload", DataType::Utf8, false),
+        ]));
+        let value = "a".repeat(1024);
+        let payload = Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
+            value.as_str(),
+            1024,
+        )));
+        let mut writer = ArrowWriter::try_new(
+            File::create(path).unwrap(),
+            Arc::clone(&schema),
+            Some(
+                crate::permanent_parquet::writer_properties()
+                    .set_dictionary_enabled(false)
+                    .build(),
+            ),
+        )
+        .unwrap();
+        for batch in 0..batches {
+            let uuids = (batch * 1024..(batch + 1) * 1024)
+                .map(u128::to_be_bytes)
+                .collect::<Vec<_>>();
+            writer
+                .write(
+                    &RecordBatch::try_new(
+                        Arc::clone(&schema),
+                        vec![
+                            Arc::new(FixedSizeBinaryArray::try_from_iter(uuids.iter()).unwrap()),
+                            payload.clone(),
+                        ],
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        writer.close().unwrap();
+        let import = AuthenticatedPropertyInventory::capture_for_import(root.path(), None);
+        if batches == 1 {
+            assert!(import.is_ok());
+        } else {
+            let error = import.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("column chunk exceeds decoded-byte admission limit")
+            );
+        }
+        let inventory = AuthenticatedPropertyInventory::capture(root.path()).unwrap();
+        let scratch = inventory.create_snapshot_scratch().unwrap();
+        let opened = inventory.open_property_fragment_batches(
+            PropertyRouteKind::Node,
+            "Person",
+            PropertyFragmentId {
+                generation: 0,
+                ordinal: 0,
+            },
+            scratch.path(),
+            true,
+        );
+        if batches == 1 {
+            let (_, reader) = opened.unwrap();
+            assert_eq!(
+                reader.map(|batch| batch.unwrap().num_rows()).sum::<usize>(),
+                1024
+            );
+        } else {
+            let error = match opened {
+                Ok(_) => panic!("logical reader accepted a column larger than 64 MiB"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("column chunk exceeds decoded-byte admission limit")
+            );
+        }
+    }
+}
+
+#[test]
+fn import_inventory_rejects_oversized_plain_and_segmented_footers_before_decode() {
+    for wrapped in [false, true] {
+        let root = TempDir::new().unwrap();
+        fs::create_dir_all(root.path().join("properties")).unwrap();
+        let path = root.path().join("properties/Person.parquet");
+        let mut logical = b"PAR1".to_vec();
+        logical.extend_from_slice(&(16_u32 * 1024 * 1024 + 1).to_le_bytes());
+        logical.extend_from_slice(b"PAR1");
+        if wrapped {
+            super::super::bounded_object::encode_parts(
+                &mut std::io::Cursor::new(&logical),
+                logical.len() as u64,
+                |index, bytes| {
+                    assert_eq!(index, 0);
+                    fs::write(&path, &bytes).map_err(io_error)
+                },
+            )
+            .unwrap();
+        } else {
+            fs::write(&path, &logical).unwrap();
+        }
+        let error =
+            AuthenticatedPropertyInventory::capture_for_import(root.path(), None).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Parquet metadata exceeds admission limit")
+        );
+    }
+}
+
+#[test]
 fn fragment_identity_is_numeric_canonical_and_total() {
     let id = PropertyFragmentId {
         generation: 2,
@@ -561,5 +739,170 @@ fn property_authentication_reaches_the_lifecycle_counters() {
     assert_eq!(
         admitted.open_metrics().property_authentication_bytes,
         payload.len() as u64
+    );
+}
+
+fn segmented_property_fixture() -> (TempDir, Vec<crate::GraphFileEntry>, String) {
+    use arrow::array::{BooleanArray, StringArray};
+    use parquet::file::properties::WriterProperties;
+    let root = TempDir::new().unwrap();
+    let value = "v".repeat(5 << 20);
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+            Field::new("payload", DataType::Utf8, true),
+            Field::new("absent", DataType::Int64, true),
+            Field::new("empty", DataType::Utf8, true),
+        ],
+        HashMap::from([
+            (
+                PROPERTY_OVERLAY_FORMAT_KEY.into(),
+                PROPERTY_OVERLAY_FORMAT.into(),
+            ),
+            (PROPERTY_KIND_KEY.into(), "node".into()),
+            (PROPERTY_ROUTE_KEY.into(), "Wide".into()),
+            (PROPERTY_GENERATION_KEY.into(), "1".into()),
+            (PROPERTY_ORDINAL_KEY.into(), "0".into()),
+        ]),
+    ));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(FixedSizeBinaryArray::try_from_iter([[1_u8; 16]].iter()).unwrap()),
+            Arc::new(BooleanArray::from(vec![false])),
+            Arc::new(StringArray::from(vec![value.as_str()])),
+            Arc::new(Int64Array::from(vec![None])),
+            Arc::new(StringArray::from(vec![""])),
+        ],
+    )
+    .unwrap();
+    let mut encoded = Vec::new();
+    let properties = WriterProperties::builder()
+        .set_dictionary_enabled(false)
+        .build();
+    let mut writer = ArrowWriter::try_new(&mut encoded, schema, Some(properties)).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    assert!(encoded.len() > MAX_PROPERTY_OBJECT_BYTES);
+    let anchor = root.path().join("properties/Wide").join(
+        PropertyFragmentId {
+            generation: 1,
+            ordinal: 0,
+        }
+        .file_name(),
+    );
+    fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+    let mut entries = Vec::new();
+    bounded_object::encode_parts(
+        &mut std::io::Cursor::new(&encoded),
+        encoded.len() as u64,
+        |index, bytes| {
+            let path = bounded_object::part_path(&anchor, index);
+            fs::write(&path, &bytes).unwrap();
+            entries.push(crate::GraphFileEntry {
+                relative_path: path
+                    .strip_prefix(root.path())
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .replace('\\', "/"),
+                byte_length: bytes.len() as u64,
+                content_xxh64: crate::corruption_checksum::checksum(&bytes),
+                content_sha256: digest_hex(&Sha256::digest(&bytes)),
+                role: crate::GraphFileRole::Properties,
+            });
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(entries.len() >= 2);
+    (root, entries, value)
+}
+
+#[test]
+fn segmented_inventory_preserves_values_nulls_and_logical_fragment_identity() {
+    let (root, entries, value) = segmented_property_fixture();
+    let inventory =
+        AuthenticatedPropertyInventory::from_entries_at_root(root.path(), entries.clone()).unwrap();
+    assert_eq!(
+        inventory
+            .property_fragments(PropertyRouteKind::Node, "Wide")
+            .len(),
+        1
+    );
+    assert_eq!(
+        inventory
+            .property_object_paths(PropertyRouteKind::Node, "Wide")
+            .len(),
+        entries.len()
+    );
+    assert_eq!(
+        inventory
+            .admitted_source_files(PropertyRouteKind::Node)
+            .len(),
+        entries.len()
+    );
+    let scratch = inventory.create_snapshot_scratch().unwrap();
+    let mut rows = Vec::new();
+    let metrics = inventory
+        .visit_route(
+            PropertyRouteKind::Node,
+            "Wide",
+            scratch.path(),
+            PropertyOverlayLimits::default(),
+            |row| {
+                rows.push(row);
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["payload"], IrLiteral::Str(value.clone()));
+    assert_eq!(rows[0].values["empty"], IrLiteral::Str(String::new()));
+    assert!(!rows[0].values.contains_key("absent"));
+    assert!(metrics.authentication_bytes > 0);
+    assert!(metrics.authenticated_snapshot_peak_bytes <= MAX_PROPERTY_OBJECT_BYTES as u64);
+    assert!(metrics.physical_bytes > metrics.authentication_bytes);
+    let targeted = read_property_targets(
+        &inventory,
+        PropertyRouteKind::Node,
+        "Wide",
+        &BTreeSet::from([[1_u8; 16]]),
+        None,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        targeted.rows[&[1_u8; 16]].values["payload"],
+        IrLiteral::Str(value)
+    );
+    assert_eq!(targeted.metrics.fragments_considered, 1);
+    assert!(targeted.metrics.authenticated_snapshot_peak_bytes <= MAX_PROPERTY_OBJECT_BYTES as u64);
+}
+
+#[test]
+fn segmented_inventory_rejects_missing_parts_and_changed_admitted_payload() {
+    let (root, entries, _) = segmented_property_fixture();
+    let mut missing = entries.clone();
+    missing.pop();
+    assert!(AuthenticatedPropertyInventory::from_entries_at_root(root.path(), missing).is_err());
+    let inventory =
+        AuthenticatedPropertyInventory::from_entries_at_root(root.path(), entries.clone()).unwrap();
+    let last = root.path().join(&entries.last().unwrap().relative_path);
+    let mut bytes = fs::read(&last).unwrap();
+    bytes[4] ^= 1;
+    fs::write(&last, bytes).unwrap();
+    let scratch = inventory.create_snapshot_scratch().unwrap();
+    assert!(
+        inventory
+            .visit_route(
+                PropertyRouteKind::Node,
+                "Wide",
+                scratch.path(),
+                PropertyOverlayLimits::default(),
+                |_| Ok(())
+            )
+            .is_err()
     );
 }

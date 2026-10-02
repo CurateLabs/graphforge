@@ -380,17 +380,15 @@ fn compact_graph_delta_after_prepare(
 
     check_cancel(cancel)?;
     before_stage(root)?;
-    if let Some(lease) = &publication_lease {
-        lease.revalidate_for_publish()?;
-    }
+    publication_lease.revalidate_for_publish()?;
     let publication = match stage_project_generation_from_installed_objects(
         admission,
         parent,
         &generation_request,
-        publication_lease.is_none().then(|| staging.path()),
         None,
         None,
-        publication_lease.as_ref(),
+        None,
+        Some(&publication_lease),
     )? {
         ProjectStageOutcome::Staged(staged) => {
             // Pre-publication verification authenticates the exact bounded
@@ -402,13 +400,9 @@ fn compact_graph_delta_after_prepare(
                 ));
             }
             let validated = staged.validate(|_| Ok(()), |_, _| Ok(()))?;
-            match &publication_lease {
-                Some(lease) => validated
-                    .publish_with_graph_objects_cancellable(lease, &mut || {
-                        cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
-                    })?,
-                None => validated.publish()?,
-            }
+            validated.publish_with_graph_objects_cancellable(&publication_lease, &mut || {
+                cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
+            })?
         }
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
     };

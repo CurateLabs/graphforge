@@ -204,6 +204,7 @@ impl GraphForge {
             candidate.or(installed.as_ref()),
             self.property_inventory_for_session(),
         )
+        .map(|catalog| catalog.with_topology_authority(Arc::clone(&self.dir().topology)))
         .map_err(|error| match GfError::from_plan_error(error) {
             // Preserve typed integrity refusals while keeping foreign catalog
             // failures in their existing storage-error classification.
@@ -419,10 +420,11 @@ impl GraphForge {
                     "GF_SEMANTIC_LEGACY_MIGRATION_REQUIRED: run a publishing write to migrate the unambiguous legacy generation".into(),
                 ));
             }
-            legacy_migration = Some(graphforge_storage::apply_legacy_route_moves(
+            legacy_migration = Some(graphforge_storage::apply_legacy_route_moves_with_topology(
                 &dir,
                 legacy_route_moves.expect("checked"),
                 candidate_bindings.expect("legacy migration has candidate bindings"),
+                Arc::clone(&self.dir().topology),
             )?);
         }
 

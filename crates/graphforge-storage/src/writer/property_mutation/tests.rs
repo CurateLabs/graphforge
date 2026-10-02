@@ -727,3 +727,135 @@ fn legacy_flat_baseline_survives_set_remove_and_reopen() {
     let imported_props = read_node_props(&imported_generation.graph_tree_root(), "_untyped");
     assert_eq!(imported_props, reopened);
 }
+
+fn node_fragments(dir: &Path, route: &str) -> Vec<crate::property_overlay::PropertyFragment> {
+    crate::property_overlay::enumerate_property_fragments(
+        dir,
+        crate::property_overlay::PropertyRouteKind::Node,
+        &crate::route_component::component(route),
+    )
+    .unwrap()
+}
+
+#[test]
+fn set_cuts_one_window_at_the_fragment_cap() {
+    use crate::property_overlay::MAX_PROPERTY_FRAGMENT_BYTES;
+    use crate::property_overlay::fragment_cap::tests::{assert_capped_fragments, wide_value};
+    let dir = TempDir::new().unwrap();
+    let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+    w.create_node(new_v7(), EntityTypeId::decode(0).unwrap())
+        .unwrap();
+    w.flush().unwrap();
+
+    // 3,000 rows of about 4 KiB: roughly 12 MiB of values in one window,
+    // three times the cap.
+    let rows = 3_000;
+    let updates = (0..rows as u64)
+        .map(|index| {
+            let uuid = (u128::from(index) + 1).to_be_bytes();
+            let value = IrLiteral::Str(wide_value(index, 4096));
+            (uuid, HashMap::from([("payload".to_owned(), value)]))
+        })
+        .collect::<HashMap<_, _>>();
+    assert_eq!(
+        set_node_properties(dir.path(), "_untyped", &updates).unwrap(),
+        rows as u64
+    );
+
+    let fragments = node_fragments(dir.path(), "_untyped");
+    let stats = assert_capped_fragments(&fragments, rows);
+    let logical = stats.iter().map(|stat| stat.logical_bytes).sum::<u64>();
+    assert!(
+        logical > 2 * MAX_PROPERTY_FRAGMENT_BYTES,
+        "the window must exceed the cap or the test proves nothing: {logical}"
+    );
+    assert!(fragments.len() >= 3, "{fragments:?}");
+    assert!(fragments.windows(2).all(|pair| {
+        pair[0].id.generation == pair[1].id.generation
+            && pair[0].id.ordinal + 1 == pair[1].id.ordinal
+    }));
+    // Every fragment but the last is full to within one row.
+    for stat in &stats[..stats.len() - 1] {
+        assert!(
+            stat.logical_bytes + 4200 > MAX_PROPERTY_FRAGMENT_BYTES,
+            "{stat:?}"
+        );
+    }
+
+    // The split changes no answer: every row reads back, and a later SET
+    // shadows the old value through the newer generation.
+    let props = read_node_props(dir.path(), "_untyped");
+    assert_eq!(props.len(), rows);
+    for (uuid, expected) in &updates {
+        assert_eq!(&props[uuid], expected);
+    }
+    let touched = (0..rows as u64).step_by(401).collect::<Vec<_>>();
+    let overwrite = touched
+        .iter()
+        .map(|index| {
+            let uuid = (u128::from(*index) + 1).to_be_bytes();
+            (
+                uuid,
+                HashMap::from([("payload".to_owned(), IrLiteral::Str(format!("new-{index}")))]),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    set_node_properties(dir.path(), "_untyped", &overwrite).unwrap();
+    let props = read_node_props(dir.path(), "_untyped");
+    assert_eq!(props.len(), rows);
+    for (uuid, expected) in &overwrite {
+        assert_eq!(&props[uuid], expected);
+    }
+    let after = node_fragments(dir.path(), "_untyped");
+    assert_eq!(
+        after.len(),
+        fragments.len() + 1,
+        "the small write is one fragment"
+    );
+    assert_eq!(after.last().unwrap().id.ordinal, 0);
+}
+
+#[test]
+fn set_gives_a_row_larger_than_the_cap_a_fragment_of_its_own() {
+    use crate::property_overlay::MAX_PROPERTY_FRAGMENT_BYTES;
+    use crate::property_overlay::fragment_cap::tests::{fragment_stats, wide_value};
+    let dir = TempDir::new().unwrap();
+    let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+    w.create_node(new_v7(), EntityTypeId::decode(0).unwrap())
+        .unwrap();
+    w.flush().unwrap();
+    let huge = wide_value(7, 5 << 20);
+    let updates = [(1_u128, "small-a"), (2, ""), (3, "small-b")]
+        .into_iter()
+        .map(|(id, text)| {
+            let value = if text.is_empty() {
+                huge.clone()
+            } else {
+                text.to_owned()
+            };
+            (
+                id.to_be_bytes(),
+                HashMap::from([("payload".to_owned(), IrLiteral::Str(value))]),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    set_node_properties(dir.path(), "_untyped", &updates).unwrap();
+    let fragments = node_fragments(dir.path(), "_untyped");
+    let stats = fragments
+        .iter()
+        .map(|fragment| fragment_stats(&fragment.path))
+        .collect::<Vec<_>>();
+    // The oversize row cannot be split, so it sits alone and the rows around
+    // it are cut off from it; no other fragment is over the cap.
+    assert_eq!(
+        stats.iter().map(|stat| stat.rows).collect::<Vec<_>>(),
+        [1, 1, 1]
+    );
+    assert!(stats[1].logical_bytes > MAX_PROPERTY_FRAGMENT_BYTES);
+    assert!(stats[0].file_bytes < MAX_PROPERTY_FRAGMENT_BYTES);
+    assert!(stats[2].file_bytes < MAX_PROPERTY_FRAGMENT_BYTES);
+    let props = read_node_props(dir.path(), "_untyped");
+    for (uuid, expected) in &updates {
+        assert_eq!(&props[uuid], expected);
+    }
+}

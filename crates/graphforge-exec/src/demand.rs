@@ -233,6 +233,13 @@ pub struct DemandSnapshot {
     /// Statement-wide owner-resolution and replacement-key work. Decoder peaks
     /// and identity counts are logical accounting, not process-memory bounds.
     pub property_writes: BTreeMap<String, u64>,
+    /// Adjacency index rebuild attempts because the index was missing or stale,
+    /// including attempts that fail after starting rebuild work. A published
+    /// generation ships a current index, so this is zero there; a nonzero count
+    /// is an O(E) rebuild inside the query that
+    /// would otherwise go unreported (#1388). Rebuilds are never a response to
+    /// corruption, which the query refuses instead.
+    pub adjacency_rebuilds: u64,
     /// Query memory-pool reservation before physical execution.
     pub memory_reserved_before: u64,
     /// Query memory-pool reservation after every operator stream was dropped.
@@ -293,6 +300,19 @@ pub fn bound_capture_session() -> u64 {
 #[doc(hidden)]
 pub fn set_bound_capture_session(epoch: u64) {
     BOUND_CAPTURE_SESSION.set(epoch);
+}
+
+/// Bind a plan's capture only for one synchronous request on its worker.
+pub(crate) fn with_capture_session<T>(epoch: u64, request: impl FnOnce() -> T) -> T {
+    struct RestoreBinding(u64);
+    impl Drop for RestoreBinding {
+        fn drop(&mut self) {
+            BOUND_CAPTURE_SESSION.set(self.0);
+        }
+    }
+
+    let _restore = RestoreBinding(BOUND_CAPTURE_SESSION.replace(epoch));
+    request()
 }
 
 /// Epoch to stamp on physical plans for the active capture bound to this thread.
@@ -526,6 +546,21 @@ pub(crate) fn record_plan_completion(
     state.snapshot.memory_reserved_after = memory_reserved_after as u64;
     state.snapshot.returned_batch_bytes = returned_batch_bytes as u64;
     state.snapshot.execution_batch_rows = execution_batch_rows as u64;
+}
+
+/// Record one adjacency rebuild in the calling thread's bound capture.
+/// Unbound peers and work retained from an older capture own no work here.
+pub(crate) fn record_adjacency_rebuild() {
+    let epoch = bound_capture_session();
+    if epoch == 0 || !capture_enabled() {
+        return;
+    }
+    let mut state = CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if session_active_locked(&state, epoch) {
+        state.snapshot.adjacency_rebuilds += 1;
+    }
 }
 
 pub(crate) fn record_property_write_work(sums: &[(&str, u64)], peaks: &[(&str, u64)]) {
@@ -2043,6 +2078,33 @@ mod tests {
         assert_eq!(hop.input_rows, 0);
         assert_eq!(hop.candidates_generated, 0);
         assert!(second.operator_rss.is_empty());
+    }
+
+    #[test]
+    fn adjacency_rebuilds_belong_only_to_the_bound_capture() {
+        let _guard = CAPTURE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (stale, _) = capture(bound_capture_session);
+        let ((), captured) = capture(|| {
+            let active = bound_capture_session();
+            record_adjacency_rebuild();
+            // A deferred older plan must not borrow the current poller's epoch.
+            with_capture_session(stale, record_adjacency_rebuild);
+            with_capture_session(0, record_adjacency_rebuild);
+            assert_eq!(bound_capture_session(), active);
+            std::thread::spawn(move || {
+                record_adjacency_rebuild();
+                BOUND_CAPTURE_SESSION.set(stale);
+                record_adjacency_rebuild();
+                // A query-owned worker carries the plan's epoch explicitly.
+                with_capture_session(active, record_adjacency_rebuild);
+                assert_eq!(bound_capture_session(), stale);
+            })
+            .join()
+            .expect("peer rebuilds");
+        });
+        assert_eq!(captured.adjacency_rebuilds, 2);
     }
 
     #[test]

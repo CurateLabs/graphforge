@@ -50,7 +50,7 @@ impl GraphCatalog {
                 )
             })?;
             snapshot.node_schema = Some(
-                crate::TopologyNodeTable::open_project(dir)
+                self.node_table()
                     .map_err(GfError::from_plan_error)?
                     .schema(),
             );

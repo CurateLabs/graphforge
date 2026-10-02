@@ -870,6 +870,29 @@ def _closed_receipt_inventory(
     return inventory
 
 
+def _valid_query_evidence(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    numeric_fields = {
+        "max_in_flight_reads",
+        "memory_reserved_before",
+        "memory_reserved_after",
+        "returned_batch_bytes",
+        "execution_batch_rows",
+        "peak_rss_bytes",
+        "rss_after_release_bytes",
+    }
+    if value.get("contract") == "graphforge-query-evidence/2":
+        numeric_fields.add("adjacency_rebuilds")
+    elif value.get("contract") != "graphforge-query-evidence/1":
+        return False
+    return (
+        set(value) == numeric_fields | {"contract", "hops", "sorts", "operator_rss"}
+        and all(_is_int(value[key]) and 0 <= value[key] <= (1 << 64) - 1 for key in numeric_fields)
+        and all(isinstance(value[key], list) for key in ("hops", "sorts", "operator_rss"))
+    )
+
+
 def _query_receipts(
     graphforge: Mapping[str, Any], phase: str, expected: int
 ) -> list[Mapping[str, Any]]:
@@ -885,8 +908,7 @@ def _query_receipts(
             receipt.get("complete") is not True
             or not isinstance(digest, str)
             or re.fullmatch(r"[0-9a-f]{64}", digest) is None
-            or not isinstance(receipt.get("query_evidence"), Mapping)
-            or receipt["query_evidence"].get("contract") != "graphforge-query-evidence/1"
+            or not _valid_query_evidence(receipt.get("query_evidence"))
         ):
             raise ControllerError("ordinary query receipt is incomplete")
     return receipts

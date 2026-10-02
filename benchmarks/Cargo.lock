@@ -1830,6 +1830,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "graphforge-benchmark-gdc-scorecard"
+version = "0.0.0"
+dependencies = [
+ "arrow",
+ "parquet",
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "graphforge-benchmark-gdc-snb-bi"
 version = "0.0.0"
 dependencies = [

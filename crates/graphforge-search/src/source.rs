@@ -60,9 +60,34 @@ pub fn project_text_source<C>(
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
-    project_text_source_with(
+    let topology = graphforge_storage::TopologyFiles::discover_legacy(project_dir)
+        .map_err(|error| source(error.to_string()))?;
+    project_text_source_from_files(
+        project_dir,
+        &topology,
+        label_id,
+        selected_properties,
+        limits,
+        checkpoint,
+    )
+}
+
+/// Project the selected canonical topology files.
+pub fn project_text_source_from_files<C>(
+    project_dir: &Path,
+    topology: &graphforge_storage::TopologyFiles,
+    label_id: graphforge_value::EntityTypeSelection,
+    selected_properties: Option<&[String]>,
+    limits: TextSearchLimits,
+    checkpoint: C,
+) -> Result<TextSourceProjection, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    project_text_source_selected(
         None,
         project_dir,
+        topology,
         label_id,
         selected_properties,
         limits,
@@ -89,12 +114,48 @@ pub(crate) fn text_source_snapshot(
     SearchSourceSnapshot::from_admitted_files(project_dir, generation, &files).map(Some)
 }
 
-/// [`project_text_source`] reading node properties through the caller's
-/// admitted `inventory` when one is supplied, and binding the projection to the
-/// manifest's source identity rather than to a second read of every object.
+/// Project the session's explicit `topology`, or the legacy directory when the
+/// caller has none, reading node properties through the caller's admitted
+/// `inventory` when one is supplied.
 pub(crate) fn project_text_source_with<C>(
     inventory: Option<&AuthenticatedPropertyInventory>,
     project_dir: &Path,
+    topology: Option<&graphforge_storage::TopologyFiles>,
+    label_id: graphforge_value::EntityTypeSelection,
+    selected_properties: Option<&[String]>,
+    limits: TextSearchLimits,
+    checkpoint: C,
+) -> Result<TextSourceProjection, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    let discovered;
+    let topology = match topology {
+        Some(files) => files,
+        None => {
+            discovered = graphforge_storage::TopologyFiles::discover_legacy(project_dir)
+                .map_err(|error| source(error.to_string()))?;
+            &discovered
+        }
+    };
+    project_text_source_selected(
+        inventory,
+        project_dir,
+        topology,
+        label_id,
+        selected_properties,
+        limits,
+        checkpoint,
+    )
+}
+
+/// Project `topology`, reading node properties through the caller's admitted
+/// `inventory` when one is supplied, and binding the projection to the
+/// manifest's source identity rather than to a second read of every object.
+fn project_text_source_selected<C>(
+    inventory: Option<&AuthenticatedPropertyInventory>,
+    project_dir: &Path,
+    topology: &graphforge_storage::TopologyFiles,
     label_id: graphforge_value::EntityTypeSelection,
     selected_properties: Option<&[String]>,
     limits: TextSearchLimits,
@@ -126,6 +187,7 @@ where
     let mut source_bytes = 0_u64;
     let eligible = select_eligible_nodes(
         project_dir,
+        topology,
         label_id,
         limits,
         &mut checkpoint,
@@ -190,6 +252,7 @@ where
 #[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
 fn select_eligible_nodes<C>(
     project_dir: &Path,
+    topology: &graphforge_storage::TopologyFiles,
     label_id: graphforge_value::EntityTypeSelection,
     limits: TextSearchLimits,
     checkpoint: &mut C,
@@ -210,8 +273,8 @@ where
     // generations authenticate UUID uniqueness through the disk index instead.
     let mut legacy_seen = index.is_none().then(BTreeSet::new);
     let mut failure = None;
-    let admitted = graphforge_storage::visit_node_fragments_admitted(
-        project_dir,
+    let admitted = graphforge_storage::visit_node_fragments_admitted_from_files(
+        topology,
         8192,
         limits.source_bytes,
         source_evidence,

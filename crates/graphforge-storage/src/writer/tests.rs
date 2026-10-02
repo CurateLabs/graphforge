@@ -45,6 +45,163 @@ fn test_inventory(dir: &Path) -> crate::AuthenticatedPropertyInventory {
 }
 
 #[test]
+fn ontology_adoption_retires_oversized_source_property_continuations() {
+    assert_adoption_retires_property_source(false);
+}
+
+#[test]
+fn ontology_adoption_converts_legacy_property_source_to_canonical_schema() {
+    assert_adoption_retires_property_source(true);
+}
+
+#[allow(clippy::too_many_lines)] // shared fixture asserts the complete adoption and retirement outcome
+fn assert_adoption_retires_property_source(legacy: bool) {
+    use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
+
+    let candidate = TempDir::new().unwrap();
+    let mut catalog = graphforge_ir::RuntimeCatalog::new();
+    let label = EntityTypeId::runtime(catalog.intern_label("Person").unwrap());
+    catalog.intern_relation_type("KNOWS").unwrap();
+    let left = Uuid::from_u128(1);
+    let right = Uuid::from_u128(2);
+    let edge = Uuid::from_u128(3);
+    let value = if legacy {
+        "legacy payload without a tombstone column".to_owned()
+    } else {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        (0..7 * 1024 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                char::from(33 + u8::try_from(state % 94).unwrap())
+            })
+            .collect()
+    };
+    let mut writer = GraphWriter::open_at(candidate.path(), OntologyMode::Exploratory, TS).unwrap();
+    writer.create_node(left, label).unwrap();
+    writer.create_node(right, label).unwrap();
+    writer.create_edge(edge, "KNOWS", &left, &right).unwrap();
+    writer
+        .set_edge_properties(
+            &edge,
+            Some("_exploratory"),
+            HashMap::from([("payload".into(), IrLiteral::Str(value.clone()))]),
+        )
+        .unwrap();
+    writer.flush().unwrap();
+    drop(writer);
+    crate::runtime_entity_labels::persist_runtime_catalog(candidate.path(), &catalog).unwrap();
+
+    let kind = crate::PropertyRouteKind::Edge;
+    if legacy {
+        let inventory = test_inventory(candidate.path());
+        for path in inventory.property_object_paths(kind, "_exploratory") {
+            fs::remove_file(path).unwrap();
+        }
+        drop(inventory);
+        // Legacy property writers declare payload fields nullable even when
+        // the current batch has no nulls (property_codec::build_property_columns_keyed).
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                uuid_field("edge_uuid"),
+                Field::new("payload", DataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([edge.as_bytes().as_slice()].into_iter())
+                        .unwrap(),
+                ) as ArrayRef,
+                Arc::new(arrow::array::StringArray::from(vec![value.as_str()])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let path = candidate.path().join("edge_properties").join(format!(
+            "{}.parquet",
+            crate::route_component::component("_exploratory")
+        ));
+        crate::graph_projection::write_parquet(&path, &batch).unwrap();
+    }
+    let prior = test_inventory(candidate.path());
+    let anchors = prior
+        .property_fragments(kind, "_exploratory")
+        .into_iter()
+        .map(|fragment| fragment.path)
+        .collect::<HashSet<_>>();
+    let continuations = prior
+        .property_object_paths(kind, "_exploratory")
+        .into_iter()
+        .filter(|path| !anchors.contains(path))
+        .collect::<Vec<_>>();
+    if !legacy {
+        assert!(
+            !continuations.is_empty(),
+            "the source must contain an actually segmented property, not just a wide logical row"
+        );
+    }
+    drop(prior);
+
+    let document = OntologyLoader::load_yaml(
+        b"ontology_id: adoption\nversion: \"1\"\nentity_types:\n  - name: Person\n    abstract: false\nrelation_types:\n  - name: KNOWS\n    src: Person\n    dst: Person\n".as_slice(),
+    )
+    .unwrap();
+    let ontology = OntologyHandle::new(OntologyCompiler::compile(&document).unwrap());
+    crate::promote_runtime_graph_for_ontology(candidate.path(), &ontology, &catalog).unwrap();
+
+    // Reopening the complete inventory must admit every declared part. A stale
+    // continuation beside the now-plain source anchor makes this fail closed.
+    let current = test_inventory(candidate.path());
+    assert!(continuations.iter().all(|path| !path.exists()));
+    for anchor in anchors {
+        assert_eq!(
+            anchor.exists(),
+            !legacy,
+            "legacy flat source must be retired"
+        );
+    }
+    for fragment in current.property_fragments(kind, "_exploratory") {
+        assert!(
+            crate::property_overlay::bounded_object::inspect_envelope(
+                File::open(&fragment.path).unwrap()
+            )
+            .unwrap()
+            .is_none(),
+            "the filtered empty source must return to plain Parquet"
+        );
+        let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            File::open(&fragment.path).unwrap(),
+        )
+        .unwrap();
+        let schema = builder.schema();
+        let tombstone = schema
+            .field_with_name(crate::property_overlay::PROPERTY_TOMBSTONE_FIELD)
+            .unwrap();
+        assert_eq!(tombstone.data_type(), &DataType::Boolean);
+        assert!(!tombstone.is_nullable());
+    }
+    let source = crate::catalog::read_edge_properties_from_inventory(
+        candidate.path(),
+        &current,
+        "_exploratory",
+    )
+    .unwrap();
+    assert!(decode_edge_property_rows(&source).unwrap().is_empty());
+    let destination =
+        crate::catalog::read_edge_properties_from_inventory(candidate.path(), &current, "KNOWS")
+            .unwrap();
+    let rows = decode_edge_property_rows(&destination).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].edge_uuid, *edge.as_bytes());
+    assert_eq!(rows[0].props.get("payload"), Some(&IrLiteral::Str(value)));
+    for path in current.property_object_paths(kind, "KNOWS") {
+        assert!(
+            fs::metadata(path).unwrap().len()
+                <= crate::property_overlay::bounded_object::MAX_PROPERTY_OBJECT_BYTES as u64
+        );
+    }
+}
+
+#[test]
 fn create_node_persists_complete_label_set_and_primary_label() {
     let dir = TempDir::new().unwrap();
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
@@ -744,11 +901,20 @@ fn topology_budget_plateaus_across_committed_mixed_batches() {
 
 #[test]
 fn topology_budget_accounts_for_cancel_and_failed_flush_retained_state() {
+    assert_failed_flush_retains_edge_charge(false);
+    assert_failed_flush_retains_edge_charge(true);
+}
+
+fn assert_failed_flush_retains_edge_charge(owned_topology: bool) {
     let dir = TempDir::new().unwrap();
     let left = new_v7();
     let right = new_v7();
     let edge = new_v7();
-    let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+    let authority =
+        owned_topology.then(|| crate::TopologyFileAuthority::discover_legacy(dir.path()).unwrap());
+    let mut writer =
+        GraphWriter::open_at_with_topology(dir.path(), OntologyMode::Strict, TS, authority.clone())
+            .unwrap();
     writer
         .create_node(left, EntityTypeId::decode(0).unwrap())
         .unwrap();
@@ -764,8 +930,23 @@ fn topology_budget_accounts_for_cancel_and_failed_flush_retained_state() {
     fs::create_dir_all(dir.path().join("topology")).unwrap();
     fs::write(dir.path().join("topology/edges"), b"not a directory").unwrap();
     assert!(writer.flush().is_err());
+    assert!(writer.nodes.is_empty());
+    assert_eq!(writer.topology_work.rows_encoded, 2);
     assert_eq!(writer.buffered_topology_rows, 1);
     assert!(writer.charged_topology_bytes <= writer.limits.max_buffered_topology_bytes);
+    // Node rows were staged before the edge failure, but the discarded batch
+    // must neither publish its node prefix nor extend session membership.
+    assert!(
+        crate::mutator::node_parquet_files(dir.path())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!dir.path().join(SURROGATE_TAILS_FILE).exists());
+    if let Some(authority) = authority {
+        let files = crate::enumerate_topology_files(&authority, None).unwrap();
+        assert!(files.nodes.is_empty());
+        assert!(files.edges.is_empty());
+    }
     writer.release_committed_topology_state();
     assert!(writer.charged_topology_bytes > 0);
     assert_eq!(writer.cancel_edges(&HashSet::from([to_bytes(&edge)])), 1);
