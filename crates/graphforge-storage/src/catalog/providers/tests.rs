@@ -395,7 +395,7 @@ fn declared_node_files_are_ordered_and_validated_like_a_listing() {
     );
 
     for (name, message) in [
-        ("topology/nodes/nodes-extra.parquet", "canonical node shard"),
+        ("topology/nodes/nodes-extra.parquet", "canonical"),
         (
             "topology/nodes/00000000000000000003-00000000000000000004.parquet",
             "overlap",

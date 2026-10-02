@@ -27,10 +27,14 @@
 //!
 //! What a query reads is the lifecycle attribution (application read bytes),
 //! never wall time, which a shared runner cannot hold steady; wall time is
-//! printed. Open is bounded at 64 bytes a node plus slack as in
-//! `open_reads_control_bytes_not_payload_bytes`, plus the declared property
-//! bytes: property fragments are still authenticated in full when a project
-//! opens (#1716, "not in this PR"), a term this change does not touch.
+//! printed. Open is bounded from the manifest: hydration copies the
+//! single-link controls (the route table and the top-level UUID-membership
+//! identity controls, about 40 bytes a node) into private files and verifies
+//! the copy, so it reads each of those bytes twice (source read plus the
+//! verification re-read, both attributed since #1717), authenticates the
+//! property fragments in full (#1716, "not in this PR"), and reads the
+//! manifest, sidecars and footers within a fixed slack. Neither term is this
+//! change's; the bound names them so a regression into payload bytes fails.
 //!
 //! Criterion 4 (same-inode, same-length flip refused) for the path this change
 //! touches: a flipped node object is refused by the generic scan on first
@@ -71,7 +75,8 @@ const LIMIT: usize = 1_000;
 const WRITE_WINDOW: usize = 32 * 1024;
 const CSR_SHARD_EDGES: usize = 1_048_576;
 
-const OPEN_CONTROL_BYTES_PER_NODE: u64 = 64;
+/// Hydration copies each single-link control and verifies the copy.
+const OPEN_CONTROL_READS: u64 = 2;
 const CONTROL_SLACK_BYTES: u64 = 64 * 1024;
 const EXECUTION_RESIDUAL_BYTES: u64 = 16 * 1024;
 
@@ -173,6 +178,10 @@ struct Layout {
     node_bytes: u64,
     edge_bytes: u64,
     property_bytes: u64,
+    /// Declared bytes of the controls hydration copies into single-link
+    /// files: the route table and every top-level `topology/uuid-membership/`
+    /// file (`requires_single_link_materialization`).
+    copied_control_bytes: u64,
     largest_shard_bytes: u64,
     shards: u64,
     node_objects: Vec<(String, String, u64)>,
@@ -183,8 +192,16 @@ fn layout(inventory: &GraphFilesInventory) -> Layout {
     let mut largest_shard_bytes = 0;
     let mut shards = 0;
     let mut node_objects = Vec::new();
+    let mut copied_control_bytes = 0;
     for file in &inventory.files {
         let path = file.relative_path.as_str();
+        if path == "semantic-routes.json"
+            || path
+                .strip_prefix("topology/uuid-membership/")
+                .is_some_and(|name| !name.contains('/'))
+        {
+            copied_control_bytes += file.byte_length;
+        }
         if path.contains(".csr.shards-") && path.ends_with(".csr") {
             shards += 1;
             largest_shard_bytes = largest_shard_bytes.max(file.byte_length);
@@ -206,6 +223,7 @@ fn layout(inventory: &GraphFilesInventory) -> Layout {
         node_bytes: by_class["nodes"],
         edge_bytes: by_class["edges"],
         property_bytes: by_class.get("properties").copied().unwrap_or(0),
+        copied_control_bytes,
         largest_shard_bytes,
         shards,
         node_objects,
@@ -367,12 +385,13 @@ fn run_size(nodes: usize) -> Size {
     let layout = layout(&inventory);
     eprintln!(
         "nodes={nodes} edges={} node_objects={} node_bytes={} edge_bytes={} property_bytes={} \
-         shards={} largest_shard_bytes={} build_s={:.1}",
+         copied_control_bytes={} shards={} largest_shard_bytes={} build_s={:.1}",
         nodes * FAN_OUT,
         layout.node_objects.len(),
         layout.node_bytes,
         layout.edge_bytes,
         layout.property_bytes,
+        layout.copied_control_bytes,
         layout.shards,
         layout.largest_shard_bytes,
         build_wall.as_secs_f64()
@@ -432,9 +451,9 @@ fn query_shapes_cost_their_result_not_their_graph_across_a_4x_node_range() {
 
     for size in [&small, &large] {
         let nodes = size.nodes;
-        let open_bound = OPEN_CONTROL_BYTES_PER_NODE * nodes as u64
-            + CONTROL_SLACK_BYTES
-            + size.layout.property_bytes;
+        let open_bound = OPEN_CONTROL_READS * size.layout.copied_control_bytes
+            + size.layout.property_bytes
+            + CONTROL_SLACK_BYTES;
         for (shape, measured) in SHAPES.iter().zip(&size.results) {
             let name = shape.name;
             assert_eq!(
@@ -460,8 +479,16 @@ fn query_shapes_cost_their_result_not_their_graph_across_a_4x_node_range() {
             }
             assert!(
                 measured.open_read <= open_bound,
-                "{name} nodes={nodes}: open read {} against a control bound of {open_bound}",
-                measured.open_read
+                "{name} nodes={nodes}: open read {} against a control bound of {open_bound} \
+                 (2 x {} copied control bytes + {} property bytes + slack)",
+                measured.open_read,
+                size.layout.copied_control_bytes,
+                size.layout.property_bytes
+            );
+            // The bound must be tighter than the payload it forbids.
+            assert!(
+                open_bound < size.layout.node_bytes + size.layout.edge_bytes,
+                "{name} nodes={nodes}: the open bound {open_bound} admits the payload"
             );
             let (bound, _) = (shape.bound)(&size.layout);
             assert!(
