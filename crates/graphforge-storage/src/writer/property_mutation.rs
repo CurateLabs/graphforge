@@ -1206,6 +1206,7 @@ fn property_snapshot_fragment_schema(
     kind: crate::PropertyRouteKind,
     route: &str,
     generation: u64,
+    ordinal: u64,
 ) -> SchemaRef {
     use crate::property_overlay::{
         PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
@@ -1228,7 +1229,7 @@ fn property_snapshot_fragment_schema(
     metadata.insert(PROPERTY_ROUTE_KEY.into(), route.to_owned());
     metadata.insert(PROPERTY_KIND_KEY.into(), kind.metadata_value().into());
     metadata.insert(PROPERTY_GENERATION_KEY.into(), generation.to_string());
-    metadata.insert(PROPERTY_ORDINAL_KEY.into(), "0".into());
+    metadata.insert(PROPERTY_ORDINAL_KEY.into(), ordinal.to_string());
     Arc::new(Schema::new_with_metadata(fields, metadata))
 }
 
@@ -1313,12 +1314,55 @@ fn property_snapshot_chunk_with_schema(
     Ok(batch)
 }
 
+/// Stages the capped fragments of one sealed property window.
+struct CappedFragmentWriter<'a> {
+    base_schema: &'a Schema,
+    kind: crate::PropertyRouteKind,
+    route: &'a str,
+    generation: u64,
+    directory: PathBuf,
+    next_ordinal: u64,
+    pending: Vec<RecordBatch>,
+}
+
+impl CappedFragmentWriter<'_> {
+    /// Stage the rows gathered for the current fragment, if any, under the
+    /// next ordinal.
+    fn finish_fragment(&mut self, staged: &mut RewriteBatch) -> Result<(), GfError> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let ordinal = self.next_ordinal;
+        self.next_ordinal = ordinal
+            .checked_add(1)
+            .ok_or_else(|| GfError::Storage("property fragment ordinal overflows".into()))?;
+        let schema = property_snapshot_fragment_schema(
+            self.base_schema,
+            self.kind,
+            self.route,
+            self.generation,
+            ordinal,
+        );
+        let destination = self.directory.join(
+            crate::property_overlay::PropertyFragmentId {
+                generation: self.generation,
+                ordinal,
+            }
+            .file_name(),
+        );
+        let batches = std::mem::take(&mut self.pending)
+            .into_iter()
+            .map(|batch| crate::property_overlay::with_fragment_ordinal(&batch, ordinal));
+        staged.stage_batches(&destination, schema, batches)
+    }
+}
+
 pub(crate) fn seal_property_windows(
     staged: &mut RewriteBatch,
     dir: &Path,
     generation: u64,
 ) -> Result<(), GfError> {
-    use crate::property_overlay::{PropertyFragmentId, enumerate_property_fragments};
+    use crate::property_overlay::enumerate_property_fragments;
     let windows = staged.take_property_windows();
     for (key, window) in windows {
         if window.project_root != dir {
@@ -1355,35 +1399,48 @@ pub(crate) fn seal_property_windows(
             ));
         }
         let base_schema = window.schema;
-        let fragment_schema = property_snapshot_fragment_schema(
-            base_schema.as_ref(),
-            key.kind,
-            &key.route,
-            generation,
-        );
         let subdir = match key.kind {
             crate::property_overlay::PropertyRouteKind::Node => "properties",
             crate::property_overlay::PropertyRouteKind::Edge => "edge_properties",
         };
-        let destination = dir.join(subdir).join(component).join(
-            PropertyFragmentId {
-                generation,
-                ordinal: 0,
-            }
-            .file_name(),
+        // One window is cut at the fixed fragment cap in UUID order: dense
+        // ordinals from zero within the generation, each fragment holding a
+        // disjoint UUID range (#1388).
+        let mut writer = CappedFragmentWriter {
+            base_schema: base_schema.as_ref(),
+            kind: key.kind,
+            route: &key.route,
+            generation,
+            directory: dir.join(subdir).join(component),
+            next_ordinal: 0,
+            pending: Vec::new(),
+        };
+        let mut splitter = crate::property_overlay::FragmentSplitter::default();
+        let chunk_schema = property_snapshot_fragment_schema(
+            base_schema.as_ref(),
+            key.kind,
+            &key.route,
+            generation,
+            0,
         );
-        staged.stage_batches(
-            &destination,
-            Arc::clone(&fragment_schema),
-            rows.chunks(4096).map(|chunk| {
-                property_snapshot_chunk_with_schema(
-                    base_schema.as_ref(),
-                    Arc::clone(&fragment_schema),
-                    key.kind,
-                    chunk,
-                )
-            }),
-        )?;
+        for chunk in rows.chunks(4096) {
+            let batch = property_snapshot_chunk_with_schema(
+                base_schema.as_ref(),
+                Arc::clone(&chunk_schema),
+                key.kind,
+                chunk,
+            )?;
+            let charges = crate::property_overlay::row_charges(&batch);
+            for piece in splitter.push(&charges) {
+                if piece.opens_fragment {
+                    writer.finish_fragment(staged)?;
+                }
+                writer
+                    .pending
+                    .push(batch.slice(piece.rows.start, piece.rows.len()));
+            }
+        }
+        writer.finish_fragment(staged)?;
     }
     Ok(())
 }

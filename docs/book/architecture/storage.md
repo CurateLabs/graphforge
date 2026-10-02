@@ -435,6 +435,25 @@ authenticated targeted batch lookup for the window's UUID set, with the same
 zero-per-record-seek scanner; sealing consumes those complete staged rows and
 does not read historical fragments again.
 
+A fragment has a fixed maximum size, set at write time like a CSR shard: at
+most `MAX_PROPERTY_FRAGMENT_ROWS` (65,536) rows and `MAX_PROPERTY_FRAGMENT_BYTES`
+(4 MiB) of logical bytes, counted as Arrow value, offset and presence bytes of
+the rows, a pure function of the rows and not of the encoder. Encoded bytes also
+include page headers, dictionary pages, compression framing and the footer;
+compression can expand its input, so the logical cap is not an exact encoded-size
+limit. First-touch admission reads the manifest's declared file length. Typical
+property data encodes to about half the logical bytes, the size of
+one full CSR shard (about 1.7 MiB). Construction, ordinary SET/REMOVE windows,
+delta replay and graph projection (research-version, subset-export and
+interchange repack; a route that fits stays one flat snapshot, a larger one
+becomes generation-zero fragments) all cut at the cap in UUID order, giving dense ordinals from
+zero within a generation and disjoint UUID ranges per fragment, so the same
+rows always cut at the same places. A single row larger than the cap is a
+fragment of its own. The cap is a format constant, not a session budget.
+Readers do not enforce it: a project written before the cap keeps its oversized
+fragments readable, and they stay as written until a later write supersedes
+their UUIDs, because no operation re-cuts a historical property fragment.
+
 Each fragment also carries the authenticated `graphforge-property-live-schema/1`
 route summary: an exact live-UUID count for every currently present property
 key. Mutation preparation updates those counts from the targeted UUIDs' old

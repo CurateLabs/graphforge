@@ -4,6 +4,11 @@
 //! authority is the numeric `(generation, ordinal)` encoded in its canonical
 //! filename; directory order and mtimes never select a winner.
 
+pub(crate) mod fragment_cap;
+pub(crate) use fragment_cap::{
+    FragmentSplitter, row_charges, split_into_fragments, with_fragment_ordinal,
+};
+pub use fragment_cap::{MAX_PROPERTY_FRAGMENT_BYTES, MAX_PROPERTY_FRAGMENT_ROWS};
 mod inventory;
 #[cfg(test)]
 use inventory::digest_hex;

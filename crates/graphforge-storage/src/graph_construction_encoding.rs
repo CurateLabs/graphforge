@@ -42,6 +42,7 @@ use crate::graph_construction::{
 use crate::property_overlay::{
     PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
     PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD, PropertyRouteKind,
+    split_into_fragments,
 };
 use crate::schemas::{
     TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, uuid_field, with_semantic_route_metadata,
@@ -1447,23 +1448,25 @@ fn encode_node_properties(
                         } else {
                             property
                         };
-                        let path = format!(
-                            "properties/{}/{:020}-{ordinal:020}.parquet",
-                            encoded_route_component(route_table, &route)?,
-                            shape.parent_topology_generation + 1
-                        );
-                        encoding_lanes.push(
-                            output,
-                            &path,
-                            &property,
-                            cache_window,
-                            evidence,
-                            cancelled,
-                            artifacts,
-                        )?;
-                        *ordinal = ordinal
-                            .checked_add(1)
-                            .ok_or_else(|| storage("encoded ordinal overflows"))?;
+                        for fragment in split_into_fragments(&property, *ordinal)? {
+                            let path = format!(
+                                "properties/{}/{:020}-{ordinal:020}.parquet",
+                                encoded_route_component(route_table, &route)?,
+                                shape.parent_topology_generation + 1
+                            );
+                            encoding_lanes.push(
+                                output,
+                                &path,
+                                &fragment,
+                                cache_window,
+                                evidence,
+                                cancelled,
+                                artifacts,
+                            )?;
+                            *ordinal = ordinal
+                                .checked_add(1)
+                                .ok_or_else(|| storage("encoded ordinal overflows"))?;
+                        }
                     }
                 }
             }
@@ -1868,23 +1871,25 @@ fn encode_edge_properties(
                         } else {
                             property
                         };
-                        let path = format!(
-                            "edge_properties/{}/{:020}-{ordinal:020}.parquet",
-                            encoded_route_component(route_table, &property_route)?,
-                            shape.parent_topology_generation + 1
-                        );
-                        encoding_lanes.push(
-                            output,
-                            &path,
-                            &property,
-                            cache_window,
-                            evidence,
-                            cancelled,
-                            artifacts,
-                        )?;
-                        *ordinal = ordinal
-                            .checked_add(1)
-                            .ok_or_else(|| storage("encoded ordinal overflows"))?;
+                        for fragment in split_into_fragments(&property, *ordinal)? {
+                            let path = format!(
+                                "edge_properties/{}/{:020}-{ordinal:020}.parquet",
+                                encoded_route_component(route_table, &property_route)?,
+                                shape.parent_topology_generation + 1
+                            );
+                            encoding_lanes.push(
+                                output,
+                                &path,
+                                &fragment,
+                                cache_window,
+                                evidence,
+                                cancelled,
+                                artifacts,
+                            )?;
+                            *ordinal = ordinal
+                                .checked_add(1)
+                                .ok_or_else(|| storage("encoded ordinal overflows"))?;
+                        }
                     }
                 }
             }

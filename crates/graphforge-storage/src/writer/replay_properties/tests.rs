@@ -236,3 +236,59 @@ fn delta_replay_new_routes_start_and_continue_live_schema_authority() {
         None
     );
 }
+
+#[test]
+fn delta_replay_cuts_one_route_at_the_fragment_cap() {
+    use crate::property_overlay::fragment_cap::tests::{assert_capped_fragments, wide_value};
+    use crate::property_overlay::{MAX_PROPERTY_FRAGMENT_BYTES, PropertyRouteKind};
+    let project = TempDir::new().unwrap();
+    let (empty_files, _) = crate::capture_graph_files(project.path()).unwrap();
+    let empty = crate::AuthenticatedPropertyInventory::from_inventory_at_root(
+        project.path(),
+        empty_files,
+        None,
+    )
+    .unwrap();
+    // 3,000 rows of about 4 KiB: three times the cap in one replay route.
+    let rows = 3_000;
+    let mut overlay = crate::graph_delta_journal::ReplayOverlay::default();
+    for index in 0..rows as u64 {
+        let uuid = uuid::Uuid::from_u128(u128::from(index) + 1)
+            .hyphenated()
+            .to_string();
+        overlay.node_properties.insert(
+            (uuid, "Wide".into(), "payload".into()),
+            Some(IrLiteral::Str(wide_value(index, 4096))),
+        );
+    }
+    stream_replay_property_route(
+        project.path(),
+        &empty,
+        &overlay,
+        crate::GraphDeltaJournalLimits::default(),
+        false,
+        "Wide",
+        project.path(),
+    )
+    .unwrap();
+
+    let fragments = crate::property_overlay::enumerate_property_fragments(
+        project.path(),
+        PropertyRouteKind::Node,
+        &crate::route_component::component("Wide"),
+    )
+    .unwrap();
+    let stats = assert_capped_fragments(&fragments, rows);
+    assert!(
+        stats.iter().map(|stat| stat.logical_bytes).sum::<u64>() > 2 * MAX_PROPERTY_FRAGMENT_BYTES
+    );
+    assert!(fragments.len() >= 3, "{fragments:?}");
+    let props = read_node_props(project.path(), "Wide");
+    assert_eq!(props.len(), rows);
+    for index in 0..rows as u64 {
+        assert_eq!(
+            props[&(u128::from(index) + 1).to_be_bytes()]["payload"],
+            IrLiteral::Str(wide_value(index, 4096))
+        );
+    }
+}

@@ -837,7 +837,13 @@ fn validate_storage_budgets(f: Fixture, storage: &graphforge_storage::StorageAtt
     let routes = f.routes as u64;
     let node_shards = nodes.div_ceil(1024) * routes;
     let edge_shards = edges.div_ceil(1024) * routes;
-    // Input batches bound fragment counts. Allow one footer/header block per
+    // Input batches bound fragment counts. The Properties object limit below
+    // assumes this fixture's fragments are no more numerous than its input
+    // batches. The write-time fragment cap (`MAX_PROPERTY_FRAGMENT_BYTES`, 4 MiB
+    // of logical bytes) adds fragments only when a batch holds more than that,
+    // which these narrow rows never do; a fixture with wide property values
+    // needs `ceil(batch bytes / cap)` objects per batch here instead.
+    // Allow one footer/header block per
     // Parquet fragment, and one allocation block of EOF rounding per object.
     // These are payload/representation ceilings, not measured-value multipliers.
     for (category, object_limit, logical_limit) in [
