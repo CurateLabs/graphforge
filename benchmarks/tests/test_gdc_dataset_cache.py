@@ -158,8 +158,11 @@ class AcquireTests(CacheTestCase):
         self.assertEqual(list(self.cache_root.rglob("*.tar.zst")), [])
 
     def test_interrupted_download_leaves_no_partial_and_no_archive(self) -> None:
-        with self.assertRaises(OSError):
-            self.acquire(ServedBytes(self.payload, fail_after=40))
+        opener = ServedBytes(self.payload, fail_after=40)
+        with self.assertRaises(cache.DatasetCacheError) as raised:
+            self.acquire(opener)
+        self.assertEqual(raised.exception.cause, "download_failed")
+        self.assertEqual(len(opener.requests), 1, "a failed download is not retried")
         self.assertEqual(self.leftovers(), [])
         self.assertEqual(list(self.cache_root.rglob("*.tar.zst")), [])
 

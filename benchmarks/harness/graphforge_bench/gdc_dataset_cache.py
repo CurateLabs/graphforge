@@ -35,6 +35,7 @@ from graphforge_bench.gdc_contracts import (
 
 ALLOWED_HOST = "datasets.ldbcouncil.org"
 CHUNK_BYTES = 1024 * 1024
+USER_AGENT = "graphforge-benchmarks-dataset-cache/1"
 Opener = Callable[[str], AbstractContextManager[BinaryIO]]
 DeviceOf = Callable[[Path], int]
 
@@ -48,7 +49,9 @@ class DatasetCacheError(ValueError):
 
 
 def default_opener(url: str) -> AbstractContextManager[BinaryIO]:
-    return urllib.request.urlopen(url, timeout=120)
+    # The dataset host's CDN rejects urllib's default agent with HTTP 403.
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    return urllib.request.urlopen(request, timeout=120)
 
 
 def _device_of(path: Path) -> int:
@@ -157,6 +160,11 @@ def acquire_archive(pin: Mapping[str, Any], archive_dir: Path, *, opener: Opener
             )
         partial.replace(final)
         _fsync_directory(archive_dir)
+    except OSError as error:
+        partial.unlink(missing_ok=True)
+        raise DatasetCacheError(
+            "download_failed", f"download of {pin['source']} failed: {error}"
+        ) from error
     except BaseException:
         partial.unlink(missing_ok=True)
         raise
