@@ -101,6 +101,9 @@ impl AuthenticatedPropertyInventory {
         let Some(fragments) = self.routes.get(&(kind, route.to_owned())) else {
             return Ok(PropertyOverlayMetrics::default());
         };
+        // Resolve the route's footer summary before any fragment is trusted, so
+        // a route that cannot be summarized refuses here rather than reading.
+        self.route_summary(kind, route)?;
         let counts = ReadCounts::new(collect);
         let authentication_bytes = collect.then(|| Arc::new(AtomicU64::new(0)));
         let authentication_block_equivalents = collect.then(|| Arc::new(AtomicU64::new(0)));
@@ -222,7 +225,7 @@ fn open_projected_fragment(
     let source_reservation = opened.file.reservation_bytes();
     context.budget.charge(source_reservation)?;
     let source = CountingChunkReader {
-        length: fragment.logical_length,
+        length: opened.logical_length,
         file: Arc::clone(&opened.file),
         counts: context.counts.clone(),
     };

@@ -1,8 +1,8 @@
 //! Parquet budget for authenticated property overlays.
 
 use super::{
-    Arc, AtomicU64, AuthenticatedPropertyFragment, BTreeSet, BufReader, Bytes, ChunkReader, File,
-    GfError, Length, OpenPropertyFragment, Ordering, PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY,
+    Arc, AtomicU64, BTreeSet, BufReader, Bytes, ChunkReader, File, GfError, Length,
+    OpenPropertyFragment, Ordering, PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY,
     PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT, PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY,
     PROPERTY_TOMBSTONE_FIELD, ParquetRecordBatchReaderBuilder, PropertyFile, PropertyFragmentId,
     PropertyFragmentLayout, PropertyOverlayLimits, PropertyOverlayMetrics, PropertyRead,
@@ -271,13 +271,12 @@ pub(super) fn admit_target_footer(
 }
 
 pub(super) fn open_counted_retained_property_builder(
-    fragment: &AuthenticatedPropertyFragment,
     opened: &OpenPropertyFragment,
     counts: ReadCounts,
 ) -> Result<ParquetRecordBatchReaderBuilder<CountingChunkReader>, GfError> {
     ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
         file: Arc::clone(&opened.file),
-        length: fragment.logical_length,
+        length: opened.logical_length,
         counts,
     })
     .map_err(parquet_error)

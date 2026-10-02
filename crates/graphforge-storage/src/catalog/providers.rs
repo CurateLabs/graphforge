@@ -1,6 +1,5 @@
 //! Streaming DataFusion providers for topology and property tables.
 
-use super::discover_parquet_schema;
 use super::visit_property_overlay_batched_with_inventory;
 use crate::parquet_scan::ParquetFragment;
 use crate::parquet_scan::scan_fragments;
@@ -325,6 +324,7 @@ pub struct PropertyTable {
     pub(super) inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
     route: String,
     schema: SchemaRef,
+    keys_only: bool,
 }
 
 impl PropertyTable {
@@ -339,6 +339,25 @@ impl PropertyTable {
             inventory: None,
             route: entity_type.to_owned(),
             schema,
+            keys_only: false,
+        }
+    }
+
+    /// Open the route's `node_uuid` keys alone. Nothing is admitted to open:
+    /// the schema is the key column and planning takes no footer statistics,
+    /// while a scan still authenticates every fragment it reads.
+    #[must_use]
+    pub fn open_keys(
+        dir: &Path,
+        stem: &str,
+        inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
+    ) -> Self {
+        Self {
+            project: dir.to_path_buf(),
+            inventory,
+            route: stem.to_owned(),
+            schema: crate::schemas::PROPERTY_BASE_SCHEMA.clone(),
+            keys_only: true,
         }
     }
 
@@ -351,39 +370,41 @@ impl PropertyTable {
     /// exist yet, falls back to [`PROPERTY_BASE_SCHEMA`](crate::schemas::PROPERTY_BASE_SCHEMA) (just `node_uuid`), so a
     /// join against an as-yet-unwritten property table yields zero property rows
     /// rather than an error.
-    #[must_use]
-    pub fn open_discovered(dir: &Path, stem: &str) -> Self {
-        let path = dir.join("properties").join(format!("{stem}.parquet"));
-        let inventory = admitted_property_route(dir, crate::PropertyRouteKind::Node, stem);
-        let schema = inventory
-            .as_ref()
-            .and_then(|inventory| inventory.route_schema(crate::PropertyRouteKind::Node, stem))
-            .or_else(|| discover_parquet_schema(&path))
-            .unwrap_or_else(|| crate::schemas::PROPERTY_BASE_SCHEMA.clone());
-        Self {
+    pub fn open_discovered(dir: &Path, stem: &str) -> Result<Self, DataFusionError> {
+        let inventory = admitted_property_route(dir, crate::PropertyRouteKind::Node, stem)?;
+        let schema = match inventory.as_ref() {
+            Some(inventory) => inventory
+                .route_schema(crate::PropertyRouteKind::Node, stem)
+                .map_err(|error| DataFusionError::External(Box::new(error)))?,
+            None => None,
+        }
+        .unwrap_or_else(|| crate::schemas::PROPERTY_BASE_SCHEMA.clone());
+        Ok(Self {
             project: dir.to_path_buf(),
             inventory,
             route: stem.to_owned(),
             schema,
-        }
+            keys_only: false,
+        })
     }
 
     /// Open from one already-authenticated immutable generation inventory.
-    #[must_use]
     pub fn open_authenticated(
         dir: &Path,
         stem: &str,
         inventory: Arc<crate::AuthenticatedPropertyInventory>,
-    ) -> Self {
+    ) -> Result<Self, DataFusionError> {
         let schema = inventory
             .route_schema(crate::PropertyRouteKind::Node, stem)
+            .map_err(|error| DataFusionError::External(Box::new(error)))?
             .unwrap_or_else(|| crate::schemas::PROPERTY_BASE_SCHEMA.clone());
-        Self {
+        Ok(Self {
             project: dir.to_path_buf(),
             inventory: Some(inventory),
             route: stem.to_owned(),
             schema,
-        }
+            keys_only: false,
+        })
     }
 
     /// Visit node-property batches using this provider's retained admission.
@@ -433,6 +454,7 @@ pub struct EdgePropertyTable {
     pub(super) inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
     route: String,
     schema: SchemaRef,
+    keys_only: bool,
 }
 
 impl EdgePropertyTable {
@@ -444,40 +466,56 @@ impl EdgePropertyTable {
     /// file does not exist yet, falls back to [`EDGE_PROPERTY_BASE_SCHEMA`](crate::schemas::EDGE_PROPERTY_BASE_SCHEMA) (just
     /// `edge_uuid`), so a join against an as-yet-unwritten edge-property table
     /// yields zero property rows rather than an error.
-    #[must_use]
-    pub fn open_discovered(dir: &Path, rel_type: &str) -> Self {
-        let path = dir
-            .join("edge_properties")
-            .join(format!("{rel_type}.parquet"));
-        let inventory = admitted_property_route(dir, crate::PropertyRouteKind::Edge, rel_type);
-        let schema = inventory
-            .as_ref()
-            .and_then(|inventory| inventory.route_schema(crate::PropertyRouteKind::Edge, rel_type))
-            .or_else(|| discover_parquet_schema(&path))
-            .unwrap_or_else(|| crate::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone());
-        Self {
+    pub fn open_discovered(dir: &Path, rel_type: &str) -> Result<Self, DataFusionError> {
+        let inventory = admitted_property_route(dir, crate::PropertyRouteKind::Edge, rel_type)?;
+        let schema = match inventory.as_ref() {
+            Some(inventory) => inventory
+                .route_schema(crate::PropertyRouteKind::Edge, rel_type)
+                .map_err(|error| DataFusionError::External(Box::new(error)))?,
+            None => None,
+        }
+        .unwrap_or_else(|| crate::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone());
+        Ok(Self {
             project: dir.to_path_buf(),
             inventory,
             route: rel_type.to_owned(),
             schema,
-        }
+            keys_only: false,
+        })
     }
 
     /// Open from one already-authenticated immutable generation inventory.
-    #[must_use]
     pub fn open_authenticated(
         dir: &Path,
         route: &str,
         inventory: Arc<crate::AuthenticatedPropertyInventory>,
-    ) -> Self {
+    ) -> Result<Self, DataFusionError> {
         let schema = inventory
             .route_schema(crate::PropertyRouteKind::Edge, route)
+            .map_err(|error| DataFusionError::External(Box::new(error)))?
             .unwrap_or_else(|| crate::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone());
-        Self {
+        Ok(Self {
             project: dir.to_path_buf(),
             inventory: Some(inventory),
             route: route.to_owned(),
             schema,
+            keys_only: false,
+        })
+    }
+
+    /// Open the route's `edge_uuid` keys alone; see [`PropertyTable::open_keys`].
+    #[must_use]
+    pub fn open_keys(
+        dir: &Path,
+        route: &str,
+        inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
+    ) -> Self {
+        Self {
+            project: dir.to_path_buf(),
+            inventory,
+            route: route.to_owned(),
+            schema: crate::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone(),
+            keys_only: true,
         }
     }
 
@@ -492,10 +530,13 @@ fn admitted_property_route(
     dir: &Path,
     kind: crate::PropertyRouteKind,
     route: &str,
-) -> Option<Arc<crate::AuthenticatedPropertyInventory>> {
+) -> Result<Option<Arc<crate::AuthenticatedPropertyInventory>>, DataFusionError> {
+    if !dir.exists() {
+        return Ok(None);
+    }
     crate::property_overlay::authenticated_property_inventory_for_route(dir, kind, route)
-        .ok()
-        .map(Arc::new)
+        .map(|inventory| Some(Arc::new(inventory)))
+        .map_err(|error| DataFusionError::External(Box::new(error)))
 }
 
 #[async_trait]
@@ -526,6 +567,7 @@ impl TableProvider for EdgePropertyTable {
                     projection,
                     limit,
                     batch_size: state.config().batch_size(),
+                    footer_statistics: !self.keys_only,
                 },
             )?,
         ))
@@ -560,6 +602,7 @@ impl TableProvider for PropertyTable {
                     projection,
                     limit,
                     batch_size: state.config().batch_size(),
+                    footer_statistics: !self.keys_only,
                 },
             )?,
         ))

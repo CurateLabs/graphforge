@@ -72,7 +72,8 @@ a manifest published before the field is proven by reading every ordinal block
 once, on the first ordered fast-path query. Bulk payloads (nodes, edges, property fragments and search segments)
 are checked for XXH64 on the first read of each object, memoized for that
 hydration, so a project that never reads an object never pays for it. A
-refusal is memoized as well. Every consumer that would otherwise bless a
+refusal is memoized as well. A checksum refusal on a search index segment is a
+hard validation error; it is never treated as a derived index to rebuild. Every consumer that would otherwise bless a
 payload's current bytes (inventory capture for publication, rewrite baselines,
 appends) admits it first, so corruption cannot be republished under a fresh
 digest. The explicit full-admission API remains for callers that want a whole

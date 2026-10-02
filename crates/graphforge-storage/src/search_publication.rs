@@ -314,11 +314,18 @@ pub fn current_search_artifact(
     let pointer = root.join(CURRENT_FILE);
     // Every search reader starts here: a hydrated artifact is checksummed on
     // first touch, before its pointer, manifest, or segments are trusted.
-    crate::graph_admission::admit_tree(&root).map_err(|error| {
-        SearchArtifactError::CorruptDerivedIndex {
+    // A checksum or length refusal is corruption of vouched-for bytes and is
+    // refused (maintainer decision 4, #1388); only a failure to read the tree
+    // keeps its earlier rebuildable classification.
+    crate::graph_admission::admit_tree(&root).map_err(|error| match error {
+        graphforge_core::GfError::Validation(reason) => SearchArtifactError::PayloadRefused {
+            path: root.clone(),
+            reason,
+        },
+        error => SearchArtifactError::CorruptDerivedIndex {
             path: root.clone(),
             reason: error.to_string(),
-        }
+        },
     })?;
     let bytes = match std::fs::read(&pointer) {
         Ok(bytes) => bytes,

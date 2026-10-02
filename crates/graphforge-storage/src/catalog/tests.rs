@@ -338,8 +338,8 @@ fn raw_catalog_shares_one_authenticated_property_inventory() {
         .property_inventory
         .as_ref()
         .expect("raw catalog admits one complete property authority");
-    let node = catalog.property_table(dir.path(), "Person");
-    let edge = catalog.edge_property_table(dir.path(), "KNOWS");
+    let node = catalog.property_table(dir.path(), "Person").unwrap();
+    let edge = catalog.edge_property_table(dir.path(), "KNOWS").unwrap();
     assert!(Arc::ptr_eq(
         authority,
         node.inventory.as_ref().expect("node authority")
@@ -749,7 +749,7 @@ fn read_nodes_returns_rows_and_empty_when_absent() {
 
 #[test]
 fn catalog_and_schema_debug_identity_are_stable_and_content_free() {
-    let schema = GraphSchema::new();
+    let schema = GraphSchema::new(std::path::Path::new(""));
     assert_eq!(format!("{schema:?}"), "GraphSchema { table_names: [] }");
     let schema_provider: Arc<dyn SchemaProvider> = Arc::new(schema);
     assert!(schema_provider.downcast_ref::<GraphSchema>().is_some());

@@ -10,6 +10,21 @@ use graphforge_search::{
 
 use super::{CancellationToken, GfError, GraphForge, NodeSelector};
 
+#[cfg(test)]
+thread_local! {
+    static AFTER_TEXT_INVENTORY_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn after_text_inventory_capture() {
+    AFTER_TEXT_INVENTORY_CAPTURE.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
 /// Statically distinct text-build and vector-upsert options.
 #[cfg(feature = "search")]
 #[derive(Clone, Debug, PartialEq)]
@@ -139,6 +154,7 @@ impl GraphForge {
         label: &str,
         options: SearchIndexOptions,
     ) -> Result<Option<TextIndexInspection>, GfError> {
+        let visibility = self.graph_visibility.lock()?;
         let label_id = self.search_label_id(label)?;
         let topology = self.dir().topology_files()?;
         let mut text_properties = None;
@@ -147,6 +163,9 @@ impl GraphForge {
                 properties,
                 rebuild,
             } => {
+                let inventory = self.property_inventory_for_session();
+                #[cfg(test)]
+                after_text_inventory_capture();
                 prepare_search_index(
                     &self.dir(),
                     SearchIndexRequest::Text {
@@ -155,6 +174,7 @@ impl GraphForge {
                         label_id,
                         properties: properties.as_deref(),
                         rebuild,
+                        inventory: Some(&inventory),
                     },
                     SearchIndexLimits::default(),
                     || Ok(()),
@@ -184,6 +204,8 @@ impl GraphForge {
             }
         }
         self.publish_workspace_update()?;
+        // Inspection acquires its own read guard after publication completes.
+        drop(visibility);
         text_properties
             .map(|properties| self.inspect_text_index(label, properties.as_deref()))
             .transpose()
@@ -205,7 +227,11 @@ impl GraphForge {
         label: &str,
         properties: Option<&[String]>,
     ) -> Result<TextIndexInspection, GfError> {
+        let _visibility = self.graph_visibility.read()?;
         let label_id = self.search_label_id(label)?;
+        let inventory = self.property_inventory_for_session();
+        #[cfg(test)]
+        after_text_inventory_capture();
         let topology = self.dir().topology_files()?;
         let inspection = inspect_text_index_freshness(
             &self.dir(),
@@ -213,6 +239,7 @@ impl GraphForge {
                 topology: Some(&topology),
                 label,
                 label_id,
+                inventory: Some(&inventory),
             },
             properties,
             graphforge_search::TextLifecycleLimits::default(),
@@ -576,6 +603,84 @@ mod tests {
 
     fn assert_validation<T>(result: Result<T, GfError>) {
         assert!(matches!(result, Err(GfError::Validation(_))));
+    }
+
+    fn assert_text_index_operation_keeps_one_generation(build: bool) {
+        use std::sync::{Arc, mpsc};
+
+        let graph = Arc::new(GraphForge::new(None).unwrap());
+        graph.execute("CREATE (:Person {name: 'before'})").unwrap();
+        graph.index_search("Person", text(None, false)).unwrap();
+        let (captured_tx, captured_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let reader_graph = Arc::clone(&graph);
+        let reader = std::thread::spawn(move || {
+            AFTER_TEXT_INVENTORY_CAPTURE.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    captured_tx.send(()).unwrap();
+                    resume_rx.recv().unwrap();
+                }));
+            });
+            if build {
+                reader_graph
+                    .index_search("Person", text(None, false))
+                    .map(Option::unwrap)
+            } else {
+                reader_graph.inspect_text_index("Person", None)
+            }
+        });
+        captured_rx.recv().unwrap();
+        // If the writer can enter, complete the publication while the
+        // operation still retains the old inventory. Otherwise run it
+        // after the operation, without sleeps or timing assumptions.
+        let mutation_before_resume = match graph.graph_visibility.try_lock() {
+            Ok(permit) => {
+                drop(permit);
+                graph
+                    .execute("MATCH (n:Person) SET n.name = 'after'")
+                    .unwrap();
+                if !build {
+                    graph.index_search("Person", text(None, true)).unwrap();
+                }
+                true
+            }
+            Err(()) => false,
+        };
+        resume_tx.send(()).unwrap();
+        let inspection = reader.join().unwrap().unwrap();
+        assert_eq!(
+            inspection.state,
+            TextIndexFreshnessState::Current,
+            "build={build}: {inspection:?}"
+        );
+        if !mutation_before_resume {
+            graph
+                .execute("MATCH (n:Person) SET n.name = 'after'")
+                .unwrap();
+        }
+        assert_eq!(
+            graph.inspect_text_index("Person", None).unwrap().state,
+            TextIndexFreshnessState::Stale,
+            "the later property publication must invalidate the index"
+        );
+        let result = graph
+            .find(crate::FindOptions {
+                label: Some("Person".into()),
+                query: Some("after".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(result.num_rows(), 1);
+    }
+
+    #[test]
+    fn text_index_build_keeps_inventory_and_workspace_on_one_generation() {
+        assert_text_index_operation_keeps_one_generation(true);
+    }
+
+    #[test]
+    fn text_index_inspection_keeps_inventory_and_workspace_on_one_generation() {
+        assert_text_index_operation_keeps_one_generation(false);
     }
 
     #[test]

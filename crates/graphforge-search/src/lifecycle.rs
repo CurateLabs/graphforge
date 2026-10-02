@@ -13,7 +13,7 @@ use graphforge_storage::{
 
 use crate::TextSearchLimits;
 use crate::analyzer::{TEXT_CONTRACT_VERSION, analyze_query};
-use crate::source::{TextSourceProjection, project_text_source_with_topology};
+use crate::source::{TextSourceProjection, project_text_source_with, text_source_snapshot};
 use crate::text_index::{
     TEXT_BACKEND_VERSION, TextIndexBuildOutcome, TextSearchHit, build_text_index,
     search_text_index, validate_text_index,
@@ -43,6 +43,10 @@ pub struct TextIndexRequest<'a> {
     pub label_id: graphforge_value::EntityTypeSelection,
     /// Explicit non-empty property selectors persisted in canonical order.
     pub properties: &'a [String],
+    /// The caller's admitted property inventory. Passing it lets projection read
+    /// node properties through it and take the freshness identity from its
+    /// manifest instead of re-capturing the whole project.
+    pub inventory: Option<&'a graphforge_storage::AuthenticatedPropertyInventory>,
 }
 
 /// Caller-resolved identity for lazy search over the stable default projection.
@@ -54,6 +58,8 @@ pub struct LazyTextRequest<'a> {
     pub label: &'a str,
     /// Local catalog identity used only for Parquet membership projection.
     pub label_id: graphforge_value::EntityTypeSelection,
+    /// The caller's admitted property inventory; see [`TextIndexRequest::inventory`].
+    pub inventory: Option<&'a graphforge_storage::AuthenticatedPropertyInventory>,
 }
 
 /// One verified, immutable text publication.
@@ -175,7 +181,8 @@ pub fn inspect_text_index_freshness<C>(
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
-    let projection = project_text_source_with_topology(
+    let projection = project_text_source_with(
+        request.inventory,
         project_dir,
         request.topology,
         request.label_id,
@@ -393,6 +400,7 @@ where
             topology: request.topology,
             label: key.label(),
             label_id: request.label_id,
+            inventory: request.inventory,
         },
         Some(properties),
         mode,
@@ -423,7 +431,8 @@ where
     let retry_budget = Cell::new(true);
 
     loop {
-        let projection = project_text_source_with_topology(
+        let projection = project_text_source_with(
+            request.inventory,
             project_dir,
             request.topology,
             request.label_id,
@@ -447,6 +456,7 @@ where
                 label: key.label(),
                 label_id: request.label_id,
                 properties: &properties,
+                inventory: request.inventory,
             },
             mode,
             limits,
@@ -465,6 +475,7 @@ where
                     request.label_id,
                     &properties,
                     limits.text,
+                    request.inventory,
                 )?;
                 match index.artifact().manifest.verify_fresh(
                     &key,
@@ -530,6 +541,7 @@ where
             request.label_id,
             &properties,
             limits.text,
+            request.inventory,
         )
     };
     let outcome = coordinate_search_publication(
@@ -547,7 +559,8 @@ where
                 return revalidate(expected).map_err(stale_after_property_discovery);
             }
             if projection.borrow().is_none() {
-                *projection.borrow_mut() = Some(project_text_source_with_topology(
+                *projection.borrow_mut() = Some(project_text_source_with(
+                    request.inventory,
                     project_dir,
                     request.topology,
                     request.label_id,
@@ -615,7 +628,8 @@ where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
     if projection.borrow().is_none() {
-        *projection.borrow_mut() = Some(project_text_source_with_topology(
+        *projection.borrow_mut() = Some(project_text_source_with(
+            request.inventory,
             project_dir,
             request.topology,
             request.label_id,
@@ -714,6 +728,7 @@ where
                     label: key.label(),
                     label_id: request.label_id,
                     properties: &properties,
+                    inventory: request.inventory,
                 },
                 key: &key,
                 query,
@@ -762,7 +777,8 @@ where
     let retry_budget = Cell::new(true);
 
     loop {
-        let projection = project_text_source_with_topology(
+        let projection = project_text_source_with(
+            request.inventory,
             project_dir,
             request.topology,
             request.label_id,
@@ -784,6 +800,7 @@ where
                     label: key.label(),
                     label_id: request.label_id,
                     properties: &projection.properties,
+                    inventory: request.inventory,
                 },
                 key: &key,
                 query,
@@ -864,6 +881,7 @@ where
         request.index.label_id,
         properties,
         limits.text,
+        request.index.inventory,
     ) {
         Ok(snapshot) => snapshot,
         Err(SearchArtifactError::ConcurrentMutation) => return Ok(TextSearchAttempt::Retry),
@@ -1054,16 +1072,29 @@ fn generation_checked_snapshot(
     label_id: graphforge_value::EntityTypeSelection,
     properties: &[String],
     limits: TextSearchLimits,
+    inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
 ) -> Result<SearchSourceSnapshot, SearchArtifactError> {
-    let fresh = project_text_source_with_topology(
-        project_dir,
-        topology,
-        label_id,
-        Some(properties),
-        limits,
-        || Ok(()),
-    )?
-    .source_snapshot;
+    // With the caller's admitted inventory the source identity is the manifest's
+    // own list of node and node-property objects (name, length, XXH64) plus the
+    // live search generation: no source byte is read to recheck freshness.
+    let fresh = if let Some(snapshot) = inventory
+        .map(|inventory| text_source_snapshot(project_dir, inventory))
+        .transpose()?
+        .flatten()
+    {
+        snapshot
+    } else {
+        project_text_source_with(
+            inventory,
+            project_dir,
+            topology,
+            label_id,
+            Some(properties),
+            limits,
+            || Ok(()),
+        )?
+        .source_snapshot
+    };
     if fresh != *expected {
         return Err(SearchArtifactError::ConcurrentMutation);
     }
@@ -1179,6 +1210,7 @@ mod tests {
                 graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
             ),
             properties,
+            inventory: None,
         }
     }
 
@@ -1189,6 +1221,7 @@ mod tests {
             label_id: graphforge_value::EntityTypeSelection::Known(
                 graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
             ),
+            inventory: None,
         }
     }
 
@@ -1577,6 +1610,7 @@ mod tests {
                 ),
                 &properties(),
                 TextSearchLimits::default(),
+                None,
             )
             .is_err()
         );

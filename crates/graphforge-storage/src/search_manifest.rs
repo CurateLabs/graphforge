@@ -55,6 +55,17 @@ pub enum SearchArtifactError {
         /// Backend validation failure.
         reason: String,
     },
+    /// A committed search payload failed its manifest length or checksum on first
+    /// touch. Unlike a derived index that is merely stale or absent, this is
+    /// corruption of bytes the project vouched for: it is refused, never treated
+    /// as a reason to rebuild over it.
+    #[error("search payload refused at {}: {reason}", path.display())]
+    PayloadRefused {
+        /// Search artifact root holding the refused payload.
+        path: PathBuf,
+        /// Length or checksum refusal.
+        reason: String,
+    },
     /// A manifest uses a version this binary cannot consume.
     #[error(
         "incompatible search manifest at {}: version {found}, supported {supported}",
@@ -130,7 +141,8 @@ impl From<SearchArtifactError> for GfError {
     fn from(error: SearchArtifactError) -> Self {
         let message = error.to_string();
         match error {
-            SearchArtifactError::InvalidSelector { .. } => Self::Validation(message),
+            SearchArtifactError::InvalidSelector { .. }
+            | SearchArtifactError::PayloadRefused { .. } => Self::Validation(message),
             SearchArtifactError::Cancelled
             | SearchArtifactError::ResourceExhausted { .. }
             | SearchArtifactError::Build(_) => Self::Execution(message),

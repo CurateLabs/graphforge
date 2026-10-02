@@ -29,6 +29,10 @@ pub struct FindSearchRequest<'a> {
     pub space: Option<&'a str>,
     /// Maximum results and per-channel hybrid candidate depth.
     pub limit: usize,
+    /// The caller's already admitted property inventory. When present, text
+    /// freshness and node-property reads use it instead of re-capturing and
+    /// checksumming the whole project on every call.
+    pub inventory: Option<&'a graphforge_storage::AuthenticatedPropertyInventory>,
 }
 
 /// Resource bounds for unified backend search.
@@ -176,6 +180,7 @@ where
                     topology: request.topology,
                     label: request.label,
                     label_id: request.label_id,
+                    inventory: request.inventory,
                 },
                 query,
                 request.limit,
@@ -231,6 +236,7 @@ where
             topology: request.topology,
             label: request.label,
             label_id: request.label_id,
+            inventory: request.inventory,
         },
         query,
         request.limit,
@@ -328,6 +334,7 @@ mod tests {
             vector,
             space,
             limit,
+            inventory: None,
         }
     }
 
@@ -482,6 +489,7 @@ mod tests {
             vector: None,
             space: None,
             limit: 10,
+            inventory: None,
         };
         assert!(
             search_graph_native(dir.path(), empty_label, FindSearchLimits::default(), || Ok(

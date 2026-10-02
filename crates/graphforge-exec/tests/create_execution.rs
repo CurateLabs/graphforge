@@ -135,7 +135,9 @@ async fn create_single_node_with_properties_strict() {
     assert_eq!(parquet_row_count(&nodes), 1);
 
     assert_canonical_fragment(dir.path(), PropertyRouteKind::Node, "Person");
-    let schema = PropertyTable::open_discovered(dir.path(), "Person").schema_ref();
+    let schema = PropertyTable::open_discovered(dir.path(), "Person")
+        .unwrap()
+        .schema_ref();
     assert!(schema.field_with_name("node_uuid").is_ok());
     assert!(schema.field_with_name("name").is_ok());
     let rows = property_rows(dir.path(), PropertyRouteKind::Node, "Person");
@@ -204,7 +206,9 @@ async fn create_edge_with_properties_persists_edge_property_file() {
     assert_eq!(summary(&result), (2, 1));
 
     assert_canonical_fragment(dir.path(), PropertyRouteKind::Edge, "IS_FRIEND_OF");
-    let schema = EdgePropertyTable::open_discovered(dir.path(), "IS_FRIEND_OF").schema_ref();
+    let schema = EdgePropertyTable::open_discovered(dir.path(), "IS_FRIEND_OF")
+        .unwrap()
+        .schema_ref();
     assert!(schema.field_with_name("edge_uuid").is_ok());
     assert!(schema.field_with_name("since").is_ok());
     let rows = property_rows(dir.path(), PropertyRouteKind::Edge, "IS_FRIEND_OF");

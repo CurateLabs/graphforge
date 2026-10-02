@@ -101,6 +101,22 @@ impl GraphPlanLowerer {
         let Some(stem) = self.prop_table_stem(ty) else {
             return Ok(scan); // no single property table applies (see prop_table_stem)
         };
+        if dir.property_schemas_omitted {
+            if !dir.node_properties.contains_key(&stem) {
+                return Ok(scan); // no stored route to join
+            }
+            let node_alias = var_alias(var);
+            return join_route_keys(
+                scan,
+                &RouteKeys {
+                    entity_alias: &node_alias,
+                    keys_alias: format!("{node_alias}__props"),
+                    table: graphforge_plan::GraphReadTable::PropertyKeys(stem),
+                    composition: dir.semantic_composition_fingerprint().map(str::to_owned),
+                    route_filter: None,
+                },
+            );
+        }
 
         let prop_table = node_property_schema(dir, &stem);
         let prop_schema = prop_table;
@@ -185,6 +201,73 @@ impl GraphPlanLowerer {
             .and_then(LogicalPlanBuilder::build)
             .map_unsupported_expr()
     }
+}
+
+/// One property route joined by its key alone.
+pub(super) struct RouteKeys<'a> {
+    /// Alias of the node or edge whose identity column is the join key.
+    pub(super) entity_alias: &'a str,
+    /// Alias of the key scan.
+    pub(super) keys_alias: String,
+    /// [`GraphReadTable::PropertyKeys`](graphforge_plan::GraphReadTable::PropertyKeys)
+    /// or its edge counterpart.
+    pub(super) table: graphforge_plan::GraphReadTable,
+    pub(super) composition: Option<String>,
+    /// Extra join condition restricting which entities the route may own.
+    pub(super) route_filter: Option<DfExpr>,
+}
+
+/// LEFT-join a property route's keys onto `scan`, adding no column.
+///
+/// A plan that reads no property value keeps every route join its scans would
+/// otherwise make, so execution still reads (and authenticates) those routes
+/// and the join's row multiplicity is unchanged; only the value schema, whose
+/// capture would admit the route at compile time, is left out.
+pub(super) fn join_route_keys(
+    scan: LogicalPlan,
+    keys: &RouteKeys<'_>,
+) -> Result<LogicalPlan, LoweringError> {
+    use datafusion::common::Column;
+    use datafusion::logical_expr::col;
+
+    let (key, schema) = match keys.table {
+        graphforge_plan::GraphReadTable::PropertyKeys(_) => (
+            "node_uuid",
+            graphforge_ir::arrow_schema::PROPERTY_BASE_SCHEMA.clone(),
+        ),
+        graphforge_plan::GraphReadTable::EdgePropertyKeys(_) => (
+            "edge_uuid",
+            graphforge_ir::arrow_schema::EDGE_PROPERTY_BASE_SCHEMA.clone(),
+        ),
+        _ => {
+            return Err(LoweringError::UnsupportedExpr(
+                "route key join requires a property key table".into(),
+            ));
+        }
+    };
+    let source = graphforge_plan::GraphReadSource::new(
+        keys.table.clone(),
+        &schema,
+        keys.composition.clone(),
+    );
+    let keys_scan = LogicalPlanBuilder::scan(keys.keys_alias.clone(), source, None)
+        .and_then(LogicalPlanBuilder::build)
+        .map_unsupported_expr()?;
+    let input_cols: Vec<DfExpr> = scan
+        .schema()
+        .iter()
+        .map(|(qualifier, field)| DfExpr::Column(Column::new(qualifier.cloned(), field.name())))
+        .collect();
+    let mut predicate =
+        col(format!("{}.{key}", keys.entity_alias)).eq(col(format!("{}.{key}", keys.keys_alias)));
+    if let Some(filter) = keys.route_filter.clone() {
+        predicate = predicate.and(filter);
+    }
+    LogicalPlanBuilder::from(scan)
+        .join_on(keys_scan, JoinType::Left, vec![predicate])
+        .and_then(|joined| joined.project(input_cols))
+        .and_then(LogicalPlanBuilder::build)
+        .map_unsupported_expr()
 }
 
 /// Wrap a schema in a [`LogicalTableSource`] suitable for
@@ -502,6 +585,9 @@ pub(super) fn join_edge_properties(
     let Some(dir) = dir else {
         return Ok(scan); // schema-only lowering: no real provider to join
     };
+    if dir.property_schemas_omitted {
+        return join_edge_route_keys(edge_alias, rel_ty, type_id_to_rel_name, catalog, dir, scan);
+    }
 
     // Base topology columns come from the edge scan's own schema (typed: 9 cols;
     // exploratory: + `rel_type_name`), so the projection matches the live file.
@@ -604,6 +690,52 @@ pub(super) fn join_edge_properties(
         .project(projections)
         .and_then(LogicalPlanBuilder::build)
         .map_unsupported_expr()
+}
+
+/// [`join_edge_properties`] for a snapshot without property schemas: join each
+/// stored route the value join would read, by `edge_uuid` alone.
+fn join_edge_route_keys(
+    edge_alias: &str,
+    rel_ty: Option<RelationTypeId>,
+    type_id_to_rel_name: &HashMap<RelationTypeId, String>,
+    catalog: Option<&LoweringSnapshot>,
+    dir: &LoweringSnapshot,
+    scan: LogicalPlan,
+) -> Result<LogicalPlan, LoweringError> {
+    use datafusion::logical_expr::{col, lit};
+
+    let stems = match rel_ty {
+        Some(rel_ty) => {
+            let Some(rel_name) = type_id_to_rel_name.get(&rel_ty) else {
+                return Ok(scan); // unknown relation name: nothing to resolve
+            };
+            vec![rel_name.clone(), "_exploratory".to_owned()]
+        }
+        None => dir.edge_property_stems.clone(),
+    };
+    let mut joined = scan;
+    let mut stems: Vec<String> = stems
+        .into_iter()
+        .filter(|stem| dir.edge_properties.contains_key(stem))
+        .collect();
+    stems.dedup();
+    for (idx, stem) in stems.into_iter().enumerate() {
+        let route_filter = (rel_ty.is_none() && stem != "_exploratory")
+            .then(|| col(format!("{edge_alias}.rel_type_name")).eq(lit(stem.clone())));
+        joined = join_route_keys(
+            joined,
+            &RouteKeys {
+                entity_alias: edge_alias,
+                keys_alias: format!("{edge_alias}__eprops_{idx}"),
+                table: graphforge_plan::GraphReadTable::EdgePropertyKeys(stem),
+                composition: catalog
+                    .and_then(LoweringSnapshot::semantic_composition_fingerprint)
+                    .map(str::to_owned),
+                route_filter,
+            },
+        )?;
+    }
+    Ok(joined)
 }
 
 fn node_property_schema(

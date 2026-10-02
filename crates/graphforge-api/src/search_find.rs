@@ -140,6 +140,7 @@ impl GraphForge {
         limit: usize,
         projection: Option<&LabelMemberProjection>,
     ) -> Result<Vec<FusedSearchHit>, GfError> {
+        let inventory = self.property_inventory_for_session();
         let topology = self.dir().topology_files()?;
         let text = query
             .map(|query| {
@@ -153,6 +154,7 @@ impl GraphForge {
                         vector: None,
                         space: None,
                         limit,
+                        inventory: Some(&inventory),
                     },
                     FindSearchLimits::default(),
                     || Ok(()),

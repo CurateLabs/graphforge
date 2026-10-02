@@ -178,7 +178,7 @@ fn fingerprint_graph_paths_with_runtime_names(
                 };
                 let schema = authority
                     .properties
-                    .route_schema(kind, route)
+                    .route_schema(kind, route)?
                     .ok_or_else(|| validation("property fingerprint route has no schema"))?;
                 batches.push(RecordBatch::new_empty(schema));
             }

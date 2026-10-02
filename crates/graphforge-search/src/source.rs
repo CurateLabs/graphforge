@@ -5,7 +5,9 @@ use std::path::Path;
 
 use arrow::array::{Array, FixedSizeBinaryArray, ListArray, StringArray, UInt32Array, UInt64Array};
 use arrow::datatypes::DataType;
-use graphforge_storage::{AdmittedSourceFile, SearchArtifactError, SearchSourceSnapshot};
+use graphforge_storage::{
+    AdmittedSourceFile, AuthenticatedPropertyInventory, SearchArtifactError, SearchSourceSnapshot,
+};
 
 use crate::TextSearchLimits;
 
@@ -77,6 +79,85 @@ pub fn project_text_source_from_files<C>(
     label_id: graphforge_value::EntityTypeSelection,
     selected_properties: Option<&[String]>,
     limits: TextSearchLimits,
+    checkpoint: C,
+) -> Result<TextSourceProjection, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    project_text_source_selected(
+        None,
+        project_dir,
+        topology,
+        label_id,
+        selected_properties,
+        limits,
+        checkpoint,
+    )
+}
+
+/// The freshness identity of the whole text source, taken from the manifest of
+/// `inventory` without reading any payload: every node-topology and
+/// node-property object it names (name, declared length, declared XXH64) bound
+/// to the live search generation. `None` when the inventory is narrowed to one
+/// route and so does not name the node topology.
+///
+/// The fingerprint format is the one [`project_text_source`] produces from the
+/// handles it reads, so an index published by either is fresh for the other.
+pub(crate) fn text_source_snapshot(
+    project_dir: &Path,
+    inventory: &AuthenticatedPropertyInventory,
+) -> Result<Option<SearchSourceSnapshot>, SearchArtifactError> {
+    let Some(files) = inventory.text_source_files() else {
+        return Ok(None);
+    };
+    let generation = SearchSourceSnapshot::generation(project_dir)?;
+    SearchSourceSnapshot::from_admitted_files(project_dir, generation, &files).map(Some)
+}
+
+/// Project the session's explicit `topology`, or the legacy directory when the
+/// caller has none, reading node properties through the caller's admitted
+/// `inventory` when one is supplied.
+pub(crate) fn project_text_source_with<C>(
+    inventory: Option<&AuthenticatedPropertyInventory>,
+    project_dir: &Path,
+    topology: Option<&graphforge_storage::TopologyFiles>,
+    label_id: graphforge_value::EntityTypeSelection,
+    selected_properties: Option<&[String]>,
+    limits: TextSearchLimits,
+    checkpoint: C,
+) -> Result<TextSourceProjection, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    let discovered;
+    let topology = if let Some(files) = topology {
+        files
+    } else {
+        discovered = graphforge_storage::TopologyFiles::discover_legacy(project_dir)
+            .map_err(|error| source(error.to_string()))?;
+        &discovered
+    };
+    project_text_source_selected(
+        inventory,
+        project_dir,
+        topology,
+        label_id,
+        selected_properties,
+        limits,
+        checkpoint,
+    )
+}
+
+/// Project `topology`, reading node properties through the caller's admitted
+/// `inventory` when one is supplied, and binding the projection to the
+/// manifest's source identity rather than to a second read of every object.
+fn project_text_source_selected<C>(
+    inventory: Option<&AuthenticatedPropertyInventory>,
+    project_dir: &Path,
+    topology: &graphforge_storage::TopologyFiles,
+    label_id: graphforge_value::EntityTypeSelection,
+    selected_properties: Option<&[String]>,
+    limits: TextSearchLimits,
     mut checkpoint: C,
 ) -> Result<TextSourceProjection, SearchArtifactError>
 where
@@ -85,6 +166,16 @@ where
     checkpoint()?;
     let source_generation = SearchSourceSnapshot::generation(project_dir)?;
     let mut source_evidence = Vec::<AdmittedSourceFile>::new();
+    // With a manifest-bound source identity the evidence the readers collect is
+    // only a byte account; the identity itself comes from the manifest.
+    let manifest_files = inventory.and_then(AuthenticatedPropertyInventory::text_source_files);
+    let bind = |project_dir: &Path, evidence: &[AdmittedSourceFile]| {
+        SearchSourceSnapshot::from_admitted_files(
+            project_dir,
+            source_generation,
+            manifest_files.as_deref().unwrap_or(evidence),
+        )
+    };
     let explicit = selected_properties
         .map(|properties| normalize_properties(properties, limits))
         .transpose()?;
@@ -106,11 +197,7 @@ where
         return Err(exhausted("text_documents", limits.documents));
     }
     if eligible.is_empty() {
-        let source_snapshot = SearchSourceSnapshot::from_admitted_files(
-            project_dir,
-            source_generation,
-            &source_evidence,
-        )?;
+        let source_snapshot = bind(project_dir, &source_evidence)?;
         return Ok(TextSourceProjection {
             properties: explicit.unwrap_or_default(),
             documents: Vec::new(),
@@ -120,6 +207,7 @@ where
     }
 
     let (observed_properties, mut fields_by_uuid) = project_properties(
+        inventory,
         project_dir,
         &eligible,
         explicit_set.as_ref(),
@@ -130,11 +218,7 @@ where
     )?;
     let properties = explicit.unwrap_or_else(|| observed_properties.into_iter().collect());
     if properties.is_empty() {
-        let source_snapshot = SearchSourceSnapshot::from_admitted_files(
-            project_dir,
-            source_generation,
-            &source_evidence,
-        )?;
+        let source_snapshot = bind(project_dir, &source_evidence)?;
         return Ok(TextSourceProjection {
             properties,
             documents: Vec::new(),
@@ -155,47 +239,13 @@ where
             TextDocument { node_uuid, fields }
         })
         .collect();
-    let source_snapshot = SearchSourceSnapshot::from_admitted_files(
-        project_dir,
-        source_generation,
-        &source_evidence,
-    )?;
+    let source_snapshot = bind(project_dir, &source_evidence)?;
     Ok(TextSourceProjection {
         properties,
         documents,
         source_bytes,
         source_snapshot,
     })
-}
-
-pub(crate) fn project_text_source_with_topology<C>(
-    project_dir: &Path,
-    topology: Option<&graphforge_storage::TopologyFiles>,
-    label_id: graphforge_value::EntityTypeSelection,
-    selected_properties: Option<&[String]>,
-    limits: TextSearchLimits,
-    checkpoint: C,
-) -> Result<TextSourceProjection, SearchArtifactError>
-where
-    C: FnMut() -> Result<(), SearchArtifactError>,
-{
-    match topology {
-        Some(files) => project_text_source_from_files(
-            project_dir,
-            files,
-            label_id,
-            selected_properties,
-            limits,
-            checkpoint,
-        ),
-        None => project_text_source(
-            project_dir,
-            label_id,
-            selected_properties,
-            limits,
-            checkpoint,
-        ),
-    }
 }
 
 #[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
@@ -334,8 +384,9 @@ where
     Ok(eligible)
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn project_properties<C>(
+    inventory: Option<&AuthenticatedPropertyInventory>,
     project_dir: &Path,
     eligible: &BTreeSet<[u8; 16]>,
     explicit: Option<&BTreeSet<String>>,
@@ -360,6 +411,7 @@ where
     let mut failure = None;
     let admitted = graphforge_storage::visit_node_property_overlay_admitted(
         project_dir,
+        inventory,
         8192,
         remaining,
         projected_columns.as_ref(),

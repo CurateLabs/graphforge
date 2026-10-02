@@ -254,6 +254,7 @@ fn delta_replay_new_routes_start_and_continue_live_schema_authority() {
         summary_count(
             &created
                 .route_schema(crate::PropertyRouteKind::Node, "NewNodeRoute")
+                .unwrap()
                 .unwrap(),
             "score"
         ),
@@ -263,6 +264,7 @@ fn delta_replay_new_routes_start_and_continue_live_schema_authority() {
         summary_count(
             &created
                 .route_schema(crate::PropertyRouteKind::Edge, "NewEdgeRoute")
+                .unwrap()
                 .unwrap(),
             "weight"
         ),
@@ -307,6 +309,7 @@ fn delta_replay_new_routes_start_and_continue_live_schema_authority() {
         summary_count(
             &reopened
                 .route_schema(crate::PropertyRouteKind::Node, "NewNodeRoute")
+                .unwrap()
                 .unwrap(),
             "score"
         ),
@@ -316,6 +319,7 @@ fn delta_replay_new_routes_start_and_continue_live_schema_authority() {
         summary_count(
             &reopened
                 .route_schema(crate::PropertyRouteKind::Edge, "NewEdgeRoute")
+                .unwrap()
                 .unwrap(),
             "weight"
         ),

@@ -28,8 +28,14 @@ impl GraphReadContext {
         if let Some(contract) = contract {
             let actual = graphforge_rel::GraphPlanLowerer::new(
                 Some(
-                    &graphforge_storage::lowering_snapshot(Some(&self.catalog), None)
-                        .map_err(|e| DataFusionError::Plan(e.to_string()))?,
+                    // The contract names labels and relations only: no
+                    // property route needs admitting to check it.
+                    &graphforge_storage::lowering_snapshot_for(
+                        Some(&self.catalog),
+                        None,
+                        graphforge_ir::PropertyDemand::None,
+                    )
+                    .map_err(|e| DataFusionError::Plan(e.to_string()))?,
                 ),
                 self.ontology.as_ref(),
             )
@@ -67,18 +73,24 @@ impl GraphReadContext {
                 })?
             }
             GraphReadTable::Properties(stem) => {
-                Arc::new(self.catalog.property_table(&self.dir, stem))
+                Arc::new(self.catalog.property_table(&self.dir, stem)?)
             }
             GraphReadTable::EdgeProperties(_, Some(id)) => self
                 .catalog
-                .semantic_edge_property_table(*id)
+                .semantic_edge_property_table(*id)?
                 .ok_or_else(|| {
                     DataFusionError::Plan(
                         "GF_READ_RESOURCE_INCOMPATIBLE: semantic edge properties".into(),
                     )
                 })?,
             GraphReadTable::EdgeProperties(stem, None) => {
-                Arc::new(self.catalog.edge_property_table(&self.dir, stem))
+                Arc::new(self.catalog.edge_property_table(&self.dir, stem)?)
+            }
+            GraphReadTable::PropertyKeys(stem) => {
+                Arc::new(self.catalog.property_keys_table(&self.dir, stem))
+            }
+            GraphReadTable::EdgePropertyKeys(stem) => {
+                Arc::new(self.catalog.edge_property_keys_table(&self.dir, stem))
             }
         };
         if graphforge_plan::read_resource::semantic_read_schema(&table.schema()) != source.schema()

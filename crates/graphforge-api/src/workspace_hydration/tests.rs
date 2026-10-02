@@ -311,11 +311,13 @@ fn compact_graph_root_reopens_through_ordinary_api_and_rematerializes() {
     assert_eq!(actual, expected);
 
     let inventory = resolved.graph_files_inventory().unwrap().unwrap();
+    // An eager sidecar: property fragments, like every bulk payload, are checked
+    // on first touch and so no longer fail the open (#1388).
     let victim_entry = inventory
         .files
         .iter()
-        .find(|entry| entry.byte_length > 0)
-        .expect("compact fixture contains a nonempty graph object");
+        .find(|entry| entry.relative_path == "topology/generation.json" && entry.byte_length > 0)
+        .expect("compact fixture contains a nonempty generation counter");
     let victim =
         graphforge_storage::graph_object_path(project.path(), &victim_entry.content_sha256)
             .unwrap();
@@ -1102,7 +1104,11 @@ fn compact_graph_root_refuses_same_inode_corruption_for_every_role() {
             "topology/nodes.parquet",
             Some(&touch(COUNT_NODES)),
         ),
-        (GraphFileRole::Properties, "properties/", None),
+        (
+            GraphFileRole::Properties,
+            "properties/",
+            Some(&touch(PROJECT_NAMES)),
+        ),
         (
             GraphFileRole::Index,
             "indexes/adjacency/index_manifest.parquet",
@@ -1164,17 +1170,16 @@ fn compact_graph_root_refuses_same_inode_corruption_for_every_role() {
 
 /// `find` on a text index published in a compact project must answer, and a
 /// same-inode, same-length corruption of any search payload must be refused by
-/// `find` itself rather than answered.
+/// `find` itself rather than answered or rebuilt over.
 ///
-/// Two independent layers refuse it, and either alone is enough to keep the
-/// corrupted bytes out of an answer: the property-source capture that every
-/// text `find` begins with (`capture_graph_read_inventory`) admits every
-/// payload in the tree, and `current_search_artifact` admits the artifact
-/// directory. The first is what surfaces here as an error: the second reports
-/// the corruption as a rebuildable derived index, which a text `find` heals by
-/// rebuilding rather than failing. Removing both makes `find` answer over the
-/// corrupted segment and fails this test; removing only the artifact admission
-/// does not, because the capture refuses first.
+/// One layer refuses it: `current_search_artifact` admits the artifact
+/// directory before any pointer, manifest or segment is trusted, and reports a
+/// checksum refusal as a hard validation error, not as a rebuildable derived
+/// index (maintainer decision 4, #1388). `find` no longer captures a
+/// whole-project inventory, so nothing else stands in front of it: removing the
+/// admission makes `find` answer over the corrupted segment, and mapping the
+/// refusal back to `CorruptDerivedIndex` makes `find` heal it by rebuilding,
+/// either of which fails this test.
 #[test]
 #[cfg(feature = "search")]
 fn find_serves_a_compact_text_index_and_refuses_segment_corruption() {
@@ -1232,10 +1237,22 @@ fn find_serves_a_compact_text_index_and_refuses_segment_corruption() {
         }
         let reopened = GraphForge::new(Some(project.path().to_str().unwrap()))
             .expect("opening reads no search segment");
+        let pointer_before = search_pointer(&reopened);
         let error = find(&reopened).expect_err(&entry.relative_path);
+        assert!(
+            matches!(error, GfError::Validation(_)),
+            "{}: a checksum refusal is a hard validation error, got {error:?}",
+            entry.relative_path
+        );
         assert!(
             error.to_string().contains("XXH64 checksum"),
             "{}: {error}",
+            entry.relative_path
+        );
+        assert_eq!(
+            search_pointer(&reopened),
+            pointer_before,
+            "{}: find must not rebuild over a refused index",
             entry.relative_path
         );
     }
@@ -1302,4 +1319,290 @@ fn vector_upsert_and_find_work_on_a_compact_project() {
         .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
         .unwrap();
     assert_eq!(ids.value(0), beta.uuid.as_bytes());
+}
+
+/// The current-version pointer of the `Person`/`name` text index, which a
+/// rebuild replaces.
+#[cfg(feature = "search")]
+fn search_pointer(graph: &GraphForge) -> Vec<u8> {
+    let key = graphforge_storage::SearchArtifactKey::text("Person", ["name"]).unwrap();
+    std::fs::read(key.artifact_root(&graph.dir()).join("current.json")).expect("published pointer")
+}
+
+const PROJECT_NAMES: &str = "MATCH (n:Person) RETURN n.name AS v";
+const FILTER_NAMES: &str = "MATCH (n:Person) WHERE n.rank = 5 RETURN n.name AS v";
+const SET_RANK: &str = "MATCH (n:Person {name: 'p1'}) SET n.rank = 0";
+const PROJECT_SINCE: &str = "MATCH ()-[r:KNOWS]->() RETURN r.since AS v";
+const FILTER_SINCE: &str = "MATCH ()-[r:KNOWS]->() WHERE r.since = 5 RETURN r.since AS v";
+const SET_SINCE: &str = "MATCH ()-[r:KNOWS {since: 1}]->() SET r.since = 0";
+
+/// A successful first read cannot authorize later reads of changed bytes.
+/// The decoder ignores the leading magic; only authentication can refuse it.
+#[test]
+fn property_reads_refuse_same_inode_corruption_after_a_successful_read() {
+    let project = tempfile::tempdir().unwrap();
+    compact_person_project(project.path());
+    for (prefix, queries) in [
+        ("properties/", [PROJECT_NAMES, FILTER_NAMES]),
+        ("edge_properties/", [PROJECT_SINCE, FILTER_SINCE]),
+    ] {
+        let entry = compact_entry(
+            project.path(),
+            graphforge_storage::GraphFileRole::Properties,
+            prefix,
+            ".parquet",
+        );
+        for query in queries {
+            let graph = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+            let rows = |result: graphforge_exec::ExecutionResult| {
+                result
+                    .batches
+                    .iter()
+                    .map(|batch| batch.num_rows())
+                    .sum::<usize>()
+            };
+            let original_rows = rows(graph.execute(query).unwrap());
+            assert!(original_rows > 0, "{query}: fixture must read properties");
+            {
+                let _corruption = InPlaceCorruption::apply(project.path(), &entry);
+                let error = graph
+                    .execute(query)
+                    .expect_err("a prior admission cannot authorize changed bytes");
+                assert_eq!(error.code(), "GF_PROJECT_CORRUPT", "{query}: {error}");
+                assert!(
+                    error.to_string().to_lowercase().contains("checksum"),
+                    "{query}: {error}"
+                );
+            }
+            assert_eq!(rows(graph.execute(query).unwrap()), original_rows);
+        }
+    }
+}
+
+/// A failed footer load must remain an integrity error through schema discovery.
+/// It must not become a base-only schema that plans the property as NULL.
+#[test]
+fn property_schema_refuses_corrupted_parquet_magic_before_planning() {
+    let project = tempfile::tempdir().unwrap();
+    compact_person_project(project.path());
+    let entry = compact_entry(
+        project.path(),
+        graphforge_storage::GraphFileRole::Properties,
+        "properties/",
+        ".parquet",
+    );
+    for offset in [0, entry.byte_length - 1] {
+        let _corruption = InPlaceCorruption::apply_at(project.path(), &entry, offset, 0x01);
+        for query in [PROJECT_NAMES, "MATCH (n:Person) RETURN n.name AS v LIMIT 0"] {
+            let reopened = GraphForge::new(Some(project.path().to_str().unwrap()))
+                .expect("project open must defer property payload admission");
+            let error = reopened
+                .execute(query)
+                .expect_err("corrupt property schema must not plan NULL rows");
+            assert_eq!(
+                error.code(),
+                "GF_PROJECT_CORRUPT",
+                "offset {offset}, {query}: {error}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.to_lowercase().contains("checksum"),
+                "offset {offset}, {query}: {message}"
+            );
+        }
+    }
+}
+
+/// [`compact_person_project`] plus a published text index over `name`.
+#[cfg(feature = "search")]
+fn compact_person_project_with_text_index(project: &Path) {
+    let graph = GraphForge::new(Some(project.to_str().unwrap())).unwrap();
+    graph
+        .execute(
+            "UNWIND range(1, 200) AS i \
+             CREATE (a:Person {name: 'p' + toString(i), rank: i}) \
+             CREATE (b:Person {name: 'q' + toString(i), rank: i}) \
+             CREATE (a)-[:KNOWS {since: i}]->(b)",
+        )
+        .expect("seed payload data");
+    graph
+        .index_search(
+            "Person",
+            crate::SearchIndexOptions::Text {
+                properties: Some(vec!["name".into()]),
+                rebuild: false,
+            },
+        )
+        .unwrap();
+    publish_compact_graph_workspace(project, &graph.dir());
+}
+
+#[cfg(feature = "search")]
+fn find_person(graph: &GraphForge) -> Result<arrow::record_batch::RecordBatch, GfError> {
+    graph.find(crate::FindOptions {
+        label: Some("Person".into()),
+        query: Some("p1".into()),
+        limit: 3,
+        ..crate::FindOptions::default()
+    })
+}
+
+/// Opening reads no property fragment, so a fragment corrupted in place (same
+/// inode, same length, the leading magic that no decoder reads) is first met by
+/// a read. Every read that touches it must refuse: a Cypher projection, a
+/// Cypher filter, `find` (node properties), a portable export, and a `SET`
+/// that must not publish over it.
+///
+/// Which layer refuses which row, found by removing the first-touch admission
+/// (`admit_fragment` in `property_overlay/inventory.rs`): the projection and
+/// filter rows are refused only by it, since a decoder never reads the flipped
+/// byte; `find` and the portable export and the `SET` have an independent layer
+/// (the node/edge payload checks in front of them) and so keep refusing.
+#[test]
+#[cfg(feature = "search")]
+fn property_fragment_corruption_is_refused_by_every_touching_read() {
+    use graphforge_storage::GraphFileRole;
+
+    let project = tempfile::tempdir().unwrap();
+    compact_person_project_with_text_index(project.path());
+    let clean = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    assert!(find_person(&clean).unwrap().num_rows() > 0);
+    drop(clean);
+
+    let export = |graph: &GraphForge| {
+        let out = tempfile::tempdir().unwrap();
+        graph
+            .export_portable(crate::PortableExportRequest {
+                selection: crate::PortableSelection::Current,
+                output: out.path().join("export.gfportable"),
+            })
+            .is_err()
+    };
+    let find = |graph: &GraphForge| find_person(graph).is_err();
+    let generation = || {
+        graphforge_storage::resolve_project_generation(project.path())
+            .unwrap()
+            .generation_uuid()
+    };
+    let before = generation();
+    let node_reads: [(&str, FirstTouch<'_>); 5] = [
+        ("projection", &touch(PROJECT_NAMES)),
+        ("filter", &touch(FILTER_NAMES)),
+        ("find", &find),
+        ("export", &export),
+        ("set", &touch(SET_RANK)),
+    ];
+    let edge_reads: [(&str, FirstTouch<'_>); 4] = [
+        ("projection", &touch(PROJECT_SINCE)),
+        ("filter", &touch(FILTER_SINCE)),
+        ("export", &export),
+        ("set", &touch(SET_SINCE)),
+    ];
+    for (prefix, reads) in [
+        ("properties/", node_reads.as_slice()),
+        ("edge_properties/", edge_reads.as_slice()),
+    ] {
+        let entry = compact_entry(
+            project.path(),
+            GraphFileRole::Properties,
+            prefix,
+            ".parquet",
+        );
+        eprintln!("corrupting {}", entry.relative_path);
+        let _corruption = InPlaceCorruption::apply(project.path(), &entry);
+        for (name, read) in reads {
+            let reopened = GraphForge::new(Some(project.path().to_str().unwrap()))
+                .unwrap_or_else(|error| panic!("{prefix} {name}: open reads no property: {error}"));
+            assert!(
+                read(&reopened),
+                "{} {name} answered over a corrupted property fragment",
+                entry.relative_path
+            );
+        }
+        let reopened = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+        let error = reopened
+            .execute(if prefix == "properties/" {
+                PROJECT_NAMES
+            } else {
+                PROJECT_SINCE
+            })
+            .unwrap_err();
+        assert!(
+            error.to_string().to_lowercase().contains("checksum"),
+            "{prefix}: {error}"
+        );
+    }
+    assert_eq!(generation(), before, "a refused SET must publish nothing");
+}
+
+/// A corrupted property fragment is not a stale index. `find` reads node
+/// properties to discover and bind its source, and must refuse the corruption
+/// rather than treat the index as rebuildable and publish a new one over it.
+#[test]
+#[cfg(feature = "search")]
+fn find_refuses_a_corrupted_property_fragment_instead_of_rebuilding() {
+    use graphforge_storage::GraphFileRole;
+
+    let project = tempfile::tempdir().unwrap();
+    compact_person_project_with_text_index(project.path());
+    let entry = compact_entry(
+        project.path(),
+        GraphFileRole::Properties,
+        "properties/",
+        ".parquet",
+    );
+    let _corruption = InPlaceCorruption::apply(project.path(), &entry);
+    let reopened = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    let pointer = search_pointer(&reopened);
+    let error = find_person(&reopened).expect_err("find over a corrupted property fragment");
+    assert!(
+        error.to_string().to_lowercase().contains("checksum"),
+        "{error}"
+    );
+    assert_eq!(
+        search_pointer(&reopened),
+        pointer,
+        "find must not republish the index over a refused source"
+    );
+}
+
+/// `find` must not read the graph. With every edge topology object corrupted in
+/// place (so any read of one is refused), a text `find` still answers, while a
+/// query that does read edges refuses: the corruption is live, and `find` never
+/// touches it. Before `find` used the session's admitted inventory, its source
+/// capture checksummed every payload in the project and refused here.
+#[test]
+#[cfg(feature = "search")]
+fn find_does_not_read_edge_payloads() {
+    use graphforge_storage::GraphFileRole;
+
+    let project = tempfile::tempdir().unwrap();
+    compact_person_project_with_text_index(project.path());
+    let resolved = graphforge_storage::resolve_project_generation(project.path()).unwrap();
+    let edges = resolved
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap()
+        .files
+        .into_iter()
+        .filter(|entry| {
+            entry.role == GraphFileRole::Topology
+                && entry.relative_path.starts_with("topology/edges/")
+                && entry.byte_length > 0
+        })
+        .collect::<Vec<_>>();
+    drop(resolved);
+    assert!(!edges.is_empty(), "the fixture must publish edge objects");
+    let _corruption = edges
+        .iter()
+        .map(|entry| InPlaceCorruption::apply(project.path(), entry))
+        .collect::<Vec<_>>();
+    let reopened = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    assert!(
+        reopened.execute(COUNT_EDGES).is_err(),
+        "the corrupted edge objects must be live"
+    );
+    for _ in 0..2 {
+        assert!(find_person(&reopened).unwrap().num_rows() > 0);
+    }
 }

@@ -7471,14 +7471,11 @@ fn construct_count_marker_fixture(source: &Path) -> (Vec<Node>, Vec<Option<Strin
     (nodes, payloads)
 }
 
-#[test]
-fn count_row_marker_rejects_property_corruption_after_facade_open() {
+/// Flip one byte of the count-marker fixture's `z_payload` property fragment
+/// in place, as hostile damage to an immutable object after facade open.
+fn corrupt_count_marker_payload(source: &Path) {
     use std::io::{Read, Seek, SeekFrom, Write};
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("source");
-    construct_count_marker_fixture(&source);
-    let graph = GraphForge::new(source.to_str()).unwrap();
-    let selected = graphforge_storage::resolve_project_generation(&source).unwrap();
+    let selected = graphforge_storage::resolve_project_generation(source).unwrap();
     let generation_owned = selected.declared_graph_files_inventory().unwrap().is_some();
     let inventory = selected.graph_files_inventory().unwrap().unwrap();
     let path = inventory
@@ -7489,7 +7486,7 @@ fn count_row_marker_rejects_property_corruption_after_facade_open() {
             let path = if generation_owned {
                 selected.graph_tree_root().join(&entry.relative_path)
             } else {
-                graphforge_storage::graph_object_path(&source, &entry.content_sha256).unwrap()
+                graphforge_storage::graph_object_path(source, &entry.content_sha256).unwrap()
             };
             let reader =
                 ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
@@ -7524,6 +7521,15 @@ fn count_row_marker_rejects_property_corruption_after_facade_open() {
     file.write_all(&byte).unwrap();
     file.sync_all().unwrap();
     drop(file);
+}
+
+#[test]
+fn count_row_marker_rejects_property_corruption_after_facade_open() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    construct_count_marker_fixture(&source);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    corrupt_count_marker_payload(&source);
     // An unknown route is resolved without demanding this property's payload.
     // A demanded route must authenticate even when its predicate yields no rows.
     let absent = graph
@@ -7564,6 +7570,128 @@ fn count_row_marker_rejects_property_corruption_after_facade_open() {
             "{query}: {error}"
         );
     }
+}
+
+/// A query that reads no property value plans without admitting the corrupted
+/// route, in the same session as queries that read values, whole nodes or
+/// write properties; each of those refuses the corruption, before planning
+/// (`LIMIT 0`) as much as at execution.
+#[test]
+fn value_free_queries_plan_beside_refused_property_reads_in_one_session() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    construct_count_marker_fixture(&source);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    corrupt_count_marker_payload(&source);
+    let value_free = |graph: &GraphForge| {
+        let result = graph
+            .execute("MATCH (n:Missing) RETURN count(*) AS value")
+            .unwrap();
+        let batch = result
+            .batches
+            .iter()
+            .find(|batch| batch.num_rows() == 1)
+            .unwrap();
+        assert_eq!(int_at(batch, 0, 0), Some(0));
+    };
+    value_free(&graph);
+    for query in [
+        "MATCH (n) RETURN n",
+        "MATCH (n) RETURN keys(n) AS value",
+        "MATCH (n) RETURN properties(n) AS value",
+        "MATCH p = (n) RETURN p",
+        "MATCH (n) RETURN n.score AS value LIMIT 0",
+        "MATCH (n) SET n.score = 1",
+        "MATCH (n) REMOVE n.score",
+    ] {
+        let error = graph.execute(query).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                graphforge_core::GfError::Project {
+                    code: graphforge_core::ProjectErrorCode::ProjectCorrupt,
+                    ..
+                }
+            ),
+            "{query}: {error}"
+        );
+    }
+    value_free(&graph);
+}
+
+/// `UNION` branches number their variables independently. An edge property
+/// named like a node topology column, read in one branch while another branch
+/// binds only nodes, is still a property value the plan must read.
+#[test]
+fn union_branch_edge_property_named_like_node_topology_is_read() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    graph
+        .execute("CREATE (:A)-[:T {updated_at: 42}]->(:B)")
+        .unwrap();
+    let result = graph
+        .execute(
+            "MATCH (a), (b), (c) RETURN count(*) AS v \
+             UNION ALL \
+             MATCH (x)-[r:T]->(y) RETURN r.updated_at AS v",
+        )
+        .unwrap();
+    let mut values = result
+        .batches
+        .iter()
+        .flat_map(|batch| (0..batch.num_rows()).map(move |row| int_at(batch, 0, row)))
+        .collect::<Vec<_>>();
+    values.sort_unstable();
+    assert_eq!(values, vec![Some(8), Some(42)]);
+}
+
+/// A pattern predicate binds its anonymous variables in a child scope. An edge
+/// bound after it must not be taken for that scope's node, so an edge property
+/// named like a node topology column is still read.
+#[test]
+fn edge_property_named_like_node_topology_after_a_pattern_predicate_is_read() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    graph
+        .execute("CREATE (:B)-[:T {updated_at: 42}]->(a:A)-[:U]->(:C)")
+        .unwrap();
+    let result = graph
+        .execute("MATCH (a:A) WHERE (a)-->() MATCH (x)-[r:T]->(a) RETURN r.updated_at AS v")
+        .unwrap();
+    let values = result
+        .batches
+        .iter()
+        .flat_map(|batch| (0..batch.num_rows()).map(move |row| int_at(batch, 0, row)))
+        .collect::<Vec<_>>();
+    assert_eq!(values, vec![Some(42)]);
+}
+
+/// A pattern predicate's anonymous edge may share its number with a node bound
+/// after the predicate. The predicate's edge property is still read, and the
+/// query still answers.
+#[test]
+fn pattern_predicate_edge_property_beside_a_later_node_is_read() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    graph
+        .execute("CREATE (:A)-[:T {updated_at: 42}]->(:B)")
+        .unwrap();
+    let count = |query: &str| {
+        let result = graph.execute(query).unwrap();
+        result
+            .batches
+            .iter()
+            .find(|batch| batch.num_rows() == 1)
+            .and_then(|batch| int_at(batch, 0, 0))
+    };
+    assert_eq!(
+        count("MATCH (a) WHERE (a)-[{updated_at: 42}]->() MATCH (b) RETURN count(*) AS v"),
+        Some(2)
+    );
+    assert_eq!(
+        count("MATCH (a) WHERE (a)-[{updated_at: 7}]->() MATCH (b) RETURN count(*) AS v"),
+        Some(0)
+    );
 }
 
 fn count_marker_rows(batches: &[RecordBatch]) -> Vec<(Uuid, Option<i64>, Option<String>)> {
@@ -7645,7 +7773,6 @@ fn count_row_marker_avoids_property_values_through_public_lifecycle() {
     let source = root.path().join("source");
     let (nodes, mut payloads) = construct_count_marker_fixture(&source);
     let graph = GraphForge::new(source.to_str()).unwrap();
-    let initial = verify_count_marker_graph(&graph, &nodes, &payloads);
     let capture = |query: &str, expected: i64| {
         let (result, captured) = graphforge_exec::demand::capture(|| graph.execute(query));
         let result = result.unwrap();
@@ -7671,8 +7798,24 @@ fn count_row_marker_avoids_property_values_through_public_lifecycle() {
         "MATCH (n) RETURN count(n.z_payload) AS value",
         payloads.iter().filter(|payload| payload.is_some()).count() as i64,
     );
-    assert!(counted.authentication_bytes > 0);
-    assert_eq!(counted.authentication_bytes, values.authentication_bytes);
+    // Property fragments are not admitted at open (#1388). Every read decodes a
+    // privately authenticated snapshot of each fragment it touches, so a bare
+    // `count(*)` and the query that reads the values each authenticate every
+    // declared node-property byte, whole, once per read.
+    let declared_property_bytes = graphforge_storage::resolve_project_generation(&source)
+        .unwrap()
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap()
+        .files
+        .iter()
+        .filter(|entry| entry.relative_path.starts_with("properties/"))
+        .map(|entry| entry.byte_length)
+        .sum::<u64>();
+    assert!(declared_property_bytes > 0);
+    assert_eq!(counted.authentication_bytes, declared_property_bytes);
+    assert_eq!(values.authentication_bytes, counted.authentication_bytes);
+    let initial = verify_count_marker_graph(&graph, &nodes, &payloads);
     assert!(counted.physical_rows > 0);
     assert_eq!(counted.physical_rows, values.physical_rows);
     let unrequested_bytes = payloads.iter().flatten().map(String::len).sum::<usize>() as u64;

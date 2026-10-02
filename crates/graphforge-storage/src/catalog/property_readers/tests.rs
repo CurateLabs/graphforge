@@ -205,7 +205,7 @@ async fn property_sql_and_direct_reads_share_newest_overlay_authority() {
     assert_eq!(direct_names.value(0), "new");
 
     let ctx = SessionContext::new();
-    let table = PropertyTable::open_discovered(dir.path(), "Person");
+    let table = PropertyTable::open_discovered(dir.path(), "Person").unwrap();
     let state = ctx.state();
     let full_plan = table
         .scan(&state as &dyn Session, None, &[], None)

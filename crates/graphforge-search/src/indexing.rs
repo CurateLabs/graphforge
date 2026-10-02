@@ -34,6 +34,9 @@ pub enum SearchIndexRequest<'a> {
         properties: Option<&'a [String]>,
         /// Force atomic replacement even when an exact fresh artifact exists.
         rebuild: bool,
+        /// The caller's admitted property inventory; see
+        /// [`TextIndexRequest::inventory`].
+        inventory: Option<&'a graphforge_storage::AuthenticatedPropertyInventory>,
     },
     /// Insert or replace one UUID-keyed vector.
     Vector {
@@ -89,6 +92,7 @@ where
             topology,
             properties,
             rebuild,
+            inventory,
         } => {
             let mode = if rebuild {
                 SearchPublicationMode::Replace
@@ -103,6 +107,7 @@ where
                         label,
                         label_id,
                         properties,
+                        inventory,
                     },
                     mode,
                     limits.text,
@@ -114,6 +119,7 @@ where
                         topology,
                         label,
                         label_id,
+                        inventory,
                     },
                     mode,
                     limits.text,
@@ -209,6 +215,7 @@ mod tests {
             ),
             properties,
             rebuild,
+            inventory: None,
         }
     }
 

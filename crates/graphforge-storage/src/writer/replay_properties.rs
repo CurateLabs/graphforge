@@ -578,7 +578,7 @@ fn stream_replay_property_route_with_table(
     }
     let mut fragment = None;
     let target_names = target_names.into_iter().collect::<Vec<_>>();
-    let authority = inventory.route_schema(kind, route);
+    let authority = inventory.route_schema(kind, route)?;
     let schema_base = authority
         .clone()
         .unwrap_or_else(|| replay_property_base_schema(kind));

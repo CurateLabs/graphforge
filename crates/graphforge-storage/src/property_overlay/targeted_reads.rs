@@ -76,7 +76,7 @@ fn resolve_edge_property_owners(
     for (uuid, route) in owners.iter() {
         for candidate in [route.as_str(), "_exploratory"] {
             if inventory
-                .route_schema(PropertyRouteKind::Edge, candidate)
+                .route_schema(PropertyRouteKind::Edge, candidate)?
                 .is_some()
             {
                 if let Some(targets) = candidates.get_mut(candidate) {
@@ -339,9 +339,9 @@ pub(super) fn read_property_targets(
             ));
         }
         if let Some(bytes) = replay_budget {
-            admit_target_footer(opened.file.as_ref(), fragment.logical_length, bytes)?;
+            admit_target_footer(opened.file.as_ref(), opened.logical_length, bytes)?;
         }
-        let builder = open_counted_retained_property_builder(fragment, &opened, counts.clone())?;
+        let builder = open_counted_retained_property_builder(&opened, counts.clone())?;
         validate_fragment_schema(
             builder.schema().as_ref(),
             fragment.id,
@@ -418,7 +418,6 @@ pub(super) fn read_property_targets(
             }
             decode_target_row_groups(
                 TargetDecodeOptions {
-                    fragment,
                     opened: &opened,
                     kind,
                     row_groups,
@@ -531,11 +530,11 @@ fn select_target_row_groups(
     targeted_batch_rows: usize,
     retained_bytes: u64,
 ) -> Result<Vec<usize>, GfError> {
-    let builder = open_counted_retained_property_builder(fragment, opened, counts.clone())?;
+    let builder = open_counted_retained_property_builder(opened, counts.clone())?;
     let mut selected_groups = Vec::new();
     let mut prior_uuid = None;
     for index in 0..builder.metadata().num_row_groups() {
-        let validation = open_counted_retained_property_builder(fragment, opened, counts.clone())?
+        let validation = open_counted_retained_property_builder(opened, counts.clone())?
             .with_row_groups(vec![index])
             .with_batch_size(targeted_batch_rows)
             .build()
@@ -600,7 +599,6 @@ fn select_target_row_groups(
 }
 
 struct TargetDecodeOptions<'a> {
-    fragment: &'a AuthenticatedPropertyFragment,
     opened: &'a OpenPropertyFragment,
     kind: PropertyRouteKind,
     row_groups: Vec<usize>,
@@ -616,12 +614,11 @@ fn decode_target_row_groups(
     retained_bytes: &mut u64,
     mut metrics: Option<&mut PropertyOverlayMetrics>,
 ) -> Result<(), GfError> {
-    let reader =
-        open_counted_retained_property_builder(options.fragment, options.opened, counts.clone())?
-            .with_row_groups(options.row_groups)
-            .with_batch_size(options.batch_rows)
-            .build()
-            .map_err(parquet_error)?;
+    let reader = open_counted_retained_property_builder(options.opened, counts.clone())?
+        .with_row_groups(options.row_groups)
+        .with_batch_size(options.batch_rows)
+        .build()
+        .map_err(parquet_error)?;
     for batch in reader {
         let batch = batch.map_err(authenticated_arrow_error)?;
         charge_target_batch(

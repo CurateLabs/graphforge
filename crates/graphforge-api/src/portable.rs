@@ -1076,6 +1076,7 @@ mod tests {
             .find(|route| {
                 inventory
                     .route_schema(graphforge_storage::PropertyRouteKind::Edge, route)
+                    .unwrap()
                     .is_some_and(|schema| schema.field_with_name("weight").is_ok())
             })
             .unwrap()
@@ -1196,7 +1197,7 @@ mod tests {
                 .map(|route| {
                     (
                         route.to_owned(),
-                        inventory.route_schema(kind, route).unwrap(),
+                        inventory.route_schema(kind, route).unwrap().unwrap(),
                     )
                 })
                 .collect::<std::collections::BTreeMap<_, _>>()

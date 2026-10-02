@@ -117,7 +117,9 @@ where
                 .map_err(|error| DataFusionError::External(Box::new(error)))?;
         &captured
     };
-    let schema = inventory.route_schema(kind, stem);
+    let schema = inventory
+        .route_schema(kind, stem)
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
     let scratch = inventory
         .create_snapshot_scratch()
         .map_err(|error| DataFusionError::External(Box::new(error)))?;
@@ -265,8 +267,14 @@ where
 /// `visit` receives only the newest live row for each UUID in a route. This
 /// keeps consumers from mistaking superseded immutable snapshots for duplicate
 /// logical rows.
+///
+/// `retained` is the session's already admitted inventory. Without it the
+/// project's current authority is captured here, which checksums every payload
+/// of a raw workspace; a caller that holds the inventory must pass it so the
+/// read costs the property sources it touches, not the graph.
 pub fn visit_node_property_overlay_admitted<F>(
     dir: &Path,
+    retained: Option<&crate::AuthenticatedPropertyInventory>,
     batch_size: usize,
     byte_limit: u64,
     projected_columns: Option<&std::collections::BTreeSet<String>>,
@@ -276,8 +284,14 @@ pub fn visit_node_property_overlay_admitted<F>(
 where
     F: FnMut(&str, &RecordBatch) -> Result<bool, DataFusionError>,
 {
-    let inventory = crate::property_overlay::authenticated_property_inventory(dir)
-        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let captured;
+    let inventory = if let Some(retained) = retained {
+        retained
+    } else {
+        captured = crate::property_overlay::authenticated_property_inventory(dir)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+        &captured
+    };
     let admitted =
         inventory.admitted_source_files(crate::property_overlay::PropertyRouteKind::Node);
     let total = admitted.iter().try_fold(0_u64, |sum, file| {

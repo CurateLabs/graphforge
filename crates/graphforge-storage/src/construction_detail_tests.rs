@@ -778,4 +778,109 @@ mod compact_details {
             assert_eq!(std::fs::read(root.path().join("CURRENT")).unwrap(), current);
         }
     }
+
+    /// Catalog open names a compact generation's property routes without
+    /// admitting their content. The table a caller asks for admits its route
+    /// then, and refuses a fragment changed in place as project corruption,
+    /// while a key-only lowering snapshot still compiles.
+    #[test]
+    fn catalog_admits_a_property_route_only_when_its_table_is_requested() {
+        use datafusion::catalog::CatalogProvider as _;
+        use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+        let root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let mut session = create(
+            &root,
+            Uuid::new_v4(),
+            GraphConstructionBudgets::default(),
+            None,
+        );
+        session
+            .append(
+                ConstructionChunkKind::Node,
+                "nodes",
+                &node_property_batch(1, 3),
+            )
+            .unwrap();
+        session
+            .append(ConstructionChunkKind::Edge, "edges", &edge_batch(100, 1, 3, 2))
+            .unwrap();
+        session.seal().unwrap();
+        let encoded = session.prepare_canonical_encoding(1).unwrap();
+        session
+            .publish_canonical(&encoded, Uuid::new_v4(), Uuid::new_v4())
+            .unwrap();
+        drop(session);
+        let selected = crate::resolve_project_generation(root.path()).unwrap();
+        let inventory = Arc::new(
+            crate::AuthenticatedPropertyInventory::from_resolved_generation(&selected).unwrap(),
+        );
+        let objects = inventory.property_object_paths(crate::PropertyRouteKind::Node, "_untyped");
+        let [object] = objects.as_slice() else {
+            panic!("one node property object expected: {objects:?}")
+        };
+        let original = std::fs::metadata(object).unwrap().permissions();
+        let mut writable = original.clone();
+        #[allow(clippy::permissions_set_readonly_false)]
+        writable.set_readonly(false);
+        std::fs::set_permissions(object, writable).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(object)
+            .unwrap();
+        let mut byte = [0_u8; 1];
+        file.seek(SeekFrom::Start(4)).unwrap();
+        file.read_exact(&mut byte).unwrap();
+        file.seek(SeekFrom::Start(4)).unwrap();
+        file.write_all(&[byte[0] ^ 1]).unwrap();
+        drop(file);
+        std::fs::set_permissions(object, original).unwrap();
+
+        let catalog = crate::GraphCatalog::open_authenticated(
+            root.path(),
+            None,
+            &graphforge_ir::RuntimeCatalog::new(),
+            Arc::clone(&inventory),
+        )
+        .expect("catalog open admits no property content");
+        let schema = catalog.schema("graph").unwrap();
+        assert!(schema.table_exist("properties__untyped"));
+        assert!(
+            schema
+                .table_names()
+                .contains(&"properties__untyped".to_owned())
+        );
+        let keys = catalog
+            .lowering_snapshot_for(Some(root.path()), graphforge_ir::PropertyDemand::None)
+            .expect("a value-free plan compiles without admitting the route");
+        assert!(keys.property_schemas_omitted);
+        assert_eq!(
+            keys.node_properties["_untyped"],
+            crate::schemas::PROPERTY_BASE_SCHEMA.clone()
+        );
+
+        let corrupt = |error: &GfError| {
+            matches!(
+                error,
+                GfError::Project {
+                    code: graphforge_core::ProjectErrorCode::ProjectCorrupt,
+                    ..
+                }
+            )
+        };
+        let refused = futures::executor::block_on(schema.table("properties__untyped"))
+            .expect_err("the requested table admits its corrupted route");
+        let datafusion::error::DataFusionError::External(refused) = refused else {
+            panic!("typed refusal expected: {refused}")
+        };
+        assert!(
+            refused.downcast_ref::<GfError>().is_some_and(corrupt),
+            "{refused}"
+        );
+        let refused = catalog
+            .lowering_snapshot(Some(root.path()))
+            .expect_err("value schemas admit the corrupted route");
+        assert!(corrupt(&refused), "{refused}");
+    }
 }
