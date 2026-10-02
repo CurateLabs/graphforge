@@ -411,16 +411,23 @@ impl GraphForge {
         let bindings = graphforge_storage::semantic_storage_bindings(&parent)
             .map_err(MultiOntologyError::from)?
             .ok_or_else(|| GfError::Validation("semantic storage bindings are missing"))?;
-        // A compact parent has no generation tree: read it through a private
-        // hydration, which aliases the tree itself only for an expanded parent.
         let (parent_tree, _parent_guard, _) = crate::hydrate_graph_workspace(&parent, true)?;
-        let plan = graphforge_storage::SemanticStorageBindings::plan_retained_data_migration(
-            &previous_compiled,
-            &next_compiled,
-            &bindings,
+        let parent_inventory =
+            crate::property_inventory_for_hydrated_generation(&parent, &parent_tree)?;
+        let parent_authority = graphforge_storage::TopologyFileAuthority::from_inventory(
             &parent_tree,
-        )
-        .map_err(MultiOntologyError::from)?;
+            &parent_inventory,
+        )?;
+        let plan =
+            graphforge_storage::SemanticStorageBindings::plan_retained_data_migration_from_files(
+                &previous_compiled,
+                &next_compiled,
+                &bindings,
+                &parent_tree,
+                &[],
+                &graphforge_storage::enumerate_topology_files(&parent_authority, None)?,
+            )
+            .map_err(MultiOntologyError::from)?;
         Ok(ModuleMigrationPreview {
             previous_module,
             next_module,
@@ -471,16 +478,30 @@ impl GraphForge {
             GfError::Validation("module migration private staging cannot be created")
         })?;
         let candidate_graph = private.path().join("graph");
+        let migration_parent = graphforge_storage::resolve_generation_by_uuid(
+            self.resolved_generation.container_root(),
+            request.authority.expected_project_generation_uuid,
+        )?;
         let (source_tree, _source_guard, _) =
-            crate::hydrate_graph_workspace(&self.resolved_generation, true)?;
-        let evidence = graphforge_storage::materialize_semantic_migration(
-            &preview.plan,
+            crate::hydrate_graph_workspace(&migration_parent, true)?;
+        let source_inventory =
+            crate::property_inventory_for_hydrated_generation(&migration_parent, &source_tree)?;
+        let source_authority = graphforge_storage::TopologyFileAuthority::from_inventory(
             &source_tree,
-            &candidate_graph,
-            graphforge_storage::SemanticMigrationLimits::default(),
-            || cancellation.map_or(Ok(()), CancellationToken::checkpoint),
-        )
-        .map_err(MultiOntologyError::from)?;
+            &source_inventory,
+        )?;
+        let source_topology =
+            graphforge_storage::enumerate_topology_files(&source_authority, None)?;
+        let (evidence, candidate_topology) =
+            graphforge_storage::materialize_semantic_migration_from_files(
+                &preview.plan,
+                &source_tree,
+                &candidate_graph,
+                graphforge_storage::SemanticMigrationLimits::default(),
+                || cancellation.map_or(Ok(()), CancellationToken::checkpoint),
+                &source_topology,
+            )
+            .map_err(MultiOntologyError::from)?;
         if evidence.plan_digest != preview.plan.plan_digest {
             return Err(GfError::Validation(
                 "materialized migration evidence does not match preview plan",
@@ -508,6 +529,7 @@ impl GraphForge {
             &preview.plan.bindings,
             expected_generation,
             &candidate_graph,
+            &candidate_topology,
             cancellation,
         )
         .map_err(MultiOntologyError::from)?;

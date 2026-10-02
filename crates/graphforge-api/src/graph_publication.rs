@@ -14,12 +14,14 @@ pub(super) type BoundGenerationStorage = (
 /// Prepare the compact root for the private workspace over `parent`.
 ///
 /// Every mutating commit publishes a compact graph root: only files that changed
-/// since the parent install, and the generation owns no graph tree. Keep the
-/// returned lease through `CURRENT` and publish with it.
+/// since the parent install, and the generation owns no graph tree. Topology
+/// payloads are exactly `topology`, never discovered from the directory. Keep
+/// the returned lease through `CURRENT` and publish with it.
 pub(crate) fn compact_graph_participant(
     workspace: &std::path::Path,
     parent: &graphforge_storage::ResolvedProjectGeneration,
     repair_corrupt_adjacency: bool,
+    topology: &graphforge_storage::TopologyFiles,
 ) -> Result<
     (
         graphforge_storage::ProjectParticipant,
@@ -28,9 +30,11 @@ pub(crate) fn compact_graph_participant(
     GfError,
 > {
     if repair_corrupt_adjacency {
-        graphforge_storage::prepare_compact_graph_publication_repairing_adjacency(parent, workspace)
+        graphforge_storage::prepare_compact_graph_publication_repairing_adjacency(
+            parent, workspace, topology,
+        )
     } else {
-        graphforge_storage::prepare_compact_graph_publication(parent, workspace)
+        graphforge_storage::prepare_compact_graph_publication(parent, workspace, topology)
     }
 }
 
@@ -69,10 +73,11 @@ impl GraphForge {
         let (projected, route_moves) =
             if current.is_none() && context.composition().modules.len() == 1 {
                 let projection =
-                    graphforge_storage::SemanticStorageBindings::project_legacy_unambiguous(
-                        context.composition(),
-                        &self.dir(),
-                    )?;
+                graphforge_storage::SemanticStorageBindings::project_legacy_unambiguous_from_files(
+                    context.composition(),
+                    &self.dir(),
+                    &self.dir().topology_files()?,
+                )?;
                 (projection.bindings, projection.route_moves)
             } else {
                 if current.is_none() {
@@ -180,13 +185,18 @@ impl GraphForge {
         }
 
         if !graphforge_storage::uuid_membership_index_is_fresh(&self.dir())? {
-            graphforge_storage::rebuild_uuid_membership_indexes(
+            graphforge_storage::rebuild_uuid_membership_indexes_with_topology(
                 &self.dir(),
                 graphforge_storage::UuidIndexBuildLimits::default(),
+                std::sync::Arc::clone(&self.dir().topology),
             )?;
         }
-        let (graph, graph_objects) =
-            compact_graph_participant(&self.dir(), &parent, repair_corrupt_adjacency)?;
+        let (graph, graph_objects) = compact_graph_participant(
+            &self.dir(),
+            &parent,
+            repair_corrupt_adjacency,
+            &self.dir().topology_files()?,
+        )?;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let installed_bindings = self
             .semantic_storage_bindings
@@ -284,12 +294,14 @@ impl GraphForge {
             ));
         }
         if !graphforge_storage::uuid_membership_index_is_fresh(&self.dir())? {
-            graphforge_storage::rebuild_uuid_membership_indexes(
+            graphforge_storage::rebuild_uuid_membership_indexes_with_topology(
                 &self.dir(),
                 graphforge_storage::UuidIndexBuildLimits::default(),
+                std::sync::Arc::clone(&self.dir().topology),
             )?;
         }
-        let (graph, graph_objects) = compact_graph_participant(&self.dir(), &parent, false)?;
+        let (graph, graph_objects) =
+            compact_graph_participant(&self.dir(), &parent, false, &self.dir().topology_files()?)?;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let participants = graph_publication_participants(
             &parent,
@@ -452,7 +464,11 @@ impl GraphForge {
     /// Replace the session's read authority with what the workspace holds now.
     fn reset_read_authority_from_workspace(&self) -> Result<(), GfError> {
         let generation = self.generation_for_read()?;
-        let (captured, _) = graphforge_storage::capture_graph_files(&self.dir())?;
+        self.dir().topology.clear();
+        let (captured, _) = graphforge_storage::capture_graph_files_with_topology(
+            &self.dir(),
+            &self.dir().topology_files()?,
+        )?;
         let inventory = std::sync::Arc::new(
             graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
                 &generation,

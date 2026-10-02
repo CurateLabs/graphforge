@@ -21,15 +21,60 @@ pub fn materialize_semantic_migration(
     source_graph_root: &Path,
     destination_graph_root: &Path,
     limits: SemanticMigrationLimits,
-    mut checkpoint: impl FnMut() -> Result<(), GfError>,
+    checkpoint: impl FnMut() -> Result<(), GfError>,
 ) -> Result<SemanticMigrationEvidence, GfError> {
+    materialize_semantic_migration_selected(
+        plan,
+        source_graph_root,
+        destination_graph_root,
+        limits,
+        checkpoint,
+        None,
+    )
+    .map(|(evidence, _)| evidence)
+}
+
+/// Materialize from selected topology, returning the exact output membership.
+pub fn materialize_semantic_migration_from_files(
+    plan: &SemanticMigrationPlan,
+    source_graph_root: &Path,
+    destination_graph_root: &Path,
+    limits: SemanticMigrationLimits,
+    checkpoint: impl FnMut() -> Result<(), GfError>,
+    topology: &crate::TopologyFiles,
+) -> Result<(SemanticMigrationEvidence, crate::TopologyFiles), GfError> {
+    materialize_semantic_migration_selected(
+        plan,
+        source_graph_root,
+        destination_graph_root,
+        limits,
+        checkpoint,
+        Some(topology),
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn materialize_semantic_migration_selected(
+    plan: &SemanticMigrationPlan,
+    source_graph_root: &Path,
+    destination_graph_root: &Path,
+    limits: SemanticMigrationLimits,
+    mut checkpoint: impl FnMut() -> Result<(), GfError>,
+    topology: Option<&crate::TopologyFiles>,
+) -> Result<(SemanticMigrationEvidence, crate::TopologyFiles), GfError> {
     if destination_graph_root.exists() {
         return Err(corrupt("semantic migration candidate already exists"));
     }
     if limits.batch_rows == 0 || limits.batch_rows > 1_000_000 {
         return Err(corrupt("semantic migration batch bound is invalid"));
     }
-    let (inventory, _) = crate::capture_graph_files(source_graph_root)?;
+    let capture_source = || -> Result<crate::GraphFilesInventory, GfError> {
+        Ok(match topology {
+            Some(files) => crate::capture_graph_files_with_topology(source_graph_root, files)?.0,
+            None => crate::capture_graph_files(source_graph_root)?.0,
+        })
+    };
+    let inventory = capture_source()?;
     let source_routes = crate::graph_projection::TransformRoutes::from_inventory(
         source_graph_root,
         inventory.clone(),
@@ -131,6 +176,7 @@ pub fn materialize_semantic_migration(
         .map_err(|_| corrupt("semantic migration candidate cannot be created"))?;
     let result = (|| {
         let mut output_table = crate::route_component::RouteTable::default();
+        let mut written = crate::TopologyFiles::default();
         let mut files_materialized = 0_u64;
         let mut rows_rewritten = 0_u64;
         let mut max_batch_rows = 0_usize;
@@ -147,7 +193,20 @@ pub fn materialize_semantic_migration(
                 &target_relative,
                 &mut output_table,
             )?;
-            let target = staging_graph_root.join(target_relative);
+            let target = staging_graph_root.join(&target_relative);
+            if crate::topology_files::is_node(&target_relative) {
+                written
+                    .nodes
+                    .push((target.clone(), target_relative.clone()));
+            } else if target_relative.starts_with("topology/edges/") {
+                let logical = output_table.semantic_relative_path(&target_relative)?;
+                let route = crate::route_component::route_position(&logical)?
+                    .ok_or_else(|| corrupt("migration output edge lacks route"))?
+                    .to_owned();
+                written
+                    .edges
+                    .push((route, target.clone(), target_relative.clone()));
+            }
             std::fs::create_dir_all(
                 target
                     .parent()
@@ -258,7 +317,7 @@ pub fn materialize_semantic_migration(
         }
         crate::graph_projection::install_transform_table(&staging_graph_root, &output_table)?;
         files_materialized += 1;
-        let (verified_source, _) = crate::capture_graph_files(source_graph_root)?;
+        let verified_source = capture_source()?;
         if hex(Sha256::digest(crate::encode_inventory(&verified_source)?).into())
             != plan.source_inventory_sha256
         {
@@ -301,15 +360,19 @@ pub fn materialize_semantic_migration(
                 }
             }
         }
-        let (candidate, _) = crate::capture_graph_files(&staging_graph_root)?;
+        let (candidate, _) =
+            crate::capture_graph_files_with_topology(&staging_graph_root, &written)?;
         let candidate_bytes = crate::encode_inventory(&candidate)?;
-        Ok(SemanticMigrationEvidence {
-            plan_digest: plan.plan_digest.clone(),
-            files_materialized,
-            rows_rewritten,
-            max_batch_rows,
-            candidate_inventory_sha256: hex(Sha256::digest(candidate_bytes).into()),
-        })
+        Ok((
+            SemanticMigrationEvidence {
+                plan_digest: plan.plan_digest.clone(),
+                files_materialized,
+                rows_rewritten,
+                max_batch_rows,
+                candidate_inventory_sha256: hex(Sha256::digest(candidate_bytes).into()),
+            },
+            written,
+        ))
     })();
     let evidence = match result {
         Ok(evidence) => evidence,
@@ -332,7 +395,7 @@ pub fn materialize_semantic_migration(
             )),
         }
     })?;
-    Ok(evidence)
+    Ok((evidence.0, evidence.1.at_root(destination_graph_root)))
 }
 
 fn migrated_semantic_wire(relative: &str, route_moves: &BTreeMap<String, String>) -> String {

@@ -73,6 +73,7 @@ pub struct GraphDeleteExec {
     cols: Vec<DeleteCol>,
     detach: bool,
     dir: PathBuf,
+    topology: Arc<graphforge_storage::TopologyFileAuthority>,
     mutation_health: mutation::MutationHealth,
     schema: SchemaRef,
     props: Arc<PlanProperties>,
@@ -117,6 +118,7 @@ impl GraphDeleteExec {
             cols,
             detach: node.detach,
             dir: resource.dir.clone(),
+            topology: resource.topology_authority(),
             mutation_health: resource.health.clone(),
             schema,
             props,
@@ -172,6 +174,7 @@ impl ExecutionPlan for GraphDeleteExec {
             cols: self.cols.clone(),
             detach: self.detach,
             dir: self.dir.clone(),
+            topology: Arc::clone(&self.topology),
             mutation_health: self.mutation_health.clone(),
             schema: self.schema.clone(),
             props: self.props.clone(),
@@ -198,6 +201,7 @@ impl ExecutionPlan for GraphDeleteExec {
         let cols = self.cols.clone();
         let detach = self.detach;
         let dir = self.dir.clone();
+        let topology = Arc::clone(&self.topology);
         let out_schema = self.schema.clone();
         let stream_schema = self.schema.clone();
 
@@ -217,8 +221,12 @@ impl ExecutionPlan for GraphDeleteExec {
             // statement. So `MATCH (a)-[r]->(b) DELETE r, a` is legal (r is gone
             // too), but deleting `a` while any *untargeted* edge remains on it is
             // an error. With DETACH, all incident edges are removed regardless.
-            let incident =
-                graphforge_storage::incident_edge_uuids(&dir, &node_uuids).map_err(to_df_err)?;
+            let incident = graphforge_storage::incident_edge_uuids_from_files(
+                &graphforge_storage::enumerate_topology_files(&topology, None)
+                    .map_err(to_df_err)?,
+                &node_uuids,
+            )
+            .map_err(to_df_err)?;
             if detach {
                 edge_uuids.extend(incident);
             } else {
@@ -238,8 +246,13 @@ impl ExecutionPlan for GraphDeleteExec {
             // building any replacement file leaves the prior state intact, and
             // the commit renames `topology/nodes.parquet` last.
             let (nodes_deleted, edges_deleted) =
-                graphforge_storage::delete_nodes_and_edges(&dir, &node_uuids, &edge_uuids)
-                    .map_err(to_df_err)?;
+                graphforge_storage::delete_nodes_and_edges_with_topology(
+                    &dir,
+                    &node_uuids,
+                    &edge_uuids,
+                    Some(topology),
+                )
+                .map_err(to_df_err)?;
             delete_summary_batch(&out_schema, nodes_deleted, edges_deleted).map_err(to_df_err)
         };
         Ok(self

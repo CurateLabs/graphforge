@@ -1,0 +1,509 @@
+{
+  "$defs": {
+    "bridge_descriptor": {
+      "additionalProperties": false,
+      "properties": {
+        "content_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "id": {
+          "$ref": "#/$defs/identity_text"
+        },
+        "version": {
+          "$ref": "#/$defs/identity_text"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "content_digest"
+      ],
+      "type": "object"
+    },
+    "digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "extensions": {
+      "maxProperties": 256,
+      "propertyNames": {
+        "pattern": "^x-[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$"
+      },
+      "type": "object"
+    },
+    "facts": {
+      "additionalProperties": false,
+      "properties": {
+        "components": {
+          "additionalProperties": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "propertyNames": {
+            "enum": [
+              "ontology",
+              "schema",
+              "migration",
+              "settings",
+              "graph-data",
+              "derived-artifact",
+              "evidence",
+              "provenance",
+              "compatibility",
+              "research"
+            ]
+          },
+          "type": "object"
+        },
+        "evidence_present": {
+          "type": "boolean"
+        },
+        "ontology_composition": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "bridge_sets": {
+                  "items": {
+                    "$ref": "#/$defs/bridge_descriptor"
+                  },
+                  "maxItems": 4096,
+                  "type": "array"
+                },
+                "composition_digest": {
+                  "$ref": "#/$defs/digest"
+                },
+                "modules": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "content_digest": {
+                        "$ref": "#/$defs/digest"
+                      },
+                      "dialect": {
+                        "$ref": "#/$defs/identity_text"
+                      },
+                      "id": {
+                        "$ref": "#/$defs/identity_text"
+                      },
+                      "profile": {
+                        "$ref": "#/$defs/identity_text"
+                      },
+                      "version": {
+                        "$ref": "#/$defs/identity_text"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "version",
+                      "content_digest",
+                      "dialect",
+                      "profile"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 4096,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "composition_digest",
+                "modules",
+                "bridge_sets"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ontology_mode": {
+          "enum": [
+            "none",
+            "advisory",
+            "strict"
+          ]
+        },
+        "payload_bytes": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "research_present": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ontology_mode",
+        "components",
+        "research_present",
+        "evidence_present",
+        "payload_bytes",
+        "ontology_composition"
+      ],
+      "type": "object"
+    },
+    "identity": {
+      "additionalProperties": false,
+      "properties": {
+        "owner": {
+          "$ref": "#/$defs/slug"
+        },
+        "repository": {
+          "$ref": "#/$defs/slug"
+        }
+      },
+      "required": [
+        "owner",
+        "repository"
+      ],
+      "type": "object"
+    },
+    "identity_text": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    },
+    "metadata": {
+      "additionalProperties": false,
+      "properties": {
+        "access": {
+          "additionalProperties": false,
+          "properties": {
+            "access_policy": {
+              "$ref": "#/$defs/optional_text"
+            },
+            "visibility": {
+              "$ref": "#/$defs/optional_text"
+            }
+          },
+          "required": [
+            "visibility",
+            "access_policy"
+          ],
+          "type": "object"
+        },
+        "authors": {
+          "$ref": "#/$defs/text_list"
+        },
+        "canonical_identifiers": {
+          "$ref": "#/$defs/text_list"
+        },
+        "corpus_size": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "artifact_count": {
+                  "$ref": "#/$defs/optional_count"
+                },
+                "node_count": {
+                  "$ref": "#/$defs/optional_count"
+                },
+                "relationship_count": {
+                  "$ref": "#/$defs/optional_count"
+                },
+                "source_count": {
+                  "$ref": "#/$defs/optional_count"
+                }
+              },
+              "required": [
+                "node_count",
+                "relationship_count",
+                "source_count",
+                "artifact_count"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_at": {
+          "$ref": "#/$defs/optional_text"
+        },
+        "description": {
+          "$ref": "#/$defs/optional_text"
+        },
+        "external_identifiers": {
+          "$ref": "#/$defs/text_list"
+        },
+        "geographic_coverage": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "label": {
+                  "$ref": "#/$defs/optional_text"
+                },
+                "regions": {
+                  "$ref": "#/$defs/text_list"
+                }
+              },
+              "required": [
+                "label",
+                "regions"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "languages": {
+          "$ref": "#/$defs/text_list"
+        },
+        "license": {
+          "$ref": "#/$defs/optional_text"
+        },
+        "ontologies": {
+          "$ref": "#/$defs/text_list"
+        },
+        "originating_projects": {
+          "$ref": "#/$defs/text_list"
+        },
+        "related_projects": {
+          "$ref": "#/$defs/text_list"
+        },
+        "source_types": {
+          "$ref": "#/$defs/text_list"
+        },
+        "subjects": {
+          "$ref": "#/$defs/text_list"
+        },
+        "tags": {
+          "$ref": "#/$defs/text_list"
+        },
+        "temporal_coverage": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "end": {
+                  "$ref": "#/$defs/optional_text"
+                },
+                "label": {
+                  "$ref": "#/$defs/optional_text"
+                },
+                "start": {
+                  "$ref": "#/$defs/optional_text"
+                }
+              },
+              "required": [
+                "start",
+                "end",
+                "label"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "$ref": "#/$defs/optional_text"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/optional_text"
+        }
+      },
+      "required": [
+        "title",
+        "description",
+        "authors",
+        "subjects",
+        "languages",
+        "geographic_coverage",
+        "temporal_coverage",
+        "source_types",
+        "corpus_size",
+        "ontologies",
+        "license",
+        "access",
+        "tags",
+        "originating_projects",
+        "related_projects",
+        "canonical_identifiers",
+        "external_identifiers",
+        "created_at",
+        "updated_at"
+      ],
+      "type": "object"
+    },
+    "optional_count": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "optional_text": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/text"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "semantic": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "major": {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "capability",
+        "major"
+      ],
+      "type": "object"
+    },
+    "slug": {
+      "maxLength": 100,
+      "minLength": 1,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$",
+      "type": "string"
+    },
+    "text": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+      "type": "string"
+    },
+    "text_list": {
+      "items": {
+        "$ref": "#/$defs/text"
+      },
+      "maxItems": 256,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "version": {
+      "additionalProperties": false,
+      "properties": {
+        "major": {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://graphforge.sh/schemas/discovery/v1/summary.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "capabilities": {
+      "items": {
+        "$ref": "#/$defs/semantic"
+      },
+      "maxItems": 256,
+      "type": "array"
+    },
+    "extensions": {
+      "$ref": "#/$defs/extensions"
+    },
+    "facts": {
+      "$ref": "#/$defs/facts"
+    },
+    "format": {
+      "const": "graphforge-project-summary/1"
+    },
+    "immutable_version": {
+      "$ref": "#/$defs/digest"
+    },
+    "metadata": {
+      "$ref": "#/$defs/metadata"
+    },
+    "package": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "const": "graphforge-project/2"
+        },
+        "package_class": {
+          "enum": [
+            "complete",
+            "ontology-only",
+            "component-selective",
+            "graph-data-subset"
+          ]
+        },
+        "package_digest": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "format",
+        "package_digest",
+        "package_class"
+      ],
+      "type": "object"
+    },
+    "repository": {
+      "$ref": "#/$defs/identity"
+    },
+    "requirements": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "capability": {
+            "const": "project-summary"
+          },
+          "major": {
+            "const": 1
+          }
+        },
+        "required": [
+          "capability",
+          "major"
+        ],
+        "type": "object"
+      },
+      "maxItems": 1,
+      "type": "array"
+    },
+    "version": {
+      "$ref": "#/$defs/version"
+    }
+  },
+  "required": [
+    "format",
+    "version",
+    "repository",
+    "immutable_version",
+    "package",
+    "requirements",
+    "capabilities",
+    "metadata",
+    "facts"
+  ],
+  "title": "summary",
+  "type": "object"
+}

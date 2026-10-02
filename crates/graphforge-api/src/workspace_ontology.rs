@@ -246,6 +246,7 @@ impl GraphForge {
                 .any(|(_, name)| handle.relation_type_id(name).is_some());
         // Reconcile only a separate authenticated workspace. A failed candidate
         // cannot mutate the facade or any retained stream's graph authority.
+        let mut candidate_topology = None;
         let mut candidate = if promotes {
             let parent = self.generation_for_read()?;
             let expected = *self
@@ -258,11 +259,21 @@ impl GraphForge {
                 ));
             }
             let candidate = crate::hydrate_graph_workspace(&parent, false)?;
-            graphforge_storage::promote_runtime_graph_for_ontology(
+            let inventory =
+                crate::property_inventory_for_hydrated_generation(&parent, &candidate.0)?;
+            let authority = graphforge_storage::TopologyFileAuthority::from_inventory(
+                &candidate.0,
+                &inventory,
+            )?;
+            graphforge_storage::promote_runtime_graph_for_ontology_with_topology(
                 &candidate.0,
                 &handle,
                 &catalog,
+                std::sync::Arc::clone(&authority),
             )?;
+            candidate_topology = Some(graphforge_storage::enumerate_topology_files(
+                &authority, None,
+            )?);
             Some(candidate)
         } else {
             None
@@ -279,7 +290,14 @@ impl GraphForge {
             Some(&composition),
             None,
             Some(generation_uuid),
-            candidate.as_ref().map(|candidate| candidate.0.as_path()),
+            candidate.as_ref().map(|candidate| {
+                (
+                    candidate.0.as_path(),
+                    candidate_topology
+                        .as_ref()
+                        .expect("ontology candidate has owned topology"),
+                )
+            }),
             cancellation,
             true,
             Some(operation_fingerprint),
@@ -318,10 +336,9 @@ impl GraphForge {
                     prepared,
                 );
             }
-            self.replace_workspace_owner(crate::GraphWorkspace {
-                dir,
-                owner: workspace,
-            });
+            let inventory =
+                crate::property_inventory_for_hydrated_generation(&self.resolved_generation, &dir)?;
+            self.replace_workspace_owner(crate::GraphWorkspace::new(dir, workspace, &inventory)?);
             self.graph_open_evidence = evidence;
             *self
                 .uuid_membership_index
@@ -431,6 +448,7 @@ pub(crate) fn publish_workspace_records_with_graph_tree(
     semantic_bindings: &graphforge_storage::SemanticStorageBindings,
     generation_uuid_override: uuid::Uuid,
     candidate_graph_root: &std::path::Path,
+    candidate_topology: &graphforge_storage::TopologyFiles,
     cancellation: Option<&crate::CancellationToken>,
 ) -> Result<(), GfError> {
     publish_workspace_records_inner(
@@ -442,7 +460,7 @@ pub(crate) fn publish_workspace_records_with_graph_tree(
         Some(composition),
         Some(semantic_bindings),
         Some(generation_uuid_override),
-        Some(candidate_graph_root),
+        Some((candidate_graph_root, candidate_topology)),
         cancellation,
         false,
         None,
@@ -459,11 +477,14 @@ fn publish_workspace_records_inner(
     composition: Option<&graphforge_storage::WorkspaceOntologyComposition>,
     semantic_bindings: Option<&graphforge_storage::SemanticStorageBindings>,
     generation_uuid_override: Option<uuid::Uuid>,
-    candidate_graph_root: Option<&std::path::Path>,
+    candidate_graph: Option<(&std::path::Path, &graphforge_storage::TopologyFiles)>,
     cancellation: Option<&crate::CancellationToken>,
     prepare_candidate_readers: bool,
     operation_fingerprint: Option<[u8; 32]>,
 ) -> Result<(), GfError> {
+    let candidate_graph_root = candidate_graph.map(|(root, _)| root);
+    let candidate_topology = candidate_graph.map(|(_, files)| files);
+
     if let Some(token) = cancellation {
         token.checkpoint()?;
     }
@@ -536,7 +557,12 @@ fn publish_workspace_records_inner(
     // the parent like every other mutating commit: only changed files install.
     let mut candidate_lease = None;
     if let Some(candidate_graph_root) = candidate_graph_root {
-        let (participant, lease) = compact_graph_participant(candidate_graph_root, &parent, false)?;
+        let (participant, lease) = compact_graph_participant(
+            candidate_graph_root,
+            &parent,
+            false,
+            candidate_topology.expect("candidate graph has owned membership"),
+        )?;
         candidate_lease = Some(lease);
         participants.push(participant);
     }

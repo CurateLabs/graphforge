@@ -737,6 +737,7 @@ fn storage(e: impl std::fmt::Display) -> ExportError {
 
 #[cfg(test)]
 mod tests {
+    mod participant_files;
     mod semantic_refusals;
     use super::planning::exact_identity;
     use super::transport::open_planned_source;

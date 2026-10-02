@@ -13,6 +13,8 @@ pub(crate) use materialization::{
 };
 mod authenticated_entries;
 use authenticated_entries::StreamHash;
+mod participant_files;
+pub use participant_files::{PortableV2FileRef, PortableV2PackageIndex};
 pub(crate) mod research;
 mod semantic_validation;
 pub(crate) use semantic_validation::decode_runtime_map;
@@ -200,6 +202,18 @@ fn scan(
     sink: Option<&mut materialization::CopySink<'_>>,
     written: Option<&crate::project_portable_v2_export::WrittenPackage>,
 ) -> Result<PortableV2Report, PortableV2Error> {
+    scan_entries(source, mode, limits, cancelled, sink, written).map(|(report, _)| report)
+}
+
+/// Scan and authenticate a package, returning the report with the scanned entries.
+fn scan_entries(
+    source: &Path,
+    mode: PortableV2Mode,
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
+    sink: Option<&mut materialization::CopySink<'_>>,
+    written: Option<&crate::project_portable_v2_export::WrittenPackage>,
+) -> Result<(PortableV2Report, Vec<Entry>), PortableV2Error> {
     let metadata = fs::symlink_metadata(source)
         .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "source unavailable"))?;
     let (report, entries) = if metadata.is_dir() {
@@ -260,7 +274,7 @@ fn scan(
             }
         }
     }
-    Ok(report)
+    Ok((report, entries))
 }
 
 pub(crate) fn verify_written_package(

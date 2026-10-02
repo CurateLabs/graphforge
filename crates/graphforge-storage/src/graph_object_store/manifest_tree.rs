@@ -211,7 +211,8 @@ pub fn prepare_graph_files_replacement(
 }
 
 /// Capture a private workspace over `parent` and publish it as a compact root:
-/// the commit path of every graph mutation. Unchanged files install nothing and
+/// the commit path of every graph mutation. Its topology payloads are exactly
+/// `topology`, the session's declared and staged membership. Unchanged files install nothing and
 /// read nothing beyond the parent's declared identities; each changed file is
 /// hashed once, while it is captured, and installed against that capture.
 /// Keep the returned lease through CURRENT and stage without a graph tree.
@@ -222,6 +223,7 @@ pub fn prepare_graph_files_replacement(
 pub fn prepare_compact_graph_publication(
     parent: &crate::ResolvedProjectGeneration,
     workspace: &Path,
+    topology: &crate::TopologyFiles,
 ) -> Result<
     (
         crate::ProjectParticipant,
@@ -229,7 +231,7 @@ pub fn prepare_compact_graph_publication(
     ),
     GfError,
 > {
-    let capture = crate::graph_files::capture_workspace_over_parent(workspace, parent)?;
+    let capture = crate::graph_files::capture_workspace_over_parent(workspace, parent, topology)?;
     prepare_compact_root(
         parent,
         workspace,
@@ -246,6 +248,7 @@ pub fn prepare_compact_graph_publication(
 pub fn prepare_compact_graph_publication_repairing_adjacency(
     parent: &crate::ResolvedProjectGeneration,
     workspace: &Path,
+    topology: &crate::TopologyFiles,
 ) -> Result<
     (
         crate::ProjectParticipant,
@@ -253,8 +256,9 @@ pub fn prepare_compact_graph_publication_repairing_adjacency(
     ),
     GfError,
 > {
-    let capture =
-        crate::graph_files::capture_workspace_over_parent_repairing_adjacency(workspace, parent)?;
+    let capture = crate::graph_files::capture_workspace_over_parent_repairing_adjacency(
+        workspace, parent, topology,
+    )?;
     let (participant, lease) = prepare_compact_root(
         parent,
         workspace,

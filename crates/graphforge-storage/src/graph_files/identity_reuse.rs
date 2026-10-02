@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use super::{
     ARTIFACT_IDENTITY, GfError, GraphFileEntry, GraphFilesInventory, GraphFilesParticipant, Path,
-    build_inventory_for_owned_layout,
+    ProjectParticipant, build_inventory_for_owned_layout,
 };
 
 /// How many freshly hashed files a capture keeps open at once. Beyond it a
@@ -216,7 +216,8 @@ pub(crate) struct WorkspaceCapture {
 /// admitted) or carries its freshly computed XXH64. Changed and new files are
 /// hashed once, and each is retained for installation (at most
 /// [`MAX_RETAINED_CAPTURES`]; a commit that changes more files hashes the rest a
-/// second time as it installs them).
+/// second time as it installs them). Topology payloads are exactly `topology`,
+/// the session's declared and staged membership; the directory never adds one.
 ///
 /// # Errors
 /// Rejects links, special files, unsafe relative paths, duplicates, and
@@ -224,23 +225,9 @@ pub(crate) struct WorkspaceCapture {
 pub(crate) fn capture_workspace_over_parent(
     source_root: &Path,
     parent: &crate::ResolvedProjectGeneration,
+    topology: &crate::TopologyFiles,
 ) -> Result<WorkspaceCapture, GfError> {
-    let known = known_files(parent)?;
-    let mut captured = BTreeMap::new();
-    let (inventory, read_calls) = build_inventory_for_owned_layout(
-        source_root,
-        false,
-        Some(&known),
-        ARTIFACT_IDENTITY,
-        &mut || Ok(()),
-        Some(&mut captured),
-        None,
-    )?;
-    Ok(WorkspaceCapture {
-        inventory,
-        captured,
-        read_calls,
-    })
+    capture_compact_workspace(source_root, parent, topology, None)
 }
 
 /// Capture rebuilt adjacency files afresh even when their bytes match the
@@ -249,6 +236,16 @@ pub(crate) fn capture_workspace_over_parent(
 pub(crate) fn capture_workspace_over_parent_repairing_adjacency(
     source_root: &Path,
     parent: &crate::ResolvedProjectGeneration,
+    topology: &crate::TopologyFiles,
+) -> Result<WorkspaceCapture, GfError> {
+    capture_compact_workspace(source_root, parent, topology, Some("indexes/adjacency/"))
+}
+
+fn capture_compact_workspace(
+    source_root: &Path,
+    parent: &crate::ResolvedProjectGeneration,
+    topology: &crate::TopologyFiles,
+    force_hash_prefix: Option<&str>,
 ) -> Result<WorkspaceCapture, GfError> {
     let known = known_files(parent)?;
     let mut captured = BTreeMap::new();
@@ -259,13 +256,48 @@ pub(crate) fn capture_workspace_over_parent_repairing_adjacency(
         ARTIFACT_IDENTITY,
         &mut || Ok(()),
         Some(&mut captured),
-        Some("indexes/adjacency/"),
+        force_hash_prefix,
+        Some(topology),
     )?;
     Ok(WorkspaceCapture {
         inventory,
         captured,
         read_calls,
     })
+}
+
+/// Build a canonical inventory and participant from a private workspace root,
+/// like [`super::capture_graph_files`], but skip hashing any file whose relative
+/// path appears in `known` at the same byte length and whose freshly computed
+/// XXH64 equals the known checksum — reusing that entry's already-authenticated
+/// digest instead. Every other file (new, resized, or
+/// simply absent from `known`) is still walked, opened, and hashed exactly as
+/// `capture_graph_files` would. This never trusts a stat alone as proof of
+/// content: a reused digest is only ever one the caller already verified for
+/// that exact path (#1401 — avoids re-hashing a materialized tree's untouched
+/// files just to fingerprint the files that actually changed).
+///
+/// # Errors
+/// Rejects links, special files, unsafe relative paths, duplicates, and
+/// inventory size overflow.
+pub(crate) fn capture_graph_files_reusing_digests(
+    source_root: &Path,
+    known: &std::collections::HashMap<String, KnownGraphFile>,
+    domain: graphforge_core::hash_observation::HashDomain,
+) -> Result<(GraphFilesInventory, ProjectParticipant), GfError> {
+    let (inventory, _) = build_inventory_for_owned_layout(
+        source_root,
+        false,
+        Some(known),
+        domain,
+        &mut || Ok(()),
+        None,
+        None,
+        None,
+    )?;
+    let bytes = super::encode_inventory(&inventory)?;
+    let participant = super::inventory_participant(bytes, inventory.file_count)?;
+    Ok((inventory, participant))
 }
 
 #[cfg(test)]
@@ -314,8 +346,12 @@ mod tests {
         };
         {
             let parent = crate::resolve_project_generation(root).unwrap();
-            let (participant, lease) =
-                crate::prepare_compact_graph_publication(&parent, workspace).unwrap();
+            let (participant, lease) = crate::prepare_compact_graph_publication(
+                &parent,
+                workspace,
+                &crate::TopologyFiles::discover_legacy(workspace).unwrap(),
+            )
+            .unwrap();
             let mut participants = empty_workspace_participants().unwrap();
             participants.insert(0, participant);
             let request = ProjectGenerationRequest {
@@ -412,7 +448,12 @@ mod tests {
         // Hydrate it as an open does, then capture the untouched workspace.
         let hydrated = tempfile::tempdir_in(root.path()).unwrap();
         crate::materialize_graph_objects(root.path(), &inventory, hydrated.path()).unwrap();
-        let untouched = capture_workspace_over_parent(hydrated.path(), &first).unwrap();
+        let untouched = capture_workspace_over_parent(
+            hydrated.path(),
+            &first,
+            &crate::TopologyFiles::discover_legacy(hydrated.path()).unwrap(),
+        )
+        .unwrap();
         // Hydration writes the route table afresh as a private single-link file, so
         // it alone is read; the payload files are the parent's own objects.
         assert!(
@@ -440,7 +481,12 @@ mod tests {
 
         // A new file is read once and kept; the payload still reads nothing.
         std::fs::write(hydrated.path().join("topology/added.bin"), vec![9_u8; 2048]).unwrap();
-        let changed = capture_workspace_over_parent(hydrated.path(), &first).unwrap();
+        let changed = capture_workspace_over_parent(
+            hydrated.path(),
+            &first,
+            &crate::TopologyFiles::discover_legacy(hydrated.path()).unwrap(),
+        )
+        .unwrap();
         assert!(changed.captured.contains_key("topology/added.bin"));
         assert!(!changed.captured.contains_key("topology/nodes.parquet"));
         assert_eq!(

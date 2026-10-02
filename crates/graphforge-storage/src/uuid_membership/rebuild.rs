@@ -159,7 +159,16 @@ pub fn rebuild_uuid_membership_indexes(
     project_dir: &Path,
     limits: UuidIndexBuildLimits,
 ) -> Result<UuidIndexBuildMetrics, GfError> {
-    migrate_uuid_membership_indexes(project_dir, limits, true)
+    migrate_uuid_membership_indexes(project_dir, limits, true, None)
+}
+
+/// Rebuild a private session index from explicit topology membership.
+pub fn rebuild_uuid_membership_indexes_with_topology(
+    project_dir: &Path,
+    limits: UuidIndexBuildLimits,
+    topology: std::sync::Arc<crate::TopologyFileAuthority>,
+) -> Result<UuidIndexBuildMetrics, GfError> {
+    migrate_uuid_membership_indexes(project_dir, limits, true, Some(topology))
 }
 
 /// Rebuild v4 ordinal identity from canonical topology, never v3 reverse state.
@@ -410,13 +419,28 @@ fn v4_rebuild_evidence(
 /// Ensure the current topology generation has a v3 UUID index before a
 /// topology mutation enters its sealed rewrite callback.
 pub(crate) fn ensure_uuid_membership_migrated(project_dir: &Path) -> Result<(), GfError> {
-    migrate_uuid_membership_indexes(project_dir, UuidIndexBuildLimits::default(), false).map(|_| ())
+    migrate_uuid_membership_indexes(project_dir, UuidIndexBuildLimits::default(), false, None)
+        .map(|_| ())
+}
+
+pub(crate) fn ensure_uuid_membership_migrated_with_topology(
+    project_dir: &Path,
+    topology: Option<std::sync::Arc<crate::TopologyFileAuthority>>,
+) -> Result<(), GfError> {
+    migrate_uuid_membership_indexes(
+        project_dir,
+        UuidIndexBuildLimits::default(),
+        false,
+        topology,
+    )
+    .map(|_| ())
 }
 
 fn migrate_uuid_membership_indexes(
     project_dir: &Path,
     limits: UuidIndexBuildLimits,
     force: bool,
+    topology: Option<std::sync::Arc<crate::TopologyFileAuthority>>,
 ) -> Result<UuidIndexBuildMetrics, GfError> {
     if !force && uuid_membership_index_is_fresh(project_dir)? {
         return Ok(UuidIndexBuildMetrics::default());
@@ -462,11 +486,11 @@ fn migrate_uuid_membership_indexes(
                     .map_err(|_| storage_err("receipt length overflow"))?,
             }))
         });
-    crate::generation::commit_topology_aware_with_participant(
-        crate::staging::RewriteBatch::new(),
-        &root,
-        participant,
-    )?;
+    let mut batch = crate::staging::RewriteBatch::new();
+    if let Some(topology) = topology {
+        batch.bind_topology_authority(topology)?;
+    }
+    crate::generation::commit_topology_aware_with_participant(batch, &root, participant)?;
     let result = metrics.borrow_mut().take().unwrap_or_default();
     Ok(result)
 }
@@ -489,7 +513,11 @@ fn stage_uuid_membership_rebuild_locked(
         .tempdir_in(staging)
         .map_err(storage_err)?;
     let mut metrics = UuidIndexBuildMetrics::default();
-    let node_paths = crate::mutator::node_parquet_files(project_dir).map_err(storage_err)?;
+    let files = match batch.topology_authority() {
+        Some(topology) => crate::enumerate_topology_files(topology, None)?,
+        None => crate::TopologyFiles::discover_legacy(project_dir)?,
+    };
+    let node_paths: Vec<_> = files.nodes.iter().map(|(path, _)| path.clone()).collect();
     let node_runs = scan_to_runs(
         &node_paths,
         "node_uuid",
@@ -509,11 +537,11 @@ fn stage_uuid_membership_rebuild_locked(
     )?;
     let node_surrogate_validation_runs =
         scan_node_surrogate_validation_runs(&node_paths, scratch.path(), limits, &mut metrics)?;
-    let mut edge_paths = crate::mutator::edge_parquet_files(project_dir, None)
-        .map_err(storage_err)?
-        .into_iter()
-        .map(|(_, path)| path)
-        .collect::<Vec<_>>();
+    let mut edge_paths: Vec<_> = files
+        .edges
+        .iter()
+        .map(|(_, path, _)| path.clone())
+        .collect();
     edge_paths.sort();
     let edge_runs = scan_to_runs(
         &edge_paths,

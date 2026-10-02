@@ -15,6 +15,10 @@ pub struct LegacyRouteMigration {
     committed: bool,
     table: Option<LegacyTableRollback>,
     backup_root: PathBuf,
+    topology: Option<(
+        std::sync::Arc<crate::TopologyFileAuthority>,
+        crate::TopologyFiles,
+    )>,
 }
 
 struct LegacyTableRollback {
@@ -100,8 +104,27 @@ impl Drop for LegacyRouteMigration {
                 let _ = replace_legacy_table(&table.root, &table.previous);
             }
             let _ = std::fs::remove_dir(&self.backup_root);
+            if let Some((authority, prior)) = &self.topology {
+                authority.restore(prior.clone());
+            }
         }
     }
+}
+
+fn capture_selected(
+    root: &Path,
+    topology: Option<&crate::TopologyFileAuthority>,
+) -> Result<crate::GraphFilesInventory, GfError> {
+    Ok(match topology {
+        Some(authority) => {
+            crate::capture_graph_files_with_topology(
+                root,
+                &crate::enumerate_topology_files(authority, None)?,
+            )?
+            .0
+        }
+        None => crate::capture_graph_files(root)?.0,
+    })
 }
 
 type PreparedLegacyRouteMoves<'a> = (
@@ -113,8 +136,9 @@ fn prepare_legacy_route_moves<'a>(
     graph_root: &Path,
     route_moves: &[(PathBuf, PathBuf)],
     bindings: &'a SemanticStorageBindings,
+    topology: Option<&crate::TopologyFileAuthority>,
 ) -> Result<PreparedLegacyRouteMoves<'a>, GfError> {
-    let (before, _) = crate::capture_graph_files(graph_root)?;
+    let before = capture_selected(graph_root, topology)?;
     let authority =
         crate::graph_projection::TransformRoutes::from_inventory(graph_root, before.clone())?;
     let source_names = before
@@ -225,12 +249,33 @@ pub fn apply_legacy_route_moves(
     route_moves: &[(PathBuf, PathBuf)],
     bindings: &SemanticStorageBindings,
 ) -> Result<LegacyRouteMigration, GfError> {
-    let (prepared, moves) = prepare_legacy_route_moves(graph_root, route_moves, bindings)?;
+    apply_legacy_route_moves_with_authority(graph_root, route_moves, bindings, None)
+}
+
+/// Apply route moves using only this session's declared topology membership.
+/// The rollback guard restores the same explicit membership on failure.
+pub fn apply_legacy_route_moves_with_topology(
+    graph_root: &Path,
+    route_moves: &[(PathBuf, PathBuf)],
+    bindings: &SemanticStorageBindings,
+    topology: std::sync::Arc<crate::TopologyFileAuthority>,
+) -> Result<LegacyRouteMigration, GfError> {
+    apply_legacy_route_moves_with_authority(graph_root, route_moves, bindings, Some(topology))
+}
+
+fn apply_legacy_route_moves_with_authority(
+    graph_root: &Path,
+    route_moves: &[(PathBuf, PathBuf)],
+    bindings: &SemanticStorageBindings,
+    topology: Option<std::sync::Arc<crate::TopologyFileAuthority>>,
+) -> Result<LegacyRouteMigration, GfError> {
+    let (prepared, moves) =
+        prepare_legacy_route_moves(graph_root, route_moves, bindings, topology.as_deref())?;
     // Physical layout admission is its own committed, semantics-preserving unit.
     // Rollback below restores this admitted baseline until semantic publication succeeds.
     let prior_table = crate::route_component::owned::admit_owned_workspace(graph_root)?;
     let previous_table = prior_table.encode(64 * 1024 * 1024)?;
-    let (inventory, _) = crate::capture_graph_files(graph_root)?;
+    let inventory = capture_selected(graph_root, topology.as_deref())?;
     let mut logical_to_physical = BTreeMap::new();
     let mut output_table = crate::route_component::RouteTable::default();
     for entry in &inventory.files {
@@ -258,6 +303,12 @@ pub fn apply_legacy_route_moves(
         committed: false,
         table: None,
         backup_root,
+        topology: topology
+            .map(|authority| -> Result<_, GfError> {
+                let prior = crate::enumerate_topology_files(&authority, None)?;
+                Ok((authority, prior))
+            })
+            .transpose()?,
     };
     for (old_relative, new_relative, binding) in prepared {
         let old = logical_to_physical
@@ -300,20 +351,64 @@ pub fn apply_legacy_route_moves(
         }
         migration.completed.push((old, new, backup));
     }
+    let candidate = migration
+        .topology
+        .as_ref()
+        .map(|(_, prior)| moved_topology(graph_root, prior, &migration.completed, &output_table))
+        .transpose()?;
     let bytes = output_table.encode(64 * 1024 * 1024)?;
-    replace_legacy_table(graph_root, &bytes)?;
-    let directory = graphforge_filesystem::StableDirectory::open(graph_root)
+    migration.table = Some(install_legacy_table(graph_root, &bytes, previous_table)?);
+    if let Some((authority, _)) = &migration.topology {
+        authority.restore(candidate.expect("owned migration has candidate topology"));
+    }
+    Ok(migration)
+}
+
+fn install_legacy_table(
+    root: &Path,
+    bytes: &[u8],
+    previous: Vec<u8>,
+) -> Result<LegacyTableRollback, GfError> {
+    replace_legacy_table(root, bytes)?;
+    let directory = graphforge_filesystem::StableDirectory::open(root)
         .map_err(|_| corrupt("legacy route table root cannot be retained"))?;
     let installed = directory
         .open_child_file(std::ffi::OsStr::new(crate::route_component::TABLE_FILE))
         .map_err(|_| corrupt("legacy route table cannot be retained"))?;
-    migration.table = Some(LegacyTableRollback {
-        root: graph_root.to_path_buf(),
-        previous: previous_table,
+    Ok(LegacyTableRollback {
+        root: root.to_path_buf(),
+        previous,
         installed,
         digest: Sha256::digest(bytes).into(),
-    });
-    Ok(migration)
+    })
+}
+
+fn moved_topology(
+    graph_root: &Path,
+    prior: &crate::TopologyFiles,
+    completed: &[(PathBuf, PathBuf, PathBuf)],
+    output_table: &crate::route_component::RouteTable,
+) -> Result<crate::TopologyFiles, GfError> {
+    let mut files = prior.clone();
+    for (old, new, _) in completed {
+        if let Some((route, path, relative)) =
+            files.edges.iter_mut().find(|(_, path, _)| path == old)
+        {
+            let name = new
+                .strip_prefix(graph_root)
+                .map_err(|_| corrupt("owned route escaped workspace"))?
+                .to_str()
+                .ok_or_else(|| corrupt("owned route path is not UTF-8"))?
+                .replace('\\', "/");
+            let logical = output_table.semantic_relative_path(&name)?;
+            crate::route_component::route_position(&logical)?
+                .ok_or_else(|| corrupt("owned edge route disappeared"))?
+                .clone_into(route);
+            path.clone_from(new);
+            *relative = name;
+        }
+    }
+    Ok(files)
 }
 
 #[cfg(test)]

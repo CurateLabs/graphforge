@@ -901,11 +901,20 @@ fn topology_budget_plateaus_across_committed_mixed_batches() {
 
 #[test]
 fn topology_budget_accounts_for_cancel_and_failed_flush_retained_state() {
+    assert_failed_flush_retains_edge_charge(false);
+    assert_failed_flush_retains_edge_charge(true);
+}
+
+fn assert_failed_flush_retains_edge_charge(owned_topology: bool) {
     let dir = TempDir::new().unwrap();
     let left = new_v7();
     let right = new_v7();
     let edge = new_v7();
-    let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+    let authority =
+        owned_topology.then(|| crate::TopologyFileAuthority::discover_legacy(dir.path()).unwrap());
+    let mut writer =
+        GraphWriter::open_at_with_topology(dir.path(), OntologyMode::Strict, TS, authority.clone())
+            .unwrap();
     writer
         .create_node(left, EntityTypeId::decode(0).unwrap())
         .unwrap();
@@ -921,8 +930,23 @@ fn topology_budget_accounts_for_cancel_and_failed_flush_retained_state() {
     fs::create_dir_all(dir.path().join("topology")).unwrap();
     fs::write(dir.path().join("topology/edges"), b"not a directory").unwrap();
     assert!(writer.flush().is_err());
+    assert!(writer.nodes.is_empty());
+    assert_eq!(writer.topology_work.rows_encoded, 2);
     assert_eq!(writer.buffered_topology_rows, 1);
     assert!(writer.charged_topology_bytes <= writer.limits.max_buffered_topology_bytes);
+    // Node rows were staged before the edge failure, but the discarded batch
+    // must neither publish its node prefix nor extend session membership.
+    assert!(
+        crate::mutator::node_parquet_files(dir.path())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!dir.path().join(SURROGATE_TAILS_FILE).exists());
+    if let Some(authority) = authority {
+        let files = crate::enumerate_topology_files(&authority, None).unwrap();
+        assert!(files.nodes.is_empty());
+        assert!(files.edges.is_empty());
+    }
     writer.release_committed_topology_state();
     assert!(writer.charged_topology_bytes > 0);
     assert_eq!(writer.cancel_edges(&HashSet::from([to_bytes(&edge)])), 1);

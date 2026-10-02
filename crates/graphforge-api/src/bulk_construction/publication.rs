@@ -264,8 +264,12 @@ impl GraphForge {
             .clone();
         let mut next_catalog = prior_catalog.clone();
         let now = (self.clock.lock().expect("clock lock poisoned"))()?;
-        let mut writer =
-            graphforge_storage::GraphWriter::open_at(&self.dir(), self.ontology_mode, now)?;
+        let mut writer = graphforge_storage::GraphWriter::open_at_with_topology(
+            &self.dir(),
+            self.ontology_mode,
+            now,
+            Some(Arc::clone(&self.dir().topology)),
+        )?;
         for row in &normalized.rows {
             let type_id = match self
                 .ontology
@@ -327,6 +331,7 @@ impl GraphForge {
                 == expected_parent;
             if still_prior {
                 crate::rematerialize_graph_workspace(&prior_generation, &self.dir())?;
+                self.install_property_generation(&prior_generation)?;
             } else {
                 *self
                     .runtime_catalog
@@ -441,8 +446,12 @@ impl GraphForge {
             .clone();
         let mut next_catalog = prior_catalog.clone();
         let now = (self.clock.lock().expect("clock lock poisoned"))()?;
-        let mut writer =
-            graphforge_storage::GraphWriter::open_at(&self.dir(), self.ontology_mode, now)?;
+        let mut writer = graphforge_storage::GraphWriter::open_at_with_topology(
+            &self.dir(),
+            self.ontology_mode,
+            now,
+            Some(Arc::clone(&self.dir().topology)),
+        )?;
         let endpoints = normalized
             .rows
             .iter()
@@ -513,6 +522,7 @@ impl GraphForge {
                 == expected_parent;
             if still_prior {
                 crate::rematerialize_graph_workspace(&prior_generation, &self.dir())?;
+                self.install_property_generation(&prior_generation)?;
             } else {
                 *self
                     .runtime_catalog

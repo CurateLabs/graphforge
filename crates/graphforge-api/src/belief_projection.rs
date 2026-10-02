@@ -407,24 +407,15 @@ impl GraphForge {
         let selection =
             resolve_selection(snapshot_batch, validity_batch, &request.policy, &graph_refs)?;
         let mut projected = GraphForge::new(None)?;
-        let storage_selection = graphforge_storage::GraphProjectionSelection {
-            node_uuids: selection
-                .node_uuids
-                .iter()
-                .map(|uuid| *uuid.as_bytes())
-                .collect(),
-            edge_uuids: selection
-                .edge_uuids
-                .iter()
-                .map(|uuid| *uuid.as_bytes())
-                .collect(),
-            ..Default::default()
-        };
-        let materialized = graphforge_storage::materialize_graph_projection(
-            &self.dir(),
-            &projected.dir(),
-            &storage_selection,
-        )?;
+        let storage_selection = storage_projection_selection(&selection);
+        let (materialized, projected_topology) =
+            graphforge_storage::materialize_graph_projection_from_files(
+                &self.dir(),
+                &projected.dir(),
+                &storage_selection,
+                &self.dir().topology_files()?,
+            )?;
+        projected.install_projection_topology(&projected_topology)?;
         projected.ontology.clone_from(&self.ontology);
         projected.ontology_mode = self.ontology_mode;
         projected.runtime_catalog = Arc::new(Mutex::new(
@@ -463,6 +454,29 @@ impl GraphForge {
             },
             subject_evidence,
         ))
+    }
+
+    fn install_projection_topology(
+        &self,
+        topology: &graphforge_storage::TopologyFiles,
+    ) -> Result<(), GfError> {
+        self.dir().topology.restore(topology.clone());
+        let projected_generation = self.generation_for_read()?;
+        let projected_inventory = Arc::new(
+            graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
+                &projected_generation,
+                &self.dir(),
+                graphforge_storage::capture_graph_files_with_topology(&self.dir(), topology)?.0,
+            )?,
+        );
+        *self
+            .property_authority
+            .lock()
+            .expect("property authority lock poisoned") = crate::GenerationPropertyAuthority {
+            generation_uuid: projected_generation.generation_uuid(),
+            inventory: projected_inventory,
+        };
+        Ok(())
     }
 
     /// Complete one knowledge run on a graph-only projection, then append epistemic context.
@@ -626,6 +640,24 @@ pub(crate) struct BeliefSelection {
     pub(crate) source_record_uuids: Vec<Uuid>,
     pub(crate) snapshot_fingerprint: [u8; 32],
     pub(crate) valid_time_fingerprint: Option<[u8; 32]>,
+}
+
+fn storage_projection_selection(
+    selection: &BeliefSelection,
+) -> graphforge_storage::GraphProjectionSelection {
+    graphforge_storage::GraphProjectionSelection {
+        node_uuids: selection
+            .node_uuids
+            .iter()
+            .map(|uuid| *uuid.as_bytes())
+            .collect(),
+        edge_uuids: selection
+            .edge_uuids
+            .iter()
+            .map(|uuid| *uuid.as_bytes())
+            .collect(),
+        ..Default::default()
+    }
 }
 
 #[allow(

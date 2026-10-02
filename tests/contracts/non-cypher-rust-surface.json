@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "1b7f26ed266d4a0c821dd29197acc7212b3d36851f79b9778717ca4634125bea",
+  "public_method_digest": "cd0510a357fd4b48b8120c7f22397ac26dda862e612576e2a8bf7ee6678b1d7e",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -1073,7 +1073,9 @@
         "PortableV2ImportResult.transient_peak_allocated_bytes",
         "PortableV2ExportFacadeResult.receipt",
         "crate.verify_discovered_portable_v2",
-        "crate.repack_verified_expanded_portable_v2"
+        "crate.repack_verified_expanded_portable_v2",
+        "crate.summarize_verified_portable_v2",
+        "crate.resolve_discovered_ontology_module"
       ],
       "test_refs": [
         {
@@ -1099,6 +1101,14 @@
         {
           "path": "crates/graphforge-api/tests/discovery_portable_v2.rs",
           "symbol": "valid_discovery_maps_to_the_storage_verified_package"
+        },
+        {
+          "path": "crates/graphforge-api/tests/discovery_project_summary.rs",
+          "symbol": "summary_bytes_are_identical_for_bundle_and_expanded_and_facts_are_verified"
+        },
+        {
+          "path": "crates/graphforge-api/tests/discovery_ontology_module.rs",
+          "symbol": "two_projects_adopting_the_same_exact_module_resolve_to_the_same_module"
         }
       ]
     },

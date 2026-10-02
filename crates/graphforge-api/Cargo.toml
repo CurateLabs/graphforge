@@ -105,6 +105,14 @@ name = "discovery_portable_v2"
 required-features = ["discovery", "portable"]
 
 [[test]]
+name = "discovery_project_summary"
+required-features = ["discovery", "portable", "research"]
+
+[[test]]
+name = "discovery_ontology_module"
+required-features = ["discovery", "portable", "research"]
+
+[[test]]
 name = "algorithm_public_surface"
 required-features = ["knowledge", "provenance", "search"]
 

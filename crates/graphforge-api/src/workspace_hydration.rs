@@ -16,9 +16,26 @@ use std::sync::Arc;
 pub(super) struct GraphWorkspace {
     pub(super) dir: PathBuf,
     pub(super) owner: Arc<tempfile::TempDir>,
+    pub(super) topology: Arc<graphforge_storage::TopologyFileAuthority>,
 }
 
 impl GraphWorkspace {
+    pub(super) fn new(
+        dir: PathBuf,
+        owner: Arc<tempfile::TempDir>,
+        inventory: &graphforge_storage::AuthenticatedPropertyInventory,
+    ) -> Result<Self, GfError> {
+        let topology = graphforge_storage::TopologyFileAuthority::from_inventory(&dir, inventory)?;
+        Ok(Self {
+            dir,
+            owner,
+            topology,
+        })
+    }
+
+    pub(super) fn topology_files(&self) -> Result<graphforge_storage::TopologyFiles, GfError> {
+        graphforge_storage::enumerate_topology_files(&self.topology, None)
+    }
     pub(super) fn path(&self) -> &Path {
         &self.dir
     }
@@ -211,6 +228,9 @@ impl GraphForge {
         generation: &ResolvedProjectGeneration,
     ) -> Result<(), GfError> {
         let prepared = self.prepare_generation_read_authority(generation, &self.dir())?;
+        self.dir()
+            .topology
+            .replace_from_inventory(&prepared.properties)?;
         self.install_prepared_generation_read_authority(generation.generation_uuid(), prepared);
         Ok(())
     }
