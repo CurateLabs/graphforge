@@ -13,6 +13,8 @@ use graphforge_storage::{
 
 use crate::TextSearchLimits;
 use crate::analyzer::{TEXT_CONTRACT_VERSION, analyze_query};
+#[cfg(test)]
+use crate::source::project_text_source;
 use crate::source::{TextSourceProjection, project_text_source_with, text_source_snapshot};
 use crate::text_index::{
     TEXT_BACKEND_VERSION, TextIndexBuildOutcome, TextSearchHit, build_text_index,
@@ -1589,6 +1591,7 @@ mod tests {
                 ),
                 &properties(),
                 TextSearchLimits::default(),
+                None,
             )
             .is_err()
         );
