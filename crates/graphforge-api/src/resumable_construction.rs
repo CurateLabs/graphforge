@@ -1253,6 +1253,10 @@ mod tests {
     #[test]
     fn construction_application_reads_reconcile_and_scale_at_one_two_four() {
         let mut observations = Vec::new();
+        // Hydration no longer owns node-linear reads (#1388): the forward and
+        // ordinal identity runs are hard-linked, not copied and verified, so
+        // its reads are the small controls and may not grow with the rows.
+        let mut hydration_reads = Vec::new();
         // Each node retains 16 identity bytes and at least 18 compact detail bytes.
         // 4,096 rows therefore exceed 100,000 payload bytes before Parquet/control
         // overhead; retain the same dominance threshold and every phase ceiling.
@@ -1321,11 +1325,19 @@ mod tests {
                     evidence.shape_application_read_bytes,
                     evidence.encode_application_read_bytes,
                     evidence.cas_application_read_bytes,
-                    evidence.hydration_application_read_bytes,
                     evidence.recovery_application_read_bytes,
                     reconciled,
                 ],
             ));
+            hydration_reads.push((scale as u64, evidence.hydration_application_read_bytes));
+        }
+        for adjacent in hydration_reads.windows(2) {
+            let ((prior_rows, prior), (next_rows, next)) = (adjacent[0], adjacent[1]);
+            assert!(
+                next.saturating_sub(prior) < next_rows - prior_rows,
+                "hydration reads grew {prior} -> {next} bytes for {} added rows",
+                next_rows - prior_rows
+            );
         }
         for adjacent in observations.windows(2) {
             let (prior_payload, prior_phases) = adjacent[0];

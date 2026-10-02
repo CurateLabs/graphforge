@@ -378,6 +378,10 @@ fn requires_single_link_materialization(relative_path: &str) -> bool {
                 | "ordinal-v4-receipt.json"
                 | "ordinal-v4.lock"
         ) || (!name.starts_with(".v4-")
+            // Node-linear identity runs are immutable and read-only; they are
+            // hard-linked and authenticated block by block (#1388).
+            && !name.starts_with("forward-v4-")
+            && !name.starts_with("ordinal-v4-")
             && crate::uuid_membership::is_exact_private_v4_name(name)))
 }
 

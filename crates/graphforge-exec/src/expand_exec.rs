@@ -1006,7 +1006,7 @@ impl V4OrdinalIdentityResolver {
             .lock()
             .expect("ordinal identity handle poisoned")
             .revalidate_for_session()
-            .map_err(GfError::from_execution_error)?;
+            .map_err(GfError::from)?;
         Ok(V4OrdinalIdentityPin {
             session: Some(Arc::new(V4OrdinalIdentitySession {
                 handle,
@@ -1035,11 +1035,15 @@ impl V4OrdinalIdentitySession {
             .max_requested_ids()
     }
 
-    pub(crate) fn uuid_order_matches_ordinals(&self) -> bool {
+    /// Whether node-ordinal order is UUID order. The first call reads and
+    /// authenticates every ordinal block once; a corrupted block is an error,
+    /// never an "unordered" answer.
+    pub(crate) fn uuid_order_matches_ordinals(&self) -> Result<bool, GfError> {
         self.handle
             .lock()
             .expect("ordinal identity handle poisoned")
             .uuid_order_matches_ordinals()
+            .map_err(GfError::from)
     }
 
     pub(crate) fn lookup_node_uuids(
@@ -1051,7 +1055,7 @@ impl V4OrdinalIdentitySession {
             .lock()
             .expect("ordinal identity handle poisoned")
             .lookup_node_uuids_pinned(requested)
-            .map_err(GfError::from_execution_error)?;
+            .map_err(GfError::from)?;
         if self.attribution_available.swap(false, Ordering::AcqRel) {
             lookup.metrics.revalidation_calls = self.revalidation.calls;
             lookup.metrics.revalidation_bytes = self.revalidation.bytes_read;

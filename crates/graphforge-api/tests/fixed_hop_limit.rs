@@ -1295,16 +1295,31 @@ fn ordinary_streaming_sink_exposes_deterministic_query_evidence() {
             "{:?}",
             receipt.evidence.hops
         );
+        // The reader is exercised when a lookup selects an ordinal range. Disk
+        // reads are a separate fact: the handle holds the blocks it already
+        // authenticated, so only the query that first touches them reads.
         assert!(
             receipt
                 .evidence
                 .hops
                 .iter()
-                .map(|hop| hop.identity_reader_calls)
+                .map(|hop| hop.identity_ranges_selected)
                 .sum::<u64>()
                 > 0,
             "the query must exercise the bounded reusable identity reader"
         );
+        if ordinal == 0 {
+            assert!(
+                receipt
+                    .evidence
+                    .hops
+                    .iter()
+                    .map(|hop| hop.identity_reader_calls)
+                    .sum::<u64>()
+                    > 0,
+                "the first query on a fresh handle reads its identity blocks"
+            );
+        }
         assert_eq!(receipt.scalar_u64, None);
         fingerprints.push(receipt.result_sha256);
     }

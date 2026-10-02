@@ -40,6 +40,8 @@ pub(crate) struct V4ConstructionArtifactBundle {
     pub(crate) manifest: crate::V4OrdinalIdentityManifest,
     pub(crate) metrics: V4OrdinalBuildMetrics,
     pub(super) publications: Vec<(String, V4PublicationGuard)>,
+    /// First UUID in ordinal order, for ordering a delta after its parent.
+    pub(crate) first_ordinal_uuid: Option<[u8; 16]>,
 }
 
 // Publication ownership carries the optional observer through explicit cleanup
@@ -283,9 +285,35 @@ where
         manifest,
         metrics,
         publications,
+        ..
     } = bundle;
     commit_v4_publications(publications, V4AuthorityTransactionProof)?;
     Ok((manifest, metrics))
+}
+
+/// Like [`stage_v4_ordinal_artifacts`] for pairs in any order: the forward run
+/// is fed in UUID order and the ordinals in node order, so the two projections
+/// can disagree about which comes first, as real construction streams do.
+#[cfg(test)]
+pub(crate) fn stage_v4_ordinal_artifacts_unordered(
+    mut records: Vec<(Uuid, u64)>,
+    generation: u64,
+    index: &graphforge_filesystem::StableDirectory,
+) -> Result<crate::V4OrdinalIdentityManifest, GfError> {
+    let mut cancelled = || false;
+    let mut writer = V4OrdinalConstructionWriter::start(generation, index)?;
+    records.sort_unstable_by_key(|(uuid, _)| *uuid.as_bytes());
+    for (uuid, node_id) in &records {
+        writer.push_forward(*uuid, *node_id, &mut cancelled)?;
+    }
+    records.sort_unstable_by_key(|(_, node_id)| *node_id);
+    for (uuid, node_id) in &records {
+        writer.push_ordinal(*node_id, *uuid, &mut cancelled)?;
+    }
+    let bundle = writer.finish()?;
+    crate::durable_commit::acknowledge_directory(&index).map_err(storage_err)?;
+    commit_v4_publications(bundle.publications, V4AuthorityTransactionProof)?;
+    Ok(bundle.manifest)
 }
 
 #[cfg(test)]
@@ -319,6 +347,10 @@ pub(crate) struct V4OrdinalConstructionWriter<'a> {
     current: Option<V4OrdinalRangeWriter>,
     previous_forward_uuid: Option<[u8; 16]>,
     previous_ordinal_node_id: u64,
+    /// UUID order across the ordinal stream, derived from the records pushed.
+    first_ordinal_uuid: Option<[u8; 16]>,
+    previous_ordinal_uuid: Option<[u8; 16]>,
+    ordinal_uuids_ascend: bool,
     forward_count: u64,
     ordinal_count: u64,
     forward_commitment: [u8; 32],
@@ -380,6 +412,9 @@ impl<'a> V4OrdinalConstructionWriter<'a> {
             current: None,
             previous_forward_uuid: None,
             previous_ordinal_node_id: 0,
+            first_ordinal_uuid: None,
+            previous_ordinal_uuid: None,
+            ordinal_uuids_ascend: true,
             forward_count: 0,
             ordinal_count: 0,
             forward_commitment: [0; 32],
@@ -507,6 +542,14 @@ impl<'a> V4OrdinalConstructionWriter<'a> {
             .checked_add(1)
             .ok_or_else(|| storage_err("v4 ordinal record count overflow"))?;
         self.previous_ordinal_node_id = node_id;
+        if self
+            .previous_ordinal_uuid
+            .is_some_and(|prior| prior >= uuid_bytes)
+        {
+            self.ordinal_uuids_ascend = false;
+        }
+        self.first_ordinal_uuid.get_or_insert(uuid_bytes);
+        self.previous_ordinal_uuid = Some(uuid_bytes);
         let live_temporary_bytes = self
             .metrics
             .artifact_bytes
@@ -576,6 +619,7 @@ impl<'a> V4OrdinalConstructionWriter<'a> {
                 artifact: tombstone.artifact,
                 blocks: Vec::new(),
             }],
+            uuid_order_matches_ordinals: Some(self.ordinal_uuids_ascend),
         };
         v4_publication_failure("manifest_update")?;
         admit_v4_construction_manifest(&manifest)?;
@@ -593,6 +637,7 @@ impl<'a> V4OrdinalConstructionWriter<'a> {
             manifest,
             metrics: self.metrics,
             publications: self.publications,
+            first_ordinal_uuid: self.first_ordinal_uuid,
         })
     }
 }
@@ -980,6 +1025,7 @@ pub(crate) fn publish_v4_construction_artifacts(
         mut manifest,
         mut metrics,
         mut publications,
+        ..
     } = bundle;
     let mut local_names = v4_manifest_artifact_names(&manifest);
     let published = (|| {
@@ -1072,6 +1118,17 @@ fn merge_construction_v4_delta(
         .collect::<HashMap<_, _>>();
     let mut combined = prior.clone();
     combined.topology_generation = delta.topology_generation;
+    // The parent's last UUID is not pinned here, so the boundary between the
+    // parent and this delta cannot be proven without authenticating the whole
+    // parent run. An inversion in either side survives the merge; otherwise the
+    // order is unknown and omitted, which readers prove by reading.
+    combined.uuid_order_matches_ordinals = if prior.uuid_order_matches_ordinals == Some(false)
+        || delta.uuid_order_matches_ordinals == Some(false)
+    {
+        Some(false)
+    } else {
+        None
+    };
     combined
         .forward_identities
         .extend(delta.forward_identities.clone());

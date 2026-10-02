@@ -1,5 +1,8 @@
 //! Read-only authenticated v4 `node_id -> node_uuid` authority.
 //!
+//! Opening reads no artifact byte; every ordinal and tombstone block is
+//! authenticated by the lookup that reads it (#1388).
+//!
 //! This module deliberately exposes no publication API. Version-three state is
 //! reported as rebuild-required and is never interpreted through this format.
 
@@ -34,7 +37,10 @@ const UUID_WIDTH_USIZE: usize = 16;
 const TOMBSTONE_WIDTH: u64 = 8;
 const TOMBSTONE_WIDTH_USIZE: usize = 8;
 const TOMBSTONE_BLOCK_BYTES: u64 = 64 * 1024;
-const ORDINAL_BLOCK_BYTES: u64 = 64 * 1024;
+/// Bytes in one authenticated ordinal block, the unit a lookup reads.
+pub const ORDINAL_BLOCK_BYTES: u64 = 64 * 1024;
+/// UUIDs in one full ordinal block.
+pub const ORDINAL_BLOCK_RECORDS: u64 = ORDINAL_BLOCK_BYTES / UUID_WIDTH;
 const ORDINAL_BLOCK_BYTES_USIZE: usize = 64 * 1024;
 pub(crate) const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const STREAM_BYTES: usize = 1024 * 1024;
@@ -61,6 +67,13 @@ pub struct V4OrdinalIdentityLimits {
     pub max_coalesced_read_bytes: usize,
     /// Total charged capacity retained by the handle-global tombstone cache.
     pub max_tombstone_cache_bytes: usize,
+    /// Bytes of already-authenticated ordinal blocks the handle retains so a
+    /// block is read from disk once per handle, not once per lookup. Zero
+    /// disables the cache. A handle keeps serving blocks it already
+    /// authenticated after a later same-inode flip of the artifact; a fresh
+    /// handle refuses the flipped block. Nothing that was wrong when it was
+    /// read is ever returned. Crate-private: no caller outside storage tunes it.
+    pub(crate) max_ordinal_cache_bytes: usize,
     /// Maximum conservatively charged retained manifest/descriptor metadata.
     pub max_descriptor_metadata_bytes: usize,
 }
@@ -72,6 +85,7 @@ impl Default for V4OrdinalIdentityLimits {
             coalesce_gap_bytes: 4_096,
             max_coalesced_read_bytes: STREAM_BYTES,
             max_tombstone_cache_bytes: STREAM_BYTES,
+            max_ordinal_cache_bytes: STREAM_BYTES,
             max_descriptor_metadata_bytes: 16 * STREAM_BYTES,
         }
     }
@@ -179,6 +193,15 @@ pub struct V4OrdinalIdentityManifest {
     pub ordinal_ranges: Vec<V4OrdinalRange>,
     /// Sparse deletion overrides in strictly increasing generation order.
     pub tombstones: Vec<V4OrdinalTombstones>,
+    /// Whether UUIDs increase strictly across every ordinal, tombstoned or not,
+    /// computed by the publisher from the records it streamed. Absent means
+    /// unknown (every manifest written before the field existed), and readers
+    /// then prove it by reading the ordinals; a publisher that cannot derive it
+    /// omits it. Sits inside the SHA-256-authenticated manifest. It lets the
+    /// ordered fast path decide in O(1) whether destinations can be walked in
+    /// ordinal order, so a bounded query never pays for a scan of the graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uuid_order_matches_ordinals: Option<bool>,
 }
 
 /// Generation authority pinned by the caller's authenticated project receipt.
@@ -343,7 +366,8 @@ impl crate::ResolvedProjectGeneration {
 /// Typed open disposition. V3 is never parsed as v4.
 #[derive(Debug)]
 pub enum V4OrdinalIdentityOpen {
-    /// Fully authenticated v4 handle.
+    /// Opened v4 handle. Descriptors are authenticated; artifact content is
+    /// authenticated block by block as lookups read it.
     Ready(Box<V4OrdinalIdentityHandle>),
     /// A valid version marker that requires an explicit rebuild.
     RebuildRequired {
@@ -392,6 +416,19 @@ pub enum V4OrdinalIdentityError {
         /// Configured maximum.
         maximum: usize,
     },
+}
+
+/// A refusal reports the same public class as every other first-touch refusal
+/// of committed data (`graph_admission`): corrupted or contradicting bytes are
+/// a validation failure, not an execution one. Only a filesystem fault is a
+/// storage error.
+impl From<V4OrdinalIdentityError> for graphforge_core::GfError {
+    fn from(error: V4OrdinalIdentityError) -> Self {
+        match error {
+            V4OrdinalIdentityError::Io => Self::Storage(error.to_string()),
+            _ => Self::Validation(error.to_string()),
+        }
+    }
 }
 
 /// Sanitized failure classification for admission and lookup evidence.
@@ -530,6 +567,9 @@ struct ArtifactStamp {
 struct OpenRange {
     descriptor: V4OrdinalRange,
     artifact: OpenArtifact,
+    /// A caller is relying on the manifest's claim that UUIDs ascend with
+    /// ordinals, so every block this range serves must still ascend.
+    verify_order: bool,
 }
 
 #[derive(Debug)]
@@ -545,6 +585,57 @@ struct OpenTombstones {
 pub(crate) struct PinnedV4OrdinalArtifact {
     pub(crate) descriptor: V4OrdinalArtifact,
     pub(crate) file: File,
+}
+
+/// The order of a manifest extended by a delta whose ordinals all follow the
+/// parent's. Exact when both sides are known: a recorded inversion on either
+/// side persists, and the boundary between the parent's last UUID and the
+/// delta's first decides the rest. Unknown stays unknown.
+pub(crate) fn combine_uuid_order(
+    prior: Option<bool>,
+    prior_last: Option<[u8; UUID_WIDTH_USIZE]>,
+    delta: Option<bool>,
+    delta_first: Option<[u8; UUID_WIDTH_USIZE]>,
+) -> Option<bool> {
+    match (prior, delta) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(match (prior_last, delta_first) {
+            (Some(last), Some(first)) => last < first,
+            _ => true,
+        }),
+        _ => None,
+    }
+}
+
+impl V4OrdinalPinnedUpdateInputs {
+    /// The UUID of the highest ordinal retained, read from the pinned,
+    /// already-authenticated final range. `None` for an empty ordinal set.
+    pub(crate) fn last_ordinal_uuid(
+        &self,
+    ) -> Result<Option<[u8; UUID_WIDTH_USIZE]>, graphforge_core::GfError> {
+        let Some(last) = self
+            .manifest
+            .ordinal_ranges
+            .iter()
+            .max_by_key(|range| range.first_node_id)
+        else {
+            return Ok(None);
+        };
+        let pinned = self
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.descriptor.name == last.artifact.name)
+            .ok_or_else(|| {
+                graphforge_core::GfError::Storage("authenticated v4 update input is absent".into())
+            })?;
+        let storage = |error: std::io::Error| graphforge_core::GfError::Storage(error.to_string());
+        let mut file = pinned.file.try_clone().map_err(storage)?;
+        // The final record: UUID_WIDTH bytes back from the end.
+        file.seek(SeekFrom::End(-16)).map_err(storage)?;
+        let mut uuid = [0_u8; UUID_WIDTH_USIZE];
+        file.read_exact(&mut uuid).map_err(storage)?;
+        Ok(Some(uuid))
+    }
 }
 
 /// Authenticated, inode-pinned inputs for planning the next v4 generation.
@@ -580,6 +671,55 @@ impl TombstoneBlockCache {
 
 type TombstoneBlock = V4OrdinalTombstoneBlock;
 
+/// An ordinal block whose bytes already passed their checksum.
+#[derive(Debug)]
+struct CachedOrdinalBlock {
+    bytes: Vec<u8>,
+    /// UUIDs ascend strictly inside this block, so a handle that later relies
+    /// on the recorded order can still refuse it without rereading.
+    ascends: bool,
+}
+
+/// Authenticated ordinal blocks, oldest evicted first, within a byte budget.
+/// Blocks are immutable and were verified when read, so serving one again can
+/// return nothing a fresh read would not.
+#[derive(Debug, Default)]
+struct OrdinalBlockCache {
+    entries: BTreeMap<(usize, usize), CachedOrdinalBlock>,
+    order: VecDeque<(usize, usize)>,
+    charged_bytes: usize,
+}
+
+impl OrdinalBlockCache {
+    fn insert(&mut self, key: (usize, usize), block: CachedOrdinalBlock, maximum: usize) {
+        let charge = block.bytes.len();
+        if charge > maximum || self.entries.contains_key(&key) {
+            return;
+        }
+        while self.charged_bytes.saturating_add(charge) > maximum {
+            let Some(oldest) = self.order.pop_front() else {
+                return;
+            };
+            if let Some(evicted) = self.entries.remove(&oldest) {
+                self.charged_bytes = self.charged_bytes.saturating_sub(evicted.bytes.len());
+            }
+        }
+        self.charged_bytes = self.charged_bytes.saturating_add(charge);
+        self.order.push_back(key);
+        self.entries.insert(key, block);
+    }
+}
+
+/// What one lookup may spend reading one ordinal range.
+struct RangeRead<'a> {
+    range_index: usize,
+    cache: &'a mut OrdinalBlockCache,
+    max_cache_bytes: usize,
+    gap_bytes: u64,
+    maximum_read_bytes: usize,
+    retained_buffer_bytes: u64,
+}
+
 /// Authenticated generation-pinned read handle.
 #[derive(Debug)]
 pub struct V4OrdinalIdentityHandle {
@@ -593,17 +733,32 @@ pub struct V4OrdinalIdentityHandle {
     ranges: Vec<OpenRange>,
     tombstones: Vec<OpenTombstones>,
     tombstone_cache: TombstoneBlockCache,
+    ordinal_cache: OrdinalBlockCache,
     limits: V4OrdinalIdentityLimits,
     admission: V4OrdinalAdmissionMetrics,
-    uuid_order_matches_ordinals: bool,
+    /// Whether every artifact byte has been authenticated and every
+    /// cross-artifact invariant proven ([`Self::admit_complete`]). Opening
+    /// reads no artifact bytes: ordinal and tombstone blocks authenticate on
+    /// the lookup that reads them.
+    complete: bool,
+    /// Memoized proof, by reading the ordinals, that UUIDs increase strictly.
+    uuid_order_matches_ordinals: Option<bool>,
+    /// The publisher's claim, from the authenticated manifest.
+    recorded_order: Option<bool>,
+    /// The seams between ordinal ranges were checked against the record.
+    seams_checked: bool,
 }
 
 impl V4OrdinalIdentityHandle {
     /// Revalidate this retained generation and clone its already-authenticated
     /// artifact handles for a bounded append/compaction planner.
     pub(crate) fn pinned_update_inputs(
-        &self,
+        &mut self,
     ) -> Result<V4OrdinalPinnedUpdateInputs, V4OrdinalIdentityError> {
+        // A writer builds the next generation from these bytes, so it never
+        // inherits them unauthenticated: forward runs have no block fences and
+        // no query reads them, which makes this their first authentication.
+        self.admit_complete()?;
         self.revalidate()?;
         let manifest = V4OrdinalIdentityManifest {
             format_version: ORDINAL_IDENTITY_V4,
@@ -627,6 +782,10 @@ impl V4OrdinalIdentityHandle {
                     blocks: run.blocks.clone(),
                 })
                 .collect(),
+            // What complete admission derived from the authenticated data, not
+            // the record: a legacy manifest that never recorded the fact is
+            // promoted by the first generation built on it.
+            uuid_order_matches_ordinals: self.uuid_order_matches_ordinals,
         };
         let artifacts = self
             .forward
@@ -692,8 +851,19 @@ impl V4OrdinalIdentityHandle {
         Ok(V4OrdinalIdentityDiscovery::RebuildRequired { found_version: 3 })
     }
 
-    /// Open and authenticate one immutable v4 generation.
-    #[allow(clippy::too_many_lines)] // One admission lifecycle; ordering is the authority invariant.
+    /// Open one immutable v4 generation without reading artifact bytes.
+    ///
+    /// The manifest is authenticated against the pinned authority, every
+    /// descriptor and block fence is validated, and every artifact is opened,
+    /// checked for a single link and exact length, and pinned by inode. Content
+    /// is authenticated when it is read: a lookup checks the required XXH64 of
+    /// every ordinal and tombstone block it returns a value from, and refuses
+    /// before returning any value derived from a block that fails. Open cost is
+    /// therefore proportional to descriptors and files, not to nodes.
+    ///
+    /// Forward runs carry only a whole-artifact checksum and are read only by
+    /// writers; the cross-artifact invariants (mapping commitments, UUID
+    /// uniqueness, canonical order) are proven by [`Self::admit_complete`].
     pub(crate) fn open(
         project_dir: &Path,
         authority: &V4OrdinalIdentityAuthority,
@@ -724,8 +894,6 @@ impl V4OrdinalIdentityHandle {
         let mut admission =
             initial_admission_metrics(&manifest, body.len(), body.capacity(), limits)?;
         let mut names = BTreeSet::new();
-        let mut forward_commitment = MappingCommitment::default();
-        let mut ordinal_commitment = MappingCommitment::default();
         let mut forward = Vec::with_capacity(manifest.forward_identities.len());
         for artifact in &manifest.forward_identities {
             require_kind(
@@ -738,18 +906,9 @@ impl V4OrdinalIdentityHandle {
                     "artifact filename is reused",
                 ));
             }
-            forward.push(admit_forward_artifact(
-                &root,
-                artifact,
-                &manifest.ordinal_ranges,
-                &mut forward_commitment,
-                &mut admission,
-            )?);
+            forward.push(open_admission_file(&root, artifact)?);
         }
-        validate_unique_forward_runs(&mut forward, &mut admission)?;
         let mut ranges = Vec::with_capacity(manifest.ordinal_ranges.len());
-        let mut prior_uuid = None;
-        let mut uuid_order_matches_ordinals = true;
         for range in &manifest.ordinal_ranges {
             if !names.insert(range.artifact.name.clone()) {
                 return Err(V4OrdinalIdentityError::InvalidDescriptor(
@@ -758,20 +917,9 @@ impl V4OrdinalIdentityHandle {
             }
             ranges.push(OpenRange {
                 descriptor: range.clone(),
-                artifact: admit_ordinal_artifact(
-                    &root,
-                    range,
-                    &mut ordinal_commitment,
-                    &mut admission,
-                    &mut prior_uuid,
-                    &mut uuid_order_matches_ordinals,
-                )?,
+                artifact: open_admission_file(&root, &range.artifact)?,
+                verify_order: false,
             });
-        }
-        if forward_commitment != ordinal_commitment {
-            return Err(V4OrdinalIdentityError::InvalidDescriptor(
-                "forward and ordinal identity authorities disagree",
-            ));
         }
         let mut tombstones = Vec::with_capacity(manifest.tombstones.len());
         for run in &manifest.tombstones {
@@ -780,10 +928,8 @@ impl V4OrdinalIdentityHandle {
                     "artifact filename is reused",
                 ));
             }
-            let artifact =
-                admit_tombstone_artifact(&root, run, &manifest.ordinal_ranges, &mut admission)?;
             tombstones.push(OpenTombstones {
-                artifact,
+                artifact: open_admission_file(&root, &run.artifact)?,
                 blocks: run.blocks.clone(),
             });
         }
@@ -805,10 +951,79 @@ impl V4OrdinalIdentityHandle {
             ranges,
             tombstones,
             tombstone_cache: TombstoneBlockCache::default(),
+            ordinal_cache: OrdinalBlockCache::default(),
             limits,
             admission,
-            uuid_order_matches_ordinals,
+            complete: false,
+            uuid_order_matches_ordinals: None,
+            recorded_order: manifest.uuid_order_matches_ordinals,
+            seams_checked: false,
         })))
+    }
+
+    /// Authenticate every artifact byte and prove every cross-artifact
+    /// invariant: block fences against content, nonzero canonical UUIDs,
+    /// forward and ordinal mapping commitments equal, forward UUIDs unique
+    /// across runs, tombstones sorted and known, and the UUID-order flag.
+    /// Reads every artifact once (twice for forward runs) through the inodes
+    /// pinned at open. Memoized: a complete handle does no further work.
+    ///
+    /// Writers call this before building on the artifacts
+    /// ([`Self::pinned_update_inputs`]); lookups never need it.
+    ///
+    /// # Errors
+    /// Returns the first authentication or descriptor refusal.
+    pub(crate) fn admit_complete(&mut self) -> Result<(), V4OrdinalIdentityError> {
+        if self.complete {
+            return Ok(());
+        }
+        let mut forward_commitment = MappingCommitment::default();
+        let mut ordinal_commitment = MappingCommitment::default();
+        for artifact in &mut self.forward {
+            admit_forward_artifact(
+                artifact,
+                &self.ranges,
+                &mut forward_commitment,
+                &mut self.admission,
+            )?;
+        }
+        validate_unique_forward_runs(&mut self.forward, &mut self.admission)?;
+        let mut prior_uuid = None;
+        let mut uuid_order_matches_ordinals = true;
+        for range in &mut self.ranges {
+            admit_ordinal_artifact(
+                &mut range.artifact,
+                &range.descriptor,
+                &mut ordinal_commitment,
+                &mut self.admission,
+                &mut prior_uuid,
+                &mut uuid_order_matches_ordinals,
+            )?;
+        }
+        if forward_commitment != ordinal_commitment {
+            return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "forward and ordinal identity authorities disagree",
+            ));
+        }
+        for run in &mut self.tombstones {
+            admit_tombstone_artifact(
+                &mut run.artifact,
+                &run.blocks,
+                &self.ranges,
+                &mut self.admission,
+            )?;
+        }
+        if self
+            .recorded_order
+            .is_some_and(|recorded| recorded != uuid_order_matches_ordinals)
+        {
+            return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "recorded ordinal UUID order disagrees with the ordinals",
+            ));
+        }
+        self.uuid_order_matches_ordinals = Some(uuid_order_matches_ordinals);
+        self.complete = true;
+        Ok(())
     }
 
     /// Admission evidence for this retained handle.
@@ -825,10 +1040,83 @@ impl V4OrdinalIdentityHandle {
 
     /// Whether authenticated UUIDs increase strictly across all ordinal ranges.
     /// This conservative proof includes tombstoned identities: removing any of
-    /// them preserves ordering. It requires no additional reads or durable data.
-    #[must_use]
-    pub const fn uuid_order_matches_ordinals(&self) -> bool {
-        self.uuid_order_matches_ordinals
+    /// them preserves ordering.
+    ///
+    /// A manifest that records the fact answers in O(1) without reading an
+    /// ordinal. A recorded `true` is a claim the publisher computed from the
+    /// records it streamed, not something this call proved, so from then on
+    /// every block a lookup reads must itself ascend; a block that does not is
+    /// refused ([`Self::admit_complete`] checks the whole claim). A manifest
+    /// that is silent (published before the field) is proven by reading and
+    /// authenticating every ordinal block once, stopping at the first
+    /// inversion, and memoized.
+    ///
+    /// # Errors
+    /// Returns the refusal for a block that fails authentication; a corrupted
+    /// block is never reported as merely "unordered".
+    pub fn uuid_order_matches_ordinals(&mut self) -> Result<bool, V4OrdinalIdentityError> {
+        if let Some(ordered) = self.uuid_order_matches_ordinals {
+            return Ok(ordered);
+        }
+        match self.recorded_order {
+            Some(false) => return Ok(false),
+            Some(true) => {
+                for range in &mut self.ranges {
+                    range.verify_order = true;
+                }
+                // A block is checked inside itself, so the seams between ranges
+                // are checked once here: O(ranges), never per node.
+                self.check_range_seams()?;
+                return Ok(true);
+            }
+            None => {}
+        }
+        let ordered = scan_uuid_order(&mut self.ranges, &mut self.admission)?;
+        self.uuid_order_matches_ordinals = Some(ordered);
+        Ok(ordered)
+    }
+
+    /// The last UUID of every range must sort below the first UUID of the next,
+    /// read through the authenticated block path. Done once per handle.
+    fn check_range_seams(&mut self) -> Result<(), V4OrdinalIdentityError> {
+        if self.seams_checked {
+            return Ok(());
+        }
+        let mut prior_last: Option<Uuid> = None;
+        // The end blocks are read to check the record and dropped: holding them
+        // would turn the first query's own reads into cache hits and hide them
+        // from its evidence, and one more read per range end is the whole cost.
+        let mut scratch = OrdinalBlockCache::default();
+        for range_index in 0..self.ranges.len() {
+            let descriptor = &self.ranges[range_index].descriptor;
+            let first_id = descriptor.first_node_id;
+            let last_id = first_id + descriptor.count - 1;
+            let ids = [first_id, last_id];
+            let mut resolved = BTreeMap::new();
+            read_range_coalesced(
+                &mut self.ranges[range_index],
+                &ids,
+                RangeRead {
+                    range_index,
+                    cache: &mut scratch,
+                    max_cache_bytes: 0,
+                    gap_bytes: self.limits.coalesce_gap_bytes,
+                    maximum_read_bytes: self.limits.max_coalesced_read_bytes,
+                    retained_buffer_bytes: 0,
+                },
+                &mut resolved,
+                &mut V4OrdinalLookupMetrics::default(),
+            )?;
+            let (first, last) = (resolved[&first_id], resolved[&last_id]);
+            if prior_last.is_some_and(|prior| prior.as_bytes() >= first.as_bytes()) {
+                return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                    "ordinal UUIDs contradict the recorded UUID order",
+                ));
+            }
+            prior_last = Some(last);
+        }
+        self.seams_checked = true;
+        Ok(())
     }
 
     /// Maximum request entries accepted by this admitted handle per lookup.
@@ -889,8 +1177,12 @@ impl V4OrdinalIdentityHandle {
         }
         let mut metrics = V4OrdinalLookupMetrics {
             requested: requested.len() as u64,
-            peak_buffer_bytes: (requested.len() as u64).saturating_mul(REQUEST_ENTRY_CHARGE),
-            retained_cache_bytes: self.tombstone_cache.charged_bytes as u64,
+            // The request, plus the ordinal blocks the handle already holds.
+            peak_buffer_bytes: (requested.len() as u64)
+                .saturating_mul(REQUEST_ENTRY_CHARGE)
+                .saturating_add(self.ordinal_cache.charged_bytes as u64),
+            retained_cache_bytes: (self.tombstone_cache.charged_bytes
+                + self.ordinal_cache.charged_bytes) as u64,
             ..Default::default()
         };
         let request_buffer_bytes = metrics.peak_buffer_bytes;
@@ -903,7 +1195,7 @@ impl V4OrdinalIdentityHandle {
             .filter(|id| !deleted.contains(id))
             .collect::<Vec<_>>();
         let mut resolved = BTreeMap::new();
-        for range in &mut self.ranges {
+        for (range_index, range) in self.ranges.iter_mut().enumerate() {
             let first = range.descriptor.first_node_id;
             let last = first + range.descriptor.count - 1;
             let start = live.partition_point(|id| *id < first);
@@ -915,13 +1207,22 @@ impl V4OrdinalIdentityHandle {
             read_range_coalesced(
                 range,
                 &live[start..end],
-                self.limits.coalesce_gap_bytes,
-                self.limits.max_coalesced_read_bytes,
-                request_buffer_bytes.saturating_add(self.tombstone_cache.charged_bytes as u64),
+                RangeRead {
+                    range_index,
+                    cache: &mut self.ordinal_cache,
+                    max_cache_bytes: self.limits.max_ordinal_cache_bytes,
+                    gap_bytes: self.limits.coalesce_gap_bytes,
+                    maximum_read_bytes: self.limits.max_coalesced_read_bytes,
+                    retained_buffer_bytes: request_buffer_bytes
+                        .saturating_add(self.tombstone_cache.charged_bytes as u64),
+                },
                 &mut resolved,
                 &mut metrics,
             )?;
         }
+        metrics.retained_cache_bytes = metrics
+            .retained_cache_bytes
+            .max((self.tombstone_cache.charged_bytes + self.ordinal_cache.charged_bytes) as u64);
         metrics.found = resolved.len() as u64;
         metrics.tombstoned = deleted.len() as u64;
         Ok(V4OrdinalLookup {
@@ -1207,9 +1508,34 @@ fn validate_manifest(
                 "ordinal artifact length is not packed",
             ));
         }
+        validate_ordinal_block_fences(range)?;
         prior_end = end;
     }
     validate_tombstone_descriptors(manifest)
+}
+
+/// Descriptor-only proof that an ordinal range's blocks tile its artifact in
+/// canonical `ORDINAL_BLOCK_BYTES` strides. Content is checked against each
+/// block's checksum when the block is read, so open needs no byte of it.
+fn validate_ordinal_block_fences(range: &V4OrdinalRange) -> Result<(), V4OrdinalIdentityError> {
+    let noncanonical =
+        || V4OrdinalIdentityError::InvalidDescriptor("ordinal block fences are noncanonical");
+    let records_per_block = ORDINAL_BLOCK_BYTES / UUID_WIDTH;
+    let expected = range.count.div_ceil(records_per_block);
+    if u64::try_from(range.blocks.len()).map_err(|_| noncanonical())? != expected {
+        return Err(noncanonical());
+    }
+    let mut remaining = range.count;
+    for (index, block) in range.blocks.iter().enumerate() {
+        let count = remaining.min(records_per_block);
+        if block.offset != u64::try_from(index).map_err(|_| noncanonical())? * ORDINAL_BLOCK_BYTES
+            || block.count != count
+        {
+            return Err(noncanonical());
+        }
+        remaining -= count;
+    }
+    Ok(())
 }
 
 fn validate_tombstone_descriptors(
@@ -1232,6 +1558,40 @@ fn validate_tombstone_descriptors(
             ));
         }
         prior_generation = run.generation;
+        validate_tombstone_block_fences(run)?;
+    }
+    Ok(())
+}
+
+/// Descriptor-only proof that a tombstone run's blocks tile its artifact in
+/// canonical strides with ascending, non-overlapping ID fences. The IDs inside
+/// a block are checked against its fence when that block is read.
+fn validate_tombstone_block_fences(
+    run: &V4OrdinalTombstones,
+) -> Result<(), V4OrdinalIdentityError> {
+    let noncanonical =
+        || V4OrdinalIdentityError::InvalidDescriptor("tombstone block fences are noncanonical");
+    let records_per_block = TOMBSTONE_BLOCK_BYTES / TOMBSTONE_WIDTH;
+    let total = run.artifact.bytes / TOMBSTONE_WIDTH;
+    if u64::try_from(run.blocks.len()).map_err(|_| noncanonical())?
+        != total.div_ceil(records_per_block)
+    {
+        return Err(noncanonical());
+    }
+    let mut remaining = total;
+    let mut prior_last = 0_u64;
+    for (index, block) in run.blocks.iter().enumerate() {
+        let count = remaining.min(records_per_block);
+        if block.offset != u64::try_from(index).map_err(|_| noncanonical())? * TOMBSTONE_BLOCK_BYTES
+            || block.count != count
+            || block.first == 0
+            || block.first > block.last
+            || block.first <= prior_last
+        {
+            return Err(noncanonical());
+        }
+        prior_last = block.last;
+        remaining -= count;
     }
     Ok(())
 }
@@ -1286,14 +1646,14 @@ impl MappingCommitment {
 }
 
 fn admit_ordinal_artifact(
-    root: &StableDirectory,
+    artifact: &mut OpenArtifact,
     range: &V4OrdinalRange,
     commitment: &mut MappingCommitment,
     metrics: &mut V4OrdinalAdmissionMetrics,
     prior_uuid: &mut Option<[u8; UUID_WIDTH_USIZE]>,
     uuid_order_matches_ordinals: &mut bool,
-) -> Result<OpenArtifact, V4OrdinalIdentityError> {
-    let mut artifact = open_admission_file(root, &range.artifact)?;
+) -> Result<(), V4OrdinalIdentityError> {
+    artifact.file.seek(SeekFrom::Start(0)).map_err(io_error)?;
     let block_bytes =
         usize::try_from(ORDINAL_BLOCK_BYTES.min(artifact.descriptor.bytes.max(UUID_WIDTH)))
             .map_err(|_| V4OrdinalIdentityError::Authentication)?;
@@ -1345,26 +1705,24 @@ fn admit_ordinal_artifact(
             "ordinal block fences are noncanonical",
         ));
     }
-    finish_admission(&mut artifact, &whole, metrics)?;
-    Ok(artifact)
+    finish_admission(artifact, &whole, metrics)
 }
 
 fn admit_forward_artifact(
-    root: &StableDirectory,
-    descriptor: &V4OrdinalArtifact,
-    ranges: &[V4OrdinalRange],
+    artifact: &mut OpenArtifact,
+    ranges: &[OpenRange],
     commitment: &mut MappingCommitment,
     metrics: &mut V4OrdinalAdmissionMetrics,
-) -> Result<OpenArtifact, V4OrdinalIdentityError> {
-    let mut artifact = open_admission_file(root, descriptor)?;
+) -> Result<(), V4OrdinalIdentityError> {
+    artifact.file.seek(SeekFrom::Start(0)).map_err(io_error)?;
     let maximum_stream = (STREAM_BYTES / FORWARD_RECORD_WIDTH_USIZE) * FORWARD_RECORD_WIDTH_USIZE;
-    let artifact_bytes = usize::try_from(descriptor.bytes).unwrap_or(usize::MAX);
+    let artifact_bytes = usize::try_from(artifact.descriptor.bytes).unwrap_or(usize::MAX);
     let stream_bytes = maximum_stream
         .min(artifact_bytes)
         .max(FORWARD_RECORD_WIDTH_USIZE);
     let mut buffer = vec![0_u8; stream_bytes];
     let mut whole = crate::corruption_checksum::Checksum::new();
-    let mut remaining = descriptor.bytes;
+    let mut remaining = artifact.descriptor.bytes;
     let mut prior_uuid = None;
     while remaining != 0 {
         let read = usize::try_from(remaining.min(stream_bytes as u64))
@@ -1396,8 +1754,61 @@ fn admit_forward_artifact(
         }
         remaining -= read as u64;
     }
-    finish_admission(&mut artifact, &whole, metrics)?;
-    Ok(artifact)
+    finish_admission(artifact, &whole, metrics)
+}
+
+/// Whether consecutive packed UUIDs strictly ascend, including across the
+/// block boundaries inside one contiguous read.
+fn uuids_strictly_ascend(packed: &[u8]) -> bool {
+    packed
+        .chunks_exact(UUID_WIDTH_USIZE)
+        .zip(packed.chunks_exact(UUID_WIDTH_USIZE).skip(1))
+        .all(|(prior, next)| prior < next)
+}
+
+/// Prove that UUIDs increase strictly across every ordinal, reading each block
+/// once and authenticating it against its required checksum. A block that fails
+/// is refused, never counted as an inversion. Stops at the first inversion:
+/// the answer cannot change, and no value from later blocks is used.
+fn scan_uuid_order(
+    ranges: &mut [OpenRange],
+    metrics: &mut V4OrdinalAdmissionMetrics,
+) -> Result<bool, V4OrdinalIdentityError> {
+    let mut prior: Option<[u8; UUID_WIDTH_USIZE]> = None;
+    let mut buffer = vec![0_u8; ORDINAL_BLOCK_BYTES_USIZE];
+    for range in ranges {
+        range
+            .artifact
+            .file
+            .seek(SeekFrom::Start(0))
+            .map_err(io_error)?;
+        for block in &range.descriptor.blocks {
+            let length = usize::try_from(block.count * UUID_WIDTH)
+                .map_err(|_| V4OrdinalIdentityError::Authentication)?;
+            let capacity = buffer.len();
+            let bytes = buffer
+                .get_mut(..length)
+                .ok_or(V4OrdinalIdentityError::Authentication)?;
+            range.artifact.file.read_exact(bytes).map_err(io_error)?;
+            record_admission_read(metrics, length, capacity);
+            if crate::corruption_checksum::checksum(bytes) != block.xxh64 {
+                return Err(V4OrdinalIdentityError::Authentication);
+            }
+            for record in bytes.chunks_exact(UUID_WIDTH_USIZE) {
+                let uuid: [u8; UUID_WIDTH_USIZE] = record.try_into().expect("fixed UUID");
+                if uuid == [0; UUID_WIDTH_USIZE] {
+                    return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                        "ordinal UUID is zero",
+                    ));
+                }
+                if prior.is_some_and(|prior| prior >= uuid) {
+                    return Ok(false);
+                }
+                prior = Some(uuid);
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Prove UUID uniqueness across independently sorted forward generations with
@@ -1498,20 +1909,20 @@ impl ForwardRunCursor {
     }
 }
 fn admit_tombstone_artifact(
-    root: &StableDirectory,
-    run: &V4OrdinalTombstones,
-    ranges: &[V4OrdinalRange],
+    artifact: &mut OpenArtifact,
+    blocks: &[V4OrdinalTombstoneBlock],
+    ranges: &[OpenRange],
     metrics: &mut V4OrdinalAdmissionMetrics,
-) -> Result<OpenArtifact, V4OrdinalIdentityError> {
-    let mut artifact = open_admission_file(root, &run.artifact)?;
-    let block_bytes = TOMBSTONE_BLOCK_BYTES.min(run.artifact.bytes.max(TOMBSTONE_WIDTH));
+) -> Result<(), V4OrdinalIdentityError> {
+    artifact.file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+    let block_bytes = TOMBSTONE_BLOCK_BYTES.min(artifact.descriptor.bytes.max(TOMBSTONE_WIDTH));
     let block_bytes =
         usize::try_from(block_bytes).map_err(|_| V4OrdinalIdentityError::Authentication)?;
     let mut buffer = vec![0_u8; block_bytes];
     let mut whole = crate::corruption_checksum::Checksum::new();
     let mut prior = None;
     let mut offset = 0_u64;
-    let mut declared = run.blocks.iter();
+    let mut declared = blocks.iter();
     loop {
         let read = read_fill_or_eof(&mut artifact.file, &mut buffer, metrics)?;
         if read == 0 {
@@ -1554,8 +1965,7 @@ fn admit_tombstone_artifact(
             "tombstone block fences are noncanonical",
         ));
     }
-    finish_admission(&mut artifact, &whole, metrics)?;
-    Ok(artifact)
+    finish_admission(artifact, &whole, metrics)
 }
 fn read_tombstone_block(
     run: &mut OpenTombstones,
@@ -1593,12 +2003,25 @@ fn read_tombstone_block(
     if crate::corruption_checksum::checksum(&bytes) != block.xxh64 {
         return Err(V4OrdinalIdentityError::Authentication);
     }
+    crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, bytes_len as u64, 1);
     metrics.sequential_read_calls = metrics.sequential_read_calls.saturating_add(1);
     metrics.bytes_read = metrics.bytes_read.saturating_add(bytes_len as u64);
     let ids = bytes
         .chunks_exact(TOMBSTONE_WIDTH_USIZE)
         .map(|record| u64::from_be_bytes(record.try_into().expect("fixed tombstone")))
         .collect::<Vec<_>>();
+    // The fence is descriptor authority and the checksum proved the bytes are
+    // the writer's; this proves the decoded block still agrees with its fence
+    // before any ID from it is used. (That every ID names a known ordinal is
+    // a cross-artifact property, proven by `admit_complete`.)
+    if ids.first() != Some(&block.first)
+        || ids.last() != Some(&block.last)
+        || ids.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(V4OrdinalIdentityError::InvalidDescriptor(
+            "tombstone block fences are noncanonical",
+        ));
+    }
     let decoded_charge = ids.capacity().saturating_mul(std::mem::size_of::<u64>());
     let retained_entry_charge = TombstoneBlockCache::entry_charge(&ids);
     let transient_charge = bytes
@@ -1634,18 +2057,29 @@ fn read_tombstone_block(
     Ok(ids)
 }
 
-fn range_contains(ranges: &[V4OrdinalRange], id: u64) -> bool {
-    let index = ranges.partition_point(|range| range.first_node_id <= id);
+fn range_contains(ranges: &[OpenRange], id: u64) -> bool {
+    let index = ranges.partition_point(|range| range.descriptor.first_node_id <= id);
     index > 0
         && ranges[index - 1]
+            .descriptor
             .first_node_id
-            .checked_add(ranges[index - 1].count)
+            .checked_add(ranges[index - 1].descriptor.count)
             .is_some_and(|end| id < end)
 }
 
 fn plain_name(name: &str) -> bool {
     let mut components = Path::new(name).components();
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+/// An immutable artifact is private (one link) or, when hydration hard-linked
+/// it from the content-addressed store, a read-only shared inode. A writable
+/// shared inode is refused: another name could rewrite it under this handle.
+/// Neither case is the integrity boundary; every block read is checked against
+/// its manifest digest, and the retained stamp detects cooperative change.
+fn has_admissible_links(file: &File) -> Result<bool, V4OrdinalIdentityError> {
+    let links = file_link_count(file).map_err(io_error)?;
+    Ok(links == 1 || links > 1 && file.metadata().map_err(io_error)?.permissions().readonly())
 }
 
 fn open_admission_file(
@@ -1656,7 +2090,7 @@ fn open_admission_file(
         .open_child_file(descriptor.name.as_ref())
         .map_err(io_error)?;
     let stamp = artifact_stamp(&file)?;
-    if file_link_count(&file).map_err(io_error)? != 1 || stamp.length != descriptor.bytes {
+    if !has_admissible_links(&file)? || stamp.length != descriptor.bytes {
         return Err(V4OrdinalIdentityError::Authentication);
     }
     Ok(OpenArtifact {
@@ -1667,6 +2101,7 @@ fn open_admission_file(
 }
 
 fn record_admission_read(metrics: &mut V4OrdinalAdmissionMetrics, read: usize, capacity: usize) {
+    crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, read as u64, 1);
     metrics.sequential_read_calls = metrics.sequential_read_calls.saturating_add(1);
     metrics.authenticated_bytes = metrics.authenticated_bytes.saturating_add(read as u64);
     metrics.peak_buffer_bytes = metrics.peak_buffer_bytes.max(
@@ -1718,15 +2153,109 @@ fn artifact_stamp(file: &File) -> Result<ArtifactStamp, V4OrdinalIdentityError> 
     })
 }
 
+/// Check every block of one contiguous read against its required checksum, and
+/// against the recorded order when a caller relies on it, before any value from
+/// the read is used.
+fn authenticate_run(
+    range: &OpenRange,
+    blocks: std::ops::RangeInclusive<usize>,
+    buffer: &[u8],
+) -> Result<(), V4OrdinalIdentityError> {
+    let run_start = range.descriptor.blocks[*blocks.start()].offset;
+    for block in &range.descriptor.blocks[blocks] {
+        let slice_start = usize::try_from(block.offset - run_start)
+            .map_err(|_| V4OrdinalIdentityError::Authentication)?;
+        let slice_len = usize::try_from(block.count * UUID_WIDTH)
+            .map_err(|_| V4OrdinalIdentityError::Authentication)?;
+        if crate::corruption_checksum::checksum(&buffer[slice_start..slice_start + slice_len])
+            != block.xxh64
+        {
+            return Err(V4OrdinalIdentityError::Authentication);
+        }
+    }
+    if range.verify_order && !uuids_strictly_ascend(buffer) {
+        return Err(V4OrdinalIdentityError::InvalidDescriptor(
+            "ordinal UUIDs contradict the recorded UUID order",
+        ));
+    }
+    Ok(())
+}
+
+/// With a recorded order relied on, adjacent blocks this handle holds must
+/// meet in ascending order: a block is only checked internally when read, so
+/// the seam between two held blocks is checked here, from memory.
+fn check_cached_seams(
+    range: &OpenRange,
+    range_index: usize,
+    cache: &OrdinalBlockCache,
+    touched: &[usize],
+) -> Result<(), V4OrdinalIdentityError> {
+    if !range.verify_order {
+        return Ok(());
+    }
+    let seam_inverted = |lower: usize, upper: usize| match (
+        cache.entries.get(&(range_index, lower)),
+        cache.entries.get(&(range_index, upper)),
+    ) {
+        (Some(lower), Some(upper)) => {
+            lower.bytes[lower.bytes.len() - UUID_WIDTH_USIZE..] >= upper.bytes[..UUID_WIDTH_USIZE]
+        }
+        _ => false,
+    };
+    for &index in touched {
+        if (index > 0 && seam_inverted(index - 1, index)) || seam_inverted(index, index + 1) {
+            return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "ordinal UUIDs contradict the recorded UUID order",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Answer from memory every selected block this handle already authenticated,
+/// and return the ones that still need reading. A held block that contradicts
+/// a relied-on recorded order is refused exactly as a fresh read would be.
+fn serve_cached_blocks(
+    range: &OpenRange,
+    selected: Vec<usize>,
+    ids: &[u64],
+    (range_index, cache): (usize, &OrdinalBlockCache),
+    resolved: &mut BTreeMap<u64, Uuid>,
+) -> Result<Vec<usize>, V4OrdinalIdentityError> {
+    let first = range.descriptor.first_node_id;
+    let mut uncached = Vec::with_capacity(selected.len());
+    for index in selected {
+        let block = &range.descriptor.blocks[index];
+        let Some(cached) = cache.entries.get(&(range_index, index)) else {
+            uncached.push(index);
+            continue;
+        };
+        if range.verify_order && !cached.ascends {
+            return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "ordinal UUIDs contradict the recorded UUID order",
+            ));
+        }
+        resolve_block_ids(first, block, block.offset, &cached.bytes, ids, resolved)?;
+    }
+    Ok(uncached)
+}
+
 fn read_range_coalesced(
     range: &mut OpenRange,
     ids: &[u64],
-    gap_bytes: u64,
-    maximum_read_bytes: usize,
-    retained_buffer_bytes: u64,
+    read: RangeRead<'_>,
     resolved: &mut BTreeMap<u64, Uuid>,
     metrics: &mut V4OrdinalLookupMetrics,
 ) -> Result<(), V4OrdinalIdentityError> {
+    let RangeRead {
+        range_index,
+        cache,
+        max_cache_bytes,
+        gap_bytes,
+        maximum_read_bytes,
+        retained_buffer_bytes,
+    } = read;
+    let read_cache = (range_index, &*cache);
     let first = range.descriptor.first_node_id;
     let selected = range
         .descriptor
@@ -1741,6 +2270,8 @@ fn read_range_coalesced(
             .then_some(index)
         })
         .collect::<Vec<_>>();
+    let touched = selected.clone();
+    let selected = serve_cached_blocks(range, selected, ids, read_cache, resolved)?;
     let mut selected_at = 0;
     while selected_at < selected.len() {
         let first_index = selected[selected_at];
@@ -1781,44 +2312,62 @@ fn read_range_coalesced(
             .file
             .read_exact(&mut buffer)
             .map_err(io_error)?;
+        crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, bytes, 1);
         metrics.sequential_read_calls = metrics.sequential_read_calls.saturating_add(1);
         metrics.bytes_read = metrics.bytes_read.saturating_add(bytes);
-        metrics.peak_buffer_bytes = metrics
-            .peak_buffer_bytes
-            .max(retained_buffer_bytes.saturating_add(bytes));
-        for block in &range.descriptor.blocks[first_index..=last_index] {
+        // The read buffer and, while it is split into held blocks, their copies.
+        let copies = if max_cache_bytes == 0 { 0 } else { bytes };
+        metrics.peak_buffer_bytes = metrics.peak_buffer_bytes.max(
+            retained_buffer_bytes
+                .saturating_add(bytes)
+                .saturating_add(copies),
+        );
+        authenticate_run(range, first_index..=last_index, &buffer)?;
+        for (offset, block) in range.descriptor.blocks[first_index..=last_index]
+            .iter()
+            .enumerate()
+        {
+            resolve_block_ids(first, block, first_block.offset, &buffer, ids, resolved)?;
             let slice_start = usize::try_from(block.offset - first_block.offset)
                 .map_err(|_| V4OrdinalIdentityError::Authentication)?;
             let slice_len = usize::try_from(block.count * UUID_WIDTH)
                 .map_err(|_| V4OrdinalIdentityError::Authentication)?;
-            if crate::corruption_checksum::checksum(&buffer[slice_start..slice_start + slice_len])
-                != block.xxh64
-            {
-                return Err(V4OrdinalIdentityError::Authentication);
-            }
-        }
-        for block in &range.descriptor.blocks[first_index..=last_index] {
-            let block_first = first + block.offset / UUID_WIDTH;
-            let block_last = block_first + block.count - 1;
-            let start = ids.partition_point(|id| *id < block_first);
-            let end = ids.partition_point(|id| *id <= block_last);
-            if start == end {
-                continue;
-            }
-            for id in &ids[start..end] {
-                let at = usize::try_from(
-                    block.offset - first_block.offset + (id - block_first) * UUID_WIDTH,
-                )
-                .map_err(|_| V4OrdinalIdentityError::Authentication)?;
-                let uuid = Uuid::from_bytes(
-                    buffer[at..at + UUID_WIDTH_USIZE]
-                        .try_into()
-                        .expect("fixed UUID"),
-                );
-                resolved.insert(*id, uuid);
-            }
+            let bytes = buffer[slice_start..slice_start + slice_len].to_vec();
+            let ascends = uuids_strictly_ascend(&bytes);
+            cache.insert(
+                (range_index, first_index + offset),
+                CachedOrdinalBlock { bytes, ascends },
+                max_cache_bytes,
+            );
         }
         selected_at = next;
+    }
+    check_cached_seams(range, range_index, cache, &touched)
+}
+
+/// Resolve the requested IDs that fall in `block` from `buffer`, which holds
+/// the block's bytes starting `buffer_start` bytes into the artifact.
+fn resolve_block_ids(
+    first_node_id: u64,
+    block: &V4OrdinalBlock,
+    buffer_start: u64,
+    buffer: &[u8],
+    ids: &[u64],
+    resolved: &mut BTreeMap<u64, Uuid>,
+) -> Result<(), V4OrdinalIdentityError> {
+    let block_first = first_node_id + block.offset / UUID_WIDTH;
+    let block_last = block_first + block.count - 1;
+    let start = ids.partition_point(|id| *id < block_first);
+    let end = ids.partition_point(|id| *id <= block_last);
+    for id in &ids[start..end] {
+        let at = usize::try_from(block.offset - buffer_start + (id - block_first) * UUID_WIDTH)
+            .map_err(|_| V4OrdinalIdentityError::Authentication)?;
+        let uuid = Uuid::from_bytes(
+            buffer[at..at + UUID_WIDTH_USIZE]
+                .try_into()
+                .expect("fixed UUID"),
+        );
+        resolved.insert(*id, uuid);
     }
     Ok(())
 }
@@ -1853,1102 +2402,4 @@ fn io_error(error: impl std::fmt::Display) -> V4OrdinalIdentityError {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::fs;
-    use std::io::Cursor;
-    use std::process::Command;
-
-    use super::*;
-
-    struct ShortReader {
-        inner: Cursor<Vec<u8>>,
-        maximum: usize,
-    }
-
-    impl Read for ShortReader {
-        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-            let available = buffer.len().min(self.maximum);
-            self.inner.read(&mut buffer[..available])
-        }
-    }
-
-    #[test]
-    fn block_fill_preserves_ordinal_and_tombstone_bytes_across_short_reads() {
-        for (width, records) in [(UUID_WIDTH_USIZE, 7_usize), (TOMBSTONE_WIDTH_USIZE, 11)] {
-            let expected = (0..width * records)
-                .map(|value| u8::try_from(value % 251).unwrap())
-                .collect::<Vec<_>>();
-            let mut reader = ShortReader {
-                inner: Cursor::new(expected.clone()),
-                maximum: 3,
-            };
-            let mut actual = vec![0_u8; expected.len()];
-            let mut metrics = V4OrdinalAdmissionMetrics::default();
-            assert_eq!(
-                read_fill_or_eof(&mut reader, &mut actual, &mut metrics).unwrap(),
-                expected.len()
-            );
-            assert_eq!(actual, expected);
-            assert_eq!(Sha256::digest(&actual), Sha256::digest(&expected));
-            assert!(metrics.sequential_read_calls > 1);
-            assert_eq!(metrics.authenticated_bytes, expected.len() as u64);
-        }
-    }
-
-    struct Fixture {
-        root: tempfile::TempDir,
-        manifest: V4OrdinalIdentityManifest,
-    }
-
-    impl Fixture {
-        fn new(range_sizes: &[u64], tombstones: &[u64]) -> Self {
-            let root = tempfile::TempDir::new().unwrap();
-            let index = root.path().join(INDEX_DIR);
-            fs::create_dir_all(&index).unwrap();
-            fs::write(index.join(LOCK_NAME), []).unwrap();
-            let mut next = 1_u64;
-            let mut ordinal_ranges = Vec::new();
-            let mut mappings = Vec::new();
-            for (ordinal, count) in range_sizes.iter().copied().enumerate() {
-                let mut bytes = Vec::new();
-                for id in next..next + count {
-                    let uuid = *Uuid::from_u128(id as u128).as_bytes();
-                    bytes.extend_from_slice(&uuid);
-                    mappings.push((uuid, id));
-                }
-                let name = format!("ordinal-{ordinal}.uuidx");
-                fs::write(index.join(&name), &bytes).unwrap();
-                ordinal_ranges.push(V4OrdinalRange {
-                    first_node_id: next,
-                    count,
-                    artifact: artifact(name, V4OrdinalArtifactKind::OrdinalUuids, 7, &bytes),
-                    blocks: ordinal_blocks(&bytes),
-                });
-                next += count + 3; // prove sparse ranges are packed, never max-id padded
-            }
-            let tombstone_bytes = tombstones
-                .iter()
-                .flat_map(|id| id.to_be_bytes())
-                .collect::<Vec<_>>();
-            fs::write(index.join("tombstones.uuidx"), &tombstone_bytes).unwrap();
-            mappings.sort_unstable_by_key(|(uuid, _)| *uuid);
-            let forward_bytes = mappings
-                .iter()
-                .flat_map(|(uuid, id)| uuid.iter().copied().chain(id.to_be_bytes()))
-                .collect::<Vec<_>>();
-            fs::write(index.join("forward.uuidx"), &forward_bytes).unwrap();
-            let manifest = V4OrdinalIdentityManifest {
-                format_version: ORDINAL_IDENTITY_V4,
-                topology_generation: 7,
-                forward_identities: vec![artifact(
-                    "forward.uuidx".into(),
-                    V4OrdinalArtifactKind::ForwardIdentities,
-                    7,
-                    &forward_bytes,
-                )],
-                ordinal_ranges,
-                tombstones: vec![V4OrdinalTombstones {
-                    generation: 7,
-                    artifact: artifact(
-                        "tombstones.uuidx".into(),
-                        V4OrdinalArtifactKind::NodeTombstones,
-                        7,
-                        &tombstone_bytes,
-                    ),
-                    blocks: tombstone_blocks(tombstones),
-                }],
-            };
-            fs::write(
-                index.join(MANIFEST_NAME),
-                serde_json::to_vec(&manifest).unwrap(),
-            )
-            .unwrap();
-            Self { root, manifest }
-        }
-
-        fn publish(&self) {
-            fs::write(
-                self.root.path().join(INDEX_DIR).join(MANIFEST_NAME),
-                serde_json::to_vec(&self.manifest).unwrap(),
-            )
-            .unwrap();
-        }
-
-        fn open(&self, limits: V4OrdinalIdentityLimits) -> V4OrdinalIdentityHandle {
-            match V4OrdinalIdentityHandle::open(self.root.path(), &self.authority(7), limits)
-                .unwrap()
-            {
-                V4OrdinalIdentityOpen::Ready(handle) => *handle,
-                V4OrdinalIdentityOpen::RebuildRequired { .. } => panic!("fixture is v4"),
-            }
-        }
-
-        fn authority(&self, topology_generation: u64) -> V4OrdinalIdentityAuthority {
-            let body = fs::read(self.root.path().join(INDEX_DIR).join(MANIFEST_NAME)).unwrap();
-            V4OrdinalIdentityAuthority {
-                topology_generation,
-                manifest_sha256: hex(&Sha256::digest(body)),
-            }
-        }
-    }
-
-    #[test]
-    fn retained_authenticated_handle_never_reenumerates_replaced_manifest_names() {
-        let fixture = Fixture::new(&[2], &[1]);
-        let handle = fixture.open(V4OrdinalIdentityLimits::default());
-        let mut replacement = fixture.manifest.clone();
-        replacement.forward_identities[0].name = "planted-forward.uuidx".into();
-        fs::write(
-            fixture.root.path().join(INDEX_DIR).join(MANIFEST_NAME),
-            serde_json::to_vec(&replacement).unwrap(),
-        )
-        .unwrap();
-
-        let referenced = handle.referenced_file_names();
-        assert!(referenced.contains("forward.uuidx"));
-        assert!(!referenced.contains("planted-forward.uuidx"));
-    }
-
-    #[test]
-    fn session_pin_authenticates_once_then_uses_retained_immutable_handles() {
-        let fixture = Fixture::new(&[4], &[]);
-        let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
-        let pin = handle.revalidate_for_session().unwrap();
-        assert_eq!(pin.calls, 11); // root + coordination/manifest + three artifacts
-        assert_eq!(pin.bytes_read, 0);
-
-        let manifest = fixture.root.path().join(INDEX_DIR).join(MANIFEST_NAME);
-        fs::write(&manifest, b"planted after the session pin").unwrap();
-        let pinned = handle.lookup_node_uuids_pinned(&[1, 4]).unwrap();
-        assert_eq!(pinned.metrics.revalidation_calls, 0);
-        assert_eq!(pinned.metrics.revalidation_bytes, 0);
-        assert!(pinned.values.iter().all(Option::is_some));
-
-        assert_eq!(
-            handle.lookup_node_uuids(&[1]).unwrap_err(),
-            V4OrdinalIdentityError::Authentication
-        );
-    }
-
-    fn artifact(
-        name: String,
-        kind: V4OrdinalArtifactKind,
-        generation: u64,
-        bytes: &[u8],
-    ) -> V4OrdinalArtifact {
-        V4OrdinalArtifact {
-            name,
-            kind,
-            generation,
-            bytes: bytes.len() as u64,
-            sha256: hex(&Sha256::digest(bytes)),
-            xxh64: crate::corruption_checksum::checksum(bytes),
-        }
-    }
-
-    fn tombstone_blocks(ids: &[u64]) -> Vec<V4OrdinalTombstoneBlock> {
-        ids.chunks((TOMBSTONE_BLOCK_BYTES / TOMBSTONE_WIDTH) as usize)
-            .enumerate()
-            .map(|(index, chunk)| V4OrdinalTombstoneBlock {
-                offset: index as u64 * TOMBSTONE_BLOCK_BYTES,
-                count: chunk.len() as u64,
-                first: chunk[0],
-                last: chunk[chunk.len() - 1],
-                xxh64: crate::corruption_checksum::checksum(
-                    &chunk
-                        .iter()
-                        .flat_map(|id| id.to_be_bytes())
-                        .collect::<Vec<_>>(),
-                ),
-            })
-            .collect()
-    }
-
-    #[test]
-    fn checksum_ordinal_manifest_refuses_legacy_missing_and_malformed_metadata() {
-        let fixture = Fixture::new(&[2], &[]);
-        let original = serde_json::to_value(&fixture.manifest).unwrap();
-        for mode in 0..9 {
-            let mut changed = original.clone();
-            match mode {
-                0 => {
-                    changed["format_version"] = serde_json::json!(5);
-                    changed["ordinal_ranges"][0]["artifact"]
-                        .as_object_mut()
-                        .unwrap()
-                        .remove("xxh64");
-                }
-                4 => {
-                    changed["format_version"] = serde_json::json!(7);
-                    changed["ordinal_ranges"][0]["artifact"]
-                        .as_object_mut()
-                        .unwrap()
-                        .remove("xxh64");
-                }
-                5 => {
-                    changed.as_object_mut().unwrap().remove("format_version");
-                }
-                6 => {
-                    changed["ordinal_ranges"][0]["blocks"][0]["sha256"] =
-                        serde_json::json!("a".repeat(64))
-                }
-                7 => {
-                    changed["tombstones"][0]["blocks"] = serde_json::json!([{ "offset":0,"count":1,"first":1,"last":1,"xxh64":"0000000000000000","sha256":"a".repeat(64) }])
-                }
-                8 => {
-                    changed["ordinal_ranges"][0]["artifact"]["xxh64"] =
-                        serde_json::json!("00000000000000000")
-                }
-                1 => {
-                    changed["ordinal_ranges"][0]["artifact"]
-                        .as_object_mut()
-                        .unwrap()
-                        .remove("xxh64");
-                }
-                2 => {
-                    changed["ordinal_ranges"][0]["blocks"][0]
-                        .as_object_mut()
-                        .unwrap()
-                        .remove("xxh64");
-                }
-                _ => {
-                    changed["ordinal_ranges"][0]["blocks"][0]["xxh64"] =
-                        serde_json::json!("not-a-checksum")
-                }
-            }
-            assert!(
-                parse_manifest(
-                    &serde_json::to_vec(&changed).unwrap(),
-                    fixture.manifest.topology_generation
-                )
-                .is_err(),
-                "mode={mode}"
-            );
-        }
-        assert!(
-            parse_manifest(
-                &serde_json::to_vec(&original).unwrap(),
-                fixture.manifest.topology_generation
-            )
-            .unwrap()
-            .is_some()
-        );
-    }
-
-    fn ordinal_blocks(bytes: &[u8]) -> Vec<V4OrdinalBlock> {
-        bytes
-            .chunks(ORDINAL_BLOCK_BYTES_USIZE)
-            .enumerate()
-            .map(|(index, block)| V4OrdinalBlock {
-                offset: index as u64 * ORDINAL_BLOCK_BYTES,
-                count: block.len() as u64 / UUID_WIDTH,
-                xxh64: crate::corruption_checksum::checksum(block),
-            })
-            .collect()
-    }
-
-    #[test]
-    fn shuffled_repeated_missing_and_tombstoned_lookup_is_exact() {
-        let fixture = Fixture::new(&[6, 3], &[3]);
-        let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
-        let result = handle.lookup_node_uuids(&[6, 3, 1, 6, 7, 10]).unwrap();
-        assert_eq!(
-            result.values,
-            vec![
-                Some(Uuid::from_u128(6)),
-                None,
-                Some(Uuid::from_u128(1)),
-                Some(Uuid::from_u128(6)),
-                None,
-                Some(Uuid::from_u128(10)),
-            ]
-        );
-        assert_eq!(result.metrics.requested, 6);
-        assert_eq!(result.metrics.unique_requested, 5);
-        assert_eq!(result.metrics.found, 3);
-        assert_eq!(result.metrics.tombstoned, 1);
-        assert_eq!(result.metrics.per_record_seeks, 0);
-    }
-
-    #[test]
-    fn generated_lookup_orders_preserve_identity_and_linear_bounds() {
-        let fixture = Fixture::new(&[96], &[7, 31, 63]);
-        for rotation in 0..32 {
-            let mut requested = (1..=96).step_by(3).collect::<Vec<_>>();
-            requested.rotate_left(rotation);
-            requested.extend([7, 31, 63, 97, requested[0]]);
-            if rotation.is_multiple_of(2) {
-                requested.reverse();
-            }
-            let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
-            let result = handle.lookup_node_uuids(&requested).unwrap();
-            let expected = requested
-                .iter()
-                .map(|id| {
-                    (!matches!(*id, 7 | 31 | 63) && *id <= 96)
-                        .then(|| Uuid::from_u128(u128::from(*id)))
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(result.values, expected);
-            assert_eq!(result.metrics.per_record_seeks, 0);
-            assert!(result.metrics.bytes_read <= 96 * UUID_WIDTH + TOMBSTONE_BLOCK_BYTES);
-            assert!(result.metrics.peak_buffer_bytes <= 4 * TOMBSTONE_BLOCK_BYTES);
-        }
-    }
-
-    #[test]
-    fn absent_v4_classifies_valid_v3_and_present_malformed_v4_never_falls_back() {
-        let (root, _, _) = crate::uuid_membership::tests::fixture();
-        fs::write(
-            root.path().join("topology/generation.json"),
-            b"{\"topology_generation\":7,\"search_generation\":0,\"property_generation\":0}\n",
-        )
-        .unwrap();
-        crate::rebuild_uuid_membership_indexes(root.path(), crate::UuidIndexBuildLimits::default())
-            .unwrap();
-        let index = root.path().join(INDEX_DIR);
-        fs::write(index.join(LOCK_NAME), []).unwrap();
-        let v4_path = index.join(MANIFEST_NAME);
-        let v3_path = index.join("manifest.json");
-        let v3 = fs::read(&v3_path).unwrap();
-        assert!(matches!(
-            V4OrdinalIdentityHandle::discover(root.path(), 7).unwrap(),
-            V4OrdinalIdentityDiscovery::RebuildRequired { found_version: 3 }
-        ));
-        assert!(matches!(
-            V4OrdinalIdentityHandle::open(
-                root.path(),
-                &V4OrdinalIdentityAuthority {
-                    topology_generation: 7,
-                    manifest_sha256: "00".repeat(32),
-                },
-                V4OrdinalIdentityLimits::default()
-            ),
-            Err(V4OrdinalIdentityError::Io)
-        ));
-        fs::remove_file(&v3_path).unwrap();
-        assert!(matches!(
-            V4OrdinalIdentityHandle::discover(root.path(), 7),
-            Err(V4OrdinalIdentityError::InvalidDescriptor(_))
-        ));
-        fs::write(&v3_path, &v3).unwrap();
-        let v3_manifest: serde_json::Value = serde_json::from_slice(&v3).unwrap();
-        let run_name = v3_manifest["runs"][0]["identities"]["name"]
-            .as_str()
-            .unwrap();
-        let run_path = index.join(run_name);
-        let mut run = fs::read(&run_path).unwrap();
-        run[0] ^= 1;
-        fs::write(&run_path, run).unwrap();
-        assert!(matches!(
-            V4OrdinalIdentityHandle::discover(root.path(), 7),
-            Err(V4OrdinalIdentityError::InvalidDescriptor(_))
-        ));
-
-        fs::write(&v4_path, b"{\"format_version\":4}").unwrap();
-        assert_eq!(
-            V4OrdinalIdentityHandle::discover(root.path(), 7).unwrap(),
-            V4OrdinalIdentityDiscovery::Present
-        );
-        let malformed_digest = hex(&Sha256::digest(b"{\"format_version\":4}"));
-        assert!(matches!(
-            V4OrdinalIdentityHandle::open(
-                root.path(),
-                &V4OrdinalIdentityAuthority {
-                    topology_generation: 7,
-                    manifest_sha256: malformed_digest,
-                },
-                V4OrdinalIdentityLimits::default()
-            ),
-            Err(V4OrdinalIdentityError::InvalidDescriptor(_)) | Err(V4OrdinalIdentityError::Io)
-        ));
-
-        let fixture = Fixture::new(&[2], &[]);
-        fixture.publish();
-        let mut mixed = fixture.manifest.clone();
-        mixed.ordinal_ranges[0].artifact.kind = V4OrdinalArtifactKind::ForwardIdentities;
-        fs::write(
-            fixture.root.path().join(INDEX_DIR).join(MANIFEST_NAME),
-            serde_json::to_vec(&mixed).unwrap(),
-        )
-        .unwrap();
-        assert!(matches!(
-            V4OrdinalIdentityHandle::open(
-                fixture.root.path(),
-                &fixture.authority(7),
-                V4OrdinalIdentityLimits::default()
-            ),
-            Err(V4OrdinalIdentityError::InvalidDescriptor(_))
-        ));
-    }
-
-    #[test]
-    fn post_open_same_inode_same_length_mutation_invalidates_capability() {
-        let fixture = Fixture::new(&[3], &[]);
-        let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
-        let path = fixture.root.path().join(INDEX_DIR).join("ordinal-0.uuidx");
-        let mut bytes = fs::read(&path).unwrap();
-        bytes[0] ^= 1;
-        fs::write(&path, bytes).unwrap();
-        assert_eq!(
-            handle.lookup_node_uuids(&[1]).unwrap_err(),
-            V4OrdinalIdentityError::Authentication
-        );
-    }
-
-    #[test]
-    fn pinned_generation_authority_rejects_whole_artifact_and_manifest_substitution() {
-        let original = Fixture::new(&[3], &[]);
-        let authority = original.authority(7);
-        let replacement = Fixture::new(&[5], &[2]);
-        let original_index = original.root.path().join(INDEX_DIR);
-        let replacement_index = replacement.root.path().join(INDEX_DIR);
-        for entry in fs::read_dir(&replacement_index).unwrap() {
-            let entry = entry.unwrap();
-            fs::copy(entry.path(), original_index.join(entry.file_name())).unwrap();
-        }
-
-        assert_eq!(
-            V4OrdinalIdentityHandle::open(
-                original.root.path(),
-                &authority,
-                V4OrdinalIdentityLimits::default()
-            )
-            .unwrap_err(),
-            V4OrdinalIdentityError::Authentication
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cross_process_mutation_with_restored_mtime_fails_block_authentication() {
-        let fixture = Fixture::new(&[3], &[]);
-        let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
-        let artifact = fixture.root.path().join(INDEX_DIR).join("ordinal-0.uuidx");
-        let reference = fixture.root.path().join("original-time");
-        assert!(
-            Command::new("cp")
-                .args(["-p"])
-                .arg(&artifact)
-                .arg(&reference)
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert!(Command::new("sh")
-            .arg("-c")
-            .arg("printf '\\001' | dd of=\"$ARTIFACT\" bs=1 seek=0 conv=notrunc 2>/dev/null && touch -r \"$REFERENCE\" \"$ARTIFACT\"")
-            .env("ARTIFACT", &artifact)
-            .env("REFERENCE", &reference)
-            .status()
-            .unwrap()
-            .success());
-        assert_eq!(
-            handle.lookup_node_uuids(&[1]).unwrap_err(),
-            V4OrdinalIdentityError::Authentication
-        );
-    }
-
-    #[test]
-    fn many_tombstone_runs_share_one_cache_budget_and_peak_charge() {
-        let mut fixture = Fixture::new(&[32], &[]);
-        let index = fixture.root.path().join(INDEX_DIR);
-        fixture.manifest.topology_generation = 20;
-        fixture.manifest.tombstones.clear();
-        for generation in 1_u64..=20 {
-            let bytes = generation.to_be_bytes();
-            let name = format!("tombstones-{generation}.uuidx");
-            fs::write(index.join(&name), bytes).unwrap();
-            fixture.manifest.tombstones.push(V4OrdinalTombstones {
-                generation,
-                artifact: artifact(
-                    name,
-                    V4OrdinalArtifactKind::NodeTombstones,
-                    generation,
-                    &bytes,
-                ),
-                blocks: tombstone_blocks(&[generation]),
-            });
-        }
-        fixture.publish();
-        let mut handle = match V4OrdinalIdentityHandle::open(
-            fixture.root.path(),
-            &fixture.authority(20),
-            V4OrdinalIdentityLimits {
-                max_tombstone_cache_bytes: TOMBSTONE_CACHE_FIXED_CHARGE
-                    + 2 * (TOMBSTONE_CACHE_ENTRY_CHARGE + TOMBSTONE_WIDTH_USIZE),
-                ..V4OrdinalIdentityLimits::default()
-            },
-        )
-        .unwrap()
-        {
-            V4OrdinalIdentityOpen::Ready(handle) => handle,
-            _ => panic!("v4"),
-        };
-        let result = handle
-            .lookup_node_uuids(&(1..=20).collect::<Vec<_>>())
-            .unwrap();
-        let cache_budget = TOMBSTONE_CACHE_FIXED_CHARGE
-            + 2 * (TOMBSTONE_CACHE_ENTRY_CHARGE + TOMBSTONE_WIDTH_USIZE);
-        assert_eq!(handle.tombstone_cache.charged_bytes, cache_budget);
-        assert_eq!(handle.tombstone_cache.entries.len(), 2);
-        assert_eq!(result.metrics.retained_cache_bytes, cache_budget as u64);
-        assert!(result.metrics.transient_buffer_bytes > TOMBSTONE_WIDTH);
-        assert!(
-            result.metrics.peak_buffer_bytes
-                <= 20 * REQUEST_ENTRY_CHARGE
-                    + cache_budget as u64
-                    + TOMBSTONE_CACHE_ENTRY_CHARGE as u64
-                    + 3 * TOMBSTONE_WIDTH
-        );
-    }
-
-    #[test]
-    fn descriptor_corruption_overlap_truncation_and_substitution_fail_closed() {
-        let mut fixture = Fixture::new(&[3, 2], &[]);
-        fixture.manifest.ordinal_ranges[1].first_node_id = 3;
-        fixture.publish();
-        assert!(matches!(
-            V4OrdinalIdentityHandle::open(
-                fixture.root.path(),
-                &fixture.authority(7),
-                V4OrdinalIdentityLimits::default()
-            ),
-            Err(V4OrdinalIdentityError::InvalidDescriptor(_))
-        ));
-
-        let fixture = Fixture::new(&[3], &[]);
-        let path = fixture.root.path().join(INDEX_DIR).join("ordinal-0.uuidx");
-        fs::write(&path, [0_u8; 15]).unwrap();
-        assert!(matches!(
-            V4OrdinalIdentityHandle::open(
-                fixture.root.path(),
-                &fixture.authority(7),
-                V4OrdinalIdentityLimits::default()
-            ),
-            Err(V4OrdinalIdentityError::Authentication)
-        ));
-
-        let mut fixture = Fixture::new(&[2], &[]);
-        fixture.manifest.ordinal_ranges[0].first_node_id = u64::MAX;
-        fixture.publish();
-        assert!(matches!(
-            V4OrdinalIdentityHandle::open(
-                fixture.root.path(),
-                &fixture.authority(7),
-                V4OrdinalIdentityLimits::default()
-            ),
-            Err(V4OrdinalIdentityError::InvalidDescriptor(_))
-        ));
-    }
-
-    #[test]
-    fn forward_authority_mismatch_duplicate_uuid_and_surrogate_fail_closed() {
-        fn publish_forward(fixture: &mut Fixture, records: &[(u128, u64)]) {
-            let bytes = records
-                .iter()
-                .flat_map(|(uuid, id)| {
-                    Uuid::from_u128(*uuid)
-                        .into_bytes()
-                        .into_iter()
-                        .chain(id.to_be_bytes())
-                })
-                .collect::<Vec<_>>();
-            fs::write(
-                fixture.root.path().join(INDEX_DIR).join("forward.uuidx"),
-                &bytes,
-            )
-            .unwrap();
-            fixture.manifest.forward_identities[0] = artifact(
-                "forward.uuidx".into(),
-                V4OrdinalArtifactKind::ForwardIdentities,
-                7,
-                &bytes,
-            );
-            fixture.publish();
-        }
-
-        for records in [
-            vec![(1, 2), (2, 1), (3, 3)],
-            vec![(1, 1), (1, 2), (3, 3)],
-            vec![(1, 1), (2, 1), (3, 3)],
-        ] {
-            let mut fixture = Fixture::new(&[3], &[]);
-            publish_forward(&mut fixture, &records);
-            assert!(matches!(
-                V4OrdinalIdentityHandle::open(
-                    fixture.root.path(),
-                    &fixture.authority(7),
-                    V4OrdinalIdentityLimits::default()
-                ),
-                Err(V4OrdinalIdentityError::InvalidDescriptor(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn generation_ordered_forward_runs_may_have_interleaved_uuid_keys() {
-        let mut fixture = Fixture::new(&[4], &[]);
-        let index = fixture.root.path().join(INDEX_DIR);
-        let encode = |records: &[(u128, u64)]| {
-            records
-                .iter()
-                .flat_map(|(uuid, id)| {
-                    Uuid::from_u128(*uuid)
-                        .into_bytes()
-                        .into_iter()
-                        .chain(id.to_be_bytes())
-                })
-                .collect::<Vec<_>>()
-        };
-        let older = encode(&[(1, 1), (3, 3)]);
-        let newer = encode(&[(2, 2), (4, 4)]);
-        fs::write(index.join("forward-6.uuidx"), &older).unwrap();
-        fs::write(index.join("forward-7.uuidx"), &newer).unwrap();
-        fixture.manifest.forward_identities = vec![
-            artifact(
-                "forward-6.uuidx".into(),
-                V4OrdinalArtifactKind::ForwardIdentities,
-                6,
-                &older,
-            ),
-            artifact(
-                "forward-7.uuidx".into(),
-                V4OrdinalArtifactKind::ForwardIdentities,
-                7,
-                &newer,
-            ),
-        ];
-        fixture.publish();
-
-        let _handle = fixture.open(V4OrdinalIdentityLimits::default());
-    }
-
-    #[test]
-    fn admitted_uuid_order_proof_spans_sparse_ranges_and_tombstones() {
-        for (uuids, expected) in [
-            ([1_u128, 2, 3, 4], true),
-            ([1, 2, 4, 3], false),
-            ([3, 4, 1, 2], false),
-        ] {
-            let mut fixture = Fixture::new(&[2, 2], &[2]);
-            let index = fixture.root.path().join(INDEX_DIR);
-            let mut mappings = Vec::new();
-            for (range, values) in fixture
-                .manifest
-                .ordinal_ranges
-                .iter_mut()
-                .zip(uuids.chunks_exact(2))
-            {
-                let bytes = values
-                    .iter()
-                    .flat_map(|value| Uuid::from_u128(*value).into_bytes())
-                    .collect::<Vec<_>>();
-                fs::write(index.join(&range.artifact.name), &bytes).unwrap();
-                range.artifact = artifact(
-                    range.artifact.name.clone(),
-                    V4OrdinalArtifactKind::OrdinalUuids,
-                    7,
-                    &bytes,
-                );
-                range.blocks = ordinal_blocks(&bytes);
-                mappings.extend(
-                    values
-                        .iter()
-                        .enumerate()
-                        .map(|(offset, uuid)| (*uuid, range.first_node_id + offset as u64)),
-                );
-            }
-            mappings.sort_unstable();
-            let bytes = mappings
-                .iter()
-                .flat_map(|(uuid, id)| {
-                    Uuid::from_u128(*uuid)
-                        .into_bytes()
-                        .into_iter()
-                        .chain(id.to_be_bytes())
-                })
-                .collect::<Vec<_>>();
-            fs::write(index.join("forward.uuidx"), &bytes).unwrap();
-            fixture.manifest.forward_identities = vec![artifact(
-                "forward.uuidx".into(),
-                V4OrdinalArtifactKind::ForwardIdentities,
-                7,
-                &bytes,
-            )];
-            fixture.publish();
-            let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
-            assert_eq!(handle.uuid_order_matches_ordinals(), expected);
-            let lookup = handle.lookup_node_uuids(&[1, 2, 6, 7]).unwrap();
-            assert!(
-                lookup.values[1].is_none(),
-                "tombstoned identity remains absent"
-            );
-            assert_eq!(lookup.values[0], Some(Uuid::from_u128(uuids[0])));
-        }
-    }
-
-    #[test]
-    fn forward_runs_reject_cross_generation_duplicates_and_noncanonical_order() {
-        let mut fixture = Fixture::new(&[4], &[]);
-        let index = fixture.root.path().join(INDEX_DIR);
-        let encode = |records: &[(u128, u64)]| {
-            records
-                .iter()
-                .flat_map(|(uuid, id)| {
-                    Uuid::from_u128(*uuid)
-                        .into_bytes()
-                        .into_iter()
-                        .chain(id.to_be_bytes())
-                })
-                .collect::<Vec<_>>()
-        };
-        let older = encode(&[(1, 1), (3, 3)]);
-        let duplicate = encode(&[(1, 1), (2, 2), (4, 4)]);
-        fs::write(index.join("forward-6.uuidx"), &older).unwrap();
-        fs::write(index.join("forward-7.uuidx"), &duplicate).unwrap();
-        fixture.manifest.forward_identities = vec![
-            artifact(
-                "forward-6.uuidx".into(),
-                V4OrdinalArtifactKind::ForwardIdentities,
-                6,
-                &older,
-            ),
-            artifact(
-                "forward-7.uuidx".into(),
-                V4OrdinalArtifactKind::ForwardIdentities,
-                7,
-                &duplicate,
-            ),
-        ];
-        fixture.publish();
-        assert!(matches!(
-            V4OrdinalIdentityHandle::open(
-                fixture.root.path(),
-                &fixture.authority(7),
-                V4OrdinalIdentityLimits::default()
-            ),
-            Err(V4OrdinalIdentityError::InvalidDescriptor(
-                "forward identity UUID is repeated across generations"
-            ))
-        ));
-
-        fixture.manifest.forward_identities.swap(0, 1);
-        fixture.publish();
-        assert!(matches!(
-            V4OrdinalIdentityHandle::open(
-                fixture.root.path(),
-                &fixture.authority(7),
-                V4OrdinalIdentityLimits::default()
-            ),
-            Err(V4OrdinalIdentityError::InvalidDescriptor(
-                "forward runs are not in canonical generation order"
-            ))
-        ));
-    }
-
-    #[test]
-    fn request_limit_fails_before_request_allocation() {
-        let fixture = Fixture::new(&[3], &[]);
-        let mut handle = fixture.open(V4OrdinalIdentityLimits {
-            max_requested: 2,
-            ..V4OrdinalIdentityLimits::default()
-        });
-        assert_eq!(
-            handle.lookup_node_uuids(&[1, 2, 3]).unwrap_err(),
-            V4OrdinalIdentityError::RequestLimit {
-                requested: 3,
-                maximum: 2,
-            }
-        );
-
-        for cache_budget in [0, TOMBSTONE_CACHE_FIXED_CHARGE - 1] {
-            assert!(matches!(
-                V4OrdinalIdentityHandle::open(
-                    fixture.root.path(),
-                    &fixture.authority(7),
-                    V4OrdinalIdentityLimits {
-                        max_tombstone_cache_bytes: cache_budget,
-                        ..V4OrdinalIdentityLimits::default()
-                    }
-                ),
-                Err(V4OrdinalIdentityError::InvalidDescriptor(
-                    "lookup bounds are invalid"
-                ))
-            ));
-        }
-    }
-
-    #[test]
-    fn failure_evidence_is_typed_sanitized_and_counts_authentication() {
-        let authentication = V4OrdinalIdentityError::Authentication.evidence();
-        assert_eq!(authentication.kind, V4OrdinalFailureKind::Authentication);
-        assert_eq!(authentication.authentication_failures, 1);
-
-        let bounded = V4OrdinalIdentityError::RequestLimit {
-            requested: 2,
-            maximum: 1,
-        }
-        .evidence();
-        assert_eq!(bounded.kind, V4OrdinalFailureKind::RequestLimit);
-        assert_eq!(bounded.authentication_failures, 0);
-        assert!(!format!("{bounded:?}").contains('/'));
-    }
-
-    #[test]
-    fn generation_uppercase_digest_and_unknown_tombstone_fail_closed() {
-        let fixture = Fixture::new(&[3], &[]);
-        assert_eq!(
-            V4OrdinalIdentityHandle::open(
-                fixture.root.path(),
-                &fixture.authority(8),
-                V4OrdinalIdentityLimits::default()
-            )
-            .unwrap_err(),
-            V4OrdinalIdentityError::GenerationMismatch {
-                expected: 8,
-                found: 7
-            }
-        );
-
-        let mut uppercase = fixture.manifest.clone();
-        uppercase.ordinal_ranges[0].artifact.sha256 =
-            uppercase.ordinal_ranges[0].artifact.sha256.to_uppercase();
-        fs::write(
-            fixture.root.path().join(INDEX_DIR).join(MANIFEST_NAME),
-            serde_json::to_vec(&uppercase).unwrap(),
-        )
-        .unwrap();
-        assert!(matches!(
-            V4OrdinalIdentityHandle::open(
-                fixture.root.path(),
-                &fixture.authority(7),
-                V4OrdinalIdentityLimits::default()
-            ),
-            Err(V4OrdinalIdentityError::InvalidDescriptor(_))
-        ));
-
-        let fixture = Fixture::new(&[3], &[]);
-        let manifest_path = fixture.root.path().join(INDEX_DIR).join(MANIFEST_NAME);
-        let mut manifest = serde_json::to_value(&fixture.manifest).unwrap();
-        manifest["untrusted_extension"] = serde_json::json!(true);
-        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-        assert!(matches!(
-            V4OrdinalIdentityHandle::open(
-                fixture.root.path(),
-                &fixture.authority(7),
-                V4OrdinalIdentityLimits::default()
-            ),
-            Err(V4OrdinalIdentityError::Io)
-        ));
-
-        let mut fixture = Fixture::new(&[3], &[]);
-        let unknown = 99_u64.to_be_bytes();
-        fs::write(
-            fixture.root.path().join(INDEX_DIR).join("tombstones.uuidx"),
-            unknown,
-        )
-        .unwrap();
-        fixture.manifest.tombstones[0].artifact = artifact(
-            "tombstones.uuidx".into(),
-            V4OrdinalArtifactKind::NodeTombstones,
-            7,
-            &unknown,
-        );
-        fixture.manifest.tombstones[0].blocks = tombstone_blocks(&[99]);
-        fixture.publish();
-        assert!(matches!(
-            V4OrdinalIdentityHandle::open(
-                fixture.root.path(),
-                &fixture.authority(7),
-                V4OrdinalIdentityLimits::default()
-            ),
-            Err(V4OrdinalIdentityError::InvalidDescriptor(_))
-        ));
-    }
-
-    #[test]
-    fn selected_tombstone_blocks_are_cached_without_full_file_rescans() {
-        let count = (TOMBSTONE_BLOCK_BYTES / TOMBSTONE_WIDTH) * 3;
-        let tombstones = (1..=count).collect::<Vec<_>>();
-        let fixture = Fixture::new(&[count], &tombstones);
-        let mut handle = fixture.open(V4OrdinalIdentityLimits {
-            max_coalesced_read_bytes: TOMBSTONE_BLOCK_BYTES as usize,
-            ..V4OrdinalIdentityLimits::default()
-        });
-        let first = handle.lookup_node_uuids(&[1]).unwrap();
-        let repeated = handle.lookup_node_uuids(&[1]).unwrap();
-        let far = handle.lookup_node_uuids(&[count]).unwrap();
-        assert_eq!(first.metrics.bytes_read, TOMBSTONE_BLOCK_BYTES);
-        assert_eq!(repeated.metrics.bytes_read, 0);
-        assert_eq!(far.metrics.bytes_read, TOMBSTONE_BLOCK_BYTES);
-        assert!(
-            first.metrics.bytes_read + repeated.metrics.bytes_read + far.metrics.bytes_read
-                < 3 * count * TOMBSTONE_WIDTH
-        );
-        assert_eq!(far.metrics.per_record_seeks, 0);
-    }
-
-    #[test]
-    fn authenticated_block_read_has_no_per_record_seeks() {
-        let fixture = Fixture::new(&[16], &[]);
-        let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
-        let result = handle
-            .lookup_node_uuids(&(1..=16).collect::<Vec<_>>())
-            .unwrap();
-        assert_eq!(result.metrics.sequential_read_calls, 1);
-        assert_eq!(result.metrics.bytes_read, 16 * UUID_WIDTH);
-        assert_eq!(result.metrics.per_record_seeks, 0);
-        assert!(
-            result.metrics.peak_buffer_bytes
-                <= 16 * REQUEST_ENTRY_CHARGE
-                    + TOMBSTONE_CACHE_FIXED_CHARGE as u64
-                    + 16 * UUID_WIDTH
-        );
-    }
-
-    #[test]
-    fn adjacent_authenticated_blocks_coalesce_within_gap_and_read_cap() {
-        let fixture = Fixture::new(&[8_200], &[]);
-        let requested = [1, 4_097, 8_200];
-        let mut coalesced = fixture.open(V4OrdinalIdentityLimits::default());
-        let one = coalesced.lookup_node_uuids(&requested).unwrap();
-        assert_eq!(one.metrics.sequential_read_calls, 1);
-        assert_eq!(one.metrics.bytes_read, 8_200 * UUID_WIDTH);
-
-        let mut split = fixture.open(V4OrdinalIdentityLimits {
-            max_coalesced_read_bytes: ORDINAL_BLOCK_BYTES_USIZE,
-            ..V4OrdinalIdentityLimits::default()
-        });
-        let three = split.lookup_node_uuids(&requested).unwrap();
-        assert_eq!(three.metrics.sequential_read_calls, 3);
-        assert_eq!(three.values, one.values);
-        assert_eq!(three.metrics.per_record_seeks, 0);
-    }
-
-    #[test]
-    fn one_two_four_x_work_is_linear_constant_factor() {
-        let mut prior_bytes = 0;
-        for count in [64_u64, 128, 256] {
-            let fixture = Fixture::new(&[count], &[]);
-            let mut handle = fixture.open(V4OrdinalIdentityLimits {
-                max_requested: count as usize,
-                ..V4OrdinalIdentityLimits::default()
-            });
-            let result = handle
-                .lookup_node_uuids(&(1..=count).collect::<Vec<_>>())
-                .unwrap();
-            assert_eq!(result.metrics.bytes_read, count * UUID_WIDTH);
-            assert_eq!(result.metrics.sequential_read_calls, 1);
-            assert_eq!(result.metrics.per_record_seeks, 0);
-            if prior_bytes != 0 {
-                assert_eq!(result.metrics.bytes_read, prior_bytes * 2);
-            }
-            prior_bytes = result.metrics.bytes_read;
-        }
-    }
-
-    #[test]
-    fn admission_streams_artifacts_with_bounded_cross_run_validation_counters() {
-        let mut prior_bytes = 0;
-        let mut prior_calls = 0;
-        let mut prior_metadata = 0;
-        for (count, expected_calls) in [(4_096_u64, 3_u64), (8_192, 4), (16_384, 6)] {
-            let fixture = Fixture::new(&[count], &[]);
-            let handle = fixture.open(V4OrdinalIdentityLimits::default());
-            let metrics = handle.admission_metrics();
-            assert_eq!(metrics.artifacts, 3);
-            assert_eq!(
-                metrics.authenticated_bytes,
-                count * (FORWARD_RECORD_WIDTH * 2 + UUID_WIDTH)
-            );
-            assert_eq!(metrics.sequential_read_calls, expected_calls);
-            assert!(metrics.peak_buffer_bytes <= STREAM_BYTES as u64);
-            assert!(metrics.peak_buffer_bytes >= metrics.retained_descriptor_bytes);
-            assert!(metrics.manifest_bytes > 0);
-            if prior_bytes != 0 {
-                assert_eq!(metrics.authenticated_bytes, prior_bytes * 2);
-                assert!(metrics.sequential_read_calls <= prior_calls * 2);
-                assert!(metrics.retained_descriptor_bytes >= prior_metadata);
-                assert!(metrics.retained_descriptor_bytes <= prior_metadata * 2);
-            }
-            prior_bytes = metrics.authenticated_bytes;
-            prior_calls = metrics.sequential_read_calls;
-            prior_metadata = metrics.retained_descriptor_bytes;
-        }
-    }
-
-    #[test]
-    fn descriptor_metadata_budget_is_enforced_before_artifact_admission() {
-        let fixture = Fixture::new(&[8_192], &[]);
-        let admitted = fixture.open(V4OrdinalIdentityLimits::default());
-        let required = admitted.admission_metrics().retained_descriptor_bytes as usize;
-        assert!(required > DESCRIPTOR_FIXED_CHARGE);
-        assert!(matches!(
-            V4OrdinalIdentityHandle::open(
-                fixture.root.path(),
-                &fixture.authority(7),
-                V4OrdinalIdentityLimits {
-                    max_descriptor_metadata_bytes: required - 1,
-                    ..V4OrdinalIdentityLimits::default()
-                }
-            ),
-            Err(V4OrdinalIdentityError::InvalidDescriptor(
-                "descriptor metadata exceeds admission bound"
-            ))
-        ));
-    }
-
-    #[test]
-    fn construction_metadata_rejects_disjoint_ranges_reusing_one_artifact() {
-        let fixture = Fixture::new(&[1], &[]);
-        let mut manifest = fixture.manifest.clone();
-        let mut duplicate = manifest.ordinal_ranges[0].clone();
-        duplicate.first_node_id = 2;
-        manifest.ordinal_ranges.push(duplicate);
-        let bytes = serde_json::to_vec(&manifest).unwrap();
-        let error =
-            decode_construction_ordinal_manifest(&bytes, manifest.topology_generation).unwrap_err();
-        assert_eq!(
-            error,
-            V4OrdinalIdentityError::InvalidDescriptor("artifact filename is reused")
-        );
-    }
-
-    #[test]
-    fn tombstones_must_be_sorted_known_ordinals_but_newer_duplicates_are_safe() {
-        let fixture = Fixture::new(&[4], &[2]);
-        let index = fixture.root.path().join(INDEX_DIR);
-        let duplicate = 2_u64.to_be_bytes();
-        fs::write(index.join("tombstones-new.uuidx"), duplicate).unwrap();
-        let mut manifest = fixture.manifest.clone();
-        manifest.topology_generation = 8;
-        manifest.tombstones.push(V4OrdinalTombstones {
-            generation: 8,
-            artifact: artifact(
-                "tombstones-new.uuidx".into(),
-                V4OrdinalArtifactKind::NodeTombstones,
-                8,
-                &duplicate,
-            ),
-            blocks: tombstone_blocks(&[2]),
-        });
-        // Retained range generation is allowed; newest deletion still wins.
-        fs::write(
-            index.join(MANIFEST_NAME),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
-        let mut handle = match V4OrdinalIdentityHandle::open(
-            fixture.root.path(),
-            &fixture.authority(8),
-            V4OrdinalIdentityLimits::default(),
-        )
-        .unwrap()
-        {
-            V4OrdinalIdentityOpen::Ready(handle) => *handle,
-            _ => panic!("v4"),
-        };
-        assert_eq!(handle.lookup_node_uuids(&[2]).unwrap().values, [None]);
-    }
-}
+mod tests;

@@ -54,6 +54,21 @@ pub(crate) enum PayloadClass {
     Eager,
 }
 
+/// A v4 ordinal-identity artifact hydration hard-links. The identity handle
+/// authenticates the blocks it reads, but it registers no ticket, so a
+/// writer's capture must admit these bytes before they can name a new digest.
+fn is_hard_linked_identity_artifact(relative_path: &str) -> bool {
+    relative_path
+        .strip_prefix("topology/uuid-membership/")
+        .is_some_and(|name| {
+            !name.contains('/')
+                && Path::new(name)
+                    .extension()
+                    .is_some_and(|extension| extension == "uuidx")
+                && (name.starts_with("forward-v4-") || name.starts_with("ordinal-v4-"))
+        })
+}
+
 /// Classify a payload by its workspace-relative path.
 pub(crate) fn classify(relative_path: &str) -> PayloadClass {
     let first_touch = relative_path == "topology/nodes.parquet"
@@ -61,7 +76,8 @@ pub(crate) fn classify(relative_path: &str) -> PayloadClass {
         || relative_path.starts_with("topology/edges/")
         || relative_path.starts_with("properties/")
         || relative_path.starts_with("edge_properties/")
-        || relative_path.starts_with("indexes/search/");
+        || relative_path.starts_with("indexes/search/")
+        || is_hard_linked_identity_artifact(relative_path);
     let self_authenticating = relative_path.starts_with("topology/uuid-membership/")
         || relative_path.starts_with("deltas/")
         || (relative_path.starts_with("indexes/adjacency/")

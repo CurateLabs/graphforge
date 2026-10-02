@@ -1059,8 +1059,10 @@ fn bounded_ordered_leaf(
         && hop.projected_columns == 1
         && hop.identity_ranges_selected > 0
         && hop.identity_ranges_selected <= hop.projected_rows
-        && hop.identity_read_calls > 0
-        && hop.identity_bytes_read > 0
+        // The handle holds the blocks it has authenticated (#1388), so a query
+        // that follows another over the same ordinals may read none; calls and
+        // bytes still never disagree.
+        && (hop.identity_read_calls == 0) == (hop.identity_bytes_read == 0)
         && hop.identity_peak_buffer_bytes > 0
         && hop
             .identity_ranges_selected
@@ -5339,7 +5341,7 @@ enum MetricRegime {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PhaseMetricPolicy {
     ScaleBearing,
-    NodeBearingBytes,
+    ControlCopyBytes,
     /// Hydration read bytes reconcile exactly to the single-link copy
     /// protocol (#1433, #1435) instead of scaling with retained payload.
     /// `materialize_graph_objects` reads the route table once to
@@ -5404,7 +5406,7 @@ impl PhaseMetricPolicy {
             // does (`BufferedCalls`: ceil(bytes / buffer) ..= bytes), or an
             // exactly reconciled count of data-proportional append batches.
             Self::ScaleBearing
-            | Self::NodeBearingBytes
+            | Self::ControlCopyBytes
             | Self::BufferedCalls { .. }
             | Self::AppendObjectInventory => MetricRegime::DataProportional,
             // Spread cap + absolute floor on a fixed set of authenticated
@@ -5472,7 +5474,7 @@ const RECOVERY_REAUTHENTICATION_MIN_ABSOLUTE_CALLS: u64 = 45;
 // The only hydration read that is neither a copy nor a copy verification is
 // the single authentication read of the manifest route table
 // (`MaterializationRoutes::prepare`). Like the UUID control JSON that
-// `NodeBearingBytes` subtracts exactly, it is a control document whose size
+// `ControlCopyBytes` subtracts exactly, it is a control document whose size
 // follows the fixed file set of the fixture, not its payload; the same 2 KiB
 // fixture bound used for the UUID controls applies. Any per-byte re-read of
 // the hard-linked payload - the 3 of 4 redundant sweeps per open that #1435
@@ -5507,9 +5509,10 @@ const HYDRATION_ROUTE_TABLE_CONTROL_BYTES: u64 = 2 * 1024;
 //   every-path-installed-or-reused inventory; payload calls are bounded by
 //   the payload bytes.
 // hydration_verification: read_bytes is a conservation law over the copy
-//   protocol (not growth); write_bytes is data-proportional on the node axis
-//   and fixed on the edge axis; calls derive from bytes; fsyncs reconcile to
-//   the protocol's file plus directory barriers.
+//   protocol (not growth); write_bytes is the small mutable controls, fixed on
+//   both axes since the identity runs are hard-linked (#1388); calls derive
+//   from bytes; fsyncs reconcile to the protocol's file plus directory
+//   barriers.
 // fsync_synchronization: fsync_calls is data-proportional on the ladder
 //   fixture. #1430 measured it as one durable barrier per cut partition with
 //   the cut `min(partition_count, max(1, staged_identity_records / 16))`, so
@@ -5607,7 +5610,7 @@ const PHASE_METRIC_POLICIES: [PhasePolicyRow; 9] = [
             // `graph_files_inventory()`, and is not this phase's I/O. What
             // remains here is exactly the copy protocol for single-link
             // controls, so the field reconciles to `write_bytes` (which
-            // `NodeBearingBytes` already polices exactly) plus one bounded
+            // `ControlCopyBytes` already polices exactly) plus one bounded
             // route-table read rather than asserting growth that would only
             // return if the redundant sweep did. A held-constant value is
             // therefore correct on the edge axis; a value that tracks
@@ -5615,7 +5618,7 @@ const PHASE_METRIC_POLICIES: [PhasePolicyRow; 9] = [
             PhaseMetricPolicy::HydrationReadReconciliation {
                 max_route_table_bytes: HYDRATION_ROUTE_TABLE_CONTROL_BYTES,
             },
-            PhaseMetricPolicy::NodeBearingBytes,
+            PhaseMetricPolicy::ControlCopyBytes,
             PhaseMetricPolicy::BufferedCalls {
                 byte_field: 0,
                 max_bytes_per_call: HYDRATION_BUFFER_BYTES,
@@ -6256,11 +6259,14 @@ fn validate_lifecycle_metric_policies_for_axis(
                 PhaseMetricPolicy::ScaleBearing => {
                     validate_affine_metric(&name, values, denominators)?;
                 }
-                PhaseMetricPolicy::NodeBearingBytes => {
-                    // Hydration copies private ordinal-V4 data plus mutable v5
-                    // controls. Control JSON gains count digits along either
-                    // axis; subtract its exact authenticated inventory bytes,
-                    // then retain the fixed-node-map bound on the edge axis.
+                PhaseMetricPolicy::ControlCopyBytes => {
+                    // Hydration copies only the small mutable UUID controls
+                    // (the forward and ordinal runs are hard-linked, #1388).
+                    // Control JSON gains count digits along either axis;
+                    // subtract its exact authenticated inventory bytes, and
+                    // what remains is fixed on both axes. A residual that
+                    // follows the node count is the identity runs being
+                    // copied again.
                     let mut ordinal_values = values;
                     for (rung, observation) in observations.iter().enumerate() {
                         let controls = observation.hydration_uuid_control_bytes;
@@ -6274,16 +6280,12 @@ fn validate_lifecycle_metric_policies_for_axis(
                                 format!("{name} omits authenticated UUID control copies")
                             })?;
                     }
-                    if matches!(axis, LinearityAxis::Nodes) {
-                        validate_affine_metric(&name, ordinal_values, denominators)?;
-                    } else {
-                        validate_fixed_protocol_metric(
-                            &name,
-                            ordinal_values,
-                            ordinal_values[0],
-                            ordinal_values[0],
-                        )?;
-                    }
+                    validate_fixed_protocol_metric(
+                        &name,
+                        ordinal_values,
+                        ordinal_values[0],
+                        ordinal_values[0],
+                    )?;
                 }
                 PhaseMetricPolicy::HydrationReadReconciliation {
                     max_route_table_bytes,
@@ -6771,11 +6773,10 @@ fn synthetic_linearity_observations_for_axis(
                     ],
                 ),
                 ("hydration_verification".into(), {
-                    let copied = if matches!(axis, LinearityAxis::Nodes) {
-                        100 + 800 * factor
-                    } else {
-                        900
-                    };
+                    // Only the small mutable controls are copied; the identity
+                    // runs are hard-linked (#1388), so this is fixed on both
+                    // axes.
+                    let copied = 900;
                     // Reads reconcile to the copy protocol: each private
                     // copy read twice, plus one bounded route-table read.
                     [2 * copied + 64, copied, factor, factor, 0, 0, 38]
