@@ -117,10 +117,18 @@ without using the Project package object:
    bundle bound), and require the bytes to hash to the object's `digest`.
 4. Pass the complete local package to the portable-v2 verifier. Require the
    semantic `package_digest` to equal the Version's `package.package_digest`.
+5. Require the package to carry research interchange whose registry holds the
+   selected Version with the lineage `identity_digest` (both the registry
+   commitment and the record's recomputed identity) and the same kind and
+   `source_version_uuid`. A projection package therefore never verifies as its
+   source Version, and a package without research never verifies as any Version.
 
 `graphforge_api::verify_discovered_research_version` implements this sequence. It
 does not publish or materialize a project, so a failed cross-contract check cannot
-leave partially accepted project state.
+leave partially accepted project state. `gf clone --ref <branch>` and
+`gf clone --version-uuid <uuid>` run it before importing, then derive the import
+operation from the repository snapshot, the selected Version UUID, and its
+identity digest.
 
 ## Exact module fetch
 
