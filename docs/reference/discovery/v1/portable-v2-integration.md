@@ -94,6 +94,16 @@ The module package's `package_digest` identifies that package and differs betwee
 Projects that publish the same module. Module identity, not package digest, is
 what two Projects have in common. The Project package is never downloaded.
 
+`gf ontology module fetch OWNER/REPOSITORY --ontology-id ID --version VERSION
+--digest HEX --output FILE [--hub URL]` runs this sequence from the command line
+with the same transport safety as `gf clone` (HTTPS only, public network only,
+bounded downloads, private no-follow staging) and writes the verified module
+document to a new file. It makes exactly three requests: refs, manifest, and the
+module object. The CLI hashes the downloaded bytes against the object's
+`digest` and `length` before step 4 and bounds the object by
+`max_module_package_bytes`. See `packages/cli/README.md` for its flags, receipt
+(`graphforge-hub-module-fetch/1`), and `hub.*` error codes.
+
 `graphforge_api::resolve_discovered_ontology_module`
 (`crates/graphforge-api/src/discovery_ontology_module.rs`) implements steps 1, 2,
 4 and 5 over a downloaded package: discovery parsing, repository and refs binding,
