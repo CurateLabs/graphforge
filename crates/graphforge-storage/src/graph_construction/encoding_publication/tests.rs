@@ -2819,3 +2819,4 @@ fn property_encoding_lanes_preserve_heterogeneous_artifacts_and_evidence() {
 }
 
 mod captures;
+mod property_fragment_cap;
