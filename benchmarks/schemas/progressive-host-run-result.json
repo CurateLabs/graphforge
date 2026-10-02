@@ -15,6 +15,8 @@
         "staging_failed",
         "execution_boundary_failed",
         "benchexec_failed",
+        "host_swapped",
+        "host_swap_unavailable",
         "rung_wall_exceeded",
         "rung_phase_failed",
         "ordinary_receipt_missing",
