@@ -393,6 +393,51 @@ fn no_replace_rename_preserves_file_and_directory_destinations() {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn no_replace_rename_supports_long_absolute_paths() {
+    for directory in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root
+            .path()
+            .join("nested-parent-".repeat(6))
+            .join("nested-parent-".repeat(6))
+            .join("nested-parent-".repeat(6));
+        std::fs::create_dir_all(&parent).unwrap();
+        let source = parent.join("source");
+        let target = parent.join("target");
+        assert!(source.as_os_str().len() > 260);
+        assert!(source.is_absolute());
+        assert!(matches!(
+            source.components().next(),
+            Some(std::path::Component::Prefix(prefix)) if !prefix.kind().is_verbatim()
+        ));
+        let contents = |path: &Path| {
+            if directory {
+                path.join("payload")
+            } else {
+                path.to_path_buf()
+            }
+        };
+        if directory {
+            std::fs::create_dir(&source).unwrap();
+            std::fs::create_dir(&target).unwrap();
+        }
+        std::fs::write(contents(&source), b"source").unwrap();
+        std::fs::write(contents(&target), b"sentinel").unwrap();
+        assert_eq!(
+            rename_no_replace(&source, &target).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(contents(&source)).unwrap(), b"source");
+        assert_eq!(std::fs::read(contents(&target)).unwrap(), b"sentinel");
+        let absent = parent.join("absent");
+        rename_no_replace(&source, &absent).unwrap();
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(contents(&absent)).unwrap(), b"source");
+    }
+}
+
 #[test]
 fn no_replace_rename_concurrent_publish_has_one_winner() {
     use std::sync::{Arc, Barrier};

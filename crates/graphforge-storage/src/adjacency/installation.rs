@@ -16,7 +16,13 @@ pub(super) fn observe_csr_barriers<T>(
 pub(super) fn promote_shards(source: &Path, destination: &Path) -> Result<(), GfError> {
     observe_csr_barriers(|| {
         crate::durable_commit::promote_no_replace(source, destination, || Ok(()), || Ok(()))
-            .map_err(storage_err)
+            .map_err(|error| {
+                storage_err(format!(
+                    "promote adjacency shards from {} to {}: {error}",
+                    source.display(),
+                    destination.display()
+                ))
+            })
     })
 }
 

@@ -803,6 +803,11 @@ fn verify_open_regular(file: &File) -> io::Result<()> {
 }
 
 pub(super) fn rename_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    // std::fs accepts long ordinary paths, but this raw Win32 call needs the
+    // extended-length paths returned by the existing directory-handle resolver.
+    // Resolve parents only: the source leaf itself must still be renamed intact.
+    let source = rename_path(source)?;
+    let destination = rename_path(destination)?;
     let source = wide(source.as_os_str())?;
     let destination = wide(destination.as_os_str())?;
     // SAFETY: both UTF-16 buffers are NUL-terminated and live for the call.
@@ -820,6 +825,18 @@ pub(super) fn rename_no_replace(source: &Path, destination: &Path) -> io::Result
     } else {
         Ok(())
     }
+}
+
+fn rename_path(path: &Path) -> io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "rename path has no parent"))?;
+    let name = absolute
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "rename path has no name"))?;
+    let directory = super::platform::stable_open_directory(parent)?;
+    Ok(directory_path(&directory)?.join(name))
 }
 
 pub(super) fn identity(path: &Path) -> io::Result<FileIdentity> {
