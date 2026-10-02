@@ -77,6 +77,26 @@ pub fn hub_clone_operation(repository: &str, immutable_version: &str) -> Uuid {
     )
 }
 
+/// Derive a hub clone operation for one exact research Version of a snapshot.
+///
+/// A Project-package clone keeps [`hub_clone_operation`]. A research clone also
+/// binds the selected research `version_uuid` and its native identity digest, so
+/// clones of different Versions (a Branch head versus an immutable base) of one
+/// repository snapshot never share an operation, and therefore never share the
+/// generation and transaction identities derived from it.
+#[must_use]
+pub fn hub_research_clone_operation(
+    repository: &str,
+    immutable_version: &str,
+    version_uuid: &str,
+    identity_digest: &str,
+) -> Uuid {
+    new_v5(
+        &hub_clone_operation(repository, immutable_version),
+        format!("graphforge-hub-research-clone/1/{version_uuid}/{identity_digest}").as_bytes(),
+    )
+}
+
 /// Convert a [`Uuid`] into its 16-byte big-endian form, suitable for an Arrow
 /// `FixedSizeBinary(16)` column.
 #[must_use]
@@ -184,6 +204,24 @@ mod tests {
             (
                 hub_clone_operation("curatelabs/other", &version_a),
                 "29ea96be-d350-5026-a85b-32cbf5b835cc",
+            ),
+            (
+                hub_research_clone_operation(
+                    "curatelabs/demo",
+                    &version_a,
+                    "01900000-0000-7000-8000-000000000021",
+                    &format!("sha256:{}", "c".repeat(64)),
+                ),
+                "a53b2fd9-7de0-5826-9fc3-cbd8f7b07c4c",
+            ),
+            (
+                hub_research_clone_operation(
+                    "curatelabs/demo",
+                    &version_a,
+                    "01900000-0000-7000-8000-000000000022",
+                    &format!("sha256:{}", "c".repeat(64)),
+                ),
+                "c4bb0970-3473-5822-a82a-516833d8fde8",
             ),
             (
                 new_v5(&PROVENANCE_NAMESPACE, b"graphforge"),

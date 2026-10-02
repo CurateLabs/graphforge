@@ -268,6 +268,7 @@ fn classify_failure(error: &graphforge_api::GfError) -> Failure {
         | "hub.package.repository_mismatch"
         | "hub.package.immutable_version_mismatch"
         | "hub.package.package_digest_mismatch"
+        | "hub.package.research_version_mismatch"
         | "hub.module.identity_mismatch"
         | "hub.module.content_digest_mismatch"
         | "hub.package.invalid_participant"
@@ -301,6 +302,8 @@ struct ResearchCloneContext {
     lineage_bytes: Vec<u8>,
     version_uuid: String,
     version_kind: String,
+    identity_digest: String,
+    package_digest: String,
 }
 
 #[derive(Debug)]
@@ -681,6 +684,17 @@ fn prepare_research_clone(
             lineage_bytes,
             version_uuid: selected_uuid,
             version_kind: version.kind.clone(),
+            identity_digest: version.identity_digest.0.clone(),
+            package_digest: version
+                .package
+                .as_ref()
+                .map(|package| package.package_digest.0.clone())
+                .ok_or_else(|| {
+                    validation(
+                        "hub.missing_object",
+                        "research Version package is not advertised",
+                    )
+                })?,
         },
     ))
 }
@@ -1396,10 +1410,18 @@ fn run_clone_job(
         },
     )?;
     let (immutable_version, research_version_uuid, research_version_kind) = verified;
-    let operation_id = OperationId(graphforge_api::hub_clone_operation(
-        &canonical_name(&identity),
-        &immutable_version,
-    ));
+    // A Project-package clone keeps its historical derivation. A research clone
+    // binds the selected Version too, so different Versions of one snapshot get
+    // distinct import operations and therefore distinct generation identities.
+    let operation_id = OperationId(match &research_context {
+        None => graphforge_api::hub_clone_operation(&canonical_name(&identity), &immutable_version),
+        Some(context) => graphforge_api::hub_research_clone_operation(
+            &canonical_name(&identity),
+            &immutable_version,
+            &context.version_uuid,
+            &context.identity_digest,
+        ),
+    });
     profile.handoff(
         ComponentKind::PortableVerify,
         ComponentKind::Api,
@@ -1433,6 +1455,14 @@ fn run_clone_job(
             .map(|imported| (imported, Some(object.length), None))
         },
     )?;
+    if let Some(context) = &research_context
+        && imported.package_digest != context.package_digest
+    {
+        return Err(validation(
+            "hub.package.package_digest_mismatch",
+            "imported research package differs from the verified Version package",
+        ));
+    }
     profile.handoff(
         ComponentKind::PortableImport,
         ComponentKind::Storage,
@@ -1565,6 +1595,9 @@ fn research_version_error(error: DiscoveryResearchVersionError) -> graphforge_ap
                 DiscoveryPortableV2Mismatch::ModuleContentDigest => {
                     "hub.module.content_digest_mismatch"
                 }
+                DiscoveryPortableV2Mismatch::ResearchVersionIdentity => {
+                    "hub.package.research_version_mismatch"
+                }
             },
             "research discovery reference mismatch",
         ),
@@ -1599,6 +1632,9 @@ fn portable_error(error: DiscoveryPortableV2Error) -> graphforge_api::GfError {
                 DiscoveryPortableV2Mismatch::ModuleIdentity => "hub.module.identity_mismatch",
                 DiscoveryPortableV2Mismatch::ModuleContentDigest => {
                     "hub.module.content_digest_mismatch"
+                }
+                DiscoveryPortableV2Mismatch::ResearchVersionIdentity => {
+                    "hub.package.research_version_mismatch"
                 }
             },
             "portable discovery reference mismatch",
@@ -1652,6 +1688,9 @@ fn hash_reader(reader: &mut impl Read) -> Result<String, graphforge_api::GfError
         });
     Ok(format!("sha256:{hex}"))
 }
+
+#[cfg(test)]
+mod research_clone_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2451,6 +2490,10 @@ mod tests {
             ("hub.integrity", Failure::InvalidInput),
             ("hub.module.identity_mismatch", Failure::InvalidInput),
             ("hub.module.content_digest_mismatch", Failure::InvalidInput),
+            (
+                "hub.package.research_version_mismatch",
+                Failure::InvalidInput,
+            ),
             ("hub.package.invalid_participant", Failure::InvalidInput),
             ("hub.limit_exceeded", Failure::ResourceLimit),
             ("hub.unsafe_location", Failure::Network),

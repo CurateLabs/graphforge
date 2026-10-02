@@ -1,11 +1,14 @@
 //! Verification-first bridge from discovery lineage to a research Version package.
 //!
 //! Discovery validates repository, refs, and lineage binding, then names an
-//! expected semantic package digest for one research Version. This module
-//! delegates package integrity exclusively to [`crate::verify_portable_v2`].
+//! expected semantic package digest for one research Version. Package integrity
+//! belongs to the storage-owned portable-v2 verifier; native research validation
+//! of every archived Version runs exactly as in [`crate::verify_portable_v2`].
+//! This module additionally requires the verified research registry to carry the
+//! selected Version with the lineage's identity digest and kind, before any
+//! destination exists.
 
 use crate::discovery_portable_v2::DiscoveryPortableV2Mismatch;
-use crate::{PortableVerifyRequest, verify_portable_v2};
 use graphforge_core::portable::{
     PortableV2Error, PortableV2Limits, PortableV2Mode, PortableV2Report,
 };
@@ -112,12 +115,10 @@ pub fn verify_discovered_research_version(
     let package = version.package.as_ref().expect(
         "research_version_object returns only Versions with an advertised package reference",
     );
-    let report = verify_portable_v2(
-        &PortableVerifyRequest {
-            input: request.package.to_path_buf(),
-            mode: request.mode,
-            limits: request.portable_limits,
-        },
+    let report = graphforge_storage::verify_portable_v2(
+        request.package,
+        request.mode,
+        request.portable_limits,
         request.cancelled,
     )
     .map_err(DiscoveryResearchVersionError::Portable)?;
@@ -126,12 +127,106 @@ pub fn verify_discovered_research_version(
             DiscoveryPortableV2Mismatch::PackageDigest,
         ));
     }
+    // A research Version package must carry research interchange; a package
+    // without it cannot prove which Version it holds.
+    if !report.research_interchange {
+        return Err(DiscoveryResearchVersionError::ReferenceMismatch(
+            DiscoveryPortableV2Mismatch::ResearchVersionIdentity,
+        ));
+    }
+    let report = verify_selected_research_version(request, version)?;
     Ok(DiscoveredResearchVersion {
         repository: manifest.repository,
         version_uuid: request.version_uuid.to_owned(),
         version: version.clone(),
         report,
     })
+}
+
+/// Run native research validation of every archived Version and require the
+/// selected Version's record to match the lineage identity digest and kind.
+#[cfg(feature = "research")]
+fn verify_selected_research_version(
+    request: &DiscoveryResearchVersionRequest<'_>,
+    expected: &LineageVersion,
+) -> Result<PortableV2Report, DiscoveryResearchVersionError> {
+    use graphforge_storage::research_versions::{ResearchRegistry, ResearchVersionRecord};
+    let selected = uuid::Uuid::parse_str(&expected.version_uuid).map_err(|_| {
+        DiscoveryResearchVersionError::ReferenceMismatch(
+            DiscoveryPortableV2Mismatch::ResearchVersionIdentity,
+        )
+    })?;
+    let mut matched = None;
+    let mut validator = |generation: &graphforge_storage::ResolvedProjectGeneration,
+                         version: &ResearchVersionRecord,
+                         registry: &ResearchRegistry| {
+        crate::research_interchange::validation::validate(generation, version, registry)?;
+        if version.version_uuid == selected {
+            matched = Some(selected_matches(expected, version, registry));
+        }
+        Ok(())
+    };
+    let report = graphforge_storage::validate_research_package(
+        request.package,
+        request.portable_limits,
+        request.cancelled,
+        &mut validator,
+    )
+    .map_err(DiscoveryResearchVersionError::Portable)?;
+    if matched != Some(true) {
+        return Err(DiscoveryResearchVersionError::ReferenceMismatch(
+            DiscoveryPortableV2Mismatch::ResearchVersionIdentity,
+        ));
+    }
+    Ok(report)
+}
+
+#[cfg(not(feature = "research"))]
+fn verify_selected_research_version(
+    _request: &DiscoveryResearchVersionRequest<'_>,
+    _expected: &LineageVersion,
+) -> Result<PortableV2Report, DiscoveryResearchVersionError> {
+    Err(DiscoveryResearchVersionError::Portable(
+        PortableV2Error::new(
+            graphforge_core::portable::PortableV2ErrorCode::Incompatible,
+            "research package validation requires the `research` feature",
+        ),
+    ))
+}
+
+/// True when the archived record is exactly the lineage Version: the registry
+/// commitment and the record's recomputed identity both equal the lineage
+/// identity digest, and complete/projection kind and source agree.
+#[cfg(feature = "research")]
+fn selected_matches(
+    expected: &LineageVersion,
+    version: &graphforge_storage::research_versions::ResearchVersionRecord,
+    registry: &graphforge_storage::research_versions::ResearchRegistry,
+) -> bool {
+    let hex = |bytes: &[u8; 32]| {
+        use std::fmt::Write as _;
+        bytes
+            .iter()
+            .fold(String::from("sha256:"), |mut output, byte| {
+                write!(output, "{byte:02x}").expect("writing to a string cannot fail");
+                output
+            })
+    };
+    let committed = registry.identities.get(&version.version_uuid).map(hex);
+    let recomputed = version.identity_sha256().ok().map(|bytes| hex(&bytes));
+    let Ok(source) = crate::discovery_research_lineage::projection_source(registry, version) else {
+        return false;
+    };
+    let source = source.map(|id| id.to_string());
+    let kind = if source.is_some() {
+        "projection"
+    } else {
+        "complete"
+    };
+    committed.as_deref() == Some(expected.identity_digest.0.as_str())
+        && recomputed.as_deref() == Some(expected.identity_digest.0.as_str())
+        && kind == expected.kind
+        && source == expected.source_version_uuid
 }
 
 fn map_immutable_mismatch(error: DiscoveryError) -> DiscoveryResearchVersionError {

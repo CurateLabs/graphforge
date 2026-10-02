@@ -114,7 +114,7 @@ required-features = ["discovery", "portable", "research"]
 
 [[test]]
 name = "discovery_research_version"
-required-features = ["discovery", "portable"]
+required-features = ["discovery", "portable", "research"]
 
 [[test]]
 name = "discovery_lineage_import"

@@ -1119,11 +1119,15 @@
         },
         {
           "path": "crates/graphforge-api/src/discovery_research_lineage.rs",
-          "symbol": "build_lineage_advertises_branch_heads_and_projection_kind"
+          "symbol": "build_lineage_reports_registry_projection_as_projection_of_its_source"
         },
         {
           "path": "crates/graphforge-api/tests/discovery_lineage_import.rs",
           "symbol": "distinct_imports_reopen_with_identical_version_lineage"
+        },
+        {
+          "path": "crates/graphforge-cli/src/hub_clone/research_clone_tests.rs",
+          "symbol": "fork_branches_and_versions_clone_into_distinct_destinations_with_identical_lineage"
         }
       ]
     },

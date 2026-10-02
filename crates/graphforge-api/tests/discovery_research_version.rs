@@ -1,24 +1,28 @@
-//! Discovery lineage binding into the storage-owned portable-v2 verifier.
+//! Discovery lineage binding into the storage-owned portable-v2 verifier, with
+//! real research interchange packages exported through the facade.
 
 use graphforge_api::{
+    BranchSource, BuildResearchLineageRequest, CancellationToken, CreateResearchBranchRequest,
     DiscoveryPortableV2Mismatch, DiscoveryResearchVersionError, DiscoveryResearchVersionRequest,
-    PortableV2Limits, PortableV2Mode, verify_discovered_research_version,
+    ExecuteResearchBranchRequest, ExportResearchRequest, GraphForge, PortableV2Limits,
+    PortableV2Mode, verify_discovered_research_version,
 };
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor, PORTABLE_V2_FORMAT,
     PortablePackageReference, ProtocolRequirement, ProtocolVersion, RefSet, RepositoryIdentity,
-    RepositoryRef, ResearchLineage, Sha256Digest,
+    RepositoryRef, ResearchLineage, ResearchLineageReference, Sha256Digest,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
+use std::path::PathBuf;
+use uuid::Uuid;
 
 const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
 const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n";
 const MANIFEST_PATH: &str = "data/graphforge-project.json";
-const LINEAGE_VERSION: &str = "01900000-0000-7000-8000-000000000022";
 
 fn hex(bytes: impl AsRef<[u8]>) -> String {
     bytes
@@ -77,166 +81,340 @@ fn package() -> (tempfile::TempDir, String) {
     (root, package_digest)
 }
 
-fn lineage_json(package_digest: &str) -> Vec<u8> {
-    let lineage = serde_json::json!({
-        "format":"graphforge-research-lineage/1","version":{"major":1,"minor":1},
-        "repository":{"owner":"openalex","repository":"openalex-fork"},
-        "immutable_version":digest('a').0,
-        "project_uuid":"01900000-0000-7000-8000-000000000010",
-        "requirements":[{"capability":"research-lineage","major":1}],"capabilities":[],
-        "branches":[{"branch_uuid":"01900000-0000-7000-8000-000000000020","ref_name":"main","project_uuid":"01900000-0000-7000-8000-000000000010","head_version_uuid":LINEAGE_VERSION,"parent_branch_uuid":null,"origin_version_uuid":LINEAGE_VERSION,"base_version_uuid":LINEAGE_VERSION,"selection_sha256":digest('1').0,"label":"main"}],
-        "versions":[{"version_uuid":LINEAGE_VERSION,"identity_digest":digest('2').0,"kind":"complete","branch_uuid":"01900000-0000-7000-8000-000000000020","source_version_uuid":null,"package":{"format":"graphforge-project/2","package_digest":package_digest,"object_digest":digest('b').0}}],
-        "proposals":[]
-    });
-    serde_json::to_vec(&lineage).unwrap()
+/// One Branch with an immutable base and a later head, each exported as its own
+/// research package, plus the discovery documents a Hub would publish for them.
+struct Published {
+    _root: tempfile::TempDir,
+    base: Uuid,
+    head: Uuid,
+    packages: BTreeMap<Uuid, (PortablePackageReference, PathBuf)>,
+    lineage: ResearchLineage,
+    repository: RepositoryIdentity,
 }
 
-fn discovery(
-    package_digest: String,
-) -> (
-    DiscoveryManifest,
-    RefSet,
-    ResearchLineage,
-    RepositoryIdentity,
-) {
-    let repository = RepositoryIdentity::parse("openalex/openalex-fork").unwrap();
-    let lineage =
-        ResearchLineage::from_json(&lineage_json(&package_digest), DiscoveryLimits::default())
+fn generation(graph: &GraphForge) -> Uuid {
+    graph
+        .committed_generation_identity()
+        .unwrap()
+        .generation_uuid
+}
+
+fn publish() -> Published {
+    let cancellation = CancellationToken::new();
+    let root = tempfile::tempdir().unwrap();
+    let mut graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    graph.execute("CREATE (:Item {x:0})").unwrap();
+    let branch = Uuid::now_v7();
+    let base = Uuid::now_v7();
+    graph
+        .create_research_branch(
+            &CreateResearchBranchRequest {
+                operation_uuid: Uuid::now_v7(),
+                expected_generation_uuid: generation(&graph),
+                branch_uuid: branch,
+                version_uuid: base,
+                source: BranchSource::Current {
+                    origin_version_uuid: Uuid::now_v7(),
+                    context_uuid: Uuid::now_v7(),
+                },
+                creator_uuid: Uuid::now_v7(),
+                created_at: 1,
+                label: "main".into(),
+            },
+            &cancellation,
+        )
+        .unwrap();
+    let head = Uuid::now_v7();
+    graph
+        .execute_research_branch(
+            &ExecuteResearchBranchRequest {
+                operation_uuid: Uuid::now_v7(),
+                expected_generation_uuid: generation(&graph),
+                branch_uuid: branch,
+                version_uuid: head,
+                created_at: 2,
+                query: "MATCH (n:Item) SET n.x=1".into(),
+            },
+            &cancellation,
+        )
+        .unwrap();
+    let mut packages = BTreeMap::new();
+    for (version, marker) in [(base, 'b'), (head, 'c')] {
+        let output = root.path().join(format!("{version}.gfpb"));
+        let exported = graph
+            .export_research(
+                &ExportResearchRequest {
+                    version_uuid: version,
+                    output: output.clone(),
+                    bundled: true,
+                    projection: None,
+                },
+                &cancellation,
+            )
             .unwrap();
-    let lineage_digest = lineage.canonical_digest().unwrap();
+        packages.insert(
+            version,
+            (
+                PortablePackageReference {
+                    format: PORTABLE_V2_FORMAT.into(),
+                    package_digest: Sha256Digest(exported.package_digest),
+                    object_digest: digest(marker),
+                },
+                output,
+            ),
+        );
+    }
+    let repository = RepositoryIdentity::parse("openalex/openalex-fork").unwrap();
+    let project_uuid = graph
+        .research_reference(
+            &graphforge_api::ResearchReferenceTarget::Version { version_uuid: head },
+            &cancellation,
+        )
+        .unwrap()
+        .project_uuid;
+    let lineage = graph
+        .build_research_lineage_for_discovery(
+            &BuildResearchLineageRequest {
+                repository: repository.clone(),
+                immutable_version: digest('a'),
+                project_uuid,
+                branch_ref_names: BTreeMap::from([(branch, "main".to_owned())]),
+                version_packages: packages
+                    .iter()
+                    .map(|(version, (package, _))| (*version, package.clone()))
+                    .collect(),
+                fork_origin_repository: None,
+                published_proposals: Default::default(),
+            },
+            &cancellation,
+        )
+        .unwrap();
+    Published {
+        _root: root,
+        base,
+        head,
+        packages,
+        lineage,
+        repository,
+    }
+}
+
+/// Canonical manifest and refs for a lineage; package objects use the
+/// lineage's object digests, distinct from the Project package object.
+fn documents(lineage: &ResearchLineage) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let mut objects = vec![
+        ObjectDescriptor {
+            digest: digest('e'),
+            length: 1,
+            media_type: "application/vnd.graphforge.project".into(),
+            locations: vec!["https://data.graphforge.sh/project".into()],
+        },
+        ObjectDescriptor {
+            digest: digest('f'),
+            length: 4096,
+            media_type: graphforge_discovery::RESEARCH_LINEAGE_MEDIA_TYPE.into(),
+            locations: vec!["https://data.graphforge.sh/lineage".into()],
+        },
+    ];
+    for version in &lineage.versions {
+        let package = version.package.as_ref().unwrap();
+        if objects
+            .iter()
+            .all(|object| object.digest != package.object_digest)
+        {
+            objects.push(ObjectDescriptor {
+                digest: package.object_digest.clone(),
+                length: 1,
+                media_type: "application/vnd.graphforge.project".into(),
+                locations: vec![format!(
+                    "https://data.graphforge.sh/{}",
+                    package.object_digest.0.trim_start_matches("sha256:")
+                )],
+            });
+        }
+    }
+    objects.sort_by(|left, right| left.digest.0.cmp(&right.digest.0));
     let manifest = DiscoveryManifest {
         format: DISCOVERY_FORMAT.into(),
         version: ProtocolVersion::CURRENT,
-        repository: repository.clone(),
+        repository: lineage.repository.clone(),
         default_ref: "main".into(),
         resolved_ref: "main".into(),
-        immutable_version: digest('a'),
+        immutable_version: lineage.immutable_version.clone(),
         package: PortablePackageReference {
             format: PORTABLE_V2_FORMAT.into(),
-            package_digest: digest('f'),
-            object_digest: digest('c'),
+            package_digest: digest('9'),
+            object_digest: digest('e'),
         },
         summary: None,
         ontology: None,
-        lineage: Some(graphforge_discovery::ResearchLineageReference {
+        lineage: Some(ResearchLineageReference {
             format: graphforge_discovery::RESEARCH_LINEAGE_FORMAT.into(),
-            lineage_digest,
-            object_digest: digest('d'),
+            lineage_digest: lineage.canonical_digest().unwrap(),
+            object_digest: digest('f'),
         }),
         requirements: vec![ProtocolRequirement {
             capability: "portable-v2".into(),
             major: 1,
         }],
         capabilities: vec![],
-        objects: vec![
-            ObjectDescriptor {
-                digest: digest('b'),
-                length: 1,
-                media_type: "application/vnd.graphforge.project".into(),
-                locations: vec!["https://data.graphforge.sh/version".into()],
-            },
-            ObjectDescriptor {
-                digest: digest('c'),
-                length: 1,
-                media_type: "application/vnd.graphforge.project".into(),
-                locations: vec!["https://data.graphforge.sh/project".into()],
-            },
-            ObjectDescriptor {
-                digest: digest('d'),
-                length: 512,
-                media_type: graphforge_discovery::RESEARCH_LINEAGE_MEDIA_TYPE.into(),
-                locations: vec!["https://data.graphforge.sh/lineage".into()],
-            },
-        ],
+        objects,
         extensions: BTreeMap::default(),
     };
     let refs = RefSet {
         format: DISCOVERY_FORMAT.into(),
         version: ProtocolVersion::CURRENT,
-        repository: repository.clone(),
+        repository: lineage.repository.clone(),
         default_ref: "main".into(),
         refs: vec![RepositoryRef {
             name: "main".into(),
-            target: digest('a'),
+            target: lineage.immutable_version.clone(),
             validator: digest('d'),
         }],
         extensions: BTreeMap::default(),
     };
-    (manifest, refs, lineage, repository)
+    (
+        manifest.to_canonical_json().unwrap(),
+        refs.to_canonical_json().unwrap(),
+        lineage.to_canonical_json().unwrap(),
+    )
 }
 
-#[test]
-fn valid_lineage_version_maps_to_the_storage_verified_package() {
-    let (package, package_digest) = package();
-    let (manifest, refs, lineage, repository) = discovery(package_digest.clone());
-    let manifest_json = serde_json::to_vec(&manifest).unwrap();
-    let refs_json = serde_json::to_vec(&refs).unwrap();
-    let lineage_json = serde_json::to_vec(&lineage).unwrap();
-    let accepted = verify_discovered_research_version(&DiscoveryResearchVersionRequest {
+fn verify(
+    lineage: &ResearchLineage,
+    repository: &RepositoryIdentity,
+    version_uuid: Uuid,
+    package: &std::path::Path,
+) -> Result<graphforge_api::DiscoveredResearchVersion, DiscoveryResearchVersionError> {
+    let (manifest_json, refs_json, lineage_json) = documents(lineage);
+    verify_discovered_research_version(&DiscoveryResearchVersionRequest {
         manifest_json: &manifest_json,
         refs_json: &refs_json,
         lineage_json: &lineage_json,
-        expected_repository: &repository,
-        version_uuid: LINEAGE_VERSION,
-        package: package.path(),
+        expected_repository: repository,
+        version_uuid: &version_uuid.to_string(),
+        package,
         discovery_limits: DiscoveryLimits::default(),
         portable_limits: PortableV2Limits::default(),
         mode: PortableV2Mode::Full,
         cancelled: None,
     })
-    .unwrap();
-    assert_eq!(accepted.repository, repository);
-    assert_eq!(accepted.version_uuid, LINEAGE_VERSION);
-    assert_eq!(accepted.version.kind, "complete");
-    assert_eq!(accepted.report.package_digest, package_digest);
+}
+
+fn version_mut(
+    lineage: &mut ResearchLineage,
+    version: Uuid,
+) -> &mut graphforge_discovery::LineageVersion {
+    lineage
+        .versions
+        .iter_mut()
+        .find(|entry| entry.version_uuid == version.to_string())
+        .unwrap()
 }
 
 #[test]
-fn package_digest_mismatch_fails_without_acceptance() {
-    let (package, package_digest) = package();
-    let (mut manifest, refs, lineage, repository) = discovery(package_digest);
-    manifest.objects[1].digest = digest('e');
-    let manifest_json = serde_json::to_vec(&manifest).unwrap();
-    let refs_json = serde_json::to_vec(&refs).unwrap();
-    let lineage_json = serde_json::to_vec(&lineage).unwrap();
-    assert!(matches!(
-        verify_discovered_research_version(&DiscoveryResearchVersionRequest {
+fn valid_lineage_version_maps_to_the_storage_verified_package() {
+    let published = publish();
+    for version in [published.head, published.base] {
+        let (package, path) = &published.packages[&version];
+        let (manifest_json, refs_json, lineage_json) = documents(&published.lineage);
+        let accepted = verify_discovered_research_version(&DiscoveryResearchVersionRequest {
             manifest_json: &manifest_json,
             refs_json: &refs_json,
             lineage_json: &lineage_json,
-            expected_repository: &repository,
-            version_uuid: LINEAGE_VERSION,
-            package: package.path(),
+            expected_repository: &published.repository,
+            version_uuid: &version.to_string(),
+            package: path,
             discovery_limits: DiscoveryLimits::default(),
             portable_limits: PortableV2Limits::default(),
             mode: PortableV2Mode::Full,
             cancelled: None,
-        }),
-        Err(DiscoveryResearchVersionError::Discovery(_))
+        })
+        .unwrap();
+        assert_eq!(accepted.repository, published.repository);
+        assert_eq!(accepted.version_uuid, version.to_string());
+        assert_eq!(accepted.version.kind, "complete");
+        assert_eq!(accepted.report.package_digest, package.package_digest.0);
+    }
+}
+
+#[test]
+fn research_package_digest_mismatch_fails_without_acceptance() {
+    let published = publish();
+    // The lineage names a different semantic digest for the head's research
+    // package; the Project package reference is untouched.
+    let mut lineage = published.lineage.clone();
+    version_mut(&mut lineage, published.head)
+        .package
+        .as_mut()
+        .unwrap()
+        .package_digest = digest('7');
+    let (_, path) = &published.packages[&published.head];
+    assert!(matches!(
+        verify(&lineage, &published.repository, published.head, path),
+        Err(DiscoveryResearchVersionError::ReferenceMismatch(
+            DiscoveryPortableV2Mismatch::PackageDigest
+        ))
+    ));
+}
+
+#[test]
+fn version_identity_must_match_the_verified_research_registry() {
+    let published = publish();
+    let (_, head_path) = &published.packages[&published.head];
+    // A tampered identity digest for the selected Version.
+    let mut lineage = published.lineage.clone();
+    version_mut(&mut lineage, published.head).identity_digest = digest('7');
+    assert!(matches!(
+        verify(&lineage, &published.repository, published.head, head_path),
+        Err(DiscoveryResearchVersionError::ReferenceMismatch(
+            DiscoveryPortableV2Mismatch::ResearchVersionIdentity
+        ))
+    ));
+    // The base Version advertised with the head's package: the package digest
+    // agrees with the lineage, but the package does not carry the base Version
+    // with the base identity, so the head is never accepted as the base.
+    let mut lineage = published.lineage.clone();
+    let head_package = published.packages[&published.head].0.clone();
+    version_mut(&mut lineage, published.base).package = Some(head_package);
+    assert!(matches!(
+        verify(&lineage, &published.repository, published.base, head_path),
+        Err(DiscoveryResearchVersionError::ReferenceMismatch(
+            DiscoveryPortableV2Mismatch::ResearchVersionIdentity
+        ))
+    ));
+}
+
+#[test]
+fn package_without_research_interchange_never_proves_a_version() {
+    let published = publish();
+    let (package, package_digest) = package();
+    let mut lineage = published.lineage.clone();
+    version_mut(&mut lineage, published.head)
+        .package
+        .as_mut()
+        .unwrap()
+        .package_digest = Sha256Digest(package_digest);
+    assert!(matches!(
+        verify(
+            &lineage,
+            &published.repository,
+            published.head,
+            package.path()
+        ),
+        Err(DiscoveryResearchVersionError::ReferenceMismatch(
+            DiscoveryPortableV2Mismatch::ResearchVersionIdentity
+        ))
     ));
 }
 
 #[test]
 fn repository_mismatch_fails_before_package_acceptance() {
-    let (package, package_digest) = package();
-    let (manifest, refs, lineage, _repository) = discovery(package_digest);
+    let published = publish();
     let other = RepositoryIdentity::parse("example/other").unwrap();
-    let manifest_json = serde_json::to_vec(&manifest).unwrap();
-    let refs_json = serde_json::to_vec(&refs).unwrap();
-    let lineage_json = serde_json::to_vec(&lineage).unwrap();
+    let (_, path) = &published.packages[&published.head];
     assert!(matches!(
-        verify_discovered_research_version(&DiscoveryResearchVersionRequest {
-            manifest_json: &manifest_json,
-            refs_json: &refs_json,
-            lineage_json: &lineage_json,
-            expected_repository: &other,
-            version_uuid: LINEAGE_VERSION,
-            package: package.path(),
-            discovery_limits: DiscoveryLimits::default(),
-            portable_limits: PortableV2Limits::default(),
-            mode: PortableV2Mode::Full,
-            cancelled: None,
-        }),
+        verify(&published.lineage, &other, published.head, path),
         Err(DiscoveryResearchVersionError::ReferenceMismatch(
             DiscoveryPortableV2Mismatch::Repository
         ))

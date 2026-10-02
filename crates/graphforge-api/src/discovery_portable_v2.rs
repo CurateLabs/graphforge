@@ -29,6 +29,9 @@ pub enum DiscoveryPortableV2Mismatch {
     ModuleIdentity,
     /// The module document's recomputed canonical digest differs from its identity.
     ModuleContentDigest,
+    /// The verified package's research registry does not carry the selected
+    /// research Version with the lineage identity digest and kind.
+    ResearchVersionIdentity,
 }
 
 /// Failure at one of the explicit discovery-to-package trust boundaries.
