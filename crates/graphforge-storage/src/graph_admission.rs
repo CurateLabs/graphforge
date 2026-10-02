@@ -219,9 +219,8 @@ impl PayloadTicket {
         file: &File,
         identity: graphforge_filesystem::FileIdentity,
     ) -> Result<(), GfError> {
-        if let Some(outcome) = self.outcome.get() {
-            return outcome.clone();
-        }
+        // A native identity may be recycled after both authoritative names
+        // disappear. Cached refusals belong only to the original payload.
         if !self.describes(identity) {
             let mut registry = registry();
             if registry
@@ -231,6 +230,9 @@ impl PayloadTicket {
                 registry.remove(&key_of(identity));
             }
             return Ok(());
+        }
+        if let Some(outcome) = self.outcome.get() {
+            return outcome.clone();
         }
         // The lock is not held while checksumming: concurrent first touches of
         // this inode wait on the one computation, every other inode proceeds.
@@ -489,14 +491,94 @@ mod tests {
 
     #[test]
     fn a_refusal_is_memoized_and_never_downgraded() {
+        for remove_object in [false, true] {
+            let fixture = Fixture::new(PAYLOAD);
+            fixture.register();
+            fixture.flip_first_byte();
+            let identity = graphforge_filesystem::path_identity(&fixture.object).unwrap();
+            let ticket = registry().get(&key_of(identity)).cloned().unwrap();
+            let first = admit_path(&fixture.link).unwrap_err();
+            // Restoring the byte does not reopen the question for this hydration,
+            // even when only one of the original authoritative names remains.
+            fixture.flip_first_byte();
+            let (removed, retained) = if remove_object {
+                (&fixture.object, &fixture.link)
+            } else {
+                (&fixture.link, &fixture.object)
+            };
+            std::fs::remove_file(removed).unwrap();
+            let second = admit_path(retained).unwrap_err();
+            assert_eq!(first.to_string(), second.to_string());
+            assert_eq!(ticket.checksum_runs.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    fn departed_refusal() -> (Fixture, Arc<PayloadTicket>) {
         let fixture = Fixture::new(PAYLOAD);
         fixture.register();
         fixture.flip_first_byte();
-        let first = admit_path(&fixture.link).unwrap_err();
-        // Restoring the byte does not reopen the question for this hydration.
-        fixture.flip_first_byte();
-        let second = admit_path(&fixture.link).unwrap_err();
-        assert_eq!(first.to_string(), second.to_string());
+        let identity = graphforge_filesystem::path_identity(&fixture.object).unwrap();
+        let ticket = registry().get(&key_of(identity)).cloned().unwrap();
+        let error = admit_path(&fixture.link).unwrap_err();
+        assert!(error.to_string().contains("XXH64 checksum"), "{error}");
+        // Pin the old identity until its exact registry entry is removed, so
+        // another parallel fixture cannot recycle it during this teardown.
+        let retained = File::open(&fixture.object).unwrap();
+        std::fs::remove_file(&fixture.object).unwrap();
+        std::fs::remove_file(&fixture.link).unwrap();
+        assert!(ticket.workspace_root.exists());
+        assert!(Arc::ptr_eq(
+            &registry().remove(&key_of(identity)).unwrap(),
+            &ticket
+        ));
+        drop(retained);
+        (fixture, ticket)
+    }
+
+    #[test]
+    fn a_departed_cached_refusal_does_not_poison_a_reused_identity() {
+        // Keep the old workspace directory alive so another hydration batch
+        // cannot prune this ticket merely because its root disappeared.
+        let (_departed, ticket) = departed_refusal();
+        let unrelated = Fixture::new(b"an unrelated clean payload");
+        unrelated.register();
+        let file = File::open(&unrelated.object).unwrap();
+        let identity = graphforge_filesystem::file_identity(&file).unwrap();
+        let unrelated_ticket = registry().get(&key_of(identity)).cloned().unwrap();
+        assert!(!ticket.describes(identity));
+        // Model native identity recycling directly, without asking the OS to
+        // recycle any particular inode number or clearing other tickets.
+        assert!(Arc::ptr_eq(
+            &registry()
+                .insert(key_of(identity), Arc::clone(&ticket))
+                .unwrap(),
+            &unrelated_ticket
+        ));
+        admit_file(&file).expect("a departed refusal must not apply to unrelated bytes");
+        assert!(!registry().contains_key(&key_of(identity)));
+        assert_eq!(ticket.checksum_runs.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn retiring_a_departed_refusal_preserves_a_replacement_ticket() {
+        let (_departed, stale) = departed_refusal();
+        let unrelated = Fixture::new(b"a newly admitted payload");
+        unrelated.register();
+        let file = File::open(&unrelated.object).unwrap();
+        let identity = graphforge_filesystem::file_identity(&file).unwrap();
+        let replacement = registry().get(&key_of(identity)).cloned().unwrap();
+        assert!(!stale.describes(identity));
+        // An in-flight reader may still hold the retired Arc after a newer
+        // hydration has replaced its entry at this identity key.
+        stale.admit(&file, identity).unwrap();
+        assert!(Arc::ptr_eq(
+            registry().get(&key_of(identity)).unwrap(),
+            &replacement
+        ));
+        assert_eq!(replacement.checksum_runs.load(Ordering::Relaxed), 0);
+        admit_file(&file).unwrap();
+        assert_eq!(replacement.checksum_runs.load(Ordering::Relaxed), 1);
+        assert_eq!(stale.checksum_runs.load(Ordering::Relaxed), 1);
     }
 
     #[test]
