@@ -1800,6 +1800,15 @@
       ]
     },
     {
+      "path": "crates/graphforge-storage/src/project_portable_v2/participant_files.rs",
+      "function": "read",
+      "role": "control_authentication",
+      "input_contract": "Bounded manifest-listed file bytes are reauthenticated against the listed SHA-256 and length before a semantic consumer receives them; no additional whole-package pass.",
+      "function_bodies_sha256": [
+        "9c9db8a9dc3419d6b53bd7410061eb8158f1feffacfa2ed28cc3aed2f0df81e2"
+      ]
+    },
+    {
       "path": "crates/graphforge-storage/src/project_portable_v2/materialization/compact_root.rs",
       "function": "publish_compact_import_root",
       "role": "control_authentication",

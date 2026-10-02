@@ -261,6 +261,9 @@ fn classify_failure(error: &graphforge_api::GfError) -> Failure {
         | "hub.package.repository_mismatch"
         | "hub.package.immutable_version_mismatch"
         | "hub.package.package_digest_mismatch"
+        | "hub.module.identity_mismatch"
+        | "hub.module.content_digest_mismatch"
+        | "hub.package.invalid_participant"
         | "hub.package.invalid_structure"
         | "hub.package.invalid_path"
         | "hub.package.duplicate_entry"
@@ -1387,8 +1390,16 @@ fn portable_error(error: DiscoveryPortableV2Error) -> graphforge_api::GfError {
                     "hub.package.immutable_version_mismatch"
                 }
                 DiscoveryPortableV2Mismatch::PackageDigest => "hub.package.package_digest_mismatch",
+                DiscoveryPortableV2Mismatch::ModuleIdentity => "hub.module.identity_mismatch",
+                DiscoveryPortableV2Mismatch::ModuleContentDigest => {
+                    "hub.module.content_digest_mismatch"
+                }
             },
             "portable discovery reference mismatch",
+        ),
+        DiscoveryPortableV2Error::Participant { .. } => validation(
+            "hub.package.invalid_participant",
+            "portable project participant is invalid",
         ),
         DiscoveryPortableV2Error::Portable(error) => validation(
             match error.code {
@@ -2086,6 +2097,9 @@ mod tests {
             ("hub.destination_conflict", Failure::InvalidInput),
             ("hub.unsupported_future", Failure::InvalidInput),
             ("hub.integrity", Failure::InvalidInput),
+            ("hub.module.identity_mismatch", Failure::InvalidInput),
+            ("hub.module.content_digest_mismatch", Failure::InvalidInput),
+            ("hub.package.invalid_participant", Failure::InvalidInput),
             ("hub.limit_exceeded", Failure::ResourceLimit),
             ("hub.unsafe_location", Failure::Network),
             ("hub.network", Failure::Network),
