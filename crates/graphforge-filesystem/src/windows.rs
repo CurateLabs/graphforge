@@ -414,64 +414,91 @@ pub(super) fn replace_file_from(
         guarded_directory_path(target_directory).map_err(ReplaceFileError::NotReplaced)?;
     let source_path = source_directory_path.join(source_name);
     let target_path = target_directory_path.join(target_name);
-    let source = open_rename_handle(&source_path).map_err(ReplaceFileError::NotReplaced)?;
-    verify_open_regular(&source).map_err(ReplaceFileError::NotReplaced)?;
-    source
-        .observed_sync_all()
-        .map_err(ReplaceFileError::NotReplaced)?;
-    let source_before = file_identity(&source).map_err(ReplaceFileError::NotReplaced)?;
-    if expected_source.is_some_and(|expected| expected != source_before)
-        || identity(&source_path).map_err(ReplaceFileError::NotReplaced)? != source_before
+    // Sealed staging files are readonly. Windows refuses GENERIC_WRITE on
+    // that inode, so clear only its readonly metadata while it remains in the
+    // private source directory and restore it on the retained handle after
+    // the rename attempt.
+    let attributes = open_attribute_writer(&source_path).map_err(ReplaceFileError::NotReplaced)?;
+    verify_open_regular(&attributes).map_err(ReplaceFileError::NotReplaced)?;
+    let attribute_identity = file_identity(&attributes).map_err(ReplaceFileError::NotReplaced)?;
+    if expected_source.is_some_and(|expected| expected != attribute_identity)
+        || identity(&source_path).map_err(ReplaceFileError::NotReplaced)? != attribute_identity
     {
         return Err(ReplaceFileError::NotReplaced(io::Error::other(
             "cross-directory rename source identity changed",
         )));
     }
-    let target = open_identity_handle(&target_path).map_err(ReplaceFileError::NotReplaced)?;
-    verify_space_usage_metadata(&target.metadata().map_err(ReplaceFileError::NotReplaced)?)
-        .map_err(ReplaceFileError::NotReplaced)?;
-    let target_before = file_identity(&target).map_err(ReplaceFileError::NotReplaced)?;
-    if expected_target.is_some_and(|expected| expected != target_before)
-        || identity(&target_path).map_err(ReplaceFileError::NotReplaced)? != target_before
-    {
-        return Err(ReplaceFileError::NotReplaced(io::Error::other(
-            "cross-directory rename target identity changed",
-        )));
+    if let Err(error) = set_readonly_attribute(&attributes, false) {
+        return match set_readonly_attribute(&attributes, true) {
+            Ok(()) => Err(ReplaceFileError::NotReplaced(error)),
+            Err(reseal_error) => Err(ReplaceFileError::StateUnknown(reseal_error)),
+        };
     }
-    let result = rename_handle(
-        &source,
-        target_path.as_os_str(),
-        true,
-        expected_target.is_some(),
-    );
-    let opened_source_after = file_identity(&source).ok();
-    let opened_target_after = file_identity(&target).ok();
-    let source_after = identity(&source_path).ok();
-    let target_after = identity(&target_path).ok();
-    if result.is_ok()
-        && opened_source_after == Some(source_before)
-        && opened_target_after == Some(target_before)
-        && source_after.is_none()
-        && target_after == Some(source_before)
-    {
-        return Ok(());
-    }
-    if result.is_ok() {
-        return Err(ReplaceFileError::StateUnknown(io::Error::other(
-            "cross-directory replacement success state did not reconcile",
-        )));
-    }
-    let error = result.expect_err("failed rename result was checked");
-    if opened_source_after != Some(source_before) || opened_target_after != Some(target_before) {
-        return Err(ReplaceFileError::StateUnknown(error));
-    }
-    Err(super::classify_failed_replacement(
-        error,
-        source_before,
-        target_before,
-        source_after,
-        target_after,
-    ))
+    let operation = (|| {
+        let source = open_rename_handle(&source_path).map_err(ReplaceFileError::NotReplaced)?;
+        verify_open_regular(&source).map_err(ReplaceFileError::NotReplaced)?;
+        source
+            .observed_sync_all()
+            .map_err(ReplaceFileError::NotReplaced)?;
+        let source_before = file_identity(&source).map_err(ReplaceFileError::NotReplaced)?;
+        if expected_source.is_some_and(|expected| expected != source_before)
+            || identity(&source_path).map_err(ReplaceFileError::NotReplaced)? != source_before
+        {
+            return Err(ReplaceFileError::NotReplaced(io::Error::other(
+                "cross-directory rename source identity changed",
+            )));
+        }
+        let target = open_identity_handle(&target_path).map_err(ReplaceFileError::NotReplaced)?;
+        verify_space_usage_metadata(&target.metadata().map_err(ReplaceFileError::NotReplaced)?)
+            .map_err(ReplaceFileError::NotReplaced)?;
+        let target_before = file_identity(&target).map_err(ReplaceFileError::NotReplaced)?;
+        if expected_target.is_some_and(|expected| expected != target_before)
+            || identity(&target_path).map_err(ReplaceFileError::NotReplaced)? != target_before
+        {
+            return Err(ReplaceFileError::NotReplaced(io::Error::other(
+                "cross-directory rename target identity changed",
+            )));
+        }
+        let result = rename_handle(
+            &source,
+            target_path.as_os_str(),
+            true,
+            expected_target.is_some(),
+        );
+        let opened_source_after = file_identity(&source).ok();
+        let opened_target_after = file_identity(&target).ok();
+        let source_after = identity(&source_path).ok();
+        let target_after = identity(&target_path).ok();
+        if result.is_ok()
+            && opened_source_after == Some(source_before)
+            && opened_target_after == Some(target_before)
+            && source_after.is_none()
+            && target_after == Some(source_before)
+        {
+            return Ok(());
+        }
+        if result.is_ok() {
+            return Err(ReplaceFileError::StateUnknown(io::Error::other(
+                "cross-directory replacement success state did not reconcile",
+            )));
+        }
+        let error = result.expect_err("failed rename result was checked");
+        if opened_source_after != Some(source_before) || opened_target_after != Some(target_before)
+        {
+            return Err(ReplaceFileError::StateUnknown(error));
+        }
+        Err(super::classify_failed_replacement(
+            error,
+            source_before,
+            target_before,
+            source_after,
+            target_after,
+        ))
+    })();
+    let reseal = set_readonly_attribute(&attributes, true);
+    drop(attributes);
+    reseal.map_err(ReplaceFileError::StateUnknown)?;
+    operation
 }
 
 pub(super) fn install_new_file(
@@ -565,6 +592,40 @@ fn open_rename_handle(path: &Path) -> io::Result<File> {
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
         .open(path)
+}
+
+fn open_attribute_writer(path: &Path) -> io::Result<File> {
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
+        .open(path)
+}
+
+fn set_readonly_attribute(file: &File, readonly: bool) -> io::Result<()> {
+    let mut basic = information(file)?;
+    if readonly {
+        basic.FileAttributes |= FILE_ATTRIBUTE_READONLY;
+    } else {
+        basic.FileAttributes &= !FILE_ATTRIBUTE_READONLY;
+    }
+    // SAFETY: `file` is an identity-checked regular file and `basic` is the
+    // fixed-size structure required by FileBasicInfo. Only the readonly bit
+    // changes; timestamps and all other attributes are preserved.
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileBasicInfo,
+            (&raw mut basic).cast(),
+            u32::try_from(std::mem::size_of::<FILE_BASIC_INFO>())
+                .expect("FILE_BASIC_INFO size fits u32"),
+        )
+    } == 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn delete_file_by_handle(path: &Path, expected: FileIdentity) -> io::Result<()> {

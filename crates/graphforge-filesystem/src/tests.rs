@@ -834,6 +834,14 @@ fn authenticated_cross_directory_replacement_preserves_old_inode() {
         path_identity(&target_path.join("target")).unwrap(),
         replacement
     );
+    #[cfg(windows)]
+    assert!(
+        std::fs::metadata(target_path.join("target"))
+            .unwrap()
+            .permissions()
+            .readonly(),
+        "cross-directory replacement must restore the readonly seal"
+    );
     assert!(!source_path.join("temporary").exists());
 }
 
