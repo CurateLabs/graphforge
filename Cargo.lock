@@ -2238,6 +2238,7 @@ dependencies = [
  "fs4 1.1.0",
  "graphforge-api",
  "graphforge-discovery",
+ "graphforge-hub-publish",
  "graphforge-storage",
  "libc",
  "parquet",

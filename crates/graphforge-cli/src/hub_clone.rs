@@ -20,25 +20,25 @@ use graphforge_discovery::{
     RefSet, RepositoryIdentity, ResearchLineage,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
-use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
-use ureq::unversioned::transport::DefaultConnector;
 use url::Url;
 
-const DEFAULT_HUB: &str = "https://graphforge.sh";
-const MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(test)]
+use crate::hub_http::fetch;
+use crate::hub_http::{
+    HttpResponse, HttpTransport, MAX_METADATA_BYTES, Transport, endpoint, fetch_with_attempts,
+    hash_reader, limit_error, network, parse_input, read_bounded, storage, validate_url,
+    validation,
+};
+
 const MAX_BUNDLE_BYTES: u64 = 100 * 1024 * 1024 * 1024;
-const MAX_REDIRECTS: usize = 4;
 
 #[derive(Args)]
 pub(crate) struct CloneArgs {
@@ -304,289 +304,6 @@ struct ResearchCloneContext {
     version_kind: String,
     identity_digest: String,
     package_digest: String,
-}
-
-#[derive(Debug)]
-struct PublicResolver(DefaultResolver);
-
-impl Resolver for PublicResolver {
-    fn resolve(
-        &self,
-        uri: &ureq::http::Uri,
-        config: &ureq::config::Config,
-        timeout: ureq::unversioned::transport::NextTimeout,
-    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
-        let addresses = self.0.resolve(uri, config, timeout)?;
-        let mut approved = self.empty();
-        for address in addresses
-            .iter()
-            .copied()
-            .filter(|address| public_ip(address.ip()))
-        {
-            approved.push(address);
-        }
-        if approved.is_empty() {
-            Err(ureq::Error::HostNotFound)
-        } else {
-            Ok(approved)
-        }
-    }
-}
-
-fn public_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => public_v4(ip),
-        IpAddr::V6(ip) => {
-            if let Some(v4) = ip.to_ipv4_mapped() {
-                return public_v4(v4);
-            }
-            !(ip.is_unspecified()
-                || ip.is_loopback()
-                || ip.is_multicast()
-                || in_v6(ip, "fc00::".parse().unwrap(), 7)
-                || in_v6(ip, "fe80::".parse().unwrap(), 10)
-                || in_v6(ip, "2001:db8::".parse().unwrap(), 32))
-        }
-    }
-}
-
-fn public_v4(ip: Ipv4Addr) -> bool {
-    let value = u32::from(ip);
-    let blocked = [
-        ("0.0.0.0", 8),
-        ("10.0.0.0", 8),
-        ("100.64.0.0", 10),
-        ("127.0.0.0", 8),
-        ("169.254.0.0", 16),
-        ("172.16.0.0", 12),
-        ("192.0.0.0", 24),
-        ("192.0.2.0", 24),
-        ("192.168.0.0", 16),
-        ("198.18.0.0", 15),
-        ("198.51.100.0", 24),
-        ("203.0.113.0", 24),
-        ("224.0.0.0", 4),
-        ("240.0.0.0", 4),
-    ];
-    !blocked.iter().any(|(base, bits)| {
-        let base = u32::from(base.parse::<Ipv4Addr>().unwrap());
-        let mask = u32::MAX.checked_shl(32 - bits).unwrap_or(0);
-        value & mask == base & mask
-    })
-}
-
-fn in_v6(ip: Ipv6Addr, base: Ipv6Addr, bits: u32) -> bool {
-    let mask = u128::MAX.checked_shl(128 - bits).unwrap_or(0);
-    u128::from(ip) & mask == u128::from(base) & mask
-}
-
-struct HttpResponse {
-    status: u16,
-    location: Option<String>,
-    content_range: Option<String>,
-    etag: Option<String>,
-    body: Box<dyn Read + Send>,
-}
-
-trait Transport {
-    fn validate(&self, url: &Url) -> Result<(), graphforge_api::GfError> {
-        validate_url(url)
-    }
-
-    fn get(
-        &self,
-        url: &Url,
-        range: Option<u64>,
-        if_range: Option<&str>,
-        limit: u64,
-    ) -> Result<HttpResponse, graphforge_api::GfError>;
-}
-
-struct HttpTransport {
-    agent: ureq::Agent,
-}
-
-impl HttpTransport {
-    fn new() -> Self {
-        let config = ureq::Agent::config_builder()
-            .https_only(true)
-            .http_status_as_error(false)
-            .max_redirects(0)
-            .proxy(None)
-            .timeout_global(Some(Duration::from_mins(1)))
-            .timeout_connect(Some(Duration::from_secs(10)))
-            .build();
-        Self {
-            agent: ureq::Agent::with_parts(
-                config,
-                DefaultConnector::new(),
-                PublicResolver(DefaultResolver::default()),
-            ),
-        }
-    }
-}
-
-impl Transport for HttpTransport {
-    fn get(
-        &self,
-        url: &Url,
-        range: Option<u64>,
-        if_range: Option<&str>,
-        limit: u64,
-    ) -> Result<HttpResponse, graphforge_api::GfError> {
-        let mut request = self.agent.get(url.as_str());
-        if let Some(offset) = range {
-            request = request.header("Range", format!("bytes={offset}-"));
-        }
-        if let Some(validator) = if_range {
-            request = request.header("If-Range", validator);
-        }
-        let response = request.call().map_err(|_| network("request failed"))?;
-        let status = response.status().as_u16();
-        let location = response
-            .headers()
-            .get("location")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-        let content_range = response
-            .headers()
-            .get("content-range")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-        let etag = response
-            .headers()
-            .get("etag")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-        let (_, body) = response.into_parts();
-        Ok(HttpResponse {
-            status,
-            location,
-            content_range,
-            etag,
-            body: Box::new(body.into_reader().take(limit.saturating_add(1))),
-        })
-    }
-}
-
-fn validate_url(url: &Url) -> Result<(), graphforge_api::GfError> {
-    if url.scheme() != "https"
-        || url.username() != ""
-        || url.password().is_some()
-        || url.host_str().is_none()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(validation(
-            "hub.unsafe_location",
-            "URL must be credential-free HTTPS",
-        ));
-    }
-    if let Some(host) = url.host_str()
-        && host.parse::<IpAddr>().is_ok_and(|ip| !public_ip(ip))
-    {
-        return Err(validation("hub.unsafe_location", "URL host is not public"));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-fn fetch(
-    transport: &dyn Transport,
-    start: &Url,
-    range: Option<u64>,
-    if_range: Option<&str>,
-    limit: u64,
-) -> Result<HttpResponse, graphforge_api::GfError> {
-    let mut attempts = 0;
-    fetch_with_attempts(transport, start, range, if_range, limit, &mut attempts)
-}
-
-fn fetch_with_attempts(
-    transport: &dyn Transport,
-    start: &Url,
-    range: Option<u64>,
-    if_range: Option<&str>,
-    limit: u64,
-    attempts: &mut u32,
-) -> Result<HttpResponse, graphforge_api::GfError> {
-    let mut url = start.clone();
-    for hop in 0..=MAX_REDIRECTS {
-        transport.validate(&url)?;
-        *attempts = attempts.saturating_add(1);
-        let response = transport.get(&url, range, if_range, limit)?;
-        if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
-            if hop == MAX_REDIRECTS {
-                return Err(network("redirect limit exceeded"));
-            }
-            let location = response
-                .location
-                .as_deref()
-                .ok_or_else(|| network("redirect is missing Location"))?;
-            url = url
-                .join(location)
-                .map_err(|_| validation("hub.unsafe_location", "invalid redirect URL"))?;
-            continue;
-        }
-        if !(200..300).contains(&response.status) {
-            return Err(network("Hub returned an unsuccessful status"));
-        }
-        return Ok(response);
-    }
-    unreachable!()
-}
-
-fn read_bounded(
-    mut response: HttpResponse,
-    limit: usize,
-) -> Result<Vec<u8>, graphforge_api::GfError> {
-    let mut bytes = Vec::new();
-    response
-        .body
-        .read_to_end(&mut bytes)
-        .map_err(|_| network("response read failed"))?;
-    if bytes.len() > limit {
-        return Err(limit_error("response exceeds byte bound"));
-    }
-    Ok(bytes)
-}
-
-fn parse_input(value: &str) -> Result<(RepositoryIdentity, Url), graphforge_api::GfError> {
-    if !value.contains("://") {
-        let identity = RepositoryIdentity::parse(value)
-            .map_err(|_| validation("hub.invalid_identity", "invalid repository identity"))?;
-        let base = Url::parse(&format!(
-            "{DEFAULT_HUB}/{}/{}",
-            identity.owner, identity.repository
-        ))
-        .unwrap();
-        return Ok((identity, base));
-    }
-    let base = Url::parse(value)
-        .map_err(|_| validation("hub.invalid_identity", "invalid repository URL"))?;
-    validate_url(&base)?;
-    if base.query().is_some() || base.path().ends_with('/') {
-        return Err(validation(
-            "hub.invalid_identity",
-            "repository URL must end in owner/repository",
-        ));
-    }
-    let segments: Vec<_> = base.path_segments().into_iter().flatten().collect();
-    if segments.len() != 2 {
-        return Err(validation(
-            "hub.invalid_identity",
-            "repository URL must end in owner/repository",
-        ));
-    }
-    let identity = RepositoryIdentity::parse(&format!("{}/{}", segments[0], segments[1]))
-        .map_err(|_| validation("hub.invalid_identity", "invalid repository identity"))?;
-    Ok((identity, base))
-}
-
-fn endpoint(base: &Url, name: &str) -> Url {
-    let mut endpoint = base.clone();
-    endpoint.set_path(&format!("{}/.gf/{name}", base.path().trim_end_matches('/')));
-    endpoint
 }
 
 fn select_bundle(
@@ -1127,7 +844,7 @@ fn clone_telemetry_runtime(endpoint: Option<&str>) -> TelemetryRuntime {
 }
 
 #[cfg(test)]
-fn run_clone_with(
+pub(crate) fn run_clone_with(
     transport: &dyn Transport,
     args: CloneArgs,
     json: bool,
@@ -1561,9 +1278,6 @@ fn write_clone_result(
     Ok(())
 }
 
-fn validation(code: &str, message: &str) -> graphforge_api::GfError {
-    graphforge_api::GfError::Validation(format!("{code}: {message}"))
-}
 fn canonical_name(identity: &RepositoryIdentity) -> String {
     identity.canonical_name()
 }
@@ -1660,46 +1374,21 @@ fn portable_error(error: DiscoveryPortableV2Error) -> graphforge_api::GfError {
         ),
     }
 }
-fn network(message: &str) -> graphforge_api::GfError {
-    graphforge_api::GfError::Storage(format!("hub.network: {message}"))
-}
-fn limit_error(message: &str) -> graphforge_api::GfError {
-    validation("hub.limit_exceeded", message)
-}
-fn storage(error: impl std::fmt::Display) -> graphforge_api::GfError {
-    graphforge_api::GfError::Storage(error.to_string())
-}
-fn hash_reader(reader: &mut impl Read) -> Result<String, graphforge_api::GfError> {
-    let mut hash = Sha256::new();
-    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
-    loop {
-        let read = reader.read(&mut buffer).map_err(storage)?;
-        if read == 0 {
-            break;
-        }
-        hash.update(&buffer[..read]);
-    }
-    let digest = hash.finalize();
-    let hex = digest
-        .iter()
-        .fold(String::with_capacity(64), |mut hex, byte| {
-            write!(hex, "{byte:02x}").expect("writing to a string cannot fail");
-            hex
-        });
-    Ok(format!("sha256:{hex}"))
-}
-
 #[cfg(test)]
 mod research_clone_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hub_http::public_ip;
     use std::collections::VecDeque;
     use std::io::{BufRead as _, BufReader};
+    use std::net::IpAddr;
     use std::net::TcpListener;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
+    use ureq::unversioned::resolver::DefaultResolver;
+    use ureq::unversioned::transport::DefaultConnector;
 
     struct Scripted(Mutex<VecDeque<HttpResponse>>);
 

@@ -97,6 +97,25 @@ pub fn hub_research_clone_operation(
     )
 }
 
+/// Derive the default `gf publish` operation for one exact research Version.
+///
+/// `repository` is the canonical `owner/repository`, `git_ref` the published
+/// Branch ref (absent when an exact Version is published without a Branch),
+/// and `version_uuid` the published Version. NUL cannot occur in any
+/// component, so the encoding is unambiguous. Publishing the same Version to
+/// the same ref again therefore reuses the operation and replays its receipt.
+#[must_use]
+pub fn hub_publish_operation(repository: &str, git_ref: Option<&str>, version_uuid: &str) -> Uuid {
+    new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!(
+            "graphforge-hub-publish/1\0{repository}\0{}\0{version_uuid}",
+            git_ref.unwrap_or("")
+        )
+        .as_bytes(),
+    )
+}
+
 /// Convert a [`Uuid`] into its 16-byte big-endian form, suitable for an Arrow
 /// `FixedSizeBinary(16)` column.
 #[must_use]
@@ -222,6 +241,30 @@ mod tests {
                     &format!("sha256:{}", "c".repeat(64)),
                 ),
                 "c4bb0970-3473-5822-a82a-516833d8fde8",
+            ),
+            (
+                hub_publish_operation(
+                    "curatelabs/demo",
+                    Some("main"),
+                    "01900000-0000-7000-8000-000000000021",
+                ),
+                "a9f6fc0f-890a-5065-b356-f449c7af4e60",
+            ),
+            (
+                hub_publish_operation(
+                    "curatelabs/demo",
+                    None,
+                    "01900000-0000-7000-8000-000000000021",
+                ),
+                "750b3ed6-142b-5b65-abb6-f75ccbb6c893",
+            ),
+            (
+                hub_publish_operation(
+                    "curatelabs/demo",
+                    Some("main"),
+                    "01900000-0000-7000-8000-000000000022",
+                ),
+                "4e3b41e1-b798-57d6-91ad-ae61b08d1d0c",
             ),
             (
                 new_v5(&PROVENANCE_NAMESPACE, b"graphforge"),

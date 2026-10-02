@@ -25,6 +25,9 @@ include!(concat!(env!("OUT_DIR"), "/project_skills.rs"));
 
 mod hub_clone;
 pub mod hub_fixture_artifacts;
+mod hub_http;
+mod hub_publication;
+mod hub_publish;
 mod maintenance_cli;
 mod ontology_cli;
 mod portable_cli;
@@ -258,6 +261,8 @@ enum Command {
     Telemetry(TelemetryArgs),
     /// Clone a verified portable project from GraphForge Hub.
     Clone(hub_clone::CloneArgs),
+    /// Publish a research Branch head or exact Version to a GraphForge Hub.
+    Publish(hub_publish::PublishArgs),
     /// Initialize repository-local GraphForge definitions and state.
     Init(InitArgs),
     /// Compare or reconcile declared definitions and source digests without ingesting data.
@@ -1192,7 +1197,10 @@ impl From<graphforge_api::MultiOntologyError> for CliRuntimeError {
 }
 
 #[allow(clippy::too_many_lines)]
-fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
+/// `interactive` is true only for the streaming `gf` process attached to a
+/// terminal; it gates prompts such as the Hub publish device flow. Captured
+/// invocations (bindings, tests) are never interactive.
+fn run(cli: Cli, output: &mut dyn Write, interactive: bool) -> Result<i32, CliRuntimeError> {
     let _capture = storage_attribution_cli::capture(&cli)?;
     let allocation = if cli.diagnostics.allocation_diagnostics {
         if !cli.json {
@@ -1207,7 +1215,7 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
     } else {
         None
     };
-    let result = run_with_allocation(cli, output, allocation.as_ref())?;
+    let result = run_with_allocation(cli, output, allocation.as_ref(), interactive)?;
     if let Some(allocation) = allocation {
         let (current, peak) = allocation.totals()?;
         // The composition sums to `peak_allocated_bytes`, so a consumer can
@@ -1238,6 +1246,7 @@ fn run_with_allocation(
     cli: Cli,
     output: &mut dyn Write,
     allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
+    interactive: bool,
 ) -> Result<i32, CliRuntimeError> {
     if cli.info {
         writeln!(output, "graphforge {}", env!("CARGO_PKG_VERSION"))
@@ -1267,6 +1276,18 @@ fn run_with_allocation(
         return hub_clone::run_clone(args, cli.json, output)
             .map(|()| 0)
             .map_err(Into::into);
+    }
+    if let Command::Publish(args) = command {
+        return hub_publish::run_publish(
+            args,
+            cli.project,
+            cli.project_dir,
+            cli.json,
+            output,
+            interactive,
+        )
+        .map(|()| 0)
+        .map_err(Into::into);
     }
     // Repository-independent portable commands must not call RepositoryContext::discover.
     if let Command::Portable { command } = command {
@@ -1492,7 +1513,7 @@ where
         }
     };
     let json = cli.json;
-    let exit_code = match run(cli, &mut stdout) {
+    let exit_code = match run(cli, &mut stdout, false) {
         Ok(exit_code) => exit_code,
         Err(error) => {
             write_runtime_error(&error, json, &mut stderr).expect("writing to Vec cannot fail");
@@ -1683,7 +1704,11 @@ pub fn run_process() {
     let json = cli.json;
     let stdout = io::stdout();
     let mut output = stdout.lock();
-    match run(cli, &mut output) {
+    let interactive = {
+        use std::io::IsTerminal as _;
+        io::stdin().is_terminal() && io::stderr().is_terminal()
+    };
+    match run(cli, &mut output, interactive) {
         Ok(exit_code) if exit_code != 0 => {
             let _ = output.flush();
             std::process::exit(exit_code);
