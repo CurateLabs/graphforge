@@ -637,11 +637,14 @@ impl DiscoveryManifest {
         }
         package.package_digest.validate()?;
         package.object_digest.validate()?;
+        // `validate_objects` has already proven the inventory strictly
+        // ascending by digest, so each module lookup is a binary search rather
+        // than a scan of up to `max_objects` entries per module.
         let object = self
             .objects
-            .iter()
-            .find(|object| object.digest == package.object_digest)
-            .ok_or_else(|| {
+            .binary_search_by(|object| object.digest.cmp(&package.object_digest))
+            .map(|index| &self.objects[index])
+            .map_err(|_| {
                 DiscoveryError::new(
                     DiscoveryErrorCode::MissingObject,
                     Some(OBJECT_FIELD),
