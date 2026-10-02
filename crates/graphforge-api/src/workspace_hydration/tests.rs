@@ -878,8 +878,9 @@ fn a_mutating_commit_does_not_launder_a_corrupted_payload() {
 /// leaving it to be decoded later by whichever reader happens to touch it
 /// first. These are the files the old open-time sweep protected that nothing at
 /// open reads by content: the topology generation counters, the runtime entity
-/// label marker, the surrogate tails, the runtime catalog, the adjacency build
-/// record and every CSR shard manifest.
+/// label marker, the surrogate tails and the runtime catalog. The adjacency
+/// index manifest and the CSR shard manifests are checked on first touch
+/// instead (`corrupted_adjacency_manifests_are_refused_on_first_touch`).
 #[test]
 fn corrupted_sidecars_are_refused_at_open() {
     let project = tempfile::tempdir().unwrap();
@@ -891,8 +892,6 @@ fn corrupted_sidecars_are_refused_at_open() {
         ("topology/runtime_entity_label_encoding.json", ""),
         ("topology/surrogate_tails.parquet", ""),
         ("topology/runtime_catalog.parquet", ""),
-        ("indexes/adjacency/index_manifest.parquet", ""),
-        ("indexes/adjacency/", ".csr.json"),
     ] {
         let entry = entry_at(project.path(), prefix, suffix);
         let _corruption = semantically_inert_corruption(project.path(), &entry);
@@ -900,6 +899,58 @@ fn corrupted_sidecars_are_refused_at_open() {
         assert!(
             GraphForge::new(Some(project.path().to_str().unwrap())).is_err(),
             "{} was accepted at open after in-place corruption",
+            entry.relative_path
+        );
+    }
+}
+
+/// Whether reading the adjacency index manifest and every CSR shard manifest of
+/// the open project is refused.
+fn adjacency_manifests_refused(graph: &GraphForge) -> bool {
+    let directory = graph.dir().join("indexes/adjacency");
+    let manifest_refused = matches!(
+        graphforge_storage::adjacency::read_manifest(&graph.dir()),
+        Err(GfError::Validation(_))
+    );
+    let shard_manifest_refused = std::fs::read_dir(directory)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.to_string_lossy().ends_with(".csr.json"))
+        .any(|path| {
+            matches!(
+                graphforge_storage::adjacency::ShardedCsrIndex::open(&path.with_extension("")),
+                Err(GfError::Validation(_))
+            )
+        });
+    manifest_refused || shard_manifest_refused
+}
+
+/// The derived adjacency index's manifests authenticate its shards, and only the
+/// adjacency provider reads them, so they are checked when it first does
+/// rather than at open: a project whose index is corrupt still opens and
+/// answers queries that never touch the index, and the query that does is
+/// refused with `GF_VALIDATION` (#1388).
+#[test]
+fn corrupted_adjacency_manifests_are_refused_on_first_touch() {
+    let project = tempfile::tempdir().unwrap();
+    compact_indexed_project(project.path());
+    let clean = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    drop(clean);
+    for (prefix, suffix) in [
+        ("indexes/adjacency/index_manifest.parquet", ""),
+        ("indexes/adjacency/", ".csr.json"),
+    ] {
+        let entry = entry_at(project.path(), prefix, suffix);
+        let _corruption = semantically_inert_corruption(project.path(), &entry);
+        assert_open_inventory_defers_content_to_first_touch(project.path(), &entry);
+        assert!(
+            !assert_refused_by_open_or_first_touch(
+                project.path(),
+                &entry,
+                &adjacency_manifests_refused
+            ),
+            "{} must open and be refused on first touch",
             entry.relative_path
         );
     }
@@ -979,8 +1030,9 @@ fn corrupted_search_artifact_is_refused_on_first_touch() {
 /// without requiring a journal replay or a consumer for an unknown file.
 ///
 /// Each payload is refused before any result is returned. Bulk data (nodes,
-/// edges, search segments) is refused on its first touch; the route table is
-/// authenticated by SHA-256 with the manifest; everything else is checked while
+/// edges, search segments, the adjacency manifests) is refused on its first
+/// touch; the route table is authenticated by SHA-256 with the manifest;
+/// everything else is checked while
 /// hydrating, so even a payload no reader opens (`Other`) fails the open.
 #[test]
 #[cfg(feature = "search")]
@@ -1024,7 +1076,7 @@ fn compact_graph_root_refuses_same_inode_corruption_for_every_role() {
         (
             GraphFileRole::Index,
             "indexes/adjacency/index_manifest.parquet",
-            None,
+            Some(&adjacency_manifests_refused),
         ),
         (GraphFileRole::Index, "indexes/search/", Some(&find)),
         (GraphFileRole::Catalog, "semantic-routes.json", None),

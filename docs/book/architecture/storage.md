@@ -875,6 +875,22 @@ shards; only `row_chunk` bounds the returned row portion by its limit.
 - **Fallback.** On mismatch (or absent index), the provider scans the typed edge tables and
   builds the adjacency in memory — yielding identical results, only slower. A stale or missing
   index can therefore never cause incorrect output.
+- **Corruption is refused, not rebuilt (#1388).** An index object that fails its
+  checksum or length (a CSR shard against its shard manifest; `index_manifest.parquet`
+  and each `*.csr.json` against the project manifest on first touch), or whose
+  checksummed bytes do not decode, is refused by the query that touches it with
+  `GF_VALIDATION`. Nothing is rebuilt or written: a rebuild would answer by scanning
+  the edge table, so a bounded query would silently cost O(E) and the damage would
+  never be reported. An index in a format this release does not read, or an I/O
+  failure, is a storage error. The explicit `index_adjacency` rebuilds from the
+  authenticated edges and replaces a corrupted index.
+- **Explain and query evidence.** Traversal plans retain `adjacency=hit`,
+  `miss`, or `building`. A stale index adds `adjacency_rebuild=stale`, including
+  the ordered one-hop and two-hop plans. Explain observes the pending rebuild
+  without performing it. Public query execution evidence records
+  `adjacency_rebuilds`: a construction-published generation reads its current
+  index with zero rebuilds; the first traversal after a stale-making mutation
+  records the rebuild it performs. Corruption refuses rather than rebuilding.
 - **Rebuild triggers.** Lazy on first traversal when the `indexes/adjacency/` capability is
   present, or explicit via `forge.index("adjacency", ...)`. Append-only commits
   publish bounded delta segments; a full rebuild compacts them into sharded bases.
@@ -901,10 +917,12 @@ shards; only `row_chunk` bounds the returned row portion by its limit.
   (`adjacency=hit`); stale or torn ⇒ lazy rebuild, then serve; fresh but **no
   row** for the requested relation ⇒ scan-build *without* rebuild (rebuilding
   cannot add an unknown relation — prevents a rebuild-per-query loop); a
-  corrupt accelerator ⇒ always-stale scan-build; capability absent ⇒ scan-build
+  missing shard manifest for a manifest row, or one that disagrees with the index
+  manifest's counts ⇒ lazy rebuild; a corrupt accelerator ⇒ `GF_VALIDATION`, never a
+  rebuild; an unreadable generation counter ⇒ scan-build; capability absent ⇒ scan-build
   (`adjacency=building`). Typed-mode `"*"` bypasses the index entirely
-  (reported as `building`, never a false miss). A build or load failure never
-  fails the query — only its speed.
+  (reported as `building`, never a false miss). A failure to *write* a missing or
+  stale index never fails the query — only its speed.
 - **Direction.** `out` and `in` CSRs are stored separately; undirected traversal unions them.
   In exploratory mode, `_exploratory.parquet` rows are routed by their `rel_type_name` column.
 

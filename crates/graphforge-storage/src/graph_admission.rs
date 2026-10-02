@@ -46,7 +46,7 @@ pub(crate) enum PayloadClass {
     SelfAuthenticating,
     /// Everything else: small metadata and sidecar files whose many readers
     /// open them by name (generation counters, label encoding, catalogs,
-    /// adjacency build records, CSR shard manifests). Hydration checks exact
+    /// adjacency build records). Hydration checks exact
     /// length and XXH64 as it links them, so an unclassified or unforeseen
     /// payload fails closed instead of being opened unchecked. These reads
     /// are attributed to `read_path_scan` like every other open-time decode of
@@ -71,13 +71,23 @@ fn is_hard_linked_identity_artifact(relative_path: &str) -> bool {
 
 /// Classify a payload by its workspace-relative path.
 pub(crate) fn classify(relative_path: &str) -> PayloadClass {
+    // The adjacency index manifest and each CSR shard manifest are the
+    // authority for the shards they name, and the adjacency provider is their
+    // only reader (`adjacency::read_manifest`, `ShardedCsrIndex::open`), both
+    // admitting before they decode. Checked on first touch, a flipped byte is
+    // refused by the query that reads it instead of being read as a stale index.
+    let adjacency_manifest = relative_path.starts_with("indexes/adjacency/")
+        && !relative_path.contains("/deltas/")
+        && (relative_path.ends_with("/index_manifest.parquet")
+            || relative_path.ends_with(".csr.json"));
     let first_touch = relative_path == "topology/nodes.parquet"
         || relative_path.starts_with("topology/nodes/")
         || relative_path.starts_with("topology/edges/")
         || relative_path.starts_with("properties/")
         || relative_path.starts_with("edge_properties/")
         || relative_path.starts_with("indexes/search/")
-        || is_hard_linked_identity_artifact(relative_path);
+        || is_hard_linked_identity_artifact(relative_path)
+        || adjacency_manifest;
     let self_authenticating = relative_path.starts_with("topology/uuid-membership/")
         || relative_path.starts_with("deltas/")
         || (relative_path.starts_with("indexes/adjacency/")

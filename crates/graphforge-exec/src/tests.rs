@@ -215,6 +215,7 @@ fn wave11_low_level_expand_and_optional_schema_guards_fail_closed() {
 
     let dir = TempDir::new().unwrap();
     let cfg = ExpandConfig {
+        capture_epoch: 0,
         rel_type_name: "KNOWS".into(),
         direction: Direction::Out,
         min_hops: 1,

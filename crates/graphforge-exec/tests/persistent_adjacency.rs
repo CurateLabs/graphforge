@@ -676,8 +676,12 @@ mod session_wiring {
         assert_eq!(rows(&on_stale), rows(&before), "stale fallback identical");
     }
 
+    /// A corrupted shard is refused by the fixed and variable traversal that
+    /// reads it (`GF_VALIDATION`), and the adjacency files are left untouched:
+    /// repairing it would rebuild from the edge table, so the bounded query
+    /// would silently cost O(E) and the damage would never be reported (#1388).
     #[tokio::test]
-    async fn lazy_corrupt_shards_are_repaired_by_fixed_and_variable_traversal() {
+    async fn corrupt_shards_are_refused_by_fixed_and_variable_traversal() {
         for query in [
             "MATCH (a:P {name: 'a'})-[:KNOWS]->(b:P) RETURN 1 AS one",
             "MATCH (a:P {name: 'a'})-[:KNOWS*1..3]->(b:P) RETURN 1 AS one",
@@ -687,6 +691,7 @@ mod session_wiring {
             build_adjacency_index(dir.path(), TS).unwrap();
             let plan = bind(query, &rc);
             let expected = session(dir.path(), &rc).execute_plan(&plan).await.unwrap();
+            assert!(expected.stats.rows_produced > 0);
             let mut stack = vec![graphforge_storage::adjacency::adjacency_dir(dir.path())];
             let mut corrupted = 0;
             while let Some(path) = stack.pop() {
@@ -701,20 +706,27 @@ mod session_wiring {
                 }
             }
             assert!(corrupted > 0);
-            let result = session(dir.path(), &rc).execute_plan(&plan).await.unwrap();
+            let manifest_before =
+                std::fs::read(graphforge_storage::adjacency::manifest_path(dir.path())).unwrap();
+            let error = session(dir.path(), &rc)
+                .execute_plan(&plan)
+                .await
+                .expect_err(query);
+            assert_eq!(error.code(), "GF_VALIDATION", "{query}: {error}");
             assert_eq!(
-                result.stats.rows_produced, expected.stats.rows_produced,
-                "{query}"
+                std::fs::read(graphforge_storage::adjacency::manifest_path(dir.path())).unwrap(),
+                manifest_before,
+                "{query}: a refused query must not rebuild the index"
             );
-            assert!(result.stats.rows_produced > 0);
-            // Recovery must also repair the reusable provider artifact.
-            let repaired = persistent(dir.path(), OntologyMode::Exploratory);
-            assert_eq!(
-                repaired.adjacency("KNOWS", Direction::Out).unwrap(),
-                scan(dir.path(), OntologyMode::Exploratory)
-                    .adjacency("KNOWS", Direction::Out)
-                    .unwrap()
-            );
+            // The reusable provider refuses too: nothing repaired the artifact.
+            let reused = persistent(dir.path(), OntologyMode::Exploratory);
+            // The overwritten shard has the wrong length, so the load itself
+            // refuses (a same-length flip would refuse on the first row read).
+            let refusal = reused
+                .adjacency("KNOWS", Direction::Out)
+                .err()
+                .expect("corrupt shard must refuse");
+            assert_eq!(refusal.code(), "GF_VALIDATION", "{query}");
         }
     }
 

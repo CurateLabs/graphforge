@@ -95,8 +95,12 @@ impl DisplayAs for OrderedOneHopExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "OrderedOneHopExec: rel={}, dir={:?}, fetch={}",
-            self.rel_type_name, self.direction, self.fetch
+            "OrderedOneHopExec: rel={}, dir={:?}, fetch={}, adjacency={}",
+            self.rel_type_name,
+            self.direction,
+            self.fetch,
+            self.provider
+                .explain_status(&self.rel_type_name, graphforge_ir::Direction::In)
         )
     }
 }
@@ -138,10 +142,11 @@ impl ExecutionPlan for OrderedOneHopExec {
             )));
         }
         // Inbound view: destinations ordered by node id, multiplicity = in-degree.
-        let mut inbound = crate::adjacency::AdjacencyReader::new(
+        let mut inbound = crate::adjacency::AdjacencyReader::for_capture(
             self.provider.as_ref(),
             &self.rel_type_name,
             Direction::In,
+            self.capture_epoch,
         )
         .map_err(|error| DataFusionError::External(Box::new(error)))?;
         let node_extent = inbound.node_extent();

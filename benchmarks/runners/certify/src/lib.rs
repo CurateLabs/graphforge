@@ -1638,10 +1638,23 @@ fn sanitized_query_evidence(value: &serde_json::Value) -> bool {
         Some(object) => object,
         None => return false,
     };
-    object.len() == KEYS.len()
-        && object.keys().all(|key| KEYS.contains(&key.as_str()))
-        && object.get("contract").and_then(serde_json::Value::as_str)
-            == Some("graphforge-query-evidence/1")
+    let version_shape = match object.get("contract").and_then(serde_json::Value::as_str) {
+        Some("graphforge-query-evidence/1") => {
+            object.len() == KEYS.len() && object.keys().all(|key| KEYS.contains(&key.as_str()))
+        }
+        Some("graphforge-query-evidence/2") => {
+            object.len() == KEYS.len() + 1
+                && object
+                    .keys()
+                    .all(|key| KEYS.contains(&key.as_str()) || key == "adjacency_rebuilds")
+                && object
+                    .get("adjacency_rebuilds")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some()
+        }
+        _ => false,
+    };
+    version_shape
         && sanitized_numeric_fields(value, &KEYS[4..])
         && sanitized_query_records(object.get("hops"), &QUERY_HOP_KEYS, None)
         && sanitized_query_records(object.get("sorts"), &QUERY_SORT_KEYS, Some("fetch_rows"))
@@ -2354,10 +2367,15 @@ mod tests {
 
     #[test]
     fn cli_measurement_adapter_explicitly_requests_diagnostics() {
-        let args = ["-c", "test \"$1\" = --diagnostics", "gf"]
-            .map(str::to_owned);
-        assert_eq!(execute_cli_measured("/bin/sh", &args).unwrap().exit_code, Some(0));
-        assert_ne!(execute_process("/bin/sh", &args).unwrap().exit_code, Some(0));
+        let args = ["-c", "test \"$1\" = --diagnostics", "gf"].map(str::to_owned);
+        assert_eq!(
+            execute_cli_measured("/bin/sh", &args).unwrap().exit_code,
+            Some(0)
+        );
+        assert_ne!(
+            execute_process("/bin/sh", &args).unwrap().exit_code,
+            Some(0)
+        );
     }
 
     #[test]
@@ -2508,10 +2526,11 @@ mod tests {
             "scalar_u64": 7,
             "application_io": lifecycle_application_io(),
             "query_evidence": {
-                "contract": "graphforge-query-evidence/1",
+                "contract": "graphforge-query-evidence/2",
                 "hops": [],
                 "sorts": [],
                 "operator_rss": [],
+                "adjacency_rebuilds": 0,
                 "max_in_flight_reads": 0,
                 "memory_reserved_before": 0,
                 "memory_reserved_after": 0,
@@ -2550,6 +2569,28 @@ mod tests {
     }
 
     #[test]
+    fn archived_query_receipts_keep_the_closed_legacy_shape() {
+        let archived: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/rungs/integrated-storage/s20-graphforge.json"
+        ))
+        .unwrap();
+        let mut count = 0;
+        for phase in archived["phases"].as_array().unwrap() {
+            for receipt in phase["receipts"].as_array().into_iter().flatten() {
+                if receipt["contract"] != "graphforge-result-sink/2" {
+                    continue;
+                }
+                assert!(sanitized_query_evidence(&receipt["query_evidence"]));
+                let mut with_counter = receipt["query_evidence"].clone();
+                with_counter["adjacency_rebuilds"] = serde_json::json!(0);
+                assert!(!sanitized_query_evidence(&with_counter));
+                count += 1;
+            }
+        }
+        assert_eq!(count, 8);
+    }
+
+    #[test]
     fn query_receipts_preserve_typed_adjacency_probe_evidence() {
         let query = serde_json::json!({
             "contract": "graphforge-result-sink/2",
@@ -2558,7 +2599,7 @@ mod tests {
             "complete": true, "result_sha256": "a".repeat(64), "scalar_u64": null,
             "application_io": lifecycle_application_io(),
             "query_evidence": {
-                "contract": "graphforge-query-evidence/1",
+                "contract": "graphforge-query-evidence/2",
                 "hops": [{
                     "ordinal": 0, "input_batches": 0, "input_rows": 0,
                     "candidates_generated": 2, "adjacency_rows_examined": 3,
@@ -2574,6 +2615,7 @@ mod tests {
                     "identity_revalidation_calls": 1, "identity_revalidation_bytes": 0
                 }],
                 "sorts": [],
+                "adjacency_rebuilds": 1,
                 "operator_rss": [{
                     "ordinal": 0, "operator": "ordered_one_hop",
                     "before_bytes": 100, "peak_bytes": 120, "after_bytes": 110
@@ -2587,6 +2629,29 @@ mod tests {
         let accepted = parse_receipts(&serde_json::to_vec(&query).unwrap(), true).unwrap();
         assert_eq!(accepted[0]["query_evidence"], query["query_evidence"]);
         assert!(accepted[0].get("destination").is_none());
+        let mut legacy = query.clone();
+        legacy["query_evidence"]["contract"] = serde_json::json!("graphforge-query-evidence/1");
+        legacy["query_evidence"]
+            .as_object_mut()
+            .unwrap()
+            .remove("adjacency_rebuilds");
+        let accepted = parse_receipts(&serde_json::to_vec(&legacy).unwrap(), true).unwrap();
+        assert_eq!(accepted[0]["query_evidence"], legacy["query_evidence"]);
+        for bad_value in [
+            serde_json::json!(-1),
+            serde_json::json!("1"),
+            serde_json::Value::Null,
+        ] {
+            let mut invalid = query.clone();
+            invalid["query_evidence"]["adjacency_rebuilds"] = bad_value;
+            assert!(parse_receipts(&serde_json::to_vec(&invalid).unwrap(), true).is_err());
+        }
+        let mut missing_rebuilds = query.clone();
+        missing_rebuilds["query_evidence"]
+            .as_object_mut()
+            .unwrap()
+            .remove("adjacency_rebuilds");
+        assert!(parse_receipts(&serde_json::to_vec(&missing_rebuilds).unwrap(), true).is_err());
         for bad_value in [
             serde_json::json!(-1),
             serde_json::json!("3"),
