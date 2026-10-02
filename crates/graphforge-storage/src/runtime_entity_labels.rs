@@ -910,6 +910,21 @@ fn stage_promoted_edges(dir: &Path, staged: &mut RewriteBatch) -> Result<bool, G
     Ok(changed)
 }
 
+fn reconciliation_inputs(
+    dir: &Path,
+    topology: Option<std::sync::Arc<crate::TopologyFileAuthority>>,
+) -> Result<(crate::TopologyFiles, RewriteBatch), GfError> {
+    let files = match &topology {
+        Some(authority) => crate::enumerate_topology_files(authority, None)?,
+        None => crate::TopologyFiles::discover_legacy(dir)?,
+    };
+    let mut staged = RewriteBatch::new();
+    if let Some(authority) = topology {
+        staged.bind_topology_authority(authority)?;
+    }
+    Ok((files, staged))
+}
+
 fn reconcile_inner(
     dir: &Path,
     ontology: Option<&OntologyHandle>,
@@ -955,14 +970,7 @@ fn reconcile_inner(
 
     let candidate_keys = remap.keys().copied().collect::<HashSet<_>>();
     let mut remapped_label_values = 0u64;
-    let files = match &topology {
-        Some(authority) => crate::enumerate_topology_files(authority, None)?,
-        None => crate::TopologyFiles::discover_legacy(dir)?,
-    };
-    let mut staged = RewriteBatch::new();
-    if let Some(authority) = topology {
-        staged.bind_topology_authority(authority)?;
-    }
+    let (files, mut staged) = reconciliation_inputs(dir, topology)?;
     for (path, _) in &files.nodes {
         let reader = || -> Result<_, GfError> {
             parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
