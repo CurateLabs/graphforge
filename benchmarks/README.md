@@ -185,8 +185,12 @@ no identity map is kept. The two identity checks run over 24-byte
 join of edge-endpoint keys against node keys finds dangling endpoints. Runs
 beyond the merge fan-in are merged in groups first, so the key buffer or the
 open run buffers fit the budget at every phase. The spill directory is removed
-on success and on failure; it needs up to 24 bytes per node plus 24 bytes per
-distinct endpoint per run of free space. The input batch and the Parquet
+on success and on failure. Reserve up to 48 bytes per node plus 48 bytes per
+edge endpoint (96 bytes per edge), in addition to the Parquet output: merges
+retain their input runs until the output run is complete. Deduplication can
+reduce actual usage. On Unix, the fan-in also respects the process's open-file
+limit, reserving eight descriptors for other files and process bookkeeping.
+The input batch and the Parquet
 writer's row group are fixed-size and outside the budget.
 
 Row-level errors are reported as rows are read. A duplicate is reported after

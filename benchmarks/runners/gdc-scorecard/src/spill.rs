@@ -31,6 +31,10 @@ pub const DEFAULT_MEMORY_BUDGET_BYTES: u64 = 256 << 20;
 pub const MIN_MEMORY_BUDGET_BYTES: u64 = 3 * KEY_RECORD_BYTES;
 const MAX_FAN_IN: u64 = 128;
 const TARGET_READ_BYTES: u64 = 1 << 20;
+// Leave room for standard streams, input/output files, the merge writer or
+// node reader, and a small amount of process bookkeeping.
+#[cfg(unix)]
+const RESERVED_FILE_DESCRIPTORS: u64 = 8;
 pub const SPILL_DIR: &str = ".spill";
 
 /// One node definition or one edge endpoint. The derived order sorts by
@@ -98,8 +102,23 @@ impl Budget {
         let fan_in = (bytes / TARGET_READ_BYTES)
             .saturating_sub(1)
             .clamp(2, MAX_FAN_IN);
+        #[cfg(unix)]
+        let fan_in = if let Some(limit) =
+            rustix::process::getrlimit(rustix::process::Resource::Nofile).current
+        {
+            let available = limit.saturating_sub(RESERVED_FILE_DESCRIPTORS);
+            if available < 2 {
+                return Err(ConvertError::new(
+                    Cause::Io,
+                    format!("open file limit {limit} leaves fewer than two spill readers"),
+                ));
+            }
+            fan_in.min(available)
+        } else {
+            fan_in
+        };
         let io = (bytes / (fan_in + 1) / KEY_RECORD_BYTES).max(1) * KEY_RECORD_BYTES;
-        let records = ((bytes - io) / KEY_RECORD_BYTES).max(1);
+        let records = ((bytes - io) / size_of::<Key>() as u64).max(1);
         let too_large = || ConvertError::new(Cause::InvalidMemoryBudget, "budget exceeds usize");
         Ok(Self {
             bytes,
@@ -541,7 +560,7 @@ mod tests {
             DEFAULT_MEMORY_BUDGET_BYTES,
         ] {
             let budget = Budget::new(bytes).unwrap();
-            let buffer = budget.buffer_records as u64 * KEY_RECORD_BYTES;
+            let buffer = budget.buffer_records as u64 * size_of::<Key>() as u64;
             assert!(buffer + budget.io_buffer_bytes as u64 <= bytes, "{bytes}");
             assert!(
                 (budget.fan_in as u64 + 1) * budget.io_buffer_bytes as u64 <= bytes,
@@ -580,6 +599,61 @@ mod tests {
         expected.sort();
         assert_eq!(merged, expected);
         drop(merge);
+        dir.close().unwrap();
+        assert!(!scratch.path().join(SPILL_DIR).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_respects_process_file_limit() {
+        const CHILD: &str = "GF_SPILL_FILE_LIMIT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "spill::tests::merge_respects_process_file_limit",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        // Limits are process-wide, so change them only in this isolated child.
+        use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+        let limit = getrlimit(Resource::Nofile);
+        setrlimit(
+            Resource::Nofile,
+            Rlimit {
+                current: Some(16),
+                ..limit
+            },
+        )
+        .unwrap();
+        let mut budget = Budget::new(16 << 20).unwrap();
+        // Many tiny runs exercise reduction, the duplicate check, and the
+        // endpoint join with the fan-in chosen for a realistic memory budget.
+        budget.buffer_records = 1;
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = SpillDir::create(scratch.path()).unwrap();
+        let mut nodes = KeySorter::new(&dir, budget, false);
+        for id in (0..40).rev() {
+            nodes.push(key(0, id, 0, id as u64 + 1)).unwrap();
+        }
+        let nodes = nodes.finish().unwrap();
+        assert!(nodes.stats().intermediate_merges > 0);
+        let (defined, duplicate) = check_nodes(&nodes).unwrap();
+        assert!(duplicate.is_none());
+
+        let mut endpoints = KeySorter::new(&dir, budget, true);
+        for id in (0..40).rev() {
+            endpoints.push(key(0, id, 1, id as u64 + 1)).unwrap();
+        }
+        let endpoints = endpoints.finish().unwrap();
+        assert!(endpoints.stats().intermediate_merges > 0);
+        assert!(find_dangling(&endpoints, &defined).unwrap().is_none());
         dir.close().unwrap();
         assert!(!scratch.path().join(SPILL_DIR).exists());
     }
