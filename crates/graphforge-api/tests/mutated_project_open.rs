@@ -475,7 +475,9 @@ impl InPlaceFlip {
         let permissions = before.permissions();
         let original = std::fs::read(&object).unwrap();
         let mut flipped = original.clone();
-        flipped[offset] ^= 0xff;
+        // Swap the letter's case: the byte stays valid UTF-8, so no decoder
+        // rejects it and only a checksum can.
+        flipped[offset] ^= 0x20;
         std::fs::set_permissions(
             &object,
             std::fs::Permissions::from_mode(before.mode() | 0o200),
@@ -516,7 +518,8 @@ impl Drop for InPlaceFlip {
 }
 
 /// A byte no decoder reads as data, so that only a checksum can refuse its
-/// change: one letter of the `created_by` string a Parquet footer carries.
+/// change: one letter of the `created_by` string a Parquet footer carries
+/// ([`InPlaceFlip`] swaps its case).
 #[cfg(unix)]
 fn inert_offset(project: &Path, entry: &graphforge_storage::GraphFileEntry) -> usize {
     let object = graphforge_storage::graph_object_path(project, &entry.content_sha256).unwrap();
@@ -588,29 +591,33 @@ fn mutated_project_refuses_a_same_inode_flip_on_the_touching_query() {
             "MATCH (n:Entity) WHERE n.tag = 'set' RETURN n.tag AS tag",
         ),
     ];
+    // Every case runs before asserting, so one run reports each payload the
+    // project fails to refuse.
+    let mut failures = Vec::new();
     for (what, entry, query) in cases {
         let _flip = InPlaceFlip::apply(&path, &entry, inert_offset(&path, &entry));
-        let reopened = GraphForge::new(Some(location)).unwrap_or_else(|error| {
-            panic!(
-                "{what} ({}): the open must read no payload: {error}",
-                entry.relative_path
-            )
-        });
-        let refused = reopened.execute(query).err().unwrap_or_else(|| {
-            panic!(
-                "{what} ({}): a flipped payload answered a query",
-                entry.relative_path
-            )
-        });
-        let message = refused.to_string().to_lowercase();
-        assert!(
-            message.contains("checksum")
-                || message.contains("digest")
-                || message.contains("corrupt"),
-            "{what} ({}): refused for the wrong reason: {refused}",
-            entry.relative_path
-        );
+        let what = format!("{what} ({})", entry.relative_path);
+        let reopened = match GraphForge::new(Some(location)) {
+            Ok(reopened) => reopened,
+            Err(error) => {
+                failures.push(format!("{what}: the open must read no payload: {error}"));
+                continue;
+            }
+        };
+        match reopened.execute(query) {
+            Ok(_) => failures.push(format!("{what}: a flipped payload answered a query")),
+            Err(refused) => {
+                let message = refused.to_string().to_lowercase();
+                if !(message.contains("checksum")
+                    || message.contains("digest")
+                    || message.contains("corrupt"))
+                {
+                    failures.push(format!("{what}: refused for the wrong reason: {refused}"));
+                }
+            }
+        }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
     // Every flip was restored: the project answers again, and correctly.
     assert_eq!(open_and_query(&path).ids, expected_ids(nodes));
 }

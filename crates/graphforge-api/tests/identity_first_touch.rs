@@ -311,6 +311,7 @@ fn flipped_forward_run_is_refused_by_the_commit_that_builds_on_it() {
         .map(drop)
         .map_err(|error| format!("{} {error}", error.code()))
         .expect_err("a commit built on a flipped forward run must be refused");
+    eprintln!("refused: {refused}");
     assert!(refused.starts_with("GF_"), "{refused}");
     assert!(
         refused.to_lowercase().contains("authenticat")
@@ -441,20 +442,28 @@ fn flipped_identity_controls_are_refused_by_the_open_that_copies_them() {
         tombstones,
     ];
     let published = generation_uuid(&path);
+    // Every class is tried before asserting, so one run reports each class
+    // the open fails to refuse.
+    let mut unrefused = Vec::new();
     for (relative, object, _, _) in &cases {
         let (offset, replacement) = inert_swap(relative, &std::fs::read(object).unwrap());
         let _swap = ByteSwap::apply(object, offset, replacement);
-        let refused = GraphForge::new(Some(path.to_str().unwrap()))
-            .map(drop)
-            .map_err(|error| format!("{} {error}", error.code()))
-            .expect_err(&format!(
-                "{relative}: the open that copies a flipped control must refuse it"
-            ));
-        assert!(
-            refused.contains("do not match inventory"),
-            "{relative}: refused for the wrong reason: {refused}"
-        );
+        match GraphForge::new(Some(path.to_str().unwrap())) {
+            Ok(_) => unrefused.push(format!("{relative}: opened")),
+            Err(error) if error.to_string().contains("do not match inventory") => {
+                eprintln!("{relative}: refused: {} {error}", error.code());
+            }
+            Err(error) => unrefused.push(format!(
+                "{relative}: refused for the wrong reason: {} {error}",
+                error.code()
+            )),
+        }
     }
+    assert!(
+        unrefused.is_empty(),
+        "the open that copies a flipped control must refuse it:\n{}",
+        unrefused.join("\n")
+    );
     // Every swap was restored: the project opens and answers again.
     assert_eq!(generation_uuid(&path), published);
     let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();

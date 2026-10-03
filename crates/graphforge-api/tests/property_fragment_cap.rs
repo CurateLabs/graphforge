@@ -413,6 +413,7 @@ fn flip_object_byte(
     path: &std::path::Path,
     part: &graphforge_storage::GraphFileEntry,
     offset: impl FnOnce(&[u8]) -> u64,
+    flip: u8,
 ) {
     use std::io::{Read, Seek, SeekFrom, Write};
     let object = graphforge_storage::graph_object_path(path, &part.content_sha256).unwrap();
@@ -431,7 +432,7 @@ fn flip_object_byte(
     file.seek(SeekFrom::Start(offset)).unwrap();
     file.read_exact(&mut byte).unwrap();
     file.seek(SeekFrom::Start(offset)).unwrap();
-    file.write_all(&[byte[0] ^ 0xff]).unwrap();
+    file.write_all(&[byte[0] ^ flip]).unwrap();
     file.set_modified(modified).unwrap();
     assert_eq!(file.metadata().unwrap().len(), part.byte_length);
     drop(file);
@@ -444,29 +445,35 @@ fn corrupted_property_part_is_refused_after_facade_open() {
     let path = root.path().join("source");
     let part = large_value_part(&path);
     let forge = GraphForge::new(path.to_str()).unwrap();
-    flip_object_byte(&path, &part, |_| part.byte_length / 2);
+    flip_object_byte(&path, &part, |_| part.byte_length / 2, 0xff);
     let error = forge
         .execute("MATCH (n) WHERE n.rank = 1 RETURN n.payload")
         .unwrap_err();
     assert_eq!(error.code(), "GF_PROJECT_CORRUPT", "{error}");
 }
 
-/// The same refusal when the flipped byte is one no decoder reads (a letter of
-/// the part's `created_by` footer string), flipped before the open: only the
-/// checksum against the manifest can refuse it, and the open reads no part.
+/// The same refusal when the flipped byte is one no decoder rejects (the case
+/// of a letter of the part's `created_by` footer string, which stays valid
+/// UTF-8), flipped before the open: only the checksum against the manifest can
+/// refuse it, and the open reads no part.
 #[test]
-fn a_part_byte_no_decoder_reads_is_refused_by_its_checksum() {
+fn a_part_byte_no_decoder_rejects_is_refused_by_its_checksum() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("source");
     let part = large_value_part(&path);
-    flip_object_byte(&path, &part, |bytes| {
-        let marker = b"graphforge property object/1";
-        (bytes
-            .windows(marker.len())
-            .position(|window| window == marker)
-            .expect("the part writer stamps created_by into the footer")
-            + 3) as u64
-    });
+    flip_object_byte(
+        &path,
+        &part,
+        |bytes| {
+            let marker = b"graphforge property object/1";
+            (bytes
+                .windows(marker.len())
+                .position(|window| window == marker)
+                .expect("the part writer stamps created_by into the footer")
+                + 3) as u64
+        },
+        0x20,
+    );
     let forge = GraphForge::new(path.to_str()).expect("the open reads no property part");
     let error = forge
         .execute("MATCH (n) WHERE n.rank = 1 RETURN n.payload")
