@@ -17,7 +17,7 @@ Sub-issues may split a canonical issue only to satisfy existing acceptance crite
 
 ### Finish and merge before starting more work
 
-- A coordinated agent team holds at most **three unmerged changes** across all agents and worktrees: open PRs (including drafts) plus implemented local branches without PRs. Multiple branches for one concern count once. Unrelated contributors' and automated dependency PRs do not count.
+- A coordinated agent team holds at most **six unmerged changes** across all agents and worktrees: open PRs (including drafts) plus implemented local branches without PRs. Multiple branches for one concern count once. Unrelated contributors' and automated dependency PRs do not count.
 - Before starting or delegating implementation, inspect the live PR queue and local work. At or above the limit, review, test, fix, and merge existing changes first. Do not close PRs or hide work in local branches to satisfy the limit.
 - The coordinating agent owns integration. Merge the first PR that can meet the gate now, respecting live dependencies, without waiting for the rest of the batch. Recheck the queue after each merge and before assigning more implementation.
 - Refresh and run final CI for the next merge candidate only; do not rebase the whole queue after every merge. Start dependent implementation after its prerequisite merges; use waiting time for review, diagnosis, or acceptance-test planning.
