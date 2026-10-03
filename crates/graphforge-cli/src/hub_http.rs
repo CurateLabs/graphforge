@@ -11,7 +11,9 @@ use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
-use ureq::unversioned::transport::DefaultConnector;
+use ureq::unversioned::transport::{
+    Buffers, ConnectionDetails, Connector, DefaultConnector, NextTimeout,
+};
 use url::Url;
 
 pub(crate) const DEFAULT_HUB: &str = "https://graphforge.sh";
@@ -133,21 +135,129 @@ pub(crate) struct HttpTransport {
 
 impl HttpTransport {
     pub(crate) fn new() -> Self {
-        let config = ureq::Agent::config_builder()
-            .https_only(true)
-            .http_status_as_error(false)
-            .max_redirects(0)
-            .proxy(None)
-            .timeout_global(Some(Duration::from_mins(1)))
-            .timeout_connect(Some(Duration::from_secs(10)))
-            .build();
         Self {
-            agent: ureq::Agent::with_parts(
-                config,
-                DefaultConnector::new(),
+            agent: read_agent(
+                true,
+                &READ_TIMEOUTS,
                 PublicResolver(DefaultResolver::default()),
             ),
         }
+    }
+}
+
+/// Bounds for Hub reads (`GET`): discovery documents and package objects.
+///
+/// A whole-request deadline cut every object larger than it could transfer,
+/// and resume could only restart the same cut. Reads therefore bound each
+/// phase instead, and the body by inactivity: every wait for response bytes
+/// may last at most `idle`, however long the whole transfer takes.
+pub(crate) struct ReadTimeouts {
+    /// Opening the connection.
+    pub(crate) connect: Duration,
+    /// Sending the request head and receiving the response head.
+    pub(crate) response: Duration,
+    /// Longest wait for the next response bytes.
+    pub(crate) idle: Duration,
+}
+
+/// Production read bounds.
+pub(crate) const READ_TIMEOUTS: ReadTimeouts = ReadTimeouts {
+    connect: Duration::from_secs(10),
+    response: Duration::from_mins(1),
+    idle: Duration::from_mins(1),
+};
+
+/// Agent for Hub reads: per-phase bounds and an idle bound on every socket
+/// wait, no global or whole-body deadline.
+pub(crate) fn read_agent(
+    https_only: bool,
+    timeouts: &ReadTimeouts,
+    resolver: impl Resolver,
+) -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
+        .https_only(https_only)
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .proxy(None)
+        .timeout_global(None)
+        .timeout_connect(Some(timeouts.connect))
+        .timeout_send_request(Some(timeouts.response))
+        .timeout_recv_response(Some(timeouts.response))
+        .timeout_recv_body(None)
+        .build();
+    ureq::Agent::with_parts(
+        config,
+        IdleConnector {
+            inner: DefaultConnector::new(),
+            idle: timeouts.idle,
+        },
+        resolver,
+    )
+}
+
+/// Connector whose transports never wait longer than `idle` for one socket
+/// read or write, so a stalled connection fails while a slow but steadily
+/// progressing one never does.
+#[derive(Debug)]
+struct IdleConnector {
+    inner: DefaultConnector,
+    idle: Duration,
+}
+
+impl Connector<()> for IdleConnector {
+    type Out = IdleTransport;
+
+    fn connect(
+        &self,
+        details: &ConnectionDetails,
+        chained: Option<()>,
+    ) -> Result<Option<Self::Out>, ureq::Error> {
+        Ok(self
+            .inner
+            .connect(details, chained)?
+            .map(|inner| IdleTransport {
+                inner,
+                idle: self.idle.into(),
+            }))
+    }
+}
+
+#[derive(Debug)]
+struct IdleTransport {
+    inner: Box<dyn ureq::unversioned::transport::Transport>,
+    idle: ureq::unversioned::transport::time::Duration,
+}
+
+impl IdleTransport {
+    fn bound(&self, timeout: NextTimeout) -> NextTimeout {
+        NextTimeout {
+            after: timeout.after.min(self.idle),
+            reason: timeout.reason,
+        }
+    }
+}
+
+impl ureq::unversioned::transport::Transport for IdleTransport {
+    fn buffers(&mut self) -> &mut dyn Buffers {
+        self.inner.buffers()
+    }
+
+    fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), ureq::Error> {
+        let timeout = self.bound(timeout);
+        self.inner.transmit_output(amount, timeout)
+    }
+
+    fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
+        let timeout = self.bound(timeout);
+        self.inner.await_input(timeout)
+    }
+
+    fn is_open(&mut self) -> bool {
+        self.inner.is_open()
+    }
+
+    fn is_tls(&self) -> bool {
+        self.inner.is_tls()
     }
 }
 
@@ -241,8 +351,8 @@ pub(crate) fn write_agent_config(
         .build()
 }
 
-/// Transport for `gf publish`: reads keep clone's whole-request bound, while
-/// writes use [`write_agent_config`].
+/// Transport for `gf publish`: reads use clone's [`read_agent`], while writes
+/// use [`write_agent_config`].
 pub(crate) struct HubTransport {
     read: HttpTransport,
     write: ureq::Agent,
@@ -390,6 +500,60 @@ pub(crate) fn validate_url(url: &Url) -> Result<(), graphforge_api::GfError> {
     Ok(())
 }
 
+/// Bounded in-process retry for transient read failures.
+///
+/// A retry follows a failed connection, a failed or truncated response body,
+/// or a `408`, `429`, or `5xx` status. Only consecutive failures without
+/// progress count toward `attempts`; a body read that advances the durable
+/// download offset resets the count, so a long transfer survives any number of
+/// separated interruptions while a dead one fails promptly.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RetryPolicy {
+    /// Requests allowed for one step without progress.
+    pub(crate) attempts: u32,
+    /// Wait before the first retry; each later wait doubles.
+    pub(crate) initial_backoff: Duration,
+    /// Upper bound on one wait.
+    pub(crate) max_backoff: Duration,
+}
+
+/// Production retry policy: five attempts, waiting 1, 2, 4, then 8 seconds.
+pub(crate) const RETRY_POLICY: RetryPolicy = RetryPolicy {
+    attempts: 5,
+    initial_backoff: Duration::from_secs(1),
+    max_backoff: Duration::from_secs(30),
+};
+
+impl RetryPolicy {
+    /// The wait before retry number `failures` (one-based).
+    pub(crate) fn backoff(&self, failures: u32) -> Duration {
+        let doublings = failures.saturating_sub(1).min(16);
+        self.initial_backoff
+            .saturating_mul(1_u32 << doublings)
+            .min(self.max_backoff)
+    }
+}
+
+/// Whether an HTTP status is worth retrying.
+fn transient_status(status: u16) -> bool {
+    matches!(status, 408 | 429 | 500..=599)
+}
+
+/// One request failure; `transient` marks a failure a retry may cure.
+pub(crate) struct FetchFailure {
+    pub(crate) error: graphforge_api::GfError,
+    pub(crate) transient: bool,
+}
+
+impl From<graphforge_api::GfError> for FetchFailure {
+    fn from(error: graphforge_api::GfError) -> Self {
+        Self {
+            error,
+            transient: false,
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn fetch(
     transport: &dyn Transport,
@@ -399,9 +563,10 @@ pub(crate) fn fetch(
     limit: u64,
 ) -> Result<HttpResponse, graphforge_api::GfError> {
     let mut attempts = 0;
-    fetch_with_attempts(transport, start, range, if_range, limit, &mut attempts)
+    fetch_once(transport, start, range, if_range, limit, &mut attempts).map_err(|f| f.error)
 }
 
+/// Fetch `start`, retrying transient failures under `policy`.
 pub(crate) fn fetch_with_attempts(
     transport: &dyn Transport,
     start: &Url,
@@ -409,15 +574,45 @@ pub(crate) fn fetch_with_attempts(
     if_range: Option<&str>,
     limit: u64,
     attempts: &mut u32,
+    policy: &RetryPolicy,
 ) -> Result<HttpResponse, graphforge_api::GfError> {
+    let mut failures = 0;
+    loop {
+        match fetch_once(transport, start, range, if_range, limit, attempts) {
+            Ok(response) => return Ok(response),
+            Err(failure) => {
+                failures += 1;
+                if !failure.transient || failures >= policy.attempts {
+                    return Err(failure.error);
+                }
+                std::thread::sleep(policy.backoff(failures));
+            }
+        }
+    }
+}
+
+/// Fetch `start` once, following at most [`MAX_REDIRECTS`] public redirects.
+pub(crate) fn fetch_once(
+    transport: &dyn Transport,
+    start: &Url,
+    range: Option<u64>,
+    if_range: Option<&str>,
+    limit: u64,
+    attempts: &mut u32,
+) -> Result<HttpResponse, FetchFailure> {
     let mut url = start.clone();
     for hop in 0..=MAX_REDIRECTS {
         transport.validate(&url)?;
         *attempts = attempts.saturating_add(1);
-        let response = transport.get(&url, range, if_range, limit)?;
+        let response = transport
+            .get(&url, range, if_range, limit)
+            .map_err(|error| FetchFailure {
+                transient: is_network(&error),
+                error,
+            })?;
         if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
             if hop == MAX_REDIRECTS {
-                return Err(network("redirect limit exceeded"));
+                return Err(network("redirect limit exceeded").into());
             }
             let location = response
                 .location
@@ -429,11 +624,19 @@ pub(crate) fn fetch_with_attempts(
             continue;
         }
         if !(200..300).contains(&response.status) {
-            return Err(network("Hub returned an unsuccessful status"));
+            return Err(FetchFailure {
+                error: network(&format!("Hub returned HTTP status {}", response.status)),
+                transient: transient_status(response.status),
+            });
         }
         return Ok(response);
     }
     unreachable!()
+}
+
+/// Whether `error` is a `hub.network` failure.
+pub(crate) fn is_network(error: &graphforge_api::GfError) -> bool {
+    matches!(error, graphforge_api::GfError::Storage(detail) if detail.starts_with("hub.network:"))
 }
 
 pub(crate) fn read_bounded(

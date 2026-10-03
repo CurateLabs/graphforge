@@ -22,26 +22,34 @@ use graphforge_discovery::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
+use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use url::Url;
 
 #[cfg(test)]
 use crate::hub_http::fetch;
 use crate::hub_http::{
-    HttpResponse, HttpTransport, MAX_METADATA_BYTES, Transport, endpoint, fetch_with_attempts,
-    hash_reader, limit_error, network, parse_input, parse_input_at, read_bounded, storage,
-    validate_url, validation,
+    HttpResponse, HttpTransport, MAX_METADATA_BYTES, RETRY_POLICY, RetryPolicy, Transport,
+    endpoint, fetch_once, fetch_with_attempts, hash_reader, limit_error, network, parse_input,
+    parse_input_at, read_bounded, storage, validate_url, validation,
 };
 
 mod module_fetch;
 pub(crate) use module_fetch::{ModuleFetchArgs, run_module_fetch};
 
-const MAX_BUNDLE_BYTES: u64 = 100 * 1024 * 1024 * 1024;
+/// Largest single object a clone downloads: the cumulative object bound
+/// `gf publish` admits ([`DiscoveryLimits::default`]), so any object a
+/// publisher could produce fits. The discovery manifest keeps that cumulative
+/// bound across all objects; clone downloads only one of them.
+pub(crate) const MAX_OBJECT_BYTES: u64 = 1024 * 1024_u64.pow(4);
+
+const CLONE_CONTRACT: &str = "graphforge-hub-clone/1";
 
 /// Clone a verified portable project from GraphForge Hub.
 #[derive(Args)]
@@ -287,9 +295,9 @@ fn classify_failure(error: &graphforge_api::GfError) -> Failure {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct CloneResult {
-    contract: &'static str,
+    contract: String,
     repository: String,
     destination: String,
     immutable_version: String,
@@ -322,6 +330,7 @@ fn fetch_inventory_object(
     transport: &dyn Transport,
     object: &ObjectDescriptor,
     max_bytes: usize,
+    retry: &RetryPolicy,
 ) -> Result<Vec<u8>, graphforge_api::GfError> {
     let location = object
         .locations
@@ -331,8 +340,15 @@ fn fetch_inventory_object(
         .map_err(|_| validation("hub.unsafe_location", "inventory location is invalid"))?;
     validate_url(&url)?;
     let mut attempts = 0;
-    let response =
-        fetch_with_attempts(transport, &url, None, None, max_bytes as u64, &mut attempts)?;
+    let response = fetch_with_attempts(
+        transport,
+        &url,
+        None,
+        None,
+        max_bytes as u64,
+        &mut attempts,
+        retry,
+    )?;
     let bytes = read_bounded(response, max_bytes)?;
     let actual = hash_reader(&mut std::io::Cursor::new(&bytes))?;
     if actual != object.digest.0 {
@@ -384,12 +400,13 @@ fn prepare_research_clone(
     limits: DiscoveryLimits,
     git_ref: Option<&str>,
     version_uuid: Option<&str>,
+    retry: &RetryPolicy,
 ) -> Result<(ObjectDescriptor, ResearchCloneContext), graphforge_api::GfError> {
     let lineage_object = manifest
         .lineage_object()
         .map_err(|error| protocol_error(&error))?;
     let lineage_bytes =
-        fetch_inventory_object(transport, lineage_object, limits.max_lineage_bytes)?;
+        fetch_inventory_object(transport, lineage_object, limits.max_lineage_bytes, retry)?;
     let lineage = ResearchLineage::from_json(&lineage_bytes, limits)
         .map_err(|error| protocol_error(&error))?;
     manifest
@@ -434,15 +451,40 @@ fn staging_path(destination: &Path) -> Result<PathBuf, graphforge_api::GfError> 
     Ok(parent.join(format!(".{name}.graphforge-clone")))
 }
 
+/// Owner-private staging beside the destination, held by an exclusive lock:
+/// the download, its resume checkpoint, the import target `project/` with
+/// the import's own residue, and the install record.
 #[derive(Debug)]
-struct CloneStaging {
-    root: PathBuf,
-    partial: PathBuf,
+pub(crate) struct CloneStaging {
+    pub(crate) root: PathBuf,
+    pub(crate) partial: PathBuf,
+    project: PathBuf,
+    operation: PathBuf,
+    installed: PathBuf,
+    lock: PathBuf,
     _lock: File,
 }
 
+impl CloneStaging {
+    fn new(root: PathBuf, lock: File) -> Self {
+        Self {
+            partial: root.join("package.part"),
+            project: root.join("project"),
+            operation: root.join("operation"),
+            installed: root.join("installed.json"),
+            lock: root.join("clone.lock"),
+            root,
+            _lock: lock,
+        }
+    }
+
+    fn lock_name(&self) -> std::ffi::OsString {
+        file_name(&self.lock)
+    }
+}
+
 #[cfg(unix)]
-fn acquire_staging(destination: &Path) -> Result<CloneStaging, graphforge_api::GfError> {
+pub(crate) fn acquire_staging(destination: &Path) -> Result<CloneStaging, graphforge_api::GfError> {
     use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
     let root = staging_path(destination)?;
     match std::fs::symlink_metadata(&root) {
@@ -487,15 +529,11 @@ fn acquire_staging(destination: &Path) -> Result<CloneStaging, graphforge_api::G
         }
         Err(TryLockError::Error(e)) => return Err(storage(e)),
     }
-    Ok(CloneStaging {
-        partial: root.join("package.part"),
-        root,
-        _lock: lock,
-    })
+    Ok(CloneStaging::new(root, lock))
 }
 
 #[cfg(not(unix))]
-fn acquire_staging(destination: &Path) -> Result<CloneStaging, graphforge_api::GfError> {
+pub(crate) fn acquire_staging(destination: &Path) -> Result<CloneStaging, graphforge_api::GfError> {
     let root = staging_path(destination)?;
     match std::fs::symlink_metadata(&root) {
         Ok(m) if !m.is_dir() => {
@@ -527,11 +565,7 @@ fn acquire_staging(destination: &Path) -> Result<CloneStaging, graphforge_api::G
         }
         Err(TryLockError::Error(e)) => return Err(storage(e)),
     }
-    Ok(CloneStaging {
-        partial: root.join("package.part"),
-        root,
-        _lock: lock,
-    })
+    Ok(CloneStaging::new(root, lock))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -632,28 +666,81 @@ fn read_resume(checkpoint: &Path) -> Result<Option<ResumeState>, graphforge_api:
     }
 }
 
-#[allow(clippy::too_many_lines)]
 #[cfg(test)]
 fn download(
     transport: &dyn Transport,
     object: &ObjectDescriptor,
     partial: &Path,
 ) -> Result<DownloadReport, graphforge_api::GfError> {
-    download_with_progress(transport, object, partial, &mut DownloadReport::default())
+    download_with_progress(
+        transport,
+        object,
+        partial,
+        &mut DownloadReport::default(),
+        &mut DownloadControl::quiet(&TEST_RETRY_POLICY),
+    )
 }
 
+/// Retry policy for in-process tests: production attempt count, no waiting.
+#[cfg(test)]
+const TEST_RETRY_POLICY: RetryPolicy = RetryPolicy {
+    attempts: RETRY_POLICY.attempts,
+    initial_backoff: Duration::ZERO,
+    max_backoff: Duration::ZERO,
+};
+
+/// Caller-owned retry bound, cancellation, and byte progress for a download.
+pub(crate) struct DownloadControl<'a> {
+    pub(crate) retry: &'a RetryPolicy,
+    pub(crate) cancelled: &'a AtomicBool,
+    /// Called with the durable byte count and the object length.
+    pub(crate) progress: Option<&'a mut dyn FnMut(u64, u64)>,
+}
+
+static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+impl<'a> DownloadControl<'a> {
+    /// No cancellation and no progress reporting.
+    pub(crate) fn quiet(retry: &'a RetryPolicy) -> Self {
+        Self {
+            retry,
+            cancelled: &NEVER_CANCELLED,
+            progress: None,
+        }
+    }
+
+    fn report(&mut self, bytes: u64, length: u64) {
+        if let Some(progress) = self.progress.as_mut() {
+            progress(bytes, length);
+        }
+    }
+}
+
+fn cancelled_error() -> graphforge_api::GfError {
+    validation("hub.interrupted", "clone was cancelled; rerun to resume")
+}
+
+/// Download `object` into `partial`, resuming a previous invocation's bytes
+/// and retrying transient failures in-process.
+///
+/// Each request after the first asks for the remaining bytes with `Range` and
+/// the strong ETag the bytes on disk came from as `If-Range`. Only an exact
+/// matching `206` appends; a `200` is the whole object again and replaces the
+/// partial file, read to the object length. The complete file must match the
+/// declared length and digest.
 #[allow(clippy::too_many_lines)]
 fn download_with_progress(
     transport: &dyn Transport,
     object: &ObjectDescriptor,
     partial: &Path,
-    progress: &mut DownloadReport,
+    report: &mut DownloadReport,
+    control: &mut DownloadControl<'_>,
 ) -> Result<DownloadReport, graphforge_api::GfError> {
     let checkpoint = partial.with_extension("resume.json");
-    if object.length > MAX_BUNDLE_BYTES {
-        return Err(limit_error("portable bundle exceeds clone byte bound"));
+    if object.length > MAX_OBJECT_BYTES {
+        return Err(limit_error("object exceeds the clone byte bound"));
     }
-    let mut resumed = match std::fs::symlink_metadata(partial) {
+    let mut offset = match std::fs::symlink_metadata(partial) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata.len(),
         Ok(_) => {
             return Err(validation(
@@ -664,9 +751,9 @@ fn download_with_progress(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
         Err(error) => return Err(storage(error)),
     };
-    if resumed > object.length {
+    if offset > object.length {
         open_partial_nofollow(partial, false).map_err(storage)?;
-        resumed = 0;
+        offset = 0;
     }
     let location = object
         .locations
@@ -675,65 +762,119 @@ fn download_with_progress(
     let url = Url::parse(location)
         .map_err(|_| validation("hub.unsafe_location", "invalid object URL"))?;
     let saved = read_resume(&checkpoint)?;
-    let validator = saved
-        .as_ref()
+    let mut validator = saved
         .filter(|s| {
             s.digest == object.digest.0 && s.length == object.length && s.location == *location
         })
-        .map(|s| s.etag.as_str());
-    if resumed > 0 && validator.is_none() {
-        resumed = 0;
+        .map(|s| s.etag);
+    if offset > 0 && validator.is_none() {
+        offset = 0;
     }
-    progress.resumed_bytes = resumed;
-    let mut transferred = 0_u64;
-    if resumed < object.length {
-        let mut response = fetch_with_attempts(
+    report.resumed_bytes = offset;
+    let mut first_request = true;
+    let mut failures = 0_u32;
+    let mut high_water = offset;
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    control.report(offset, object.length);
+    while offset < object.length {
+        if control.cancelled.load(Ordering::Relaxed) {
+            return Err(cancelled_error());
+        }
+        let range = (offset > 0).then_some(offset);
+        // The server may ignore `Range` and send the whole object, so the
+        // transport bound is always the object length; the expected size is
+        // applied once the status is known.
+        let failure = match fetch_once(
             transport,
             &url,
-            (resumed > 0).then_some(resumed),
-            validator,
-            object.length.saturating_sub(resumed),
-            &mut progress.attempts,
-        )?;
-        let expected_range = format!("bytes {resumed}-{}/{}", object.length - 1, object.length);
-        let append = resumed > 0
-            && response.status == 206
-            && response.content_range.as_deref() == Some(expected_range.as_str());
-        if resumed > 0 && response.status == 206 && !append {
-            let _ = std::fs::remove_file(partial);
-            return Err(validation(
-                "hub.integrity",
-                "range response does not match the requested object",
-            ));
-        }
-        if resumed > 0 && !append {
-            resumed = 0;
-        }
-        if resumed == 0 {
-            save_resume(&checkpoint, object, location, &response)?;
-        }
-        let mut file = open_partial_nofollow(partial, append).map_err(storage)?;
-        let mut copied = 0_u64;
-        let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
-        loop {
-            let read = response
-                .body
-                .read(&mut buffer)
-                .map_err(|_| network("object read failed"))?;
-            if read == 0 {
-                break;
+            range,
+            range.and(validator.as_deref()),
+            object.length,
+            &mut report.attempts,
+        ) {
+            Err(failure) if failure.transient => failure.error,
+            Err(failure) => return Err(failure.error),
+            Ok(mut response) => {
+                let append = if range.is_some() && response.status == 206 {
+                    let expected_range =
+                        format!("bytes {offset}-{}/{}", object.length - 1, object.length);
+                    if response.content_range.as_deref() != Some(expected_range.as_str())
+                        || response
+                            .etag
+                            .as_deref()
+                            .is_some_and(|etag| Some(etag) != validator.as_deref())
+                    {
+                        let _ = std::fs::remove_file(partial);
+                        let _ = std::fs::remove_file(&checkpoint);
+                        return Err(validation(
+                            "hub.integrity",
+                            "range response does not match the requested object",
+                        ));
+                    }
+                    true
+                } else if response.status == 206 {
+                    return Err(validation(
+                        "hub.integrity",
+                        "unrequested range response for the object",
+                    ));
+                } else {
+                    false
+                };
+                if !append {
+                    save_resume(&checkpoint, object, location, &response)?;
+                    validator.clone_from(&response.etag);
+                    offset = 0;
+                    if first_request {
+                        report.resumed_bytes = 0;
+                    }
+                }
+                first_request = false;
+                let mut file = open_partial_nofollow(partial, append).map_err(storage)?;
+                let mut interrupted = None;
+                loop {
+                    if control.cancelled.load(Ordering::Relaxed) {
+                        file.sync_all().map_err(storage)?;
+                        return Err(cancelled_error());
+                    }
+                    let Ok(read) = response.body.read(&mut buffer) else {
+                        interrupted = Some(network("object read failed"));
+                        break;
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    let next = offset
+                        .checked_add(read as u64)
+                        .filter(|next| *next <= object.length)
+                        .ok_or_else(|| limit_error("object exceeds declared size"))?;
+                    file.write_all(&buffer[..read]).map_err(storage)?;
+                    offset = next;
+                    report.transferred_bytes = report.transferred_bytes.saturating_add(read as u64);
+                    control.report(offset, object.length);
+                }
+                file.sync_all().map_err(storage)?;
+                match interrupted {
+                    Some(error) => error,
+                    None if offset < object.length => {
+                        validation("hub.interrupted", "download is incomplete; rerun to resume")
+                    }
+                    None => break,
+                }
             }
-            copied = copied
-                .checked_add(read as u64)
-                .ok_or_else(|| limit_error("object exceeds byte bound"))?;
-            transferred = copied;
-            progress.transferred_bytes = transferred;
-            if copied > object.length.saturating_sub(resumed) {
-                return Err(limit_error("object exceeds declared size"));
-            }
-            file.write_all(&buffer[..read]).map_err(storage)?;
+        };
+        if offset > high_water {
+            high_water = offset;
+            failures = 0;
         }
-        file.sync_all().map_err(storage)?;
+        failures += 1;
+        if failures >= control.retry.attempts {
+            return Err(if offset > 0 {
+                validation("hub.interrupted", "download is incomplete; rerun to resume")
+            } else {
+                failure
+            });
+        }
+        std::thread::sleep(control.retry.backoff(failures));
     }
     let mut file = open_read_nofollow(partial).map_err(storage)?;
     let length = file.metadata().map_err(storage)?.len();
@@ -750,11 +891,7 @@ fn download_with_progress(
         let _ = std::fs::remove_file(&checkpoint);
         return Err(validation("hub.integrity", "download digest mismatch"));
     }
-    Ok(DownloadReport {
-        resumed_bytes: resumed,
-        transferred_bytes: transferred,
-        attempts: progress.attempts,
-    })
+    Ok(*report)
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -827,9 +964,182 @@ pub(crate) fn run_clone(
     output: &mut dyn Write,
 ) -> Result<(), graphforge_api::GfError> {
     let runtime = clone_telemetry_runtime(args.telemetry_endpoint.as_deref());
-    let result = run_clone_profiled(&HttpTransport::new(), args, json, output, &runtime);
+    let attached = PROCESS_ATTACHED.load(Ordering::Relaxed);
+    if attached {
+        install_interrupt_handler();
+    }
+    let mut stderr = std::io::stderr();
+    let mut env = CloneEnv {
+        retry: RETRY_POLICY,
+        cancelled: if attached {
+            &INTERRUPTED
+        } else {
+            &NEVER_CANCELLED
+        },
+        available_space,
+        progress: CloneProgress::new(attached.then_some(&mut stderr as &mut dyn Write)),
+    };
+    let result = run_clone_profiled_with_delays(
+        &HttpTransport::new(),
+        args,
+        json,
+        output,
+        &runtime,
+        &CloneDelays::default(),
+        &mut env,
+    );
     let _ = runtime.shutdown();
     result
+}
+
+/// Set by the native `gf` process only: an embedding host keeps its own
+/// signal handling and standard error.
+static PROCESS_ATTACHED: AtomicBool = AtomicBool::new(false);
+/// Set by the first Ctrl-C during a clone.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Let `gf clone` handle Ctrl-C and print byte progress on standard error.
+/// Only the native `gf` process calls this.
+pub(crate) fn attach_to_process() {
+    PROCESS_ATTACHED.store(true, Ordering::Relaxed);
+}
+
+/// The first Ctrl-C asks the running download, verification, or import to
+/// stop at its next cancellation check, which leaves a state a rerun resumes.
+/// A second Ctrl-C exits at once; that is also resumable.
+fn install_interrupt_handler() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        // A host that already owns SIGINT keeps it; the clone then simply
+        // cannot be cancelled cooperatively.
+        let _ = ctrlc::set_handler(|| {
+            if INTERRUPTED.swap(true, Ordering::SeqCst) {
+                std::process::exit(130);
+            }
+            let _ = writeln!(
+                std::io::stderr(),
+                "gf clone: cancelling; a rerun resumes. Press Ctrl-C again to stop now."
+            );
+        });
+    });
+}
+
+fn available_space(path: &Path) -> std::io::Result<u64> {
+    fs4::available_space(path)
+}
+
+/// Process-level effects of one clone: retry bound, cancellation, the free
+/// space probe, and progress output. Tests inject each of them.
+struct CloneEnv<'a> {
+    retry: RetryPolicy,
+    cancelled: &'a AtomicBool,
+    available_space: fn(&Path) -> std::io::Result<u64>,
+    progress: CloneProgress<'a>,
+}
+
+#[cfg(test)]
+impl CloneEnv<'_> {
+    fn quiet<'a>() -> CloneEnv<'a> {
+        CloneEnv {
+            retry: TEST_RETRY_POLICY,
+            cancelled: &NEVER_CANCELLED,
+            available_space,
+            progress: CloneProgress::new(None),
+        }
+    }
+}
+
+/// At most one byte-progress line per interval, plus the final one.
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Human progress lines; writing them is best effort and never fails a clone.
+struct CloneProgress<'a> {
+    sink: Option<&'a mut dyn Write>,
+    last: Option<Instant>,
+}
+
+impl<'a> CloneProgress<'a> {
+    fn new(sink: Option<&'a mut dyn Write>) -> Self {
+        Self { sink, last: None }
+    }
+
+    fn phase(&mut self, message: &str) {
+        if let Some(sink) = self.sink.as_mut() {
+            let _ = writeln!(sink, "gf clone: {message}");
+        }
+    }
+
+    fn bytes(&mut self, done: u64, total: u64) {
+        let Some(sink) = self.sink.as_mut() else {
+            return;
+        };
+        let now = Instant::now();
+        if done < total
+            && self
+                .last
+                .is_some_and(|last| now.duration_since(last) < PROGRESS_INTERVAL)
+        {
+            return;
+        }
+        self.last = Some(now);
+        let percent = if total == 0 {
+            100
+        } else {
+            u128::from(done) * 100 / u128::from(total)
+        };
+        let _ = writeln!(
+            sink,
+            "gf clone: downloaded {} of {} ({percent}%)",
+            human_bytes(done),
+            human_bytes(total)
+        );
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut unit = 0;
+    let mut scale = 1_u64;
+    while unit + 1 < UNITS.len() && bytes / scale >= 1024 {
+        scale *= 1024;
+        unit += 1;
+    }
+    if unit == 0 {
+        return format!("{bytes} B");
+    }
+    // One decimal place, truncated, in exact integer arithmetic.
+    let tenths = u128::from(bytes) * 10 / u128::from(scale);
+    format!("{}.{} {}", tenths / 10, tenths % 10, UNITS[unit])
+}
+
+/// Free space a clone needs beside the destination: the rest of the download
+/// plus the import's transient peak. The import was measured at 2.20-2.22x the
+/// package (`observed_transient_peak_allocated_bytes`); 2.25x keeps a margin.
+fn required_space(length: u64, downloaded: u64) -> u64 {
+    let import_peak = (u128::from(length) * 9).div_ceil(4);
+    u64::try_from(u128::from(length.saturating_sub(downloaded)) + import_peak).unwrap_or(u64::MAX)
+}
+
+fn check_free_space(
+    staging: &CloneStaging,
+    length: u64,
+    available: fn(&Path) -> std::io::Result<u64>,
+) -> Result<(), graphforge_api::GfError> {
+    let downloaded = std::fs::symlink_metadata(&staging.partial)
+        .ok()
+        .filter(std::fs::Metadata::is_file)
+        .map_or(0, |metadata| metadata.len().min(length));
+    let required = required_space(length, downloaded);
+    let available = available(&staging.root).map_err(storage)?;
+    if available < required {
+        return Err(graphforge_api::GfError::Storage(format!(
+            "hub.insufficient_space: the destination filesystem has {} available; \
+             this clone needs about {}",
+            human_bytes(available),
+            human_bytes(required)
+        )));
+    }
+    Ok(())
 }
 
 fn clone_telemetry_runtime(endpoint: Option<&str>) -> TelemetryRuntime {
@@ -857,6 +1167,7 @@ pub(crate) fn run_clone_with(
     run_clone_profiled(transport, args, json, output, &TelemetryRuntime::default())
 }
 
+#[cfg(test)]
 fn run_clone_profiled(
     transport: &dyn Transport,
     args: CloneArgs,
@@ -871,6 +1182,7 @@ fn run_clone_profiled(
         output,
         runtime,
         &CloneDelays::default(),
+        &mut CloneEnv::quiet(),
     )
 }
 
@@ -880,6 +1192,9 @@ struct CloneDelays {
     verification: Duration,
     import: Duration,
     reopen: Duration,
+    /// Runs immediately before the import, after verification.
+    #[cfg(test)]
+    before_import: Option<Box<dyn Fn()>>,
 }
 
 fn run_clone_profiled_with_delays(
@@ -889,24 +1204,280 @@ fn run_clone_profiled_with_delays(
     output: &mut dyn Write,
     runtime: &TelemetryRuntime,
     delays: &CloneDelays,
+    env: &mut CloneEnv<'_>,
 ) -> Result<(), graphforge_api::GfError> {
     let mut profile = CloneProfile::new(runtime);
     #[cfg(test)]
     {
         profile.clock = delays.clock.clone();
     }
-    let result = run_clone_job(transport, args, &mut profile, delays)
+    let result = run_clone_job(transport, args, &mut profile, delays, env)
         .and_then(|result| write_clone_result(&result, json, output));
     profile.finish(&result);
     result
 }
 
+/// Test-only process exit at a named clone phase, for kill-and-rerun tests.
+#[cfg(test)]
+fn clone_failpoint(name: &str) {
+    if std::env::var("GRAPHFORGE_CLONE_FAILPOINT").as_deref() == Ok(name) {
+        std::process::exit(CLONE_FAILPOINT_EXIT);
+    }
+}
+
+#[cfg(test)]
+const CLONE_FAILPOINT_EXIT: i32 = 86;
+
+#[cfg(not(test))]
+const fn clone_failpoint(_name: &str) {}
+
+/// What one completed clone left in its staging directory before the
+/// destination was installed, so a rerun after a crash can finish it.
+#[derive(Serialize, Deserialize)]
+struct InstallRecord {
+    generation_uuid: String,
+    result: CloneResult,
+}
+
+/// Finish a clone whose destination was installed but whose staging was not
+/// yet removed: the rerun reports the recorded result and removes the staging.
+fn finish_installed_clone(
+    destination: &Path,
+) -> Result<Option<CloneResult>, graphforge_api::GfError> {
+    let root = staging_path(destination)?;
+    match std::fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        _ => return Ok(None),
+    }
+    let staging = acquire_staging(destination)?;
+    if std::fs::symlink_metadata(&staging.project).is_ok() {
+        return Ok(None);
+    }
+    let Some(record) = read_install_record(&staging.installed)? else {
+        return Ok(None);
+    };
+    let installed = destination
+        .to_str()
+        .and_then(|path| GraphForge::new(Some(path)).ok())
+        .and_then(|graph| graph.committed_generation_identity().ok())
+        .map(|identity| identity.generation_uuid.to_string());
+    if installed.as_deref() != Some(record.generation_uuid.as_str()) {
+        return Ok(None);
+    }
+    release_staging(staging);
+    Ok(Some(record.result))
+}
+
+fn read_install_record(path: &Path) -> Result<Option<InstallRecord>, graphforge_api::GfError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            let mut bytes = Vec::new();
+            open_read_nofollow(path)
+                .map_err(storage)?
+                .take(64 * 1024)
+                .read_to_end(&mut bytes)
+                .map_err(storage)?;
+            Ok(serde_json::from_slice(&bytes).ok())
+        }
+        Ok(_) => Err(validation(
+            "hub.destination_conflict",
+            "install record path is unsafe",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(storage(error)),
+    }
+}
+
+/// Write `bytes` to `path` in the staging directory and make it durable.
+fn write_staging_file(path: &Path, bytes: &[u8]) -> Result<(), graphforge_api::GfError> {
+    reject_unsafe_state_path(path)?;
+    let temporary = path.with_extension("tmp");
+    reject_unsafe_state_path(&temporary)?;
+    let mut file = open_private_checkpoint(&temporary)?;
+    file.write_all(bytes).map_err(storage)?;
+    file.sync_all().map_err(storage)?;
+    drop(file);
+    std::fs::rename(&temporary, path).map_err(storage)?;
+    if let Some(parent) = path.parent() {
+        let _ = File::open(parent).and_then(|directory| directory.sync_all());
+    }
+    Ok(())
+}
+
+/// Bind the staged import target to `operation`. A target staged for another
+/// operation (the Hub moved to a newer version since the previous run) is
+/// removed with its import residue, so the import starts from an empty
+/// target; the same operation resumes or replays in place.
+fn bind_import_target(
+    staging: &CloneStaging,
+    operation: &OperationId,
+) -> Result<(), graphforge_api::GfError> {
+    let expected = operation.0.hyphenated().to_string();
+    let recorded = match std::fs::symlink_metadata(&staging.operation) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            let mut bytes = Vec::new();
+            open_read_nofollow(&staging.operation)
+                .map_err(storage)?
+                .take(128)
+                .read_to_end(&mut bytes)
+                .map_err(storage)?;
+            Some(bytes)
+        }
+        Ok(_) => {
+            return Err(validation(
+                "hub.destination_conflict",
+                "staged operation path is unsafe",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(storage(error)),
+    };
+    if recorded.as_deref() == Some(expected.as_bytes()) {
+        return Ok(());
+    }
+    clear_import_target(staging)?;
+    write_staging_file(&staging.operation, expected.as_bytes())
+}
+
+/// Remove the staged import target with the import's residue and the
+/// operation binding; the download and its checkpoint stay.
+fn clear_import_target(staging: &CloneStaging) -> Result<(), graphforge_api::GfError> {
+    let keep = [
+        staging.lock_name(),
+        file_name(&staging.partial),
+        file_name(&staging.partial.with_extension("resume.json")),
+    ];
+    for entry in std::fs::read_dir(&staging.root).map_err(storage)? {
+        let entry = entry.map_err(storage)?;
+        if keep.iter().any(|name| *name == entry.file_name()) {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_type().map_err(storage)?.is_dir() {
+            std::fs::remove_dir_all(&path).map_err(storage)?;
+        } else {
+            std::fs::remove_file(&path).map_err(storage)?;
+        }
+    }
+    Ok(())
+}
+
+fn file_name(path: &Path) -> std::ffi::OsString {
+    path.file_name().map(ToOwned::to_owned).unwrap_or_default()
+}
+
+/// Atomically install the imported project at `destination`; an existing
+/// destination is never replaced.
+fn install_destination(
+    staging: &CloneStaging,
+    destination: &Path,
+) -> Result<(), graphforge_api::GfError> {
+    match graphforge_filesystem::rename_no_replace(&staging.project, destination) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(validation(
+                "hub.destination_conflict",
+                "destination already exists",
+            ));
+        }
+        Err(error) => return Err(storage(error)),
+    }
+    if let Some(parent) = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        let _ = File::open(parent).and_then(|directory| directory.sync_all());
+    }
+    Ok(())
+}
+
+fn import_error(error: &graphforge_api::PortableV2Error) -> graphforge_api::GfError {
+    let code = portable_code(error.code);
+    let mut message = format!("{code}: portable project import failed: {error}");
+    if let Some(cause) = &error.cause {
+        // Sanitized: host paths are reduced to their last two components.
+        let _ = write!(message, " (cause: {cause})");
+    }
+    match error.code {
+        PortableV2ErrorCode::Io | PortableV2ErrorCode::Cancelled => {
+            graphforge_api::GfError::Storage(message)
+        }
+        _ => graphforge_api::GfError::Validation(message),
+    }
+}
+
+fn portable_code(code: PortableV2ErrorCode) -> &'static str {
+    match code {
+        PortableV2ErrorCode::Cancelled => "hub.package.cancelled",
+        PortableV2ErrorCode::LimitExceeded => "hub.package.limit_exceeded",
+        PortableV2ErrorCode::Io => "hub.package.io",
+        PortableV2ErrorCode::InvalidStructure => "hub.package.invalid_structure",
+        PortableV2ErrorCode::InvalidPath => "hub.package.invalid_path",
+        PortableV2ErrorCode::DuplicateEntry => "hub.package.duplicate_entry",
+        PortableV2ErrorCode::UnsupportedFuture => "hub.package.unsupported_future",
+        PortableV2ErrorCode::Incompatible => "hub.package.incompatible",
+        PortableV2ErrorCode::DigestMismatch => "hub.package.digest_mismatch",
+        PortableV2ErrorCode::ConcurrentMutation => "hub.package.concurrent_mutation",
+    }
+}
+
+/// Remove a staging directory that holds nothing a rerun can reuse.
+fn release_staging_if_unused(staging: CloneStaging) {
+    let reusable = std::fs::read_dir(&staging.root).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|entry| entry.file_name() != staging.lock_name())
+    });
+    if reusable {
+        drop(staging);
+    } else {
+        release_staging(staging);
+    }
+}
+
+/// Remove everything staged, on success and on failure alike.
+///
+/// The contents (partial file, checkpoint, staged output, and the lock file
+/// itself) are removed while the lock is still held, so a concurrent run can
+/// never acquire the directory and then have its files deleted. Only then is
+/// the lock released and the now-empty directory removed with `remove_dir`,
+/// which fails harmlessly if a concurrent run has meanwhile re-created its
+/// lock; that run's staging is never touched.
+pub(crate) fn release_staging(staging: CloneStaging) {
+    clear_staging(&staging);
+    let root = staging.root.clone();
+    drop(staging);
+    remove_staging_dir(&root);
+}
+
+/// `remove_dir`, not `remove_dir_all`: it refuses a directory that a concurrent
+/// run has re-populated, and that refusal is expected and benign.
+fn remove_staging_dir(root: &Path) {
+    let _ = std::fs::remove_dir(root);
+}
+
+/// Best-effort removal of every entry in the staging directory. Cleanup can
+/// neither turn a published success into a failure nor mask the real error.
+fn clear_staging(staging: &CloneStaging) {
+    let Ok(entries) = std::fs::read_dir(&staging.root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let _ = match entry.file_type() {
+            Ok(kind) if kind.is_dir() => std::fs::remove_dir_all(&path),
+            _ => std::fs::remove_file(&path),
+        };
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_clone_job(
     transport: &dyn Transport,
-    args: CloneArgs,
+    mut args: CloneArgs,
     profile: &mut CloneProfile<'_>,
     delays: &CloneDelays,
+    env: &mut CloneEnv<'_>,
 ) -> Result<CloneResult, graphforge_api::GfError> {
     if args.git_ref.is_some() && args.version_uuid.is_some() {
         return Err(validation(
@@ -914,7 +1485,8 @@ fn run_clone_job(
             "specify only one of --ref and --version-uuid",
         ));
     }
-    let (identity, base, destination) = profile.stage(
+    let requested_destination = args.destination.take();
+    let (identity, base, destination, finished) = profile.stage(
         Stage::IdentityValidation,
         ComponentKind::Cli,
         ComponentRole::Facade,
@@ -922,13 +1494,24 @@ fn run_clone_job(
         1,
         || {
             let (identity, base) = parse_input(&args.repository)?;
-            let destination = args
-                .destination
-                .unwrap_or_else(|| PathBuf::from(&identity.repository));
+            let destination =
+                requested_destination.unwrap_or_else(|| PathBuf::from(&identity.repository));
+            if std::fs::symlink_metadata(&destination).is_ok() {
+                let finished = finish_installed_clone(&destination)?.ok_or_else(|| {
+                    validation("hub.destination_conflict", "destination already exists")
+                })?;
+                return Ok(((identity, base, destination, Some(finished)), None, None));
+            }
             ensure_destination_absent(&destination)?;
-            Ok(((identity, base, destination), None, None))
+            // Refuse an inadmissible destination filesystem with its real
+            // code before any network request or download.
+            graphforge_api::filesystem_durability_preflight(&destination)?;
+            Ok(((identity, base, destination, None), None, None))
         },
     )?;
+    if let Some(finished) = finished {
+        return Ok(finished);
+    }
     profile.handoff(
         ComponentKind::Cli,
         ComponentKind::NetworkTransport,
@@ -951,6 +1534,7 @@ fn run_clone_job(
                     None,
                     MAX_METADATA_BYTES as u64,
                     &mut refs_attempts,
+                    &env.retry,
                 )?,
                 MAX_METADATA_BYTES,
             )?;
@@ -978,6 +1562,7 @@ fn run_clone_job(
                     None,
                     MAX_METADATA_BYTES as u64,
                     &mut manifest_attempts,
+                    &env.retry,
                 )?,
                 MAX_METADATA_BYTES,
             )?;
@@ -991,7 +1576,6 @@ fn run_clone_job(
     let manifest_bytes = manifest_result?;
     let limits = DiscoveryLimits {
         max_response_bytes: MAX_METADATA_BYTES,
-        max_cumulative_object_bytes: MAX_BUNDLE_BYTES,
         ..DiscoveryLimits::default()
     };
     profile.handoff(
@@ -1020,7 +1604,76 @@ fn run_clone_job(
             Ok(((manifest, staging), None, None))
         },
     )?;
-    let refs = RefSet::from_json(&refs_bytes, limits).map_err(|error| protocol_error(&error))?;
+    let discovered = Discovered {
+        identity: &identity,
+        destination: &destination,
+        refs_bytes: &refs_bytes,
+        manifest_bytes: &manifest_bytes,
+        manifest: &manifest,
+        limits,
+    };
+    let result = clone_into_staging(
+        transport,
+        &args,
+        &discovered,
+        &staging,
+        profile,
+        delays,
+        env,
+    );
+    match result {
+        Ok(result) => {
+            // The destination is already atomically installed; cleanup cannot
+            // turn success into a reported failure.
+            profile.stage(
+                Stage::Cleanup,
+                ComponentKind::Storage,
+                ComponentRole::Persistence,
+                None,
+                1,
+                || {
+                    release_staging(staging);
+                    Ok(((), None, None))
+                },
+            )?;
+            Ok(result)
+        }
+        Err(error) => {
+            release_staging_if_unused(staging);
+            Err(error)
+        }
+    }
+}
+
+/// Validated discovery state shared by the staged clone phases.
+struct Discovered<'a> {
+    identity: &'a RepositoryIdentity,
+    destination: &'a Path,
+    refs_bytes: &'a [u8],
+    manifest_bytes: &'a [u8],
+    manifest: &'a DiscoveryManifest,
+    limits: DiscoveryLimits,
+}
+
+#[allow(clippy::too_many_lines)]
+fn clone_into_staging(
+    transport: &dyn Transport,
+    args: &CloneArgs,
+    discovered: &Discovered<'_>,
+    staging: &CloneStaging,
+    profile: &mut CloneProfile<'_>,
+    delays: &CloneDelays,
+    env: &mut CloneEnv<'_>,
+) -> Result<CloneResult, graphforge_api::GfError> {
+    let Discovered {
+        identity,
+        destination,
+        refs_bytes,
+        manifest_bytes,
+        manifest,
+        limits,
+    } = *discovered;
+    let refs = RefSet::from_json(refs_bytes, limits).map_err(|error| protocol_error(&error))?;
     let research_requested = args.git_ref.is_some() || args.version_uuid.is_some();
     let (object, research_context) = if research_requested {
         if manifest.lineage.is_none() {
@@ -1037,11 +1690,12 @@ fn run_clone_job(
         );
         let (object, context) = prepare_research_clone(
             transport,
-            &manifest,
+            manifest,
             &refs,
             limits,
             args.git_ref.as_deref(),
             args.version_uuid.as_deref(),
+            &env.retry,
         )?;
         profile.handoff(
             ComponentKind::NetworkTransport,
@@ -1051,8 +1705,12 @@ fn run_clone_job(
         );
         (object, Some(context))
     } else {
-        (select_bundle(&manifest)?.clone(), None)
+        (select_bundle(manifest)?.clone(), None)
     };
+    if object.length > MAX_OBJECT_BYTES {
+        return Err(limit_error("object exceeds the clone byte bound"));
+    }
+    check_free_space(staging, object.length, env.available_space)?;
     let partial = staging.partial.clone();
     profile.handoff(
         ComponentKind::Discovery,
@@ -1068,8 +1726,24 @@ fn run_clone_job(
         Some(WaitReason::Network),
         1,
         || {
-            let report =
-                download_with_progress(transport, &object, &partial, &mut download_progress)?;
+            let CloneEnv {
+                retry,
+                cancelled,
+                progress,
+                ..
+            } = env;
+            let mut report_bytes = |done, total| progress.bytes(done, total);
+            let report = download_with_progress(
+                transport,
+                &object,
+                &partial,
+                &mut download_progress,
+                &mut DownloadControl {
+                    retry,
+                    cancelled,
+                    progress: Some(&mut report_bytes),
+                },
+            )?;
             Ok((report, Some(report.transferred_bytes), None))
         },
     );
@@ -1079,6 +1753,7 @@ fn run_clone_job(
         stage.resumed_bytes = Some(download_progress.resumed_bytes);
     }
     let download = download_result?;
+    clone_failpoint("clone.after_download");
     let portable_limits = PortableV2Limits::default();
     profile.handoff(
         ComponentKind::NetworkTransport,
@@ -1086,6 +1761,8 @@ fn run_clone_job(
         HandoffKind::Transfer,
         Some(download.resumed_bytes + download.transferred_bytes),
     );
+    env.progress.phase("verifying the package");
+    let cancelled = env.cancelled;
     let verified = profile.stage(
         Stage::PortableVerification,
         ComponentKind::PortableVerify,
@@ -1096,16 +1773,17 @@ fn run_clone_job(
             delays.clock.wait(delays.verification);
             let outcome = if let Some(context) = &research_context {
                 verify_discovered_research_version(&DiscoveryResearchVersionRequest {
-                    manifest_json: &manifest_bytes,
-                    refs_json: &refs_bytes,
+                    manifest_json: manifest_bytes,
+                    refs_json: refs_bytes,
                     lineage_json: &context.lineage_bytes,
-                    expected_repository: &identity,
+                    expected_repository: identity,
                     version_uuid: &context.version_uuid,
                     package: &partial,
                     discovery_limits: limits,
                     portable_limits,
                     mode: PortableV2Mode::Full,
-                    cancelled: None,
+                    cancelled: Some(cancelled),
+                    scratch: Some(&staging.root),
                 })
                 .map_err(research_version_error)?;
                 (
@@ -1115,14 +1793,14 @@ fn run_clone_job(
                 )
             } else {
                 let accepted = verify_discovered_portable_v2(&DiscoveryPortableV2Request {
-                    manifest_json: &manifest_bytes,
-                    refs_json: &refs_bytes,
-                    expected_repository: &identity,
+                    manifest_json: manifest_bytes,
+                    refs_json: refs_bytes,
+                    expected_repository: identity,
                     package: &partial,
                     discovery_limits: limits,
                     portable_limits,
                     mode: PortableV2Mode::Full,
-                    cancelled: None,
+                    cancelled: Some(cancelled),
                 })
                 .map_err(portable_error)?;
                 (accepted.immutable_version, None, None)
@@ -1135,9 +1813,9 @@ fn run_clone_job(
     // binds the selected Version too, so different Versions of one snapshot get
     // distinct import operations and therefore distinct generation identities.
     let operation_id = OperationId(match &research_context {
-        None => graphforge_api::hub_clone_operation(&canonical_name(&identity), &immutable_version),
+        None => graphforge_api::hub_clone_operation(&canonical_name(identity), &immutable_version),
         Some(context) => graphforge_api::hub_research_clone_operation(
-            &canonical_name(&identity),
+            &canonical_name(identity),
             &immutable_version,
             &context.version_uuid,
             &context.identity_digest,
@@ -1155,6 +1833,7 @@ fn run_clone_job(
         HandoffKind::Call,
         Some(object.length),
     );
+    env.progress.phase("importing the project");
     let imported = profile.stage(
         Stage::AtomicImport,
         ComponentKind::PortableImport,
@@ -1163,16 +1842,38 @@ fn run_clone_job(
         1,
         || {
             delays.clock.wait(delays.import);
+            #[cfg(test)]
+            if let Some(hook) = &delays.before_import {
+                hook();
+            }
+            // The import targets a private directory inside the staging
+            // directory; only a complete, reopened project is installed at
+            // the destination, by one atomic rename.
+            bind_import_target(staging, &operation_id)?;
             GraphForge::import_portable_v2(
-                &destination,
+                &staging.project,
                 &PortableV2ImportRequest {
                     input: partial.clone(),
                     operation_id,
                     limits: portable_limits,
                 },
-                None,
+                Some(cancelled),
             )
-            .map_err(|_| validation("hub.integrity", "portable project import failed"))
+            .map_err(|error| {
+                // An import that did not commit leaves nothing worth
+                // keeping; the rerun starts from an empty target. A committed
+                // one stays, and the rerun replays it.
+                if error.committed_import.is_none()
+                    && let Err(cleanup) = clear_import_target(staging)
+                {
+                    return graphforge_api::GfError::Storage(format!(
+                        "{}: portable project import failed ({error}), and removing \
+                         its staged target failed: {cleanup}",
+                        portable_code(error.code)
+                    ));
+                }
+                import_error(&error)
+            })
             .map(|imported| (imported, Some(object.length), None))
         },
     )?;
@@ -1208,15 +1909,13 @@ fn run_clone_job(
         HandoffKind::Return,
         None,
     );
-    // `import_portable_v2` already reopened the destination through the public
-    // facade and verified the reopened generation UUID matches the published
-    // receipt (see `import_portable_v2_with_allocation`), including its own
-    // UTF-8 path check — success there already proves normal runtime
-    // readability. Reopening again here would just re-parse everything that
-    // call already confirmed is readable, for a `GraphForge` handle nothing
-    // uses. The stage itself is kept (with its test-only injected delay) so
-    // clone job telemetry keeps reporting a distinct recovery/verification
-    // phase.
+    // `import_portable_v2` already reopened the imported project through the
+    // public facade and verified the reopened generation UUID matches the
+    // published receipt (see `import_portable_v2_with_allocation`), including
+    // its own UTF-8 path check — success there already proves normal runtime
+    // readability. The stage itself is kept (with its test-only injected
+    // delay) so clone job telemetry keeps reporting a distinct
+    // recovery/verification phase.
     profile.stage(
         Stage::Reopen,
         ComponentKind::Recovery,
@@ -1234,24 +1933,9 @@ fn run_clone_job(
         HandoffKind::Call,
         None,
     );
-    let staging_root = staging.root.clone();
-    drop(staging);
-    // The destination is already atomically published; cleanup cannot turn
-    // success into a reported failure.
-    profile.stage(
-        Stage::Cleanup,
-        ComponentKind::Storage,
-        ComponentRole::Persistence,
-        None,
-        1,
-        || {
-            let _ = std::fs::remove_dir_all(staging_root);
-            Ok(((), None, None))
-        },
-    )?;
-    Ok(CloneResult {
-        contract: "graphforge-hub-clone/1",
-        repository: canonical_name(&identity),
+    let result = CloneResult {
+        contract: CLONE_CONTRACT.to_owned(),
+        repository: canonical_name(identity),
         destination: destination.display().to_string(),
         immutable_version,
         package_digest: imported.package_digest,
@@ -1259,7 +1943,19 @@ fn run_clone_job(
         resumed_bytes: download.resumed_bytes,
         research_version_uuid,
         research_version_kind,
-    })
+    };
+    let record = InstallRecord {
+        generation_uuid: result.generation_uuid.clone(),
+        result,
+    };
+    write_staging_file(
+        &staging.installed,
+        &serde_json::to_vec(&record).map_err(storage)?,
+    )?;
+    clone_failpoint("clone.before_install");
+    install_destination(staging, destination)?;
+    clone_failpoint("clone.after_install");
+    Ok(record.result)
 }
 
 fn write_clone_result(
@@ -1320,18 +2016,7 @@ fn research_version_error(error: DiscoveryResearchVersionError) -> graphforge_ap
             "research discovery reference mismatch",
         ),
         DiscoveryResearchVersionError::Portable(error) => validation(
-            match error.code {
-                PortableV2ErrorCode::Cancelled => "hub.package.cancelled",
-                PortableV2ErrorCode::LimitExceeded => "hub.package.limit_exceeded",
-                PortableV2ErrorCode::Io => "hub.package.io",
-                PortableV2ErrorCode::InvalidStructure => "hub.package.invalid_structure",
-                PortableV2ErrorCode::InvalidPath => "hub.package.invalid_path",
-                PortableV2ErrorCode::DuplicateEntry => "hub.package.duplicate_entry",
-                PortableV2ErrorCode::UnsupportedFuture => "hub.package.unsupported_future",
-                PortableV2ErrorCode::Incompatible => "hub.package.incompatible",
-                PortableV2ErrorCode::DigestMismatch => "hub.package.digest_mismatch",
-                PortableV2ErrorCode::ConcurrentMutation => "hub.package.concurrent_mutation",
-            },
+            portable_code(error.code),
             "research portable verification failed",
         ),
     }
@@ -1362,37 +2047,27 @@ fn portable_error(error: DiscoveryPortableV2Error) -> graphforge_api::GfError {
             "portable project participant is invalid",
         ),
         DiscoveryPortableV2Error::Portable(error) => validation(
-            match error.code {
-                PortableV2ErrorCode::Cancelled => "hub.package.cancelled",
-                PortableV2ErrorCode::LimitExceeded => "hub.package.limit_exceeded",
-                PortableV2ErrorCode::Io => "hub.package.io",
-                PortableV2ErrorCode::InvalidStructure => "hub.package.invalid_structure",
-                PortableV2ErrorCode::InvalidPath => "hub.package.invalid_path",
-                PortableV2ErrorCode::DuplicateEntry => "hub.package.duplicate_entry",
-                PortableV2ErrorCode::UnsupportedFuture => "hub.package.unsupported_future",
-                PortableV2ErrorCode::Incompatible => "hub.package.incompatible",
-                PortableV2ErrorCode::DigestMismatch => "hub.package.digest_mismatch",
-                PortableV2ErrorCode::ConcurrentMutation => "hub.package.concurrent_mutation",
-            },
+            portable_code(error.code),
             "portable project verification failed",
         ),
     }
 }
 #[cfg(test)]
 mod research_clone_tests;
+#[cfg(test)]
+mod transfer_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::hub_http::public_ip;
+    use crate::hub_http::{ReadTimeouts, read_agent};
     use std::collections::VecDeque;
     use std::io::{BufRead as _, BufReader};
     use std::net::IpAddr;
     use std::net::TcpListener;
     use std::sync::Mutex;
-    use std::sync::atomic::AtomicBool;
     use ureq::unversioned::resolver::DefaultResolver;
-    use ureq::unversioned::transport::DefaultConnector;
 
     pub(super) struct Scripted(Mutex<VecDeque<HttpResponse>>);
 
@@ -1413,14 +2088,23 @@ mod tests {
     }
 
     impl Transport for Scripted {
+        /// Like [`HttpTransport`], read at most one byte past `limit`; an
+        /// exhausted script is a server that refuses connections.
         fn get(
             &self,
             _url: &Url,
             _range: Option<u64>,
             _if_range: Option<&str>,
-            _limit: u64,
+            limit: u64,
         ) -> Result<HttpResponse, graphforge_api::GfError> {
-            Ok(self.0.lock().unwrap().pop_front().unwrap())
+            let mut response = self
+                .0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| network("request failed"))?;
+            response.body = Box::new(response.body.take(limit.saturating_add(1)));
+            Ok(response)
         }
     }
 
@@ -1453,21 +2137,24 @@ mod tests {
         }
     }
 
-    struct LoopbackTransport(HttpTransport);
+    pub(super) struct LoopbackTransport(HttpTransport);
 
     impl LoopbackTransport {
-        fn new() -> Self {
-            let config = ureq::Agent::config_builder()
-                .https_only(false)
-                .http_status_as_error(false)
-                .max_redirects(0)
-                .proxy(None)
-                .timeout_global(Some(Duration::from_secs(2)))
-                .build();
+        pub(super) fn new() -> Self {
+            Self::with_idle(Duration::from_secs(2))
+        }
+
+        /// The production read agent over plain loopback HTTP, with `idle`
+        /// as every phase bound.
+        pub(super) fn with_idle(idle: Duration) -> Self {
             Self(HttpTransport {
-                agent: ureq::Agent::with_parts(
-                    config,
-                    DefaultConnector::new(),
+                agent: read_agent(
+                    false,
+                    &ReadTimeouts {
+                        connect: idle,
+                        response: idle,
+                        idle,
+                    },
                     DefaultResolver::default(),
                 ),
             })
@@ -1512,7 +2199,7 @@ mod tests {
         }
     }
 
-    fn object(bytes: &[u8]) -> ObjectDescriptor {
+    pub(super) fn object(bytes: &[u8]) -> ObjectDescriptor {
         let mut cursor = std::io::Cursor::new(bytes);
         ObjectDescriptor {
             digest: graphforge_discovery::Sha256Digest(hash_reader(&mut cursor).unwrap()),
@@ -1580,8 +2267,16 @@ mod tests {
         let transport = Scripted::new(vec![redirect, response(200, None, b"ok")]);
         let start = Url::parse("https://hub.example/start").unwrap();
         let mut attempts = 0;
-        let response =
-            fetch_with_attempts(&transport, &start, None, None, 1024, &mut attempts).unwrap();
+        let response = fetch_with_attempts(
+            &transport,
+            &start,
+            None,
+            None,
+            1024,
+            &mut attempts,
+            &TEST_RETRY_POLICY,
+        )
+        .unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(attempts, 2);
     }
@@ -1646,7 +2341,7 @@ mod tests {
     }
 
     #[test]
-    fn real_http_interruption_resumes_with_range() {
+    fn real_http_interruption_resumes_in_process_with_range() {
         let bytes = b"verified portable bytes".to_vec();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -1699,15 +2394,16 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let destination = root.path().join("project");
         let transport = LoopbackTransport::new();
-        assert!(download(&transport, &descriptor, &destination).is_err());
+        // The cut body is retried in-process: one invocation completes.
         assert_eq!(
             download(&transport, &descriptor, &destination).unwrap(),
             DownloadReport {
-                resumed_bytes: 8,
-                transferred_bytes: (bytes.len() - 8) as u64,
-                attempts: 1,
+                resumed_bytes: 0,
+                transferred_bytes: bytes.len() as u64,
+                attempts: 2,
             }
         );
+        assert_eq!(std::fs::read(&destination).unwrap(), bytes);
         server.join().unwrap();
     }
 
@@ -1921,7 +2617,22 @@ mod tests {
         );
     }
 
-    fn clone_script(bundle: &[u8], package_digest: &str) -> Scripted {
+    pub(super) fn clone_script(bundle: &[u8], package_digest: &str) -> Scripted {
+        let (refs, manifest) = clone_documents(bundle, package_digest, &[]);
+        Scripted::new(vec![
+            response(200, None, &refs),
+            response(200, None, &manifest),
+            response(200, None, bundle),
+        ])
+    }
+
+    /// Refs and manifest advertising `bundle` as the Project package, plus
+    /// `extra` objects that clone must never fetch.
+    pub(super) fn clone_documents(
+        bundle: &[u8],
+        package_digest: &str,
+        extra: &[serde_json::Value],
+    ) -> (Vec<u8>, Vec<u8>) {
         let object_digest = hash_reader(&mut std::io::Cursor::new(bundle)).unwrap();
         let repository = serde_json::json!({"owner":"openalex","repository":"openalex"});
         let immutable = format!("sha256:{}", "a".repeat(64));
@@ -1932,19 +2643,50 @@ mod tests {
             "refs":[{"name":"main","target":immutable.clone(),"validator":validator}]
         }))
         .unwrap();
+        let mut objects = vec![
+            serde_json::json!({"digest":object_digest,"length":bundle.len(),"media_type":graphforge_discovery::PORTABLE_V2_MEDIA_TYPE,"locations":["https://objects.example/project.gfpb"]}),
+        ];
+        objects.extend(extra.iter().cloned());
+        objects.sort_by(|left, right| left["digest"].as_str().cmp(&right["digest"].as_str()));
         let manifest = serde_json::to_vec(&serde_json::json!({
             "format":"graphforge-discovery/1","version":{"major":1,"minor":0},
             "repository":repository,"default_ref":"main","resolved_ref":"main",
             "immutable_version":immutable,
             "package":{"format":"graphforge-project/2","package_digest":package_digest,"object_digest":object_digest},
             "requirements":[{"capability":"portable-v2","major":1}],"capabilities":[{"capability":"range-requests","major":1}],
-            "objects":[{"digest":object_digest,"length":bundle.len(),"media_type":graphforge_discovery::PORTABLE_V2_MEDIA_TYPE,"locations":["https://objects.example/project.gfpb"]}]
+            "objects":objects
         })).unwrap();
-        Scripted::new(vec![
-            response(200, None, &refs),
-            response(200, None, &manifest),
-            response(200, None, bundle),
-        ])
+        (refs, manifest)
+    }
+
+    /// A real complete portable-v2 bundle of an empty project and its
+    /// semantic package digest.
+    pub(super) fn real_bundle() -> (Vec<u8>, String) {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        GraphForge::new(source.to_str()).unwrap();
+        let generation = graphforge_storage::resolve_project_generation(&source).unwrap();
+        let limits = PortableV2Limits::default();
+        let plan = graphforge_storage::plan_complete_portable_v2(&generation, limits).unwrap();
+        let bundle_path = root.path().join("complete.gfpb");
+        graphforge_storage::export_complete_portable_v2(
+            &plan,
+            &bundle_path,
+            graphforge_storage::PortableV2Output::Bundle,
+            limits,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        let report = graphforge_storage::verify_portable_v2(
+            &bundle_path,
+            PortableV2Mode::Full,
+            limits,
+            None,
+        )
+        .unwrap();
+        (std::fs::read(&bundle_path).unwrap(), report.package_digest)
     }
 
     /// Scripted responses that also record every requested URL.
@@ -2091,7 +2833,8 @@ mod tests {
             .unwrap();
         assert_eq!(stage.resumed_bytes, Some(8));
         assert_eq!(stage.bytes, Some(4));
-        assert_eq!(stage.attempt, 1);
+        // One short `206`, then refused connections until the retry bound.
+        assert_eq!(stage.attempt, RETRY_POLICY.attempts);
         assert!(!job.handoffs.iter().any(|handoff| {
             matches!(
                 handoff.to,
@@ -2309,6 +3052,7 @@ mod tests {
                 } else {
                     Duration::ZERO
                 },
+                before_import: None,
             };
             let clone_started = Instant::now();
             run_clone_profiled_with_delays(
@@ -2324,6 +3068,7 @@ mod tests {
                 &mut output,
                 &runtime,
                 &delays,
+                &mut CloneEnv::quiet(),
             )
             .unwrap();
             let clone_elapsed = clone_started.elapsed();
