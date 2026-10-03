@@ -41,6 +41,10 @@ impl Default for VectorLifecycleLimits {
 pub struct VectorIndexRequest<'a> {
     /// Explicit topology membership; absent only for standalone legacy callers.
     pub topology: Option<&'a graphforge_storage::TopologyFiles>,
+    /// The facade's generation-pinned ordinal identity authority. Membership
+    /// projection checks node rows against it, reading only the identity blocks
+    /// it needs; without one it opens the whole UUID-membership index.
+    pub ordinal: Option<&'a crate::SessionOrdinalIdentity>,
     /// Normalized graph label persisted in the artifact key.
     pub label: &'a str,
     /// Local catalog identity used only for topology membership projection.
@@ -87,6 +91,7 @@ where
                 *projection.borrow_mut() = Some(project_label_members_snapshot_with_topology(
                     project_dir,
                     request.topology,
+                    request.ordinal,
                     request.label_id,
                     limits,
                     || checkpoint.borrow_mut()(),
@@ -171,6 +176,7 @@ where
             captured = project_label_members_snapshot_with_topology(
                 project_dir,
                 request.topology,
+                request.ordinal,
                 request.label_id,
                 limits,
                 &mut checkpoint,
@@ -266,14 +272,27 @@ pub fn project_label_members_snapshot<C>(
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
-    project_label_members_snapshot_with_topology(project_dir, None, label_id, limits, checkpoint)
+    project_label_members_snapshot_with_topology(
+        project_dir,
+        None,
+        None,
+        label_id,
+        limits,
+        checkpoint,
+    )
 }
 
 /// Project membership from an explicit file authority, or standalone legacy source.
+///
+/// `ordinal` is the facade's generation-pinned identity authority. With it,
+/// each node row is checked against the ordinal blocks it touches; without it,
+/// against the whole UUID-membership index when one exists
+/// (see [`crate::node_identity`]).
 #[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
 pub fn project_label_members_snapshot_with_topology<C>(
     project_dir: &Path,
     topology: Option<&graphforge_storage::TopologyFiles>,
+    ordinal: Option<&crate::SessionOrdinalIdentity>,
     label_id: graphforge_value::EntityTypeSelection,
     limits: VectorLifecycleLimits,
     mut checkpoint: C,
@@ -296,11 +315,7 @@ where
     let mut eligible = BTreeSet::new();
     let mut rows = 0_usize;
     let mut last_surrogate = None;
-    let mut index = graphforge_storage::uuid_membership_index_present(project_dir)
-        .then(|| graphforge_storage::UuidMembershipIndex::open(project_dir))
-        .transpose()
-        .map_err(|error| source(error.to_string()))?;
-    let mut legacy_seen = index.is_none().then(BTreeSet::new);
+    let mut identity = crate::node_identity::NodeIdentityCheck::open(project_dir, ordinal)?;
     let mut failure = None;
     graphforge_storage::visit_node_fragments_admitted_from_files(
         topology,
@@ -322,20 +337,7 @@ where
                     .column_by_name("node_id")
                     .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
                     .ok_or_else(|| source("topology node_id is not UInt64"))?;
-                let mut batch_uuids = Vec::with_capacity(batch.num_rows());
-                for row in 0..batch.num_rows() {
-                    let bytes: [u8; 16] = uuids
-                        .value(row)
-                        .try_into()
-                        .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
-                    batch_uuids.push(uuid::Uuid::from_bytes(bytes));
-                }
-                let indexed = index
-                    .as_mut()
-                    .map(|index| index.lookup_node_surrogates(&batch_uuids))
-                    .transpose()
-                    .map_err(|error| source(error.to_string()))?
-                    .map(|(values, _)| values);
+                let agrees = identity.resolve_batch(uuids, surrogates, &mut checkpoint)?;
                 for row in 0..batch.num_rows() {
                     checkpoint()?;
                     rows = rows.saturating_add(1);
@@ -351,15 +353,11 @@ where
                         .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
                     let surrogate = surrogates.value(row);
                     if last_surrogate.is_some_and(|prior| surrogate <= prior)
-                        || indexed
-                            .as_ref()
-                            .is_some_and(|values| values[row] != Some(surrogate))
-                        || legacy_seen
-                            .as_mut()
-                            .is_some_and(|seen| !seen.insert(node_uuid))
+                        || !agrees[row]
+                        || !identity.distinct(node_uuid)
                     {
                         return Err(source(
-                            "topology identity disagrees with authenticated UUID index",
+                            "topology identity disagrees with authenticated node identity",
                         ));
                     }
                     last_surrogate = Some(surrogate);
@@ -398,14 +396,7 @@ where
     if let Some(error) = failure {
         return Err(error);
     }
-    if index
-        .as_ref()
-        .is_some_and(|index| rows as u64 != index.count(graphforge_storage::UuidIndexKind::Node))
-    {
-        return Err(source(
-            "topology row count disagrees with authenticated UUID index",
-        ));
-    }
+    identity.finish(rows, &mut checkpoint)?;
     let snapshot = SearchSourceSnapshot::from_admitted_files(
         project_dir,
         source_generation,
@@ -531,6 +522,7 @@ mod tests {
     fn request() -> VectorIndexRequest<'static> {
         VectorIndexRequest {
             topology: None,
+            ordinal: None,
             label: "Person",
             label_id: graphforge_value::EntityTypeSelection::Known(
                 graphforge_value::EntityTypeId::decode(9).unwrap(),
