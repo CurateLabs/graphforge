@@ -18,7 +18,7 @@ pub const RESEARCH_LEGACY_VERSION: u32 = 6;
 /// Whether this build reads a research capability or registry revision.
 #[must_use]
 pub fn research_revision_readable(version: u32) -> bool {
-    version == RESEARCH_VERSION || version == RESEARCH_LEGACY_VERSION
+    registry_schema(version).is_some()
 }
 
 /// Registry participant schema identity of a readable revision.

@@ -168,8 +168,25 @@ fn research_v6_is_carried_but_never_written_anew() {
     // Once upgraded, a Project is never published as revision 6 again.
     let other = tempfile::tempdir().unwrap();
     let upgraded = other.path();
-    let (context, _) = legacy_project(upgraded);
-    execute(upgraded, &register(upgraded, context));
+    let (_, v6_head) = legacy_project(upgraded);
+    // A research write that adds no Version: the registry has no commit data,
+    // so only its revision label could make it revision 6 again.
+    execute(
+        upgraded,
+        &ResearchOperation {
+            operation_uuid: Uuid::now_v7(),
+            expected_generation_uuid: current(upgraded),
+            mutation: ResearchMutation::RetainRoot {
+                root: ResearchRetentionRoot {
+                    root_uuid: Uuid::now_v7(),
+                    kind: ResearchRootKind::RetainedVersion,
+                    versions: BTreeSet::from([v6_head]),
+                },
+            },
+        },
+    );
+    assert_eq!(revision(upgraded), RESEARCH_VERSION);
+    state(upgraded).validate_legacy().unwrap();
     let Err(error) = republish(upgraded, &|request| {
         let mut capabilities = std::mem::take(&mut request.capabilities);
         for c in &mut capabilities {
