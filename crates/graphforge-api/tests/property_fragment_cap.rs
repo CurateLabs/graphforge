@@ -395,21 +395,29 @@ fn assert_portable_large_round_trip(root: &std::path::Path, forge: &GraphForge, 
     assert_mutations_persisted(&imported);
 }
 
-#[test]
-fn corrupted_property_part_is_refused_after_facade_open() {
-    use std::io::{Read, Seek, SeekFrom, Write};
-    let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("source");
-    build_large_properties(&path, &large_payload());
-    let files = assert_bounded_objects(&path);
-    let part = files
-        .iter()
+/// The first node-property part of a project whose one large value spans
+/// bounded objects.
+fn large_value_part(path: &std::path::Path) -> graphforge_storage::GraphFileEntry {
+    build_large_properties(path, &large_payload());
+    assert_bounded_objects(path)
+        .into_iter()
         .find(|entry| {
             entry.relative_path.starts_with("properties/") && entry.relative_path.contains(".part-")
         })
-        .unwrap();
-    let forge = GraphForge::new(path.to_str()).unwrap();
-    let object = graphforge_storage::graph_object_path(&path, &part.content_sha256).unwrap();
+        .unwrap()
+}
+
+/// Flip one byte of a content-store object in place: same inode, same length,
+/// same mtime.
+fn flip_object_byte(
+    path: &std::path::Path,
+    part: &graphforge_storage::GraphFileEntry,
+    offset: impl FnOnce(&[u8]) -> u64,
+    flip: u8,
+) {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let object = graphforge_storage::graph_object_path(path, &part.content_sha256).unwrap();
+    let offset = offset(&std::fs::read(&object).unwrap());
     let permissions = std::fs::metadata(&object).unwrap().permissions();
     let mut writable = permissions.clone();
     writable.set_readonly(false);
@@ -420,17 +428,56 @@ fn corrupted_property_part_is_refused_after_facade_open() {
         .open(&object)
         .unwrap();
     let modified = file.metadata().unwrap().modified().unwrap();
-    let offset = part.byte_length / 2;
     let mut byte = [0];
     file.seek(SeekFrom::Start(offset)).unwrap();
     file.read_exact(&mut byte).unwrap();
     file.seek(SeekFrom::Start(offset)).unwrap();
-    file.write_all(&[byte[0] ^ 0xff]).unwrap();
+    file.write_all(&[byte[0] ^ flip]).unwrap();
     file.set_modified(modified).unwrap();
+    assert_eq!(file.metadata().unwrap().len(), part.byte_length);
     drop(file);
     std::fs::set_permissions(&object, permissions).unwrap();
+}
+
+#[test]
+fn corrupted_property_part_is_refused_after_facade_open() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("source");
+    let part = large_value_part(&path);
+    let forge = GraphForge::new(path.to_str()).unwrap();
+    flip_object_byte(&path, &part, |_| part.byte_length / 2, 0xff);
     let error = forge
         .execute("MATCH (n) WHERE n.rank = 1 RETURN n.payload")
         .unwrap_err();
     assert_eq!(error.code(), "GF_PROJECT_CORRUPT", "{error}");
+}
+
+/// The same refusal when the flipped byte is one no decoder rejects (the case
+/// of a letter of the part's `created_by` footer string, which stays valid
+/// UTF-8), flipped before the open: only the checksum against the manifest can
+/// refuse it, and the open reads no part.
+#[test]
+fn a_part_byte_no_decoder_rejects_is_refused_by_its_checksum() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("source");
+    let part = large_value_part(&path);
+    flip_object_byte(
+        &path,
+        &part,
+        |bytes| {
+            let marker = b"graphforge property object/1";
+            (bytes
+                .windows(marker.len())
+                .position(|window| window == marker)
+                .expect("the part writer stamps created_by into the footer")
+                + 3) as u64
+        },
+        0x20,
+    );
+    let forge = GraphForge::new(path.to_str()).expect("the open reads no property part");
+    let error = forge
+        .execute("MATCH (n) WHERE n.rank = 1 RETURN n.payload")
+        .unwrap_err();
+    assert_eq!(error.code(), "GF_PROJECT_CORRUPT", "{error}");
+    assert!(error.to_string().contains("checksum"), "{error}");
 }

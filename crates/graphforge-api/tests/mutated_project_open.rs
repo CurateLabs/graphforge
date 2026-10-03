@@ -11,7 +11,10 @@
 //! a node DELETE, `index_adjacency` and a composite property SET (the one commit
 //! that used to publish a delta run), each through the ordinary public path.
 //! Nodes and edges both grow 16x between the two sizes (edge fan-out is fixed),
-//! so work proportional to either shows up in the open.
+//! so work proportional to either shows up in the open. The same gate runs on a
+//! project constructed with a node property column whose mutations also write a
+//! second property for every node: property fragments are admitted lazily
+//! (#1737), so the open reads none of them at either size.
 //!
 //! The gate is deterministic: lifecycle-attributed read bytes and the
 //! whole-process `rchar` where the platform has it, never wall time. The bound is
@@ -168,6 +171,8 @@ struct Layout {
     /// Edge objects plus the published adjacency shards: the payload an open
     /// must never read.
     edge_payload_bytes: u64,
+    /// Node and edge property fragments, which an open must never read either.
+    property_bytes: u64,
     delta_runs: usize,
 }
 
@@ -176,6 +181,7 @@ fn layout(inventory: &GraphFilesInventory) -> Layout {
         files: inventory.files.len() as u64,
         node_bytes: 0,
         edge_payload_bytes: 0,
+        property_bytes: 0,
         delta_runs: 0,
     };
     for file in &inventory.files {
@@ -186,6 +192,8 @@ fn layout(inventory: &GraphFilesInventory) -> Layout {
             || (path.starts_with("indexes/adjacency/") && path.ends_with(".csr"))
         {
             layout.edge_payload_bytes += file.byte_length;
+        } else if path.starts_with("properties/") || path.starts_with("edge_properties/") {
+            layout.property_bytes += file.byte_length;
         } else if path.starts_with("deltas/") {
             layout.delta_runs += 1;
         }
@@ -264,11 +272,29 @@ struct Measured {
     open: Open,
 }
 
-fn run_size(nodes: usize) -> Measured {
+/// A property for every node, written by a mutating commit rather than by
+/// construction, so the mutated generation's property payload grows with the
+/// node count too.
+const MUTATED_COLUMN: &str = "MATCH (n:Entity) SET n.alias = n.name";
+
+fn run_size(nodes: usize, properties: bool) -> Measured {
     let project = tempfile::tempdir().expect("project directory");
     let path = project_path(&project);
-    bulk_fixture::generate_bulk_graph_with_index(&path, nodes, FAN_OUT, false);
+    if properties {
+        // Node properties only: with an edge property column, the edge DELETE
+        // in `mutate` rewrites every edge property and alone costs minutes at
+        // the larger size. `open_identity_cost.rs` covers edge properties.
+        bulk_fixture::generate_bulk_graph_with_properties(&path, nodes, FAN_OUT, false);
+    } else {
+        bulk_fixture::generate_bulk_graph_with_index(&path, nodes, FAN_OUT, false);
+    }
     mutate(&path);
+    if properties {
+        GraphForge::new(Some(path.to_str().expect("utf-8 project path")))
+            .unwrap()
+            .execute(MUTATED_COLUMN)
+            .expect("SET of a property on every node");
+    }
     let record_version = graph_record_version(&path);
     assert!(
         is_compact_root(record_version),
@@ -301,12 +327,13 @@ fn assert_open_bounded(measured: &Measured) {
         open,
     } = measured;
     eprintln!(
-        "mutated nodes={nodes} edges={} files={} node_bytes={} edge_payload_bytes={}: \
-         open attributed={} rchar={:?} copied={} checksummed={}",
+        "mutated nodes={nodes} edges={} files={} node_bytes={} edge_payload_bytes={} \
+         property_bytes={}: open attributed={} rchar={:?} copied={} checksummed={}",
         nodes * FAN_OUT,
         layout.files,
         layout.node_bytes,
         layout.edge_payload_bytes,
+        layout.property_bytes,
         open.attributed,
         open.rchar,
         open.copied,
@@ -376,15 +403,58 @@ fn mutated_project_open_reads_controls_not_payload_across_a_16x_range() {
              platform; the attributed assertions still run"
         );
     }
-    let small = run_size(SMALL_NODES);
+    let small = run_size(SMALL_NODES, false);
     assert_open_bounded(&small);
-    let large = run_size(LARGE_NODES);
+    let large = run_size(LARGE_NODES, false);
     assert_open_bounded(&large);
     // Nodes and edges both grew; the comparison is meaningful only if they did.
     assert!(large.layout.node_bytes > 8 * small.layout.node_bytes);
     assert!(large.layout.edge_payload_bytes > 8 * small.layout.edge_payload_bytes);
     // The file count grows by at most a handful of shards, not with the data.
     assert!(large.layout.files < 2 * small.layout.files);
+}
+
+/// Criterion 1 with properties: the same bound, from the same manifest, holds
+/// for a mutated project whose every node carries two properties, one from
+/// construction and one from a mutating commit.
+#[test]
+fn mutated_project_with_properties_opens_without_reading_them_across_a_16x_range() {
+    if process_rchar().is_none() {
+        eprintln!(
+            "SKIPPED whole-process rchar assertions: /proc/self/io is unavailable on this \
+             platform; the attributed assertions still run"
+        );
+    }
+    let small = run_size(SMALL_NODES, true);
+    assert_open_bounded(&small);
+    let large = run_size(LARGE_NODES, true);
+    assert_open_bounded(&large);
+    assert!(large.layout.node_bytes > 8 * small.layout.node_bytes);
+    assert!(large.layout.edge_payload_bytes > 8 * small.layout.edge_payload_bytes);
+    assert!(
+        large.layout.property_bytes > 8 * small.layout.property_bytes,
+        "property payload {} -> {}",
+        small.layout.property_bytes,
+        large.layout.property_bytes
+    );
+    assert!(large.layout.files < 2 * small.layout.files);
+    // The bound is a few kilobytes per declared file, and the property payload
+    // outgrows it: an open that read the property fragments of the larger
+    // project would exceed the bound by the payload it read.
+    let bound = attributed_bound(large.layout.files);
+    assert!(
+        bound < large.open.attributed + large.layout.property_bytes,
+        "the bound {bound} admits a full property payload read ({} bytes)",
+        large.layout.property_bytes
+    );
+    if let Some(rchar) = large.open.rchar {
+        let rchar_bound = bound + UNATTRIBUTED_SLACK_BYTES;
+        assert!(
+            rchar_bound < rchar + large.layout.property_bytes,
+            "the rchar bound {rchar_bound} admits a full property payload read ({} bytes)",
+            large.layout.property_bytes
+        );
+    }
 }
 
 /// Flip one byte of a content-store object in place: same inode, same length.
@@ -405,7 +475,9 @@ impl InPlaceFlip {
         let permissions = before.permissions();
         let original = std::fs::read(&object).unwrap();
         let mut flipped = original.clone();
-        flipped[offset] ^= 0xff;
+        // Swap the letter's case: the byte stays valid UTF-8, so no decoder
+        // rejects it and only a checksum can.
+        flipped[offset] ^= 0x20;
         std::fs::set_permissions(
             &object,
             std::fs::Permissions::from_mode(before.mode() | 0o200),
@@ -446,7 +518,8 @@ impl Drop for InPlaceFlip {
 }
 
 /// A byte no decoder reads as data, so that only a checksum can refuse its
-/// change: one letter of the `created_by` string a Parquet footer carries.
+/// change: one letter of the `created_by` string a Parquet footer carries
+/// ([`InPlaceFlip`] swaps its case).
 #[cfg(unix)]
 fn inert_offset(project: &Path, entry: &graphforge_storage::GraphFileEntry) -> usize {
     let object = graphforge_storage::graph_object_path(project, &entry.content_sha256).unwrap();
@@ -467,6 +540,8 @@ fn inert_offset(project: &Path, entry: &graphforge_storage::GraphFileEntry) -> u
 /// Criterion 4: a payload of a mutated (now compact) project that is corrupted
 /// in place is accepted by the open, which reads no payload, and refused by the
 /// query that touches it. The same project answers correctly before and after.
+/// Adjacency shards of a mutated project are covered in
+/// `adjacency_corruption_refusal.rs`.
 #[cfg(unix)]
 #[test]
 fn mutated_project_refuses_a_same_inode_flip_on_the_touching_query() {
@@ -494,23 +569,14 @@ fn mutated_project_refuses_a_same_inode_flip_on_the_touching_query() {
             .unwrap_or_else(|| panic!("the mutated project lacks a {prefix}*{suffix} payload"))
             .clone()
     };
-    // The query that touches each payload. Property fragments are still
-    // authenticated in full by the property overlay when the project opens (not
-    // yet first-touch, #1388 decision 3), so their refusal may come from the open;
-    // the other bulk payloads must be accepted by the open and refused by the
-    // query. The adjacency index is not covered here: refusing a corrupt shard
-    // instead of falling back to the edge table is a separate #1388 slice.
-    #[derive(Clone, Copy, PartialEq)]
-    enum Expect {
-        RefusedByQuery,
-        RefusedByOpenOrQuery,
-    }
+    // The query that touches each payload. Every one, property fragments
+    // included (admitted lazily since #1737), must be accepted by the open and
+    // refused by the query.
     let cases = [
         (
             "node object",
             find("topology/nodes/", ".parquet"),
             "MATCH (n:Entity) RETURN count(n) AS total",
-            Expect::RefusedByQuery,
         ),
         (
             "edge object",
@@ -518,43 +584,40 @@ fn mutated_project_refuses_a_same_inode_flip_on_the_touching_query() {
             // Not `count(*)`: with the adjacency index published, the count
             // is answered from the index and touches no edge object.
             "MATCH ()-[r]->() RETURN r.edge_uuid AS id ORDER BY id LIMIT 5",
-            Expect::RefusedByQuery,
         ),
         (
             "property fragment",
             find("properties/", ".parquet"),
             "MATCH (n:Entity) WHERE n.tag = 'set' RETURN n.tag AS tag",
-            Expect::RefusedByOpenOrQuery,
         ),
     ];
-    for (what, entry, query, expect) in cases {
+    // Every case runs before asserting, so one run reports each payload the
+    // project fails to refuse.
+    let mut failures = Vec::new();
+    for (what, entry, query) in cases {
         let _flip = InPlaceFlip::apply(&path, &entry, inert_offset(&path, &entry));
-        let opened = GraphForge::new(Some(location));
-        let refused = match opened {
+        let what = format!("{what} ({})", entry.relative_path);
+        let reopened = match GraphForge::new(Some(location)) {
+            Ok(reopened) => reopened,
             Err(error) => {
-                assert!(
-                    expect == Expect::RefusedByOpenOrQuery,
-                    "{what} ({}): the open must read no payload: {error}",
-                    entry.relative_path
-                );
-                error
+                failures.push(format!("{what}: the open must read no payload: {error}"));
+                continue;
             }
-            Ok(reopened) => reopened.execute(query).err().unwrap_or_else(|| {
-                panic!(
-                    "{what} ({}): a flipped payload answered a query",
-                    entry.relative_path
-                )
-            }),
         };
-        let message = refused.to_string().to_lowercase();
-        assert!(
-            message.contains("checksum")
-                || message.contains("digest")
-                || message.contains("corrupt"),
-            "{what} ({}): refused for the wrong reason: {refused}",
-            entry.relative_path
-        );
+        match reopened.execute(query) {
+            Ok(_) => failures.push(format!("{what}: a flipped payload answered a query")),
+            Err(refused) => {
+                let message = refused.to_string().to_lowercase();
+                if !(message.contains("checksum")
+                    || message.contains("digest")
+                    || message.contains("corrupt"))
+                {
+                    failures.push(format!("{what}: refused for the wrong reason: {refused}"));
+                }
+            }
+        }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
     // Every flip was restored: the project answers again, and correctly.
     assert_eq!(open_and_query(&path).ids, expected_ids(nodes));
 }

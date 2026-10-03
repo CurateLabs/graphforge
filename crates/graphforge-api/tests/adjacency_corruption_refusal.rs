@@ -11,12 +11,20 @@
 //! Each case publishes a compact (V2) project exactly as construction ships it
 //! (CSR shards, shard manifests and `index_manifest.parquet` included), flips
 //! one byte of one content-addressed object in place, then opens the project
-//! and runs a bounded query. The flip is before open on purpose: opening a
+//! and runs a bounded query. The byte is one no decoder reads (Arrow IPC
+//! padding, JSON whitespace, a Parquet `created_by` letter), and the refusal
+//! must carry the checksum's own message, so a decoder rejecting a malformed
+//! object cannot stand in for the integrity check. The flip is before open on purpose: opening a
 //! compact generation reads no payload, so the first touch is the query's.
 //!
 //! The assertion that matters is "no rebuild": the project must keep its
 //! generation, and the files of the whole project must be byte-for-byte what
 //! they were before the query ran.
+//!
+//! The same refusals hold on a mutated project, whose index was republished by
+//! an explicit `index_adjacency` after an edge DELETE and then carried, current,
+//! through a property SET. An adjacency delta a later commit appends is a small
+//! sidecar hydration checks as it links it, so the open refuses a flipped one.
 
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
@@ -92,6 +100,53 @@ impl Target {
                 Self::IndexManifest => unreachable!(),
             }
     }
+
+    /// What only the integrity check says. A shard is checked against the
+    /// XXH64 its shard manifest records; a manifest is admitted against the
+    /// XXH64 the project's own inventory records. Neither message can come
+    /// from a decoder, so a refusal carrying it is the checksum's.
+    const fn refusal(self) -> &'static str {
+        match self {
+            Self::OutShard | Self::InShard => "CSR shard checksum mismatch",
+            Self::OutShardManifest | Self::InShardManifest | Self::IndexManifest => {
+                "XXH64 checksum does not match its inventory"
+            }
+        }
+    }
+
+    /// A byte no decoder reads, and its replacement: the flipped object still
+    /// decodes to exactly what it did, so only a checksum can refuse it.
+    fn inert_flip(self, bytes: &[u8]) -> (usize, u8) {
+        match self {
+            // An Arrow IPC file opens with `ARROW1` and two padding bytes that
+            // no reader inspects.
+            Self::OutShard | Self::InShard => {
+                assert_eq!(&bytes[..8], b"ARROW1\0\0", "{self:?}: Arrow IPC file magic");
+                (7, 1)
+            }
+            // A shard manifest is pretty-printed JSON: one space of the first
+            // indentation becomes a tab, which is JSON whitespace too.
+            Self::OutShardManifest | Self::InShardManifest => {
+                let at = bytes
+                    .windows(3)
+                    .position(|window| window == b"\n  ")
+                    .expect("an indented shard manifest")
+                    + 1;
+                (at, b'\t')
+            }
+            // One letter of the `created_by` string the Parquet footer
+            // carries, which no decoder interprets.
+            Self::IndexManifest => {
+                let marker = b"graphforge permanent parquet";
+                let at = bytes
+                    .windows(marker.len())
+                    .position(|window| window == marker)
+                    .expect("the writer stamps created_by into the footer")
+                    + 3;
+                (at, bytes[at] ^ 1)
+            }
+        }
+    }
 }
 
 /// Every file under `root` with its length and a content hash.
@@ -132,7 +187,20 @@ fn flip_object(project: &Path, target: Target) -> String {
         .find(|entry| target.selects(&entry.relative_path))
         .unwrap_or_else(|| panic!("no published object for {target:?}"));
     let object = graph_object_path(generation.container_root(), &entry.content_sha256).unwrap();
-    let before = std::fs::metadata(&object).unwrap();
+    let (at, replacement) = target.inert_flip(&std::fs::read(&object).unwrap());
+    replace_byte_at(&object, at, replacement);
+    entry.relative_path.clone()
+}
+
+/// Flip one bit of `object` at `at` in place: same inode, same length.
+fn flip_byte_at(object: &Path, at: usize) {
+    let flipped = std::fs::read(object).unwrap()[at] ^ 1;
+    replace_byte_at(object, at, flipped);
+}
+
+/// Replace the byte of `object` at `at` in place: same inode, same length.
+fn replace_byte_at(object: &Path, at: usize, replacement: u8) {
+    let before = std::fs::metadata(object).unwrap();
     let mut permissions = before.permissions();
     #[cfg(unix)]
     {
@@ -141,14 +209,13 @@ fn flip_object(project: &Path, target: Target) -> String {
     }
     #[cfg(not(unix))]
     permissions.set_readonly(false);
-    std::fs::set_permissions(&object, permissions).unwrap();
-    let mut bytes = std::fs::read(&object).unwrap();
-    // A byte in the middle is inside the payload for every object kind.
-    let at = bytes.len() / 2;
-    bytes[at] ^= 1;
+    std::fs::set_permissions(object, permissions).unwrap();
+    let mut bytes = std::fs::read(object).unwrap();
+    assert_ne!(bytes[at], replacement, "the flip must change the byte");
+    bytes[at] = replacement;
     let file = std::fs::OpenOptions::new()
         .write(true)
-        .open(&object)
+        .open(object)
         .unwrap();
     #[cfg(unix)]
     std::os::unix::fs::FileExt::write_all_at(&file, &bytes, 0).unwrap();
@@ -159,14 +226,30 @@ fn flip_object(project: &Path, target: Target) -> String {
         file.write_all(&bytes).unwrap();
     }
     drop(file);
-    let after = std::fs::metadata(&object).unwrap();
+    let after = std::fs::metadata(object).unwrap();
     assert_eq!(before.len(), after.len(), "same length");
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
         assert_eq!(before.ino(), after.ino(), "same inode");
     }
-    entry.relative_path.clone()
+}
+
+/// A project after real use: construction, an edge DELETE (which stales the
+/// index), an explicit `index_adjacency` that republishes it, and a node
+/// property SET, which leaves it current. Each commit publishes a compact root.
+fn mutated_project() -> (tempfile::TempDir, String) {
+    let (directory, path) = published_project();
+    let forge = GraphForge::new(Some(&path)).unwrap();
+    forge
+        .execute("MATCH (a)-[r]->(b) WITH r LIMIT 1 DELETE r")
+        .unwrap();
+    forge.index_adjacency().unwrap();
+    forge
+        .execute("MATCH (n:Entity) WITH n LIMIT 1 SET n.tag = 'set'")
+        .unwrap();
+    drop(forge);
+    (directory, path)
 }
 
 fn published_project() -> (tempfile::TempDir, String) {
@@ -189,9 +272,18 @@ fn rows(forge: &GraphForge, query: &str) -> usize {
 }
 
 /// A flipped byte of `target`, bounded queries touching it: each is refused
-/// with `GF_VALIDATION`, twice, with the generation and every file unchanged.
+/// with `GF_VALIDATION` by the integrity check, twice, with the generation and
+/// every file unchanged.
 fn assert_refused(target: Target, queries: &[&str]) {
-    let (directory, path) = published_project();
+    assert_refused_in(published_project, target, queries);
+}
+
+fn assert_refused_in(
+    project: fn() -> (tempfile::TempDir, String),
+    target: Target,
+    queries: &[&str],
+) {
+    let (directory, path) = project();
     let generation = resolve_project_generation(directory.path())
         .unwrap()
         .generation_uuid();
@@ -221,6 +313,10 @@ fn assert_refused(target: Target, queries: &[&str]) {
                 error.code(),
                 "GF_VALIDATION",
                 "{target:?} ({flipped}): {query}: {error}"
+            );
+            assert!(
+                error.to_string().contains(target.refusal()),
+                "{target:?} ({flipped}): {query}: refused for the wrong reason: {error}"
             );
         }
     }
@@ -301,6 +397,10 @@ fn explicit_index_adjacency_replaces_a_corrupted_index() {
         let forge = GraphForge::new(Some(&path)).unwrap();
         let error = forge.execute(ORDERED_ONE_HOP).unwrap_err();
         assert_eq!(error.code(), "GF_VALIDATION", "{target:?}: {error}");
+        assert!(
+            error.to_string().contains(target.refusal()),
+            "{target:?}: {error}"
+        );
         forge.index_adjacency().unwrap();
         assert!(rows(&forge, ORDERED_ONE_HOP) > 0, "{target:?}");
         assert!(rows(&forge, REVERSE_HOP) > 0, "{target:?}");
@@ -442,4 +542,132 @@ fn a_stale_index_rebuild_on_a_worker_is_reported_by_its_query() {
         assert_eq!(receipt.sink.progress.rows, 2000);
         assert_eq!(receipt.evidence.adjacency_rebuilds, 1);
     }
+}
+
+const EVERY_HOP: [&str; 5] = [
+    ORDERED_ONE_HOP,
+    ORDERED_TWO_HOP,
+    REVERSE_HOP,
+    FORWARD_HOP,
+    FORWARD_TWO_HOP,
+];
+
+/// The mutated project's republished index is current: every bounded query is
+/// served from it with no rebuild, so a flipped object below cannot be
+/// replaced by a rebuild that an honestly stale index would have earned.
+#[test]
+fn mutated_project_serves_its_republished_index_without_rebuilding() {
+    let (directory, path) = mutated_project();
+    let generation = resolve_project_generation(directory.path()).unwrap();
+    let inventory = generation.graph_files_inventory().unwrap().unwrap();
+    assert!(
+        inventory
+            .files
+            .iter()
+            .any(|entry| Target::InShard.selects(&entry.relative_path)),
+        "the mutated generation declares the union index"
+    );
+    drop(generation);
+    let forge = GraphForge::new(Some(&path)).unwrap();
+    for (index, query) in EVERY_HOP.into_iter().enumerate() {
+        let explanation = forge.explain(query).unwrap();
+        assert!(
+            explanation.contains("adjacency=hit") && !explanation.contains("adjacency_rebuild"),
+            "{query}: {explanation}"
+        );
+        let sink = directory.path().join(format!("mutated-{index}.arrow"));
+        let receipt = forge
+            .execute_to_result_sink_with_evidence(
+                query,
+                &std::collections::HashMap::default(),
+                sink.to_str().unwrap(),
+                ResultSinkFormat::ArrowIpc,
+                &ResultSinkOptions::default(),
+                None,
+            )
+            .unwrap();
+        assert!(receipt.sink.progress.rows > 0, "{query}");
+        assert_eq!(receipt.evidence.adjacency_rebuilds, 0, "{query}");
+    }
+}
+
+/// Every class is tried before asserting, so one run names each class the
+/// mutated project fails to refuse.
+#[test]
+fn mutated_project_refuses_every_flipped_index_object() {
+    let mut unrefused = Vec::new();
+    for (target, queries) in [
+        (Target::OutShard, &[FORWARD_HOP, FORWARD_TWO_HOP][..]),
+        (
+            Target::InShard,
+            &[ORDERED_ONE_HOP, ORDERED_TWO_HOP, REVERSE_HOP][..],
+        ),
+        (
+            Target::OutShardManifest,
+            &[FORWARD_HOP, FORWARD_TWO_HOP][..],
+        ),
+        (
+            Target::InShardManifest,
+            &[ORDERED_ONE_HOP, ORDERED_TWO_HOP, REVERSE_HOP][..],
+        ),
+        (Target::IndexManifest, &EVERY_HOP[..]),
+    ] {
+        if let Err(panic) =
+            std::panic::catch_unwind(|| assert_refused_in(mutated_project, target, queries))
+        {
+            let message = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string panic");
+            // The served result's debug form follows; the reason is enough.
+            let reason: String = message.chars().take(240).collect();
+            unrefused.push(format!("{target:?}: {reason}"));
+        }
+    }
+    assert!(
+        unrefused.is_empty(),
+        "the mutated project must refuse every flipped index object:\n{}",
+        unrefused.join("\n")
+    );
+}
+
+/// A commit after `index_adjacency` appends an adjacency delta rather than
+/// republishing the shards. Hydration checks that small sidecar as it links
+/// it, so the open refuses a flipped delta and nothing reads it unchecked.
+#[test]
+fn flipped_adjacency_delta_is_refused_by_the_open_that_links_it() {
+    let (directory, path) = published_project();
+    {
+        let forge = GraphForge::new(Some(&path)).unwrap();
+        forge.execute("CREATE (:Extra {name: 'created'})").unwrap();
+    }
+    let generation = resolve_project_generation(directory.path()).unwrap();
+    let inventory = generation.graph_files_inventory().unwrap().unwrap();
+    let delta = inventory
+        .files
+        .iter()
+        .find(|entry| {
+            entry.relative_path.starts_with("indexes/adjacency/deltas/")
+                && entry.relative_path.ends_with(".parquet")
+        })
+        .expect("a commit after the index appends an adjacency delta")
+        .clone();
+    let object = graph_object_path(generation.container_root(), &delta.content_sha256).unwrap();
+    drop(generation);
+    let bytes = std::fs::read(&object).unwrap();
+    // One letter of the `created_by` string the Parquet footer carries: no
+    // decoder reads it, so only a checksum can refuse its change.
+    let marker = b"graphforge permanent parquet";
+    let at = bytes
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("the writer stamps created_by into the footer")
+        + 3;
+    flip_byte_at(&object, at);
+    let error = GraphForge::new(Some(&path))
+        .map(drop)
+        .expect_err("the open that links a flipped adjacency delta must refuse it");
+    assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+    assert!(error.to_string().contains("XXH64"), "{error}");
 }
