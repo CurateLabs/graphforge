@@ -7,16 +7,20 @@
 //!    same bytes whether its property fragments are 16 or 1,024 bytes a row. The
 //!    manifest names each fragment's length and XXH64, so open checks the length
 //!    and leaves the content to the first read of each fragment.
-//! 2. **`find` reads no edge payload.** With a fixed node set and 8 versus 128
-//!    edges per node (16x the edges), its attributed source and index reads
-//!    stay bounded. It reads node and node-property sources and the index.
-//!    Whole-process reads still grow with the UUID-membership index; this
-//!    slice does not establish a bound while both nodes and edges scale.
+//! 2. **`find` reads nothing that grows with the edges.** With a fixed node set
+//!    and 8 versus 128 edges per node (16x the edges), its attributed source
+//!    and index reads and its whole-process reads stay bounded. It reads node
+//!    and node-property sources, the index, and the ordinal identity blocks of
+//!    the nodes it projects; it never opens the UUID-membership identity run,
+//!    which holds a record per edge as well as per node.
 //!
-//! Both report attributed read bytes and whole-process `rchar` from
-//! `/proc/self/io` (every `read(2)`/`pread(2)` the process makes). Open gates
-//! both measures; `find` gates only attributed reads and reports its remaining
-//! UUID-membership growth. Missing `/proc/self/io` prints a `SKIPPED` line.
+//! Both gate attributed read bytes and whole-process `rchar` from
+//! `/proc/self/io` (every `read(2)`/`pread(2)` the process makes). Missing
+//! `/proc/self/io` prints a `SKIPPED` line.
+//!
+//! The ordinal blocks `find` reads instead of the identity run stay verified:
+//! a same-inode, same-length flip in one is refused by the text or vector
+//! `find` that touches it.
 //!
 //! The tests share one process counter, so they serialize on a lock.
 
@@ -30,7 +34,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, FindOptions, GraphConstructionBudgets,
-    GraphForge, LifecycleIoCapture, SearchIndexOptions, lifecycle_io_snapshot,
+    GraphForge, LifecycleIoCapture, NodeSelector, SearchIndexOptions, lifecycle_io_snapshot,
 };
 use graphforge_core::uuid::Uuid;
 use graphforge_storage::{GraphFileRole, resolve_project_generation};
@@ -357,16 +361,16 @@ fn text_find_does_not_read_the_graph_across_a_16x_edge_range() {
         let layout = layout(&path);
         let forge = open(&path);
         // The first call settles first-touch admissions; the second is steady
-        // cost. The source/index attribution bound covers both; total process
-        // reads still include the growing UUID-membership index.
+        // cost. Both bounds cover both calls.
         let (rows, first) = measured(|| find_text(&forge));
         assert_eq!(rows, 1, "fan-out {fan_out}: wrong answer");
         let (rows, second) = measured(|| find_text(&forge));
         assert_eq!(rows, 1);
         eprintln!(
-            "fan_out={fan_out} edges={} node_bytes={} property_bytes={} index_bytes={} \
+            "fan_out={fan_out} edges={} files={} node_bytes={} property_bytes={} index_bytes={} \
              edge_bytes={} find1_read={} find1_rchar={:?} find2_read={} find2_rchar={:?}",
             NODES * fan_out,
+            layout.files,
             layout.node_bytes,
             layout.property_bytes,
             layout.index_bytes,
@@ -412,20 +416,212 @@ fn text_find_does_not_read_the_graph_across_a_16x_edge_range() {
             small.attributed,
             large.attributed
         );
-        // The process counter is reported, not gated. It still moves with the
-        // edge count because `UuidMembershipIndex::open`, which text discovery
-        // calls to authenticate node identities, reads the whole identity run
-        // (nodes and edges) several times; that reader reports nothing to the
-        // ledger and is outside this slice. Edge payloads are proven unread by
-        // `find_does_not_read_edge_payloads` in
-        // `workspace_hydration/tests.rs`, which answers a `find` with every
-        // edge object corrupted.
+        // Every read the process makes, including readers that report nothing
+        // to the ledger, obeys the same bound. The node set, its properties
+        // and the index are byte-identical at both sizes (asserted above), so
+        // the only thing the edge axis changes that `find` may observe is the
+        // manifest's file list: one row, route and stat per extra declared
+        // file. Node identities are authenticated through the ordinal blocks
+        // of the projected nodes, which hold node UUIDs only. The
+        // UUID-membership identity run, with a record per edge, is not read;
+        // opening it cost roughly 100 bytes per added edge, about 50 MB here.
+        // Edge payloads are also proven unread by
+        // `find_does_not_read_edge_payloads` in `workspace_hydration/tests.rs`,
+        // which answers a `find` with every edge object corrupted.
         eprintln!(
             "{name}: process reads {:?} -> {:?}",
             small.rchar, large.rchar
         );
+        if let (Some(small_rchar), Some(large_rchar)) = (small.rchar, large.rchar) {
+            assert!(
+                large_rchar <= small_rchar + allowed,
+                "{name}: process reads grew with the edges: {small_rchar} -> {large_rchar} \
+                 (allowed +{allowed})"
+            );
+        }
     }
     let sources =
         large_layout.node_bytes + large_layout.node_property_bytes + large_layout.index_bytes;
     eprintln!("declared node + node-property + index bytes: {sources}");
+}
+
+/// `(file, length)` of the generation's first v4 ordinal UUID artifact: the
+/// tree copy an expanded (mutated) generation keeps, else the content-store
+/// object a compact one is hydrated from.
+fn ordinal_object(path: &Path) -> (std::path::PathBuf, u64) {
+    let generation = resolve_project_generation(path).expect("project resolves");
+    let inventory = generation
+        .unadmitted_graph_files_inventory()
+        .expect("inventory reads")
+        .expect("the generation declares an inventory");
+    let entry = inventory
+        .files
+        .iter()
+        .filter(|file| {
+            file.relative_path
+                .starts_with("topology/uuid-membership/ordinal-v4-")
+                && file.relative_path.ends_with(".uuidx")
+        })
+        .min_by(|left, right| left.relative_path.cmp(&right.relative_path))
+        .expect("the generation declares a v4 ordinal artifact");
+    let tree = generation.graph_tree_root().join(&entry.relative_path);
+    let file = if tree.exists() {
+        tree
+    } else {
+        graphforge_storage::graph_object_path(path, &entry.content_sha256).unwrap()
+    };
+    (file, entry.byte_length)
+}
+
+/// Flip one byte of the shared inode in place: same inode, same length, same
+/// mtime, so only a content check can notice.
+#[cfg(unix)]
+fn flip_in_place(object: &Path, offset: u64) {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::os::unix::fs::MetadataExt;
+    let before = std::fs::metadata(object).unwrap();
+    let mut writable = before.permissions();
+    #[allow(clippy::permissions_set_readonly_false)] // restored below
+    writable.set_readonly(false);
+    std::fs::set_permissions(object, writable).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(object)
+        .unwrap();
+    let modified = file.metadata().unwrap().modified().unwrap();
+    let mut byte = [0_u8; 1];
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.write_all(&[byte[0] ^ 0xff]).unwrap();
+    file.set_modified(modified).unwrap();
+    drop(file);
+    std::fs::set_permissions(object, before.permissions()).unwrap();
+    let after = std::fs::metadata(object).unwrap();
+    assert_eq!((after.ino(), after.len()), (before.ino(), before.len()));
+}
+
+fn find_vector(forge: &GraphForge) -> Result<usize, graphforge_core::GfError> {
+    forge
+        .find(FindOptions {
+            label: Some(LABEL.into()),
+            vector: Some(vec![1.0, 0.0]),
+            space: Some("probe".into()),
+            limit: 3,
+            ..FindOptions::default()
+        })
+        .map(|batch| batch.num_rows())
+}
+
+/// Criterion 4 for the identity `find` reads: the flipped byte sits in the one
+/// ordinal block (`NODES` * 16 bytes = 64 KiB) that every text and vector
+/// `find` reads to authenticate its node rows. Open reads no identity byte, so
+/// the facade opens; each `find` refuses with the block's checksum failure.
+#[cfg(unix)]
+#[test]
+fn text_and_vector_find_refuse_a_flipped_ordinal_block() {
+    let project = tempfile::tempdir().unwrap();
+    let path = project.path().join("state");
+    build_indexed_project(&path, 8);
+    let forge = open(&path);
+    forge
+        .index_search(
+            LABEL,
+            SearchIndexOptions::Vector {
+                node: NodeSelector::Uuid(node_uuid(7)),
+                vector: vec![1.0, 0.0],
+                space: "probe".into(),
+            },
+        )
+        .unwrap();
+    // The healthy project answers both forms.
+    assert_eq!(find_text(&forge), 1);
+    assert_eq!(find_vector(&forge).unwrap(), 1);
+    drop(forge);
+
+    let (object, length) = ordinal_object(&path);
+    assert_eq!(length, NODES as u64 * 16, "one 64 KiB ordinal block");
+    // The UUID of ordinal 101, well inside the block and not a node either
+    // query returns.
+    flip_in_place(&object, 100 * 16 + 5);
+
+    let forge = open(&path);
+    let text = forge
+        .find(FindOptions {
+            label: Some(LABEL.into()),
+            query: Some("person000007".into()),
+            limit: 3,
+            ..FindOptions::default()
+        })
+        .unwrap_err();
+    let vector = find_vector(&forge).unwrap_err();
+    for (form, error) in [("text", text), ("vector", vector)] {
+        // Search reports identity-authority failures as a source snapshot
+        // refusal; the block's own checksum, not a later cross-check, refuses.
+        assert_eq!(error.code(), "GF_IO", "{form}: {error}");
+        assert!(
+            error
+                .to_string()
+                .contains("v4 ordinal identity artifact authentication failed"),
+            "{form}: {error}"
+        );
+    }
+}
+
+fn find_name(forge: &GraphForge, query: &str) -> usize {
+    forge
+        .find(FindOptions {
+            label: Some(LABEL.into()),
+            query: Some(query.into()),
+            limit: 3,
+            ..FindOptions::default()
+        })
+        .expect("find")
+        .num_rows()
+}
+
+/// A mutated generation exercises the parts of the ordinal check a published
+/// one does not: deleted nodes leave tombstoned ordinals between the rows, and
+/// a version-7 UUID, which sorts below every fixture UUID, means UUIDs no
+/// longer ascend with ordinals. `find` must still answer exactly the current
+/// members, on the writing facade and after reopen, and still refuse a flipped
+/// ordinal block.
+#[cfg(unix)]
+#[test]
+fn find_checks_a_mutated_generation_against_its_ordinal_identity() {
+    let project = tempfile::tempdir().unwrap();
+    let path = project.path().join("state");
+    build_indexed_project(&path, 8);
+    let forge = open(&path);
+    // Ordinals 101..=110, inside the first ordinal block.
+    forge
+        .execute("MATCH (p:Person) WHERE p.name STARTS WITH 'person00010' DETACH DELETE p")
+        .unwrap();
+    forge
+        .execute("CREATE (:Person {name: 'newcomer'})")
+        .unwrap();
+    for forge in [forge, open(&path)] {
+        assert_eq!(find_name(&forge, "person000007"), 1);
+        assert_eq!(find_name(&forge, "person000105"), 0, "deleted");
+        assert_eq!(find_name(&forge, "newcomer"), 1, "added");
+    }
+
+    let (object, _) = ordinal_object(&path);
+    flip_in_place(&object, 4 * 16 + 5);
+    let error = open(&path)
+        .find(FindOptions {
+            label: Some(LABEL.into()),
+            query: Some("person000007".into()),
+            limit: 3,
+            ..FindOptions::default()
+        })
+        .unwrap_err();
+    assert_eq!(error.code(), "GF_IO", "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("v4 ordinal identity artifact authentication failed"),
+        "{error}"
+    );
 }

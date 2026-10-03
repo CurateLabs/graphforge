@@ -37,6 +37,10 @@ pub struct TextLifecycleLimits {
 pub struct TextIndexRequest<'a> {
     /// Explicit topology membership; absent only for standalone legacy callers.
     pub topology: Option<&'a graphforge_storage::TopologyFiles>,
+    /// The facade's generation-pinned ordinal identity authority. Membership
+    /// projection checks node rows against it, reading only the identity blocks
+    /// it needs; without one it opens the whole UUID-membership index.
+    pub ordinal: Option<&'a crate::SessionOrdinalIdentity>,
     /// Normalized graph label persisted in the artifact key.
     pub label: &'a str,
     /// Local catalog identity used only for Parquet membership projection.
@@ -54,6 +58,10 @@ pub struct TextIndexRequest<'a> {
 pub struct LazyTextRequest<'a> {
     /// Explicit topology membership; absent only for standalone legacy callers.
     pub topology: Option<&'a graphforge_storage::TopologyFiles>,
+    /// The facade's generation-pinned ordinal identity authority. Membership
+    /// projection checks node rows against it, reading only the identity blocks
+    /// it needs; without one it opens the whole UUID-membership index.
+    pub ordinal: Option<&'a crate::SessionOrdinalIdentity>,
     /// Normalized graph label persisted in the discovered artifact key.
     pub label: &'a str,
     /// Local catalog identity used only for Parquet membership projection.
@@ -185,6 +193,7 @@ where
         request.inventory,
         project_dir,
         request.topology,
+        request.ordinal,
         request.label_id,
         explicit_properties,
         limits.text,
@@ -398,6 +407,7 @@ where
         project_dir,
         LazyTextRequest {
             topology: request.topology,
+            ordinal: request.ordinal,
             label: key.label(),
             label_id: request.label_id,
             inventory: request.inventory,
@@ -435,6 +445,7 @@ where
             request.inventory,
             project_dir,
             request.topology,
+            request.ordinal,
             request.label_id,
             explicit_properties.as_deref(),
             limits.text,
@@ -453,6 +464,7 @@ where
             project_dir,
             TextIndexRequest {
                 topology: request.topology,
+                ordinal: request.ordinal,
                 label: key.label(),
                 label_id: request.label_id,
                 properties: &properties,
@@ -471,6 +483,7 @@ where
                 let after = generation_checked_snapshot(
                     project_dir,
                     request.topology,
+                    request.ordinal,
                     &discovered,
                     request.label_id,
                     &properties,
@@ -537,6 +550,7 @@ where
         generation_checked_snapshot(
             project_dir,
             request.topology,
+            request.ordinal,
             expected,
             request.label_id,
             &properties,
@@ -563,6 +577,7 @@ where
                     request.inventory,
                     project_dir,
                     request.topology,
+                    request.ordinal,
                     request.label_id,
                     Some(&properties),
                     limits.text,
@@ -632,6 +647,7 @@ where
             request.inventory,
             project_dir,
             request.topology,
+            request.ordinal,
             request.label_id,
             Some(properties),
             limits.text,
@@ -725,6 +741,7 @@ where
             TextSearchAttemptRequest {
                 index: TextIndexRequest {
                     topology: request.topology,
+                    ordinal: request.ordinal,
                     label: key.label(),
                     label_id: request.label_id,
                     properties: &properties,
@@ -781,6 +798,7 @@ where
             request.inventory,
             project_dir,
             request.topology,
+            request.ordinal,
             request.label_id,
             None,
             limits.text,
@@ -797,6 +815,7 @@ where
             TextSearchAttemptRequest {
                 index: TextIndexRequest {
                     topology: request.topology,
+                    ordinal: request.ordinal,
                     label: key.label(),
                     label_id: request.label_id,
                     properties: &projection.properties,
@@ -877,6 +896,7 @@ where
     let after = match generation_checked_snapshot(
         project_dir,
         request.index.topology,
+        request.index.ordinal,
         &manifest_snapshot,
         request.index.label_id,
         properties,
@@ -1065,9 +1085,11 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generation_checked_snapshot(
     project_dir: &Path,
     topology: Option<&graphforge_storage::TopologyFiles>,
+    ordinal: Option<&crate::SessionOrdinalIdentity>,
     expected: &SearchSourceSnapshot,
     label_id: graphforge_value::EntityTypeSelection,
     properties: &[String],
@@ -1088,6 +1110,7 @@ fn generation_checked_snapshot(
             inventory,
             project_dir,
             topology,
+            ordinal,
             label_id,
             Some(properties),
             limits,
@@ -1205,6 +1228,7 @@ mod tests {
     fn request(properties: &[String]) -> TextIndexRequest<'_> {
         TextIndexRequest {
             topology: None,
+            ordinal: None,
             label: LABEL,
             label_id: graphforge_value::EntityTypeSelection::Known(
                 graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
@@ -1217,6 +1241,7 @@ mod tests {
     fn lazy_request() -> LazyTextRequest<'static> {
         LazyTextRequest {
             topology: None,
+            ordinal: None,
             label: LABEL,
             label_id: graphforge_value::EntityTypeSelection::Known(
                 graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
@@ -1603,6 +1628,7 @@ mod tests {
         assert!(
             generation_checked_snapshot(
                 dir.path(),
+                None,
                 None,
                 &selected_before,
                 graphforge_value::EntityTypeSelection::Known(

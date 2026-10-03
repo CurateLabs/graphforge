@@ -1119,6 +1119,20 @@ impl V4OrdinalIdentityHandle {
         Ok(())
     }
 
+    /// Every node ordinal the authenticated manifest declares, as inclusive
+    /// ranges in ascending order. Descriptor data only: no artifact byte is
+    /// read. An ordinal in a range resolves to its UUID unless tombstoned.
+    #[must_use]
+    pub fn ordinal_ranges(&self) -> Vec<std::ops::RangeInclusive<u64>> {
+        self.ranges
+            .iter()
+            .map(|range| {
+                let first = range.descriptor.first_node_id;
+                first..=first + range.descriptor.count - 1
+            })
+            .collect()
+    }
+
     /// Maximum request entries accepted by this admitted handle per lookup.
     #[must_use]
     pub const fn max_requested_ids(&self) -> usize {

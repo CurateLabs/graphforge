@@ -1001,6 +1001,34 @@ impl V4OrdinalIdentityResolver {
             handle.map(|handle| Arc::new(Mutex::new(handle)));
     }
 
+    /// The exact generation this resolver serves, revalidated (by stat, no
+    /// artifact bytes) for one caller outside query execution, such as search
+    /// membership projection. `None` when the facade has no ordinal authority.
+    ///
+    /// # Errors
+    /// Returns the refusal when the retained artifacts no longer match the
+    /// generation the handle authenticated.
+    pub fn revalidated_handle(
+        &self,
+    ) -> Result<
+        Option<Arc<Mutex<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>>>,
+        GfError,
+    > {
+        let handle = self
+            .handle
+            .read()
+            .expect("ordinal identity lock poisoned")
+            .clone();
+        if let Some(handle) = &handle {
+            handle
+                .lock()
+                .expect("ordinal identity handle poisoned")
+                .revalidate_for_session()
+                .map_err(GfError::from)?;
+        }
+        Ok(handle)
+    }
+
     pub(super) fn pin(&self) -> Result<V4OrdinalIdentityPin, GfError> {
         let handle = self
             .handle
