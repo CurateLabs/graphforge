@@ -103,20 +103,30 @@ impl<'a> NodeIdentityCheck<'a> {
                 .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
             batch_uuids.push(uuid::Uuid::from_bytes(bytes));
         }
-        match &mut self.authority {
-            Authority::Ordinal(check) => check.resolve_batch(&batch_uuids, surrogates, checkpoint),
+        if surrogates.len() != batch_uuids.len() {
+            return Err(source("topology node_id and node_uuid lengths differ"));
+        }
+        let agrees = match &mut self.authority {
+            Authority::Ordinal(check) => {
+                check.resolve_batch(&batch_uuids, surrogates, checkpoint)?
+            }
             Authority::Membership(index) => {
                 let (values, _) = index
                     .lookup_node_surrogates(&batch_uuids)
                     .map_err(|error| source(error.to_string()))?;
-                Ok(values
+                values
                     .iter()
                     .enumerate()
                     .map(|(row, value)| *value == Some(surrogates.value(row)))
-                    .collect())
+                    .collect()
             }
-            Authority::Unindexed(_) => Ok(vec![true; batch_uuids.len()]),
+            Authority::Unindexed(_) => vec![true; batch_uuids.len()],
+        };
+        // Callers zip the verdicts with the rows; one per row, or none pass.
+        if agrees.len() != batch_uuids.len() {
+            return Err(source("node identity verdicts do not cover the batch"));
         }
+        Ok(agrees)
     }
 
     /// Whether `node_uuid` is distinct from every row before it. The caller has

@@ -338,7 +338,7 @@ where
                     .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
                     .ok_or_else(|| source("topology node_id is not UInt64"))?;
                 let agrees = identity.resolve_batch(uuids, surrogates, &mut checkpoint)?;
-                for row in 0..batch.num_rows() {
+                for (row, agrees) in agrees.into_iter().enumerate() {
                     checkpoint()?;
                     rows = rows.saturating_add(1);
                     if rows > limits.topology_rows {
@@ -353,7 +353,7 @@ where
                         .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
                     let surrogate = surrogates.value(row);
                     if last_surrogate.is_some_and(|prior| surrogate <= prior)
-                        || !agrees[row]
+                        || !agrees
                         || !identity.distinct(node_uuid)
                     {
                         return Err(source(
