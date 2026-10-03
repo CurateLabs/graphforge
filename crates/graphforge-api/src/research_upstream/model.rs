@@ -95,6 +95,12 @@ pub struct UpdateResearchBranchRequest {
     pub created_at: i64,
     /// Bounded review explanation.
     pub explanation: String,
+    /// Credited author of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<graphforge_storage::research_versions::ResearchSignature>,
+    /// Credited committer of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committer: Option<graphforge_storage::research_versions::ResearchSignature>,
 }
 
 /// Bounded inspection of permanent upstream decisions for one Branch.

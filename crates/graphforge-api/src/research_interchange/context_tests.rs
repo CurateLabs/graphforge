@@ -18,6 +18,8 @@ fn fork_historical_project_suppression_uses_original_authority_after_reopen() {
     let version = Uuid::now_v7();
     let capture = source
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid: version,
             context_uuid: Uuid::now_v7(),

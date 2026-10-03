@@ -184,6 +184,8 @@ fn capture(graph: &mut GraphForge) -> Uuid {
     let version_uuid = Uuid::now_v7();
     let prepared = graph
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid,
             context_uuid: graph
@@ -378,6 +380,8 @@ fn selected_history_never_falls_back_to_current_or_retains_its_ancestor() {
             .generation_uuid,
         mutation: ResearchMutation::RegisterGraphProjection {
             spec: RegisterResearchVersion {
+                author: None,
+                committer: None,
                 version_uuid: projected,
                 context_uuid: version.context_uuid,
                 source_generation_uuid: version.content.generation_uuid,
@@ -841,6 +845,8 @@ fn selected_branch_decision_context_reads_exact_version_after_parent_change_reop
         .freeze_slice(&selection, &CancellationToken::new())
         .unwrap();
     let branch = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: graph
             .research_project_summary()

@@ -177,6 +177,8 @@ impl Journey {
         self.graph
             .restore_research_branch(
                 &RestoreResearchBranchRequest {
+                    author: None,
+                    committer: None,
                     operation_uuid: Uuid::now_v7(),
                     expected_generation_uuid: self.generation(),
                     branch_uuid: self.a,

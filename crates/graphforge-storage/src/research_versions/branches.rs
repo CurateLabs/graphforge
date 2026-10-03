@@ -40,7 +40,7 @@ pub(super) fn publish_with_origin(
         }
         stage_origin(root, registry, origin)?;
     }
-    let id = publish(root, registry, creation, version)?;
+    let id = publish(root, registry, creation, version, None)?;
     if let Some(origin) = origin {
         // Preserve immutable identity evidence without retaining a whole parent
         // merely because the selected Branch records its origin.
@@ -49,11 +49,14 @@ pub(super) fn publish_with_origin(
     Ok(id)
 }
 
+/// Publish a Branch head. A created Branch descends from its origin; any later
+/// head descends from the prior head, plus `merged` as a second parent.
 pub(super) fn publish(
     root: &std::path::Path,
     registry: &mut ResearchRegistry,
     creation: Option<&ResearchBranchRecord>,
     version: &super::ResearchVersionRecord,
+    merged: Option<Uuid>,
 ) -> Result<Uuid, GfError> {
     if version.content.source_version.is_none()
         || registry.identities.contains_key(&version.version_uuid)
@@ -92,9 +95,18 @@ pub(super) fn publish(
                 "Branch creation identity or selected base conflicts",
             ));
         }
+        if merged.is_some() {
+            return Err(invalid("Branch creation cannot merge"));
+        }
+        super::ancestry::require(version, &[record.origin_version_uuid])?;
         registry.branches.insert(record.branch_uuid, record.clone());
     } else if !registry.branches.contains_key(&version.context_uuid) {
         return Err(invalid("Branch publication context is unavailable"));
+    } else {
+        super::ancestry::require(
+            version,
+            &super::ancestry::prior_head_then(registry, version.context_uuid, merged),
+        )?;
     }
     // No temporary preparation generation becomes a durable source pin. Verify
     // the complete CAS closure before it can become an authoritative head.

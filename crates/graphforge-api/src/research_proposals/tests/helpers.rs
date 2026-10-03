@@ -5,6 +5,8 @@ pub(super) fn branch(graph: &mut GraphForge) -> Uuid {
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: current(graph),
                 branch_uuid,
@@ -107,6 +109,8 @@ pub(super) fn decision(
 ) -> ReviewResearchProposalRequest {
     let preview = super::super::preview::load(graph, proposal, &CancellationToken::new()).unwrap();
     ReviewResearchProposalRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: preview.generation,
         proposal_uuid: proposal,

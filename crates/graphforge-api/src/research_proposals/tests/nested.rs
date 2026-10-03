@@ -15,6 +15,8 @@ fn nested_acceptance_deduplicates_per_destination_and_preserves_contribution() {
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: current(&graph),
                 branch_uuid: child,
@@ -32,10 +34,16 @@ fn nested_acceptance_deduplicates_per_destination_and_preserves_contribution() {
     let source = edit(&mut graph, child, "MATCH (n:Character) SET n.score=1");
     let proposal = submit(&mut graph, child, source, node, &["property:score"]);
     let first = decision(&graph, proposal.proposal_uuid, |_| Accept);
+    let prior_parent = graph.open_research_branch(parent).unwrap().version_uuid();
     graph
         .review_research_proposal(&first, &CancellationToken::new())
         .unwrap();
     let parent_version = graph.open_research_branch(parent).unwrap().version_uuid();
+    // Whole-Proposal acceptance merges the Proposal's source Version.
+    assert_eq!(
+        graph.research_version(parent_version).unwrap().parents,
+        vec![prior_parent, source]
+    );
     let forwarded = submit(
         &mut graph,
         parent,
@@ -44,9 +52,16 @@ fn nested_acceptance_deduplicates_per_destination_and_preserves_contribution() {
         &["property:score"],
     );
     let second = decision(&graph, forwarded.proposal_uuid, |_| Accept);
-    graph
+    let accepted = graph
         .review_research_proposal(&second, &CancellationToken::new())
+        .unwrap()
+        .version_uuid
         .unwrap();
+    // The Project had no research head yet: the merge source is the only parent.
+    assert_eq!(
+        graph.research_version(accepted).unwrap().parents,
+        vec![parent_version]
+    );
     let registry = graph.research_version_retention().unwrap();
     let mappings: Vec<_> = registry.proposals.accepted.values().collect();
     assert_eq!(mappings.len(), 2);

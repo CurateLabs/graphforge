@@ -88,6 +88,7 @@ pub(super) fn build(
                 .and_then(|id| registry.historical_branch(id));
         }
     }
+    let ancestry = descent(registry, &versions, &mut identities, cancellation)?;
     let version_projects = project_citations(owner, registry, &versions)?;
     let source_project_uuid = version_projects[&selected.version_uuid];
     let manifest = ResearchInterchangeManifest {
@@ -107,12 +108,38 @@ pub(super) fn build(
         versions,
         version_projects,
         identities,
+        ancestry,
         genealogy,
         accepted: proofs.accepted.clone(),
         proof_exports: proofs.exports.clone(),
     };
     manifest.validate()?;
     Ok(manifest)
+}
+
+/// The closure's recorded ancestry, citing every ancestor's identity, so descent
+/// stays walkable after import.
+fn descent(
+    registry: &ResearchRegistry,
+    versions: &BTreeMap<Uuid, ResearchVersionRecord>,
+    identities: &mut BTreeMap<Uuid, [u8; 32]>,
+    cancellation: &CancellationToken,
+) -> Result<BTreeMap<Uuid, Vec<Uuid>>, GfError> {
+    let mut ancestry = BTreeMap::new();
+    let mut pending: Vec<_> = versions.keys().copied().collect();
+    while let Some(id) = pending.pop() {
+        cancellation.checkpoint()?;
+        if let Some(parents) = registry.ancestry.get(&id)
+            && !ancestry.contains_key(&id)
+        {
+            for parent in parents {
+                cite(registry, identities, *parent)?;
+            }
+            pending.extend(parents.iter().copied());
+            ancestry.insert(id, parents.clone());
+        }
+    }
+    Ok(ancestry)
 }
 
 fn cite(

@@ -10,6 +10,8 @@ fn archived_native_baseline_rejects_unknown_origin_without_mutating_source() {
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: graph.generation_for_read().unwrap().generation_uuid(),
                 branch_uuid: Uuid::now_v7(),

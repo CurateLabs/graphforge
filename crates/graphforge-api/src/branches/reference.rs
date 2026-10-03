@@ -56,6 +56,29 @@ fn read(root: &std::path::Path, version: &ResearchVersionRecord) -> Result<Vec<C
     }
     decode(&p.bytes)
 }
+/// The head's citations plus the requested one, canonically ordered and encoded.
+fn cite(
+    root: &std::path::Path,
+    head: &ResearchVersionRecord,
+    request: &ReferenceResearchBranchRequest,
+) -> Result<(Vec<Citation>, Vec<u8>), GfError> {
+    let mut rows = read(root, head)?;
+    if rows
+        .iter()
+        .any(|r| r.reference_uuid == request.reference_uuid)
+    {
+        return Err(invalid());
+    }
+    rows.push(Citation {
+        reference_uuid: request.reference_uuid,
+        source_version_uuid: request.source_version_uuid,
+        label: request.label.clone(),
+    });
+    rows.sort_by_key(|r| r.reference_uuid);
+    let bytes = serde_json::to_vec(&rows).map_err(|_| invalid())?;
+    decode(&bytes)?;
+    Ok((rows, bytes))
+}
 impl GraphForge {
     /// Record an exact historical citation without expanding Branch research.
     pub fn reference_research_branch(
@@ -97,22 +120,10 @@ impl GraphForge {
             .versions
             .get(head)
             .ok_or_else(unavailable)?;
-        let mut rows = read(&command.root, version)?;
-        if rows
-            .iter()
-            .any(|r| r.reference_uuid == request.reference_uuid)
-        {
-            return Err(invalid());
-        }
-        rows.push(Citation {
-            reference_uuid: request.reference_uuid,
-            source_version_uuid: request.source_version_uuid,
-            label: request.label.clone(),
-        });
-        rows.sort_by_key(|r| r.reference_uuid);
-        let bytes = serde_json::to_vec(&rows).map_err(|_| invalid())?;
-        decode(&bytes)?;
+        let (rows, bytes) = cite(&command.root, version, request)?;
         let spec = RegisterResearchVersion {
+            author: None,
+            committer: None,
             version_uuid: request.version_uuid,
             context_uuid: request.branch_uuid,
             source_generation_uuid: version.content.generation_uuid,
@@ -127,6 +138,13 @@ impl GraphForge {
         let mut prepared =
             prepare_branch_selection(&command.root, &spec, None, None, &[], cancellation.flag())?;
         prepared.version.content.source_version = version.content.source_version;
+        publication::commit(
+            &mut prepared.version,
+            vec![*head],
+            request.author.as_ref(),
+            request.committer.as_ref(),
+            None,
+        )?;
         let keep = prepared
             .version
             .content

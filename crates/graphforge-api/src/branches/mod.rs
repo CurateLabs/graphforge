@@ -145,8 +145,24 @@ impl GraphForge {
                 "Branch restore requires its owning context and a fresh Version".into(),
             ));
         }
+        let head = *command
+            .registry
+            .heads
+            .get(&request.branch_uuid)
+            .ok_or_else(unavailable)?;
         version.version_uuid = request.version_uuid;
         version.created_at = request.created_at;
+        publication::commit(
+            &mut version,
+            vec![head],
+            request.author.as_ref(),
+            request.committer.as_ref(),
+            Some(
+                graphforge_storage::research_versions::ResearchVersionProvenance::Restored {
+                    version_uuid: request.source_version_uuid,
+                },
+            ),
+        )?;
         let mutation = ResearchMutation::PublishBranch {
             intent_sha256: command.intent,
             origin_capture: None,

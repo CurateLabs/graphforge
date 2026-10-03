@@ -104,6 +104,8 @@ fn bring_unions_disjoint_selected_lineage_from_one_operation_without_unselected_
     let source = Uuid::now_v7();
     let operation = graph
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid: source,
             context_uuid: Uuid::now_v7(),
@@ -144,6 +146,8 @@ fn bring_unions_disjoint_selected_lineage_from_one_operation_without_unselected_
     let a = frozen(&graph, source, "A");
     let b = frozen(&graph, source, "B");
     let create = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: Uuid::now_v7(),
@@ -172,6 +176,8 @@ fn bring_unions_disjoint_selected_lineage_from_one_operation_without_unselected_
     );
 
     let bring = BringResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: create.branch_uuid,

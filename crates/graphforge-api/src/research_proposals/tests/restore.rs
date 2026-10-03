@@ -31,6 +31,8 @@ fn restored_branch_reproposal_cannot_repeat_acceptance_after_cleanup_and_reopen(
     graph
         .restore_research_branch(
             &RestoreResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: current(&graph),
                 branch_uuid: first,

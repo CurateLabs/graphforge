@@ -420,6 +420,10 @@ export default defineConfig({
                   label: '0053 — Hub publish wire contract',
                   slug: 'adr/0053-hub-publish-wire-contract',
                 },
+                {
+                  label: '0054 — Research Versions are commits',
+                  slug: 'adr/0054-versions-are-commits',
+                },
                 // END generated ADR records
               ],
             },

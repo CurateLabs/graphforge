@@ -37,6 +37,10 @@ pub use upstream::{
     ResearchUpstreamField, ResearchUpstreamFieldReview, ResearchUpstreamHistory,
     ResearchUpstreamResolutionRecord, ResearchUpstreamReview,
 };
+mod ancestry;
+pub use ancestry::{MAX_PARENTS, ResearchVersionProvenance};
+mod signature;
+pub use signature::{MAX_SIGNATURE_EMAIL_BYTES, MAX_SIGNATURE_NAME_BYTES, ResearchSignature};
 mod branches;
 pub(crate) mod interchange;
 pub use branches::ResearchBranchRecord;
@@ -59,7 +63,7 @@ use crate::{
 /// Required research capability; unsupported readers must refuse it.
 pub const RESEARCH_CAPABILITY: &str = "research";
 /// Frozen research capability and registry record version.
-pub const RESEARCH_VERSION: u32 = 6;
+pub const RESEARCH_VERSION: u32 = 7;
 /// Authenticated registry record family.
 pub const RESEARCH_REGISTRY: &str = "registry";
 /// Maximum canonical registry payload; no unbounded history growth.
@@ -72,10 +76,12 @@ pub const MAX_RECEIPTS: usize = 4_096;
 pub const MAX_CONTEXTS: usize = 256;
 /// Maximum explicit dependency roots.
 pub const MAX_ROOTS: usize = 4_096;
+/// Registry participant schema identity for `RESEARCH_VERSION`.
+const REGISTRY_SCHEMA: &[u8] = b"graphforge-research-registry/7";
 const PRODUCER: &str = concat!(
     "graphforge-storage/",
     env!("CARGO_PKG_VERSION"),
-    ";research/6"
+    ";research/7"
 );
 
 /// Exact participant identity, never a filesystem path.
@@ -173,6 +179,19 @@ pub struct ResearchVersionRecord {
     pub created_at: i64,
     /// Exact content locator and commitments.
     pub content: ResearchVersionContent,
+    /// Parent Versions: the prior head first, then any merged Version. Empty
+    /// for a context's first Version and for records that predate parents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parents: Vec<Uuid>,
+    /// Who wrote the change; recorded credit, not authentication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<ResearchSignature>,
+    /// Who recorded the Version; recorded credit, not authentication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committer: Option<ResearchSignature>,
+    /// Restore or bring source, recorded without becoming a parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ResearchVersionProvenance>,
 }
 
 /// Lifetime class for a registered dependency root.
@@ -243,6 +262,10 @@ pub struct ResearchRegistry {
     pub receipts: BTreeMap<Uuid, ResearchOperationReceipt>,
     /// Permanent immutable identity commitments, including released payloads.
     pub identities: BTreeMap<Uuid, [u8; 32]>,
+    /// Permanent parent lists of every Version recorded with parents, including
+    /// released payloads, so descent stays walkable.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ancestry: BTreeMap<Uuid, Vec<Uuid>>,
     /// Versions whose exact participant and graph payloads are rooted in CAS.
     pub materialized: BTreeSet<Uuid>,
 }
@@ -271,6 +294,12 @@ pub struct RegisterResearchVersion {
     pub created_at: i64,
     /// Required evidence closure supplied by the Source/Artifact domain owner.
     pub evidence: Vec<ResearchEvidenceReference>,
+    /// Credited author of a Project capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<ResearchSignature>,
+    /// Credited committer of a Project capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committer: Option<ResearchSignature>,
 }
 
 /// One bounded research mutation, published with its receipt in CURRENT.
@@ -355,6 +384,12 @@ pub enum ResearchMutation {
         version_uuid: Uuid,
         /// New Version's UTC creation time in microseconds.
         created_at: i64,
+        /// Credited author of the restored Version.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        author: Option<ResearchSignature>,
+        /// Credited committer of the restored Version.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committer: Option<ResearchSignature>,
     },
     /// Replace complete Project research, preserving current history and other heads.
     RestoreProject {
@@ -366,6 +401,12 @@ pub enum ResearchMutation {
         version_uuid: Uuid,
         /// New Version creation time in UTC microseconds.
         created_at: i64,
+        /// Credited author of the restored Version.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        author: Option<ResearchSignature>,
+        /// Credited committer of the restored Version.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committer: Option<ResearchSignature>,
     },
     /// Register an explicit immutable dependency root.
     RetainRoot {
@@ -467,6 +508,7 @@ impl ResearchRegistry {
                     "research Version differs from its immutable identity commitment",
                 ));
             }
+            ancestry::validate_record(self, version)?;
             if keys.windows(2).any(|p| p[0] >= p[1]) || keys.iter().any(|key| history(key)) {
                 return Err(invalid(
                     "research content has duplicate, unsorted or history participants",
@@ -490,6 +532,7 @@ impl ResearchRegistry {
         branches::validate(self)?;
         proposal_validation::validate(self)?;
         self.validate_dependency_cycles()?;
+        ancestry::validate(self)?;
         interchange::validate_registry(self)?;
         for (context, version) in &self.heads {
             if self
@@ -536,6 +579,7 @@ impl ResearchRegistry {
             || self.heads.len() > MAX_CONTEXTS
             || self.roots.len() > MAX_ROOTS
             || self.identities.len() > MAX_RECEIPTS
+            || self.ancestry.len() > MAX_RECEIPTS
         {
             return Err(error(
                 ProjectErrorCode::ResourceLimit,
@@ -581,7 +625,7 @@ impl ResearchRegistry {
             record_family_id: RESEARCH_REGISTRY.into(),
             record_version: RESEARCH_VERSION,
             encoding: ProjectParticipantEncoding::Json,
-            schema_fingerprint: Sha256::digest(b"graphforge-research-registry/6").into(),
+            schema_fingerprint: Sha256::digest(REGISTRY_SCHEMA).into(),
             row_count: 1,
             bytes: json(self)?,
         })
@@ -642,8 +686,7 @@ pub fn read_research_registry(
     if snapshot.record_version != RESEARCH_VERSION
         || snapshot.row_count != 1
         || snapshot.encoding != "json"
-        || snapshot.schema_fingerprint
-            != <[u8; 32]>::from(Sha256::digest(b"graphforge-research-registry/6"))
+        || snapshot.schema_fingerprint != <[u8; 32]>::from(Sha256::digest(REGISTRY_SCHEMA))
         || snapshot.bytes.len() > MAX_REGISTRY_BYTES
     {
         return Err(invalid(
@@ -750,6 +793,10 @@ fn capture(
             producer: PRODUCER.into(),
             evidence: request.evidence.clone(),
         },
+        parents: Vec::new(),
+        author: request.author.clone(),
+        committer: request.committer.clone(),
+        provenance: None,
     })
 }
 
@@ -758,6 +805,14 @@ fn insert_version(
     version: ResearchVersionRecord,
 ) -> Result<Uuid, GfError> {
     let context = version.context_uuid;
+    // A head moves only to a descendant: its first parent is the prior head.
+    if let Some(prior) = registry.heads.get(&context)
+        && version.parents.first() != Some(prior)
+    {
+        return Err(invalid(
+            "a new context head must record the prior head as its first parent",
+        ));
+    }
     let id = insert_content(registry, version)?;
     registry.heads.insert(context, id);
     Ok(id)
@@ -780,6 +835,7 @@ fn insert_content(
         ));
     }
     registry.identities.insert(id, digest);
+    ancestry::record(registry, &version)?;
     registry.versions.insert(id, version);
     Ok(id)
 }
@@ -796,11 +852,28 @@ fn restore_context(
     root: &Path,
     registry: &mut ResearchRegistry,
     mutation: &ResearchMutation,
-    context_uuid: Uuid,
-    source_version: Uuid,
-    version_uuid: Uuid,
-    created_at: i64,
 ) -> Result<Option<Uuid>, GfError> {
+    let (ResearchMutation::Restore {
+        context_uuid,
+        source_version,
+        version_uuid,
+        created_at,
+        author,
+        committer,
+    }
+    | ResearchMutation::RestoreProject {
+        context_uuid,
+        source_version,
+        version_uuid,
+        created_at,
+        author,
+        committer,
+    }) = mutation
+    else {
+        return Err(invalid("unsupported research restoration"));
+    };
+    let (context_uuid, source_version, version_uuid) =
+        (*context_uuid, *source_version, *version_uuid);
     let mut version = registry
         .versions
         .get(&source_version)
@@ -819,8 +892,15 @@ fn restore_context(
         ));
     }
     inspect_research_version(root, &version)?;
+    // Every commit field is set explicitly; none is inherited from the source.
     version.version_uuid = version_uuid;
-    version.created_at = created_at;
+    version.created_at = *created_at;
+    version.parents = ancestry::prior_head_then(registry, context_uuid, None);
+    version.author.clone_from(author);
+    version.committer.clone_from(committer);
+    version.provenance = Some(ResearchVersionProvenance::Restored {
+        version_uuid: source_version,
+    });
     if registry.materialized.contains(&source_version) {
         registry.materialized.insert(version_uuid);
     }
@@ -877,29 +957,13 @@ fn apply_mutation(
             if registry.branches.contains_key(&spec.context_uuid) {
                 return Err(invalid("Project capture cannot replace a Branch context"));
             }
-            let version = capture(root, spec, registry)?;
+            let mut version = capture(root, spec, registry)?;
+            version.parents = ancestry::prior_head_then(registry, spec.context_uuid, None);
             Some(insert_version(registry, version)?)
         }
-        ResearchMutation::Restore {
-            context_uuid,
-            source_version,
-            version_uuid,
-            created_at,
+        ResearchMutation::Restore { .. } | ResearchMutation::RestoreProject { .. } => {
+            restore_context(root, registry, mutation)?
         }
-        | ResearchMutation::RestoreProject {
-            context_uuid,
-            source_version,
-            version_uuid,
-            created_at,
-        } => restore_context(
-            root,
-            registry,
-            mutation,
-            *context_uuid,
-            *source_version,
-            *version_uuid,
-            *created_at,
-        )?,
         ResearchMutation::RetainRoot { root } => {
             if registry
                 .roots
@@ -1311,8 +1375,7 @@ pub(crate) fn validate_publication_transition(
         || candidate.row_count != 1
         || candidate.encoding != "json"
         || candidate.byte_length > MAX_REGISTRY_BYTES as u64
-        || candidate.schema_fingerprint
-            != hex(&Sha256::digest(b"graphforge-research-registry/6").into())
+        || candidate.schema_fingerprint != hex(&Sha256::digest(REGISTRY_SCHEMA).into())
     {
         return Err(invalid("unsupported research registry publication"));
     }
@@ -1354,6 +1417,7 @@ pub(crate) fn validate_publication_transition(
             ));
         }
     }
+    ancestry::preserve(&before, &after)?;
     for (id, root) in &before.roots {
         if root.kind == ResearchRootKind::AcceptedProvenance && after.roots.get(id) != Some(root) {
             return Err(invalid(

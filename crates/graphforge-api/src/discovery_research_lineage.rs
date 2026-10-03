@@ -288,6 +288,8 @@ mod tests {
         graph
             .create_research_branch(
                 &CreateResearchBranchRequest {
+                    author: None,
+                    committer: None,
                     operation_uuid: Uuid::now_v7(),
                     expected_generation_uuid: graph
                         .generation_for_read()
@@ -311,6 +313,8 @@ mod tests {
         graph
             .execute_research_branch(
                 &ExecuteResearchBranchRequest {
+                    author: None,
+                    committer: None,
                     operation_uuid: Uuid::now_v7(),
                     expected_generation_uuid: generation,
                     branch_uuid,
@@ -440,6 +444,8 @@ mod tests {
             .graph
             .create_research_branch(
                 &CreateResearchBranchRequest {
+                    author: None,
+                    committer: None,
                     operation_uuid: Uuid::now_v7(),
                     expected_generation_uuid: generation,
                     branch_uuid: unnamed,

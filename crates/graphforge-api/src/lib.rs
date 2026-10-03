@@ -268,7 +268,8 @@ mod slices;
 #[cfg(feature = "research")]
 pub use graphforge_storage::research_versions::{
     ResearchMutation, ResearchOperation, ResearchOperationReceipt, ResearchRegistry,
-    ResearchRetentionRoot, ResearchRootKind, ResearchVersionRecord,
+    ResearchRetentionRoot, ResearchRootKind, ResearchSignature, ResearchVersionProvenance,
+    ResearchVersionRecord,
 };
 #[cfg(feature = "research")]
 pub use research_versions::{PrepareResearchVersionRequest, ResearchVersionView};

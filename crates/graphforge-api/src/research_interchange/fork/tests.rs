@@ -72,6 +72,8 @@ fn committed_fork_replays_after_source_version_release_without_resetting_destina
 fn capture(graph: &mut GraphForge, context_uuid: Uuid, version_uuid: Uuid) {
     let operation = graph
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid,
             context_uuid,

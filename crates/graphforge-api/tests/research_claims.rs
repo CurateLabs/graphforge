@@ -84,6 +84,8 @@ fn canonical_parent_and_branch_decisions_are_explicit_independent_and_durable() 
     assert_eq!(current(&g), published);
     assert_eq!(count(&g), 1);
     let branch = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&g),
         branch_uuid: Uuid::now_v7(),
@@ -278,6 +280,8 @@ fn claim_provenance(g: &GraphForge, id: Uuid) -> Uuid {
 }
 fn create_branch(g: &mut GraphForge) -> Uuid {
     let request = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(g),
         branch_uuid: Uuid::now_v7(),
@@ -300,6 +304,8 @@ fn change(
     action: ResearchClaimChange,
 ) -> ChangeResearchBranchClaimRequest {
     ChangeResearchBranchClaimRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(g),
         branch_uuid,
@@ -657,6 +663,8 @@ fn restoration_keeps_history_and_allows_revoking_an_absent_subject() {
     let version = Uuid::now_v7();
     let capture = g
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid: version,
             context_uuid: context,
@@ -677,6 +685,8 @@ fn restoration_keeps_history_and_allows_revoking_an_absent_subject() {
             operation_uuid: Uuid::now_v7(),
             expected_generation_uuid: current(&g),
             mutation: ResearchMutation::RestoreProject {
+                author: None,
+                committer: None,
                 context_uuid: context,
                 source_version: version,
                 version_uuid: Uuid::now_v7(),
@@ -783,6 +793,8 @@ fn child_inherits_frozen_suppression_while_sibling_and_parent_remain_visible() {
     g.change_research_branch_claim(&suppress, &CancellationToken::new())
         .unwrap();
     let child = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&g),
         branch_uuid: Uuid::now_v7(),
@@ -978,6 +990,8 @@ fn bring_selected_claim_keeps_classification_without_importing_source_authority(
     let version = Uuid::now_v7();
     let capture = g
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid: version,
             context_uuid: Uuid::now_v7(),
@@ -1021,6 +1035,8 @@ fn bring_selected_claim_keeps_classification_without_importing_source_authority(
     }
     g.bring_research_branch(
         &BringResearchBranchRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             expected_generation_uuid: current(&g),
             branch_uuid: destination,

@@ -12,6 +12,8 @@ fn legacy_local_reference_remains_local_after_bring() {
     g.execute("CREATE (:Item)").unwrap();
     let token = CancellationToken::new();
     let b = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&g),
         branch_uuid: Uuid::now_v7(),
@@ -28,6 +30,8 @@ fn legacy_local_reference_remains_local_after_bring() {
     g.execute("CREATE (:NewItem)").unwrap();
     let op = g
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid: Uuid::now_v7(),
             context_uuid: Uuid::now_v7(),
@@ -43,6 +47,8 @@ fn legacy_local_reference_remains_local_after_bring() {
         .version_uuid
         .unwrap();
     let reference = ReferenceResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&g),
         branch_uuid: b.branch_uuid,
@@ -103,6 +109,8 @@ fn legacy_local_reference_remains_local_after_bring() {
     drop(writer);
     g.bring_research_branch(
         &BringResearchBranchRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             expected_generation_uuid: current(&g),
             branch_uuid: b.branch_uuid,

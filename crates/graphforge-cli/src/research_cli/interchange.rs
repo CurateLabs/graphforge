@@ -85,6 +85,8 @@ mod tests {
         graph
             .create_research_branch(
                 &CreateResearchBranchRequest {
+                    author: None,
+                    committer: None,
                     operation_uuid: Uuid::now_v7(),
                     expected_generation_uuid: graph
                         .research_project_summary()

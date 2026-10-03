@@ -66,6 +66,8 @@ fn register(root: &Path, context: Uuid) -> ResearchOperation {
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(root),
         mutation: ResearchMutation::Register(RegisterResearchVersion {
+            author: None,
+            committer: None,
             version_uuid: Uuid::now_v7(),
             context_uuid: context,
             source_generation_uuid: current(root),
@@ -105,6 +107,8 @@ fn restoration_preserves_unselected_context_and_operation_history_after_reopen()
             operation_uuid: Uuid::now_v7(),
             expected_generation_uuid: current(root),
             mutation: ResearchMutation::Restore {
+                author: None,
+                committer: None,
                 context_uuid: a,
                 source_version: first.version_uuid.unwrap(),
                 version_uuid: new_id,
@@ -707,6 +711,7 @@ fn pre_and_post_linearization_faults_preserve_truthful_reopen_and_replay() {
     }
 }
 
+mod commits;
 mod project_content;
 mod proposals;
 mod retention;
@@ -729,6 +734,8 @@ fn project_restore_replaces_research_in_one_publication_and_replay_keeps_later_s
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(root.path()),
         mutation: ResearchMutation::RestoreProject {
+            author: None,
+            committer: None,
             context_uuid: context,
             source_version: source,
             version_uuid: Uuid::now_v7(),
@@ -791,6 +798,7 @@ fn branch_registry_and_selected_base_publish_with_one_receipt() {
     version.version_uuid = Uuid::now_v7();
     version.context_uuid = branch_uuid;
     version.content.source_version = Some(origin);
+    version.parents = vec![origin];
     let base = version.version_uuid;
     let creation = ResearchBranchRecord {
         branch_uuid,
@@ -863,6 +871,8 @@ fn branch_registry_and_selected_base_publish_with_one_receipt() {
             operation_uuid: Uuid::now_v7(),
             expected_generation_uuid: current(root),
             mutation: ResearchMutation::Restore {
+                author: None,
+                committer: None,
                 context_uuid: branch_uuid,
                 source_version: base,
                 version_uuid: next,
@@ -899,6 +909,7 @@ fn prepared_branch_content_outlives_private_source_without_changing_parent_resea
     version.version_uuid = Uuid::now_v7();
     version.context_uuid = branch_uuid;
     version.content.source_version = Some(origin_id);
+    version.parents = vec![origin_id];
     let prepared = prepare_branch_content(root, &source, version, &AtomicBool::new(false)).unwrap();
     let base = prepared.version.version_uuid;
     let parent_before = crate::resolve_project_generation(root).unwrap();
@@ -971,7 +982,7 @@ fn current_branch_origin_is_atomic_genealogy_without_an_implicit_whole_parent_pi
     spec.context_uuid = branch_uuid;
     spec.source_version = Some(origin_uuid);
     let before = current(root);
-    let prepared = prepare_branch_selection(
+    let mut prepared = prepare_branch_selection(
         root,
         &spec,
         Some(&origin),
@@ -980,6 +991,7 @@ fn current_branch_origin_is_atomic_genealogy_without_an_implicit_whole_parent_pi
         &AtomicBool::new(false),
     )
     .unwrap();
+    prepared.version.parents = vec![origin_uuid];
     assert_eq!(current(root), before);
     assert!(state(root).identities.is_empty());
     let creation = ResearchBranchRecord {

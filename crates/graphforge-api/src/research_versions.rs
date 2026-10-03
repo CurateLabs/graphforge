@@ -39,6 +39,12 @@ pub struct PrepareResearchVersionRequest {
     pub created_at: i64,
     /// Explicit required retained Versions, distinct from genealogy.
     pub required_versions: BTreeSet<Uuid>,
+    /// Credited author of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<graphforge_storage::research_versions::ResearchSignature>,
+    /// Credited committer of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committer: Option<graphforge_storage::research_versions::ResearchSignature>,
 }
 
 impl GraphForge {
@@ -48,6 +54,9 @@ impl GraphForge {
         &self,
         request: PrepareResearchVersionRequest,
     ) -> Result<ResearchOperation, GfError> {
+        for signature in request.author.iter().chain(&request.committer) {
+            signature.validate()?;
+        }
         let generation = self.generation_for_read()?;
         crate::checkpoints::validate_research_source(&generation)?;
         let evidence = complete_evidence(&generation)?;
@@ -65,6 +74,8 @@ impl GraphForge {
                 description: request.description,
                 created_at: request.created_at,
                 evidence,
+                author: request.author,
+                committer: request.committer,
             }),
         })
     }

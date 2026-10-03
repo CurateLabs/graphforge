@@ -69,6 +69,8 @@ fn individual_assertion_adoption_preserves_unselected_claims_and_graph_values() 
     };
     let review = preview::load(&graph, &request, &cancel).unwrap();
     let update = UpdateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: graph.generation_for_read().unwrap().generation_uuid(),
         version_uuid: Uuid::now_v7(),
@@ -116,6 +118,8 @@ fn individual_assertion_adoption_preserves_unselected_claims_and_graph_values() 
     graph
         .suppress_research_branch_assertion(
             &SuppressResearchBranchAssertionRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: graph.generation_for_read().unwrap().generation_uuid(),
                 branch_uuid: seed.preview.branch_uuid,
@@ -159,6 +163,8 @@ fn individual_assertion_adoption_preserves_unselected_claims_and_graph_values() 
         .unwrap();
     assert_eq!(changed_status.change, "conflict");
     let mut update = UpdateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: graph.generation_for_read().unwrap().generation_uuid(),
         version_uuid: Uuid::now_v7(),

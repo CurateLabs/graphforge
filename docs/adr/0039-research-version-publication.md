@@ -146,3 +146,25 @@ before commit. Committing that exact prepared request preserves stable retry
 content after later Project changes or payload release. Historical native views
 materialize retained participants and graph/evidence into private temporary
 containers; their temporary storage identity is not the immutable citation.
+
+## Versions are commits amendment (#1773)
+
+Research capability and registry revision 7 (ADR 0054). A Version record also
+carries its `parents`, optional `author` and `committer` signatures, and the
+`provenance` of restored or brought content. The identity digest keeps its form
+(struct-order JSON with physical placement zeroed) and so commits to these
+fields; each is omitted when empty, so a record without them keeps the digest it
+had under revision 6. Removing credit is a history rewrite.
+
+Every operation that moves a context head records the prior head as the first
+parent, and storage refuses any other head move. Project capture and context
+restoration set the parents themselves: capture records the prior head (none for
+a context's first Version); restore records the prior head and the restored
+source as provenance. Restoration sets every commit field explicitly; none is
+inherited from the source record.
+
+The registry gains a permanent `ancestry` ledger beside `identities`: every
+Version recorded with parents keeps its parent list after its payload is
+released, every publisher must carry the ledger unchanged, and it is bounded by
+`MAX_RECEIPTS`. Revision 6 registries are refused, consistent with the pre-v1
+policy above; their identities stay valid identities under revision 7.

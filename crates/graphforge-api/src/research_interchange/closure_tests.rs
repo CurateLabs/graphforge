@@ -83,6 +83,8 @@ fn selected_artifact_bytes_external_limits_and_ontology_survive_reopen() {
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: generation(&graph),
                 branch_uuid: branch,
@@ -274,6 +276,8 @@ fn install_ontology(graph: &mut GraphForge, branch_uuid: Uuid) -> Uuid {
     graph
         .change_research_branch_ontology(
             &ChangeResearchBranchOntologyRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: generation(graph),
                 branch_uuid,

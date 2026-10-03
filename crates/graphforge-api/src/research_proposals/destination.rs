@@ -25,6 +25,8 @@ pub(super) fn prepare(
     let (mut graph, branch_version) = match preview.proposal.destination {
         ResearchProposalDestination::Project { project_uuid } => {
             let spec = RegisterResearchVersion {
+                author: None,
+                committer: None,
                 version_uuid: identity(request.operation_uuid, "destination"),
                 context_uuid: project_uuid,
                 source_generation_uuid: preview.generation,

@@ -52,6 +52,8 @@ impl GraphForge {
             selected.as_ref().map(|s| s.version.version_uuid),
         )?;
         let mut spec = RegisterResearchVersion {
+            author: None,
+            committer: None,
             version_uuid: request.version_uuid,
             context_uuid: request.branch_uuid,
             source_generation_uuid: source.generation,
@@ -89,6 +91,14 @@ impl GraphForge {
         )?;
         let project_uuid = crate::research_claims::authority::project_uuid(
             &graphforge_storage::resolve_project_generation(&command.root)?,
+        )?;
+        // A new Branch descends from its origin.
+        publication::commit(
+            &mut prepared.version,
+            vec![source.version],
+            request.author.as_ref(),
+            request.committer.as_ref(),
+            None,
         )?;
         let creation = ResearchBranchRecord {
             branch_uuid: request.branch_uuid,
@@ -136,6 +146,8 @@ fn resolve_source(
             )?;
             let evidence = crate::research_versions::complete_evidence(&generation)?;
             let capture = RegisterResearchVersion {
+                author: None,
+                committer: None,
                 version_uuid: origin_version_uuid,
                 context_uuid,
                 source_generation_uuid: generation.generation_uuid(),

@@ -175,6 +175,12 @@ pub struct ChangeResearchBranchClaimRequest {
     pub created_at: i64,
     /// One bounded explicit change.
     pub change: ResearchClaimChange,
+    /// Credited author of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<graphforge_storage::research_versions::ResearchSignature>,
+    /// Credited committer of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committer: Option<graphforge_storage::research_versions::ResearchSignature>,
 }
 
 /// Explicit scoped knowledge inspection; ordinary graph queries never use this filter.
