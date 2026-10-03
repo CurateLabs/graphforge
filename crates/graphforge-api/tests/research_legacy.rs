@@ -412,10 +412,18 @@ fn research_v6_imported_project_opens_and_exports_as_v7() {
     assert_legacy_roots(&registry, &ids);
     let archive = &registry.interchange[&head];
     assert_eq!(archive.research_capability_version, RESEARCH_LEGACY_VERSION);
-    // A revision 6 archive cannot hold revision 7 commit data.
+    // A revision 6 archive cannot hold revision 7 commit data, even when the
+    // forged record's identity is recommitted consistently.
     let mut forged = archive.clone();
-    forged.versions.get_mut(&head).unwrap().parents = vec![Uuid::now_v7()];
-    assert!(forged.validate().is_err());
+    let record = forged.versions.get_mut(&head).unwrap();
+    record.author = Some(signature("Forged"));
+    let identity = record.identity_sha256().unwrap();
+    forged.identities.insert(head, identity);
+    let error = forged.validate().unwrap_err();
+    assert!(error.to_string().contains("revision 6"), "{error}");
+    let mut current = forged.clone();
+    current.research_capability_version = RESEARCH_VERSION;
+    current.validate().unwrap();
     // A whole-Project export of it is written at the current revision.
     let package = directory.path().join("whole.gfpb");
     graph
