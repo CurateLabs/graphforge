@@ -12,8 +12,8 @@
 //!   reads at least the bytes the manifest declares for the node property
 //!   fragments, and the edge property scan the same for edge properties;
 //! - a complete portable export reads at least the node, edge and property
-//!   payload the manifest declares, and its receipt counts at least that much
-//!   payload written.
+//!   payload the manifest declares, writes at least that payload, and reads at
+//!   least the payload bytes it writes.
 //!
 //! Every read bound comes from the manifest, not from any observation or any
 //! re-encoded size; the declared payload growing with the data is what makes the
@@ -250,11 +250,18 @@ fn whole_payload_operations_read_the_whole_payload_at_every_size() {
             "nodes={nodes}: the export read {} bytes of {payload} declared payload",
             size.export_read
         );
-        // And it carries that payload: the receipt counts at least as many
-        // payload bytes as the manifest declares.
+        // And it carries that payload, reading what it writes: the package
+        // holds the generation's objects byte for byte, so the receipt counts
+        // at least the declared payload.
         assert!(
             size.export_payload >= payload,
             "nodes={nodes}: the export wrote {} payload bytes of {payload} declared",
+            size.export_payload
+        );
+        assert!(
+            size.export_read >= size.export_payload,
+            "nodes={nodes}: the export read {} bytes for {} payload bytes written",
+            size.export_read,
             size.export_payload
         );
     }
