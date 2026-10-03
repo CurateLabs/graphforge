@@ -250,8 +250,7 @@ impl<'a> OrdinalCheck<'a> {
         for range in &self.ranges {
             let first = (*range.start()).max(self.next);
             let last = (*range.end()).min(end - 1);
-            let mut id = first;
-            while id <= last {
+            for id in first..=last {
                 pending.push(id);
                 if pending.len() == self.chunk {
                     checkpoint()?;
@@ -261,7 +260,6 @@ impl<'a> OrdinalCheck<'a> {
                     }
                     pending.clear();
                 }
-                id += 1;
             }
         }
         if !pending.is_empty() {
