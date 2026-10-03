@@ -173,12 +173,37 @@ pub fn install_graph_object_file(
     install_graph_object_file_with_lease(&lease, source, expected_digest, expected_length)
 }
 
-#[allow(clippy::too_many_lines)] // The streamed copy keeps source authentication and destination durability atomic.
 pub(crate) fn install_graph_object_file_with_lease(
     lease: &GraphObjectPublicationLease,
     source: &Path,
     expected_digest: &str,
     expected_length: u64,
+) -> Result<GraphObjectInstallEvidence, GfError> {
+    install_graph_object_file_admitted(lease, source, expected_digest, expected_length, false)
+}
+
+/// Install a regular source file that may replace a corrupt object at its
+/// digest. Only the explicit adjacency repair action grants this, for the
+/// rebuilt files a capture did not retain. The copy is SHA-256 authenticated
+/// as it streams, the full-digest authority repair requires; an existing
+/// object that authenticates is reused, and any other existing-object failure
+/// is refused exactly as an ordinary install refuses it.
+pub(crate) fn install_graph_object_file_repairing_with_lease(
+    lease: &GraphObjectPublicationLease,
+    source: &Path,
+    expected_digest: &str,
+    expected_length: u64,
+) -> Result<GraphObjectInstallEvidence, GfError> {
+    install_graph_object_file_admitted(lease, source, expected_digest, expected_length, true)
+}
+
+#[allow(clippy::too_many_lines)] // The streamed copy keeps source authentication and destination durability atomic.
+fn install_graph_object_file_admitted(
+    lease: &GraphObjectPublicationLease,
+    source: &Path,
+    expected_digest: &str,
+    expected_length: u64,
+    repair_corrupt_existing: bool,
 ) -> Result<GraphObjectInstallEvidence, GfError> {
     validate_digest(expected_digest)?;
     let metadata = fs::symlink_metadata(source)
@@ -194,11 +219,12 @@ pub(crate) fn install_graph_object_file_with_lease(
     let file_sync_calls = std::cell::Cell::new(0_u64);
     let payload_checksum = std::cell::Cell::new(None);
     let result =
-        install_object(
+        install_object_admitted(
             &lease.cas,
             expected_digest,
             expected_length,
-            HashDomain::ArtifactPayload,
+            ObjectAuthentication::Sha(HashDomain::ArtifactPayload),
+            repair_corrupt_existing,
             true,
             |output| {
                 let cache_window = graphforge_filesystem::cache_release_window_for_streams(2)

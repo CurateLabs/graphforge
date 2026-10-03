@@ -813,3 +813,203 @@ fn duplicate_and_conflicting_delta_inputs_fail_before_publication() {
     );
     assert!(state.root().is_none());
 }
+
+/// Stage and publish one compact generation over the project's CURRENT, as a
+/// mutating commit (or, with `repair`, the explicit adjacency rebuild) does.
+fn publish_compact_over_current(
+    root: &Path,
+    workspace: &Path,
+    repair: bool,
+) -> Result<crate::ResolvedProjectGeneration, GfError> {
+    use crate::{
+        GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, ProjectCapability, ProjectGenerationRequest,
+        ProjectStageOutcome, empty_workspace_participants,
+    };
+    let parent = crate::resolve_project_generation(root)?;
+    let topology = crate::TopologyFiles::discover_legacy(workspace)?;
+    let (participant, lease) = if repair {
+        crate::prepare_compact_graph_publication_repairing_adjacency(&parent, workspace, &topology)?
+    } else {
+        crate::prepare_compact_graph_publication(&parent, workspace, &topology)?
+    };
+    let mut participants = empty_workspace_participants()?;
+    participants.insert(0, participant);
+    let request = ProjectGenerationRequest {
+        transaction_uuid: uuid::Uuid::now_v7(),
+        generation_uuid: uuid::Uuid::now_v7(),
+        capabilities: vec![
+            ProjectCapability {
+                capability_id: GRAPH_CAPABILITY_ID.into(),
+                capability_version: GRAPH_CAPABILITY_VERSION,
+            },
+            ProjectCapability {
+                capability_id: "workspace".into(),
+                capability_version: 1,
+            },
+        ],
+        participants,
+    };
+    let ProjectStageOutcome::Staged(staged) =
+        crate::stage_project_generation_with_graph_tree(root, &request, None)?
+    else {
+        panic!("fresh publication replayed");
+    };
+    staged
+        .validate(|_| Ok(()), |_, _| Ok(()))?
+        .publish_with_graph_objects(&lease)?;
+    crate::resolve_project_generation(root)
+}
+
+/// More rebuilt adjacency files than a capture retains, so the explicit repair
+/// must also reach the files it installs without a retained capture (#1738).
+fn adjacency_workspace(root: &Path, extra: &[(&str, &[u8])]) -> tempfile::TempDir {
+    let workspace = tempfile::tempdir_in(root).unwrap();
+    fs::create_dir_all(workspace.path().join("topology")).unwrap();
+    fs::create_dir_all(workspace.path().join("indexes/adjacency")).unwrap();
+    fs::write(
+        workspace.path().join("topology/nodes.parquet"),
+        [7_u8; 4096],
+    )
+    .unwrap();
+    fs::write(workspace.path().join("topology/generation.json"), b"{}\n").unwrap();
+    for index in 0..ADJACENCY_FILES {
+        fs::write(
+            workspace
+                .path()
+                .join(format!("indexes/adjacency/shard-{index:04}.out.csr")),
+            format!("rebuilt adjacency shard {index:04}").repeat(16),
+        )
+        .unwrap();
+    }
+    for (path, bytes) in extra {
+        fs::write(workspace.path().join(path), bytes).unwrap();
+    }
+    workspace
+}
+
+const ADJACENCY_FILES: usize = crate::graph_files::MAX_RETAINED_CAPTURES + 2;
+
+/// Flip one byte of the sealed object in place: same inode, same length.
+fn flip_object(root: &Path, entry: &crate::GraphFileEntry) -> Vec<u8> {
+    let object = graph_object_path(root, &entry.content_sha256).unwrap();
+    let mut bytes = fs::read(&object).unwrap();
+    let at = bytes.len() / 2;
+    bytes[at] ^= 1;
+    crate::graph_object_store::corrupt_sealed_graph_object_for_test(&object, &bytes);
+    bytes
+}
+
+#[test]
+fn adjacency_repair_beyond_the_retained_capture_cap_replaces_every_corrupt_object() {
+    let root = tempfile::tempdir().unwrap();
+    crate::open_or_initialize_project(root.path()).unwrap();
+    let workspace = adjacency_workspace(root.path(), &[]);
+    let first = publish_compact_over_current(root.path(), workspace.path(), false).unwrap();
+    let inventory = first.graph_files_inventory().unwrap().unwrap();
+    let adjacency = inventory
+        .files
+        .iter()
+        .filter(|entry| entry.relative_path.starts_with("indexes/adjacency/"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(adjacency.len(), ADJACENCY_FILES);
+    for entry in &adjacency {
+        flip_object(root.path(), entry);
+        assert!(
+            verify_graph_object(root.path(), &entry.content_sha256, entry.byte_length).is_err()
+        );
+    }
+
+    // The repair capture retains only the cap; the rest are installed from
+    // their workspace path, the branch that used to lose repair authority.
+    let capture = crate::graph_files::capture_workspace_over_parent_repairing_adjacency(
+        workspace.path(),
+        &first,
+        &crate::TopologyFiles::discover_legacy(workspace.path()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        capture.captured.len(),
+        crate::graph_files::MAX_RETAINED_CAPTURES
+    );
+    let uncaptured = adjacency
+        .iter()
+        .filter(|entry| !capture.captured.contains_key(&entry.relative_path))
+        .count();
+    assert_eq!(
+        uncaptured,
+        ADJACENCY_FILES - crate::graph_files::MAX_RETAINED_CAPTURES
+    );
+    drop(capture);
+
+    let repaired = publish_compact_over_current(root.path(), workspace.path(), true).unwrap();
+    let after = repaired.graph_files_inventory().unwrap().unwrap();
+    assert_eq!(
+        after.files, inventory.files,
+        "repair keeps every declared identity"
+    );
+    for entry in &adjacency {
+        let bytes = read_graph_object(root.path(), &entry.content_sha256, entry.byte_length)
+            .unwrap_or_else(|error| panic!("{} was not repaired: {error}", entry.relative_path));
+        assert_eq!(
+            bytes,
+            fs::read(workspace.path().join(&entry.relative_path)).unwrap()
+        );
+        let object = graph_object_path(root.path(), &entry.content_sha256).unwrap();
+        assert!(fs::metadata(object).unwrap().permissions().readonly());
+    }
+}
+
+#[test]
+fn adjacency_repair_still_refuses_an_uncaptured_non_adjacency_collision() {
+    let payload = [5_u8; 2048];
+    let root = tempfile::tempdir().unwrap();
+    crate::open_or_initialize_project(root.path()).unwrap();
+    let workspace = adjacency_workspace(root.path(), &[("topology/payload.bin", &payload)]);
+    let first = publish_compact_over_current(root.path(), workspace.path(), false).unwrap();
+    let inventory = first.graph_files_inventory().unwrap().unwrap();
+    let entry = inventory
+        .files
+        .iter()
+        .find(|entry| entry.relative_path == "topology/payload.bin")
+        .unwrap()
+        .clone();
+    let corrupt = flip_object(root.path(), &entry);
+    let object = graph_object_path(root.path(), &entry.content_sha256).unwrap();
+    let prior = graphforge_filesystem::path_identity(&object).unwrap();
+
+    // A new non-adjacency path with those exact bytes names the corrupt
+    // object. Every adjacency file is captured first, so this one is not.
+    fs::write(workspace.path().join("topology/zz-copy.bin"), payload).unwrap();
+    let capture = crate::graph_files::capture_workspace_over_parent_repairing_adjacency(
+        workspace.path(),
+        &first,
+        &crate::TopologyFiles::discover_legacy(workspace.path()).unwrap(),
+    )
+    .unwrap();
+    assert!(!capture.captured.contains_key("topology/zz-copy.bin"));
+    drop(capture);
+
+    let error = publish_compact_over_current(root.path(), workspace.path(), true).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("graph object digest does not match its address"),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read(&object).unwrap(),
+        corrupt,
+        "the collision is never replaced"
+    );
+    assert_eq!(
+        graphforge_filesystem::path_identity(&object).unwrap(),
+        prior
+    );
+    assert_eq!(
+        crate::resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid(),
+        first.generation_uuid()
+    );
+}
