@@ -3,7 +3,16 @@
 //!
 //! The runs are hard-linked from the content-addressed store at open, so a
 //! same-inode byte flip is visible through the workspace without any rename.
-//! Open reads none of them; the lookup that reads a block checks it.
+//! Open reads none of them; the lookup that reads a block checks it. No query
+//! reads a forward run: the commit that builds the next identity generation on
+//! it does, and refuses a flipped one.
+//!
+//! The small UUID-membership controls (the manifests, the receipts, the
+//! tombstone runs and the lock) are different: hydration copies each into a
+//! private single-link file and checks the copy against the manifest, so the
+//! open is the operation that touches them, and it refuses a flipped one. The
+//! lock is published empty, so it has no byte to flip; it is opened and
+//! flocked, never read.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -271,4 +280,184 @@ fn ordered_queries_stay_correct_when_a_mutation_breaks_uuid_order() {
         ordered[0] < *bulk_fixture::fixture_node_uuid(0).as_bytes(),
         "the new node's UUID sorts first"
     );
+}
+
+fn generation_uuid(path: &Path) -> uuid::Uuid {
+    graphforge_storage::resolve_project_generation(path)
+        .unwrap()
+        .generation_uuid()
+}
+
+/// Forward runs carry `(UUID, surrogate)` records of 24 bytes and have no
+/// block fences: no lookup reads them, so a query never refuses one. The
+/// commit that builds the next identity generation reads the whole run, and
+/// must refuse a flipped one before it names a new digest.
+#[test]
+fn flipped_forward_run_is_refused_by_the_commit_that_builds_on_it() {
+    const RECORD: u64 = 24;
+    let (_root, path) = project(NODES);
+    let forward = identity_run(&path, "forward-v4-");
+    // The last surrogate byte of a record in the middle of the run.
+    flip_in_place(&forward, (NODES as u64 / 2) * RECORD + RECORD - 1);
+    let published = generation_uuid(&path);
+
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    // Reads never touch the forward run.
+    assert_eq!(rows(&forge, HEALTHY), Ok(3));
+    assert_eq!(rows(&forge, ORDERED), Ok(3));
+    // A commit that adds a node builds on it, and is refused.
+    let refused = forge
+        .execute("CREATE (:Entity)")
+        .map(drop)
+        .map_err(|error| format!("{} {error}", error.code()))
+        .expect_err("a commit built on a flipped forward run must be refused");
+    assert!(refused.starts_with("GF_"), "{refused}");
+    assert!(
+        refused.to_lowercase().contains("authenticat")
+            || refused.to_lowercase().contains("checksum"),
+        "refused for the wrong reason: {refused}"
+    );
+    assert_eq!(
+        generation_uuid(&path),
+        published,
+        "a refused commit published a generation"
+    );
+}
+
+/// Replace one byte of a content-store object in place (same inode, same
+/// length, same mtime) and put it back on drop.
+struct ByteSwap {
+    object: PathBuf,
+    offset: u64,
+    original: u8,
+}
+
+impl ByteSwap {
+    fn apply(object: &Path, offset: u64, replacement: impl FnOnce(u8) -> u8) -> Self {
+        let original = write_byte(object, offset, replacement);
+        Self {
+            object: object.to_path_buf(),
+            offset,
+            original,
+        }
+    }
+}
+
+impl Drop for ByteSwap {
+    fn drop(&mut self) {
+        let original = self.original;
+        write_byte(&self.object, self.offset, |_| original);
+    }
+}
+
+fn identity(object: &Path) -> graphforge_filesystem::FileIdentity {
+    graphforge_filesystem::file_identity(&std::fs::File::open(object).unwrap()).unwrap()
+}
+
+/// Write one byte through the shared inode, keeping its length and mtime;
+/// returns the byte replaced.
+fn write_byte(object: &Path, offset: u64, replacement: impl FnOnce(u8) -> u8) -> u8 {
+    let before = std::fs::metadata(object).unwrap();
+    let inode = identity(object);
+    let permissions = before.permissions();
+    let mut writable = permissions.clone();
+    writable.set_readonly(false);
+    std::fs::set_permissions(object, writable).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(object)
+        .unwrap();
+    let modified = file.metadata().unwrap().modified().unwrap();
+    let mut byte = [0_u8; 1];
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.read_exact(&mut byte).unwrap();
+    let replaced = replacement(byte[0]);
+    assert_ne!(replaced, byte[0], "the swap must change the byte");
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.write_all(&[replaced]).unwrap();
+    file.set_modified(modified).unwrap();
+    drop(file);
+    std::fs::set_permissions(object, permissions).unwrap();
+    assert_eq!(identity(object), inode, "same inode");
+    let after = std::fs::metadata(object).unwrap();
+    assert_eq!(after.len(), before.len(), "same length");
+    assert_eq!(after.modified().unwrap(), modified, "same mtime");
+    byte[0]
+}
+
+/// A byte whose change leaves the file well formed, so that only a checksum
+/// can notice: in JSON, the last digit of the first 64-digit hex string (a
+/// digest) becomes another hex digit; in a binary run, any byte.
+fn inert_swap(relative: &str, bytes: &[u8]) -> (u64, fn(u8) -> u8) {
+    fn other_hex_digit(byte: u8) -> u8 {
+        if byte == b'0' { b'1' } else { b'0' }
+    }
+    if !relative.ends_with(".json") {
+        return ((bytes.len() / 2) as u64, |byte| byte ^ 0xff);
+    }
+    let digest = bytes
+        .windows(64)
+        .position(|window| window.iter().all(u8::is_ascii_hexdigit))
+        .unwrap_or_else(|| panic!("{relative} carries no 64-digit hex digest"));
+    ((digest + 63) as u64, other_hex_digit)
+}
+
+/// The copied UUID-membership controls of a project that has been mutated, so
+/// that a topology receipt and a non-empty tombstone run are published too.
+#[test]
+fn flipped_identity_controls_are_refused_by_the_open_that_copies_them() {
+    let (_root, path) = project(2_048);
+    {
+        let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+        forge
+            .execute("MATCH (n:Entity) WITH n LIMIT 3 DETACH DELETE n")
+            .unwrap();
+    }
+    let objects = objects(&path);
+    let control = |name: &str| {
+        let relative = format!("topology/uuid-membership/{name}");
+        objects
+            .iter()
+            .find(|(path, ..)| *path == relative)
+            .unwrap_or_else(|| panic!("{relative} is not published"))
+            .clone()
+    };
+    // The lock is published empty: there is no byte to flip, and nothing
+    // reads its content.
+    assert_eq!(control("ordinal-v4.lock").3, 0, "the lock carries bytes");
+    let tombstones = objects
+        .iter()
+        .find(|(relative, .., length)| {
+            relative.starts_with("topology/uuid-membership/tombstones-v4-") && *length > 0
+        })
+        .expect("a DELETE publishes a non-empty tombstone run")
+        .clone();
+    let cases = [
+        control("manifest.json"),
+        control("ordinal-v4-manifest.json"),
+        control("topology-receipt.json"),
+        control("ordinal-v4-receipt.json"),
+        tombstones,
+    ];
+    let published = generation_uuid(&path);
+    for (relative, object, _, _) in &cases {
+        let (offset, replacement) = inert_swap(relative, &std::fs::read(object).unwrap());
+        let _swap = ByteSwap::apply(object, offset, replacement);
+        let refused = GraphForge::new(Some(path.to_str().unwrap()))
+            .map(drop)
+            .map_err(|error| format!("{} {error}", error.code()))
+            .expect_err(&format!(
+                "{relative}: the open that copies a flipped control must refuse it"
+            ));
+        assert!(
+            refused.contains("do not match inventory"),
+            "{relative}: refused for the wrong reason: {refused}"
+        );
+    }
+    // Every swap was restored: the project opens and answers again.
+    assert_eq!(generation_uuid(&path), published);
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    assert_eq!(rows(&forge, "MATCH (n) RETURN n"), Ok(2_048 - 3));
+    assert_eq!(rows(&forge, ORDERED), Ok(3));
 }
