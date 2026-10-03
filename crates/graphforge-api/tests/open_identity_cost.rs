@@ -1,8 +1,13 @@
-//! Opening a compact (V2) project reads metadata, not nodes or edges (#1388).
+//! Opening a compact (V2) project reads metadata, not nodes, edges or
+//! properties (#1388, criterion 1).
 //!
 //! Nodes and edges scale 16x together. Everything an open reads must then stay
 //! bounded by descriptors: the manifest, route table and sidecars grow by a few
 //! hundred bytes, while the identity runs alone grow by 40 bytes per node.
+//! The same holds for a project published with a node and an edge property
+//! column: property fragments are admitted lazily (#1737), so their payload,
+//! which grows with both axes, is read by the first query that needs a value,
+//! never by the open.
 //!
 //! This file holds exactly one test on purpose. `/proc/self/io` `rchar` counts
 //! every read of the whole process, so a second test running on another thread
@@ -36,6 +41,8 @@ fn rchar() -> u64 {
 struct Open {
     nodes: usize,
     declared_payload: u64,
+    /// Declared bytes of the node and edge property fragments.
+    property_bytes: u64,
     rchar: u64,
     attributed: u64,
     checksummed: u64,
@@ -70,10 +77,33 @@ fn identity_bytes(dir: &Path) -> u64 {
     total
 }
 
-fn measure(nodes: usize) -> Open {
+/// Declared bytes of the property fragments, read from the manifest without
+/// admitting a byte.
+fn property_bytes(project: &Path) -> u64 {
+    graphforge_storage::resolve_project_generation(project)
+        .expect("project resolves")
+        .unadmitted_graph_files_inventory()
+        .expect("inventory reads")
+        .expect("compact generation declares an inventory")
+        .files
+        .iter()
+        .filter(|file| {
+            file.relative_path.starts_with("properties/")
+                || file.relative_path.starts_with("edge_properties/")
+        })
+        .map(|file| file.byte_length)
+        .sum()
+}
+
+fn measure(nodes: usize, properties: bool) -> Open {
     let root = tempfile::tempdir().expect("project directory");
     let path = root.path().join("state");
-    bulk_fixture::generate_bulk_graph_with_index(&path, nodes, FAN_OUT, false);
+    if properties {
+        bulk_fixture::generate_bulk_graph_with_properties(&path, nodes, FAN_OUT, true);
+    } else {
+        bulk_fixture::generate_bulk_graph_with_index(&path, nodes, FAN_OUT, false);
+    }
+    let property_bytes = property_bytes(&path);
     let _capture = LifecycleIoCapture::install();
     let before = lifecycle_io_snapshot().expect("requested observation");
     let started = rchar();
@@ -104,6 +134,7 @@ fn measure(nodes: usize) -> Open {
     let open = Open {
         nodes,
         declared_payload: evidence.bytes_validated,
+        property_bytes,
         rchar: opened,
         attributed,
         checksummed: evidence.bytes_checksummed,
@@ -111,9 +142,11 @@ fn measure(nodes: usize) -> Open {
         identity_bytes: identity_bytes(&workspace(&path.parent().unwrap().join("state"))),
     };
     eprintln!(
-        "nodes={} declared_payload={} identity_bytes={} rchar={} attributed={} checksummed={} copied={}",
+        "nodes={} properties={properties} declared_payload={} property_bytes={} identity_bytes={} \
+         rchar={} attributed={} checksummed={} copied={}",
         open.nodes,
         open.declared_payload,
+        open.property_bytes,
         open.identity_bytes,
         open.rchar,
         open.attributed,
@@ -125,9 +158,31 @@ fn measure(nodes: usize) -> Open {
 
 #[test]
 fn open_reads_metadata_when_nodes_and_edges_scale_sixteenfold() {
-    let small = measure(SMALL_NODES);
-    let large = measure(SMALL_NODES * SCALE);
+    // One test, both fixtures: see the module comment on `rchar`.
+    assert_open_reads_metadata(false);
+    assert_open_reads_metadata(true);
+}
+
+fn assert_open_reads_metadata(properties: bool) {
+    let small = measure(SMALL_NODES, properties);
+    let large = measure(SMALL_NODES * SCALE, properties);
     let added_nodes = (large.nodes - small.nodes) as u64;
+    if properties {
+        // The growth gate below admits under one byte per added node. Every
+        // node and edge carries a value, so reading the property payload at
+        // open would grow the open by more than that.
+        let property_growth = large.property_bytes.saturating_sub(small.property_bytes);
+        assert!(
+            property_growth > added_nodes,
+            "property payload grew {property_growth} bytes ({} -> {}) for {added_nodes} added \
+             nodes: the fixture cannot show an open that reads it",
+            small.property_bytes,
+            large.property_bytes
+        );
+    } else {
+        assert_eq!(small.property_bytes, 0);
+        assert_eq!(large.property_bytes, 0);
+    }
 
     // The comparison means something only if the data really grew.
     assert!(
@@ -156,7 +211,8 @@ fn open_reads_metadata_when_nodes_and_edges_scale_sixteenfold() {
         let growth = large.saturating_sub(small);
         assert!(
             growth < added_nodes,
-            "{what} grew {growth} bytes ({small} -> {large}) for {added_nodes} added nodes"
+            "properties={properties}: {what} grew {growth} bytes ({small} -> {large}) for \
+             {added_nodes} added nodes"
         );
     }
     // Attribution never claims more than the process actually read.

@@ -8,7 +8,7 @@ use super::{
     GraphObjectKind, LineageRecord, LineageRole, OperationId, PageToken,
     ParquetRecordBatchReaderBuilder, ProjectParticipant, ProjectParticipantEncoding,
     ProvenanceEvent, ProvenanceLedger, ReasoningLedger, RecordBatch, ResolvedProjectGeneration,
-    Schema, SchemaRef, SubjectKind, Uuid, fs, knowledge_error, provenance_error, schema_registry,
+    Schema, SchemaRef, SubjectKind, Uuid, knowledge_error, provenance_error, schema_registry,
 };
 #[cfg(feature = "research")]
 use crate::research_claims::ledger::{encode_claims, encode_suppressions};
@@ -1111,18 +1111,14 @@ fn write_parquet(batch: &RecordBatch, schema: &SchemaRef) -> Result<Vec<u8>, GfE
 }
 
 pub(crate) fn read_parquet(bytes: &[u8]) -> Result<Vec<RecordBatch>, GfError> {
-    let file =
-        tempfile::NamedTempFile::new().map_err(|error| GfError::Storage(error.to_string()))?;
-    fs::write(file.path(), bytes).map_err(|error| GfError::Storage(error.to_string()))?;
-    ParquetRecordBatchReaderBuilder::try_new(
-        file.reopen()
-            .map_err(|error| GfError::Storage(error.to_string()))?,
-    )
-    .map_err(|error| GfError::Validation(format!("invalid knowledge parquet: {error}")))?
-    .build()
-    .map_err(|error| GfError::Validation(format!("invalid knowledge parquet: {error}")))?
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(|error| GfError::Validation(format!("invalid knowledge parquet: {error}")))
+    // The participant bytes are already bounded in memory; reading them in
+    // place writes nothing to the system temporary directory.
+    ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::copy_from_slice(bytes))
+        .map_err(|error| GfError::Validation(format!("invalid knowledge parquet: {error}")))?
+        .build()
+        .map_err(|error| GfError::Validation(format!("invalid knowledge parquet: {error}")))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| GfError::Validation(format!("invalid knowledge parquet: {error}")))
 }
 
 fn read_or_empty(

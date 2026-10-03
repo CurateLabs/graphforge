@@ -596,7 +596,7 @@ impl SealedArtifact {
     /// This is restricted to authenticated replacement; creation and ordinary
     /// replacement continue to use the source's own parent authority.
     pub(crate) fn make_visible_into(
-        self,
+        #[cfg_attr(not(windows), allow(unused_mut))] mut self,
         destination: &StableDirectory,
         target: &OsStr,
         expected_target: FileIdentity,
@@ -607,6 +607,15 @@ impl SealedArtifact {
         #[cfg(test)]
         super::fault::hit(super::fault::Point::BeforeVisible).map_err(unpublished)?;
         before_visible().map_err(unpublished)?;
+        // A Windows sealed reader denies write and delete sharing, so this
+        // producer's own retained reader would refuse the native rename of
+        // the very inode it holds. The replacement authenticates the exact
+        // source identity on its rename handle, and acknowledgement reopens
+        // the published name, so only the descriptor is released here.
+        #[cfg(windows)]
+        if !self.locked {
+            drop(self.file.take());
+        }
         let result = destination.replace_authenticated_child_from(
             &self.parent,
             &self.temporary,

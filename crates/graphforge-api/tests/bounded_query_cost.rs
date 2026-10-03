@@ -30,25 +30,25 @@
 //!   mutable controls are copied, at most `COPIED_CONTROL_BYTES`: the
 //!   node-linear identity runs are hard-linked and read nothing at open. Never
 //!   a payload.
-//! - **Execution** (attributed): every node object once, checksummed whole on
-//!   first touch (the node-linear term, see below); at most one CSR shard per
-//!   hop, read whole because a shard carries its own checksum; the 64 KiB
+//! - **Execution** (attributed): at most one CSR shard per hop, read whole
+//!   because a shard carries its own checksum; the 64 KiB
 //!   ordinal blocks that hold the destinations it resolves
 //!   (`ceil(destinations / ORDINAL_BLOCK_RECORDS)` blocks, plus the two ends of
 //!   the ordinal range, read to check the recorded order; each read once per
 //!   handle and then held; never a block that holds none, and never all of
 //!   them, because the manifest records that UUID order follows ordinals); and
-//!   a bounded residual of footers and manifests. Edge objects are never read.
+//!   a bounded residual of footers and manifests. Node and edge objects are
+//!   never read.
 //! - **Unattributed**: whatever a reader reads without reporting it. The
 //!   identity readers now report. The gate asserts that the remainder does not
 //!   grow with the edge payload (the node count is fixed), which is what any
 //!   reader of an edge-linear object would break.
 //!
-//! The node-linear term is a known defect, not a design: planning registers the
-//! node table with `ParquetFragment::for_path`, whose footer read admits every
-//! node object whole, so a query that touches 250 nodes pays for all of them.
-//! It is bounded here separately, at 1x the declared node bytes, so the edge
-//! property this gate asserts is not hidden behind a loose number. The CSR
+//! There is no node-linear term. Planning used to register the node table with
+//! `ParquetFragment::for_path`, whose footer read admitted every node object
+//! whole; it now takes row bounds from the declared shard names
+//! (`ParquetFragment::for_declared`, #1718) and opens no node object, and the
+//! ordered fast paths resolve destinations through the ordinal blocks. The CSR
 //! shard term grows with the edges one shard holds, capped at
 //! `DEFAULT_CSR_SHARD_EDGES` edges; both sizes here sit below that cap.
 
@@ -346,7 +346,9 @@ fn bounded_queries_cost_their_result_not_their_graph_across_a_16x_edge_range() {
         small.layout.edge_bytes,
         large.layout.edge_bytes
     );
-    // The node set is identical, so the node-linear term must be too.
+    // The node set is identical: the edge payload is the only axis this gate
+    // varies. The node axis is gated in `bounded_query_shapes.rs`, whose node
+    // table outgrows its execution slack.
     assert_eq!(small.layout.node_bytes, large.layout.node_bytes);
 
     let extra_files = large.layout.files.saturating_sub(small.layout.files);
@@ -430,27 +432,24 @@ fn assert_query_bounds(query: &Query, size: &Size, measured: &Measured) {
     // ordinal-from-one leaves in front.
     let destinations = (LIMIT.div_ceil(paths) + 1) as u64;
 
-    // Execution reads every node object once, at most one shard per hop, the
-    // ordinal blocks that hold the destinations it resolves (a block is read
-    // once per handle, then held), and a bounded residual: and never an edge
-    // object, and never a block it has no destination in.
+    // Execution reads at most one shard per hop, the ordinal blocks that hold
+    // the destinations it resolves (a block is read once per handle, then
+    // held), and a bounded residual: never a node or edge object, and never a
+    // block it has no destination in.
     // Plus the first and last block of the one ordinal range bulk construction
     // publishes, read once to check the recorded UUID order. Per range, never
     // per node.
     const RANGE_END_BLOCKS: u64 = 2;
     let identity_blocks = destinations.div_ceil(ORDINAL_BLOCK_RECORDS) + RANGE_END_BLOCKS;
     let identity_bound = identity_blocks * ORDINAL_BLOCK_BYTES;
-    let execution_bound = layout.node_bytes
-        + query.hops * layout.largest_shard_bytes
-        + identity_bound
-        + EXECUTION_RESIDUAL_BYTES;
+    let execution_bound =
+        query.hops * layout.largest_shard_bytes + identity_bound + EXECUTION_RESIDUAL_BYTES;
     assert!(
         measured.execution_read <= execution_bound,
         "{name} fan-out {fan_out}: execution read {} bytes against a structural bound of \
-         {execution_bound} (nodes {}, {} shard(s) of at most {}, {identity_blocks} identity \
+         {execution_bound} ({} shard(s) of at most {}, {identity_blocks} identity \
          block(s) of {ORDINAL_BLOCK_BYTES}, residual {EXECUTION_RESIDUAL_BYTES})",
         measured.execution_read,
-        layout.node_bytes,
         query.hops,
         layout.largest_shard_bytes
     );

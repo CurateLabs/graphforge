@@ -50,13 +50,25 @@ only the versioned `/.gf/refs` and `/.gf/manifest` control documents from that
 identity; package bytes come only from the content-addressed HTTPS location in
 the validated manifest. Existing destinations are never overwritten.
 
-Downloads use finite response, object, redirect, connection, and operation
-limits. An interrupted download remains in an owner-private, symlink-safe
-staging directory protected by an exclusive process lock. A retry uses a
-strong ETag with `Range`/`If-Range`, resumes only an exact matching `206`
-response, and otherwise restarts safely. A complete destination is published only after transport
-size and SHA-256 checks, full portable-v2 verification, semantic package
-identity comparison, atomic import, and reopen through the GraphForge facade.
+Downloads use finite response, object (1 TiB), redirect, and connection
+limits, and an idle bound instead of a whole-transfer deadline: a slow transfer
+continues as long as bytes keep arriving. Transient failures (a failed
+connection, a cut body, or a `408`, `429`, or `5xx` status) are retried in the
+same invocation with backoff. A retry uses a strong ETag with
+`Range`/`If-Range`, appends only an exact matching `206` response, and reads a
+full `200` response as the whole object again. Before downloading, clone checks
+that the destination filesystem is admissible (`GF_UNSUPPORTED_FILESYSTEM`) and
+has room for the package plus the import (about 3.25 times the package;
+`hub.insufficient_space`). Download, import target, and resume state live in an
+owner-private, symlink-safe staging directory beside the destination, protected
+by an exclusive process lock. The destination is installed by one atomic
+no-replace rename only after transport size and SHA-256 checks, full
+portable-v2 verification, semantic package identity comparison, import, and
+reopen through the GraphForge facade. After a kill, a failed import, or Ctrl-C,
+rerunning the same command resumes or finishes the clone; import failures keep
+their `hub.package.*` code. Byte progress goes to standard error. The
+[portable projects guide](https://github.com/CurateLabs/graphforge/blob/main/docs/guide/portable-projects.md#large-projects)
+covers disk needs, resume, limits, and errors for large projects.
 Redirects and DNS answers are rechecked against the public-network-only policy;
 HTTP, credential-bearing URLs, private/link-local/loopback addresses, corrupt
 objects, and ambiguous package references fail closed. JSON mode returns the

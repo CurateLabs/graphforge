@@ -52,12 +52,15 @@ pub(crate) fn shape_search_output(
     label_id: graphforge_value::EntityTypeSelection,
     hits: &[FusedSearchHit],
 ) -> Result<RecordBatch, GfError> {
-    shape_search_output_with_members(project_dir, inventory, label_id, hits, None)
+    shape_search_output_with_members(project_dir, inventory, None, label_id, hits, None)
 }
 
+/// `ordinal` is the facade's identity authority for the membership projection
+/// shaping takes when retrieval admitted no members.
 pub(crate) fn shape_search_output_with_members(
     project_dir: &std::path::Path,
     inventory: &AuthenticatedPropertyInventory,
+    ordinal: Option<&graphforge_search::SessionOrdinalIdentity>,
     label_id: graphforge_value::EntityTypeSelection,
     hits: &[FusedSearchHit],
     admitted: Option<&BTreeSet<[u8; 16]>>,
@@ -72,6 +75,7 @@ pub(crate) fn shape_search_output_with_members(
             Some(&graphforge_storage::TopologyFiles::from_inventory(
                 inventory,
             )?),
+            ordinal,
             label_id,
             VectorLifecycleLimits::default(),
             || Ok(()),

@@ -33,8 +33,8 @@
 //! reading each twice; the node-linear forward and ordinal runs are
 //! hard-linked and read nothing at open (#1719). The copied bytes come from
 //! the open evidence and are capped at what the manifest declares for that
-//! set; the property fragments are authenticated in full (#1716, "not in this
-//! PR"); manifest, sidecars and footers fit a fixed slack. Execution also
+//! set; property fragments are admitted lazily (#1737), so open reads none of
+//! them; manifest, sidecars and footers fit a fixed slack. Execution also
 //! reads the 64 KiB ordinal blocks holding the destinations it resolves plus
 //! the two ends of the range (#1719), once per handle.
 //!
@@ -553,9 +553,8 @@ fn query_shapes_cost_their_result_not_their_graph_across_a_4x_node_range() {
 
     for size in [&small, &large] {
         let nodes = size.nodes;
-        let open_bound = OPEN_CONTROL_READS * size.layout.copied_control_bytes
-            + size.layout.property_bytes
-            + CONTROL_SLACK_BYTES;
+        let open_bound =
+            OPEN_CONTROL_READS * size.layout.copied_control_bytes + CONTROL_SLACK_BYTES;
         let copied_cap = size.layout.copied_control_bytes;
         for (shape, measured) in SHAPES.iter().zip(&size.results) {
             let name = shape.name;
@@ -590,17 +589,25 @@ fn query_shapes_cost_their_result_not_their_graph_across_a_4x_node_range() {
             assert!(
                 measured.open_read <= open_bound,
                 "{name} nodes={nodes}: open read {} against a control bound of {open_bound} \
-                 (2 x {} copied control bytes + {} property bytes + slack)",
+                 (2 x {} copied control bytes + slack)",
                 measured.open_read,
-                size.layout.copied_control_bytes,
-                size.layout.property_bytes
+                size.layout.copied_control_bytes
             );
-            // Beyond the copied controls and the property fragments the bound
-            // allows only the slack, and the slack is smaller than the node
-            // and edge payload: reading one object at open fails this gate.
+            // Beyond the copied controls the bound allows only the slack, and
+            // the slack is smaller than the node and edge payload: reading one
+            // object at open fails this gate.
             assert!(
                 CONTROL_SLACK_BYTES < size.layout.node_bytes + size.layout.edge_bytes,
                 "{name} nodes={nodes}: the slack admits the payload"
+            );
+            // Property fragments are admitted lazily (#1737), so the bound has
+            // no property term, and it is tighter than an open that also read
+            // the property payload.
+            assert!(
+                open_bound < measured.open_read + size.layout.property_bytes,
+                "{name} nodes={nodes}: the bound {open_bound} admits a full property payload \
+                 read ({} bytes)",
+                size.layout.property_bytes
             );
             let (bound, _) = (shape.bound)(&size.layout);
             let bound = bound + identity_bound(shape, FAN_OUT);

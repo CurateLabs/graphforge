@@ -1,7 +1,7 @@
 //! `graphforge-api` orchestration between neutral graph receipts and `graphforge-provenance`.
 
 use std::collections::HashMap;
-use std::fs;
+
 use std::sync::Arc;
 
 use arrow::array::{
@@ -295,16 +295,12 @@ fn write_parquet(batch: &RecordBatch, schema: &SchemaRef) -> Result<Vec<u8>, GfE
 }
 
 fn read_parquet(bytes: &[u8]) -> Result<Vec<RecordBatch>, GfError> {
-    let file =
-        tempfile::NamedTempFile::new().map_err(|error| GfError::Storage(error.to_string()))?;
-    fs::write(file.path(), bytes).map_err(|error| GfError::Storage(error.to_string()))?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(
-        file.reopen()
-            .map_err(|error| GfError::Storage(error.to_string()))?,
-    )
-    .map_err(|error| GfError::Validation(format!("invalid provenance parquet: {error}")))?
-    .build()
-    .map_err(|error| GfError::Validation(format!("invalid provenance parquet: {error}")))?;
+    // The participant bytes are already bounded in memory; reading them in
+    // place writes nothing to the system temporary directory.
+    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::copy_from_slice(bytes))
+        .map_err(|error| GfError::Validation(format!("invalid provenance parquet: {error}")))?
+        .build()
+        .map_err(|error| GfError::Validation(format!("invalid provenance parquet: {error}")))?;
     reader
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| GfError::Validation(format!("invalid provenance parquet: {error}")))

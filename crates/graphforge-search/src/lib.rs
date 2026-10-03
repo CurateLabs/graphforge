@@ -17,6 +17,7 @@ pub mod find;
 pub mod fusion;
 pub mod indexing;
 pub mod lifecycle;
+pub mod node_identity;
 pub mod provider;
 pub mod provider_adapter;
 pub mod provider_batching;
@@ -65,6 +66,7 @@ pub use lifecycle::{
     inspect_text_index_freshness, prepare_default_text_index, prepare_explicit_text_index,
     prepare_text_index, search_default_text, search_published_text,
 };
+pub use node_identity::SessionOrdinalIdentity;
 pub use provider::{
     DEFAULT_REMOTE_PROVIDER, ProviderCapabilities, ProviderCapability, ProviderError,
     ProviderFailureClass, ProviderModelContract, ProviderRequestLimits, ProviderResult,

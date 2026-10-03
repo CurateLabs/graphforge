@@ -302,6 +302,7 @@ fn verify(
         portable_limits: PortableV2Limits::default(),
         mode: PortableV2Mode::Full,
         cancelled: None,
+        scratch: None,
     })
 }
 
@@ -333,6 +334,7 @@ fn valid_lineage_version_maps_to_the_storage_verified_package() {
             portable_limits: PortableV2Limits::default(),
             mode: PortableV2Mode::Full,
             cancelled: None,
+            scratch: None,
         })
         .unwrap();
         assert_eq!(accepted.repository, published.repository);

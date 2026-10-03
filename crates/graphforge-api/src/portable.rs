@@ -269,6 +269,7 @@ pub fn verify_portable_v2(
         #[cfg(feature = "research")]
         return graphforge_storage::validate_research_package(
             &request.input,
+            None,
             request.limits,
             cancelled,
             &mut crate::research_interchange::validation::validate,

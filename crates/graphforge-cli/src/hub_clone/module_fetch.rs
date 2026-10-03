@@ -6,10 +6,10 @@
 //! apart. Sub-issue of #1732.
 
 use super::{
-    CloneStaging, DownloadReport, HttpTransport, MAX_BUNDLE_BYTES, MAX_METADATA_BYTES, Transport,
-    acquire_staging, canonical_name, download_with_progress, endpoint, ensure_destination_absent,
-    fetch_with_attempts, open_partial_nofollow, parse_input_at, portable_error, protocol_error,
-    read_bounded, storage, validation,
+    CloneStaging, DownloadControl, DownloadReport, HttpTransport, MAX_METADATA_BYTES, RETRY_POLICY,
+    RetryPolicy, Transport, acquire_staging, canonical_name, download_with_progress, endpoint,
+    ensure_destination_absent, fetch_with_attempts, open_partial_nofollow, parse_input_at,
+    portable_error, protocol_error, read_bounded, release_staging, storage, validation,
 };
 use clap::Args;
 use graphforge_api::{
@@ -68,7 +68,7 @@ pub(crate) fn run_module_fetch(
     json: bool,
     output: &mut dyn Write,
 ) -> Result<(), graphforge_api::GfError> {
-    run_module_fetch_with(&HttpTransport::new(), args, json, output)
+    run_module_fetch_with(&HttpTransport::new(), args, json, output, &RETRY_POLICY)
 }
 
 fn run_module_fetch_with(
@@ -76,8 +76,9 @@ fn run_module_fetch_with(
     args: &ModuleFetchArgs,
     json: bool,
     output: &mut dyn Write,
+    retry: &RetryPolicy,
 ) -> Result<(), graphforge_api::GfError> {
-    let result = run_module_fetch_job(transport, args)?;
+    let result = run_module_fetch_job(transport, args, retry)?;
     write_module_fetch_result(&result, json, output)
 }
 
@@ -141,6 +142,7 @@ fn ensure_output_available(output: &Path) -> Result<(), graphforge_api::GfError>
 fn fetch_document(
     transport: &dyn Transport,
     url: &Url,
+    retry: &RetryPolicy,
 ) -> Result<Vec<u8>, graphforge_api::GfError> {
     let mut attempts = 0;
     read_bounded(
@@ -151,6 +153,7 @@ fn fetch_document(
             None,
             MAX_METADATA_BYTES as u64,
             &mut attempts,
+            retry,
         )?,
         MAX_METADATA_BYTES,
     )
@@ -159,15 +162,15 @@ fn fetch_document(
 fn run_module_fetch_job(
     transport: &dyn Transport,
     args: &ModuleFetchArgs,
+    retry: &RetryPolicy,
 ) -> Result<ModuleFetchResult, graphforge_api::GfError> {
     let (identity, base) = parse_input_at(&args.repository, args.hub.as_deref())?;
     let module = module_identity(args)?;
     ensure_output_available(&args.output)?;
-    let refs_bytes = fetch_document(transport, &endpoint(&base, "refs"))?;
-    let manifest_bytes = fetch_document(transport, &endpoint(&base, "manifest"))?;
+    let refs_bytes = fetch_document(transport, &endpoint(&base, "refs"), retry)?;
+    let manifest_bytes = fetch_document(transport, &endpoint(&base, "manifest"), retry)?;
     let limits = DiscoveryLimits {
         max_response_bytes: MAX_METADATA_BYTES,
-        max_cumulative_object_bytes: MAX_BUNDLE_BYTES,
         max_module_package_bytes: MAX_MODULE_PACKAGE_BYTES,
         ..DiscoveryLimits::default()
     };
@@ -193,47 +196,15 @@ fn run_module_fetch_job(
         object,
         limits,
         &staging,
+        retry,
     );
     release_staging(staging);
     result
 }
 
-/// Remove everything this fetch staged, on success and on failure alike: the
-/// document is already published, and the package is cheap to download again.
-///
-/// The contents (partial file, checkpoint, staged output, and the lock file
-/// itself) are removed while the lock is still held, so a concurrent fetch can
-/// never acquire the directory and then have its files deleted. Only then is
-/// the lock released and the now-empty directory removed with `remove_dir`,
-/// which fails harmlessly if a concurrent fetch has meanwhile re-created its
-/// lock; that fetch's staging is never touched.
-fn release_staging(staging: CloneStaging) {
-    clear_staging(&staging);
-    let root = staging.root.clone();
-    drop(staging);
-    remove_staging_dir(&root);
-}
-
-/// `remove_dir`, not `remove_dir_all`: it refuses a directory that a concurrent
-/// fetch has re-populated, and that refusal is expected and benign.
-fn remove_staging_dir(root: &Path) {
-    let _ = std::fs::remove_dir(root);
-}
-
-/// Best-effort removal of every entry in the staging directory. Cleanup can
-/// neither turn a published success into a failure nor mask the real error.
-fn clear_staging(staging: &CloneStaging) {
-    let Ok(entries) = std::fs::read_dir(&staging.root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let _ = match entry.file_type() {
-            Ok(kind) if kind.is_dir() => std::fs::remove_dir_all(&path),
-            _ => std::fs::remove_file(&path),
-        };
-    }
-}
+// `release_staging` removes everything this fetch staged, on success and on
+// failure alike: the document is already published, and the package is cheap
+// to download again.
 
 #[allow(clippy::too_many_arguments)]
 fn fetch_and_publish_module(
@@ -246,12 +217,14 @@ fn fetch_and_publish_module(
     object: &ObjectDescriptor,
     limits: DiscoveryLimits,
     staging: &CloneStaging,
+    retry: &RetryPolicy,
 ) -> Result<ModuleFetchResult, graphforge_api::GfError> {
     download_with_progress(
         transport,
         object,
         &staging.partial,
         &mut DownloadReport::default(),
+        &mut DownloadControl::quiet(retry),
     )?;
     let resolved = resolve_discovered_ontology_module(&DiscoveryOntologyModuleRequest {
         manifest_json: manifest_bytes,
@@ -329,6 +302,7 @@ mod tests {
     use super::*;
     use crate::hub_clone::tests::{RecordingTransport, Scripted, response};
     use crate::hub_clone::{HttpResponse, hash_reader};
+    use crate::hub_clone::{TEST_RETRY_POLICY, clear_staging, remove_staging_dir};
     use std::sync::Mutex;
 
     const FIXTURE_REFS: &[u8] =
@@ -397,7 +371,7 @@ mod tests {
         args: &ModuleFetchArgs,
     ) -> Result<serde_json::Value, graphforge_api::GfError> {
         let mut output = Vec::new();
-        run_module_fetch_with(transport, args, true, &mut output)?;
+        run_module_fetch_with(transport, args, true, &mut output, &TEST_RETRY_POLICY)?;
         Ok(serde_json::from_slice(&output).unwrap())
     }
 

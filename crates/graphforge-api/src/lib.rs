@@ -60,6 +60,8 @@ use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
 use graphforge_storage::ResolvedProjectGeneration;
 /// Non-durable lifecycle region diagnostics for stock callers.
 pub use graphforge_storage::concurrency_attribution;
+/// Prove a proposed durable project location is admissible without creating it.
+pub use graphforge_storage::filesystem_admission::filesystem_durability_preflight;
 /// Explicit, thread-bound lifecycle I/O observation boundary.
 pub use graphforge_storage::lifecycle_io::CaptureScope as LifecycleIoCapture;
 /// Whether lifecycle I/O was explicitly requested on this thread.
@@ -384,6 +386,7 @@ pub use graphforge_core::embedding_options::{
 pub use graphforge_core::manifest::{MANIFEST_FILE, ONTOLOGY_FILE, ProjectManifest};
 pub use graphforge_core::uuid::{
     hub_clone_operation, hub_publish_operation, hub_research_clone_operation,
+    portable_v2_import_generation,
 };
 pub use graphforge_core::{
     AlgorithmError, AnalyzeOptions, ApiErrorCode, ClusterOptions, EdgeHandle, ExplainStage,

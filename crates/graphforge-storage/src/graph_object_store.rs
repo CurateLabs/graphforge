@@ -1978,6 +1978,7 @@ pub use installation::install_graph_object_bytes;
     reason = "preserve the existing staged CAS root API across feature and test configurations"
 )]
 pub use installation::install_graph_object_file;
+pub(crate) use installation::install_graph_object_file_repairing_with_lease;
 pub(crate) use installation::install_graph_object_file_with_lease;
 #[cfg(test)]
 pub(crate) use installation::set_captured_copy_hook;
