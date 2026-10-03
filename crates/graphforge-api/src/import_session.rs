@@ -811,7 +811,13 @@ impl GraphImportSession {
             );
         }
         #[cfg(not(target_os = "linux"))]
-        let _ = cache_release.peak_combined_window_bytes;
+        {
+            // No file-cache release is supported off Linux, so neither stream
+            // may report released bytes.
+            debug_assert_eq!(cache_release.reader.released_bytes, 0);
+            debug_assert_eq!(cache_release.writer.released_bytes, 0);
+            let _ = cache_release.peak_combined_window_bytes;
+        }
         if bytes != metadata.len() {
             let _ = fs::remove_file(&temporary);
             return Err(storage("Parquet source length changed while copying"));
