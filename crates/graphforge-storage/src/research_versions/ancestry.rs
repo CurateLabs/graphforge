@@ -4,8 +4,8 @@
 //! keeps every recorded parent list in `ancestry`, which outlives released
 //! payloads exactly as `identities` does, so descent stays walkable.
 use super::{
-    BTreeMap, BTreeSet, GfError, MAX_RECEIPTS, ProjectErrorCode, ResearchRegistry,
-    ResearchVersionRecord, Uuid, error, invalid,
+    BTreeMap, BTreeSet, GfError, ProjectErrorCode, ResearchRegistry, ResearchVersionRecord, Uuid,
+    error, invalid,
 };
 use serde::{Deserialize, Serialize};
 
@@ -84,14 +84,9 @@ pub(super) fn validate_record(
     Ok(())
 }
 
-/// Validate the ledger itself: bounded, known identities, and acyclic.
+/// Validate the ledger itself: known identities and acyclic. Its capacity,
+/// `MAX_RECEIPTS`, is checked with the registry's other bounds.
 pub(super) fn validate(registry: &ResearchRegistry) -> Result<(), GfError> {
-    if registry.ancestry.len() > MAX_RECEIPTS {
-        return Err(error(
-            ProjectErrorCode::ResourceLimit,
-            "research ancestry capacity exceeded; ancestry does not expire implicitly",
-        ));
-    }
     for (id, parents) in &registry.ancestry {
         if parents.is_empty()
             || !registry.identities.contains_key(id)

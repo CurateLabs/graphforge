@@ -344,3 +344,94 @@ fn requests_without_signatures_keep_their_serialized_intent() {
     .unwrap();
     assert_eq!(parsed.author.unwrap().orcid.unwrap(), "0000-0002-1825-0097");
 }
+
+#[test]
+fn exported_research_carries_the_walkable_descent_of_released_versions() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut source = GraphForge::new(directory.path().join("source").to_str()).unwrap();
+    source.execute("CREATE (:Item {n: 0})").unwrap();
+    let cancel = CancellationToken::new();
+    let origin = Uuid::now_v7();
+    let create = CreateResearchBranchRequest {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(&source),
+        branch_uuid: Uuid::now_v7(),
+        version_uuid: Uuid::now_v7(),
+        source: BranchSource::Current {
+            origin_version_uuid: origin,
+            context_uuid: Uuid::now_v7(),
+        },
+        creator_uuid: Uuid::now_v7(),
+        created_at: 1,
+        label: "exported".into(),
+        author: None,
+        committer: None,
+    };
+    source.create_research_branch(&create, &cancel).unwrap();
+    let mut edits = Vec::new();
+    for n in 1..=2 {
+        let request = ExecuteResearchBranchRequest {
+            operation_uuid: Uuid::now_v7(),
+            expected_generation_uuid: current(&source),
+            branch_uuid: create.branch_uuid,
+            version_uuid: Uuid::now_v7(),
+            query: format!("MATCH (i:Item) SET i.n = {n}"),
+            created_at: 2,
+            author: Some(signature("Ada")),
+            committer: None,
+        };
+        source.execute_research_branch(&request, &cancel).unwrap();
+        edits.push(request.version_uuid);
+    }
+    // Release the intermediate Version's payload; its ancestry stays.
+    source
+        .commit_research_version_operation(
+            ResearchOperation {
+                operation_uuid: Uuid::now_v7(),
+                expected_generation_uuid: current(&source),
+                mutation: ResearchMutation::DeleteVersion {
+                    version_uuid: edits[0],
+                },
+            },
+            &cancel,
+        )
+        .unwrap();
+    let descent = vec![edits[0], create.version_uuid, origin];
+    let registry = source.research_version_retention().unwrap();
+    assert!(!registry.versions.contains_key(&edits[0]));
+    assert_eq!(registry.ancestors(edits[1]), descent);
+    let package = directory.path().join("package");
+    source
+        .export_research(
+            &ExportResearchRequest {
+                version_uuid: edits[1],
+                output: package.clone(),
+                bundled: false,
+                projection: None,
+            },
+            &cancel,
+        )
+        .unwrap();
+    let target = directory.path().join("imported");
+    GraphForge::import_portable_v2(
+        &target,
+        &PortableV2ImportRequest {
+            input: package,
+            operation_id: OperationId(Uuid::now_v7()),
+            limits: Default::default(),
+        },
+        None,
+    )
+    .unwrap();
+    let imported = GraphForge::new(target.to_str())
+        .unwrap()
+        .research_version_retention()
+        .unwrap();
+    let archive = &imported.interchange[&edits[1]];
+    assert_eq!(archive.ancestry, registry.ancestry);
+    assert_eq!(imported.ancestors(edits[1]), descent);
+    assert_eq!(imported.versions[&edits[1]].author, Some(signature("Ada")));
+    for id in &descent {
+        assert_eq!(imported.identities[id], registry.identities[id]);
+    }
+}
