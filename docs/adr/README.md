@@ -59,6 +59,7 @@ Roadmap-only ADRs are not retained in this tree.
 | 0051 | [Discovery carries a digest-addressed Project summary and exact ontology descriptors](0051-discovery-project-summary-and-ontology-descriptors.md) | `0051-discovery-project-summary-and-ontology-descriptors.md` |
 | 0052 | [Discovery carries a digest-addressed research lineage document](0052-discovery-research-lineage-document.md) | `0052-discovery-research-lineage-document.md` |
 | 0053 | [Hub publish wire contract](0053-hub-publish-wire-contract.md) | `0053-hub-publish-wire-contract.md` |
+| 0054 | [GraphForge component boundaries: Core, XYG, editor, and Hub](0054-product-component-boundaries.md) | `0054-product-component-boundaries.md` |
 
 ## Superseded records
 

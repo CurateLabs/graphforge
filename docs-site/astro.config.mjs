@@ -420,6 +420,10 @@ export default defineConfig({
                   label: '0053 — Hub publish wire contract',
                   slug: 'adr/0053-hub-publish-wire-contract',
                 },
+                {
+                  label: '0054 — GraphForge component boundaries: Core, XYG, editor, and Hub',
+                  slug: 'adr/0054-product-component-boundaries',
+                },
                 // END generated ADR records
               ],
             },

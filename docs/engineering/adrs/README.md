@@ -106,6 +106,7 @@ the CI Lint job (#1390).
 | 0051 | Discovery carries a digest-addressed Project summary and exact ontology descriptors | Accepted | A summary field needs required interpretation by readers, module packages must become independent of the publishing Project (which requires a portable-v2 manifest change), or a Hub needs summary data that cannot be derived from a verified package | [`../../adr/0051-discovery-project-summary-and-ontology-descriptors.md`](../../adr/0051-discovery-project-summary-and-ontology-descriptors.md) |
 | 0052 | Discovery carries a digest-addressed research lineage document | Accepted | Clone or publish paths need identities this document cannot express, or Hub moderation requires cross-owner Proposal submission semantics | [`../../adr/0052-discovery-research-lineage-document.md`](../../adr/0052-discovery-research-lineage-document.md) |
 | 0053 | Hub publish wire contract | Accepted | The control-plane publish session shape, data-plane upload URL policy, or ref precondition encoding needs a breaking wire change | [`../../adr/0053-hub-publish-wire-contract.md`](../../adr/0053-hub-publish-wire-contract.md) |
+| 0054 | GraphForge component boundaries: Core, XYG, editor, and Hub | Accepted | A component needs to own a contract assigned here to another component, or the Hub needs to store data GraphForge Core does not define | [`../../adr/0054-product-component-boundaries.md`](../../adr/0054-product-component-boundaries.md) |
 
 ### Superseded
 
