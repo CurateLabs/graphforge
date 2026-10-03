@@ -24,6 +24,7 @@ use super::fs;
 use super::hash_regular_file;
 use super::hex_digest;
 use super::install_graph_manifest_node_with_lease;
+use super::install_graph_object_file_repairing_with_lease;
 use super::install_graph_object_file_with_lease;
 use super::read_graph_object_by_digest_file_counted_in_domain;
 use super::returned_error_boundary;
@@ -656,6 +657,12 @@ fn append_graph_files_v2_inner(
                 let (digest, io) = hash_regular_file(&source)?;
                 (hex_digest(digest), metadata.len(), io)
             };
+        // Only the explicit adjacency repair action may replace a corrupt
+        // object, and only at an adjacency index path (#1738).
+        let repair_corrupt_adjacency = lease.repair_corrupt_adjacency
+            && relative
+                .to_str()
+                .is_some_and(|path| path.starts_with("indexes/adjacency/"));
         let installed = if let Some(CapturedGraphInventory::Encoded(captured)) = captured {
             let source = captured.open(relative)?;
             super::install_captured_encoded_artifact_with_lease(lease, &source, cancelled)?
@@ -670,15 +677,20 @@ fn append_graph_files_v2_inner(
             }
             super::install_captured_portable_source_with_lease(lease, &source, cancelled)?
         } else if let Some(capture) = workspace_capture {
-            let repair_corrupt_adjacency = lease.repair_corrupt_adjacency
-                && relative
-                    .to_str()
-                    .is_some_and(|path| path.starts_with("indexes/adjacency/"));
             super::install_captured_workspace_file_with_lease(
                 lease,
                 capture,
                 repair_corrupt_adjacency,
                 cancelled,
+            )?
+        } else if repair_corrupt_adjacency {
+            // A capture retains a bounded number of sources. Repair authority
+            // belongs to the path, not to whether its capture was retained.
+            install_graph_object_file_repairing_with_lease(
+                lease,
+                &source,
+                &digest,
+                expected_length,
             )?
         } else {
             install_graph_object_file_with_lease(lease, &source, &digest, expected_length)?

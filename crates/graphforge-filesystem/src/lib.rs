@@ -1027,6 +1027,12 @@ impl StableDirectory {
 
     /// Atomically move an authenticated temporary from another retained
     /// directory over this directory's exact authenticated target.
+    ///
+    /// The temporary must already be durably sealed: this renames it without
+    /// write access, so it neither flushes nor needs to open its payload for
+    /// writing. On Windows the caller must not retain its own handle to the
+    /// temporary, and a retained reader of the target that denies delete
+    /// sharing makes the replacement fail with nothing replaced.
     #[doc(hidden)]
     pub fn replace_authenticated_child_from(
         &self,

@@ -233,10 +233,12 @@ impl GraphForge {
         #[cfg(test)]
         after_text_inventory_capture();
         let topology = self.dir().topology_files()?;
+        let ordinal = self.ordinal_identities.revalidated_handle()?;
         let inspection = inspect_text_index_freshness(
             &self.dir(),
             LazyTextRequest {
                 topology: Some(&topology),
+                ordinal: ordinal.as_deref(),
                 label,
                 label_id,
                 inventory: Some(&inventory),

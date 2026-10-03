@@ -304,6 +304,25 @@ fn explicit_index_adjacency_replaces_a_corrupted_index() {
         forge.index_adjacency().unwrap();
         assert!(rows(&forge, ORDERED_ONE_HOP) > 0, "{target:?}");
         assert!(rows(&forge, REVERSE_HOP) > 0, "{target:?}");
+        drop(forge);
+
+        // The repair is the published content-addressed object, not the
+        // session's private rebuild: a fresh open hydrates CURRENT and every
+        // object it names authenticates against its address.
+        let generation = resolve_project_generation(directory.path()).unwrap();
+        for entry in generation.graph_files_inventory().unwrap().unwrap().files {
+            graphforge_storage::read_graph_object(
+                generation.container_root(),
+                &entry.content_sha256,
+                entry.byte_length,
+            )
+            .unwrap_or_else(|error| {
+                panic!("{target:?}: {} after repair: {error}", entry.relative_path)
+            });
+        }
+        let reopened = GraphForge::new(Some(&path)).unwrap();
+        assert!(rows(&reopened, ORDERED_ONE_HOP) > 0, "{target:?} reopened");
+        assert!(rows(&reopened, REVERSE_HOP) > 0, "{target:?} reopened");
     }
 }
 

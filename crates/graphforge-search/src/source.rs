@@ -10,6 +10,7 @@ use graphforge_storage::{
 };
 
 use crate::TextSearchLimits;
+use crate::node_identity::{NodeIdentityCheck, SessionOrdinalIdentity};
 
 type TextFieldsByUuid = BTreeMap<[u8; 16], BTreeMap<String, String>>;
 type ProjectedProperties = (BTreeSet<String>, TextFieldsByUuid);
@@ -88,6 +89,7 @@ where
         None,
         project_dir,
         topology,
+        None,
         label_id,
         selected_properties,
         limits,
@@ -117,10 +119,13 @@ pub(crate) fn text_source_snapshot(
 /// Project the session's explicit `topology`, or the legacy directory when the
 /// caller has none, reading node properties through the caller's admitted
 /// `inventory` when one is supplied.
+/// `ordinal` is the session's identity authority (see [`crate::node_identity`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn project_text_source_with<C>(
     inventory: Option<&AuthenticatedPropertyInventory>,
     project_dir: &Path,
     topology: Option<&graphforge_storage::TopologyFiles>,
+    ordinal: Option<&SessionOrdinalIdentity>,
     label_id: graphforge_value::EntityTypeSelection,
     selected_properties: Option<&[String]>,
     limits: TextSearchLimits,
@@ -141,6 +146,7 @@ where
         inventory,
         project_dir,
         topology,
+        ordinal,
         label_id,
         selected_properties,
         limits,
@@ -151,10 +157,12 @@ where
 /// Project `topology`, reading node properties through the caller's admitted
 /// `inventory` when one is supplied, and binding the projection to the
 /// manifest's source identity rather than to a second read of every object.
+#[allow(clippy::too_many_arguments)]
 fn project_text_source_selected<C>(
     inventory: Option<&AuthenticatedPropertyInventory>,
     project_dir: &Path,
     topology: &graphforge_storage::TopologyFiles,
+    ordinal: Option<&SessionOrdinalIdentity>,
     label_id: graphforge_value::EntityTypeSelection,
     selected_properties: Option<&[String]>,
     limits: TextSearchLimits,
@@ -187,6 +195,7 @@ where
     let eligible = select_eligible_nodes(
         project_dir,
         topology,
+        ordinal,
         label_id,
         limits,
         &mut checkpoint,
@@ -248,10 +257,11 @@ where
     })
 }
 
-#[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // one streaming callback preserves one admitted handle
 fn select_eligible_nodes<C>(
     project_dir: &Path,
     topology: &graphforge_storage::TopologyFiles,
+    ordinal: Option<&SessionOrdinalIdentity>,
     label_id: graphforge_value::EntityTypeSelection,
     limits: TextSearchLimits,
     checkpoint: &mut C,
@@ -264,13 +274,9 @@ where
     let mut eligible = BTreeSet::new();
     let mut topology_rows = 0_usize;
     let mut last_surrogate = None;
-    let mut index = graphforge_storage::uuid_membership_index_present(project_dir)
-        .then(|| graphforge_storage::UuidMembershipIndex::open(project_dir))
-        .transpose()
-        .map_err(|error| source(error.to_string()))?;
     // Pre-index legacy graphs are bounded by `topology_rows`; current durable
-    // generations authenticate UUID uniqueness through the disk index instead.
-    let mut legacy_seen = index.is_none().then(BTreeSet::new);
+    // generations authenticate every row against their identity authority.
+    let mut identity = NodeIdentityCheck::open(project_dir, ordinal)?;
     let mut failure = None;
     let admitted = graphforge_storage::visit_node_fragments_admitted_from_files(
         topology,
@@ -292,21 +298,8 @@ where
                     .column_by_name("node_id")
                     .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
                     .ok_or_else(|| source("topology node_id is not UInt64"))?;
-                let mut batch_uuids = Vec::with_capacity(batch.num_rows());
-                for row in 0..batch.num_rows() {
-                    let bytes: [u8; 16] = uuids
-                        .value(row)
-                        .try_into()
-                        .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
-                    batch_uuids.push(uuid::Uuid::from_bytes(bytes));
-                }
-                let indexed = index
-                    .as_mut()
-                    .map(|index| index.lookup_node_surrogates(&batch_uuids))
-                    .transpose()
-                    .map_err(|error| source(error.to_string()))?
-                    .map(|(values, _)| values);
-                for row in 0..batch.num_rows() {
+                let agrees = identity.resolve_batch(uuids, surrogates, &mut *checkpoint)?;
+                for (row, agrees) in agrees.into_iter().enumerate() {
                     checkpoint()?;
                     topology_rows = topology_rows.saturating_add(1);
                     if topology_rows > limits.topology_rows {
@@ -321,15 +314,11 @@ where
                         .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
                     let surrogate = surrogates.value(row);
                     if last_surrogate.is_some_and(|prior| surrogate <= prior)
-                        || indexed
-                            .as_ref()
-                            .is_some_and(|values| values[row] != Some(surrogate))
-                        || legacy_seen
-                            .as_mut()
-                            .is_some_and(|seen| !seen.insert(node_uuid))
+                        || !agrees
+                        || !identity.distinct(node_uuid)
                     {
                         return Err(source(
-                            "topology identity disagrees with authenticated UUID index",
+                            "topology identity disagrees with authenticated node identity",
                         ));
                     }
                     last_surrogate = Some(surrogate);
@@ -374,13 +363,7 @@ where
         return Err(error);
     }
     *source_bytes = admitted;
-    if index.as_ref().is_some_and(|index| {
-        topology_rows as u64 != index.count(graphforge_storage::UuidIndexKind::Node)
-    }) {
-        return Err(source(
-            "topology row count disagrees with authenticated UUID index",
-        ));
-    }
+    identity.finish(topology_rows, checkpoint)?;
     Ok(eligible)
 }
 
