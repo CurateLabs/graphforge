@@ -342,6 +342,7 @@ jobs:
           project_publication::tests::commit_lock_guard_unlocks_before_a_cloned_descriptor_closes
           project_publication::tests::optimistic_promotion_closes_staged_handles_before_directory_rename
           project_checkpoints::tests::checkpoint_read_guard_unlocks_before_a_cloned_descriptor_closes
+          workspace_research_metadata::tests::summary_reads_the_project_root_identity
 
       - name: Publication kill matrix, injected errors, and durability certification
         run: >-

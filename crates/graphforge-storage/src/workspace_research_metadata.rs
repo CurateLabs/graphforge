@@ -354,13 +354,16 @@ fn project_identity(
     project_path: &Path,
     generation_uuid: Uuid,
 ) -> Result<ResearchProjectIdentity, GfError> {
-    let file = std::fs::File::open(project_path).map_err(|_| {
+    // A directory handle: Windows cannot open a directory as a plain file.
+    // `resolve_project_generation` already refused a linked root, so the
+    // platform no-follow policy changes nothing for an accepted root.
+    let handle = graphforge_filesystem::open_directory_handle(project_path).map_err(|_| {
         project_error(
             ProjectErrorCode::UnsupportedProjectFormat,
             "project root is inaccessible",
         )
     })?;
-    let identity = graphforge_filesystem::file_identity(&file).map_err(|_| {
+    let identity = graphforge_filesystem::file_identity(handle.as_file()).map_err(|_| {
         project_error(
             ProjectErrorCode::UnsupportedProjectFormat,
             "project root identity is unavailable",
@@ -658,6 +661,20 @@ mod tests {
         let bytes = metadata.to_canonical_json().unwrap();
         let decoded = WorkspaceResearchMetadata::from_canonical_json(&bytes).unwrap();
         assert_eq!(decoded, metadata);
+    }
+
+    #[test]
+    fn summary_reads_the_project_root_identity() {
+        let root = TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let generation = crate::open_or_initialize_project(&project).unwrap();
+        let generation_uuid = generation.generation_uuid();
+        drop(generation);
+        let summary = summarize_research_project(&project).unwrap();
+        let expected = graphforge_filesystem::path_identity(&project).unwrap();
+        assert_eq!(summary.identity.volume_serial, expected.volume_serial);
+        assert_eq!(summary.identity.file_id_hex, encode_identity_hex(&expected));
+        assert_eq!(summary.identity.generation_uuid, generation_uuid);
     }
 
     fn open_admitted_project(root: &Path) -> Option<crate::ResolvedProjectGeneration> {
