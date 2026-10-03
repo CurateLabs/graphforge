@@ -1240,10 +1240,11 @@ fn finalize_temporary_object(
                 returned_error_boundary("install:before-repair-visible")
                     .map_err(std::io::Error::other)
             })
-            .map_err(|error| immutable_commit_error(std::io::Error::other(error), cas))?;
-        pending
-            .acknowledge(cas.allocation.as_ref())
-            .map_err(|error| immutable_commit_error(std::io::Error::other(error), cas))?;
+            .map_err(|failure| {
+                reconcile_uncertain_repair(failure, bucket, destination_name, &temporary_path, cas)
+            })?;
+        acknowledge_repair(pending, &temporary_path, cas)
+            .map_err(|failure| commit_failure_error(failure, cas))?;
         (temporary.identity, true)
     } else {
         let installed = crate::durable_commit::install_immutable(
@@ -1290,6 +1291,80 @@ fn finalize_temporary_object(
         sealed_bytes_hashed,
         checked_read_io_sum(sealed_io, concurrent_io)?,
     ))
+}
+
+/// Acknowledge a visible repair: record the exact replacement at the CAS
+/// address and fence both namespaces. The replacement moved the private name,
+/// so its owner is retired before the identity is recorded at the address.
+/// Acknowledgement would retire it anyway, but only after recording the
+/// address; NTFS can report a different allocation for the same identity once
+/// its name changes, which the accounting refuses while the stale private
+/// owner still holds that identity.
+fn acknowledge_repair(
+    pending: crate::durable_commit::PendingCommit,
+    temporary_path: &Path,
+    cas: &CasRoot,
+) -> Result<(), crate::durable_commit::CommitFailure> {
+    if let Some(allocation) = &cas.allocation
+        && let Err(error) = allocation.remove_file_at(temporary_path)
+    {
+        return Err(crate::durable_commit::CommitFailure {
+            visibility: crate::durable_commit::Visibility::VisibleUnacknowledged,
+            cause: crate::durable_commit::CommitCause::Io(std::io::Error::other(error)),
+            pending: Some(Box::new(pending)),
+        });
+    }
+    pending.acknowledge(cas.allocation.as_ref())
+}
+
+/// A native replacement can report an unknown outcome after it took effect.
+/// Keep the original failure, and if the exact staged replacement is the one
+/// now at the address, acknowledge it so its allocation and namespace fences
+/// are not lost. A different visible object is left untouched; the staged
+/// temporary is then retired by its own owner.
+fn reconcile_uncertain_repair(
+    mut failure: crate::durable_commit::CommitFailure,
+    bucket: &StableDirectory,
+    destination_name: &std::ffi::OsStr,
+    temporary_path: &Path,
+    cas: &CasRoot,
+) -> GfError {
+    let Some(pending) = failure.pending.take() else {
+        return commit_failure_error(failure, cas);
+    };
+    let reconciled = (|| -> Result<(), String> {
+        let visible = bucket
+            .open_child_file(destination_name)
+            .map_err(|error| format!("inspect uncertain graph object repair: {error}"))?;
+        let identity = graphforge_filesystem::file_identity(&visible)
+            .map_err(|error| format!("identify uncertain graph object repair: {error}"))?;
+        drop(visible);
+        if pending.matches_target(destination_name, identity) {
+            acknowledge_repair(*pending, temporary_path, cas).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })();
+    match reconciled {
+        Ok(()) => commit_failure_error(failure, cas),
+        Err(reconciliation) => storage(
+            "commit immutable graph object",
+            &cas.diagnostic_root,
+            format!("{failure}; reconciliation failed: {reconciliation}"),
+        ),
+    }
+}
+
+/// Report a durable commit failure as its own cause, keeping a nested
+/// storage error intact.
+fn commit_failure_error(failure: crate::durable_commit::CommitFailure, cas: &CasRoot) -> GfError {
+    match failure.cause {
+        crate::durable_commit::CommitCause::Io(error) => immutable_commit_error(error, cas),
+        crate::durable_commit::CommitCause::Replacement(error) => storage(
+            "commit immutable graph object",
+            &cas.diagnostic_root,
+            error.to_string(),
+        ),
+    }
 }
 
 fn immutable_commit_error(error: std::io::Error, cas: &CasRoot) -> GfError {
@@ -1473,5 +1548,7 @@ fn seal_graph_object(file: &File, object_path: &Path, diagnostic: &Path) -> Resu
     Ok(())
 }
 
+#[cfg(test)]
+mod repair_tests;
 #[cfg(test)]
 mod tests;
