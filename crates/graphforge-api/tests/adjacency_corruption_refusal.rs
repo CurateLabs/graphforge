@@ -138,7 +138,7 @@ fn flip_object(project: &Path, target: Target) -> String {
         .unwrap_or_else(|| panic!("no published object for {target:?}"));
     let object = graph_object_path(generation.container_root(), &entry.content_sha256).unwrap();
     // A byte in the middle is inside the payload for every object kind.
-    let at = std::fs::metadata(&object).unwrap().len() as usize / 2;
+    let at = usize::try_from(std::fs::metadata(&object).unwrap().len() / 2).unwrap();
     flip_byte_at(&object, at);
     entry.relative_path.clone()
 }
@@ -495,7 +495,7 @@ fn mutated_project_serves_its_republished_index_without_rebuilding() {
         let receipt = forge
             .execute_to_result_sink_with_evidence(
                 query,
-                &Default::default(),
+                &std::collections::HashMap::default(),
                 sink.to_str().unwrap(),
                 ResultSinkFormat::ArrowIpc,
                 &ResultSinkOptions::default(),

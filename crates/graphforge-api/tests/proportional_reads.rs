@@ -128,25 +128,25 @@ fn measure(root: &Path, nodes: usize) -> Size {
     let edges = nodes * FAN_OUT;
     // Each scan opens its own project, so neither inherits the other's admitted
     // fragments.
-    let (names, rows, node_scan_read) = scan(
+    let (node_names, rows, node_scan_read) = scan(
         &GraphForge::new(path.to_str()).unwrap(),
         "MATCH (n) RETURN n.name AS name",
         "name",
     );
     assert_eq!(rows, nodes, "every node returns its name");
     assert_eq!(
-        names,
+        node_names,
         (0..nodes).map(bulk_fixture::fixture_node_name).collect(),
         "the names are the input's"
     );
-    let (notes, rows, edge_scan_read) = scan(
+    let (edge_notes, rows, edge_scan_read) = scan(
         &GraphForge::new(path.to_str()).unwrap(),
         "MATCH ()-[r]->() RETURN r.note AS note",
         "note",
     );
     assert_eq!(rows, edges, "every edge returns its note");
     assert_eq!(
-        notes,
+        edge_notes,
         (0..edges).map(bulk_fixture::fixture_edge_note).collect(),
         "the notes are the input's"
     );

@@ -357,6 +357,10 @@ fn identity(object: &Path) -> graphforge_filesystem::FileIdentity {
 
 /// Write one byte through the shared inode, keeping its length and mtime;
 /// returns the byte replaced.
+#[allow(
+    clippy::permissions_set_readonly_false,
+    reason = "the content-store object is made writable for one byte and its permissions restored"
+)]
 fn write_byte(object: &Path, offset: u64, replacement: impl FnOnce(u8) -> u8) -> u8 {
     let before = std::fs::metadata(object).unwrap();
     let inode = identity(object);
@@ -394,7 +398,10 @@ fn inert_swap(relative: &str, bytes: &[u8]) -> (u64, fn(u8) -> u8) {
     fn other_hex_digit(byte: u8) -> u8 {
         if byte == b'0' { b'1' } else { b'0' }
     }
-    if !relative.ends_with(".json") {
+    if Path::new(relative)
+        .extension()
+        .is_none_or(|extension| extension != "json")
+    {
         return ((bytes.len() / 2) as u64, |byte| byte ^ 0xff);
     }
     let digest = bytes
