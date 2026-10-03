@@ -12,8 +12,10 @@ use crate::hub_http::{
 };
 use graphforge_api::{
     BranchSource, CreateResearchBranchRequest, ExecuteResearchBranchRequest, ForkResearchRequest,
-    ResearchReference, WorkspaceResearchMetadata,
+    OperationId, ResearchReference, UpdateResearchMetadataRequest, WorkspaceResearchMetadata,
+    WriteContext,
 };
+use graphforge_discovery::ProjectSummary;
 use graphforge_hub_publish::{ReferenceHub, ReferenceHubConfig};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -941,6 +943,44 @@ fn tree_contains(root: &Path, needle: &[u8]) -> Vec<PathBuf> {
         }
     }
     found
+}
+
+#[test]
+fn published_research_repository_summary_carries_project_metadata() {
+    let root = tempfile::tempdir().unwrap();
+    let mut graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    graph.execute("CREATE (:Item {score:0})").unwrap();
+    let mut metadata = WorkspaceResearchMetadata::empty();
+    metadata.title = Some("Claims".into());
+    metadata.license = Some("CC0-1.0".into());
+    graph
+        .update_research_metadata(UpdateResearchMetadataRequest {
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            metadata,
+        })
+        .unwrap();
+    let (branch, _) = create_branch(&mut graph, "main", current());
+    edit(&mut graph, branch, 1);
+    let hub = LoopbackHub::start();
+    publish_ok(&hub, &graph, &on_ref("curate/claims", "main"));
+
+    let (manifest, _) = served_lineage(&hub, "curate/claims");
+    let object = manifest.summary_object().unwrap();
+    let bytes = hub.get(&object.locations[0]).body;
+    assert_eq!(digest_bytes(&bytes), object.digest.0);
+    let summary = ProjectSummary::from_json(&bytes, DiscoveryLimits::default()).unwrap();
+    manifest.bind_summary(&summary).unwrap();
+    // The summary describes the Project, not only its graph data.
+    assert_eq!(summary.metadata.title.as_deref(), Some("Claims"));
+    assert_eq!(summary.metadata.license.as_deref(), Some("CC0-1.0"));
+    assert_eq!(summary.facts.components.get("settings"), Some(&2));
+    // Research travels in the Version packages; the repository's lineage, not
+    // the Project package, says it has research.
+    assert!(!summary.facts.research_present);
+    assert!(manifest.lineage.is_some());
 }
 
 #[test]
