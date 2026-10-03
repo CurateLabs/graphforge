@@ -1123,6 +1123,28 @@ fn import_materialized(
     admission.revalidate_identity().map_err(|error| {
         outcome::with_io_context(storage(&error), "revalidate import target", target)
     })?;
+    // An owned retry follows this transaction's own interrupted attempt. Its
+    // journal is classified against CURRENT first, exactly as a project open
+    // would, so the attempt either replays as published or retries cleanly.
+    if owned_retry
+        && !import_target_is_empty(admission.root()).map_err(|error| {
+            outcome::with_io_context(
+                storage(&error),
+                "inspect import retry target",
+                admission.root(),
+            )
+        })?
+    {
+        crate::project_recovery::recover_project_transactions_admitted(admission.root()).map_err(
+            |error| {
+                outcome::with_io_context(
+                    storage(&error),
+                    "recover interrupted import",
+                    admission.root(),
+                )
+            },
+        )?;
+    }
     let replay = crate::published_project_transaction(admission.root(), transaction_uuid)
         .map_err(|error| {
             outcome::with_io_context(storage(&error), "inspect import replay", admission.root())
@@ -1146,17 +1168,33 @@ fn import_materialized(
                 admission.root(),
             )
         })?;
-        if generation.is_none() {
+        if generation.is_some() {
+            Some(
+                crate::resolve_project_generation(admission.root()).map_err(|error| {
+                    outcome::with_io_context(
+                        storage(&error),
+                        "resolve import retry",
+                        admission.root(),
+                    )
+                })?,
+            )
+        } else if import_target_is_empty(admission.root()).map_err(|error| {
+            outcome::with_io_context(
+                storage(&error),
+                "inspect import retry target",
+                admission.root(),
+            )
+        })? {
+            // The interrupted attempt stopped before the target held a
+            // project (for example right after claiming its staging), so the
+            // retry initializes it like a first attempt.
+            None
+        } else {
             return Err(PortableV2Error::new(
                 PortableV2ErrorCode::Io,
                 "owned retry target is not pristine",
             ));
         }
-        Some(
-            crate::resolve_project_generation(admission.root()).map_err(|error| {
-                outcome::with_io_context(storage(&error), "resolve import retry", admission.root())
-            })?,
-        )
     } else {
         prepare_import_target(admission.root()).map_err(|error| {
             outcome::with_io_context(storage(&error), "prepare import target", admission.root())
@@ -1332,6 +1370,13 @@ fn import_materialized(
         materialized_cleanup: PortableV2ImportCleanupReceipt::default(),
         transient_peak_allocated_bytes: 0,
     })
+}
+
+fn import_target_is_empty(target: &Path) -> Result<bool, GfError> {
+    Ok(fs::read_dir(target)
+        .map_err(|error| GfError::Storage(format!("failed to inspect import target: {error}")))?
+        .next()
+        .is_none())
 }
 
 const IMPORT_IDENTITY_BATCH_ROWS: usize = 8192;
@@ -1902,6 +1947,7 @@ fn parse_digest(value: &str) -> Result<[u8; 32], PortableV2Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod crash_into_fresh_target;
     mod returned_errors;
 
     #[test]

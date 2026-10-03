@@ -1688,6 +1688,7 @@ pub fn run_process() {
     let json = cli.json;
     let mut output = io::stdout().lock();
     hub_publish::allow_device_flow();
+    hub_clone::attach_to_process();
     match run(cli, &mut output) {
         Ok(exit_code) if exit_code != 0 => {
             let _ = output.flush();

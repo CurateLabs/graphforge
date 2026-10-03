@@ -83,6 +83,10 @@ pub struct DiscoveryResearchVersionRequest<'a> {
     pub mode: PortableV2Mode,
     /// Optional cooperative cancellation signal.
     pub cancelled: Option<&'a AtomicBool>,
+    /// Directory in which native research validation materializes the
+    /// package; `None` uses the system temporary directory. Pass a directory
+    /// on the import destination's filesystem.
+    pub scratch: Option<&'a Path>,
 }
 
 /// Validate discovery documents, bind lineage, and verify the Version package.
@@ -168,6 +172,7 @@ fn verify_selected_research_version(
     };
     let report = graphforge_storage::validate_research_package(
         request.package,
+        request.scratch,
         request.portable_limits,
         request.cancelled,
         &mut validator,

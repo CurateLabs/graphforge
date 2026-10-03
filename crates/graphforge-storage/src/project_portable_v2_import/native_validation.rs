@@ -18,13 +18,22 @@ pub type NativeResearchValidator<'a> = dyn FnMut(
     + 'a;
 
 /// Verify native historical content without admitting or mutating any destination.
+///
+/// The package is materialized in a private directory created inside
+/// `scratch`, or in the system temporary directory when `scratch` is `None`.
+/// A caller that knows where the package will be imported passes a directory
+/// on that filesystem, so verification needs no space anywhere else.
 pub fn validate_research_package(
     source: &Path,
+    scratch: Option<&Path>,
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
     validator: &mut NativeResearchValidator<'_>,
 ) -> Result<graphforge_core::portable::PortableV2Report, PortableV2Error> {
-    let owner = tempfile::tempdir().map_err(|_| invalid())?;
+    let owner = match scratch {
+        Some(directory) => private_directory_in(directory)?,
+        None => private_directory_in(&std::env::temp_dir())?,
+    };
     let stage = owner.path().join("verified");
     let materialized = crate::project_portable_v2::materialize_verified_portable_v2_observed(
         source,
@@ -59,7 +68,10 @@ pub(super) fn validate(
     validator: Option<&mut NativeResearchValidator<'_>>,
 ) -> Result<(), PortableV2Error> {
     let validator = validator.ok_or_else(invalid)?;
-    let source = tempfile::tempdir().map_err(|_| invalid())?;
+    // Historical views live beside the stage, on the filesystem the import
+    // already admitted, never in the system temporary directory.
+    let scratch = stage.parent().unwrap_or_else(|| Path::new("."));
+    let source = private_directory_in(scratch)?;
     crate::open_or_initialize_ephemeral_project(source.path()).map_err(|_| invalid())?;
     let lease = crate::begin_graph_object_publication(source.path()).map_err(|_| invalid())?;
     crate::project_portable_v2::research::install_captured_with_lease(
@@ -67,7 +79,7 @@ pub(super) fn validate(
     )?;
     for version in registry.versions.values() {
         check_cancel(cancelled)?;
-        let target = tempfile::tempdir().map_err(|_| invalid())?;
+        let target = private_directory_in(scratch)?;
         let generation = crate::research_versions::materialize_prepared_research_version(
             source.path(),
             version,
@@ -77,6 +89,19 @@ pub(super) fn validate(
         validator(&generation, version, registry).map_err(|_| invalid())?;
     }
     check_cancel(cancelled)
+}
+
+fn private_directory_in(parent: &Path) -> Result<tempfile::TempDir, PortableV2Error> {
+    tempfile::Builder::new()
+        .prefix(".graphforge-research-validation-")
+        .tempdir_in(parent)
+        .map_err(|error| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "cannot create research validation scratch",
+            )
+            .with_cause(error.kind().to_string())
+        })
 }
 
 fn invalid() -> PortableV2Error {

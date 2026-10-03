@@ -870,3 +870,115 @@ fn unknown_required_manifest_research_capability_fails_before_any_object_read() 
     );
     assert!(!destination.exists(), "no project was created");
 }
+
+const RESEARCH_HELPER: &str = "hub_clone::research_clone_tests::subprocess_research_clone_helper";
+
+/// Clone the research fixture named by the environment; a no-op otherwise.
+#[test]
+fn subprocess_research_clone_helper() {
+    let Ok(fixture) = std::env::var("GRAPHFORGE_RESEARCH_CLONE_FIXTURE") else {
+        return;
+    };
+    let fixture = PathBuf::from(fixture);
+    let index: BTreeMap<String, String> =
+        serde_json::from_slice(&std::fs::read(fixture.join("index.json")).unwrap()).unwrap();
+    let hub = Hub {
+        documents: index
+            .into_iter()
+            .map(|(url, file)| (url, std::fs::read(fixture.join(file)).unwrap()))
+            .collect(),
+        requested: Mutex::new(Vec::new()),
+    };
+    let destination =
+        PathBuf::from(std::env::var("GRAPHFORGE_RESEARCH_CLONE_DESTINATION").unwrap());
+    match clone_into(&hub, &destination, Some("main"), None) {
+        Ok(result) => println!("CLONE_OK {}", result["generation_uuid"]),
+        Err(error) => println!("CLONE_ERROR {error}"),
+    }
+}
+
+#[test]
+fn research_clone_writes_no_file_to_the_temporary_directory() {
+    let published = publish_history();
+    let lineage = published
+        .fork
+        .build_research_lineage_for_discovery(
+            &lineage_request(&published),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let hub = serve(&published, &lineage);
+    let fixture = tempfile::tempdir().unwrap();
+    let mut index = BTreeMap::new();
+    for (number, (url, bytes)) in hub.documents.iter().enumerate() {
+        let file = format!("document-{number}");
+        std::fs::write(fixture.path().join(&file), bytes).unwrap();
+        index.insert(url.clone(), file);
+    }
+    std::fs::write(
+        fixture.path().join("index.json"),
+        serde_json::to_vec(&index).unwrap(),
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("head");
+    // The child's temporary directory is watched for its whole run. A tiny
+    // one can hold empty directories (every facade view creates one for its
+    // lazy adjacency cache) but no package bytes, so no regular file may
+    // ever appear in it: research validation stages beside the destination.
+    let temporary = root.path().join("temporary");
+    std::fs::create_dir(&temporary).unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            RESEARCH_HELPER,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("GRAPHFORGE_RESEARCH_CLONE_FIXTURE", fixture.path())
+        .env("GRAPHFORGE_RESEARCH_CLONE_DESTINATION", &destination)
+        .env("TMPDIR", &temporary)
+        .env("TMP", &temporary)
+        .env("TEMP", &temporary)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut files = BTreeSet::new();
+    let status = loop {
+        collect_files(&temporary, &mut files);
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    };
+    let mut stdout = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut stdout).unwrap();
+    assert!(status.success(), "{stdout}");
+    assert!(
+        files.is_empty(),
+        "files written to the temporary directory: {files:?}"
+    );
+    assert!(stdout.contains("CLONE_OK"), "{stdout}");
+    let cloned = GraphForge::new(destination.to_str()).unwrap();
+    assert!(
+        stdout.contains(&generation(&cloned).to_string()),
+        "{stdout}"
+    );
+    assert_eq!(score(&cloned), 1);
+}
+
+/// Record every regular file under `directory`; entries may vanish mid-walk.
+fn collect_files(directory: &Path, files: &mut BTreeSet<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => collect_files(&entry.path(), files),
+            Ok(_) => {
+                files.insert(entry.path());
+            }
+            Err(_) => {}
+        }
+    }
+}

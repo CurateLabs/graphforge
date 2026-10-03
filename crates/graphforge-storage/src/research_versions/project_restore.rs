@@ -109,12 +109,14 @@ pub fn materialize_research_project(
 
 /// Materialize authenticated prepared CAS content without requiring source history.
 /// The caller must validate the immutable Version identity before using this seam.
+/// The transient graph workspace is created beside `target`, on its filesystem.
 pub fn materialize_prepared_research_version(
     root: &Path,
     version: &ResearchVersionRecord,
     target: &Path,
 ) -> Result<ResolvedProjectGeneration, GfError> {
-    materialize(root, version, target, true)
+    let scratch = target.parent().unwrap_or_else(|| Path::new("."));
+    materialize_in(root, version, target, true, scratch)
 }
 
 pub(super) fn materialize(
@@ -122,6 +124,17 @@ pub(super) fn materialize(
     version: &ResearchVersionRecord,
     target: &Path,
     prepared: bool,
+) -> Result<ResolvedProjectGeneration, GfError> {
+    materialize_in(root, version, target, prepared, &std::env::temp_dir())
+}
+
+/// [`materialize`] with the transient graph workspace created in `scratch`.
+fn materialize_in(
+    root: &Path,
+    version: &ResearchVersionRecord,
+    target: &Path,
+    prepared: bool,
+    scratch: &Path,
 ) -> Result<ResolvedProjectGeneration, GfError> {
     let source_pin = crate::resolve_project_generation(root)?;
     validate_private_target(root, target)?;
@@ -132,8 +145,8 @@ pub(super) fn materialize(
     };
     crate::open_or_initialize_ephemeral_project(target)?;
     let lease = crate::begin_graph_object_publication(target)?;
-    let graph =
-        tempfile::tempdir().map_err(|_| invalid("cannot allocate historical graph workspace"))?;
+    let graph = tempfile::tempdir_in(scratch)
+        .map_err(|_| invalid("cannot allocate historical graph workspace"))?;
     let mut needs_graph_tree = false;
     for p in &snapshots {
         if p.capability_id == "graph" && p.record_family_id == "files" {

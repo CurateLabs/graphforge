@@ -48,7 +48,6 @@ pub use source_artifact::{
 };
 
 use std::collections::HashSet;
-use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 

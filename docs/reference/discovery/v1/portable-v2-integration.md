@@ -113,8 +113,8 @@ without using the Project package object:
    object to a `application/vnd.graphforge.project` entry other than the Project
    package object.
 3. Download that object under the same rules as the Project package (it counts
-   toward `max_cumulative_object_bytes`, and `gf clone` applies its Project
-   bundle bound), and require the bytes to hash to the object's `digest`.
+   toward `max_cumulative_object_bytes`, and `gf clone` applies its per-object
+   bound), and require the bytes to hash to the object's `digest`.
 4. Pass the complete local package to the portable-v2 verifier. Require the
    semantic `package_digest` to equal the Version's `package.package_digest`.
 5. Require the package to carry research interchange whose registry holds the

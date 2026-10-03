@@ -293,7 +293,7 @@ jobs:
     runs-on: blacksmith-4vcpu-windows-2025
     needs: changes
     if: needs.changes.outputs.platform == 'true'
-    timeout-minutes: 30
+    timeout-minutes: 45
     defaults:
       run:
         shell: bash
@@ -343,13 +343,23 @@ jobs:
           project_publication::tests::commit_lock_guard_unlocks_before_a_cloned_descriptor_closes
           project_publication::tests::optimistic_promotion_closes_staged_handles_before_directory_rename
           project_checkpoints::tests::checkpoint_read_guard_unlocks_before_a_cloned_descriptor_closes
+          workspace_research_metadata::tests::summary_reads_the_project_root_identity
 
       - name: Publication kill matrix, injected errors, and durability certification
         run: >-
           cargo test -p graphforge-storage --features test-failpoints --lib --no-fail-fast --
           project_recovery::tests::subprocess_kill_matrix_never_exposes_a_partial_generation
           project_recovery::tests::injected_operation_errors_report_exact_commit_state
+          project_portable_v2_import::tests::crash_
           project_certification
+
+      # Clone downloads, resumes, and imports into a staged target that one
+      # no-replace rename installs; Windows refuses that rename while any
+      # handle in the imported project stays open.
+      - name: Hub clone and portable import
+        run: >-
+          cargo test -p graphforge-cli --lib --no-fail-fast --
+          hub_clone::
 
       # #1363: an open facade retains a directory handle on
       # generations/<uuid>/graph plus its generation leases. Windows is the

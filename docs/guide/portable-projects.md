@@ -156,6 +156,65 @@ that removal or its directory synchronization succeeded. Re-exporting the same p
 selection is deterministic; host paths, runtime catalog IDs, session state, and
 machine configuration cannot enter the semantic package identity.
 
+## Clone from a Hub
+
+`gf clone OWNER/REPOSITORY [DESTINATION]` downloads a published Project
+package, verifies it, and imports it as a new project (see the
+[CLI reference](https://github.com/CurateLabs/graphforge/blob/main/packages/cli/README.md)
+for identity forms and transport rules). Everything in progress lives in a
+private staging directory beside the destination, `.DESTINATION.graphforge-clone`:
+the partial download, its resume checkpoint, and the import target. The project
+appears at `DESTINATION` only once it is complete and reopened, through one
+atomic rename that never replaces an existing path.
+
+### Large projects
+
+**Disk space.** Clone needs free space on the destination's filesystem, not in
+the system temporary directory: the package itself plus about 2.25 times the
+package for the import's transient peak, roughly 3.25 times the package in all
+(less whatever a previous run already downloaded or staged for the import; a
+rerun after the import committed needs only about one more package length). Clone checks this, and that
+the filesystem is admissible (`ext4`, `xfs`, `btrfs`, APFS, or NTFS), before it
+downloads anything. When the import finishes, the staging directory and the
+package are removed and only the project remains.
+
+**Interruptions and resume.** Rerun the same command. A network stall is
+detected when no bytes arrive for a minute; each phase of a request has its own
+bound, so a slow but steady transfer is never cut off however long it takes.
+Clone retries a failed connection, a cut body, or a `408`, `429`, or `5xx`
+response in the same invocation, up to five attempts without progress, waiting
+1, 2, 4, then 8 seconds; a retry asks only for the missing bytes with `Range`
+and the strong `ETag` the partial bytes came from. A server that ignores `Range`
+sends the whole object again, which clone accepts and verifies. After the retry
+bound, or a kill, power loss, or Ctrl-C at any point, a rerun of the same command
+resumes the download, retries or replays the import, or finishes installing the
+destination. The first Ctrl-C asks the running download, verification, or
+import to stop cleanly; a second one exits immediately. Both are resumable.
+Progress is printed to standard error.
+
+**Limits.**
+
+| Limit | Value |
+|---|---|
+| One downloaded object | 1 TiB, the same bound `gf publish` admits for a repository |
+| One file inside the package | 8 GiB (the USTAR entry size field of a `.gfpb` bundle) |
+| Package payload | 1 TiB |
+| Files in a package | 1,000,000 entries, but the 4 MiB tag manifest bounds a package to roughly 20,000 files at typical path lengths |
+
+**Errors.** Codes are stable; the message adds detail.
+
+| Code | Meaning | What to do |
+|---|---|---|
+| `GF_UNSUPPORTED_FILESYSTEM` | The destination filesystem cannot hold a durable project | Clone onto a supported local volume |
+| `hub.insufficient_space` | Not enough free space beside the destination | Free space or choose another destination |
+| `hub.interrupted` | The download stopped or was cancelled | Rerun the same command |
+| `hub.network` | The Hub could not be reached or answered with an error status (named in the message) | Rerun later |
+| `hub.integrity` | The downloaded bytes do not match their digest; the partial download was removed | Rerun to download again |
+| `hub.package.*` | The package failed verification or import, with the import's own code (for example `hub.package.io` or `hub.package.cancelled`) | `hub.package.io` and `hub.package.cancelled`: rerun; others: the package is unusable |
+| `hub.destination_conflict` | The destination already exists, or appeared while the clone ran. Clone never replaces it; it removes its own staging for that destination, including any partial download | Choose another destination, or remove the existing one and rerun |
+| `hub.concurrent_clone` | Another clone to the same destination is running | Wait for it |
+| `hub.limit_exceeded` | An object exceeds the 1 TiB bound | None; the repository cannot be cloned |
+
 ## Carry TCK results as evidence
 
 TCK results describe how an engine behaved; they do not define an ontology or
