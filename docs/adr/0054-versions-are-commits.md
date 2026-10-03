@@ -4,7 +4,7 @@ adr: "0054"
 status: "Proposed"
 date: "2026-10-03"
 superseded_by: null
-revisit_when: "A head-moving operation needs more than one merge parent, or a host needs identity it cannot express as free-form author and committer signatures"
+revisit_when: "A head-moving operation needs more than one merge parent, a host needs identity that free-form signatures cannot express, or revision 6 Projects no longer need to be read"
 ---
 
 # ADR 0054: Research Versions are commits
@@ -103,14 +103,38 @@ client-side at export and publish (#1771, slice 5). Permission to see or change
 anything belongs to the Hub or other host and never appears in project,
 package, lineage or summary formats.
 
-### Format
+### Format and compatibility
 
 Research capability and registry revision 7 (`graphforge-research-registry/7`,
-producer `research/7`). As with revisions 2–6 there is no migration and no
-reader compatibility: a revision 6 registry or package is refused with
-`GF_UNSUPPORTED_CAPABILITY_VERSION`. Identities already committed by revision 6
-remain valid identities: the same record digests to the same value under
-revision 7, and a revision 7 registry may hold Versions without parents.
+producer `research/7`). Revision 6 Projects and packages keep working; revisions
+before 6 are refused with `GF_UNSUPPORTED_CAPABILITY_VERSION`, as before.
+
+Compatibility needs no translation because every field revision 7 adds is
+omitted when empty: revision 6 registry bytes are valid revision 7 bytes and
+decode, validate and digest identically.
+
+- **Reading.** A revision 6 registry (`registry/6`) is read as-is. Its Versions
+  are parentless legacy roots with no author, committer or provenance; its
+  ancestry ledger is empty; their identity digests are unchanged. A registry
+  labelled revision 6 that holds any revision 7 commit data is refused.
+- **Upgrade on the first research write.** Publishers that do not write
+  research (graph writes, checkpoints) carry revision 6 unchanged. The first
+  research write (any registry operation, or research decisions) relabels the
+  research capability and its participants to revision 7 in that same
+  publication, so the upgrade is atomic and crash-safe: a crash leaves CURRENT at
+  either the revision 6 or the revision 7 generation. No record's bytes are
+  rewritten. The new Version's first parent is the prior head even when that
+  head is a revision 6 Version. Once a Project is revision 7, no publication may
+  label it revision 6 again.
+- **Packages.** Revision 6 research packages (an older client's export) are
+  admitted and import at revision 7 by the same relabelling; their imported
+  Versions and archive stay legacy roots and keep `research_capability_version`
+  6 in the archive. Every export is written at revision 7, including a
+  whole-Project export of a Project imported by the revision 6 code.
+- **Readers of research participants.** Canonical decisions written at
+  revision 6 read unchanged. Checkpoint summary diffs span the upgrade;
+  record-level checkpoint diff still has no research registry adapter at any
+  revision.
 
 Author and committer are optional on requests in this slice, so existing callers
 keep working and record none. Branch `creator_uuid` and Proposal and review
@@ -123,10 +147,10 @@ new Version credit uses `author` and `committer`.
   them, so a publisher could rewrite history without changing any identity.
 - **Authenticated identities.** Rejected: authentication is the host's job, and
   committing account identifiers would put access control into history.
-- **Reader compatibility for revision 6.** Rejected for the same reasons as the
-  earlier revisions: it would need dual acceptance in every reader of the
-  research capability (registry, canonical decisions, checkpoint diff, portable
-  packages) for a format with no deployed Hub and no real packages.
+- **Migrating revision 6 records.** Rejected: giving old Versions parents or
+  signatures would change their identities. They stay parentless roots.
+- **A separate upgrade command.** Rejected: the first research write already
+  publishes the whole registry atomically, so the upgrade needs no extra step.
 
 ## Consequences
 
@@ -134,5 +158,5 @@ new Version credit uses `author` and `committer`.
   which is what lets publish and clone fast-forward (#1771, slice 2).
 - Every new Version is larger by its parent list and signatures; the ledger adds
   at most one entry per Version identity.
-- Local research Projects written before revision 7 must be recreated; there
-  is no migration.
+- Every reader of the research capability accepts two revisions until
+  revision 6 support is withdrawn by a later decision.

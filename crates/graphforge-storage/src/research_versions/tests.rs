@@ -715,6 +715,7 @@ mod commits;
 mod project_content;
 mod proposals;
 mod retention;
+mod revision_six;
 mod upstream;
 
 #[test]

@@ -39,6 +39,11 @@ pub use upstream::{
 };
 mod ancestry;
 pub use ancestry::{MAX_PARENTS, ResearchVersionProvenance};
+mod legacy;
+pub use legacy::{
+    RESEARCH_LEGACY_VERSION, current_registry_schema, research_revision_readable,
+    upgrade_research_request,
+};
 mod signature;
 pub use signature::{MAX_SIGNATURE_EMAIL_BYTES, MAX_SIGNATURE_NAME_BYTES, ResearchSignature};
 mod branches;
@@ -660,18 +665,28 @@ impl ResearchRegistry {
 }
 
 /// Read and validate CURRENT's registry without modifying the Project.
+/// Revision 6 registries are read as-is; their Versions are parentless roots.
 pub fn read_research_registry(
     generation: &ResolvedProjectGeneration,
 ) -> Result<ResearchRegistry, GfError> {
+    read_registry_revision(generation).map(|(registry, _)| registry)
+}
+
+/// The registry and its research revision; a Project without research reads as
+/// an empty registry of the current revision.
+fn read_registry_revision(
+    generation: &ResolvedProjectGeneration,
+) -> Result<(ResearchRegistry, u32), GfError> {
     let Some(capability) = generation.capability(RESEARCH_CAPABILITY)? else {
-        return Ok(ResearchRegistry::default());
+        return Ok((ResearchRegistry::default(), RESEARCH_VERSION));
     };
-    if capability.capability_version != RESEARCH_VERSION {
+    let revision = capability.capability_version;
+    let Some(schema) = legacy::registry_schema(revision) else {
         return Err(error(
             ProjectErrorCode::UnsupportedCapabilityVersion,
             "unsupported research capability",
         ));
-    }
+    };
     let path = generation.participant_path(RESEARCH_CAPABILITY, RESEARCH_REGISTRY)?;
     if std::fs::metadata(path)
         .map_err(|_| invalid("research registry is unreadable"))?
@@ -683,10 +698,10 @@ pub fn read_research_registry(
     let snapshot = generation
         .participant_snapshot(RESEARCH_CAPABILITY, RESEARCH_REGISTRY)?
         .ok_or_else(|| invalid("research capability has no registry participant"))?;
-    if snapshot.record_version != RESEARCH_VERSION
+    if snapshot.record_version != revision
         || snapshot.row_count != 1
         || snapshot.encoding != "json"
-        || snapshot.schema_fingerprint != <[u8; 32]>::from(Sha256::digest(REGISTRY_SCHEMA))
+        || snapshot.schema_fingerprint != schema
         || snapshot.bytes.len() > MAX_REGISTRY_BYTES
     {
         return Err(invalid(
@@ -696,10 +711,13 @@ pub fn read_research_registry(
     let registry: ResearchRegistry = serde_json::from_slice(&snapshot.bytes)
         .map_err(|_| invalid("malformed research registry"))?;
     registry.validate()?;
+    if revision == RESEARCH_LEGACY_VERSION {
+        registry.validate_legacy()?;
+    }
     if json(&registry)? != snapshot.bytes {
         return Err(invalid("research registry is not canonical"));
     }
-    Ok(registry)
+    Ok((registry, revision))
 }
 
 fn commitments(
@@ -1083,6 +1101,9 @@ fn publication_request(
             capability_version: RESEARCH_VERSION,
         });
     }
+    // Every research write publishes the current revision; a revision 6
+    // Project is upgraded here, atomically with this operation.
+    upgrade_research_request(&mut capabilities, &mut participants);
     Ok(ProjectGenerationRequest {
         transaction_uuid: request.operation_uuid,
         generation_uuid,
@@ -1347,6 +1368,32 @@ pub(crate) fn source_generation_roots(
         .collect())
 }
 
+/// The candidate registry's readable revision. Revision 6 is only carried,
+/// never written anew or published over revision 7.
+fn registry_publication_revision(
+    candidate: &crate::StagedParticipant,
+    declares_research: bool,
+    parent_revision: u32,
+) -> Result<u32, GfError> {
+    let revision = candidate.capability_version;
+    if !declares_research
+        || candidate.record_version != revision
+        || candidate.row_count != 1
+        || candidate.encoding != "json"
+        || candidate.byte_length > MAX_REGISTRY_BYTES as u64
+        || legacy::registry_schema(revision)
+            .is_none_or(|schema| candidate.schema_fingerprint != hex(&schema))
+    {
+        return Err(invalid("unsupported research registry publication"));
+    }
+    if revision == RESEARCH_LEGACY_VERSION && parent_revision != RESEARCH_LEGACY_VERSION {
+        return Err(invalid(
+            "publication cannot write a revision 6 research registry",
+        ));
+    }
+    Ok(revision)
+}
+
 /// Every publisher preserves permanent identity and receipt history, including
 /// publishers which do not themselves implement research lifecycle operations.
 pub(crate) fn validate_publication_transition(
@@ -1357,7 +1404,7 @@ pub(crate) fn validate_publication_transition(
     candidate_generation: Uuid,
     origin_witness: Option<&RegisterResearchVersion>,
 ) -> Result<(), GfError> {
-    let before = read_research_registry(parent)?;
+    let (before, parent_revision) = read_registry_revision(parent)?;
     let candidate = participants.iter().find(|p| {
         p.capability_id == RESEARCH_CAPABILITY && p.record_family_id == RESEARCH_REGISTRY
     });
@@ -1369,21 +1416,15 @@ pub(crate) fn validate_publication_transition(
         }
         return Ok(());
     };
-    if !declares_research
-        || candidate.capability_version != RESEARCH_VERSION
-        || candidate.record_version != RESEARCH_VERSION
-        || candidate.row_count != 1
-        || candidate.encoding != "json"
-        || candidate.byte_length > MAX_REGISTRY_BYTES as u64
-        || candidate.schema_fingerprint != hex(&Sha256::digest(REGISTRY_SCHEMA).into())
-    {
-        return Err(invalid("unsupported research registry publication"));
-    }
+    let revision = registry_publication_revision(candidate, declares_research, parent_revision)?;
     let bytes = std::fs::read(directory.join(&candidate.relative_path))
         .map_err(|_| invalid("research registry publication is unreadable"))?;
     let after: ResearchRegistry = serde_json::from_slice(&bytes)
         .map_err(|_| invalid("malformed research registry publication"))?;
     after.validate()?;
+    if revision == RESEARCH_LEGACY_VERSION {
+        after.validate_legacy()?;
+    }
     proposals::preserve(&before, &after)?;
     interchange::preserve(&before, &after)?;
     if json(&after)? != bytes {

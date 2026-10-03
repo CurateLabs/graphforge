@@ -677,6 +677,11 @@ pub(crate) fn supported_capabilities() -> Vec<ProjectCapability> {
             1
         },
     })
+    // Revision 6 research packages (older clients' exports) still import.
+    .chain(std::iter::once(ProjectCapability {
+        capability_id: "research".into(),
+        capability_version: graphforge_storage::research_versions::RESEARCH_LEGACY_VERSION,
+    }))
     .collect()
 }
 

@@ -166,5 +166,12 @@ inherited from the source record.
 The registry gains a permanent `ancestry` ledger beside `identities`: every
 Version recorded with parents keeps its parent list after its payload is
 released, every publisher must carry the ledger unchanged, and it is bounded by
-`MAX_RECEIPTS`. Revision 6 registries are refused, consistent with the pre-v1
-policy above; their identities stay valid identities under revision 7.
+`MAX_RECEIPTS`.
+
+Revision 6 is the one exception to the pre-v1 refusal policy above. A revision
+6 registry is read as-is: its Versions are parentless roots, its identities
+unchanged, its ancestry empty. Publishers that do not write research carry it
+unchanged; the first research write relabels the research capability and
+participants to revision 7 inside that same atomic publication, without
+rewriting any record. Revision 6 packages import at revision 7, and exports are
+always revision 7. Revisions before 6 remain refused (ADR 0054).

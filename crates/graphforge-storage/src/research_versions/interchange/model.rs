@@ -85,7 +85,7 @@ impl ResearchInterchangeManifest {
     /// Validate identity, bounds, selected closure, and provenance before admission.
     pub fn validate(&self) -> Result<(), GfError> {
         if self.contract_version != 1
-            || self.research_capability_version != RESEARCH_VERSION
+            || !super::super::research_revision_readable(self.research_capability_version)
             || self.producer
                 != concat!(
                     "graphforge-storage/",
@@ -103,6 +103,18 @@ impl ResearchInterchangeManifest {
         {
             return Err(invalid(
                 "unsupported or oversized research interchange manifest",
+            ));
+        }
+        // A revision 6 export (an older client's) holds only parentless legacy roots.
+        if self.research_capability_version == super::super::RESEARCH_LEGACY_VERSION
+            && (!self.ancestry.is_empty()
+                || !self
+                    .versions
+                    .values()
+                    .all(super::super::legacy::legacy_record))
+        {
+            return Err(invalid(
+                "research revision 6 interchange carries revision 7 commit data",
             ));
         }
         if self.version_projects.keys().ne(self.versions.keys())
