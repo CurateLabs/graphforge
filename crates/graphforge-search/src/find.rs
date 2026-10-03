@@ -17,6 +17,10 @@ use crate::vector_lifecycle::{VectorIndexRequest, VectorLifecycleLimits, search_
 pub struct FindSearchRequest<'a> {
     /// Explicit topology membership; absent only for standalone legacy callers.
     pub topology: Option<&'a graphforge_storage::TopologyFiles>,
+    /// The facade's generation-pinned ordinal identity authority. Membership
+    /// projection checks node rows against it, reading only the identity blocks
+    /// it needs; without one it opens the whole UUID-membership index.
+    pub ordinal: Option<&'a crate::SessionOrdinalIdentity>,
     /// Normalized graph label.
     pub label: &'a str,
     /// Local catalog identity used only for graph membership projection.
@@ -178,6 +182,7 @@ where
                 project_dir,
                 LazyTextRequest {
                     topology: request.topology,
+                    ordinal: request.ordinal,
                     label: request.label,
                     label_id: request.label_id,
                     inventory: request.inventory,
@@ -192,6 +197,7 @@ where
                 project_dir,
                 VectorIndexRequest {
                     topology: request.topology,
+                    ordinal: request.ordinal,
                     label: request.label,
                     label_id: request.label_id,
                     space,
@@ -234,6 +240,7 @@ where
         project_dir,
         LazyTextRequest {
             topology: request.topology,
+            ordinal: request.ordinal,
             label: request.label,
             label_id: request.label_id,
             inventory: request.inventory,
@@ -269,6 +276,7 @@ where
         project_dir,
         VectorIndexRequest {
             topology: request.topology,
+            ordinal: request.ordinal,
             label: request.label,
             label_id: request.label_id,
             space,
@@ -326,6 +334,7 @@ mod tests {
     ) -> FindSearchRequest<'a> {
         FindSearchRequest {
             topology: None,
+            ordinal: None,
             label: LABEL,
             label_id: graphforge_value::EntityTypeSelection::Known(
                 graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
@@ -361,6 +370,7 @@ mod tests {
                 dir.path(),
                 VectorIndexRequest {
                     topology: None,
+                    ordinal: None,
                     label: LABEL,
                     label_id: graphforge_value::EntityTypeSelection::Known(
                         graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
@@ -481,6 +491,7 @@ mod tests {
         );
         let empty_label = FindSearchRequest {
             topology: None,
+            ordinal: None,
             label: "Empty",
             label_id: graphforge_value::EntityTypeSelection::Known(
                 graphforge_value::EntityTypeId::decode(44).unwrap(),

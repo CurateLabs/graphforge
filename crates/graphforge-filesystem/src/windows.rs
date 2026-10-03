@@ -414,10 +414,11 @@ pub(super) fn replace_file_from(
         guarded_directory_path(target_directory).map_err(ReplaceFileError::NotReplaced)?;
     let source_path = source_directory_path.join(source_name);
     let target_path = target_directory_path.join(target_name);
-    // Sealed staging files are readonly. Windows refuses GENERIC_WRITE on
-    // that inode, so clear only its readonly metadata while it remains in the
-    // private source directory and restore it on the retained handle after
-    // the rename attempt.
+    // The source is a private, already durably sealed staging file. Clear
+    // only its readonly metadata while it remains in the private source
+    // directory and restore it on the retained handle after the rename
+    // attempt. The rename handle itself requests no data-write access, so a
+    // canonical CAS DACL keeps payload writes excluded throughout (#1738).
     let attributes = open_attribute_writer(&source_path).map_err(ReplaceFileError::NotReplaced)?;
     verify_open_regular(&attributes).map_err(ReplaceFileError::NotReplaced)?;
     let attribute_identity = file_identity(&attributes).map_err(ReplaceFileError::NotReplaced)?;
@@ -435,11 +436,9 @@ pub(super) fn replace_file_from(
         };
     }
     let operation = (|| {
-        let source = open_rename_handle(&source_path).map_err(ReplaceFileError::NotReplaced)?;
+        let source =
+            open_sealed_rename_handle(&source_path).map_err(ReplaceFileError::NotReplaced)?;
         verify_open_regular(&source).map_err(ReplaceFileError::NotReplaced)?;
-        source
-            .observed_sync_all()
-            .map_err(ReplaceFileError::NotReplaced)?;
         let source_before = file_identity(&source).map_err(ReplaceFileError::NotReplaced)?;
         if expected_source.is_some_and(|expected| expected != source_before)
             || identity(&source_path).map_err(ReplaceFileError::NotReplaced)? != source_before
@@ -590,6 +589,18 @@ fn open_rename_handle(path: &Path) -> io::Result<File> {
     std::fs::OpenOptions::new()
         .access_mode(GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
+        .open(path)
+}
+
+/// Rename authority over an already durably sealed source. A canonically
+/// sealed CAS object grants its owner no data-write right, so this requests
+/// only DELETE (with the attribute reads every open carries). Sharing admits
+/// concurrent readers but no writer or second deleter while it is held.
+fn open_sealed_rename_handle(path: &Path) -> io::Result<File> {
+    std::fs::OpenOptions::new()
+        .access_mode(DELETE | FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
         .open(path)
 }

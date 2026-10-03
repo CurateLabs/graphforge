@@ -104,6 +104,7 @@ where
                     project_dir,
                     TextIndexRequest {
                         topology,
+                        ordinal: None,
                         label,
                         label_id,
                         properties,
@@ -117,6 +118,7 @@ where
                     project_dir,
                     LazyTextRequest {
                         topology,
+                        ordinal: None,
                         label,
                         label_id,
                         inventory,
@@ -140,6 +142,7 @@ where
             project_dir,
             VectorIndexRequest {
                 topology,
+                ordinal: None,
                 label,
                 label_id,
                 space,

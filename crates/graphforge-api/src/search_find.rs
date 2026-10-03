@@ -77,6 +77,7 @@ impl GraphForge {
             return Err(validation("find requires text or vector retrieval"));
         }
         let topology = self.dir().topology_files()?;
+        let ordinal = self.ordinal_identities.revalidated_handle()?;
         for attempt in 1_u8..=2 {
             let before = read_search_generation(dir)?;
             let projection = vector_query
@@ -85,6 +86,7 @@ impl GraphForge {
                     project_label_members_snapshot_with_topology(
                         dir,
                         Some(&topology),
+                        ordinal.as_deref(),
                         label_id,
                         VectorLifecycleLimits::default(),
                         || Ok(()),
@@ -113,6 +115,7 @@ impl GraphForge {
             let batch = shape_search_output_with_members(
                 dir,
                 &self.property_inventory_for_session(),
+                ordinal.as_deref(),
                 label_id,
                 &hits,
                 projection.as_ref().map(LabelMemberProjection::members),
@@ -142,12 +145,14 @@ impl GraphForge {
     ) -> Result<Vec<FusedSearchHit>, GfError> {
         let inventory = self.property_inventory_for_session();
         let topology = self.dir().topology_files()?;
+        let ordinal = self.ordinal_identities.revalidated_handle()?;
         let text = query
             .map(|query| {
                 search_graph_native(
                     dir,
                     FindSearchRequest {
                         topology: Some(&topology),
+                        ordinal: ordinal.as_deref(),
                         label,
                         label_id,
                         query: Some(query),
@@ -230,6 +235,7 @@ impl GraphForge {
                         dir,
                         VectorIndexRequest {
                             topology: Some(&self.dir().topology_files()?),
+                            ordinal: self.ordinal_identities.revalidated_handle()?.as_deref(),
                             label,
                             label_id,
                             space,
