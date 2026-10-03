@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, FixedSizeBinaryBuilder, StringArray};
+use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, GraphConstructionBudgets, GraphForge,
@@ -45,7 +46,82 @@ pub(crate) fn generate_bulk_graph_with_index(
     fan_out: usize,
     index_adjacency: bool,
 ) -> BulkFixtureEvidence {
+    generate(dir, nodes, fan_out, index_adjacency, Properties::None)
+}
+
+/// [`generate_bulk_graph_with_index`] without the trailing `index_adjacency`,
+/// where every node carries a `name` ([`fixture_node_name`]) and, with
+/// `edge_properties`, every edge a `note` ([`fixture_edge_note`]), so the
+/// published generation holds property fragments that grow with the data.
+pub(crate) fn generate_bulk_graph_with_properties(
+    dir: &Path,
+    nodes: usize,
+    fan_out: usize,
+    edge_properties: bool,
+) -> BulkFixtureEvidence {
+    let properties = if edge_properties {
+        Properties::NodesAndEdges
+    } else {
+        Properties::Nodes
+    };
+    generate(dir, nodes, fan_out, false, properties)
+}
+
+/// The `name` property [`generate_bulk_graph_with_properties`] gives node
+/// `index`: unique, and carrying 16 bytes of pseudo-random hex that a
+/// compressor cannot remove, so the property payload grows with the nodes.
+pub(crate) fn fixture_node_name(index: usize) -> String {
+    let mix = |mut state: u64| {
+        state = (state ^ (state >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        state = (state ^ (state >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        state ^ (state >> 31)
+    };
+    let seed = index as u64;
+    format!(
+        "entity-{index}-{:016x}{:016x}",
+        mix(seed.wrapping_mul(2).wrapping_add(1)),
+        mix(seed.wrapping_mul(2).wrapping_add(2))
+    )
+}
+
+/// The `note` property [`generate_bulk_graph_with_properties`] gives edge `index`.
+pub(crate) fn fixture_edge_note(index: usize) -> String {
+    format!("link-{index}")
+}
+
+fn with_property(schema: &Schema, name: &str) -> Arc<Schema> {
+    let mut fields = schema.fields().to_vec();
+    fields.push(Arc::new(Field::new(name, DataType::Utf8, true)));
+    Arc::new(Schema::new(fields))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Properties {
+    None,
+    Nodes,
+    NodesAndEdges,
+}
+
+fn generate(
+    dir: &Path,
+    nodes: usize,
+    fan_out: usize,
+    index_adjacency: bool,
+    properties: Properties,
+) -> BulkFixtureEvidence {
     assert!(nodes > fan_out);
+    let node_properties = properties != Properties::None;
+    let edge_properties = properties == Properties::NodesAndEdges;
+    let node_schema = if node_properties {
+        with_property(&CONSTRUCTION_NODE_SCHEMA, "name")
+    } else {
+        Arc::clone(&CONSTRUCTION_NODE_SCHEMA)
+    };
+    let edge_schema = if edge_properties {
+        with_property(&CONSTRUCTION_EDGE_SCHEMA, "note")
+    } else {
+        Arc::clone(&CONSTRUCTION_EDGE_SCHEMA)
+    };
     let forge = GraphForge::new(Some(dir.to_str().expect("temp path is UTF-8"))).unwrap();
     let mut session = forge
         .begin_graph_construction(GraphConstructionBudgets {
@@ -65,14 +141,16 @@ pub(crate) fn generate_bulk_graph_with_index(
                 .append_value(fixture_node_uuid(node).as_bytes())
                 .unwrap();
         }
-        let batch = RecordBatch::try_new(
-            Arc::clone(&CONSTRUCTION_NODE_SCHEMA),
-            vec![
-                Arc::new(identities.finish()) as ArrayRef,
-                Arc::new(StringArray::from(vec!["Entity"; rows])),
-            ],
-        )
-        .unwrap();
+        let mut columns = vec![
+            Arc::new(identities.finish()) as ArrayRef,
+            Arc::new(StringArray::from(vec!["Entity"; rows])),
+        ];
+        if node_properties {
+            columns.push(Arc::new(StringArray::from_iter_values(
+                (start..end).map(fixture_node_name),
+            )));
+        }
+        let batch = RecordBatch::try_new(Arc::clone(&node_schema), columns).unwrap();
         session
             .append_nodes(&format!("nodes-{start}"), &batch)
             .unwrap();
@@ -100,16 +178,18 @@ pub(crate) fn generate_bulk_graph_with_index(
                 .append_value(fixture_node_uuid((source + offset) % nodes).as_bytes())
                 .unwrap();
         }
-        let batch = RecordBatch::try_new(
-            Arc::clone(&CONSTRUCTION_EDGE_SCHEMA),
-            vec![
-                Arc::new(identities.finish()) as ArrayRef,
-                Arc::new(StringArray::from(vec!["LINK"; rows])),
-                Arc::new(sources.finish()),
-                Arc::new(targets.finish()),
-            ],
-        )
-        .unwrap();
+        let mut columns = vec![
+            Arc::new(identities.finish()) as ArrayRef,
+            Arc::new(StringArray::from(vec!["LINK"; rows])),
+            Arc::new(sources.finish()),
+            Arc::new(targets.finish()),
+        ];
+        if edge_properties {
+            columns.push(Arc::new(StringArray::from_iter_values(
+                (start..end).map(fixture_edge_note),
+            )));
+        }
+        let batch = RecordBatch::try_new(Arc::clone(&edge_schema), columns).unwrap();
         session
             .append_edges(&format!("edges-{start}"), &batch)
             .unwrap();
