@@ -7,16 +7,16 @@
 //!    same bytes whether its property fragments are 16 or 1,024 bytes a row. The
 //!    manifest names each fragment's length and XXH64, so open checks the length
 //!    and leaves the content to the first read of each fragment.
-//! 2. **`find` reads no edge payload.** With a fixed node set and 8 versus 128
-//!    edges per node (16x the edges), its attributed source and index reads
-//!    stay bounded. It reads node and node-property sources and the index.
-//!    Whole-process reads still grow with the UUID-membership index; this
-//!    slice does not establish a bound while both nodes and edges scale.
+//! 2. **`find` reads nothing that grows with the edges.** With a fixed node set
+//!    and 8 versus 128 edges per node (16x the edges), its attributed source
+//!    and index reads and its whole-process reads stay bounded. It reads node
+//!    and node-property sources, the index, and the ordinal identity blocks of
+//!    the nodes it projects; it never opens the UUID-membership identity run,
+//!    which holds a record per edge as well as per node.
 //!
-//! Both report attributed read bytes and whole-process `rchar` from
-//! `/proc/self/io` (every `read(2)`/`pread(2)` the process makes). Open gates
-//! both measures; `find` gates only attributed reads and reports its remaining
-//! UUID-membership growth. Missing `/proc/self/io` prints a `SKIPPED` line.
+//! Both gate attributed read bytes and whole-process `rchar` from
+//! `/proc/self/io` (every `read(2)`/`pread(2)` the process makes). Missing
+//! `/proc/self/io` prints a `SKIPPED` line.
 //!
 //! The tests share one process counter, so they serialize on a lock.
 
@@ -357,16 +357,16 @@ fn text_find_does_not_read_the_graph_across_a_16x_edge_range() {
         let layout = layout(&path);
         let forge = open(&path);
         // The first call settles first-touch admissions; the second is steady
-        // cost. The source/index attribution bound covers both; total process
-        // reads still include the growing UUID-membership index.
+        // cost. Both bounds cover both calls.
         let (rows, first) = measured(|| find_text(&forge));
         assert_eq!(rows, 1, "fan-out {fan_out}: wrong answer");
         let (rows, second) = measured(|| find_text(&forge));
         assert_eq!(rows, 1);
         eprintln!(
-            "fan_out={fan_out} edges={} node_bytes={} property_bytes={} index_bytes={} \
+            "fan_out={fan_out} edges={} files={} node_bytes={} property_bytes={} index_bytes={} \
              edge_bytes={} find1_read={} find1_rchar={:?} find2_read={} find2_rchar={:?}",
             NODES * fan_out,
+            layout.files,
             layout.node_bytes,
             layout.property_bytes,
             layout.index_bytes,
@@ -412,18 +412,29 @@ fn text_find_does_not_read_the_graph_across_a_16x_edge_range() {
             small.attributed,
             large.attributed
         );
-        // The process counter is reported, not gated. It still moves with the
-        // edge count because `UuidMembershipIndex::open`, which text discovery
-        // calls to authenticate node identities, reads the whole identity run
-        // (nodes and edges) several times; that reader reports nothing to the
-        // ledger and is outside this slice. Edge payloads are proven unread by
-        // `find_does_not_read_edge_payloads` in
-        // `workspace_hydration/tests.rs`, which answers a `find` with every
-        // edge object corrupted.
+        // Every read the process makes, including readers that report nothing
+        // to the ledger, obeys the same bound. The node set, its properties
+        // and the index are byte-identical at both sizes (asserted above), so
+        // the only thing the edge axis changes that `find` may observe is the
+        // manifest's file list: one row, route and stat per extra declared
+        // file. Node identities are authenticated through the ordinal blocks
+        // of the projected nodes, which hold node UUIDs only. The
+        // UUID-membership identity run, with a record per edge, is not read;
+        // opening it cost roughly 100 bytes per added edge, about 50 MB here.
+        // Edge payloads are also proven unread by
+        // `find_does_not_read_edge_payloads` in `workspace_hydration/tests.rs`,
+        // which answers a `find` with every edge object corrupted.
         eprintln!(
             "{name}: process reads {:?} -> {:?}",
             small.rchar, large.rchar
         );
+        if let (Some(small_rchar), Some(large_rchar)) = (small.rchar, large.rchar) {
+            assert!(
+                large_rchar <= small_rchar + allowed,
+                "{name}: process reads grew with the edges: {small_rchar} -> {large_rchar} \
+                 (allowed +{allowed})"
+            );
+        }
     }
     let sources =
         large_layout.node_bytes + large_layout.node_property_bytes + large_layout.index_bytes;
