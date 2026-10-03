@@ -10,7 +10,7 @@ service). The authoritative Rust compile/test path under CI Gate is the
 reports.
 
 Coverage floors are enforced by the **Coverage** workflow
-(`.github/workflows/coverage-baseline.yml`) on every push to `main` via
+(`.github/workflows/coverage-baseline.yml`) nightly against `main` via
 `scripts/coverage-rust.sh` (Rust llvm-cov plus Python/Node wrapper thresholds).
 PR CI does not run full `llvm-cov`. Run `make coverage-rust` locally when
 claiming floor changes.

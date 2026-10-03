@@ -275,11 +275,9 @@ There are four CI surfaces for concurrency and durability contracts:
    docs make no SSI, universal-filesystem, or distributed-durability claim;
    optimistic write-skew remains `allowed_documented_not_ssi`.
 
-The deterministic fault oracle and native POSIX/Windows subprocess kill lanes
-remain the process-death and persistent-media authority. Required CI aggregates
-the Windows and macOS reports under the exact tested SHA and rejects a missing,
-empty, wrong-platform, or mixed-seed report; the production history runner does
-not model a successful API call as proof of a process crash. M6 CPU-simulation, durable walltime, and peak
+The deterministic fault oracle and native Linux/Windows subprocess kill lanes
+remain the process-death and persistent-media authority; the production history
+runner does not model a successful API call as proof of a process crash. M6 CPU-simulation, durable walltime, and peak
 RSS fallback evidence use the frozen `storage-benchmarks-v1` / `storage_io` fixture
 contract documented in [Benchmarking](../../development/benchmarking.md).
 

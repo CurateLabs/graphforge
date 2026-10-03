@@ -95,7 +95,7 @@
       "command": "coverage-baseline",
       "args": [],
       "evidence_contract": "rust-coverage-ledger",
-      "freshness": "latest_main_change",
+      "freshness": "1d",
       "sha_rule": "exact_main"
     },
     {

@@ -3,16 +3,18 @@ name: Coverage
 # Rust coverage enforcement. PR CI does not otherwise run llvm-cov, so the 90%
 # patch floor had no enforcement point on the merge path and did not hold.
 #
-# Post-merge only. Repository policy keeps full llvm-cov out of pull-request CI,
-# where its cost would be paid on every review cycle; this pays it once per merge
-# and blocks nobody. It enforces every floor and records the baseline.
+# Nightly, never per merge. Repository policy keeps full llvm-cov out of
+# pull-request CI, where its cost would be paid on every review cycle. It ran
+# once per push to main until 2026-10-02, when a 19-merge day cost 19 runs of a
+# 16 vCPU runner for one ledger (#1760); the floors do not need per-commit
+# resolution, so one run a night covers the day's merges as a single patch.
 #
 # Runs are never cancelled. An earlier draft cancelled in-progress runs, which
 # on a day with 21 merges meant no run ever completed.
 
 on:
-  push:
-    branches: ["main"]
+  schedule:
+    - cron: "23 5 * * *"
   workflow_dispatch:
 
 permissions:
@@ -36,18 +38,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The patch is everything that landed since the previous nightly: the
+      # last main commit at least 24 hours old. A day with no merges still runs
+      # (HEAD is its own base, an empty patch) so the total floors are judged.
       - name: Resolve patch base
         id: scope
         shell: bash
         run: |
           set -euo pipefail
-          before="${{ github.event.before }}"
-          if [[ -n "$before" && "$before" != "0000000000000000000000000000000000000000" ]] \
-            && git cat-file -e "${before}^{commit}" 2>/dev/null; then
-            base="$before"
-          else
-            base="$(git rev-parse HEAD~1)"
-          fi
+          base="$(git rev-list -1 --first-parent --before='24 hours ago' HEAD)"
+          test -n "$base"
           echo "base=$base" >> "$GITHUB_OUTPUT"
           echo "Patch coverage base: $base"
 
