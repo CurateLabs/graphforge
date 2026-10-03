@@ -746,6 +746,7 @@ pub(super) fn build_edge_list_column(
     let mut children: Vec<ArrayRef> = vec![edge_arr, src_arr, dst_arr, rel_arr];
     children.extend(build_edge_prop_children(
         cfg.provider.admitted_inventory().as_deref(),
+        None,
         &cfg.rel_type_name,
         &cfg.dir,
         &prop_fields,
@@ -763,17 +764,24 @@ pub(super) fn build_edge_list_column(
 
 fn read_target_edge_properties(
     inventory: &graphforge_storage::AuthenticatedPropertyInventory,
+    routes: Option<&std::sync::Mutex<EdgePropertyRoutes>>,
     stem: &str,
     targets: &std::collections::BTreeSet<[u8; 16]>,
     property_names: &[String],
     owners: &mut std::collections::BTreeSet<[u8; 16]>,
 ) -> Result<Vec<arrow::record_batch::RecordBatch>, GfError> {
-    let selected = graphforge_storage::read_authenticated_property_target_data_for_inventory(
-        inventory,
-        graphforge_storage::PropertyRouteKind::Edge,
-        stem,
-        targets,
-    )?;
+    let selected = match routes {
+        Some(routes) => routes
+            .lock()
+            .map_err(|_| GfError::Execution("Expand edge-property routes poisoned".into()))?
+            .read(inventory, stem, targets)?,
+        None => graphforge_storage::read_authenticated_property_target_data_for_inventory(
+            inventory,
+            graphforge_storage::PropertyRouteKind::Edge,
+            stem,
+            targets,
+        )?,
+    };
     if selected.present.iter().any(|uuid| !owners.insert(*uuid)) {
         return Err(GfError::Project {
             code: graphforge_core::ProjectErrorCode::ProjectCorrupt,
@@ -832,6 +840,57 @@ fn edge_property_stems(
     })
 }
 
+/// The edge-property routes one single-hop Expand stream has read (#1388).
+///
+/// A targeted read authenticates and decodes every fragment of its route
+/// whatever its target count, so reading a route once per output chunk cost
+/// route-sized work per chunk: quadratic in the hops a stream expands. The
+/// first chunk keeps the targeted read, so a one-chunk expansion retains
+/// nothing. A route read again reads it whole, once, and answers that chunk and
+/// every later one from the retained rows, which the stream's memory
+/// reservation charges.
+#[derive(Default)]
+struct EdgePropertyRoutes {
+    targeted: std::collections::HashSet<String>,
+    retained: std::collections::HashMap<String, graphforge_storage::PropertyRouteData>,
+}
+
+impl EdgePropertyRoutes {
+    fn read(
+        &mut self,
+        inventory: &graphforge_storage::AuthenticatedPropertyInventory,
+        stem: &str,
+        targets: &std::collections::BTreeSet<[u8; 16]>,
+    ) -> Result<graphforge_storage::PropertyTargetData, GfError> {
+        if let Some(route) = self.retained.get(stem) {
+            return Ok(route.select(targets));
+        }
+        if self.targeted.insert(stem.to_owned()) {
+            return graphforge_storage::read_authenticated_property_target_data_for_inventory(
+                inventory,
+                graphforge_storage::PropertyRouteKind::Edge,
+                stem,
+                targets,
+            );
+        }
+        let route = graphforge_storage::read_authenticated_property_route_data_for_inventory(
+            inventory,
+            graphforge_storage::PropertyRouteKind::Edge,
+            stem,
+        )?;
+        let selected = route.select(targets);
+        self.retained.insert(stem.to_owned(), route);
+        Ok(selected)
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.retained
+            .values()
+            .map(|route| usize::try_from(route.retained_bytes()).unwrap_or(usize::MAX))
+            .fold(0, usize::saturating_add)
+    }
+}
+
 /// Build one child array per edge-property struct field (#755), in field order.
 ///
 /// Authenticates candidate owners and retains values for flattened hop UUIDs.
@@ -842,6 +901,7 @@ fn edge_property_stems(
 /// `hop_edge_uuids` is in flattened hop order (matching the topology children).
 fn build_edge_prop_children(
     inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
+    routes: Option<&std::sync::Mutex<EdgePropertyRoutes>>,
     rel_type_name: &str,
     dir: &Path,
     prop_fields: &[arrow::datatypes::FieldRef],
@@ -869,9 +929,14 @@ fn build_edge_prop_children(
         .collect::<Vec<_>>();
     for stem in &stems {
         let batches = match inventory {
-            Some(inventory) => {
-                read_target_edge_properties(inventory, stem, &targets, &property_names, &mut owners)
-            }
+            Some(inventory) => read_target_edge_properties(
+                inventory,
+                routes,
+                stem,
+                &targets,
+                &property_names,
+                &mut owners,
+            ),
             None => graphforge_storage::read_edge_properties_projected(dir, stem, &property_names)
                 .map_err(|e| exec_err(e.to_string())),
         }?;
@@ -1268,6 +1333,7 @@ impl ExpandExec {
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
             reservation: std::sync::Mutex::new(crate::fast_path::expand_reservation(context)),
+            edge_property_routes: std::sync::Mutex::new(EdgePropertyRoutes::default()),
         }
     }
 }
@@ -1512,17 +1578,26 @@ struct SingleHopConfig {
     /// #1688 candidate C: the memory-pool reservation for held batches.
     /// Memory-pool reservation for the batches this hop holds (ADR 0050).
     reservation: std::sync::Mutex<datafusion::execution::memory_pool::MemoryReservation>,
+    /// Edge-property routes this stream has read, shared by its chunks.
+    edge_property_routes: std::sync::Mutex<EdgePropertyRoutes>,
 }
 
 impl SingleHopConfig {
-    /// Charge the held input batch and the output batch to the session memory pool.
+    /// Charge the held input batch, the output batch and the retained
+    /// edge-property routes to the session memory pool.
     fn account(
         &self,
         held: Option<&RecordBatch>,
         output: &RecordBatch,
     ) -> Result<(), DataFusionError> {
-        let bytes =
-            held.map_or(0, RecordBatch::get_array_memory_size) + output.get_array_memory_size();
+        let routes = self
+            .edge_property_routes
+            .lock()
+            .map_err(|_| DataFusionError::Internal("Expand edge-property routes poisoned".into()))?
+            .retained_bytes();
+        let bytes = (held.map_or(0, RecordBatch::get_array_memory_size)
+            + output.get_array_memory_size())
+        .saturating_add(routes);
         self.reservation
             .lock()
             .map_err(|_| DataFusionError::Internal("ExpandExec reservation poisoned".into()))?
@@ -2055,6 +2130,7 @@ fn expand_single_hop_chunk(
         .collect::<Vec<_>>();
     let demanded_property_columns = build_edge_prop_children(
         cfg.provider.admitted_inventory().as_deref(),
+        Some(&cfg.edge_property_routes),
         &cfg.rel_type_name,
         &cfg.dir,
         &demanded_property_fields,

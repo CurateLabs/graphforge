@@ -214,6 +214,72 @@ pub fn read_authenticated_property_target_data_for_inventory(
     })
 }
 
+/// Every newest live row and every owned UUID of one route, from one
+/// authenticated pass over its fragments.
+///
+/// A targeted read authenticates and decodes every fragment of its route
+/// whatever its target count. A caller that resolves many target batches
+/// against one route reads it once here and selects each batch with
+/// [`select`](Self::select), instead of doing route-sized work per batch (#1388).
+pub struct PropertyRouteData {
+    rows: BTreeMap<[u8; 16], PropertySnapshotRow>,
+    present: BTreeSet<[u8; 16]>,
+    retained_bytes: u64,
+}
+
+impl PropertyRouteData {
+    /// The rows and owners a targeted read of the same route returns for
+    /// `targets`: their newest live snapshots, and every target with a
+    /// physical owner, newest tombstones included.
+    #[must_use]
+    pub fn select(&self, targets: &BTreeSet<[u8; 16]>) -> PropertyTargetData {
+        PropertyTargetData {
+            rows: targets
+                .iter()
+                .filter_map(|uuid| self.rows.get(uuid).map(|row| (*uuid, row.clone())))
+                .collect(),
+            present: targets
+                .iter()
+                .filter(|uuid| self.present.contains(*uuid))
+                .copied()
+                .collect(),
+        }
+    }
+
+    /// Decoded bytes the retained live rows charge, by the targeted decoder's
+    /// own row charge.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        self.retained_bytes
+    }
+}
+
+/// Read one whole route under the targeted reader's authentication, schema,
+/// ordering, tombstone and resource validation.
+#[doc(hidden)]
+pub fn read_authenticated_property_route_data_for_inventory(
+    inventory: &AuthenticatedPropertyInventory,
+    kind: PropertyRouteKind,
+    route: &str,
+) -> Result<PropertyRouteData, GfError> {
+    let result = read_property_target_set(
+        inventory,
+        kind,
+        route,
+        TargetSet::All(BTreeSet::new()),
+        None,
+        crate::lifecycle_io::is_active(),
+    )?;
+    let TargetSet::All(present) = result.targets else {
+        unreachable!("a whole-route read keeps its target set");
+    };
+    Ok(PropertyRouteData {
+        retained_bytes: result.rows.values().map(snapshot_charge).sum(),
+        rows: result.rows,
+        present,
+    })
+}
+
 /// Read logical replacement snapshots without optional returned-work observations.
 #[doc(hidden)]
 pub fn read_authenticated_property_snapshot_data_for_inventory(
@@ -295,10 +361,37 @@ pub(super) struct TargetPropertyRows {
     pub(super) metrics: PropertyOverlayMetrics,
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "authenticated targeted read and its resource accounting share one lifecycle"
-)]
+/// The UUIDs a read still resolves, newest fragment first.
+enum TargetSet {
+    /// Requested UUIDs no newer fragment has resolved.
+    Selected(BTreeSet<[u8; 16]>),
+    /// Every UUID of the route; holds those a newer fragment resolved.
+    All(BTreeSet<[u8; 16]>),
+}
+
+impl TargetSet {
+    fn wants(&self, uuid: &[u8; 16]) -> bool {
+        match self {
+            Self::Selected(unresolved) => unresolved.contains(uuid),
+            Self::All(resolved) => !resolved.contains(uuid),
+        }
+    }
+
+    /// Resolve `uuid` at its newest owner; false when a newer fragment did.
+    fn resolve(&mut self, uuid: [u8; 16]) -> bool {
+        match self {
+            Self::Selected(unresolved) => unresolved.remove(&uuid),
+            Self::All(resolved) => resolved.insert(uuid),
+        }
+    }
+}
+
+struct TargetSetRows {
+    rows: BTreeMap<[u8; 16], PropertySnapshotRow>,
+    targets: TargetSet,
+    metrics: PropertyOverlayMetrics,
+}
+
 pub(super) fn read_property_targets(
     inventory: &AuthenticatedPropertyInventory,
     kind: PropertyRouteKind,
@@ -307,6 +400,36 @@ pub(super) fn read_property_targets(
     replay_budget: Option<usize>,
     collect: bool,
 ) -> Result<TargetPropertyRows, GfError> {
+    let result = read_property_target_set(
+        inventory,
+        kind,
+        route,
+        TargetSet::Selected(targets.clone()),
+        replay_budget,
+        collect,
+    )?;
+    let TargetSet::Selected(unresolved) = result.targets else {
+        unreachable!("a targeted read keeps its target set");
+    };
+    Ok(TargetPropertyRows {
+        rows: result.rows,
+        unresolved,
+        metrics: result.metrics,
+    })
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "authenticated targeted read and its resource accounting share one lifecycle"
+)]
+fn read_property_target_set(
+    inventory: &AuthenticatedPropertyInventory,
+    kind: PropertyRouteKind,
+    route: &str,
+    mut unresolved: TargetSet,
+    replay_budget: Option<usize>,
+    collect: bool,
+) -> Result<TargetSetRows, GfError> {
     let mut limits = PropertyOverlayLimits::default();
     if let Some(bytes) = replay_budget {
         limits.max_buffered_bytes = bytes as u64;
@@ -317,14 +440,13 @@ pub(super) fn read_property_targets(
             ));
         }
     }
-    let mut unresolved = targets.clone();
     let mut found = BTreeMap::new();
     let mut retained_bytes = 0;
     let mut metrics = collect.then(PropertyOverlayMetrics::default);
     let Some(fragments) = inventory.routes.get(&(kind, route.to_owned())) else {
-        return Ok(TargetPropertyRows {
+        return Ok(TargetSetRows {
             rows: found,
-            unresolved,
+            targets: unresolved,
             metrics: metrics.unwrap_or_default(),
         });
     };
@@ -508,9 +630,9 @@ pub(super) fn read_property_targets(
         metrics.logical_rows = u64::try_from(found.len()).unwrap_or(u64::MAX);
         metrics.peak_buffered_rows = metrics.decoder_peak_rows;
     }
-    Ok(TargetPropertyRows {
+    Ok(TargetSetRows {
         rows: found,
-        unresolved,
+        targets: unresolved,
         metrics: metrics.unwrap_or_default(),
     })
 }
@@ -523,7 +645,7 @@ fn select_target_row_groups(
     fragment: &AuthenticatedPropertyFragment,
     opened: &OpenPropertyFragment,
     kind: PropertyRouteKind,
-    unresolved: &std::collections::BTreeSet<[u8; 16]>,
+    unresolved: &TargetSet,
     counts: &ReadCounts,
     mut metrics: Option<&mut PropertyOverlayMetrics>,
     admission: TargetReadAdmission,
@@ -574,7 +696,7 @@ fn select_target_row_groups(
                     ));
                 }
                 prior_uuid = Some(uuid);
-                selected |= !unresolved.is_empty() && unresolved.contains(&uuid);
+                selected |= unresolved.wants(&uuid);
                 if tombstones.is_some_and(|values| values.value(row))
                     && batch
                         .columns()
@@ -609,7 +731,7 @@ struct TargetDecodeOptions<'a> {
 fn decode_target_row_groups(
     options: TargetDecodeOptions<'_>,
     counts: &ReadCounts,
-    unresolved: &mut std::collections::BTreeSet<[u8; 16]>,
+    unresolved: &mut TargetSet,
     found: &mut BTreeMap<[u8; 16], PropertySnapshotRow>,
     retained_bytes: &mut u64,
     mut metrics: Option<&mut PropertyOverlayMetrics>,
@@ -652,7 +774,7 @@ fn decode_target_row_groups(
             if let Some(metrics) = &mut metrics {
                 metrics.physical_rows = metrics.physical_rows.saturating_add(1);
             }
-            if unresolved.remove(&row.uuid) {
+            if unresolved.resolve(row.uuid) {
                 if row.tombstone {
                     if let Some(metrics) = &mut metrics {
                         metrics.tombstones = metrics.tombstones.saturating_add(1);
