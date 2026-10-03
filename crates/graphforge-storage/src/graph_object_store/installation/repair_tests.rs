@@ -129,7 +129,6 @@ fn plant_sealed_object(
     {
         let mut file = bucket.create_child_file(name).unwrap();
         file.write_all(bytes).unwrap();
-        file.sync_all().unwrap();
         let mut permissions = file.metadata().unwrap().permissions();
         permissions.set_readonly(true);
         file.set_permissions(permissions).unwrap();
@@ -139,7 +138,6 @@ fn plant_sealed_object(
     {
         let mut writer = bucket.create_cas_child_file(name).unwrap();
         writer.write_all(bytes).unwrap();
-        writer.sync_all().unwrap();
         let sealed = bucket
             .seal_cas_child_file(name, writer)
             .unwrap()
