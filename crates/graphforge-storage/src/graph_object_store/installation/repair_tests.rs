@@ -199,6 +199,32 @@ fn sealed_cas_repair_refuses_a_source_that_is_not_the_address() {
     repair.assert_address_unchanged();
 }
 
+/// Windows readers of a sealed CAS object deny deletion sharing, so they
+/// protect it from replacement: the repair fails closed while one is open and
+/// succeeds once it is released.
+#[cfg(windows)]
+#[test]
+fn sealed_cas_repair_waits_for_a_protected_windows_reader() {
+    let repair = Repair::new();
+    let bucket = repair
+        .lease
+        .cas
+        .digest_bucket(&repair.digest, false)
+        .unwrap();
+    let protected = bucket
+        .open_cas_child_file(std::ffi::OsStr::new(&repair.digest[2..]))
+        .unwrap()
+        .into_file();
+    let error = repair.repair().unwrap_err();
+    repair.assert_unrepaired();
+    assert_eq!(read_retained(&protected), repair.corrupt, "{error}");
+    repair.assert_allocation_is_the_visible_object();
+    drop(protected);
+    repair.repair().unwrap();
+    repair.assert_repaired();
+    repair.assert_allocation_is_the_visible_object();
+}
+
 /// A native replacement that took effect but reported an unknown outcome
 /// keeps its original failure, and is acknowledged exactly like a certain
 /// replacement: the same allocation and the same namespace fences.
