@@ -355,7 +355,9 @@ jobs:
       # no-replace rename installs; Windows refuses that rename while any
       # handle in the imported project stays open.
       - name: Hub clone and portable import
-        run: cargo test -p graphforge-cli --lib --no-fail-fast -- hub_clone::
+        run: >-
+          cargo test -p graphforge-cli --lib --no-fail-fast --
+          hub_clone::
 
       # #1363: an open facade retains a directory handle on
       # generations/<uuid>/graph plus its generation leases. Windows is the
