@@ -54,6 +54,7 @@ impl Transport for Hub {
             location: None,
             content_range: None,
             etag: Some("\"hub\"".into()),
+            retry_after: None,
             body: Box::new(std::io::Cursor::new(body)),
         })
     }

@@ -136,6 +136,7 @@ pub(super) fn response(status: u16, content_range: Option<&str>, body: &[u8]) ->
         location: None,
         content_range: content_range.map(str::to_owned),
         etag: Some("\"fixture-1\"".to_owned()),
+        retry_after: None,
         body: Box::new(std::io::Cursor::new(body.to_vec())),
     }
 }
@@ -890,6 +891,11 @@ fn hub_failure_codes_map_through_a_finite_matrix() {
         ("hub.limit_exceeded", Failure::ResourceLimit),
         ("hub.unsafe_location", Failure::Network),
         ("hub.network", Failure::Network),
+        ("hub.not_found", Failure::InvalidInput),
+        ("hub.access_denied", Failure::InvalidInput),
+        ("hub.rate_limited", Failure::Network),
+        ("hub.unavailable", Failure::Network),
+        ("hub.unexpected_status", Failure::Network),
         ("hub.package.io", Failure::Storage),
     ] {
         assert_eq!(classify_failure(&validation(code, "redacted")), expected);

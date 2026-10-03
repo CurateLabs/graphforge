@@ -75,7 +75,7 @@ pub(crate) fn run_module_fetch(
     run_module_fetch_with(&HttpTransport::new(), args, json, output, &RETRY_POLICY)
 }
 
-fn run_module_fetch_with(
+pub(super) fn run_module_fetch_with(
     transport: &dyn Transport,
     args: &ModuleFetchArgs,
     json: bool,

@@ -104,6 +104,8 @@ pub(crate) struct HttpResponse {
     pub(crate) location: Option<String>,
     pub(crate) content_range: Option<String>,
     pub(crate) etag: Option<String>,
+    /// `Retry-After` of an unsuccessful response, in whole seconds.
+    pub(crate) retry_after: Option<u64>,
     pub(crate) body: Box<dyn Read + Send>,
 }
 
@@ -336,12 +338,18 @@ impl HttpTransport {
             .get("etag")
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(retry_after_seconds);
         let (_, body) = response.into_parts();
         Ok(HttpResponse {
             status,
             location,
             content_range,
             etag,
+            retry_after,
             body: Box::new(body.into_reader().take(limit.saturating_add(1))),
         })
     }
@@ -628,17 +636,18 @@ pub(crate) fn validate_url(url: &Url) -> Result<(), graphforge_api::GfError> {
 /// Bounded in-process retry for transient read failures.
 ///
 /// A retry follows a failed connection, a failed or truncated response body,
-/// or a `408`, `429`, or `5xx` status. Only consecutive failures without
-/// progress count toward `attempts`; a body read that advances the durable
-/// download offset resets the count, so a long transfer survives any number of
-/// separated interruptions while a dead one fails promptly.
+/// or a status of the retry class ([`StatusClass::transient`]). Only
+/// consecutive failures without progress count toward `attempts`; a body read
+/// that advances the durable download offset resets the count, so a long
+/// transfer survives any number of separated interruptions while a dead one
+/// fails promptly.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RetryPolicy {
     /// Requests allowed for one step without progress.
     pub(crate) attempts: u32,
     /// Wait before the first retry; each later wait doubles.
     pub(crate) initial_backoff: Duration,
-    /// Upper bound on one wait.
+    /// Upper bound on one wait, including one a Hub asks for with `Retry-After`.
     pub(crate) max_backoff: Duration,
 }
 
@@ -657,19 +666,96 @@ impl RetryPolicy {
             .saturating_mul(1_u32 << doublings)
             .min(self.max_backoff)
     }
+
+    /// The wait before retry number `failures` after a failure whose response
+    /// asked for `retry_after` seconds: the longer of that and the backoff.
+    /// `None` when the Hub asks for a longer pause than one wait may last, so
+    /// the caller reports the failure instead of retrying early.
+    pub(crate) fn wait(&self, failures: u32, retry_after: Option<u64>) -> Option<Duration> {
+        let backoff = self.backoff(failures);
+        match retry_after.map(Duration::from_secs) {
+            Some(asked) if asked > self.max_backoff => None,
+            Some(asked) => Some(asked.max(backoff)),
+            None => Some(backoff),
+        }
+    }
 }
 
-/// Whether an HTTP status is worth retrying.
-fn transient_status(status: u16) -> bool {
-    matches!(status, 408 | 429 | 500..=599)
+/// `Retry-After` as delta-seconds. The HTTP-date form is not interpreted; a
+/// response carrying it is retried on the ordinary backoff schedule.
+fn retry_after_seconds(value: &str) -> Option<u64> {
+    let value = value.trim();
+    (!value.is_empty() && value.len() <= 10 && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| value.parse().ok())
+        .flatten()
 }
 
-/// One request failure; `transient` marks a failure a retry may cure, and
-/// `status` is the HTTP status of an unsuccessful response.
+/// What an unsuccessful Hub status means to the caller. The class decides both
+/// the in-process retry and the error: retry-class statuses are storage errors
+/// (`GF_IO`, exit 3), the rest validation errors (`GF_VALIDATION`, exit 2).
+/// Messages carry only the status number, never the Hub's response body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StatusClass {
+    /// `404`, `410`: no such repository or object. Fix the input.
+    NotFound,
+    /// `401`, `403`: the Hub refuses this read. Ask a human for access.
+    AccessDenied,
+    /// `429`: too many requests. Retry later, after `Retry-After`.
+    RateLimited,
+    /// `408`, `502`, `503`, `504`: the Hub is temporarily unavailable. Retry.
+    Unavailable,
+    /// Any other status: a protocol or Hub failure. Ask a human.
+    Unexpected,
+}
+
+impl StatusClass {
+    pub(crate) const fn of(status: u16) -> Self {
+        match status {
+            404 | 410 => Self::NotFound,
+            401 | 403 => Self::AccessDenied,
+            429 => Self::RateLimited,
+            408 | 502..=504 => Self::Unavailable,
+            _ => Self::Unexpected,
+        }
+    }
+
+    /// The stable semantic code.
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::NotFound => "hub.not_found",
+            Self::AccessDenied => "hub.access_denied",
+            Self::RateLimited => "hub.rate_limited",
+            Self::Unavailable => "hub.unavailable",
+            Self::Unexpected => "hub.unexpected_status",
+        }
+    }
+
+    /// Whether a retry may cure the failure.
+    pub(crate) const fn transient(self) -> bool {
+        matches!(self, Self::RateLimited | Self::Unavailable)
+    }
+
+    fn error(self, status: u16, retry_after: Option<u64>) -> graphforge_api::GfError {
+        let mut message = format!("{}: Hub returned HTTP status {status}", self.code());
+        if let Some(seconds) = retry_after {
+            let _ = write!(message, "; retry after {seconds} s");
+        }
+        if self.transient() {
+            graphforge_api::GfError::Storage(message)
+        } else {
+            graphforge_api::GfError::Validation(message)
+        }
+    }
+}
+
+/// One request failure; `transient` marks a failure a retry may cure,
+/// `status` is the HTTP status of an unsuccessful response, and `retry_after`
+/// its `Retry-After` seconds.
 pub(crate) struct FetchFailure {
     pub(crate) error: graphforge_api::GfError,
     pub(crate) transient: bool,
     pub(crate) status: Option<u16>,
+    pub(crate) retry_after: Option<u64>,
 }
 
 impl From<graphforge_api::GfError> for FetchFailure {
@@ -678,6 +764,7 @@ impl From<graphforge_api::GfError> for FetchFailure {
             error,
             transient: false,
             status: None,
+            retry_after: None,
         }
     }
 }
@@ -719,10 +806,13 @@ fn retry_read(
             Ok(response) => return Ok(response),
             Err(failure) => {
                 failures += 1;
-                if !failure.transient || failures >= policy.attempts {
-                    return Err(failure.error);
+                let wait = policy.wait(failures, failure.retry_after);
+                match wait {
+                    Some(wait) if failure.transient && failures < policy.attempts => {
+                        std::thread::sleep(wait);
+                    }
+                    _ => return Err(failure.error),
                 }
-                std::thread::sleep(policy.backoff(failures));
             }
         }
     }
@@ -768,6 +858,7 @@ fn fetch_once_inner(
             transient: is_network(&error),
             error,
             status: None,
+            retry_after: None,
         })?;
         if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
             if hop == MAX_REDIRECTS {
@@ -783,10 +874,12 @@ fn fetch_once_inner(
             continue;
         }
         if !(200..300).contains(&response.status) {
+            let class = StatusClass::of(response.status);
             return Err(FetchFailure {
-                error: network(&format!("Hub returned HTTP status {}", response.status)),
-                transient: transient_status(response.status),
+                error: class.error(response.status, response.retry_after),
+                transient: class.transient(),
                 status: Some(response.status),
+                retry_after: response.retry_after,
             });
         }
         return Ok(response);

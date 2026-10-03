@@ -271,10 +271,16 @@ fn classify_failure(error: &graphforge_api::GfError) -> Failure {
     };
     let code = detail.split_once(':').map_or(detail, |(code, _)| code);
     match code {
-        "hub.network" | "hub.unsafe_location" => Failure::Network,
+        "hub.network"
+        | "hub.unsafe_location"
+        | "hub.rate_limited"
+        | "hub.unavailable"
+        | "hub.unexpected_status" => Failure::Network,
         "hub.limit_exceeded" | "hub.package.limit_exceeded" => Failure::ResourceLimit,
         "hub.invalid_identity"
         | "hub.auth_denied"
+        | "hub.not_found"
+        | "hub.access_denied"
         | "hub.malformed_response"
         | "hub.unsupported_future"
         | "hub.missing_ref"
@@ -816,6 +822,7 @@ fn download_with_progress(
             return Err(cancelled_error());
         }
         let range = (offset > 0).then_some(offset);
+        let mut retry_after = None;
         // The server may ignore `Range` and send the whole object, so the
         // transport bound is always the object length; the expected size is
         // applied once the status is known.
@@ -827,7 +834,10 @@ fn download_with_progress(
             object.length,
             &mut report.attempts,
         ) {
-            Err(failure) if failure.transient => failure.error,
+            Err(failure) if failure.transient => {
+                retry_after = failure.retry_after;
+                failure.error
+            }
             // The partial bytes no longer match the object the server holds
             // under this location: discard them and restart from zero rather
             // than repeat the same unsatisfiable range on every rerun.
@@ -914,6 +924,11 @@ fn download_with_progress(
             failures = 0;
         }
         failures += 1;
+        // A Hub that asks for a longer pause than one wait may last gets its
+        // own error, which says when to rerun.
+        let Some(wait) = control.retry.wait(failures, retry_after) else {
+            return Err(failure);
+        };
         if failures >= control.retry.attempts {
             return Err(if offset > 0 {
                 validation("hub.interrupted", "download is incomplete; rerun to resume")
@@ -921,7 +936,7 @@ fn download_with_progress(
                 failure
             });
         }
-        std::thread::sleep(control.retry.backoff(failures));
+        std::thread::sleep(wait);
     }
     let mut file = open_read_nofollow(partial).map_err(storage)?;
     let length = file.metadata().map_err(storage)?.len();
@@ -2390,6 +2405,8 @@ fn portable_error(error: DiscoveryPortableV2Error) -> graphforge_api::GfError {
 }
 #[cfg(test)]
 mod research_clone_tests;
+#[cfg(test)]
+mod status_tests;
 #[cfg(test)]
 mod transfer_tests;
 
