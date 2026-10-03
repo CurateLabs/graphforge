@@ -11,12 +11,12 @@
 //! - a full property scan (`RETURN n.name`, no `LIMIT`) returns every value and
 //!   reads at least the bytes the manifest declares for the node property
 //!   fragments, and the edge property scan the same for edge properties;
-//! - a complete portable export reads at least the payload bytes it writes,
-//!   and writes at least the node, edge and property payload the manifest
-//!   declares.
+//! - a complete portable export reads at least the node, edge and property
+//!   payload the manifest declares, and its receipt counts at least that much
+//!   payload written.
 //!
-//! The lower bounds come from the manifest and the export receipt, not from any
-//! observation; the declared payload growing with the data is what makes the
+//! Every read bound comes from the manifest, not from any observation or any
+//! re-encoded size; the declared payload growing with the data is what makes the
 //! reads scale. Reads are the whole-process `rchar`, which counts every
 //! `read(2)` whoever issues it, so a reader that forgot to report to the
 //! lifecycle attribution cannot make an operation look cheaper. Recount is not
@@ -240,18 +240,21 @@ fn whole_payload_operations_read_the_whole_payload_at_every_size() {
             size.edge_scan_read,
             declared.edge_properties
         );
-        // A complete export carries the whole payload and reads what it writes.
+        // A complete export reads the whole payload the manifest declares. The
+        // bound is the manifest's, not the receipt's re-encoded size, so a
+        // codec change cannot move it.
         let payload =
             declared.nodes + declared.edges + declared.node_properties + declared.edge_properties;
         assert!(
+            size.export_read >= payload,
+            "nodes={nodes}: the export read {} bytes of {payload} declared payload",
+            size.export_read
+        );
+        // And it carries that payload: the receipt counts at least as many
+        // payload bytes as the manifest declares.
+        assert!(
             size.export_payload >= payload,
             "nodes={nodes}: the export wrote {} payload bytes of {payload} declared",
-            size.export_payload
-        );
-        assert!(
-            size.export_read >= size.export_payload,
-            "nodes={nodes}: the export read {} bytes for {} payload bytes written",
-            size.export_read,
             size.export_payload
         );
     }

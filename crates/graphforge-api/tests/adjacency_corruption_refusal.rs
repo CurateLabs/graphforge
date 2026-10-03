@@ -11,7 +11,10 @@
 //! Each case publishes a compact (V2) project exactly as construction ships it
 //! (CSR shards, shard manifests and `index_manifest.parquet` included), flips
 //! one byte of one content-addressed object in place, then opens the project
-//! and runs a bounded query. The flip is before open on purpose: opening a
+//! and runs a bounded query. The byte is one no decoder reads (Arrow IPC
+//! padding, JSON whitespace, a Parquet `created_by` letter), and the refusal
+//! must carry the checksum's own message, so a decoder rejecting a malformed
+//! object cannot stand in for the integrity check. The flip is before open on purpose: opening a
 //! compact generation reads no payload, so the first touch is the query's.
 //!
 //! The assertion that matters is "no rebuild": the project must keep its
@@ -97,6 +100,53 @@ impl Target {
                 Self::IndexManifest => unreachable!(),
             }
     }
+
+    /// What only the integrity check says. A shard is checked against the
+    /// XXH64 its shard manifest records; a manifest is admitted against the
+    /// XXH64 the project's own inventory records. Neither message can come
+    /// from a decoder, so a refusal carrying it is the checksum's.
+    const fn refusal(self) -> &'static str {
+        match self {
+            Self::OutShard | Self::InShard => "CSR shard checksum mismatch",
+            Self::OutShardManifest | Self::InShardManifest | Self::IndexManifest => {
+                "XXH64 checksum does not match its inventory"
+            }
+        }
+    }
+
+    /// A byte no decoder reads, and its replacement: the flipped object still
+    /// decodes to exactly what it did, so only a checksum can refuse it.
+    fn inert_flip(self, bytes: &[u8]) -> (usize, u8) {
+        match self {
+            // An Arrow IPC file opens with `ARROW1` and two padding bytes that
+            // no reader inspects.
+            Self::OutShard | Self::InShard => {
+                assert_eq!(&bytes[..8], b"ARROW1\0\0", "{self:?}: Arrow IPC file magic");
+                (7, 1)
+            }
+            // A shard manifest is pretty-printed JSON: one space of the first
+            // indentation becomes a tab, which is JSON whitespace too.
+            Self::OutShardManifest | Self::InShardManifest => {
+                let at = bytes
+                    .windows(3)
+                    .position(|window| window == b"\n  ")
+                    .expect("an indented shard manifest")
+                    + 1;
+                (at, b'\t')
+            }
+            // One letter of the `created_by` string the Parquet footer
+            // carries, which no decoder interprets.
+            Self::IndexManifest => {
+                let marker = b"graphforge permanent parquet";
+                let at = bytes
+                    .windows(marker.len())
+                    .position(|window| window == marker)
+                    .expect("the writer stamps created_by into the footer")
+                    + 3;
+                (at, bytes[at] ^ 1)
+            }
+        }
+    }
 }
 
 /// Every file under `root` with its length and a content hash.
@@ -137,14 +187,19 @@ fn flip_object(project: &Path, target: Target) -> String {
         .find(|entry| target.selects(&entry.relative_path))
         .unwrap_or_else(|| panic!("no published object for {target:?}"));
     let object = graph_object_path(generation.container_root(), &entry.content_sha256).unwrap();
-    // A byte in the middle is inside the payload for every object kind.
-    let at = usize::try_from(std::fs::metadata(&object).unwrap().len() / 2).unwrap();
-    flip_byte_at(&object, at);
+    let (at, replacement) = target.inert_flip(&std::fs::read(&object).unwrap());
+    replace_byte_at(&object, at, replacement);
     entry.relative_path.clone()
 }
 
 /// Flip one bit of `object` at `at` in place: same inode, same length.
 fn flip_byte_at(object: &Path, at: usize) {
+    let flipped = std::fs::read(object).unwrap()[at] ^ 1;
+    replace_byte_at(object, at, flipped);
+}
+
+/// Replace the byte of `object` at `at` in place: same inode, same length.
+fn replace_byte_at(object: &Path, at: usize, replacement: u8) {
     let before = std::fs::metadata(object).unwrap();
     let mut permissions = before.permissions();
     #[cfg(unix)]
@@ -156,7 +211,8 @@ fn flip_byte_at(object: &Path, at: usize) {
     permissions.set_readonly(false);
     std::fs::set_permissions(object, permissions).unwrap();
     let mut bytes = std::fs::read(object).unwrap();
-    bytes[at] ^= 1;
+    assert_ne!(bytes[at], replacement, "the flip must change the byte");
+    bytes[at] = replacement;
     let file = std::fs::OpenOptions::new()
         .write(true)
         .open(object)
@@ -216,7 +272,8 @@ fn rows(forge: &GraphForge, query: &str) -> usize {
 }
 
 /// A flipped byte of `target`, bounded queries touching it: each is refused
-/// with `GF_VALIDATION`, twice, with the generation and every file unchanged.
+/// with `GF_VALIDATION` by the integrity check, twice, with the generation and
+/// every file unchanged.
 fn assert_refused(target: Target, queries: &[&str]) {
     assert_refused_in(published_project, target, queries);
 }
@@ -256,6 +313,10 @@ fn assert_refused_in(
                 error.code(),
                 "GF_VALIDATION",
                 "{target:?} ({flipped}): {query}: {error}"
+            );
+            assert!(
+                error.to_string().contains(target.refusal()),
+                "{target:?} ({flipped}): {query}: refused for the wrong reason: {error}"
             );
         }
     }
@@ -336,6 +397,10 @@ fn explicit_index_adjacency_replaces_a_corrupted_index() {
         let forge = GraphForge::new(Some(&path)).unwrap();
         let error = forge.execute(ORDERED_ONE_HOP).unwrap_err();
         assert_eq!(error.code(), "GF_VALIDATION", "{target:?}: {error}");
+        assert!(
+            error.to_string().contains(target.refusal()),
+            "{target:?}: {error}"
+        );
         forge.index_adjacency().unwrap();
         assert!(rows(&forge, ORDERED_ONE_HOP) > 0, "{target:?}");
         assert!(rows(&forge, REVERSE_HOP) > 0, "{target:?}");
@@ -526,8 +591,11 @@ fn mutated_project_serves_its_republished_index_without_rebuilding() {
     }
 }
 
+/// Every class is tried before asserting, so one run names each class the
+/// mutated project fails to refuse.
 #[test]
 fn mutated_project_refuses_every_flipped_index_object() {
+    let mut unrefused = Vec::new();
     for (target, queries) in [
         (Target::OutShard, &[FORWARD_HOP, FORWARD_TWO_HOP][..]),
         (
@@ -544,8 +612,24 @@ fn mutated_project_refuses_every_flipped_index_object() {
         ),
         (Target::IndexManifest, &EVERY_HOP[..]),
     ] {
-        assert_refused_in(mutated_project, target, queries);
+        if let Err(panic) =
+            std::panic::catch_unwind(|| assert_refused_in(mutated_project, target, queries))
+        {
+            let message = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string panic");
+            // The served result's debug form follows; the reason is enough.
+            let reason: String = message.chars().take(240).collect();
+            unrefused.push(format!("{target:?}: {reason}"));
+        }
     }
+    assert!(
+        unrefused.is_empty(),
+        "the mutated project must refuse every flipped index object:\n{}",
+        unrefused.join("\n")
+    );
 }
 
 /// A commit after `index_adjacency` appends an adjacency delta rather than
