@@ -507,7 +507,9 @@ pub fn remove_durable_project_root(container_root: impl AsRef<Path>) -> Result<(
     admission.remove_project_root()
 }
 
-fn recover_project_transactions_admitted(root: &Path) -> Result<ProjectRecoveryReport, GfError> {
+pub(crate) fn recover_project_transactions_admitted(
+    root: &Path,
+) -> Result<ProjectRecoveryReport, GfError> {
     recover_project_transactions_admitted_with_allocation(root, None)
 }
 

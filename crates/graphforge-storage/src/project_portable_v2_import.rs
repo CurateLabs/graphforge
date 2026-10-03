@@ -1123,6 +1123,28 @@ fn import_materialized(
     admission.revalidate_identity().map_err(|error| {
         outcome::with_io_context(storage(&error), "revalidate import target", target)
     })?;
+    // An owned retry follows this transaction's own interrupted attempt. Its
+    // journal is classified against CURRENT first, exactly as a project open
+    // would, so the attempt either replays as published or retries cleanly.
+    if owned_retry
+        && !import_target_is_empty(admission.root()).map_err(|error| {
+            outcome::with_io_context(
+                storage(&error),
+                "inspect import retry target",
+                admission.root(),
+            )
+        })?
+    {
+        crate::project_recovery::recover_project_transactions_admitted(admission.root()).map_err(
+            |error| {
+                outcome::with_io_context(
+                    storage(&error),
+                    "recover interrupted import",
+                    admission.root(),
+                )
+            },
+        )?;
+    }
     let replay = crate::published_project_transaction(admission.root(), transaction_uuid)
         .map_err(|error| {
             outcome::with_io_context(storage(&error), "inspect import replay", admission.root())
@@ -1146,17 +1168,33 @@ fn import_materialized(
                 admission.root(),
             )
         })?;
-        if generation.is_none() {
+        if generation.is_some() {
+            Some(
+                crate::resolve_project_generation(admission.root()).map_err(|error| {
+                    outcome::with_io_context(
+                        storage(&error),
+                        "resolve import retry",
+                        admission.root(),
+                    )
+                })?,
+            )
+        } else if import_target_is_empty(admission.root()).map_err(|error| {
+            outcome::with_io_context(
+                storage(&error),
+                "inspect import retry target",
+                admission.root(),
+            )
+        })? {
+            // The interrupted attempt stopped before the target held a
+            // project (for example right after claiming its staging), so the
+            // retry initializes it like a first attempt.
+            None
+        } else {
             return Err(PortableV2Error::new(
                 PortableV2ErrorCode::Io,
                 "owned retry target is not pristine",
             ));
         }
-        Some(
-            crate::resolve_project_generation(admission.root()).map_err(|error| {
-                outcome::with_io_context(storage(&error), "resolve import retry", admission.root())
-            })?,
-        )
     } else {
         prepare_import_target(admission.root()).map_err(|error| {
             outcome::with_io_context(storage(&error), "prepare import target", admission.root())
@@ -1332,6 +1370,13 @@ fn import_materialized(
         materialized_cleanup: PortableV2ImportCleanupReceipt::default(),
         transient_peak_allocated_bytes: 0,
     })
+}
+
+fn import_target_is_empty(target: &Path) -> Result<bool, GfError> {
+    Ok(fs::read_dir(target)
+        .map_err(|error| GfError::Storage(format!("failed to inspect import target: {error}")))?
+        .next()
+        .is_none())
 }
 
 const IMPORT_IDENTITY_BATCH_ROWS: usize = 8192;
@@ -2809,6 +2854,72 @@ mod tests {
                 residue.file_name().unwrap().to_string_lossy()
             ));
             assert!(!owner_residue.exists(), "owned marker survived {failpoint}");
+        }
+    }
+
+    #[test]
+    fn crash_into_a_fresh_target_retries_without_external_recovery() {
+        let source_project = tempfile::tempdir().unwrap();
+        let source_generation = crate::open_or_initialize_project(source_project.path()).unwrap();
+        let package_parent = tempfile::tempdir().unwrap();
+        let package = package_parent.path().join("complete.gfproject");
+        let limits = crate::PortableV2ExportLimits::default();
+        let plan = crate::plan_complete_portable_v2(&source_generation, limits).unwrap();
+        crate::export_complete_portable_v2(
+            &plan,
+            &package,
+            crate::PortableV2Output::Expanded,
+            limits,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        for failpoint in [
+            "portable_import.after_owner",
+            "project.after_writer_lock",
+            "project.after_manifest_fsync",
+            "project.after_current_replace",
+        ] {
+            let parent = tempfile::tempdir().unwrap();
+            let target = parent.path().join("project");
+            let transaction = Uuid::new_v4();
+            let generation = Uuid::new_v4();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(HELPER)
+                .arg("--nocapture")
+                .env("GRAPHFORGE_PORTABLE_V2_CRASH_PACKAGE", &package)
+                .env("GRAPHFORGE_PORTABLE_V2_CRASH_TARGET", &target)
+                .env(
+                    "GRAPHFORGE_PORTABLE_V2_CRASH_TRANSACTION",
+                    transaction.to_string(),
+                )
+                .env(
+                    "GRAPHFORGE_PORTABLE_V2_CRASH_GENERATION",
+                    generation.to_string(),
+                )
+                .env("GRAPHFORGE_PROJECT_FAILPOINTS", COOKIE)
+                .env("GRAPHFORGE_PROJECT_FAILPOINT", failpoint)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(crate::project_failpoint::exit_code()));
+            let receipt = import_complete_portable_v2(
+                &package,
+                &target,
+                transaction,
+                generation,
+                &supported(),
+                PortableV2Limits::default(),
+                None,
+            )
+            .unwrap_or_else(|error| panic!("retry after {failpoint} failed: {error:?}"));
+            assert_eq!(receipt.publication.generation_uuid, generation);
+            assert_eq!(
+                crate::resolve_project_generation(&target)
+                    .unwrap()
+                    .generation_uuid(),
+                generation
+            );
         }
     }
 
