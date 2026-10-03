@@ -172,7 +172,8 @@ atomic rename that never replaces an existing path.
 **Disk space.** Clone needs free space on the destination's filesystem, not in
 the system temporary directory: the package itself plus about 2.25 times the
 package for the import's transient peak, roughly 3.25 times the package in all
-(less whatever a previous run already downloaded). Clone checks this, and that
+(less whatever a previous run already downloaded or staged for the import; a
+rerun after the import committed needs only about one more package length). Clone checks this, and that
 the filesystem is admissible (`ext4`, `xfs`, `btrfs`, APFS, or NTFS), before it
 downloads anything. When the import finishes, the staging directory and the
 package are removed and only the project remains.
@@ -210,7 +211,7 @@ Progress is printed to standard error.
 | `hub.network` | The Hub could not be reached or answered with an error status (named in the message) | Rerun later |
 | `hub.integrity` | The downloaded bytes do not match their digest; the partial download was removed | Rerun to download again |
 | `hub.package.*` | The package failed verification or import, with the import's own code (for example `hub.package.io` or `hub.package.cancelled`) | `hub.package.io` and `hub.package.cancelled`: rerun; others: the package is unusable |
-| `hub.destination_conflict` | The destination already exists | Choose another destination |
+| `hub.destination_conflict` | The destination already exists, or appeared while the clone ran. Clone never replaces it; it removes its own staging for that destination, including any partial download | Choose another destination, or remove the existing one and rerun |
 | `hub.concurrent_clone` | Another clone to the same destination is running | Wait for it |
 | `hub.limit_exceeded` | An object exceeds the 1 TiB bound | None; the repository cannot be cloned |
 

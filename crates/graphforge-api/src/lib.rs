@@ -385,6 +385,7 @@ pub use graphforge_core::embedding_options::{
 pub use graphforge_core::manifest::{MANIFEST_FILE, ONTOLOGY_FILE, ProjectManifest};
 pub use graphforge_core::uuid::{
     hub_clone_operation, hub_publish_operation, hub_research_clone_operation,
+    portable_v2_import_generation,
 };
 pub use graphforge_core::{
     AlgorithmError, AnalyzeOptions, ApiErrorCode, ClusterOptions, EdgeHandle, ExplainStage,

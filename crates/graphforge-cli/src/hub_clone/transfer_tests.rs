@@ -409,9 +409,13 @@ fn insufficient_space_fails_before_download_and_leaves_nothing() {
 
 #[test]
 fn required_space_covers_the_download_and_the_import_peak() {
-    assert_eq!(required_space(1000, 0), 1000 + 2250);
-    assert_eq!(required_space(1000, 400), 600 + 2250);
-    assert_eq!(required_space(u64::MAX, 0), u64::MAX);
+    assert_eq!(required_space(1000, 0, 0, false), 1000 + 2250);
+    assert_eq!(required_space(1000, 400, 0, false), 600 + 2250);
+    assert_eq!(required_space(1000, 1000, 2000, false), 250);
+    assert_eq!(required_space(1000, 1000, 5000, false), 0);
+    assert_eq!(required_space(1000, 1000, 0, true), 1000);
+    assert_eq!(required_space(1000, 1000, 600, true), 400);
+    assert_eq!(required_space(u64::MAX, 0, 0, false), u64::MAX);
 }
 
 #[test]
@@ -502,14 +506,258 @@ fn subprocess_clone_helper() {
     }
 }
 
-#[test]
-fn killed_or_failed_clone_leaves_a_state_the_rerun_completes() {
+/// A real bundle and a fixture directory the child helper clones from.
+fn helper_fixture() -> (Vec<u8>, String, tempfile::TempDir) {
     let (bundle, package_digest) = real_bundle();
     let fixture = tempfile::tempdir().unwrap();
     let (refs, manifest) = clone_documents(&bundle, &package_digest, &[]);
     std::fs::write(fixture.path().join("refs.json"), &refs).unwrap();
     std::fs::write(fixture.path().join("manifest.json"), &manifest).unwrap();
     std::fs::write(fixture.path().join("project.gfpb"), &bundle).unwrap();
+    (bundle, package_digest, fixture)
+}
+
+/// Clone `fixture` into `destination` in a child process with `failpoint` set.
+fn clone_in_child(fixture: &Path, destination: &Path, failpoint: &str) -> std::process::Output {
+    Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", HELPER, "--nocapture", "--test-threads=1"])
+        .env("GRAPHFORGE_CLONE_HELPER_FIXTURE", fixture)
+        .env("GRAPHFORGE_CLONE_HELPER_DESTINATION", destination)
+        .env("GRAPHFORGE_CLONE_FAILPOINT", failpoint)
+        .env(
+            "GRAPHFORGE_PROJECT_FAILPOINTS",
+            "graphforge-internal-subprocess-v1",
+        )
+        .env("GRAPHFORGE_PROJECT_FAILPOINT", failpoint)
+        .output()
+        .unwrap()
+}
+
+static RERUN_AVAILABLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[test]
+fn a_rerun_after_the_import_committed_needs_space_only_for_the_remaining_work() {
+    let (bundle, package_digest, fixture) = helper_fixture();
+    let length = bundle.len() as u64;
+    // A first run needs about 3.25x the package.
+    assert!(required_space(length, length, 0, false) > length);
+    for failpoint in ["portable_import.before_reopen", "clone.before_install"] {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("openalex");
+        let child = clone_in_child(fixture.path(), &destination, failpoint);
+        assert_eq!(
+            child.status.code(),
+            Some(CLONE_FAILPOINT_EXIT),
+            "{failpoint}"
+        );
+        // Bytes the killed run staged for the import are credited: offer
+        // less than the package, so the rerun passes only with that credit.
+        let staged = staged_import_bytes(&acquire_staging(&destination).unwrap());
+        assert!(staged > 0, "{failpoint}: nothing staged");
+        RERUN_AVAILABLE.store(length - staged / 2, Ordering::SeqCst);
+        // Research validation scratch an interrupted run left behind is
+        // removed before space is measured, never counted as credit.
+        let scratch = staging_path(&destination)
+            .unwrap()
+            .join(format!("{RESEARCH_SCRATCH_PREFIX}left"));
+        std::fs::create_dir(&scratch).unwrap();
+        std::fs::write(scratch.join("bytes"), vec![0_u8; bundle.len() * 4]).unwrap();
+        let mut env = CloneEnv {
+            available_space: |root| {
+                let stale = std::fs::read_dir(root)?.flatten().any(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(RESEARCH_SCRATCH_PREFIX)
+                });
+                if stale {
+                    return Err(std::io::Error::other("stale scratch was not removed"));
+                }
+                Ok(RERUN_AVAILABLE.load(Ordering::SeqCst))
+            },
+            ..CloneEnv::quiet()
+        };
+        let mut output = Vec::new();
+        run_clone_profiled_with_delays(
+            &clone_script(&bundle, &package_digest),
+            clone_args(&destination),
+            true,
+            &mut output,
+            &TelemetryRuntime::default(),
+            &CloneDelays::default(),
+            &mut env,
+        )
+        .unwrap_or_else(|error| panic!("{failpoint}: rerun failed: {error}"));
+        let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(names(root.path()), BTreeSet::from(["openalex".to_owned()]));
+        assert_reopens_at(&destination, &result);
+    }
+}
+
+#[test]
+fn a_destination_that_appears_during_the_clone_releases_the_staging() {
+    let (bundle, package_digest) = real_bundle();
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("openalex");
+    let appearing = destination.clone();
+    let delays = CloneDelays {
+        before_import: Some(Box::new(move || std::fs::create_dir(&appearing).unwrap())),
+        ..CloneDelays::default()
+    };
+    let error = run_clone_profiled_with_delays(
+        &clone_script(&bundle, &package_digest),
+        clone_args(&destination),
+        true,
+        &mut Vec::new(),
+        &TelemetryRuntime::default(),
+        &delays,
+        &mut CloneEnv::quiet(),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("hub.destination_conflict"),
+        "{error}"
+    );
+    assert_eq!(names(root.path()), BTreeSet::from(["openalex".to_owned()]));
+    assert!(
+        names(&destination).is_empty(),
+        "the other destination is untouched"
+    );
+}
+
+#[test]
+fn an_occupied_destination_releases_staging_a_killed_clone_left() {
+    let (bundle, package_digest, fixture) = helper_fixture();
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("openalex");
+    let child = clone_in_child(fixture.path(), &destination, "clone.before_install");
+    assert_eq!(child.status.code(), Some(CLONE_FAILPOINT_EXIT));
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::write(destination.join("mine"), b"user data").unwrap();
+    let error = run_clone_with(
+        &clone_script(&bundle, &package_digest),
+        clone_args(&destination),
+        true,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("hub.destination_conflict"),
+        "{error}"
+    );
+    assert_eq!(names(root.path()), BTreeSet::from(["openalex".to_owned()]));
+    assert_eq!(
+        std::fs::read(destination.join("mine")).unwrap(),
+        b"user data"
+    );
+}
+
+#[test]
+fn a_kill_during_cleanup_leaves_a_state_the_rerun_resolves() {
+    let (bundle, package_digest, fixture) = helper_fixture();
+    for keep_record in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("openalex");
+        let child = clone_in_child(fixture.path(), &destination, "clone.after_install");
+        assert_eq!(child.status.code(), Some(CLONE_FAILPOINT_EXIT));
+        let staging = acquire_staging(&destination).unwrap();
+        let entries = std::fs::read_dir(&staging.root)
+            .unwrap()
+            .flatten()
+            .map(|entry| (entry.path(), entry.file_type().unwrap().is_dir()))
+            .collect();
+        // Remove what a cleanup killed part-way through would have removed:
+        // everything before the record, and the record too when it went.
+        let order = removal_order(&staging, entries);
+        let stop = order.len() - if keep_record { 2 } else { 1 };
+        for (path, directory) in &order[..stop] {
+            if *directory {
+                std::fs::remove_dir_all(path).unwrap();
+            } else {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        drop(staging);
+        let mut output = Vec::new();
+        let result = run_clone_with(
+            &clone_script(&bundle, &package_digest),
+            clone_args(&destination),
+            true,
+            &mut output,
+        );
+        if keep_record {
+            result.unwrap();
+            let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_reopens_at(&destination, &result);
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                error.to_string().contains("hub.destination_conflict"),
+                "{error}"
+            );
+        }
+        let left = names(root.path());
+        assert!(
+            left.iter()
+                .all(|name| name == "openalex" || name.starts_with(".graphforge-admission-")),
+            "residue {left:?}"
+        );
+    }
+}
+
+#[test]
+fn removal_order_puts_the_install_record_and_then_the_lock_last() {
+    let root = tempfile::tempdir().unwrap();
+    let staging = acquire_staging(&root.path().join("openalex")).unwrap();
+    let entries = vec![
+        (staging.lock.clone(), false),
+        (staging.installed.clone(), false),
+        (staging.project.clone(), true),
+        (staging.partial.clone(), false),
+    ];
+    let order: Vec<_> = removal_order(&staging, entries)
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect();
+    assert_eq!(
+        &order[2..],
+        [staging.installed.clone(), staging.lock.clone()]
+    );
+}
+
+#[test]
+fn an_unsatisfiable_range_discards_the_partial_and_restarts() {
+    let bytes = payload();
+    let descriptor = object(&bytes);
+    let root = tempfile::tempdir().unwrap();
+    let partial = root.path().join("package.part");
+    std::fs::write(&partial, &bytes[..100]).unwrap();
+    std::fs::write(
+        partial.with_extension("resume.json"),
+        serde_json::to_vec(&ResumeState {
+            digest: descriptor.digest.0.clone(),
+            length: bytes.len() as u64,
+            location: descriptor.locations[0].clone(),
+            etag: "\"fixture-1\"".into(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let transport = Scripted::new(vec![response(416, None, b""), response(200, None, &bytes)]);
+    assert_eq!(
+        download(&transport, &descriptor, &partial).unwrap(),
+        DownloadReport {
+            resumed_bytes: 0,
+            transferred_bytes: bytes.len() as u64,
+            attempts: 2,
+        }
+    );
+    assert_eq!(std::fs::read(&partial).unwrap(), bytes);
+}
+
+#[test]
+fn killed_or_failed_clone_leaves_a_state_the_rerun_completes() {
+    let (bundle, package_digest, fixture) = helper_fixture();
     for (failpoint, killed, installed) in [
         ("clone.after_download", true, false),
         ("portable_import.after_owner", true, false),
@@ -524,18 +772,7 @@ fn killed_or_failed_clone_leaves_a_state_the_rerun_completes() {
     ] {
         let root = tempfile::tempdir().unwrap();
         let destination = root.path().join("openalex");
-        let child = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", HELPER, "--nocapture", "--test-threads=1"])
-            .env("GRAPHFORGE_CLONE_HELPER_FIXTURE", fixture.path())
-            .env("GRAPHFORGE_CLONE_HELPER_DESTINATION", &destination)
-            .env("GRAPHFORGE_CLONE_FAILPOINT", failpoint)
-            .env(
-                "GRAPHFORGE_PROJECT_FAILPOINTS",
-                "graphforge-internal-subprocess-v1",
-            )
-            .env("GRAPHFORGE_PROJECT_FAILPOINT", failpoint)
-            .output()
-            .unwrap();
+        let child = clone_in_child(fixture.path(), &destination, failpoint);
         let stdout = String::from_utf8_lossy(&child.stdout);
         if killed {
             assert_eq!(

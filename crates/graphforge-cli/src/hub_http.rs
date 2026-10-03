@@ -539,10 +539,12 @@ fn transient_status(status: u16) -> bool {
     matches!(status, 408 | 429 | 500..=599)
 }
 
-/// One request failure; `transient` marks a failure a retry may cure.
+/// One request failure; `transient` marks a failure a retry may cure, and
+/// `status` is the HTTP status of an unsuccessful response.
 pub(crate) struct FetchFailure {
     pub(crate) error: graphforge_api::GfError,
     pub(crate) transient: bool,
+    pub(crate) status: Option<u16>,
 }
 
 impl From<graphforge_api::GfError> for FetchFailure {
@@ -550,6 +552,7 @@ impl From<graphforge_api::GfError> for FetchFailure {
         Self {
             error,
             transient: false,
+            status: None,
         }
     }
 }
@@ -609,6 +612,7 @@ pub(crate) fn fetch_once(
             .map_err(|error| FetchFailure {
                 transient: is_network(&error),
                 error,
+                status: None,
             })?;
         if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
             if hop == MAX_REDIRECTS {
@@ -627,6 +631,7 @@ pub(crate) fn fetch_once(
             return Err(FetchFailure {
                 error: network(&format!("Hub returned HTTP status {}", response.status)),
                 transient: transient_status(response.status),
+                status: Some(response.status),
             });
         }
         return Ok(response);

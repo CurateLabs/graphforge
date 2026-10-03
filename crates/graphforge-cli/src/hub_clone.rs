@@ -793,6 +793,18 @@ fn download_with_progress(
             &mut report.attempts,
         ) {
             Err(failure) if failure.transient => failure.error,
+            // The partial bytes no longer match the object the server holds
+            // under this location: discard them and restart from zero rather
+            // than repeat the same unsatisfiable range on every rerun.
+            Err(failure) if range.is_some() && failure.status == Some(416) => {
+                discard_partial(partial, &checkpoint)?;
+                offset = 0;
+                validator = None;
+                if first_request {
+                    report.resumed_bytes = 0;
+                }
+                failure.error
+            }
             Err(failure) => return Err(failure.error),
             Ok(mut response) => {
                 let append = if range.is_some() && response.status == 206 {
@@ -892,6 +904,17 @@ fn download_with_progress(
         return Err(validation("hub.integrity", "download digest mismatch"));
     }
     Ok(*report)
+}
+
+fn discard_partial(partial: &Path, checkpoint: &Path) -> Result<(), graphforge_api::GfError> {
+    for path in [partial, checkpoint] {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(storage(error)),
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1112,24 +1135,39 @@ fn human_bytes(bytes: u64) -> String {
     format!("{}.{} {}", tenths / 10, tenths % 10, UNITS[unit])
 }
 
-/// Free space a clone needs beside the destination: the rest of the download
-/// plus the import's transient peak. The import was measured at 2.20-2.22x the
-/// package (`observed_transient_peak_allocated_bytes`); 2.25x keeps a margin.
-fn required_space(length: u64, downloaded: u64) -> u64 {
-    let import_peak = (u128::from(length) * 9).div_ceil(4);
-    u64::try_from(u128::from(length.saturating_sub(downloaded)) + import_peak).unwrap_or(u64::MAX)
+/// Free space a clone still needs beside the destination: the rest of the
+/// download plus whatever part of the import's transient peak is not already
+/// staged. The import was measured at 2.20-2.22x the package
+/// (`observed_transient_peak_allocated_bytes`); 2.25x keeps a margin.
+///
+/// Bytes an earlier run staged for the import (its target, its private
+/// stage) count toward that peak: the import either reuses them (a resumed or
+/// replayed import) or removes them before writing anew (another operation,
+/// a retry from scratch), so they are space the import already holds.
+///
+/// An import that already committed only replays: it materializes the package
+/// once more (at most its length) and rewrites nothing in the project.
+fn required_space(length: u64, downloaded: u64, staged_import: u64, committed: bool) -> u64 {
+    let import_peak = if committed {
+        u128::from(length)
+    } else {
+        (u128::from(length) * 9).div_ceil(4)
+    };
+    let import = import_peak.saturating_sub(u128::from(staged_import));
+    u64::try_from(u128::from(length.saturating_sub(downloaded)) + import).unwrap_or(u64::MAX)
 }
 
 fn check_free_space(
     staging: &CloneStaging,
     length: u64,
+    committed: bool,
     available: fn(&Path) -> std::io::Result<u64>,
 ) -> Result<(), graphforge_api::GfError> {
     let downloaded = std::fs::symlink_metadata(&staging.partial)
         .ok()
         .filter(std::fs::Metadata::is_file)
         .map_or(0, |metadata| metadata.len().min(length));
-    let required = required_space(length, downloaded);
+    let required = required_space(length, downloaded, staged_import_bytes(staging), committed);
     let available = available(&staging.root).map_err(storage)?;
     if available < required {
         return Err(graphforge_api::GfError::Storage(format!(
@@ -1141,6 +1179,112 @@ fn check_free_space(
     }
     Ok(())
 }
+
+/// Bytes in regular files under the staging directory other than the download,
+/// its checkpoint, and the small control files; each hard-linked file once.
+fn staged_import_bytes(staging: &CloneStaging) -> u64 {
+    fn visit(directory: &Path, seen: &mut std::collections::BTreeSet<(u64, u64)>, total: &mut u64) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if metadata.is_dir() {
+                visit(&entry.path(), seen, total);
+            } else if metadata.is_file() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt as _;
+                    if !seen.insert((metadata.dev(), metadata.ino())) {
+                        continue;
+                    }
+                }
+                *total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    let skip = [
+        staging.partial.clone(),
+        staging.partial.with_extension("resume.json"),
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    let mut total = 0_u64;
+    let Ok(entries) = std::fs::read_dir(&staging.root) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        if skip.contains(&entry.path()) {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if metadata.is_dir() {
+            visit(&entry.path(), &mut seen, &mut total);
+        } else if metadata.is_file() {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    total
+}
+
+/// The import operation of one clone: a Project-package clone keeps its
+/// historical derivation; a research clone binds the selected Version too, so
+/// different Versions of one snapshot get distinct import operations and
+/// therefore distinct generation identities.
+fn clone_operation(
+    identity: &RepositoryIdentity,
+    immutable_version: &str,
+    research: Option<&ResearchCloneContext>,
+) -> OperationId {
+    OperationId(match research {
+        None => graphforge_api::hub_clone_operation(&canonical_name(identity), immutable_version),
+        Some(context) => graphforge_api::hub_research_clone_operation(
+            &canonical_name(identity),
+            immutable_version,
+            &context.version_uuid,
+            &context.identity_digest,
+        ),
+    })
+}
+
+/// Whether an earlier run already committed `operation` in the staged import
+/// target, so the import only replays.
+fn import_committed(staging: &CloneStaging, operation: &OperationId) -> bool {
+    if std::fs::symlink_metadata(&staging.project).is_err() {
+        return false;
+    }
+    let expected = graphforge_api::portable_v2_import_generation(&operation.0);
+    staging
+        .project
+        .to_str()
+        .and_then(|path| GraphForge::new(Some(path)).ok())
+        .and_then(|graph| graph.committed_generation_identity().ok())
+        .is_some_and(|identity| identity.generation_uuid == expected)
+}
+
+/// Remove research validation scratch an interrupted run left in the staging
+/// directory; it never outlives the run that created it.
+fn remove_stale_scratch(staging: &CloneStaging) -> Result<(), graphforge_api::GfError> {
+    for entry in std::fs::read_dir(&staging.root).map_err(storage)? {
+        let entry = entry.map_err(storage)?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(RESEARCH_SCRATCH_PREFIX)
+            && entry.file_type().map_err(storage)?.is_dir()
+        {
+            std::fs::remove_dir_all(entry.path()).map_err(storage)?;
+        }
+    }
+    Ok(())
+}
+
+/// Prefix of the private directories research validation creates beside the
+/// package it validates.
+const RESEARCH_SCRATCH_PREFIX: &str = ".graphforge-research-validation-";
 
 fn clone_telemetry_runtime(endpoint: Option<&str>) -> TelemetryRuntime {
     let Some(endpoint) = endpoint else {
@@ -1239,8 +1383,13 @@ struct InstallRecord {
     result: CloneResult,
 }
 
-/// Finish a clone whose destination was installed but whose staging was not
-/// yet removed: the rerun reports the recorded result and removes the staging.
+/// Resolve the staging of a destination that already exists.
+///
+/// A clone whose destination was installed but whose staging was not yet
+/// removed is finished: the rerun reports the recorded result and removes the
+/// staging. Any other staging for an existing destination can never be
+/// installed there, because installation never replaces a path, so it is
+/// removed and the caller reports `hub.destination_conflict`.
 fn finish_installed_clone(
     destination: &Path,
 ) -> Result<Option<CloneResult>, graphforge_api::GfError> {
@@ -1250,22 +1399,20 @@ fn finish_installed_clone(
         _ => return Ok(None),
     }
     let staging = acquire_staging(destination)?;
-    if std::fs::symlink_metadata(&staging.project).is_ok() {
-        return Ok(None);
-    }
-    let Some(record) = read_install_record(&staging.installed)? else {
-        return Ok(None);
+    let record = if std::fs::symlink_metadata(&staging.project).is_ok() {
+        None
+    } else {
+        read_install_record(&staging.installed)?
     };
-    let installed = destination
-        .to_str()
-        .and_then(|path| GraphForge::new(Some(path)).ok())
-        .and_then(|graph| graph.committed_generation_identity().ok())
-        .map(|identity| identity.generation_uuid.to_string());
-    if installed.as_deref() != Some(record.generation_uuid.as_str()) {
-        return Ok(None);
-    }
+    let finished = record.filter(|record| {
+        destination
+            .to_str()
+            .and_then(|path| GraphForge::new(Some(path)).ok())
+            .and_then(|graph| graph.committed_generation_identity().ok())
+            .is_some_and(|identity| identity.generation_uuid.to_string() == record.generation_uuid)
+    });
     release_staging(staging);
-    Ok(Some(record.result))
+    Ok(finished.map(|record| record.result))
 }
 
 fn read_install_record(path: &Path) -> Result<Option<InstallRecord>, graphforge_api::GfError> {
@@ -1462,13 +1609,31 @@ fn clear_staging(staging: &CloneStaging) {
     let Ok(entries) = std::fs::read_dir(&staging.root) else {
         return;
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let _ = match entry.file_type() {
-            Ok(kind) if kind.is_dir() => std::fs::remove_dir_all(&path),
-            _ => std::fs::remove_file(&path),
+    let entries: Vec<_> = entries
+        .flatten()
+        .map(|entry| {
+            let directory = entry.file_type().is_ok_and(|kind| kind.is_dir());
+            (entry.path(), directory)
+        })
+        .collect();
+    for (path, directory) in removal_order(staging, entries) {
+        let _ = if directory {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
         };
     }
+}
+
+/// Crash-safe removal order: the install record goes after everything it
+/// describes, and the lock file last. A kill part-way through leaves either
+/// the record (the rerun finishes the clone) or nothing a rerun needs.
+fn removal_order(
+    staging: &CloneStaging,
+    mut entries: Vec<(PathBuf, bool)>,
+) -> Vec<(PathBuf, bool)> {
+    entries.sort_by_key(|(path, _)| (*path == staging.lock, *path == staging.installed));
+    entries
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1639,7 +1804,13 @@ fn run_clone_job(
             Ok(result)
         }
         Err(error) => {
-            release_staging_if_unused(staging);
+            // A destination that appeared during the clone can never receive
+            // this staging: installation never replaces a path.
+            if std::fs::symlink_metadata(&destination).is_ok() {
+                release_staging(staging);
+            } else {
+                release_staging_if_unused(staging);
+            }
             Err(error)
         }
     }
@@ -1710,7 +1881,20 @@ fn clone_into_staging(
     if object.length > MAX_OBJECT_BYTES {
         return Err(limit_error("object exceeds the clone byte bound"));
     }
-    check_free_space(staging, object.length, env.available_space)?;
+    remove_stale_scratch(staging)?;
+    // Verification later confirms the manifest's immutable version, so the
+    // operation planned here is the one the import runs.
+    let planned = clone_operation(
+        identity,
+        &manifest.immutable_version.0,
+        research_context.as_ref(),
+    );
+    check_free_space(
+        staging,
+        object.length,
+        import_committed(staging, &planned),
+        env.available_space,
+    )?;
     let partial = staging.partial.clone();
     profile.handoff(
         ComponentKind::Discovery,
@@ -1809,18 +1993,7 @@ fn clone_into_staging(
         },
     )?;
     let (immutable_version, research_version_uuid, research_version_kind) = verified;
-    // A Project-package clone keeps its historical derivation. A research clone
-    // binds the selected Version too, so different Versions of one snapshot get
-    // distinct import operations and therefore distinct generation identities.
-    let operation_id = OperationId(match &research_context {
-        None => graphforge_api::hub_clone_operation(&canonical_name(identity), &immutable_version),
-        Some(context) => graphforge_api::hub_research_clone_operation(
-            &canonical_name(identity),
-            &immutable_version,
-            &context.version_uuid,
-            &context.identity_digest,
-        ),
-    });
+    let operation_id = clone_operation(identity, &immutable_version, research_context.as_ref());
     profile.handoff(
         ComponentKind::PortableVerify,
         ComponentKind::Api,
