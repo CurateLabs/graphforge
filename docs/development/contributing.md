@@ -204,7 +204,7 @@ acceptance criteria, and dependencies must be explicit.
 ### Merge cadence
 
 Finish and merge reviewed work before starting more implementation. Coordinated
-agent teams have a limit of three unmerged changes across all agents, including
+agent teams have a limit of six unmerged changes across all agents, including
 draft PRs and implemented local branches. The coordinating agent owns the merge
 queue; prioritize existing PRs and shared CI blockers, and integrate dependent
 changes in order. See [the work-in-progress rules in AGENTS.md](../../AGENTS.md#finish-and-merge-before-starting-more-work)
