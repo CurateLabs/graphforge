@@ -3,7 +3,7 @@
 A real Project and research interchange package written by the last research
 revision 6 producer (graphforge 0.5.2 at commit `b2b703732`). Tests copy them
 to a private directory and prove that this build reads them, upgrades the
-Project on its first research write, and imports the package (ADR 0054).
+Project on its first research write, and imports the package (ADR 0055).
 
 - `project/`: a durable Project with a canonical research decision, a Project
   capture, and a Branch `main` created from current research and edited once.
