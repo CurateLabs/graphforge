@@ -523,12 +523,14 @@ fn checksum_bytes(
         ));
     }
     let mut reader = std::io::Read::take(ReadAt { file, offset: 0 }, byte_length.saturating_add(1));
-    let (actual, calls) = crate::graph_files::checksum_reader(&mut reader, diagnostic)?;
+    let (actual, calls, bytes) =
+        crate::graph_files::checksum_reader_counted(&mut reader, diagnostic)?;
     if actual != content_xxh64 {
         return Err(GfError::Validation(
             "graph payload XXH64 checksum does not match its inventory".into(),
         ));
     }
+    crate::graph_construction::diagnostics::hashed_bytes(bytes, 1);
     crate::lifecycle_io::record_read(
         crate::StorageIoPhase::HydrationVerification,
         byte_length,
@@ -601,6 +603,27 @@ mod tests {
     }
 
     const PAYLOAD: &[u8] = b"first touch authenticates this payload exactly once";
+
+    #[test]
+    fn first_touch_hash_work_counts_once_and_failed_or_cached_touches_add_none() {
+        let fixture = Fixture::new(PAYLOAD);
+        fixture.register();
+        let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+        admit_path(&fixture.link).unwrap();
+        assert_eq!(
+            capture.finish().regions["import_command"].work["hashed_bytes"],
+            PAYLOAD.len() as u64
+        );
+        let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+        admit_path(&fixture.object).unwrap();
+        assert!(capture.finish().regions["import_command"].work.is_empty());
+        let corrupt = Fixture::new(PAYLOAD);
+        corrupt.register();
+        corrupt.flip_first_byte();
+        let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+        assert!(admit_path(&corrupt.link).is_err());
+        assert!(capture.finish().regions["import_command"].work.is_empty());
+    }
 
     #[test]
     fn a_clean_payload_is_admitted_through_any_of_its_links() {

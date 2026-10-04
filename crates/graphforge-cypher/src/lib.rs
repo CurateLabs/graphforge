@@ -7,6 +7,8 @@
 
 pub mod lexer;
 pub mod parser;
+mod read_only;
+pub use read_only::read_only_query_parameters;
 
 pub use graphforge_ast::{AstQuery, ParseError, ParseErrorKind, Token};
 pub use graphforge_core::Span;

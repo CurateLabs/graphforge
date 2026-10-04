@@ -223,7 +223,10 @@ fn authenticate_encoded_checksum(
     })();
     let released = reader.finish().map_err(storage);
     match (checked, released) {
-        (Ok(()), Ok(released)) => Ok((released, calls)),
+        (Ok(()), Ok(released)) => {
+            crate::graph_construction::diagnostics::hashed_bytes(bytes, 1);
+            Ok((released, calls))
+        }
         (Err(primary), Ok(_)) | (Ok(()), Err(primary)) => Err(primary),
         (Err(primary), Err(cleanup)) => Err(storage(format!(
             "{primary}; encoded cache cleanup also failed: {cleanup}"

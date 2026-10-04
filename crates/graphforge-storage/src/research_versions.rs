@@ -793,7 +793,10 @@ fn capture(
     // Authenticate frozen bytes at capture; descriptors alone do not prove content.
     authenticate_evidence(root, &request.evidence)?;
     for p in &participants {
-        source.participant_snapshot(&p.key.capability, &p.key.family)?;
+        let snapshot = source
+            .participant_snapshot(&p.key.capability, &p.key.family)?
+            .ok_or_else(|| invalid("research participant is unavailable"))?;
+        validate_saved_query_participant(p, &snapshot.bytes)?;
     }
     Ok(ResearchVersionRecord {
         version_uuid: request.version_uuid,
@@ -1289,13 +1292,42 @@ fn inspect_with_registry(
         if !available.contains(p) {
             return Err(invalid("research participant commitment changed"));
         }
-        snapshots.push(
-            source
-                .participant_snapshot(&p.key.capability, &p.key.family)?
-                .ok_or_else(|| invalid("research participant is unavailable"))?,
-        );
+        let snapshot = source
+            .participant_snapshot(&p.key.capability, &p.key.family)?
+            .ok_or_else(|| invalid("research participant is unavailable"))?;
+        validate_saved_query_participant(p, &snapshot.bytes)?;
+        snapshots.push(snapshot);
     }
     Ok(snapshots)
+}
+
+fn participant_byte_bound(participant: &ResearchParticipantCommitment) -> u64 {
+    if participant.key.capability == crate::WORKSPACE_CAPABILITY_ID
+        && participant.key.family == crate::WORKSPACE_SAVED_QUERIES_FAMILY
+    {
+        crate::MAX_WORKSPACE_SAVED_QUERIES_BYTES as u64
+    } else {
+        256 * 1024 * 1024
+    }
+}
+
+fn validate_saved_query_participant(
+    participant: &ResearchParticipantCommitment,
+    bytes: &[u8],
+) -> Result<(), GfError> {
+    if participant.key.capability == crate::WORKSPACE_CAPABILITY_ID
+        && participant.key.family == crate::WORKSPACE_SAVED_QUERIES_FAMILY
+    {
+        crate::workspace_saved_queries::decode_participant(
+            participant.capability_version,
+            participant.record_version,
+            &participant.encoding,
+            &participant.schema_sha256,
+            participant.row_count,
+            bytes,
+        )?;
+    }
+    Ok(())
 }
 
 fn authenticate_evidence(

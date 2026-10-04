@@ -27,6 +27,11 @@ def summarize_regions(receipts: list[dict[str, Any]]) -> dict[str, Any]:
                     "command_index": index,
                     "path": path,
                     **row,
+                    # Completed work is local to this row, not inclusive process
+                    # measurement or an implicit parent/child rollup. Missing
+                    # historical units remain unknown rather than invented zero.
+                    "successful_hashed_bytes": row["work"].get("hashed_bytes"),
+                    "successful_written_bytes": row["work"].get("written_bytes"),
                     "process_effective_cores": cpu / wall if cpu is not None and wall else None,
                     "calling_thread_on_cpu_fraction": (
                         measured["thread_running_ns"] / wall
@@ -141,7 +146,11 @@ def main() -> None:
     parser.add_argument("baseline", type=Path)
     parser.add_argument("candidate", type=Path)
     parser.add_argument("--scope", required=True)
-    parser.add_argument("--unit", required=True, choices=("nodes", "edges", "rows", "bytes"))
+    parser.add_argument(
+        "--unit",
+        required=True,
+        choices=("nodes", "edges", "rows", "bytes", "hashed_bytes", "written_bytes"),
+    )
     args = parser.parse_args()
     print(
         json.dumps(

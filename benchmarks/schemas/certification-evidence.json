@@ -321,6 +321,14 @@
                   "edges": {
                     "type": "integer",
                     "minimum": 0
+                  },
+                  "hashed_bytes": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "written_bytes": {
+                    "type": "integer",
+                    "minimum": 0
                   }
                 }
               }
@@ -541,6 +549,14 @@
                     "minimum": 0
                   },
                   "edges": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "hashed_bytes": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "written_bytes": {
                     "type": "integer",
                     "minimum": 0
                   }

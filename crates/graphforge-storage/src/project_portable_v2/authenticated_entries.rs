@@ -3,7 +3,7 @@
 use super::{
     AtomicBool, ControlSha256, Digest, Entry, Path, PortableV2Error, PortableV2ErrorCode,
     PortableV2Limits, PortableV2Report, Read, Seek, SeekFrom, Sha256, canonical_json, check_cancel,
-    fs, has_multiple_links, modified, research, same_identity, semantic_validation,
+    fs, has_multiple_links, hex, modified, research, same_identity, semantic_validation,
 };
 
 /// Authentication for untrusted bytes, or corruption refusal against evidence
@@ -56,6 +56,7 @@ pub(super) fn validate_semantics(
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
 ) -> Result<(), PortableV2Error> {
+    validate_saved_queries(source, entries, limits, cancelled)?;
     semantic_validation::validate_with_reader(report, limits, cancelled, |descriptor| {
         let bytes = read(
             source,
@@ -187,4 +188,80 @@ pub(super) fn read(
         ));
     }
     Ok(bytes)
+}
+
+/// Native admission uses authenticated runtime identities rather than payload paths.
+fn validate_saved_queries(
+    source: &Path,
+    entries: &[Entry],
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), PortableV2Error> {
+    if !entries
+        .iter()
+        .any(|entry| entry.path == super::RUNTIME_MAP_PATH)
+    {
+        return Ok(());
+    }
+    let map_bytes = read(
+        source,
+        entries,
+        super::RUNTIME_MAP_PATH,
+        limits.max_manifest_bytes,
+        cancelled,
+    )?;
+    let (_, runtime) = super::decode_runtime_map(&map_bytes)?;
+    let mut matching = runtime.participants.iter().filter(|participant| {
+        participant.capability_id == crate::WORKSPACE_CAPABILITY_ID
+            && participant.record_family_id == crate::WORKSPACE_SAVED_QUERIES_FAMILY
+    });
+    let Some(participant) = matching.next() else {
+        return Ok(());
+    };
+    let refuse = || {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Incompatible,
+            "invalid native saved-query definitions",
+        )
+    };
+    if matching.next().is_some()
+        || participant.capability_version != crate::WORKSPACE_CAPABILITY_VERSION
+        || participant.record_version != crate::WORKSPACE_SAVED_QUERIES_VERSION
+        || participant.encoding != "json"
+        || participant.schema_fingerprint
+            != hex(&crate::workspace_saved_queries::schema_fingerprint())
+    {
+        return Err(refuse());
+    }
+    let manifest_bytes = read(
+        source,
+        entries,
+        super::MANIFEST_PATH,
+        limits.max_manifest_bytes,
+        cancelled,
+    )?;
+    let (manifest, _) = super::parse_manifest(&manifest_bytes, limits)?;
+    let component = manifest
+        .components
+        .iter()
+        .find(|component| component.participant_id == participant.participant_id)
+        .ok_or_else(refuse)?;
+    let [file] = component.files.as_slice() else {
+        return Err(refuse());
+    };
+    if component.kind != "settings" {
+        return Err(refuse());
+    }
+    let bytes = read(
+        source,
+        entries,
+        &file.path,
+        crate::MAX_WORKSPACE_SAVED_QUERIES_BYTES as u64,
+        cancelled,
+    )?;
+    let record = crate::WorkspaceSavedQueries::from_canonical_json(&bytes).map_err(|_| refuse())?;
+    if participant.row_count != record.queries.len() as u64 {
+        return Err(refuse());
+    }
+    Ok(())
 }

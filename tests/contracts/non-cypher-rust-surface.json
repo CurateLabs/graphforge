@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "29a9d064b8ac863d01ddf711ae433006077d8831ef2a86e3d073e12f600cf36e",
+  "public_method_digest": "47ffb81ad3b9872364cd050b0e7761bc9fcf57c909447484a9f64fedef85ea0c",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -1461,6 +1461,35 @@
         {
           "path": "crates/graphforge-api/tests/decision_results.rs",
           "symbol": "validation_is_read_only_and_explicit_artifact_recording_survives_reopen"
+        }
+      ]
+    },
+    "saved-queries": {
+      "ids": [
+        "GraphForge.create_saved_query",
+        "GraphForge.delete_saved_query",
+        "GraphForge.execute_saved_query",
+        "GraphForge.execute_saved_query_json",
+        "GraphForge.saved_queries",
+        "GraphForge.saved_queries_at",
+        "GraphForge.saved_query",
+        "GraphForge.saved_query_at",
+        "GraphForge.update_saved_query",
+        "ResearchVersionView.saved_queries",
+        "ResearchVersionView.saved_query"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/tests/saved_queries.rs",
+          "symbol": "in_memory_lifecycle_executes_parameterized_aggregate_and_preserves_failed_update"
+        },
+        {
+          "path": "crates/graphforge-api/tests/saved_queries.rs",
+          "symbol": "reopen_and_retained_version_preserve_definition_and_execution_context"
+        },
+        {
+          "path": "crates/graphforge-api/tests/saved_queries.rs",
+          "symbol": "json_parameters_follow_declarations_across_integral_numeric_representations"
         }
       ]
     }

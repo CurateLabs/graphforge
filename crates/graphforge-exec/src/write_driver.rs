@@ -135,6 +135,45 @@ pub(crate) fn split_write_plan(ops: &[GraphOp]) -> Result<SplitWritePlan, GfErro
     })
 }
 
+/// Columns consumed by a terminal sequence of direct-variable DELETE clauses.
+///
+/// Deletion resolves properties, labels and incident edges from its storage
+/// authority, so its frontier needs only target identities. Projecting these
+/// columns before optimization leaves predicate dependencies in the read
+/// prefix while avoiding unused property reads for every expansion chunk.
+/// Expression targets, other writes and later reads retain the full frontier.
+pub(crate) fn delete_identity_projection(
+    ops: &[GraphOp],
+    split: &SplitWritePlan,
+    schema: &DFSchema,
+) -> Option<Vec<DfExpr>> {
+    let tail = &ops[split.prefix_len..];
+    if !tail.iter().all(|op| {
+        matches!(op, GraphOp::Delete { vars, exprs, .. } if !vars.is_empty() && exprs.is_empty())
+    }) {
+        return None;
+    }
+    let mut seen = HashSet::new();
+    let mut columns = Vec::new();
+    for op in tail {
+        let GraphOp::Delete { vars, .. } = op else {
+            unreachable!("direct DELETE-only suffix checked above");
+        };
+        for var in vars {
+            if seen.insert(*var) {
+                let qualifier = datafusion::common::TableReference::bare(format!("var_{}", var.0));
+                let name = ["node_uuid", "edge_uuid"].into_iter().find(|name| {
+                    schema
+                        .index_of_column_by_name(Some(&qualifier), name)
+                        .is_some()
+                })?;
+                columns.push(DfExpr::Column(Column::new(Some(qualifier), name)));
+            }
+        }
+    }
+    Some(columns)
+}
+
 /// For a contiguous, terminal CREATE-only suffix, return the created bindings
 /// each clause must retain for later clauses. Variables that are never read
 /// again do not need columns in the statement frontier: their graph effects

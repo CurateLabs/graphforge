@@ -24,8 +24,95 @@ current openCypher TCK corpus gate.
 - [Functions](#functions)
 - [Temporal Types](#temporal-types)
 - [Parameters](#parameters)
+- [Saved Queries](#saved-queries)
 
 ---
+
+## Saved Queries
+
+A Project can keep named, reusable read-only analyses. Each definition has a
+stable `query_uuid`, a unique case-sensitive name without surrounding whitespace,
+an optional description, Cypher text, and parameter declarations. These are native
+Project metadata, so they survive reopen and complete portable export/import.
+
+```python
+from uuid import uuid4
+from graphforge import GraphForge
+
+forge = GraphForge()
+forge.execute("CREATE (:Person {age:20}), (:Person {age:40})")
+query_uuid = str(uuid4())
+forge.create_saved_query({
+    "query_uuid": query_uuid,
+    "name": "People above an age",
+    "description": "Count people meeting a supplied threshold",
+    "query": "MATCH (p:Person) WHERE p.age >= $minimum RETURN count(p) AS people",
+    "parameters": {"minimum": "integer"},
+})
+definitions = forge.saved_queries()
+definition = forge.saved_query(query_uuid)
+table = forge.execute_saved_query(query_uuid, {"minimum": 30})
+assert table.to_pylist() == [{"people": 1}]
+forge.update_saved_query({**definition, "name": "People by age threshold"})
+forge.delete_saved_query(query_uuid)
+```
+
+Parameter declarations must exactly name the `$parameters` referenced by the
+query. Every declared value is required on execution and must match its type:
+`boolean`, `integer` (signed 64-bit), `float` (finite), `string`, or `uuid`.
+Null, defaults, and undeclared values are refused. Python UUID parameters use
+`uuid.UUID`; Node and CLI use `{"$uuid": "<canonical UUID>"}`. Literal values
+embedded in query text are part of the published definition; supply private
+values through execution parameters instead.
+
+Node and CLI JSON numbers are interpreted by the saved declaration: an integral
+number can supply `float`, and a floating representation can supply `integer`
+only when integral and within ±9,007,199,254,740,991. Rust and Python retain their
+native integer/float distinction. Lean Rust builds support current saved queries;
+historical sources require the `research` feature and otherwise return
+`GF_CAPABILITY_DISABLED`.
+
+Saving validates syntax and the read-only contract without binding to the graph
+or running the query. Mutation clauses and procedure `CALL` are refused. General
+aggregates and tables are supported; a saved query need not return membership
+UUIDs. If it does return `node_uuid` or `edge_uuid`, its text can also be used by
+a Slice query selector. A saved definition and a frozen Slice remain separate
+objects.
+
+Execution pins one committed generation, uses the instance's native resource
+policy, and collects at most 1,000,000 rows and 64 MiB of Arrow array data.
+Exceeding either ceiling fails without a partial result. Supply a
+`CancellationToken` through Python's `cancellation` argument, or pass an
+`AbortSignal` as Node's fourth `executeSavedQuery(uuid, params, source, signal)`
+argument.
+
+Retained research Versions keep the definition revision they captured. Python's
+`saved_query`, `saved_queries`, and `execute_saved_query` accept
+`source={"kind": "version", "version_uuid": "<UUID>"}` to read that revision
+and execute against its exact retained graph. Omit `source` for current state.
+A missing/released Version fails; it never follows the live parent. A definition
+alone does not retain graph data or promise identical results across projects.
+
+Node exposes `createSavedQuery`, `updateSavedQuery`, `deleteSavedQuery`,
+`savedQuery`, `savedQueries`, and asynchronous `executeSavedQuery`; execution
+returns Arrow IPC bytes. Rust exposes the same lifecycle plus
+`saved_query_at`/`saved_queries_at` with `SavedQuerySource`.
+
+CLI definitions and parameter values use separate JSON files:
+
+```sh
+gf --project ./research saved-query save --file definition.json
+gf --project ./research saved-query list
+gf --project ./research saved-query show QUERY_UUID
+gf --project ./research saved-query update --file definition.json
+gf --project ./research saved-query run QUERY_UUID --params parameters.json > result.arrow
+gf --project ./research saved-query delete QUERY_UUID
+```
+
+`list`, `show`, and `run` accept `--version-uuid UUID`. Lifecycle output is JSON;
+execution emits Arrow IPC, or JSON with the global `--json` option. Saving,
+listing, publishing, cloning, and importing never execute definitions. Previous
+execution values and results are not saved with them.
 
 ## Reading Data
 

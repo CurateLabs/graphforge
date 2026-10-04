@@ -421,8 +421,12 @@ export default defineConfig({
                   slug: 'adr/0053-hub-publish-wire-contract',
                 },
                 {
-                  label: '0054 — Research Versions are commits',
-                  slug: 'adr/0054-versions-are-commits',
+                  label: '0054 — GraphForge component boundaries: Core, XYG, editor, and Hub',
+                  slug: 'adr/0054-product-component-boundaries',
+                },
+                {
+                  label: '0055 — Research Versions are commits',
+                  slug: 'adr/0055-versions-are-commits',
                 },
                 // END generated ADR records
               ],

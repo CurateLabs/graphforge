@@ -32,10 +32,11 @@ pub(crate) fn portable_objects(
     for version in registry.versions.values() {
         for participant in &version.content.participants {
             let digest = hex(&participant.content_sha256);
-            let bytes = read(&digest, 256 * 1024 * 1024)?;
+            let bytes = read(&digest, super::super::participant_byte_bound(participant))?;
             if hex(&Sha256::digest(&bytes).into()) != digest {
                 return Err(invalid("portable research participant identity conflicts"));
             }
+            super::super::validate_saved_query_participant(participant, &bytes)?;
             if participant.key.capability == "workspace"
                 && participant.key.family == "configuration"
             {
@@ -105,7 +106,7 @@ fn add(
 }
 
 /// Derive closure from identities authenticated by the outer portable scanner.
-/// Only settings, graph inventories and bounded manifest nodes need decoding;
+/// Only settings, saved definitions, graph inventories and manifest nodes need decoding;
 /// Arrow/Parquet participant bodies are not composition metadata.
 pub(crate) fn portable_objects_admitted(
     registry: &ResearchRegistry,
@@ -117,10 +118,17 @@ pub(crate) fn portable_objects_admitted(
         for participant in &version.content.participants {
             let digest = hex(&participant.content_sha256);
             let byte_length = length(&digest)?;
-            if byte_length > 256 * 1024 * 1024 {
+            if byte_length > super::super::participant_byte_bound(participant) {
                 return Err(invalid("portable research participant exceeds its bound"));
             }
             add(&mut objects, digest.clone(), Some(byte_length))?;
+            if participant.key.capability == crate::WORKSPACE_CAPABILITY_ID
+                && participant.key.family == crate::WORKSPACE_SAVED_QUERIES_FAMILY
+            {
+                let bytes =
+                    read_control(&digest, super::super::participant_byte_bound(participant))?;
+                super::super::validate_saved_query_participant(participant, &bytes)?;
+            }
             if participant.key.capability == "workspace"
                 && participant.key.family == "configuration"
             {

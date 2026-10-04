@@ -40,7 +40,8 @@ anyhow = "1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Property-overlay JSONL spools must preserve every finite Float64 bit pattern.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_yaml = { version = "0.9", package = "serde_yaml_ng" }
 sha2 = "0.11"
 unicode-normalization = "0.1"

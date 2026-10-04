@@ -447,7 +447,7 @@ fn limit(_: &str) -> PortableV2Error {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::fs;
     use std::sync::atomic::AtomicBool;
 
@@ -473,6 +473,12 @@ mod tests {
     }
 
     fn publish_graph_project() -> (tempfile::TempDir, [Uuid; 3], [Uuid; 2]) {
+        publish_graph_project_with_metadata(None)
+    }
+
+    fn publish_graph_project_with_metadata(
+        extra: Option<crate::ProjectParticipant>,
+    ) -> (tempfile::TempDir, [Uuid; 3], [Uuid; 2]) {
         let root = tempfile::tempdir().unwrap();
         open_or_initialize_project(root.path()).unwrap();
         let workspace = tempfile::tempdir().unwrap();
@@ -539,6 +545,9 @@ mod tests {
             .unwrap()
             .unwrap();
         participants.push(composition.to_project_participant().unwrap());
+        if let Some(extra) = extra {
+            participants.push(extra);
+        }
         participants.sort_by(|left, right| {
             (&left.capability_id, &left.record_family_id)
                 .cmp(&(&right.capability_id, &right.record_family_id))
@@ -571,6 +580,50 @@ mod tests {
             .publish()
             .unwrap();
         (root, nodes, edges)
+    }
+
+    #[test]
+    fn graph_subset_excludes_saved_queries_instead_of_widening_selection() {
+        let query = crate::SavedQuery {
+            query_uuid: Uuid::new_v4(),
+            name: "Analyst definition".into(),
+            description: None,
+            query: "RETURN 1".into(),
+            parameters: BTreeMap::new(),
+        };
+        let definitions = crate::WorkspaceSavedQueries {
+            queries: BTreeMap::from([(query.query_uuid, query)]),
+            ..crate::WorkspaceSavedQueries::default()
+        };
+        let (root, nodes, _) = publish_graph_project_with_metadata(Some(
+            definitions.to_project_participant().unwrap(),
+        ));
+        let generation = resolve_project_generation(root.path()).unwrap();
+        let preview = preview_portable_v2_graph_subset(
+            &generation,
+            &PortableV2SubsetRequest {
+                selector: PortableV2GraphSelector {
+                    node_uuids: vec![nodes[0].to_string()],
+                    edge_uuids: Vec::new(),
+                },
+                closure: PortableV2SubsetClosure::InducedEdges,
+                projection: PortableV2PropertyProjection::default(),
+            },
+            PortableV2Limits::default(),
+        )
+        .unwrap();
+        assert!(!preview.selection.includes(
+            crate::WORKSPACE_CAPABILITY_ID,
+            crate::WORKSPACE_SAVED_QUERIES_FAMILY
+        ));
+        assert!(
+            preview
+                .selection
+                .excluded
+                .iter()
+                .any(|entry| entry.identity.record_family_id
+                    == crate::WORKSPACE_SAVED_QUERIES_FAMILY)
+        );
     }
 
     #[test]

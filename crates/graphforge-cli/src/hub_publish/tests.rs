@@ -1447,3 +1447,70 @@ fn repository_cli_parity_cases_match_the_rust_cli() {
         );
     }
 }
+
+#[test]
+fn saved_query_definition_and_parameterized_aggregate_survive_hub_publish_and_clone() {
+    use graphforge_api::{IrLiteral, SavedQuery, SavedQueryParameterType, SavedQuerySource};
+    let root = tempfile::tempdir().unwrap();
+    let mut graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    graph
+        .execute("CREATE (:Item {score:1}), (:Item {score:3})")
+        .unwrap();
+    let saved = SavedQuery {
+        query_uuid: Uuid::now_v7(),
+        name: "Items above threshold".into(),
+        description: Some("Reusable published aggregate".into()),
+        query: "MATCH (n:Item) WHERE n.score >= $minimum RETURN count(n) AS total".into(),
+        parameters: BTreeMap::from([("minimum".into(), SavedQueryParameterType::Integer)]),
+    };
+    graph.create_saved_query(saved.clone()).unwrap();
+    // A portable definition may need parameters and must never run on publish or clone.
+    let failing = SavedQuery {
+        query_uuid: Uuid::now_v7(),
+        name: "Explicit execution only".into(),
+        description: None,
+        query: "RETURN 1 / 0 AS unavailable".into(),
+        parameters: BTreeMap::new(),
+    };
+    graph.create_saved_query(failing.clone()).unwrap();
+    let (_, version) = create_branch(&mut graph, "main", current());
+    let hub = LoopbackHub::start();
+    publish_ok(&hub, &graph, &on_ref("curate/claims", "main"));
+    let destination = root.path().join("clone");
+    let cloned = clone_into(&hub, "curate/claims", &destination, Some("main"), None);
+    assert_eq!(cloned["research_version_uuid"], version.to_string());
+    let reopened = GraphForge::new(destination.to_str()).unwrap();
+    assert_eq!(reopened.saved_query(saved.query_uuid).unwrap(), saved);
+    assert_eq!(reopened.saved_query(failing.query_uuid).unwrap(), failing);
+    assert!(
+        reopened
+            .execute_saved_query(
+                failing.query_uuid,
+                &std::collections::HashMap::new(),
+                &SavedQuerySource::Current,
+                None
+            )
+            .is_err()
+    );
+    let result = reopened
+        .execute_saved_query(
+            saved.query_uuid,
+            &std::collections::HashMap::from([("minimum".into(), IrLiteral::Int(2))]),
+            &SavedQuerySource::Current,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        result.batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .value(0),
+        1
+    );
+    assert_eq!(
+        reference(&reopened, version).identity_sha256,
+        reference(&graph, version).identity_sha256
+    );
+}

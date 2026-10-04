@@ -4,6 +4,40 @@ use super::*;
 use std::fs;
 
 #[test]
+fn participant_hash_work_counts_sha_and_checksum_only_when_each_stream_completes() {
+    let request = request(vec![participant("graph", "nodes", b"payload")]);
+    let bytes = request.participants[0].bytes.len() as u64;
+    let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+    let identities = ParticipantIdentities::compute(&request.participants).unwrap();
+    assert_eq!(
+        capture.finish().regions["import_command"].work["hashed_bytes"],
+        2 * bytes
+    );
+    for (prepared, expected) in [(None, 2 * bytes), (Some(&identities), bytes)] {
+        let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+        request_metadata_with_payloads(&request, ParticipantPayloads::Memory(prepared)).unwrap();
+        let snapshot = capture.finish();
+        assert_eq!(
+            snapshot.regions["import_command"].work["hashed_bytes"],
+            expected
+        );
+        assert!(
+            !snapshot.regions["import_command"]
+                .work
+                .contains_key("written_bytes")
+        );
+    }
+    let mut wrong = identities;
+    wrong.0[0].content_xxh64 ^= 1;
+    let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+    assert!(
+        request_metadata_with_payloads(&request, ParticipantPayloads::Memory(Some(&wrong)))
+            .is_err()
+    );
+    assert!(capture.finish().regions["import_command"].work.is_empty());
+}
+
+#[test]
 fn request_fingerprint_is_independent_of_participant_input_order() {
     let mut request = request(vec![
         participant("provenance", "events", b"provenance"),

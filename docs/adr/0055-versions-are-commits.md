@@ -1,13 +1,13 @@
 ---
-title: "ADR 0054: Research Versions are commits"
-adr: "0054"
+title: "ADR 0055: Research Versions are commits"
+adr: "0055"
 status: "Proposed"
 date: "2026-10-03"
 superseded_by: null
 revisit_when: "A head-moving operation needs more than one merge parent, a host needs identity that free-form signatures cannot express, or revision 6 Projects no longer need to be read"
 ---
 
-# ADR 0054: Research Versions are commits
+# ADR 0055: Research Versions are commits
 
 **Status:** Proposed
 

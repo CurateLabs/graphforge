@@ -149,7 +149,7 @@ containers; their temporary storage identity is not the immutable citation.
 
 ## Versions are commits amendment (#1773)
 
-Research capability and registry revision 7 (ADR 0054). A Version record also
+Research capability and registry revision 7 (ADR 0055). A Version record also
 carries its `parents`, optional `author` and `committer` signatures, and the
 `provenance` of restored or brought content. The identity digest keeps its form
 (struct-order JSON with physical placement zeroed) and so commits to these
@@ -174,4 +174,4 @@ unchanged, its ancestry empty. Publishers that do not write research carry it
 unchanged; the first research write relabels the research capability and
 participants to revision 7 inside that same atomic publication, without
 rewriting any record. Revision 6 packages import at revision 7, and exports are
-always revision 7. Revisions before 6 remain refused (ADR 0054).
+always revision 7. Revisions before 6 remain refused (ADR 0055).

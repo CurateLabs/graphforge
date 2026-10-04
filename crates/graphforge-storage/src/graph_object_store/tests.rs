@@ -30,6 +30,49 @@ use crate::graph_object_store::try_begin_graph_object_gc;
 use crate::graph_object_store::verify_graph_object;
 
 #[test]
+fn publication_payload_hash_work_counts_actual_authentication_streams_after_acceptance() {
+    let root = tempfile::tempdir().unwrap();
+    let payload = b"publication authenticated bytes";
+    let (digest, evidence) = install_graph_object_bytes(root.path(), payload).unwrap();
+    let lease = begin_graph_object_publication(root.path()).unwrap();
+    let mut entry = crate::GraphFileEntry {
+        relative_path: "topology/nodes.parquet".into(),
+        byte_length: payload.len() as u64,
+        content_sha256: digest,
+        content_xxh64: evidence.content_xxh64.unwrap(),
+        role: crate::GraphFileRole::Topology,
+    };
+    for crypto in [false, true] {
+        let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+        {
+            let _region =
+                crate::concurrency_attribution::RegionScope::named("publication_authentication");
+            if crypto {
+                authenticate_graph_object_entry(root.path(), &entry).unwrap();
+            } else {
+                admit_graph_object_with_lease(&lease, &entry).unwrap();
+            }
+        }
+        let snapshot = capture.finish();
+        assert_eq!(
+            snapshot.regions["import_command/publication_authentication"].work["hashed_bytes"],
+            payload.len() as u64 * if crypto { 2 } else { 1 }
+        );
+        assert!(snapshot.regions["import_command"].work.is_empty());
+        entry.content_xxh64 ^= 1;
+        let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+        let result = if crypto {
+            authenticate_graph_object_entry(root.path(), &entry)
+        } else {
+            admit_graph_object_with_lease(&lease, &entry)
+        };
+        assert!(result.is_err());
+        assert!(capture.finish().regions["import_command"].work.is_empty());
+        entry.content_xxh64 ^= 1;
+    }
+}
+
+#[test]
 fn checksum_admission_hashes_no_payload_bytes_and_boundary_authentication_keeps_sha256() {
     let root = tempfile::tempdir().unwrap();
     let payload = vec![0x5a; BUFFER_BYTES + 17];

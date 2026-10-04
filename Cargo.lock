@@ -2526,6 +2526,7 @@ dependencies = [
  "fs4 1.1.0",
  "futures",
  "graphforge-core",
+ "graphforge-cypher",
  "graphforge-filesystem",
  "graphforge-ir",
  "graphforge-ontology",

@@ -95,7 +95,7 @@ Changed public requests cannot reuse an aborted or committed operation identity.
 
 ## Versions are commits amendment (#1773)
 
-A Branch head is a commit (ADR 0054). Branch creation records the origin Version
+A Branch head is a commit (ADR 0055). Branch creation records the origin Version
 as the base's only parent. Every later Branch Version records the prior Branch
 head as its first parent: execute, ontology, claim, suppression and reference
 record only that; restore also records the restored source and Bring the Slice

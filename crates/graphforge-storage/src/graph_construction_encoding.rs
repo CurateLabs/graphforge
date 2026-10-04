@@ -239,6 +239,7 @@ fn authenticated_source_spool<'a>(
         evidence.source_spool_peak_temporary_bytes.max(bytes);
     let mut spool = spool.into_file();
     spool.rewind().map_err(storage)?;
+    crate::graph_construction::diagnostics::sealed_payload(bytes, 1);
     Ok((spool, guard))
 }
 
@@ -2295,6 +2296,7 @@ fn copy_artifact<R: Read + Seek>(
         (write_bytes, write_operations),
         cache_release.sync_operations,
     )?;
+    crate::graph_construction::diagnostics::sealed_payload(artifact.bytes, 2);
     artifacts.push(artifact);
     Ok(())
 }
@@ -2457,7 +2459,10 @@ fn authenticate_file_cancellable(
     })();
     let released = file.finish().map_err(storage);
     match (authentication, released) {
-        (Ok(artifact), Ok(released)) => Ok((artifact, released, operations)),
+        (Ok(artifact), Ok(released)) => {
+            crate::graph_construction::diagnostics::hashed_bytes(artifact.bytes, 2);
+            Ok((artifact, released, operations))
+        }
         (Ok(_), Err(error)) => Err(error),
         (Err(primary), Ok(_)) => Err(primary),
         (Err(primary), Err(release)) => Err(storage(format!(

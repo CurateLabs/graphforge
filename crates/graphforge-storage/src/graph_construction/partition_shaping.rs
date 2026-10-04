@@ -303,6 +303,7 @@ impl SpillWriter {
             .merge_fsync_operations
             .checked_add(receipt.fsync_operations)
             .ok_or_else(|| super::storage("merge fsync operations overflows"))?;
+        super::diagnostics::sealed_payload(receipt.bytes, 1);
         Ok(receipt)
     }
 }
@@ -481,6 +482,7 @@ impl SealedSpill {
             .merge_fsync_operations
             .checked_add(receipt.fsync_operations)
             .ok_or_else(|| super::storage("merge fsync operations overflows"))?;
+        super::diagnostics::sealed_payload(receipt.bytes, 1);
         Ok(receipt)
     }
 }
@@ -1097,6 +1099,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
         }
         publication.commit().map_err(super::storage)?;
         *evidence = committed;
+        super::diagnostics::sealed_payload(receipt.bytes, 1);
         #[cfg(any(test, feature = "test-support"))]
         if let Some(diagnostic) = diagnostic {
             diagnostic.finish(self.family.as_str(), 1, partitions, evidence, true);
@@ -1966,6 +1969,7 @@ impl<'a> RowRangePartitioner<'a> {
                 }
             }
         }
+        super::diagnostics::sealed_payload(receipt.bytes, 1);
         Ok(output.to_owned())
     }
 

@@ -10,6 +10,32 @@ use std::io::Write;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+/// Successful payload hash inputs, independent of the attempted SHA-only
+/// process measurements. Each actual digest stream counts its input: SHA and
+/// XXH64 over the same bytes count twice; a retained identity counts nothing.
+pub(crate) fn hashed_bytes(bytes: u64, streams: u8) {
+    if bytes == 0 {
+        return;
+    }
+    for _ in 0..streams {
+        crate::concurrency_attribution::RegionScope::record_work("hashed_bytes", bytes);
+    }
+}
+
+/// Accepted bytes of successfully file-sealed output, not write submissions or
+/// process syscall deltas. Namespace durability remains a separate protocol.
+pub(crate) fn written_bytes(bytes: u64) {
+    if bytes == 0 {
+        return;
+    }
+    crate::concurrency_attribution::RegionScope::record_work("written_bytes", bytes);
+}
+
+pub(crate) fn sealed_payload(bytes: u64, hash_streams: u8) {
+    hashed_bytes(bytes, hash_streams);
+    written_bytes(bytes);
+}
+
 fn clock_ns() -> u128 {
     #[cfg(test)]
     CLOCK_SAMPLES.with(|count| count.set(count.get() + 1));

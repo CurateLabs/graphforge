@@ -1049,6 +1049,7 @@ pub(crate) fn authenticate_graph_object_entry(
             "graph payload XXH64 checksum does not match its inventory",
         ));
     }
+    crate::graph_construction::diagnostics::hashed_bytes(io.bytes, 2);
     Ok(())
 }
 
@@ -1092,11 +1093,11 @@ fn admit_checksum_file(
     }
     let mut file = graphforge_filesystem::FileCacheReleasingReader::new(file)
         .map_err(|error| storage("open bounded checksum payload", root, error))?;
-    let checked = crate::graph_files::checksum_reader(&mut file, root);
+    let checked = crate::graph_files::checksum_reader_counted(&mut file, root);
     let released = file
         .finish()
         .map_err(|error| storage("release checksum payload cache", root, error));
-    let (actual, calls) = match (checked, released) {
+    let (actual, calls, bytes) = match (checked, released) {
         (Ok(value), Ok(_)) => value,
         (Err(primary), Ok(_)) | (Ok(_), Err(primary)) => return Err(primary),
         (Err(primary), Err(release)) => {
@@ -1112,6 +1113,7 @@ fn admit_checksum_file(
             "graph payload XXH64 checksum does not match its inventory",
         ));
     }
+    crate::graph_construction::diagnostics::hashed_bytes(bytes, 1);
     crate::lifecycle_io::record_read(
         crate::StorageIoPhase::HydrationVerification,
         entry.byte_length,
@@ -1264,6 +1266,7 @@ impl GraphObjectReadLease {
                 return Err(validation(format!("{primary}; {cleanup}")));
             }
         };
+        crate::graph_construction::diagnostics::hashed_bytes(totals.read_bytes, 1);
         Ok((
             AuthenticatedGraphObject {
                 file: retained,
@@ -1458,6 +1461,7 @@ pub(crate) fn open_graph_object_with_checksum(
         .map_err(|error| storage("rewind checksum object", root, error))?;
     crate::lifecycle_io::record_read(crate::StorageIoPhase::HydrationVerification, bytes, calls);
     crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
+    crate::graph_construction::diagnostics::hashed_bytes(bytes, 1);
     Ok(AuthenticatedGraphObject {
         file,
         authenticated_length: entry.byte_length,

@@ -149,6 +149,13 @@ pub fn preview_portable_v2_selection(
         crate::semantic_storage_bindings(generation).map_err(storage)?;
     }
     validate_settings(generation, &selected, limits)?;
+    if selected.contains(&PortableV2ParticipantId {
+        capability_id: crate::WORKSPACE_CAPABILITY_ID.into(),
+        record_family_id: crate::WORKSPACE_SAVED_QUERIES_FAMILY.into(),
+    }) {
+        crate::read_workspace_saved_queries(generation)
+            .map_err(|_| incompatible("invalid native saved-query definitions"))?;
+    }
 
     let mut included = Vec::new();
     let mut excluded = Vec::new();
@@ -445,6 +452,13 @@ pub(crate) fn validate_selection_plan(
     {
         return Err(incompatible("selection plan identity mismatch"));
     }
+    if plan.includes(
+        crate::WORKSPACE_CAPABILITY_ID,
+        crate::WORKSPACE_SAVED_QUERIES_FAMILY,
+    ) {
+        crate::read_workspace_saved_queries(generation)
+            .map_err(|_| incompatible("invalid native saved-query definitions"))?;
+    }
     Ok(())
 }
 
@@ -461,7 +475,12 @@ pub(crate) fn fingerprint(plan: &PortableV2SelectionPlan) -> Result<String, Port
 }
 
 pub(crate) fn component_kind(capability: &str, family: &str) -> &'static str {
-    if capability == "research" {
+    if capability == crate::WORKSPACE_CAPABILITY_ID
+        && family == crate::WORKSPACE_SAVED_QUERIES_FAMILY
+    {
+        // Definitions are portable project metadata, not graph membership or results.
+        "settings"
+    } else if capability == "research" {
         "research"
     } else if capability == crate::GRAPH_CAPABILITY_ID {
         "graph-data"

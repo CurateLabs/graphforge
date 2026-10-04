@@ -30,6 +30,93 @@ use crate::graph_object_store::verify_file;
 use crate::graph_object_store::verify_graph_object;
 
 #[test]
+fn successful_install_byte_work_counts_actual_streams_and_refuses_failed_writes() {
+    let payload = b"payload byte work";
+    for failure in [None, Some("install:temp-sealed")] {
+        let root = tempfile::tempdir().unwrap();
+        let lease = begin_graph_object_publication(root.path()).unwrap();
+        let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+        inject_returned_error(failure);
+        let result = install_graph_object_bytes_with_lease(&lease, payload);
+        inject_returned_error(None);
+        let snapshot = capture.finish();
+        let work = &snapshot.regions["import_command"].work;
+        if failure.is_some() {
+            assert!(result.is_err());
+            assert!(
+                work.is_empty(),
+                "failed installation must not credit successful byte work"
+            );
+            assert!(
+                snapshot.regions["import_command"]
+                    .inclusive
+                    .hashed_bytes
+                    .unwrap()
+                    >= payload.len() as u64,
+                "attempted SHA work must remain visible independently"
+            );
+        } else {
+            let (_, evidence) = result.unwrap();
+            let bytes = payload.len() as u64;
+            assert_eq!(work["written_bytes"], bytes);
+            // Resident SHA + XXH64 naming. Windows additionally authenticates
+            // the reopened sealed temporary through both streams.
+            #[cfg(unix)]
+            assert_eq!(work["hashed_bytes"], 2 * bytes);
+            #[cfg(windows)]
+            assert_eq!(work["hashed_bytes"], 4 * bytes);
+            assert!(evidence.attempted_install);
+            let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+            let (_, reused) = install_graph_object_bytes_with_lease(&lease, payload).unwrap();
+            assert!(reused.reused_existing);
+            let work = &capture.finish().regions["import_command"].work;
+            // Resident naming and one existing-object SHA/XXH64 admission.
+            assert_eq!(work["hashed_bytes"], 4 * bytes);
+            assert!(!work.contains_key("written_bytes"));
+        }
+    }
+}
+
+#[test]
+fn failed_streamed_payload_authentication_does_not_credit_hash_or_write_work() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let payload = b"failed streamed payload";
+    fs::write(&source, payload).unwrap();
+    let lease = begin_graph_object_publication(root.path()).unwrap();
+    let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+    let error = install_graph_object_file_with_lease(
+        &lease,
+        &source,
+        &"ab".repeat(32),
+        payload.len() as u64,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("source digest or length changed")
+    );
+    let snapshot = capture.finish();
+    assert!(snapshot.regions["import_command"].work.is_empty());
+    assert!(
+        snapshot.regions["import_command"]
+            .inclusive
+            .hashed_bytes
+            .unwrap()
+            >= payload.len() as u64
+    );
+    #[cfg(target_os = "linux")]
+    assert!(
+        snapshot.regions["import_command"]
+            .inclusive
+            .written_bytes
+            .unwrap()
+            >= payload.len() as u64
+    );
+}
+
+#[test]
 fn allocation_observed_concurrent_cas_winner_keeps_real_temporary_peak() {
     let root = tempfile::tempdir().unwrap();
     let operation = crate::StorageAllocationOperation::default();
