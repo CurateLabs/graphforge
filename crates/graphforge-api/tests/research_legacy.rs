@@ -1,4 +1,4 @@
-//! Research revision 6 Projects and packages keep working (ADR 0054).
+//! Research revision 6 Projects and packages keep working (ADR 0055).
 //!
 //! The fixture is a real Project and package written by the research/6 code;
 //! see `tests/fixtures/research-v6/README.md` for how it is generated.

@@ -1,4 +1,4 @@
-//! Research revision 6 compatibility (ADR 0054).
+//! Research revision 6 compatibility (ADR 0055).
 //!
 //! A revision 6 registry is a valid revision 7 registry with no commit fields:
 //! every field revision 7 added is omitted when empty, so the same bytes decode,
