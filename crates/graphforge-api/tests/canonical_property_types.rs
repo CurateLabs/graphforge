@@ -330,12 +330,9 @@ fn accepted_property_types_read_back_canonically_after_reopen() {
             if column.name.starts_with("t_") {
                 assert!(actual.is_null(3), "{pattern} {} null", column.name);
             }
-            // Integer and string scalars also read back as exactly the
-            // canonical values imported. Widened floats are held to the
-            // Float64 control above: a Float64 property equal to f32::MAX
-            // currently reads back one ULP off whatever its imported type,
-            // a read-path defect outside construction.
-            if column.name.starts_with("t_") && column.name != "t_f32" {
+            // Every scalar reads back as exactly the canonical value
+            // imported, including the lossless Float32-to-Float64 widening.
+            if column.name.starts_with("t_") {
                 assert_eq!(
                     actual.to_data(),
                     column.canonical.to_data(),
