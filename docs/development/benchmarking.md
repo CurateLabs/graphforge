@@ -78,10 +78,14 @@ Method input SHA-256 identities:
 | Comparison driver | `a51cc92b75bf9dc99e567b025cfedee2a2a3ec4c9c726fd56fce45e2de81e05d` |
 | S18 profile | `762fdac3d4ad790eaf1aa75348ccca692c709dcf578f91e1363f720afebc368b` |
 | S20 profile | `b8af47526cad5641bfe85c8c68e507c46edf0de106f92bffd712e6ae90c9b59d` |
+| S18 nodes.parquet | `44c9dfd9325013d0f6ea2f03bd86b00d2bea01265254cb28f70f0881a6478075` |
+| S18 edges.parquet | `f112ccbec94875f36f113e9bdf3e6e7d88e3105bafbaeeb3a7cb42ac4883e9c4` |
+| S20 nodes.parquet | `5792da943d39a3ec0cfe48c375fef1b078ae31f2c086af5d9bcfd417c74f24aa` |
+| S20 edges.parquet | `3fb656aa9af568f12359c51fcb6a337460d0521ac07bd05def3a7e98f2e51086` |
 
-The generator binary and generated Parquet hashes are written in each input
-`identity.json`; record the four Parquet hashes here before accepting a new
-comparison. Raw receipts, counts, logs, per-run tables and binary provenance
+These inputs use the profiles' edge factor 16 and seed 13907095936298285200.
+The generator binary and generated Parquet hashes also appear in each input
+`identity.json`. Raw receipts, counts, logs, per-run tables and binary provenance
 attach to the producing issue/PR outside the repository.
 
 ## Inventory and enforcement
