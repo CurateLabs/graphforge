@@ -5,9 +5,12 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from benchexec.model import Benchmark
+from benchexec.util import read_local_time
 from graphforge_bench.progressive_run import (
     APPLICATION_IO_FIELDS,
     APPLICATION_IO_PHASES,
@@ -1296,10 +1299,9 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         stage.mkdir()
         _stage_benchmark_xml(ROOT, stage, wall_seconds=102)
         xml = (stage / "benchmark.xml").read_text(encoding="utf-8")
-        self.assertIn('timelimit="102 s"', xml)
-        self.assertIn('hardtimelimit="132 s"', xml)
-        self.assertNotIn("14400", xml)
-        self.assertNotIn("14430", xml)
+        self.assertIn('walltimelimit="102 s"', xml)
+        self.assertIn('timelimit="14400 s"', xml)
+        self.assertIn('hardtimelimit="14430 s"', xml)
         definition = (ROOT / "definitions/graphforge-progressive-qualification-v1.xml").read_text(
             encoding="utf-8"
         )
@@ -1309,6 +1311,45 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                 _rewrite_benchmark_wall(definition, wall)  # type: ignore[arg-type]
         with self.assertRaises(ControllerError):
             _rewrite_benchmark_wall(definition.replace('timelimit="14400 s"', 'timelimit="1 s"'), 5)
+
+    def test_benchexec_parser_keeps_cpu_and_elapsed_deadlines_independent(self) -> None:
+        from graphforge_bench.progressive_run import _stage_benchmark_xml
+
+        config = SimpleNamespace(
+            name=None,
+            description_file=None,
+            output_path=str(self.base / "results"),
+            container=False,
+            timelimit=None,
+            walltimelimit=None,
+            memorylimit=None,
+            corelimit=None,
+            num_of_threads=None,
+            results_per_rundefinition=False,
+            results_per_taskset=False,
+            selected_run_definitions=None,
+            selected_sourcefile_sets=None,
+        )
+        for wall in (None, 51, 100, 200, 799):
+            with self.subTest(wall=wall):
+                stage = self.base / f"parsed-wall-{wall}"
+                stage.mkdir()
+                _stage_benchmark_xml(ROOT, stage, wall_seconds=wall)
+                (stage / "profile.json").write_text("{}\n")
+                benchmark = Benchmark(str(stage / "benchmark.xml"), config, read_local_time())
+                self.assertEqual(benchmark.rlimits.cputime, 14_400)
+                self.assertEqual(benchmark.rlimits.cputime_hard, 14_430)
+                self.assertEqual(benchmark.rlimits.walltime, wall or 14_400)
+                self.assertEqual(benchmark.rlimits.memory, 4_000_000_000)
+                self.assertEqual(benchmark.rlimits.cpu_cores, 16)
+                run = benchmark.run_sets[0].runs[0]
+                # Process-tree CPU can exceed elapsed time on multiple cores.
+                run.values.update(cputime=799.281815, walltime=742.165077934)
+                self.assertEqual(run._is_timeout(), wall is not None and wall < 742.165077934)
+                run.values.update(cputime=1.0, walltime=(wall or 14_400) + 0.1)
+                self.assertTrue(run._is_timeout())
+                run.values.update(cputime=14_400.1, walltime=1.0)
+                self.assertTrue(run._is_timeout())
 
     def test_provider_volume_keeps_four_gib_benchexec_memory(self) -> None:
         stage = self.base / "stage"
