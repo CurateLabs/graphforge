@@ -134,6 +134,34 @@ fn in_memory_lifecycle_executes_parameterized_aggregate_and_preserves_failed_upd
 }
 
 #[test]
+fn incompatible_target_schema_is_reported_without_mutating_data() {
+    let mut graph = GraphForge::new(None).unwrap();
+    let mut saved = definition("Numeric ages");
+    saved.query = "MATCH (n:Person) RETURN n.age + 1 AS age".into();
+    saved.parameters.clear();
+    graph.create_saved_query(saved.clone()).unwrap();
+    graph.execute("CREATE (:Person {age:'forty'})").unwrap();
+    let error = graph
+        .execute_saved_query(
+            saved.query_uuid,
+            &HashMap::new(),
+            &SavedQuerySource::Current,
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "GF_EXECUTION");
+    assert_eq!(graph.saved_query(saved.query_uuid).unwrap(), saved);
+    assert_eq!(
+        count(
+            graph
+                .execute("MATCH (n:Person) RETURN count(n) AS people")
+                .unwrap()
+        ),
+        1
+    );
+}
+
+#[test]
 #[cfg(feature = "research")]
 fn reopen_and_retained_version_preserve_definition_and_execution_context() {
     let directory = tempfile::tempdir().unwrap();
