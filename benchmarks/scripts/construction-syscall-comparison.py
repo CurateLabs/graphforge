@@ -135,6 +135,8 @@ def main():
         if path.is_symlink() or not path.is_file():
             raise RuntimeError("registration input must be a regular non-linked file")
     input_identity = json.loads((args.inputs / "identity.json").read_text())
+    if input_identity["profile_sha256"] != digest(args.profile):
+        raise RuntimeError("input identity belongs to a different profile")
     actual_inputs = {
         name: digest(args.inputs / name) for name in ["nodes.parquet", "edges.parquet"]
     }
