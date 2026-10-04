@@ -93,7 +93,13 @@ pub(super) fn inspect(
     let mut snapshots = Vec::new();
     let mut total = 0_u64;
     for p in &version.content.participants {
-        let bytes = read(root, guard, &hex(&p.content_sha256), MAX_PARTICIPANT_BYTES)?;
+        let bytes = read(
+            root,
+            guard,
+            &hex(&p.content_sha256),
+            super::participant_byte_bound(p),
+        )?;
+        super::validate_saved_query_participant(p, &bytes)?;
         total = total
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| invalid("retained participant length overflow"))?;

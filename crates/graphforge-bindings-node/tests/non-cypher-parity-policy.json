@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 338,
-  "releaseSurfaceDigest": "f676891a2bb341450a3f0a140a0a8bdd4461a72af95f8c9c8e78e8980d9edd03",
+  "releaseSurfaceCount": 349,
+  "releaseSurfaceDigest": "70d52b3767a1d151d99649a2f6b6fdce35844acd22667d0ace9f6c3be5c0e405",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -10,7 +10,12 @@
     "GraphForge.inspect_runtime_catalog",
     "GraphForge.suggest_ontology",
     "GraphForge.validate_ontology",
-    "GraphForge.workspace_ontology"
+    "GraphForge.workspace_ontology",
+    "GraphForge.create_saved_query",
+    "GraphForge.update_saved_query",
+    "GraphForge.delete_saved_query",
+    "GraphForge.saved_query",
+    "GraphForge.saved_queries"
   ],
   "rustEvidenceGroupMap": {
     "multi-ontology-lifecycle": "multiOntology",
@@ -42,7 +47,8 @@
     "research-proposals": "researchProposals",
     "research-upstream": "researchUpstream",
     "research-interchange": "researchInterchange",
-    "external-decision-results": "decisionResults"
+    "external-decision-results": "decisionResults",
+    "saved-queries": "savedQueries"
   },
   "classification": {
     "equivalent": [
@@ -263,7 +269,12 @@
       "GraphForge.research_upstream_history",
       "GraphForge.research_reference",
       "GraphForge.export_research",
-      "GraphForge.fork_research"
+      "GraphForge.fork_research",
+      "GraphForge.create_saved_query",
+      "GraphForge.update_saved_query",
+      "GraphForge.delete_saved_query",
+      "GraphForge.saved_query",
+      "GraphForge.saved_queries"
     ],
     "languageSpecific": {
       "DecisionBatchV1.validate": {
@@ -430,6 +441,42 @@
           "GraphForge.researchBranch"
         ],
         "reason": "Explicit Branch UUID transport opens the native immutable Branch view and returns metadata or Arrow IPC."
+      },
+      "GraphForge.saved_query_at": {
+        "nodeMembers": [
+          "GraphForge.savedQuery"
+        ],
+        "reason": "Node selects current or exact historical state with the optional native source contract."
+      },
+      "GraphForge.saved_queries_at": {
+        "nodeMembers": [
+          "GraphForge.savedQueries"
+        ],
+        "reason": "Node selects current or exact historical state with the optional native source contract."
+      },
+      "ResearchVersionView.saved_query": {
+        "nodeMembers": [
+          "GraphForge.savedQuery"
+        ],
+        "reason": "Node selects an immutable Version through the source argument instead of a separate view handle."
+      },
+      "ResearchVersionView.saved_queries": {
+        "nodeMembers": [
+          "GraphForge.savedQueries"
+        ],
+        "reason": "Node selects an immutable Version through the source argument instead of a separate view handle."
+      },
+      "GraphForge.execute_saved_query": {
+        "nodeMembers": [
+          "GraphForge.executeSavedQuery"
+        ],
+        "reason": "Node has JSON numeric values and delegates declaration-aware conversion to execute_saved_query_json before strict native execution."
+      },
+      "GraphForge.execute_saved_query_json": {
+        "nodeMembers": [
+          "GraphForge.executeSavedQuery"
+        ],
+        "reason": "Node passes JSON parameters to the pinned native declaration and receives cancellable Arrow IPC."
       }
     },
     "nodeOnly": {
@@ -725,6 +772,12 @@
       ],
       "non-cypher-release-parity.test.mjs": [
         "the Node classification is total, frozen, and backed by non-skipped native tests"
+      ]
+    },
+    "savedQueries": {
+      "saved-queries.test.mjs": [
+        "saved query CRUD, parameter validation and historical aggregates survive reopen",
+        "JSON numbers follow the pinned saved parameter declaration"
       ]
     }
   }

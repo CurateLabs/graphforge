@@ -315,6 +315,7 @@ pub mod portable_bytes;
 
 pub mod workspace_participants;
 pub mod workspace_research_metadata;
+pub mod workspace_saved_queries;
 pub use workspace_participants::{
     GraphDirectedness, MAX_WORKSPACE_REPOSITORY_SNAPSHOT_BYTES,
     MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ENTRIES, MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ID_BYTES,
@@ -337,6 +338,12 @@ pub use workspace_research_metadata::{
     WORKSPACE_RESEARCH_METADATA_FAMILY, WORKSPACE_RESEARCH_METADATA_VERSION,
     WorkspaceResearchMetadata, discover_research_projects, read_workspace_research_metadata,
     summarize_research_project,
+};
+pub use workspace_saved_queries::{
+    MAX_SAVED_QUERIES, MAX_SAVED_QUERY_BYTES, MAX_SAVED_QUERY_DESCRIPTION_BYTES,
+    MAX_SAVED_QUERY_NAME_BYTES, MAX_SAVED_QUERY_PARAMETERS, MAX_WORKSPACE_SAVED_QUERIES_BYTES,
+    SavedQuery, SavedQueryParameterType, WORKSPACE_SAVED_QUERIES_FAMILY,
+    WORKSPACE_SAVED_QUERIES_VERSION, WorkspaceSavedQueries, read_workspace_saved_queries,
 };
 
 pub mod embedding_identity;

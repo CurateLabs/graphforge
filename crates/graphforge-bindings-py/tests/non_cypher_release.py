@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "29a9d064b8ac863d01ddf711ae433006077d8831ef2a86e3d073e12f600cf36e"
-EXPECTED_RELEASE_DIGEST = "f676891a2bb341450a3f0a140a0a8bdd4461a72af95f8c9c8e78e8980d9edd03"
+EXPECTED_RUST_DIGEST = "47ffb81ad3b9872364cd050b0e7761bc9fcf57c909447484a9f64fedef85ea0c"
+EXPECTED_RELEASE_DIGEST = "70d52b3767a1d151d99649a2f6b6fdce35844acd22667d0ace9f6c3be5c0e405"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -68,6 +68,7 @@ PYTHON_ONLY_METHODS = frozenset(
 )
 
 EVIDENCE = {
+    "saved-queries": {"saved_queries.py": ["check_saved_queries"]},
     "research-interchange": {"research_journey.py": ["main"], "research_interchange.py": ["main"]},
     "research-proposals": {"research_journey.py": ["main"], "research_proposals.py": ["main"]},
     "research-upstream": {"research_journey.py": ["main"], "research_upstream.py": ["main"]},
@@ -285,7 +286,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 338
+    assert len(release_methods) == 349
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -347,6 +348,10 @@ def _classification_report() -> dict[str, object]:
         ),
     }
     research_adapters = {
+        "GraphForge.saved_query_at": "GraphForge.saved_query",
+        "GraphForge.saved_queries_at": "GraphForge.saved_queries",
+        "ResearchVersionView.saved_query": "GraphForge.saved_query",
+        "ResearchVersionView.saved_queries": "GraphForge.saved_queries",
         "DecisionBatchV1.validate": "GraphForge.validate_decision_batch",
         "GraphForge.open_research_branch": "GraphForge.research_branch",
         "ResearchBranchView.record": "GraphForge.research_branch",
@@ -371,11 +376,30 @@ def _classification_report() -> dict[str, object]:
             reason = (
                 "the Python request-object adapter delegates provider-neutral validation to Rust"
                 if rust_id == "DecisionBatchV1.validate"
-                else "explicit immutable Version UUID adapter delegates to the Rust historical view"
+                else (
+                    "optional native source selects current or immutable Version saved definitions"
+                    if rust_id
+                    in {
+                        "GraphForge.saved_query_at",
+                        "GraphForge.saved_queries_at",
+                        "ResearchVersionView.saved_query",
+                        "ResearchVersionView.saved_queries",
+                    }
+                    else (
+                        "explicit immutable Version UUID adapter delegates "
+                        "to the Rust historical view"
+                    )
+                )
             )
         elif python_id in python_methods:
             classification = "equivalent"
             reason = "same receiver operation delegates through the compiled PyO3 extension"
+        elif rust_id == "GraphForge.execute_saved_query_json":
+            classification = "not-exposed"
+            reason = (
+                "Node and CLI pass JSON for declaration-aware numeric conversion; "
+                "Python passes strictly typed native literals to execute_saved_query"
+            )
         elif rust_id == "GraphImportSession.operation_timings":
             classification = "not-exposed"
             reason = "per-operation timing observations are Rust/CLI diagnostics"
@@ -418,6 +442,11 @@ def _classification_report() -> dict[str, object]:
     )
     assert classifications["GraphForge.explain_stage"]["classification"] == "not-exposed"
     assert classifications["GraphForge.explain_stage"]["python_id"] == ""
+    assert classifications["GraphForge.execute_saved_query"]["classification"] == "equivalent"
+    assert classifications["GraphForge.execute_saved_query_json"]["classification"] == "not-exposed"
+    assert classifications["GraphForge.execute_saved_query_json"]["python_id"] == ""
+    assert classifications["GraphForge.saved_query_at"]["python_id"] == "GraphForge.saved_query"
+    assert classifications["GraphForge.saved_queries_at"]["python_id"] == "GraphForge.saved_queries"
     assert classifications["DecisionBatchV1.validate"] == {
         "classification": "intentionally-language-specific",
         "python_id": "GraphForge.validate_decision_batch",
