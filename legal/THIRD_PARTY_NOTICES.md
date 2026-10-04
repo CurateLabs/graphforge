@@ -7097,9 +7097,9 @@ Used by:
 - syn 2.0.117
 - syn 3.0.2
 - thiserror 1.0.69
-- thiserror 2.0.20
+- thiserror 2.0.21
 - thiserror-impl 1.0.69
-- thiserror-impl 2.0.20
+- thiserror-impl 2.0.21
 - thrift 0.17.0
 - time 0.3.54
 - time-core 0.1.9
@@ -8962,11 +8962,11 @@ SOFTWARE.
 Used by:
 - block2 0.6.2
 - libm 0.2.16
-- napi 3.12.5
-- napi-build 2.4.4
-- napi-derive 3.6.8
+- napi 3.12.7
+- napi-build 2.6.0
+- napi-derive 3.6.10
 - napi-derive-backend 6.1.4
-- napi-sys 3.3.1
+- napi-sys 3.4.0
 - objc2 0.6.4
 - objc2-encode 4.1.0
 - ownedbytes 0.9.0
