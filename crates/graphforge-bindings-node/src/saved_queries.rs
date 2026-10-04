@@ -18,7 +18,7 @@ fn output(value: impl serde::Serialize) -> Result<serde_json::Value> {
     })
 }
 fn source(value: Option<serde_json::Value>) -> Result<SavedQuerySource> {
-    value.map(contract).unwrap_or(Ok(SavedQuerySource::Current))
+    value.map_or(Ok(SavedQuerySource::Current), contract)
 }
 #[napi]
 impl GraphForge {

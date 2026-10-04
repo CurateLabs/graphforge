@@ -18,9 +18,9 @@ fn contract<T: serde::de::DeserializeOwned>(
     })
 }
 fn source(py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<SavedQuerySource> {
-    value
-        .map(|value| contract(py, py_to_json_value(value)?))
-        .unwrap_or(Ok(SavedQuerySource::Current))
+    value.map_or(Ok(SavedQuerySource::Current), |value| {
+        contract(py, py_to_json_value(value)?)
+    })
 }
 fn output(py: Python<'_>, value: impl serde::Serialize) -> PyResult<Py<PyAny>> {
     json_value_to_python(

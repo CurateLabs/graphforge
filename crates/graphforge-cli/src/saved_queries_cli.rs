@@ -39,12 +39,9 @@ pub(crate) enum SavedQueryCommand {
     },
 }
 fn source(version: Option<String>) -> Result<SavedQuerySource, GfError> {
-    version
-        .map(|text| {
-            crate::canonical_uuid(&text)
-                .map(|version_uuid| SavedQuerySource::Version { version_uuid })
-        })
-        .unwrap_or(Ok(SavedQuerySource::Current))
+    version.map_or(Ok(SavedQuerySource::Current), |text| {
+        crate::canonical_uuid(&text).map(|version_uuid| SavedQuerySource::Version { version_uuid })
+    })
 }
 fn json(output: &mut dyn Write, value: impl serde::Serialize) -> Result<(), GfError> {
     serde_json::to_writer(&mut *output, &value).map_err(|e| GfError::Execution(e.to_string()))?;
