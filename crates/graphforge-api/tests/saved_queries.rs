@@ -149,7 +149,7 @@ fn incompatible_target_schema_is_reported_without_mutating_data() {
             None,
         )
         .unwrap_err();
-    assert_eq!(error.code(), "GF_EXECUTION");
+    assert_eq!(error.code(), "GF_PLAN");
     assert_eq!(graph.saved_query(saved.query_uuid).unwrap(), saved);
     assert_eq!(
         count(
@@ -198,6 +198,12 @@ fn reopen_and_retained_version_preserve_definition_and_execution_context() {
     let mut graph = GraphForge::new(root.to_str()).unwrap();
     assert!(graph.saved_queries().unwrap().is_empty());
     let source = SavedQuerySource::Version { version_uuid };
+    let historical = graph.open_research_version(version_uuid).unwrap();
+    assert_eq!(
+        historical.saved_query(original.query_uuid).unwrap(),
+        original
+    );
+    assert_eq!(historical.saved_queries().unwrap(), vec![original.clone()]);
     assert_eq!(
         graph.saved_query_at(original.query_uuid, &source).unwrap(),
         original

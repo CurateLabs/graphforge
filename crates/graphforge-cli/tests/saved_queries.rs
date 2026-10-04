@@ -130,7 +130,10 @@ fn cli_json_numbers_follow_saved_parameter_declarations_and_uuid_tags() {
     saved["parameters"]["x"] = serde_json::json!("integer");
     std::fs::write(file, serde_json::to_vec(&saved).unwrap()).unwrap();
     success(run(&root, &["update", "--file", file], true));
-    for (input, expected) in [(r#"{"x":1.0}"#, 1), (r#"{"x":4294967296}"#, 4294967296)] {
+    for (input, expected) in [
+        (r#"{"x":1.0}"#, 1_i64),
+        (r#"{"x":4294967296}"#, 4_294_967_296),
+    ] {
         std::fs::write(params, input).unwrap();
         let result = json(run(&root, &["run", &id, "--params", params], true));
         assert_eq!(result["columns"][0]["data_type"], "Int64");
@@ -149,14 +152,28 @@ fn cli_json_numbers_follow_saved_parameter_declarations_and_uuid_tags() {
         assert_eq!(error["error"]["code"], "GF_VALIDATION");
     }
     saved["parameters"]["x"] = serde_json::json!("uuid");
+    saved["query"] =
+        serde_json::json!("MATCH (n:Item) WHERE n.node_uuid = $x RETURN count(n) AS value");
     std::fs::write(file, serde_json::to_vec(&saved).unwrap()).unwrap();
     success(run(&root, &["update", "--file", file], true));
-    let value = Uuid::now_v7().to_string();
+    let graph = GraphForge::new(root.to_str()).unwrap();
+    let value = graph
+        .add_node("Item", &std::collections::HashMap::new())
+        .unwrap()
+        .uuid;
+    drop(graph);
     std::fs::write(
         params,
         serde_json::to_vec(&serde_json::json!({"x":{"$uuid":value}})).unwrap(),
     )
     .unwrap();
     let result = json(run(&root, &["run", &id, "--params", params], true));
-    assert_eq!(result["rows"], serde_json::json!([[value]]));
+    assert_eq!(result["rows"], serde_json::json!([[1]]));
+    std::fs::write(
+        params,
+        serde_json::to_vec(&serde_json::json!({"x":{"$uuid":Uuid::now_v7()}})).unwrap(),
+    )
+    .unwrap();
+    let result = json(run(&root, &["run", &id, "--params", params], true));
+    assert_eq!(result["rows"], serde_json::json!([[0]]));
 }
