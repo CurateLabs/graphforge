@@ -622,25 +622,22 @@ fn canonical_property_columns(
     let mut fields = Vec::with_capacity(schema.fields().len());
     let mut columns = Vec::with_capacity(batch.num_columns());
     for (index, (field, column)) in schema.fields().iter().zip(batch.columns()).enumerate() {
-        match (index >= required).then(|| target(field)).flatten() {
-            Some(canonical) => {
-                let normalized = arrow::compute::cast_with_options(column, &canonical, &lossless)
-                    .map_err(|error| {
+        if let Some(canonical) = (index >= required).then(|| target(field)).flatten() {
+            let normalized = arrow::compute::cast_with_options(column, &canonical, &lossless)
+                .map_err(|error| {
                     validation(format!(
                         "property column {} cannot be normalized from {} to {canonical}: {error}",
                         field.name(),
                         field.data_type()
                     ))
                 })?;
-                fields.push(std::sync::Arc::new(
-                    field.as_ref().clone().with_data_type(canonical),
-                ));
-                columns.push(normalized);
-            }
-            None => {
-                fields.push(std::sync::Arc::clone(field));
-                columns.push(std::sync::Arc::clone(column));
-            }
+            fields.push(std::sync::Arc::new(
+                field.as_ref().clone().with_data_type(canonical),
+            ));
+            columns.push(normalized);
+        } else {
+            fields.push(std::sync::Arc::clone(field));
+            columns.push(std::sync::Arc::clone(column));
         }
     }
     RecordBatch::try_new(
