@@ -10,6 +10,9 @@ use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use arrow::array::{Array, ArrayRef, BinaryArray, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::ipc::reader::FileReader;
@@ -26,6 +29,44 @@ const MAX_SNAPSHOT_FILE_BYTES: u64 = 1 << 30;
 const MAX_SNAPSHOT_TOTAL_BYTES: u64 = 2 << 30;
 const GRAPH_SNAPSHOT_SCHEMA_CANONICAL_BYTES: &[u8] =
     b"graph_snapshot/1|relative_path:utf8:not-null|content:binary:not-null";
+
+#[cfg(test)]
+thread_local! {
+    static CAPTURE_WORK: Cell<SnapshotWork> = const { Cell::new(SnapshotWork {
+        payload_bytes_read: 0,
+        payload_bytes_allocated: 0,
+    }) };
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SnapshotWork {
+    pub payload_bytes_read: u64,
+    pub payload_bytes_allocated: u64,
+}
+
+#[cfg(test)]
+pub(crate) fn reset_capture_work() {
+    CAPTURE_WORK.set(SnapshotWork::default());
+}
+
+#[cfg(test)]
+pub(crate) fn capture_work() -> SnapshotWork {
+    CAPTURE_WORK.get()
+}
+
+#[cfg(test)]
+fn record_capture_work(payload_bytes_read: usize, payload_bytes_allocated: usize) {
+    CAPTURE_WORK.with(|capture| {
+        let work = capture.get();
+        let read = u64::try_from(payload_bytes_read).unwrap_or(u64::MAX);
+        let allocated = u64::try_from(payload_bytes_allocated).unwrap_or(u64::MAX);
+        capture.set(SnapshotWork {
+            payload_bytes_read: work.payload_bytes_read.saturating_add(read),
+            payload_bytes_allocated: work.payload_bytes_allocated.saturating_add(allocated),
+        });
+    });
+}
 
 static GRAPH_SNAPSHOT_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
@@ -77,9 +118,11 @@ pub(crate) fn capture(root: &Path) -> Result<ProjectParticipant, GfError> {
             return Err(resource_limit("graph snapshot total size exceeds limit"));
         }
         relative_paths.push(relative);
-        contents.push(
-            fs::read(&path).map_err(|error| storage("read graph snapshot file", &path, error))?,
-        );
+        let content =
+            fs::read(&path).map_err(|error| storage("read graph snapshot file", &path, error))?;
+        #[cfg(test)]
+        record_capture_work(content.len(), content.capacity());
+        contents.push(content);
     }
 
     let batch = RecordBatch::try_new(
@@ -92,6 +135,8 @@ pub(crate) fn capture(root: &Path) -> Result<ProjectParticipant, GfError> {
         ],
     )
     .map_err(|error| GfError::Execution(error.to_string()))?;
+    #[cfg(test)]
+    record_capture_work(0, batch.get_array_memory_size());
     let mut bytes = Vec::new();
     {
         let mut writer = FileWriter::try_new(&mut bytes, &GRAPH_SNAPSHOT_SCHEMA)
@@ -103,6 +148,8 @@ pub(crate) fn capture(root: &Path) -> Result<ProjectParticipant, GfError> {
             .finish()
             .map_err(|error| GfError::Execution(error.to_string()))?;
     }
+    #[cfg(test)]
+    record_capture_work(0, bytes.capacity());
     Ok(ProjectParticipant {
         capability_id: "graph".into(),
         capability_version: GRAPH_SNAPSHOT_CAPABILITY_VERSION,
@@ -199,28 +246,6 @@ pub(crate) fn hydrate(bytes: &[u8], target: &Path) -> Result<(), GfError> {
         }
     }
     Ok(())
-}
-
-/// Replace private workspace contents with one previously captured snapshot.
-pub(crate) fn restore(bytes: &[u8], target: &Path) -> Result<(), GfError> {
-    for entry in target
-        .read_dir()
-        .map_err(|error| storage("read graph workspace for restore", target, error))?
-    {
-        let entry = entry.map_err(|error| storage("read graph workspace entry", target, error))?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| storage("inspect graph workspace entry", &path, error))?;
-        if file_type.is_dir() {
-            fs::remove_dir_all(&path)
-                .map_err(|error| storage("remove graph workspace directory", &path, error))?;
-        } else {
-            fs::remove_file(&path)
-                .map_err(|error| storage("remove graph workspace file", &path, error))?;
-        }
-    }
-    hydrate(bytes, target)
 }
 
 fn collect_files(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<(), GfError> {

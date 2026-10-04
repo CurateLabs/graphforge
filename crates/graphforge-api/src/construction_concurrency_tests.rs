@@ -18,6 +18,8 @@ const DEADLINE: Duration = Duration::from_secs(10);
 const FAILPOINT_COOKIE: &str = "graphforge-internal-subprocess-v1";
 const EDGE_QUERY: &str = "MATCH ()-[r:KNOWS]->() RETURN r.edge_uuid AS edge, r.edge_id AS id \
      ORDER BY r.edge_id";
+const EDGE_WEIGHT_QUERY: &str = "MATCH ()-[r:KNOWS]->() RETURN r.weight AS weight \
+     ORDER BY r.weight";
 
 fn empty_props() -> HashMap<String, PropValue> {
     HashMap::new()
@@ -62,6 +64,24 @@ fn edge_inventory(graph: &GraphForge) -> Result<(Vec<[u8; 16]>, Vec<u64>), GfErr
         }
     }
     Ok((uuids, ids))
+}
+
+fn edge_weights(graph: &GraphForge) -> Result<Vec<i64>, GfError> {
+    let result = graph.execute(EDGE_WEIGHT_QUERY)?;
+    let mut weights = Vec::new();
+    for batch in result.batches {
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let values = batch
+            .column_by_name("weight")
+            .and_then(|column| column.as_any().downcast_ref::<Int64Array>())
+            .ok_or_else(|| GfError::Execution("edge weight column malformed".into()))?;
+        for row in 0..batch.num_rows() {
+            weights.push(values.value(row));
+        }
+    }
+    Ok(weights)
 }
 
 fn generation(graph: &GraphForge) -> Uuid {
@@ -336,11 +356,13 @@ fn add_edge_failpoint_helper() {
     let dst_uuid = Uuid::parse_str(&std::env::var("GF_ADD_EDGE_DST").expect("dst uuid"))
         .expect("parse dst uuid");
     let graph = GraphForge::new(Some(root.as_str())).expect("helper open");
+    let pinned_parent = GraphForge::new(Some(root.as_str())).expect("pin parent reader");
     let parent = generation(&graph);
     let src = NodeHandle::new(src_uuid, "Person", graph.identity.clone());
     let dst = NodeHandle::new(dst_uuid, "Person", graph.identity.clone());
+    let attempted_weight = HashMap::from([("weight".into(), PropValue::Int(23))]);
     let error = graph
-        .add_edge(&src, "KNOWS", &dst, &empty_props())
+        .add_edge(&src, "KNOWS", &dst, &attempted_weight)
         .expect_err("failpoint must abort publication");
     assert!(!error.to_string().is_empty());
     let durable = durable_generation(std::path::Path::new(&root));
@@ -349,15 +371,36 @@ fn add_edge_failpoint_helper() {
         assert_ne!(durable, parent);
         assert_eq!(visible, durable);
         assert_eq!(edge_inventory(&graph).expect("committed").0.len(), 1);
+        assert_eq!(edge_weights(&graph).expect("committed property"), [23]);
+        assert!(
+            edge_inventory(&pinned_parent)
+                .expect("pinned parent")
+                .0
+                .is_empty()
+        );
+        assert!(
+            edge_weights(&pinned_parent)
+                .expect("pinned parent property")
+                .is_empty()
+        );
         let reopened = GraphForge::new(Some(root.as_str())).expect("reopen after commit");
         assert_eq!(
             edge_inventory(&reopened).expect("reopen committed").0.len(),
             1
         );
+        assert_eq!(
+            edge_weights(&reopened).expect("reopen committed property"),
+            [23]
+        );
     } else {
         assert_eq!(durable, parent);
         assert_eq!(visible, parent);
         assert!(edge_inventory(&graph).expect("rolled back").0.is_empty());
+        assert!(
+            edge_weights(&graph)
+                .expect("rolled back property")
+                .is_empty()
+        );
         let reopened = GraphForge::new(Some(root.as_str())).expect("reopen after rollback");
         assert_eq!(generation(&reopened), parent);
         assert!(
@@ -366,7 +409,40 @@ fn add_edge_failpoint_helper() {
                 .0
                 .is_empty()
         );
+        assert!(
+            edge_weights(&reopened)
+                .expect("reopen rolled back property")
+                .is_empty()
+        );
     }
+
+    graph
+        .add_edge(
+            &src,
+            "KNOWS",
+            &dst,
+            &HashMap::from([("weight".into(), PropValue::Int(29))]),
+        )
+        .expect("subsequent same-facade write after publication error");
+    let expected_weights = if expect_committed {
+        vec![23, 29]
+    } else {
+        vec![29]
+    };
+    assert_eq!(
+        edge_weights(&graph).expect("same-facade subsequent properties"),
+        expected_weights
+    );
+    assert!(
+        edge_weights(&pinned_parent)
+            .expect("parent reader after subsequent publication")
+            .is_empty()
+    );
+    let reopened = GraphForge::new(Some(root.as_str())).expect("reopen after subsequent write");
+    assert_eq!(
+        edge_weights(&reopened).expect("reopen subsequent properties"),
+        expected_weights
+    );
 }
 
 #[test]
@@ -399,6 +475,7 @@ fn add_edge_failpoints_reconcile_before_and_after_current() {
             .env("GF_ADD_EDGE_DST", &dst_uuid)
             .env("GRAPHFORGE_PROJECT_FAILPOINTS", FAILPOINT_COOKIE)
             .env("GRAPHFORGE_PROJECT_FAILPOINT", failpoint)
+            .env("GRAPHFORGE_PROJECT_FAILPOINT_ONCE", "1")
             .status()
             .expect("spawn failpoint helper");
         assert!(

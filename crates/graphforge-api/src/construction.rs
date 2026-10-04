@@ -129,7 +129,6 @@ impl GraphForge {
         // selection, endpoint registration against live topology, surrogate
         // allocation, flush, and publication (see #704).
         let _visibility = self.graph_visibility.lock()?;
-        let prior = crate::graph_snapshot::capture(&self.dir())?;
         let prior_topology = self.dir().topology_files()?;
         let expected_generation = *self
             .current_generation_uuid
@@ -178,15 +177,29 @@ impl GraphForge {
             }],
         };
         if let Err(error) = self.publish_graph_mutation(&receipt) {
-            let still_prior = *self
-                .current_generation_uuid
-                .lock()
-                .expect("generation UUID lock poisoned")
-                == expected_generation;
-            if still_prior {
-                crate::graph_snapshot::restore(&prior.bytes, &self.dir())?;
+            // Resolve CURRENT itself: publication can fail either before the
+            // transition or after it became durable. Restore the workspace,
+            // catalog, and read authority from the generation that actually
+            // won instead of retaining a second copy of every workspace file.
+            let current = graphforge_storage::resolve_project_generation(
+                self.resolved_generation.container_root(),
+            )?;
+            if current.generation_uuid() == expected_generation {
+                crate::rematerialize_graph_workspace(&current, &self.dir())?;
                 self.dir().topology.restore(prior_topology);
+                *self
+                    .runtime_catalog
+                    .lock()
+                    .expect("runtime catalog poisoned") = crate::load_runtime_catalog(&self.dir())?;
+                self.install_property_generation(&current)?;
                 self.adjacency_provider_for_session().invalidate();
+            } else {
+                crate::composite_publish::reconcile_workspace_to(self, &current)?;
+                *self
+                    .semantic_storage_bindings
+                    .lock()
+                    .expect("semantic storage binding lock poisoned") =
+                    graphforge_storage::semantic_storage_bindings(&current)?;
             }
             return Err(error);
         }
@@ -399,6 +412,134 @@ mod tests {
         let io = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
         assert_eq!(io.node_full_reads, 0, "endpoint resolution decoded nodes");
         assert_eq!(io.edge_full_reads, 0, "endpoint resolution decoded edges");
+    }
+
+    #[test]
+    fn public_add_edge_rollback_preparation_does_not_scale_with_workspace_payload() {
+        fn measure(
+            unrelated_payload_bytes: usize,
+        ) -> (crate::graph_snapshot::SnapshotWork, AddEdgeWork) {
+            let directory = tempfile::tempdir().unwrap();
+            let graph = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();
+            let source = graph.add_node("Person", &HashMap::new()).unwrap();
+            let target = graph.add_node("Person", &HashMap::new()).unwrap();
+            let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+            let unrelated_payload = (0..unrelated_payload_bytes)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    char::from(b'!' + (state % 94) as u8)
+                })
+                .collect::<String>();
+            graph
+                .add_node(
+                    "Unrelated",
+                    &HashMap::from([("payload".into(), PropValue::Str(unrelated_payload))]),
+                )
+                .unwrap();
+
+            // Prove the work counter observes the old full-workspace capture
+            // and grows with unrelated payload in the actual facade fixture.
+            crate::graph_snapshot::reset_capture_work();
+            crate::graph_snapshot::capture(&graph.dir()).unwrap();
+            let baseline = crate::graph_snapshot::capture_work();
+            assert!(baseline.payload_bytes_read > 0);
+            assert!(baseline.payload_bytes_allocated >= baseline.payload_bytes_read);
+
+            // Capture the actual facade operation as well. Lifecycle counters
+            // observe instrumented storage I/O, barriers, and object work;
+            // io_stats observes topology read/rewrite work. Neither is a
+            // process-wide heap profiler. SnapshotWork separately measures
+            // bytes read/allocated by the legacy whole-workspace capture.
+            let _lifecycle = graphforge_storage::lifecycle_io::CaptureScope::install();
+            let _io = graphforge_storage::io_stats::CaptureScope::install();
+            crate::graph_snapshot::reset_capture_work();
+            graph
+                .add_edge(
+                    &source,
+                    "KNOWS",
+                    &target,
+                    &HashMap::from([("weight".into(), PropValue::Int(17))]),
+                )
+                .unwrap();
+            let add_edge = crate::graph_snapshot::capture_work();
+            assert_eq!(add_edge.payload_bytes_read, 0);
+            assert_eq!(add_edge.payload_bytes_allocated, 0);
+            let lifecycle = graphforge_storage::lifecycle_io_snapshot()
+                .expect("requested lifecycle I/O capture");
+            let io = graphforge_storage::io_stats::snapshot().expect("requested topology work");
+
+            drop(graph);
+            let reopened = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();
+            let result = reopened
+                .execute("MATCH ()-[r:KNOWS]->() RETURN r.weight AS weight")
+                .unwrap();
+            let values = result.batches[0]
+                .column_by_name("weight")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            assert_eq!(values.len(), 1);
+            assert_eq!(values.value(0), 17);
+            (
+                baseline,
+                AddEdgeWork {
+                    add_edge,
+                    lifecycle,
+                    io,
+                },
+            )
+        }
+
+        let small = measure(64);
+        let large = measure(256 * 1024);
+        println!(
+            "unrelated_payload_bytes=64 baseline={:?} add_edge={:?}; unrelated_payload_bytes=262144 baseline={:?} add_edge={:?}",
+            small.0, small.1, large.0, large.1
+        );
+        assert!(
+            large.0.payload_bytes_read > small.0.payload_bytes_read,
+            "baseline capture must observe the larger unrelated payload: small={small:?} large={large:?}"
+        );
+        assert!(
+            large.0.payload_bytes_allocated > small.0.payload_bytes_allocated,
+            "baseline capture allocations must observe the larger unrelated payload: small={small:?} large={large:?}"
+        );
+        for (name, work) in [("small", &small.1), ("large", &large.1)] {
+            assert_eq!(work.add_edge.payload_bytes_read, 0, "{name} snapshot reads");
+            assert_eq!(
+                work.add_edge.payload_bytes_allocated, 0,
+                "{name} snapshot allocations"
+            );
+            assert!(
+                work.lifecycle.totals.read_bytes > 0,
+                "{name} lifecycle reads"
+            );
+            assert!(
+                work.lifecycle.phases
+                    [&graphforge_storage::StorageIoPhase::PublicationPreauthentication]
+                    .read_bytes
+                    > 0,
+                "{name} publication authentication reads"
+            );
+            assert!(
+                work.lifecycle.phases[&graphforge_storage::StorageIoPhase::HydrationVerification]
+                    .read_bytes
+                    > 0,
+                "{name} hydration verification reads"
+            );
+            assert!(work.io.rewrite_commits > 0, "{name} topology rewrite work");
+            assert!(work.io.uuid_files_synced > 0, "{name} UUID sync work");
+        }
+    }
+
+    #[derive(Debug)]
+    struct AddEdgeWork {
+        add_edge: crate::graph_snapshot::SnapshotWork,
+        lifecycle: graphforge_storage::LifecyclePhaseAttribution,
+        io: graphforge_storage::io_stats::IoSnapshot,
     }
 
     #[test]
