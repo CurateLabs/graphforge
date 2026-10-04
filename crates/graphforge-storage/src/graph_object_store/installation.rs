@@ -160,7 +160,7 @@ fn install_graph_object_bytes_in_domain(
             // Resident naming computed SHA and XXH64 even when CAS reuse
             // avoided writing. Native read work below describes separate passes.
             crate::graph_construction::diagnostics::hashed_bytes(expected_length, 2);
-            record_completed_install(&evidence);
+            record_completed_install(&evidence, 0);
             Ok((digest, evidence))
         },
     )
@@ -399,7 +399,7 @@ fn install_graph_object_file_admitted(
                 identity,
                 evidence.content_xxh64,
             )?;
-            record_completed_install(&evidence);
+            record_completed_install(&evidence, 0);
             Ok(evidence)
         },
     )
@@ -557,15 +557,29 @@ fn install_captured_source_with_lease(
         identity,
         evidence.content_xxh64,
     )?;
-    record_completed_install(&evidence);
+    // A captured repair copy feeds XXH64 only, even though its temporary
+    // must subsequently pass full SHA authentication. The compatibility
+    // evidence classifies that source read by requested authority; successful
+    // hash work must instead follow the actual copy producer.
+    let checksum_only_source = if repair_corrupt_existing && evidence.attempted_install {
+        source.bytes()
+    } else {
+        0
+    };
+    record_completed_install(&evidence, checksum_only_source);
     Ok(evidence)
 }
 
 /// Completed native operation evidence, never sampled process measurements.
-/// Every SHA read in these installers also fed XXH64; checksum-only admitted
-/// reads feed one stream. A reused identity itself performs no digest work.
-fn record_completed_install(evidence: &GraphObjectInstallEvidence) {
-    crate::graph_construction::diagnostics::hashed_bytes(evidence.bytes_hashed, 2);
+/// Actual read passes feed XXH64; those which also ran SHA contribute one
+/// additional stream. A captured repair source is checksum-only regardless of
+/// its temporary's later SHA authority. Reused identities perform no digest work.
+fn record_completed_install(evidence: &GraphObjectInstallEvidence, checksum_only_source: u64) {
+    crate::graph_construction::diagnostics::hashed_bytes(evidence.bytes_hashed, 1);
+    crate::graph_construction::diagnostics::hashed_bytes(
+        evidence.bytes_hashed.saturating_sub(checksum_only_source),
+        1,
+    );
     crate::graph_construction::diagnostics::hashed_bytes(evidence.checksum_read_bytes, 1);
     crate::graph_construction::diagnostics::written_bytes(evidence.write_bytes);
 }
