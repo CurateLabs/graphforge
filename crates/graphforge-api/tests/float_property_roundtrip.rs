@@ -263,7 +263,12 @@ fn parquet_import_session_preserves_float_bits() {
     let mut identities = FixedSizeBinaryBuilder::with_capacity(values.len(), 16);
     for index in 0..values.len() {
         identities
-            .append_value(uuid::Uuid::from_u128(u128::try_from(index).unwrap() + 1).as_bytes())
+            .append_value(
+                uuid::Uuid::from_u128(
+                    (0x7_u128 << 76) | (0x2_u128 << 62) | (u128::try_from(index).unwrap() + 1),
+                )
+                .as_bytes(),
+            )
             .unwrap();
     }
     let schema = Arc::new(Schema::new(vec![
