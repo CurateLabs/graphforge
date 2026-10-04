@@ -53,7 +53,7 @@ jobs:
             ${{ runner.os }}-fuzz-
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2.87.15
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: cargo-fuzz
 
