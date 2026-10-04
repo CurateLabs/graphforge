@@ -24,6 +24,7 @@ mod research_project;
 mod research_proposals;
 mod research_upstream;
 mod research_versions;
+mod saved_queries;
 mod slices;
 mod source_artifact;
 

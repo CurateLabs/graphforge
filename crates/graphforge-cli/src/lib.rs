@@ -32,6 +32,7 @@ mod ontology_cli;
 mod portable_cli;
 mod research_cli;
 mod research_versions_cli;
+mod saved_queries_cli;
 mod source_artifact_cli;
 mod storage_attribution_cli;
 
@@ -299,6 +300,11 @@ enum Command {
     },
     /// Stream a Cypher result to Parquet or Arrow IPC without full materialization.
     Query(portable_cli::QueryArgs),
+    /// Save, inspect, edit, and explicitly execute reusable project queries.
+    SavedQuery {
+        #[command(subcommand)]
+        command: saved_queries_cli::SavedQueryCommand,
+    },
     /// Staged Arrow/Parquet graph-import sessions.
     ImportSession {
         #[command(subcommand)]
@@ -1327,6 +1333,11 @@ fn run_with_allocation(
     let command = match command {
         Command::Export(args) => {
             return run_export(&graph, args, cli.json, output)
+                .map(|()| 0)
+                .map_err(Into::into);
+        }
+        Command::SavedQuery { command } => {
+            return saved_queries_cli::run(&mut graph, command, cli.json, output)
                 .map(|()| 0)
                 .map_err(Into::into);
         }
