@@ -21,6 +21,7 @@ test-failpoints = []
 test-support = ["graphforge-core/test-support"]
 
 [dependencies]
+graphforge-cypher = { version = "0.5.2", path = "../graphforge-cypher" }
 graphforge-value = { version = "0.5.2", path = "../graphforge-value" }
 graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
 graphforge-filesystem = { version = "0.5.2", path = "../graphforge-filesystem" }

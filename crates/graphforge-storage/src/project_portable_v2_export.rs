@@ -738,6 +738,7 @@ fn storage(e: impl std::fmt::Display) -> ExportError {
 #[cfg(test)]
 mod tests {
     mod participant_files;
+    mod saved_queries;
     mod semantic_refusals;
     use super::planning::exact_identity;
     use super::transport::open_planned_source;
@@ -835,6 +836,13 @@ mod tests {
     fn graph_generation_with_composition(
         include_composition: bool,
     ) -> (tempfile::TempDir, ResolvedProjectGeneration) {
+        graph_generation_with_metadata(include_composition, None)
+    }
+
+    fn graph_generation_with_metadata(
+        include_composition: bool,
+        extra: Option<crate::ProjectParticipant>,
+    ) -> (tempfile::TempDir, ResolvedProjectGeneration) {
         let project = tempfile::tempdir().unwrap();
         let parent = open_or_initialize_project(project.path()).unwrap();
         let tree = tempfile::tempdir().unwrap();
@@ -889,6 +897,13 @@ mod tests {
                 .unwrap()
                 .unwrap();
             participants.push(composition.to_project_participant().unwrap());
+            participants.sort_by(|left, right| {
+                (&left.capability_id, &left.record_family_id)
+                    .cmp(&(&right.capability_id, &right.record_family_id))
+            });
+        }
+        if let Some(extra) = extra {
+            participants.push(extra);
             participants.sort_by(|left, right| {
                 (&left.capability_id, &left.record_family_id)
                     .cmp(&(&right.capability_id, &right.record_family_id))
