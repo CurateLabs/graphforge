@@ -466,10 +466,19 @@ impl BoundaryReaders {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn captured_process_cpu() -> Option<Option<std::time::Duration>> {
+pub(super) enum CapturedProcessCpu {
+    Inactive,
+    Active(Option<std::time::Duration>),
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn captured_process_cpu() -> CapturedProcessCpu {
     ACTIVE.with(|active| {
-        let state = active.borrow().last()?.clone();
-        Some(state.borrow_mut().readers.cpu())
+        let Some(state) = active.borrow().last().cloned() else {
+            return CapturedProcessCpu::Inactive;
+        };
+        let cpu = state.borrow_mut().readers.cpu();
+        CapturedProcessCpu::Active(cpu)
     })
 }
 
