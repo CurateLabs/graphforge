@@ -572,3 +572,24 @@ fn retained_retirement_refuses_fresh_extra_links() {
         );
     }
 }
+
+#[test]
+fn retirement_without_writer_capability_keeps_payload_authentication() {
+    let temporary = TempDir::new().unwrap();
+    let root = StableDirectory::open(temporary.path()).unwrap();
+    let name = "shaped-identities.run";
+    std::fs::write(temporary.path().join(name), b"identity").unwrap();
+    let expected = receipt_for_existing(&root, name).unwrap();
+    let actual = unlink_shape_artifact_files(&root, name).unwrap();
+    assert_eq!(actual, expected);
+    assert!(!temporary.path().join(name).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn retained_retirement_refuses_disappeared_capability_before_unlink() {
+    let (temporary, root, receipt, retained) = retained_retirement_fixture();
+    std::fs::remove_file(temporary.path().join(shape_receipt_name(&receipt.name))).unwrap();
+    assert!(retained.unlink(&root, &receipt).is_err());
+    assert!(temporary.path().join(&receipt.name).exists());
+}
