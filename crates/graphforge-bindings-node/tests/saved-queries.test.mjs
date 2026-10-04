@@ -97,11 +97,12 @@ test("saved query CRUD, parameter validation and historical aggregates survive r
       ...saved,
       query_uuid: randomUUID(),
       name: "UUID parameter",
-      query: "RETURN $identity AS identity",
+      query:
+        "MATCH (n:Item) WHERE n.node_uuid = $identity RETURN n.node_uuid AS identity",
       parameters: { identity: "uuid" },
     };
     graph.createSavedQuery(uuidQuery);
-    const identity = randomUUID();
+    const identity = graph.addNode("Item", { score: 5 }).uuid;
     const result = tableFromIPC(
       await graph.executeSavedQuery(uuidQuery.query_uuid, {
         identity: { $uuid: identity },

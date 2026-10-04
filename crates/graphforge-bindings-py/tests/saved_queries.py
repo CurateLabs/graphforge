@@ -3,7 +3,7 @@
 from pathlib import Path
 import tempfile
 import unittest
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from graphforge import CancellationToken, GraphForge, GraphForgeError
 
@@ -79,11 +79,11 @@ def check_saved_queries() -> None:
             saved,
             query_uuid=str(uuid4()),
             name="UUID parameter",
-            query="RETURN $identity AS identity",
+            query="MATCH (n:Item) WHERE n.node_uuid = $identity RETURN n.node_uuid AS identity",
             parameters={"identity": "uuid"},
         )
         graph.create_saved_query(uuid_query)
-        value = uuid4()
+        value = UUID(graph.add_node("Item", score=5).uuid)
         result = graph.execute_saved_query(uuid_query["query_uuid"], {"identity": value})
         assert result.num_rows == 1
         assert result.column(0)[0].as_py() in [value.bytes, str(value)]

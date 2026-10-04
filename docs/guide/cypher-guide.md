@@ -65,6 +65,13 @@ Null, defaults, and undeclared values are refused. Python UUID parameters use
 embedded in query text are part of the published definition; supply private
 values through execution parameters instead.
 
+Node and CLI JSON numbers are interpreted by the saved declaration: an integral
+number can supply `float`, and a floating representation can supply `integer`
+only when integral and within ±9,007,199,254,740,991. Rust and Python retain their
+native integer/float distinction. Lean Rust builds support current saved queries;
+historical sources require the `research` feature and otherwise return
+`GF_CAPABILITY_DISABLED`.
+
 Saving validates syntax and the read-only contract without binding to the graph
 or running the query. Mutation clauses and procedure `CALL` are refused. General
 aggregates and tables are supported; a saved query need not return membership

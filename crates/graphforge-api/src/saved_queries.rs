@@ -1,5 +1,6 @@
 //! Project-owned reusable read-only Cypher definitions and explicit execution.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -36,6 +37,11 @@ pub enum SavedQuerySource {
     },
 }
 
+enum ParameterInput<'a> {
+    Typed(&'a HashMap<String, IrLiteral>),
+    Json(&'a HashMap<String, serde_json::Value>),
+}
+
 impl GraphForge {
     /// List current saved definitions in stable UUID order without executing them.
     pub fn saved_queries(&self) -> Result<Vec<SavedQuery>, GfError> {
@@ -58,7 +64,15 @@ impl GraphForge {
         match source {
             SavedQuerySource::Current => self.saved_queries(),
             SavedQuerySource::Version { version_uuid } => {
-                self.open_research_version(*version_uuid)?.saved_queries()
+                #[cfg(feature = "research")]
+                {
+                    self.open_research_version(*version_uuid)?.saved_queries()
+                }
+                #[cfg(not(feature = "research"))]
+                {
+                    let _ = version_uuid;
+                    Err(research_unavailable())
+                }
             }
         }
     }
@@ -71,9 +85,18 @@ impl GraphForge {
     ) -> Result<SavedQuery, GfError> {
         match source {
             SavedQuerySource::Current => self.saved_query(query_uuid),
-            SavedQuerySource::Version { version_uuid } => self
-                .open_research_version(*version_uuid)?
-                .saved_query(query_uuid),
+            SavedQuerySource::Version { version_uuid } => {
+                #[cfg(feature = "research")]
+                {
+                    self.open_research_version(*version_uuid)?
+                        .saved_query(query_uuid)
+                }
+                #[cfg(not(feature = "research"))]
+                {
+                    let _ = version_uuid;
+                    Err(research_unavailable())
+                }
+            }
         }
     }
 
@@ -127,6 +150,42 @@ impl GraphForge {
         source: &SavedQuerySource,
         cancellation: Option<&CancellationToken>,
     ) -> Result<ExecutionResult, GfError> {
+        self.run_saved_query(
+            query_uuid,
+            ParameterInput::Typed(params),
+            source,
+            cancellation,
+        )
+    }
+
+    /// Execute plain JSON parameters using the saved declaration's numeric types.
+    ///
+    /// This is the shared native parameter boundary for Node and CLI. Whole JSON
+    /// numbers can supply a declared float; floating representations can supply
+    /// integers only when integral and within the exact JSON/JavaScript safe range.
+    /// UUID values use a single `{"$uuid":"canonical UUID"}` tag.
+    pub fn execute_saved_query_json(
+        &self,
+        query_uuid: Uuid,
+        params: &HashMap<String, serde_json::Value>,
+        source: &SavedQuerySource,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<ExecutionResult, GfError> {
+        self.run_saved_query(
+            query_uuid,
+            ParameterInput::Json(params),
+            source,
+            cancellation,
+        )
+    }
+
+    fn run_saved_query(
+        &self,
+        query_uuid: Uuid,
+        input: ParameterInput<'_>,
+        source: &SavedQuerySource,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<ExecutionResult, GfError> {
         checkpoint(cancellation)?;
         let started = Instant::now();
         let mut view = match source {
@@ -138,20 +197,34 @@ impl GraphForge {
                     true,
                     self.lifecycle_mode,
                 )?;
-                view.runtime_catalog = Arc::new(Mutex::new(
-                    self.runtime_catalog
-                        .lock()
-                        .map_err(|_| invalid("runtime catalog is unavailable"))?
-                        .clone(),
-                ));
+                // In-memory catalogs carry names that are intentionally not
+                // persisted. Durable views hydrate the pinned generation's own
+                // catalog, which can be newer than this caller's cached names.
+                if self.path.is_none() {
+                    view.runtime_catalog = Arc::new(Mutex::new(
+                        self.runtime_catalog
+                            .lock()
+                            .map_err(|_| invalid("runtime catalog is unavailable"))?
+                            .clone(),
+                    ));
+                }
                 view.tempdir.clone_from(&self.tempdir);
                 view.research_materialization
                     .clone_from(&self.research_materialization);
                 view
             }
-            SavedQuerySource::Version { version_uuid } => self
-                .open_research_version(*version_uuid)?
-                .into_saved_query_graph()?,
+            SavedQuerySource::Version { version_uuid } => {
+                #[cfg(feature = "research")]
+                {
+                    self.open_research_version(*version_uuid)?
+                        .into_saved_query_graph()?
+                }
+                #[cfg(not(feature = "research"))]
+                {
+                    let _ = version_uuid;
+                    return Err(research_unavailable());
+                }
+            }
         };
         // A private pinned facade must share the owner's resource policy and
         // admission, rather than granting a fresh default budget for each run.
@@ -161,9 +234,13 @@ impl GraphForge {
         view.heavy_query_admission = Arc::clone(&self.heavy_query_admission);
         let definition = view.saved_query(query_uuid)?;
         definition.validate()?;
-        validate_parameters(&definition, params)?;
+        let params = match input {
+            ParameterInput::Typed(params) => Cow::Borrowed(params),
+            ParameterInput::Json(params) => Cow::Owned(json_parameters(&definition, params)?),
+        };
+        validate_parameters(&definition, &params)?;
         checkpoint(cancellation)?;
-        let mut stream = view.execute_stream_with_params(&definition.query, params)?;
+        let mut stream = view.execute_stream_with_params(&definition.query, &params)?;
         let schema = stream.schema();
         let mut batches = Vec::new();
         let mut bytes = 0_usize;
@@ -173,7 +250,7 @@ impl GraphForge {
             let next = view.block_on(async {
                 loop {
                     tokio::select! {
-                        batch = stream.next() => return Ok(batch),
+                        batch = stream.next() => return Ok::<_, GfError>(batch),
                         () = tokio::time::sleep(std::time::Duration::from_millis(10)), if cancellation.is_some() => checkpoint(cancellation)?,
                     }
                 }
@@ -317,9 +394,77 @@ fn missing_query() -> GfError {
 
 fn conflict() -> GfError {
     GfError::Project {
-        code: ProjectErrorCode::TransactionConflict,
+        code: ProjectErrorCode::WriteConflict,
         message: "project generation changed before saved-query publication".into(),
     }
+}
+
+#[cfg(not(feature = "research"))]
+fn research_unavailable() -> GfError {
+    GfError::Project {
+        code: ProjectErrorCode::CapabilityDisabled,
+        message: "historical saved queries require the research feature".into(),
+    }
+}
+
+fn json_parameters(
+    definition: &SavedQuery,
+    values: &HashMap<String, serde_json::Value>,
+) -> Result<HashMap<String, IrLiteral>, GfError> {
+    if values.len() != definition.parameters.len() {
+        return Err(invalid(
+            "saved query requires exactly its declared parameters",
+        ));
+    }
+    definition
+        .parameters
+        .iter()
+        .map(|(name, kind)| {
+            let value = values
+                .get(name)
+                .ok_or_else(|| invalid("saved query parameter is missing"))?;
+            let literal = match kind {
+                SavedQueryParameterType::Boolean => value.as_bool().map(IrLiteral::Bool),
+                SavedQueryParameterType::String => {
+                    value.as_str().map(|v| IrLiteral::Str(v.to_owned()))
+                }
+                SavedQueryParameterType::Integer => {
+                    value.as_i64().map(IrLiteral::Int).or_else(|| {
+                        let number = value.as_f64()?;
+                        if number.is_finite()
+                            && number.fract() == 0.0
+                            && number.abs() <= 9_007_199_254_740_991.0
+                        {
+                            #[allow(
+                                clippy::cast_possible_truncation,
+                                reason = "finite integral value is within the exact safe range"
+                            )]
+                            Some(IrLiteral::Int(number as i64))
+                        } else {
+                            None
+                        }
+                    })
+                }
+                SavedQueryParameterType::Float => value
+                    .as_f64()
+                    .filter(|v| v.is_finite())
+                    .map(IrLiteral::Float),
+                SavedQueryParameterType::Uuid => {
+                    let tag = value.as_object().filter(|tag| tag.len() == 1);
+                    tag.and_then(|tag| tag.get("$uuid"))
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|text| {
+                            Uuid::parse_str(text)
+                                .ok()
+                                .filter(|id| id.hyphenated().to_string() == text)
+                        })
+                        .map(|id| IrLiteral::Uuid(*id.as_bytes()))
+                }
+            }
+            .ok_or_else(|| invalid("saved query parameter has the wrong type or numeric range"))?;
+            Ok((name.clone(), literal))
+        })
+        .collect()
 }
 
 fn result_limit() -> GfError {

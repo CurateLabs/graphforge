@@ -1,6 +1,8 @@
 //! Real-engine evidence for durable, historical, and portable saved analyses.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+#[cfg(feature = "research")]
+use std::collections::BTreeSet;
+use std::collections::{BTreeMap, HashMap};
 
 use arrow::array::Int64Array;
 use graphforge_api::*;
@@ -58,6 +60,7 @@ fn in_memory_lifecycle_executes_parameterized_aggregate_and_preserves_failed_upd
     same_name.query_uuid = Uuid::now_v7();
     assert!(graph.create_saved_query(same_name).is_err());
 
+    #[cfg(feature = "research")]
     let before = graph.research_project_summary().unwrap().identity;
     let mut invalid = original.clone();
     invalid.query = "CREATE (:Person {age:60})".into();
@@ -66,6 +69,7 @@ fn in_memory_lifecycle_executes_parameterized_aggregate_and_preserves_failed_upd
         graph.update_saved_query(invalid).unwrap_err().code(),
         "GF_VALIDATION"
     );
+    #[cfg(feature = "research")]
     assert_eq!(graph.research_project_summary().unwrap().identity, before);
     assert_eq!(graph.saved_query(original.query_uuid).unwrap(), original);
 
@@ -130,6 +134,7 @@ fn in_memory_lifecycle_executes_parameterized_aggregate_and_preserves_failed_upd
 }
 
 #[test]
+#[cfg(feature = "research")]
 fn reopen_and_retained_version_preserve_definition_and_execution_context() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("project");
@@ -190,6 +195,7 @@ fn reopen_and_retained_version_preserve_definition_and_execution_context() {
 }
 
 #[test]
+#[cfg(feature = "portable")]
 fn portable_roundtrip_preserves_definitions_without_execution_or_parameter_values() {
     let directory = tempfile::tempdir().unwrap();
     let mut graph = GraphForge::new(None).unwrap();
@@ -278,9 +284,88 @@ fn stale_facade_cannot_overwrite_a_concurrent_saved_definition() {
             .create_saved_query(definition("Stale writer"))
             .unwrap_err()
             .code(),
-        "GF_TRANSACTION_CONFLICT"
+        "GF_WRITE_CONFLICT"
     );
     assert_eq!(first.saved_queries().unwrap(), vec![original]);
+}
+
+#[test]
+fn json_parameters_follow_declarations_across_integral_numeric_representations() {
+    let mut graph = GraphForge::new(None).unwrap();
+    for (kind, value, data_type) in [
+        (
+            SavedQueryParameterType::Float,
+            serde_json::json!(1),
+            arrow::datatypes::DataType::Float64,
+        ),
+        (
+            SavedQueryParameterType::Integer,
+            serde_json::json!(4_294_967_296.0),
+            arrow::datatypes::DataType::Int64,
+        ),
+        (
+            SavedQueryParameterType::Boolean,
+            serde_json::json!(true),
+            arrow::datatypes::DataType::Boolean,
+        ),
+        (
+            SavedQueryParameterType::String,
+            serde_json::json!("text"),
+            arrow::datatypes::DataType::Utf8,
+        ),
+    ] {
+        let saved = SavedQuery {
+            query_uuid: Uuid::now_v7(),
+            name: format!("Parameter {kind:?}"),
+            description: None,
+            query: "RETURN $value AS value".into(),
+            parameters: BTreeMap::from([("value".into(), kind)]),
+        };
+        graph.create_saved_query(saved.clone()).unwrap();
+        let result = graph
+            .execute_saved_query_json(
+                saved.query_uuid,
+                &HashMap::from([("value".into(), value)]),
+                &SavedQuerySource::Current,
+                None,
+            )
+            .unwrap();
+        assert_eq!(result.schema.field(0).data_type(), &data_type);
+        assert_eq!(result.stats.rows_produced, 1);
+        if kind == SavedQueryParameterType::Integer {
+            for invalid in [
+                serde_json::json!(1.5),
+                serde_json::json!(9_007_199_254_740_992.0),
+                serde_json::Value::Null,
+            ] {
+                assert_eq!(
+                    graph
+                        .execute_saved_query_json(
+                            saved.query_uuid,
+                            &HashMap::from([("value".into(), invalid)]),
+                            &SavedQuerySource::Current,
+                            None
+                        )
+                        .unwrap_err()
+                        .code(),
+                    "GF_VALIDATION"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(not(feature = "research"))]
+fn lean_saved_queries_refuse_historical_context_explicitly() {
+    let graph = GraphForge::new(None).unwrap();
+    let source = SavedQuerySource::Version {
+        version_uuid: Uuid::now_v7(),
+    };
+    assert_eq!(
+        graph.saved_queries_at(&source).unwrap_err().code(),
+        "GF_CAPABILITY_DISABLED"
+    );
 }
 
 #[test]
