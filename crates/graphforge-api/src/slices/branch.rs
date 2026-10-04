@@ -3,8 +3,9 @@ use super::{
     CancellationToken, GfError, GraphForge, SliceMembers, SliceRequest, SliceSelector, SliceSource,
     engine, frozen, invalid, unavailable,
 };
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::research_versions::{ResearchEvidenceReference, ResearchVersionRecord};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
@@ -192,6 +193,8 @@ fn selected_view(
         exclude_properties: BTreeSet::new(),
     };
     let spec = RegisterResearchVersion {
+        author: None,
+        committer: None,
         version_uuid: Uuid::now_v7(),
         context_uuid: Uuid::now_v7(),
         source_generation_uuid: version.content.generation_uuid,

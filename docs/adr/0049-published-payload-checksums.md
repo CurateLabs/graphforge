@@ -57,6 +57,28 @@ admission path.
 Current-format graph-inventory admission checks exact length and XXH64 on
 the retained payload handle. It preserves path, link, identity, filesystem
 and atomic-publication checks. It performs no payload SHA-256 pass.
+Opening a compact generation does not read payload content. The open
+authenticates the manifest and route table, checks every payload for presence
+and exact length, and hard-links payloads into the private workspace; it
+checksums only the small sidecars and the small identity controls (manifests,
+receipt, lock, tombstones), which it copies into single-link files and verifies
+as it copies. The node-linear forward and ordinal identity runs are hard-linked
+read-only and opened without reading a byte: each lookup checks the required
+XXH64 of every ordinal or tombstone block it returns a value from, forward runs
+(read only by writers) are authenticated whole before a writer builds on them,
+and the fact that UUID order matches ordinal order is recorded by the publisher in
+the authenticated manifest ([ADR 0038](0038-determinism-at-the-publication-boundary.md));
+a manifest published before the field is proven by reading every ordinal block
+once, on the first ordered fast-path query. Bulk payloads (nodes, edges, property fragments and search segments)
+are checked for XXH64 on the first read of each object, memoized for that
+hydration, so a project that never reads an object never pays for it. A
+refusal is memoized as well. A checksum refusal on a search index segment is a
+hard validation error; it is never treated as a derived index to rebuild. Every consumer that would otherwise bless a
+payload's current bytes (inventory capture for publication, rewrite baselines,
+appends) admits it first, so corruption cannot be republished under a fresh
+digest. The explicit full-admission API remains for callers that want a whole
+generation checked.
+
 Retired graph/files formats 1–4 and persisted graph/snapshot Arrow records
 are refused with an unsupported-format error. Their compatibility readers,
 SHA-256 read fallback and publication upgrade path are removed. Projects
@@ -72,9 +94,49 @@ refusal; producer installation, control metadata and portable package trust
 boundaries retain required authentication. Internal snapshots used for live
 construction rollback remain an implementation detail.
 
-This format foundation does not claim that all other read-path digest sites
-or the complete #1617 policy have been converted. Zero cryptographic payload
-hashing on ordinary reads permits mandatory checksum work.
+The same mandatory-checksum policy applies to the other persisted payload
+readers: CSR shard manifests use version 3, UUID membership manifests version 7,
+the logical ordinal-v4 facet descriptor uses wire version 6, GFDR run envelopes
+and records use version 2, and embedding generation manifests use version 2.
+These versions bind exact payload lengths and required file/block checksums;
+older descriptors are refused without a SHA read fallback. Publication names,
+control authentication, and canonical identity commitments remain SHA-256.
+
+Private encoded construction inventories use wire version 2 with required
+whole-artifact XXH64 for new and retained entries. Their checkpoint, generation,
+shape and current-parent controls authorize those expected checksums before
+replay or publication. UUID wire 7 and ordinal wire 6 retire unused per-block
+SHA fields while preserving whole-artifact SHA names, checksum fences, counts
+and semantic mapping commitments. Unsupported inventory and index versions
+are refused before decoding current required fields; retired block fields
+are refused rather than silently ignored.
+
+Final writer SHA/XXH64/length captures are forwarded into the inventory,
+including already captured CSR shards. Private publication opens one retained
+encoded source at a time, binds its native identity and allocation to checkpoint
+authority, and checksums the actual copied bytes. Same-inode mutate/read/restore
+therefore refuses at the consuming boundary. Existing CAS objects use this
+shortcut only when an installation lease already binds their exact native
+identity; unknown objects and concurrent winners retain genuine SHA trust
+checks. Public untrusted installation and orphan deletion authority retain
+SHA authentication. This changes SHA work, not the checksum I/O required for
+corruption refusal. Reclaim retains its existing zero-payload-read behavior.
+
+The reproduction commands and current source/test hashes are in the
+[ingest diagnostics method](../development/ingest-region-diagnostics.md).
+
+The project generation manifest uses wire version 2 with mandatory participant
+checksums. Arrow/Parquet participant reads use checksum/length admission, while
+JSON control participant authentication remains cryptographic. The project
+`FORMAT` and `CURRENT` schemas are unchanged and retain version 1.
+
+Private replay and materialization inventories carry read-only lengths and
+checksums. They are not serializable publication descriptors and cannot create
+CAS names. A bounded semantic-route control table retains its actual SHA-256
+authentication; no placeholder payload digest substitutes for one. Zero
+cryptographic payload hashing on ordinary reads permits mandatory checksum work.
+Once-per-payload publication/export and optional observability remain separate
+acceptance outcomes of the complete #1617 policy.
 
 ## Consequences
 
@@ -84,6 +146,17 @@ checksum; eliminating that I/O requires a separate trusted storage mechanism.
 Each entry gains one fixed-width checksum, and newly written versions require a
 reader that understands them. Retired formats are rejected rather than
 rewritten or migrated in place.
+
+Every mutating commit publishes a compact root (#1388): the first commit on an
+empty project, ordinary CREATE, SET and DELETE, composite transactions and
+`index_adjacency` all install only the files that changed since the parent and
+carry no graph tree into the generation. Delta runs are no longer published.
+Current expanded (V1) generations and delta-bearing generations that already
+exist stay readable unchanged, through the expanded open and the replay and
+compaction paths, so opening one still verifies and copies the whole tree. An
+expanded parent converts to a compact root on its next commit; a compaction of
+a delta-bearing generation publishes compact as well. Opening a project
+therefore costs the same whether it was constructed, imported or mutated.
 
 XXH64 has neither cryptographic collision resistance nor adversarial
 authentication. This decision inherits ADR 0013 and ADR 0045's exclusion of

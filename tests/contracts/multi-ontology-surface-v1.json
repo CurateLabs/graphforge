@@ -120,10 +120,5 @@
       "node":{"path":"crates/graphforge-bindings-node/tests/multi-ontology.test.mjs","symbol":"packaged clean install","kind":"node_test","markers":["graphforge/package.json","ontologyModules"]},
       "cli":{"path":"crates/graphforge-cli/tests/multi_ontology.rs","symbol":"packaged_clean_install","kind":"rust_test","markers":["CARGO_BIN_EXE_gf","ontology module list"]}
     }
-  },
-  "packaged_artifacts": {
-    "python_wheel":{"workflow":".github/workflows/test.yml","oracle":"crates/graphforge-bindings-py/tests/multi_ontology.py","workflow_markers":["maturin build","uv pip install --python /tmp/gf-native/bin/python","crates/graphforge-bindings-py/tests/multi_ontology.py"],"oracle_markers":["import graphforge","ontology_modules"]},
-    "node_package":{"workflow":".github/workflows/binding-release-candidate.yml","oracle":"scripts/ci/multi-ontology-packaged-smoke.mjs","workflow_markers":["npm pack . --ignore-scripts","npm install","multi-ontology-packaged-smoke.mjs"],"oracle_markers":["@curatelabs/graphforge","ontologyModules"]},
-    "cli_binary":{"workflow":".github/workflows/binding-release-candidate.yml","oracle":"scripts/ci/multi-ontology-packaged-smoke.mjs","workflow_markers":["packages/cli\" pack","npm install","multi-ontology-packaged-smoke.mjs"],"oracle_markers":["@curatelabs/graphforge-cli","ontology\", \"module\", \"list"]}
   }
 }

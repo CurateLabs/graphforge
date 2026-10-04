@@ -186,8 +186,8 @@ fn stage_set_node_properties_from_inventory(
         )?;
         &owned_inventory
     };
-    let (mut existing, _) =
-        crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+    let mut existing =
+        crate::property_overlay::read_authenticated_property_snapshot_data_for_inventory(
             inventory,
             crate::PropertyRouteKind::Node,
             stem,
@@ -228,9 +228,10 @@ fn stage_set_node_properties_from_inventory(
         .into_iter()
         .filter(|row| updates.contains_key(&row.node_uuid))
         .collect::<Vec<_>>();
-    let route_schema = staged
-        .property_window_schema(crate::PropertyRouteKind::Node, stem)
-        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Node, stem));
+    let route_schema = match staged.property_window_schema(crate::PropertyRouteKind::Node, stem) {
+        Some(schema) => Some(schema),
+        None => inventory.route_schema(crate::PropertyRouteKind::Node, stem)?,
+    };
     stage_node_property_file(
         staged,
         dir,
@@ -312,8 +313,8 @@ fn stage_remove_node_properties_from_inventory(
         )?;
         &owned_inventory
     };
-    let (mut existing, _) =
-        crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+    let mut existing =
+        crate::property_overlay::read_authenticated_property_snapshot_data_for_inventory(
             inventory,
             crate::PropertyRouteKind::Node,
             stem,
@@ -341,9 +342,10 @@ fn stage_remove_node_properties_from_inventory(
         .into_iter()
         .filter(|row| removals.contains_key(&row.node_uuid))
         .collect::<Vec<_>>();
-    let route_schema = staged
-        .property_window_schema(crate::PropertyRouteKind::Node, stem)
-        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Node, stem));
+    let route_schema = match staged.property_window_schema(crate::PropertyRouteKind::Node, stem) {
+        Some(schema) => Some(schema),
+        None => inventory.route_schema(crate::PropertyRouteKind::Node, stem)?,
+    };
     stage_node_property_file(
         staged,
         dir,
@@ -404,8 +406,8 @@ fn stage_set_edge_properties_from_inventory(
         )?;
         &owned_inventory
     };
-    let (mut existing, _) =
-        crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+    let mut existing =
+        crate::property_overlay::read_authenticated_property_snapshot_data_for_inventory(
             inventory,
             crate::PropertyRouteKind::Edge,
             rel_stem,
@@ -431,9 +433,11 @@ fn stage_set_edge_properties_from_inventory(
         .into_iter()
         .filter(|row| updates.contains_key(&row.edge_uuid))
         .collect::<Vec<_>>();
-    let route_schema = staged
-        .property_window_schema(crate::PropertyRouteKind::Edge, rel_stem)
-        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Edge, rel_stem));
+    let route_schema = match staged.property_window_schema(crate::PropertyRouteKind::Edge, rel_stem)
+    {
+        Some(schema) => Some(schema),
+        None => inventory.route_schema(crate::PropertyRouteKind::Edge, rel_stem)?,
+    };
     stage_edge_property_file(
         staged,
         dir,
@@ -493,8 +497,8 @@ fn stage_remove_edge_properties_from_inventory(
         )?;
         &owned_inventory
     };
-    let (mut existing, _) =
-        crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+    let mut existing =
+        crate::property_overlay::read_authenticated_property_snapshot_data_for_inventory(
             inventory,
             crate::PropertyRouteKind::Edge,
             rel_stem,
@@ -524,9 +528,11 @@ fn stage_remove_edge_properties_from_inventory(
         .into_iter()
         .filter(|row| removals.contains_key(&row.edge_uuid))
         .collect::<Vec<_>>();
-    let route_schema = staged
-        .property_window_schema(crate::PropertyRouteKind::Edge, rel_stem)
-        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Edge, rel_stem));
+    let route_schema = match staged.property_window_schema(crate::PropertyRouteKind::Edge, rel_stem)
+    {
+        Some(schema) => Some(schema),
+        None => inventory.route_schema(crate::PropertyRouteKind::Edge, rel_stem)?,
+    };
     stage_edge_property_file(
         staged,
         dir,
@@ -619,21 +625,20 @@ pub(crate) fn stage_promoted_properties(
     let inventory =
         crate::property_overlay::authenticated_property_inventory_for_route(dir, kind, stem)?;
     let targets = source.keys().copied().collect();
-    let (before, _) = crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+    let before = crate::property_overlay::read_authenticated_property_snapshot_data_for_inventory(
         &inventory, kind, stem, &targets,
     )?;
     if kind == crate::PropertyRouteKind::Edge {
-        let (present, _) =
-            crate::property_overlay::read_authenticated_property_presence_for_inventory(
-                &inventory, kind, stem, &targets,
-            )?;
+        let present = crate::property_overlay::read_property_presence_data_for_inventory(
+            &inventory, kind, stem, &targets,
+        )?;
         if !present.is_empty() {
             return Err(GfError::Validation(
                 "ontology promotion has overlapping edge property owners".into(),
             ));
         }
     }
-    let destination = inventory.route_schema(kind, stem);
+    let destination = inventory.route_schema(kind, stem)?;
     let mut source_metadata = source_schema.metadata().clone();
     source_metadata.insert(
         match kind {
@@ -893,7 +898,7 @@ pub(super) fn complete_node_property_window(
         route,
         staged,
     )?;
-    let (mut complete, _) = crate::read_authenticated_property_snapshots_for_inventory(
+    let mut complete = crate::read_authenticated_property_snapshot_data_for_inventory(
         &inventory,
         crate::PropertyRouteKind::Node,
         route,
@@ -936,9 +941,10 @@ pub(super) fn complete_node_property_window(
             values: row.props.clone().into_iter().collect(),
         })
         .collect::<Vec<_>>();
-    let authority = staged
-        .property_window_schema(crate::PropertyRouteKind::Node, route)
-        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Node, route));
+    let authority = match staged.property_window_schema(crate::PropertyRouteKind::Node, route) {
+        Some(schema) => Some(schema),
+        None => inventory.route_schema(crate::PropertyRouteKind::Node, route)?,
+    };
     let schema = crate::property_overlay::update_live_route_schema(
         crate::PropertyRouteKind::Node,
         route,
@@ -964,7 +970,7 @@ pub(super) fn complete_edge_property_window(
         route,
         staged,
     )?;
-    let (mut complete, _) = crate::read_authenticated_property_snapshots_for_inventory(
+    let mut complete = crate::read_authenticated_property_snapshot_data_for_inventory(
         &inventory,
         crate::PropertyRouteKind::Edge,
         route,
@@ -1012,9 +1018,10 @@ pub(super) fn complete_edge_property_window(
             values: row.props.clone().into_iter().collect(),
         })
         .collect::<Vec<_>>();
-    let authority = staged
-        .property_window_schema(crate::PropertyRouteKind::Edge, route)
-        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Edge, route));
+    let authority = match staged.property_window_schema(crate::PropertyRouteKind::Edge, route) {
+        Some(schema) => Some(schema),
+        None => inventory.route_schema(crate::PropertyRouteKind::Edge, route)?,
+    };
     let schema = crate::property_overlay::update_live_route_schema(
         crate::PropertyRouteKind::Edge,
         route,
@@ -1054,8 +1061,8 @@ fn stage_property_tombstones_from_inventory<S: std::hash::BuildHasher>(
     uuids: &HashSet<[u8; 16], S>,
 ) -> Result<(), GfError> {
     let targets = uuids.iter().copied().collect::<BTreeSet<_>>();
-    let (mut before, _) =
-        crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+    let mut before =
+        crate::property_overlay::read_authenticated_property_snapshot_data_for_inventory(
             inventory, kind, route, &targets,
         )?;
     before.extend(pending_property_snapshots(staged, dir, kind, route)?);
@@ -1084,9 +1091,10 @@ fn stage_property_tombstones_from_inventory<S: std::hash::BuildHasher>(
         vec![Field::new(uuid_field, DataType::FixedSizeBinary(16), false)],
         HashMap::from([(route_key.to_owned(), route.to_owned())]),
     ));
-    let authority = staged
-        .property_window_schema(kind, route)
-        .or_else(|| inventory.route_schema(kind, route));
+    let authority = match staged.property_window_schema(kind, route) {
+        Some(schema) => Some(schema),
+        None => inventory.route_schema(kind, route)?,
+    };
     let schema = crate::property_overlay::update_live_route_schema(
         kind,
         route,
@@ -1207,6 +1215,7 @@ fn property_snapshot_fragment_schema(
     kind: crate::PropertyRouteKind,
     route: &str,
     generation: u64,
+    ordinal: u64,
 ) -> SchemaRef {
     use crate::property_overlay::{
         PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
@@ -1229,7 +1238,7 @@ fn property_snapshot_fragment_schema(
     metadata.insert(PROPERTY_ROUTE_KEY.into(), route.to_owned());
     metadata.insert(PROPERTY_KIND_KEY.into(), kind.metadata_value().into());
     metadata.insert(PROPERTY_GENERATION_KEY.into(), generation.to_string());
-    metadata.insert(PROPERTY_ORDINAL_KEY.into(), "0".into());
+    metadata.insert(PROPERTY_ORDINAL_KEY.into(), ordinal.to_string());
     Arc::new(Schema::new_with_metadata(fields, metadata))
 }
 
@@ -1314,12 +1323,55 @@ fn property_snapshot_chunk_with_schema(
     Ok(batch)
 }
 
+/// Stages the capped fragments of one sealed property window.
+struct CappedFragmentWriter<'a> {
+    base_schema: &'a Schema,
+    kind: crate::PropertyRouteKind,
+    route: &'a str,
+    generation: u64,
+    directory: PathBuf,
+    next_ordinal: u64,
+    pending: Vec<RecordBatch>,
+}
+
+impl CappedFragmentWriter<'_> {
+    /// Stage the rows gathered for the current fragment, if any, under the
+    /// next ordinal.
+    fn finish_fragment(&mut self, staged: &mut RewriteBatch) -> Result<(), GfError> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let ordinal = self.next_ordinal;
+        self.next_ordinal = ordinal
+            .checked_add(1)
+            .ok_or_else(|| GfError::Storage("property fragment ordinal overflows".into()))?;
+        let schema = property_snapshot_fragment_schema(
+            self.base_schema,
+            self.kind,
+            self.route,
+            self.generation,
+            ordinal,
+        );
+        let destination = self.directory.join(
+            crate::property_overlay::PropertyFragmentId {
+                generation: self.generation,
+                ordinal,
+            }
+            .file_name(),
+        );
+        let batches = std::mem::take(&mut self.pending)
+            .into_iter()
+            .map(|batch| crate::property_overlay::with_fragment_ordinal(&batch, ordinal));
+        staged.stage_property_batches(&destination, schema, batches)
+    }
+}
+
 pub(crate) fn seal_property_windows(
     staged: &mut RewriteBatch,
     dir: &Path,
     generation: u64,
 ) -> Result<(), GfError> {
-    use crate::property_overlay::{PropertyFragmentId, enumerate_property_fragments};
+    use crate::property_overlay::enumerate_property_fragments;
     let windows = staged.take_property_windows();
     for (key, window) in windows {
         if window.project_root != dir {
@@ -1356,35 +1408,48 @@ pub(crate) fn seal_property_windows(
             ));
         }
         let base_schema = window.schema;
-        let fragment_schema = property_snapshot_fragment_schema(
-            base_schema.as_ref(),
-            key.kind,
-            &key.route,
-            generation,
-        );
         let subdir = match key.kind {
             crate::property_overlay::PropertyRouteKind::Node => "properties",
             crate::property_overlay::PropertyRouteKind::Edge => "edge_properties",
         };
-        let destination = dir.join(subdir).join(component).join(
-            PropertyFragmentId {
-                generation,
-                ordinal: 0,
-            }
-            .file_name(),
+        // One window is cut at the fixed fragment cap in UUID order: dense
+        // ordinals from zero within the generation, each fragment holding a
+        // disjoint UUID range (#1388).
+        let mut writer = CappedFragmentWriter {
+            base_schema: base_schema.as_ref(),
+            kind: key.kind,
+            route: &key.route,
+            generation,
+            directory: dir.join(subdir).join(component),
+            next_ordinal: 0,
+            pending: Vec::new(),
+        };
+        let mut splitter = crate::property_overlay::FragmentSplitter::default();
+        let chunk_schema = property_snapshot_fragment_schema(
+            base_schema.as_ref(),
+            key.kind,
+            &key.route,
+            generation,
+            0,
         );
-        staged.stage_batches(
-            &destination,
-            Arc::clone(&fragment_schema),
-            rows.chunks(4096).map(|chunk| {
-                property_snapshot_chunk_with_schema(
-                    base_schema.as_ref(),
-                    Arc::clone(&fragment_schema),
-                    key.kind,
-                    chunk,
-                )
-            }),
-        )?;
+        for chunk in rows.chunks(4096) {
+            let batch = property_snapshot_chunk_with_schema(
+                base_schema.as_ref(),
+                Arc::clone(&chunk_schema),
+                key.kind,
+                chunk,
+            )?;
+            let charges = crate::property_overlay::row_charges(&batch);
+            for piece in splitter.push(&charges) {
+                if piece.opens_fragment {
+                    writer.finish_fragment(staged)?;
+                }
+                writer
+                    .pending
+                    .push(batch.slice(piece.rows.start, piece.rows.len()));
+            }
+        }
+        writer.finish_fragment(staged)?;
     }
     Ok(())
 }

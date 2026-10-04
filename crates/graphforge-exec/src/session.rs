@@ -126,7 +126,7 @@ struct OwnedSessionAdjacency(RwLock<Arc<PersistentAdjacencyProvider>>);
 
 /// `SessionConfig` extension carrying the facade's exact generation-pinned
 /// ordinal identity authority.
-struct OrdinalIdentityResolverExt(pub Option<Arc<V4OrdinalIdentitySession>>);
+pub(crate) struct OrdinalIdentityResolverExt(pub Option<Arc<V4OrdinalIdentitySession>>);
 
 fn plan_expand_extension(
     expand: &graphforge_plan::ExpandNode,
@@ -173,10 +173,15 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
         &self,
         _planner: &dyn PhysicalPlanner,
         node: &dyn UserDefinedLogicalNode,
-        _logical_inputs: &[&LogicalPlan],
+        logical_inputs: &[&LogicalPlan],
         physical_inputs: &[Arc<dyn ExecutionPlan>],
         session_state: &SessionState,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
+        if let Some(planned) =
+            crate::fast_path::plan_extension(node, logical_inputs, physical_inputs, session_state)
+        {
+            return planned.map(Some);
+        }
         if let Some(create) = node.as_any().downcast_ref::<GraphCreateNode>() {
             let input = physical_inputs.first().cloned().ok_or_else(|| {
                 DataFusionError::Internal("GraphCreate requires one physical input".into())
@@ -703,7 +708,6 @@ impl ExecutionSession {
 
         let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
         let runtime_env = session_runtime(resources)?;
-
         let state = SessionStateBuilder::new()
             .with_default_features()
             .with_config(config)
@@ -1009,6 +1013,16 @@ impl ExecutionSession {
         let mut var_map = graphforge_rel::VarMap::new();
         let logical =
             lowerer.lower_prefix(&plan.ops[..split.prefix_len], &plan.exprs, &mut var_map)?;
+        let logical = if let Some(columns) =
+            write_driver::delete_identity_projection(&plan.ops, &split, logical.schema())
+        {
+            LogicalPlanBuilder::from(logical)
+                .project(columns)
+                .and_then(LogicalPlanBuilder::build)
+                .map_err(GfError::from_plan_error)?
+        } else {
+            logical
+        };
         let logical = bind_query_params(logical, params)?;
         let df_schema = logical.schema().as_ref().clone();
         let physical = self
@@ -1036,8 +1050,12 @@ impl ExecutionSession {
                 Arc::clone(&self.ctx.runtime_env().memory_pool),
             ),
         };
-        let mut wctx = write_driver::StatementWriteContext::new(&resource.dir, resource.mode)?
-            .with_semantic_composition_fingerprint(self.semantic_composition_fingerprint.clone());
+        let mut wctx = write_driver::StatementWriteContext::new_with_topology(
+            &resource.dir,
+            resource.mode,
+            Some(resource.topology_authority()),
+        )?
+        .with_semantic_composition_fingerprint(self.semantic_composition_fingerprint.clone());
         let create_retention =
             write_driver::create_retention_by_write(&plan.ops, &plan.exprs, &split);
         let mut cursor = split.prefix_len;
@@ -1504,6 +1522,9 @@ impl ExecutionSession {
         // session cannot read persisted data, so reject scan plans up front
         // (mirroring `execute_create`'s write-target guard) and lower the rest
         // schema-only so pure computed/`RETURN` plans still run.
+        // A plan that reads no property value compiles without admitting any
+        // property route; its key-only joins authenticate what they read.
+        let demand = graphforge_ir::property_demand(plan, self.catalog.prop_names());
         let lowerer = if self.dir.as_os_str().is_empty() {
             if plan_reads_persisted_data(plan) {
                 return Err(GfError::Execution(
@@ -1513,15 +1534,20 @@ impl ExecutionSession {
                 ));
             }
             GraphPlanLowerer::new(
-                Some(&graphforge_storage::lowering_snapshot(
+                Some(&graphforge_storage::lowering_snapshot_for(
                     Some(&self.catalog),
                     None,
+                    demand,
                 )?),
                 self.ontology.as_ref(),
             )?
         } else {
             GraphPlanLowerer::new_for_reads(
-                &graphforge_storage::lowering_snapshot(Some(&self.catalog), Some(&self.dir))?,
+                &graphforge_storage::lowering_snapshot_for(
+                    Some(&self.catalog),
+                    Some(&self.dir),
+                    demand,
+                )?,
                 self.ontology.as_ref(),
                 self.mode,
             )?

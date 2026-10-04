@@ -182,7 +182,8 @@ pub struct ResearchDecisionPublication {
 impl ResearchAcceptedMapping {
     /// Deterministic destination-scoped semantic identity, independent of operation.
     pub fn identity(&self) -> Result<Uuid, GfError> {
-        use sha2::{Digest, Sha256};
+        use crate::concurrency_attribution::ObservedSha256 as Sha256;
+        use sha2::Digest;
         let bytes = super::json(&(
             &self.destination,
             &self.unit,

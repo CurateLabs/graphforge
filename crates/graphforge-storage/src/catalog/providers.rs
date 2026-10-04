@@ -1,6 +1,5 @@
 //! Streaming DataFusion providers for topology and property tables.
 
-use super::discover_parquet_schema;
 use super::visit_property_overlay_batched_with_inventory;
 use crate::parquet_scan::ParquetFragment;
 use crate::parquet_scan::scan_fragments;
@@ -27,22 +26,60 @@ use std::sync::Arc;
 /// [`TableProvider`] for the logical legacy-plus-canonical node shard union.
 #[derive(Debug, Clone)]
 pub struct TopologyNodeTable {
-    paths: Vec<PathBuf>,
+    /// Physical path and, when the authenticated inventory declared it, the
+    /// inventory-relative path the row-count hint is taken from.
+    fragments: Vec<(PathBuf, Option<String>)>,
 }
 
 impl TopologyNodeTable {
+    /// Bind the node reader to its selected files, with no directory capability.
+    #[must_use]
+    pub fn from_files(files: &crate::TopologyFiles) -> Self {
+        Self {
+            fragments: files
+                .node_fragments()
+                .iter()
+                .map(|(path, relative)| (path.clone(), Some(relative.clone())))
+                .collect(),
+        }
+    }
     /// Create a table backed by one legacy or canonical Parquet fragment.
     #[must_use]
     pub fn new(path: PathBuf) -> Self {
-        Self { paths: vec![path] }
+        Self {
+            fragments: vec![(path, None)],
+        }
     }
 
-    /// Open every canonical node topology fragment in deterministic order.
+    /// Open every canonical node topology fragment in deterministic order,
+    /// listed from the directory. For a hydrated compact workspace prefer
+    /// [`Self::open_with_inventory`]: a directory listing would also read a
+    /// file nothing registered for admission.
     pub fn open_project(dir: &Path) -> Result<Self, DataFusionError> {
         Ok(Self {
-            paths: crate::mutator::node_parquet_files(dir)
-                .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+            fragments: crate::mutator::node_parquet_files(dir)
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?
+                .into_iter()
+                .map(|path| (path, None))
+                .collect(),
         })
+    }
+
+    /// Open the node fragments the authenticated inventory declares, so a
+    /// file in `topology/nodes/` that the manifest does not name is never
+    /// read (#1388). An inventory without topology authority (route-scoped)
+    /// is refused. `None` is the explicit manifest-less standalone boundary.
+    pub fn open_with_inventory(
+        dir: &Path,
+        inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    ) -> Result<Self, DataFusionError> {
+        match inventory {
+            Some(inventory) => Ok(Self::from_files(
+                &crate::TopologyFiles::from_inventory(inventory)
+                    .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+            )),
+            None => Self::open_project(dir),
+        }
     }
 }
 
@@ -65,10 +102,12 @@ impl TableProvider for TopologyNodeTable {
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
         // Existence only — no Parquet decode during planning (#339).
         let fragments = self
-            .paths
+            .fragments
             .iter()
-            .cloned()
-            .map(|path| ParquetFragment::for_path(path, true))
+            .map(|(path, relative)| match relative {
+                Some(relative) => ParquetFragment::for_declared(path.clone(), relative, true),
+                None => ParquetFragment::for_path(path.clone(), true),
+            })
             .collect();
         scan_fragments(
             TOPOLOGY_NODES_SCHEMA.clone(),
@@ -87,6 +126,7 @@ impl TableProvider for TopologyNodeTable {
 /// [`TableProvider`] for `topology/edges/TYPENAME.parquet`.
 #[derive(Debug, Clone)]
 pub struct TypedEdgeTable {
+    files: Option<crate::TopologyFiles>,
     dir: PathBuf,
     inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
     rel_type_name: String,
@@ -94,6 +134,14 @@ pub struct TypedEdgeTable {
 }
 
 impl TypedEdgeTable {
+    /// Build a relation reader that receives selected payloads without a directory.
+    #[must_use]
+    pub fn from_files(files: crate::TopologyFiles, route: &str) -> Self {
+        let mut table = Self::open(Path::new(""), route);
+        table.files = Some(files);
+        table
+    }
+
     /// Open the edge table for `rel_type_name` inside `dir`.
     ///
     /// - `"_exploratory"` → schema includes `rel_type_name` column
@@ -106,6 +154,7 @@ impl TypedEdgeTable {
             TYPED_EDGE_SCHEMA.clone()
         };
         Self {
+            files: None,
             dir: dir.to_path_buf(),
             rel_type_name: rel_type_name.to_owned(),
             inventory: None,
@@ -141,15 +190,31 @@ impl TableProvider for TypedEdgeTable {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let paths = match &self.inventory {
-            Some(inventory) => inventory.edge_files(Some(&self.rel_type_name)),
-            None => crate::mutator::edge_parquet_files(&self.dir, Some(&self.rel_type_name))
-                .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+        let fragments = if let Some(files) = &self.files {
+            files
+                .edges
+                .iter()
+                .filter(|(route, _, _)| route == &self.rel_type_name)
+                .map(|(_, path, relative)| {
+                    ParquetFragment::for_declared(path.clone(), relative, false)
+                })
+                .collect()
+        } else {
+            match &self.inventory {
+                Some(inventory) => inventory
+                    .edge_fragments(Some(&self.rel_type_name))
+                    .into_iter()
+                    .map(|(_, path, relative)| {
+                        ParquetFragment::for_declared(path, &relative, false)
+                    })
+                    .collect(),
+                None => crate::mutator::edge_parquet_files(&self.dir, Some(&self.rel_type_name))
+                    .map_err(|error| DataFusionError::Execution(error.to_string()))?
+                    .into_iter()
+                    .map(|(_, path)| ParquetFragment::for_path(path, false))
+                    .collect(),
+            }
         };
-        let fragments = paths
-            .into_iter()
-            .map(|(_, path)| ParquetFragment::for_path(path, false))
-            .collect();
         scan_fragments(
             self.schema.clone(),
             fragments,
@@ -172,15 +237,25 @@ impl TableProvider for TypedEdgeTable {
 /// source relation).
 #[derive(Debug, Clone)]
 pub struct UnionEdgeTable {
+    files: Option<crate::TopologyFiles>,
     pub(super) dir: PathBuf,
     pub(super) inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
 }
 
 impl UnionEdgeTable {
+    /// Build a union reader from selected payloads without a directory.
+    #[must_use]
+    pub fn from_files(files: crate::TopologyFiles) -> Self {
+        let mut table = Self::open(Path::new(""));
+        table.files = Some(files);
+        table
+    }
+
     /// Open a union edge table over `dir`'s `topology/edges/`.
     #[must_use]
     pub fn open(dir: &Path) -> Self {
         Self {
+            files: None,
             dir: dir.to_path_buf(),
             inventory: None,
         }
@@ -204,15 +279,30 @@ impl TableProvider for UnionEdgeTable {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let paths = match &self.inventory {
-            Some(inventory) => inventory.edge_files(None),
-            None => crate::mutator::edge_parquet_files(&self.dir, None)
-                .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+        let fragments: Vec<ParquetFragment> = if let Some(files) = &self.files {
+            files
+                .edges
+                .iter()
+                .map(|(route, path, relative)| {
+                    ParquetFragment::for_declared_union_edge(path.clone(), route.clone(), relative)
+                })
+                .collect()
+        } else {
+            match &self.inventory {
+                Some(inventory) => inventory
+                    .edge_fragments(None)
+                    .into_iter()
+                    .map(|(stem, path, relative)| {
+                        ParquetFragment::for_declared_union_edge(path, stem, &relative)
+                    })
+                    .collect(),
+                None => crate::mutator::edge_parquet_files(&self.dir, None)
+                    .map_err(|error| DataFusionError::Execution(error.to_string()))?
+                    .into_iter()
+                    .map(|(stem, path)| ParquetFragment::for_union_edge(path, stem))
+                    .collect(),
+            }
         };
-        let fragments: Vec<ParquetFragment> = paths
-            .into_iter()
-            .map(|(stem, path)| ParquetFragment::for_union_edge(path, stem))
-            .collect();
         scan_fragments(
             EXPLORATORY_EDGE_SCHEMA.clone(),
             fragments,
@@ -234,6 +324,7 @@ pub struct PropertyTable {
     pub(super) inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
     route: String,
     schema: SchemaRef,
+    keys_only: bool,
 }
 
 impl PropertyTable {
@@ -248,6 +339,25 @@ impl PropertyTable {
             inventory: None,
             route: entity_type.to_owned(),
             schema,
+            keys_only: false,
+        }
+    }
+
+    /// Open the route's `node_uuid` keys alone. Nothing is admitted to open:
+    /// the schema is the key column and planning takes no footer statistics,
+    /// while a scan still authenticates every fragment it reads.
+    #[must_use]
+    pub fn open_keys(
+        dir: &Path,
+        stem: &str,
+        inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
+    ) -> Self {
+        Self {
+            project: dir.to_path_buf(),
+            inventory,
+            route: stem.to_owned(),
+            schema: crate::schemas::PROPERTY_BASE_SCHEMA.clone(),
+            keys_only: true,
         }
     }
 
@@ -260,39 +370,41 @@ impl PropertyTable {
     /// exist yet, falls back to [`PROPERTY_BASE_SCHEMA`](crate::schemas::PROPERTY_BASE_SCHEMA) (just `node_uuid`), so a
     /// join against an as-yet-unwritten property table yields zero property rows
     /// rather than an error.
-    #[must_use]
-    pub fn open_discovered(dir: &Path, stem: &str) -> Self {
-        let path = dir.join("properties").join(format!("{stem}.parquet"));
-        let inventory = admitted_property_route(dir, crate::PropertyRouteKind::Node, stem);
-        let schema = inventory
-            .as_ref()
-            .and_then(|inventory| inventory.route_schema(crate::PropertyRouteKind::Node, stem))
-            .or_else(|| discover_parquet_schema(&path))
-            .unwrap_or_else(|| crate::schemas::PROPERTY_BASE_SCHEMA.clone());
-        Self {
+    pub fn open_discovered(dir: &Path, stem: &str) -> Result<Self, DataFusionError> {
+        let inventory = admitted_property_route(dir, crate::PropertyRouteKind::Node, stem)?;
+        let schema = match inventory.as_ref() {
+            Some(inventory) => inventory
+                .route_schema(crate::PropertyRouteKind::Node, stem)
+                .map_err(|error| DataFusionError::External(Box::new(error)))?,
+            None => None,
+        }
+        .unwrap_or_else(|| crate::schemas::PROPERTY_BASE_SCHEMA.clone());
+        Ok(Self {
             project: dir.to_path_buf(),
             inventory,
             route: stem.to_owned(),
             schema,
-        }
+            keys_only: false,
+        })
     }
 
     /// Open from one already-authenticated immutable generation inventory.
-    #[must_use]
     pub fn open_authenticated(
         dir: &Path,
         stem: &str,
         inventory: Arc<crate::AuthenticatedPropertyInventory>,
-    ) -> Self {
+    ) -> Result<Self, DataFusionError> {
         let schema = inventory
             .route_schema(crate::PropertyRouteKind::Node, stem)
+            .map_err(|error| DataFusionError::External(Box::new(error)))?
             .unwrap_or_else(|| crate::schemas::PROPERTY_BASE_SCHEMA.clone());
-        Self {
+        Ok(Self {
             project: dir.to_path_buf(),
             inventory: Some(inventory),
             route: stem.to_owned(),
             schema,
-        }
+            keys_only: false,
+        })
     }
 
     /// Visit node-property batches using this provider's retained admission.
@@ -342,6 +454,7 @@ pub struct EdgePropertyTable {
     pub(super) inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
     route: String,
     schema: SchemaRef,
+    keys_only: bool,
 }
 
 impl EdgePropertyTable {
@@ -353,40 +466,56 @@ impl EdgePropertyTable {
     /// file does not exist yet, falls back to [`EDGE_PROPERTY_BASE_SCHEMA`](crate::schemas::EDGE_PROPERTY_BASE_SCHEMA) (just
     /// `edge_uuid`), so a join against an as-yet-unwritten edge-property table
     /// yields zero property rows rather than an error.
-    #[must_use]
-    pub fn open_discovered(dir: &Path, rel_type: &str) -> Self {
-        let path = dir
-            .join("edge_properties")
-            .join(format!("{rel_type}.parquet"));
-        let inventory = admitted_property_route(dir, crate::PropertyRouteKind::Edge, rel_type);
-        let schema = inventory
-            .as_ref()
-            .and_then(|inventory| inventory.route_schema(crate::PropertyRouteKind::Edge, rel_type))
-            .or_else(|| discover_parquet_schema(&path))
-            .unwrap_or_else(|| crate::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone());
-        Self {
+    pub fn open_discovered(dir: &Path, rel_type: &str) -> Result<Self, DataFusionError> {
+        let inventory = admitted_property_route(dir, crate::PropertyRouteKind::Edge, rel_type)?;
+        let schema = match inventory.as_ref() {
+            Some(inventory) => inventory
+                .route_schema(crate::PropertyRouteKind::Edge, rel_type)
+                .map_err(|error| DataFusionError::External(Box::new(error)))?,
+            None => None,
+        }
+        .unwrap_or_else(|| crate::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone());
+        Ok(Self {
             project: dir.to_path_buf(),
             inventory,
             route: rel_type.to_owned(),
             schema,
-        }
+            keys_only: false,
+        })
     }
 
     /// Open from one already-authenticated immutable generation inventory.
-    #[must_use]
     pub fn open_authenticated(
         dir: &Path,
         route: &str,
         inventory: Arc<crate::AuthenticatedPropertyInventory>,
-    ) -> Self {
+    ) -> Result<Self, DataFusionError> {
         let schema = inventory
             .route_schema(crate::PropertyRouteKind::Edge, route)
+            .map_err(|error| DataFusionError::External(Box::new(error)))?
             .unwrap_or_else(|| crate::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone());
-        Self {
+        Ok(Self {
             project: dir.to_path_buf(),
             inventory: Some(inventory),
             route: route.to_owned(),
             schema,
+            keys_only: false,
+        })
+    }
+
+    /// Open the route's `edge_uuid` keys alone; see [`PropertyTable::open_keys`].
+    #[must_use]
+    pub fn open_keys(
+        dir: &Path,
+        route: &str,
+        inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
+    ) -> Self {
+        Self {
+            project: dir.to_path_buf(),
+            inventory,
+            route: route.to_owned(),
+            schema: crate::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone(),
+            keys_only: true,
         }
     }
 
@@ -401,10 +530,13 @@ fn admitted_property_route(
     dir: &Path,
     kind: crate::PropertyRouteKind,
     route: &str,
-) -> Option<Arc<crate::AuthenticatedPropertyInventory>> {
+) -> Result<Option<Arc<crate::AuthenticatedPropertyInventory>>, DataFusionError> {
+    if !dir.exists() {
+        return Ok(None);
+    }
     crate::property_overlay::authenticated_property_inventory_for_route(dir, kind, route)
-        .ok()
-        .map(Arc::new)
+        .map(|inventory| Some(Arc::new(inventory)))
+        .map_err(|error| DataFusionError::External(Box::new(error)))
 }
 
 #[async_trait]
@@ -435,6 +567,7 @@ impl TableProvider for EdgePropertyTable {
                     projection,
                     limit,
                     batch_size: state.config().batch_size(),
+                    footer_statistics: !self.keys_only,
                 },
             )?,
         ))
@@ -469,6 +602,7 @@ impl TableProvider for PropertyTable {
                     projection,
                     limit,
                     batch_size: state.config().batch_size(),
+                    footer_statistics: !self.keys_only,
                 },
             )?,
         ))

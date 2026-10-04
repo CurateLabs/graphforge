@@ -205,7 +205,7 @@ async fn property_sql_and_direct_reads_share_newest_overlay_authority() {
     assert_eq!(direct_names.value(0), "new");
 
     let ctx = SessionContext::new();
-    let table = PropertyTable::open_discovered(dir.path(), "Person");
+    let table = PropertyTable::open_discovered(dir.path(), "Person").unwrap();
     let state = ctx.state();
     let full_plan = table
         .scan(&state as &dyn Session, None, &[], None)
@@ -389,4 +389,147 @@ fn admitted_property_rejects_compressed_decode_expansion() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("decoded-byte admission limit"));
+}
+
+#[test]
+fn projected_overlay_preserves_nonnullable_fields_and_metadata() {
+    use arrow::array::{Float64Array, Int64Array};
+
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("properties")).unwrap();
+    let field_metadata = HashMap::from([("unit".into(), "finite-float".into())]);
+    let schema_metadata = HashMap::from([("origin".into(), "projected-properties".into())]);
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("index", DataType::Int64, false),
+            Field::new("x", DataType::Float64, false).with_metadata(field_metadata.clone()),
+        ],
+        schema_metadata.clone(),
+    ));
+    let values = [1.25_f64, 2.5];
+    let source = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(FixedSizeBinaryArray::try_from_iter([[1_u8; 16], [2_u8; 16]].iter()).unwrap()),
+            Arc::new(Int64Array::from(vec![0, 1])),
+            Arc::new(Float64Array::from(values.to_vec())),
+        ],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(
+        File::create(root.path().join("properties/Q.parquet")).unwrap(),
+        schema,
+        None,
+    )
+    .unwrap();
+    writer.write(&source).unwrap();
+    writer.close().unwrap();
+    let inventory =
+        crate::AuthenticatedPropertyInventory::capture_for_import(root.path(), None).unwrap();
+
+    // A batch of one reaches the flush; a larger batch reaches the remainder.
+    for batch_size in [1, 8] {
+        for selection in [
+            Some(BTreeSet::new()),
+            Some(BTreeSet::from(["x".into()])),
+            None,
+        ] {
+            let mut batches = Vec::new();
+            visit_property_overlay_batched_projected(
+                root.path(),
+                Some(&inventory),
+                "Q",
+                false,
+                batch_size,
+                selection.as_ref(),
+                |batch| {
+                    batches.push(batch.clone());
+                    Ok(true)
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+                values.len()
+            );
+            assert!(batches.iter().all(|batch| batch.num_rows() <= batch_size));
+            let mut read_bits = Vec::new();
+            for batch in &batches {
+                assert_eq!(batch.schema().metadata(), &schema_metadata);
+                assert!(
+                    batch
+                        .schema()
+                        .fields()
+                        .iter()
+                        .all(|field| !field.is_nullable())
+                );
+                let expected_names = match &selection {
+                    Some(selected) if selected.is_empty() => vec!["node_uuid"],
+                    Some(_) => vec!["node_uuid", "x"],
+                    None => vec!["node_uuid", "index", "x"],
+                };
+                assert_eq!(
+                    batch
+                        .schema()
+                        .fields()
+                        .iter()
+                        .map(|field| field.name().as_str())
+                        .collect::<Vec<_>>(),
+                    expected_names
+                );
+                if let Some(column) = batch.column_by_name("x") {
+                    assert_eq!(
+                        batch.schema().field_with_name("x").unwrap().metadata(),
+                        &field_metadata
+                    );
+                    let floats = column.as_any().downcast_ref::<Float64Array>().unwrap();
+                    assert_eq!(floats.null_count(), 0);
+                    read_bits.extend(floats.values().iter().map(|value| value.to_bits()));
+                }
+            }
+            if selection
+                .as_ref()
+                .is_none_or(|selected| selected.contains("x"))
+            {
+                assert_eq!(
+                    read_bits,
+                    values
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                );
+            } else {
+                assert!(read_bits.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn projected_schema_still_rejects_a_null_required_selected_field() {
+    use arrow::array::Float64Array;
+
+    let source = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("x", DataType::Float64, true),
+        ])),
+        vec![
+            Arc::new(FixedSizeBinaryArray::try_from_iter([[1_u8; 16]].iter()).unwrap()),
+            Arc::new(Float64Array::from(vec![None])),
+        ],
+    )
+    .unwrap();
+    let expected = Arc::new(Schema::new(vec![
+        Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+        Field::new("index", DataType::Int64, false),
+        Field::new("x", DataType::Float64, false),
+    ]));
+    let selection = BTreeSet::from(["x".into()]);
+    let expected = super::project_property_schema(expected, "node_uuid", Some(&selection)).unwrap();
+    assert!(!expected.field_with_name("x").unwrap().is_nullable());
+    let error = super::normalize_property_batch(source, Some(&expected)).unwrap_err();
+    assert!(matches!(error, graphforge_core::GfError::Storage(message)
+        if message.contains("'x'") && message.contains("non-nullable")));
 }

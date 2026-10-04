@@ -122,6 +122,7 @@ impl ResearchInterchangeManifest {
         let registry = ResearchRegistry {
             versions: self.versions.clone(),
             identities: self.identities.clone(),
+            ancestry: self.ancestry.clone(),
             materialized: self.versions.keys().copied().collect(),
             roots,
             interchange: BTreeMap::from([(self.selected_version_uuid, self.clone())]),

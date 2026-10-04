@@ -13,6 +13,24 @@ pub struct ResearchVersionView {
 }
 
 impl ResearchVersionView {
+    pub(crate) fn into_saved_query_graph(self) -> Result<GraphForge, GfError> {
+        self.require_retained("workspace", &["saved_queries"])?;
+        self.require_retained("graph", &["files", "snapshot"])?;
+        Ok(self.graph)
+    }
+
+    /// Inspect exact saved-query definitions from this retained Version.
+    pub fn saved_queries(&self) -> Result<Vec<crate::SavedQuery>, GfError> {
+        self.require_retained("workspace", &["saved_queries"])?;
+        self.graph.saved_queries()
+    }
+
+    /// Inspect one exact saved definition without executing it.
+    pub fn saved_query(&self, query_uuid: Uuid) -> Result<crate::SavedQuery, GfError> {
+        self.require_retained("workspace", &["saved_queries"])?;
+        self.graph.saved_query(query_uuid)
+    }
+
     pub(crate) fn into_slice_graph(self) -> Result<GraphForge, GfError> {
         self.require_retained("graph", &["files", "snapshot"])?;
         Ok(self.graph)
@@ -137,6 +155,23 @@ pub(crate) fn materialize(
     owner: &GraphForge,
     version: &ResearchVersionRecord,
 ) -> Result<GraphForge, GfError> {
+    materialize_with(owner, version, true)
+}
+
+/// Materialize one Version for editing: the facade is writable from the start
+/// over a private copy of the materialized tree, never a flipped pinned alias.
+pub(crate) fn materialize_writable(
+    owner: &GraphForge,
+    version: &ResearchVersionRecord,
+) -> Result<GraphForge, GfError> {
+    materialize_with(owner, version, false)
+}
+
+fn materialize_with(
+    owner: &GraphForge,
+    version: &ResearchVersionRecord,
+    read_only: bool,
+) -> Result<GraphForge, GfError> {
     let directory =
         Arc::new(tempfile::tempdir().map_err(|error| GfError::Storage(error.to_string()))?);
     let generation = graphforge_storage::research_versions::materialize_research_project(
@@ -148,7 +183,7 @@ pub(crate) fn materialize(
     let mut graph = GraphForge::open_resolved_with_options(
         directory.path().to_path_buf(),
         generation.clone(),
-        true,
+        read_only,
         owner.write_options.clone(),
         owner.resource_policy.clone(),
         graphforge_storage::ProjectOpenRecoveryEvidence::checkpoint_view(

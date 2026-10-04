@@ -1,4 +1,5 @@
 use super::*;
+
 use crate::graph_object_store::ACTIVE_DIR;
 use crate::graph_object_store::BTreeSet;
 use crate::graph_object_store::GRAPH_OBJECTS_DIR;
@@ -27,6 +28,49 @@ use crate::graph_object_store::read_graph_object;
 use crate::graph_object_store::read_graph_object_by_digest;
 use crate::graph_object_store::try_begin_graph_object_gc;
 use crate::graph_object_store::verify_graph_object;
+
+#[test]
+fn publication_payload_hash_work_counts_actual_authentication_streams_after_acceptance() {
+    let root = tempfile::tempdir().unwrap();
+    let payload = b"publication authenticated bytes";
+    let (digest, evidence) = install_graph_object_bytes(root.path(), payload).unwrap();
+    let lease = begin_graph_object_publication(root.path()).unwrap();
+    let mut entry = crate::GraphFileEntry {
+        relative_path: "topology/nodes.parquet".into(),
+        byte_length: payload.len() as u64,
+        content_sha256: digest,
+        content_xxh64: evidence.content_xxh64.unwrap(),
+        role: crate::GraphFileRole::Topology,
+    };
+    for crypto in [false, true] {
+        let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+        {
+            let _region =
+                crate::concurrency_attribution::RegionScope::named("publication_authentication");
+            if crypto {
+                authenticate_graph_object_entry(root.path(), &entry).unwrap();
+            } else {
+                admit_graph_object_with_lease(&lease, &entry).unwrap();
+            }
+        }
+        let snapshot = capture.finish();
+        assert_eq!(
+            snapshot.regions["import_command/publication_authentication"].work["hashed_bytes"],
+            payload.len() as u64 * if crypto { 2 } else { 1 }
+        );
+        assert!(snapshot.regions["import_command"].work.is_empty());
+        entry.content_xxh64 ^= 1;
+        let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+        let result = if crypto {
+            authenticate_graph_object_entry(root.path(), &entry)
+        } else {
+            admit_graph_object_with_lease(&lease, &entry)
+        };
+        assert!(result.is_err());
+        assert!(capture.finish().regions["import_command"].work.is_empty());
+        entry.content_xxh64 ^= 1;
+    }
+}
 
 #[test]
 fn checksum_admission_hashes_no_payload_bytes_and_boundary_authentication_keeps_sha256() {
@@ -568,4 +612,104 @@ fn publication_lease_probe_fails_closed_on_noncanonical_residue() {
     fs::write(&hostile, b"preserve").unwrap();
     assert!(graph_object_publication_is_live(root.path()).is_err());
     assert_eq!(fs::read(&hostile).unwrap(), b"preserve");
+}
+
+#[test]
+fn object_payload_read_is_bounded_even_when_input_has_no_end() {
+    struct UnendingReader(u64);
+    impl std::io::Read for UnendingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            buffer.fill(0);
+            self.0 += buffer.len() as u64;
+            Ok(buffer.len())
+        }
+    }
+    let root = Path::new(".");
+    let mut source = UnendingReader(0);
+    let error = read_exact_object_payload(&mut source, 4, root).unwrap_err();
+    assert!(
+        error.to_string().contains("length does not match"),
+        "{error}"
+    );
+    assert_eq!(source.0, 5);
+
+    let mut source = UnendingReader(0);
+    let error = read_exact_object_payload(&mut source, u64::MAX, root).unwrap_err();
+    assert!(error.to_string().contains("length overflow"), "{error}");
+    assert_eq!(source.0, 0);
+}
+
+#[test]
+fn object_payload_read_requires_exact_length_and_consumes_no_excess() {
+    let root = Path::new(".");
+    assert_eq!(
+        read_exact_object_payload(&b"data"[..], 4, root).unwrap(),
+        b"data"
+    );
+    assert!(read_exact_object_payload(&b"bad"[..], 4, root).is_err());
+    let mut source = std::io::Cursor::new(b"oversized");
+    assert!(read_exact_object_payload(&mut source, 4, root).is_err());
+    assert_eq!(source.position(), 5);
+}
+
+#[test]
+fn portable_cas_authentication_has_its_own_domain_and_still_refuses_corruption() {
+    use graphforge_core::hash_observation::operation::Capture;
+
+    let root = tempfile::tempdir().unwrap();
+    let payload = b"portable authenticated source";
+    let (digest, _) = install_graph_object_bytes(root.path(), payload).unwrap();
+    let lease = begin_graph_object_read(root.path()).unwrap();
+    let capture = Capture::start();
+    let mut object = lease
+        .open_for_portable(&digest, payload.len() as u64)
+        .unwrap();
+    let mut bytes = Vec::new();
+    object.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, payload);
+    assert_eq!(object.authenticated_length(), payload.len() as u64);
+    let work = capture.snapshot();
+    drop(object);
+    drop(capture);
+    assert_eq!(
+        work.portable_authentication_sha256_bytes,
+        payload.len() as u64
+    );
+    assert_eq!(work.artifact_payload_sha256_bytes, 0);
+    assert_eq!(work.unclassified_sha256_bytes, 0);
+
+    let capture = Capture::start();
+    drop(lease.open(&digest, payload.len() as u64).unwrap());
+    let work = capture.snapshot();
+    drop(capture);
+    assert_eq!(work.artifact_payload_sha256_bytes, payload.len() as u64);
+    assert_eq!(work.portable_authentication_sha256_bytes, 0);
+    assert_eq!(work.unclassified_sha256_bytes, 0);
+
+    let path = graph_object_path(root.path(), &digest).unwrap();
+    let before = graphforge_filesystem::file_identity(&File::open(&path).unwrap()).unwrap();
+    let permissions = fs::metadata(&path).unwrap().permissions();
+    let mut changed = payload.to_vec();
+    changed[0] ^= 1;
+    corrupt_sealed_graph_object_for_test(&path, &changed);
+    fs::set_permissions(&path, permissions).unwrap();
+    assert_eq!(
+        graphforge_filesystem::file_identity(&File::open(&path).unwrap()).unwrap(),
+        before
+    );
+    let capture = Capture::start();
+    let error = lease
+        .open_for_portable(&digest, payload.len() as u64)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("graph object digest does not match its address")
+    );
+    assert_eq!(
+        capture.snapshot().portable_authentication_sha256_bytes,
+        payload.len() as u64
+    );
+    assert_eq!(capture.snapshot().artifact_payload_sha256_bytes, 0);
+    assert_eq!(capture.snapshot().unclassified_sha256_bytes, 0);
 }

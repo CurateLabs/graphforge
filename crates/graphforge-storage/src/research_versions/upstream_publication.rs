@@ -57,7 +57,14 @@ pub(super) fn apply(
             ));
         }
     }
-    let id = super::branches::publish(root, registry, None, version)?;
+    // An upstream incorporation merges: prior head first, then the upstream Version.
+    let id = super::branches::publish(
+        root,
+        registry,
+        None,
+        version,
+        Some(review.upstream_version_uuid),
+    )?;
     if let Some(capture) = source_capture {
         // Keep exact immutable identity, not unrelated whole-parent payload.
         registry.versions.remove(&capture.version_uuid);

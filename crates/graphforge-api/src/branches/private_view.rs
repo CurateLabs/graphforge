@@ -7,6 +7,23 @@ pub(crate) fn open(
     owner: &GraphForge,
     prepared: &PreparedBranchContent,
 ) -> Result<GraphForge, GfError> {
+    open_with(owner, prepared, true)
+}
+
+/// Open for editing: writable from the start over a private copy of the
+/// prepared tree, never a flipped pinned alias.
+pub(crate) fn open_writable(
+    owner: &GraphForge,
+    prepared: &PreparedBranchContent,
+) -> Result<GraphForge, GfError> {
+    open_with(owner, prepared, false)
+}
+
+fn open_with(
+    owner: &GraphForge,
+    prepared: &PreparedBranchContent,
+    read_only: bool,
+) -> Result<GraphForge, GfError> {
     let directory = Arc::new(tempfile::tempdir().map_err(|e| GfError::Storage(e.to_string()))?);
     let generation = materialize_prepared_branch(
         owner.resolved_generation.container_root(),
@@ -17,7 +34,7 @@ pub(crate) fn open(
     let mut graph = GraphForge::open_resolved_with_options(
         directory.path().to_path_buf(),
         generation.clone(),
-        true,
+        read_only,
         owner.write_options.clone(),
         owner.resource_policy.clone(),
         graphforge_storage::ProjectOpenRecoveryEvidence::checkpoint_view(

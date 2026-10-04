@@ -12,6 +12,7 @@ pub(crate) struct FacadeMutationLifecycle<'a> {
     graph: &'a GraphForge,
     parent: ResolvedProjectGeneration,
     prior_catalog: RuntimeCatalog,
+    prior_topology: graphforge_storage::TopologyFiles,
     publish: bool,
     bindings: Option<&'a SemanticStorageBindings>,
     unpublished: Option<graphforge_storage::GraphWorkspaceCheckpoint>,
@@ -29,6 +30,8 @@ impl<'a> FacadeMutationLifecycle<'a> {
                 "GF_WRITE_RESOURCE_READ_ONLY: session does not authorize writes".into(),
             ));
         }
+        // The executor writes into the workspace before publication runs.
+        graph.require_private_workspace()?;
         let parent = graphforge_storage::resolve_project_generation(
             graph.resolved_generation.container_root(),
         )?;
@@ -40,6 +43,7 @@ impl<'a> FacadeMutationLifecycle<'a> {
             )?)
         };
         Ok(Self {
+            prior_topology: graph.dir().topology_files()?,
             graph,
             parent,
             prior_catalog,
@@ -50,7 +54,10 @@ impl<'a> FacadeMutationLifecycle<'a> {
     }
 
     fn refresh_unpublished(&self) -> Result<(), GfError> {
-        let (inventory, _) = graphforge_storage::capture_graph_files(&self.graph.dir())?;
+        let (inventory, _) = graphforge_storage::capture_graph_files_with_topology(
+            &self.graph.dir(),
+            &self.graph.dir().topology_files()?,
+        )?;
         let inventory = Arc::new(
             graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
                 &self.parent,
@@ -130,9 +137,17 @@ impl FacadeMutationLifecycle<'_> {
         if current.generation_uuid() == self.parent.generation_uuid() {
             if let Some(checkpoint) = &mut self.unpublished {
                 checkpoint.restore(&self.graph.dir())?;
+                self.graph
+                    .dir()
+                    .topology
+                    .restore(self.prior_topology.clone());
                 self.refresh_unpublished()?;
             } else {
                 crate::rematerialize_graph_workspace(&self.parent, &self.graph.dir())?;
+                self.graph
+                    .dir()
+                    .topology
+                    .restore(self.prior_topology.clone());
                 self.graph.install_property_generation(&self.parent)?;
             }
             *self

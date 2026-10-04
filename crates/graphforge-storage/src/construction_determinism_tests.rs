@@ -211,7 +211,7 @@ mod determinism {
             .chain(std::iter::once(&shape.runtime_catalog))
         {
             let receipt = receipt_for_existing(&session.root, name).unwrap();
-            shaped.push((name.clone(), receipt.sha256));
+            shaped.push((name.clone(), receipt.xxh64));
         }
         shaped.sort_unstable();
         shaped

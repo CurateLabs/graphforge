@@ -54,6 +54,7 @@ uuid = { workspace = true }
 # Assessment-only IPC codec experiments; production writers remain unchanged.
 arrow = { workspace = true, features = ["ipc_compression"] }
 cucumber = { workspace = true }
+divan = { workspace = true }
 tokio = { workspace = true }
 graphforge-cypher = { path = "../graphforge-cypher" }
 graphforge-storage = { path = "../graphforge-storage", features = ["test-failpoints", "test-support"] }
@@ -62,10 +63,6 @@ graphforge-storage = { path = "../graphforge-storage", features = ["test-failpoi
 name = "graphforge-fly-filesystem-smoke"
 path = "src/bin/graphforge-fly-filesystem-smoke.rs"
 required-features = ["portable"]
-
-[[example]]
-name = "release_load_probe"
-required-features = ["search"]
 
 [[example]]
 name = "atomic_recovery_workflow"
@@ -106,6 +103,22 @@ required-features = ["knowledge", "provenance", "search", "research"]
 [[test]]
 name = "discovery_portable_v2"
 required-features = ["discovery", "portable"]
+
+[[test]]
+name = "discovery_project_summary"
+required-features = ["discovery", "portable", "research"]
+
+[[test]]
+name = "discovery_ontology_module"
+required-features = ["discovery", "portable", "research"]
+
+[[test]]
+name = "discovery_research_version"
+required-features = ["discovery", "portable", "research"]
+
+[[test]]
+name = "discovery_lineage_import"
+required-features = ["discovery", "research", "portable"]
 
 [[test]]
 name = "algorithm_public_surface"
@@ -172,11 +185,23 @@ name = "scale_g500_ladder"
 required-features = ["portable"]
 
 [[test]]
+name = "mutated_project_open"
+required-features = ["knowledge"]
+
+[[test]]
 name = "permanent_storage_budgets"
 required-features = ["knowledge", "provenance", "portable"]
 
 [[test]]
 name = "research_versions"
+required-features = ["research"]
+
+[[test]]
+name = "research_commits"
+required-features = ["research"]
+
+[[test]]
+name = "research_legacy"
 required-features = ["research"]
 
 [[test]]
@@ -207,10 +232,26 @@ required-features = ["search"]
 name = "source_artifact_write"
 required-features = ["research", "search"]
 
+# Measures real portable export/import through the Rust facade.
+[[test]]
+name = "portable_payload_identity"
+required-features = ["portable"]
+
+# Includes knowledge/capability publication on a compact imported graph.
+[[test]]
+name = "publication_payload_identity"
+required-features = ["knowledge", "provenance"]
+
 # BDD runner for the public-API + TCK feature files (tests/features/).
 # A custom-harness target (cucumber drives its own main).
 [[test]]
 name = "bdd"
+harness = false
+
+# In-process Divan benchmark over the same TCK scenarios, step functions and
+# pooled fixture as the `bdd` run (#1653). Divan's own harness drives `main`.
+[[bench]]
+name = "tck_scenarios"
 harness = false
 
 [lints]

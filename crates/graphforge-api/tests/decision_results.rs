@@ -153,6 +153,8 @@ fn context() -> WriteContext {
 fn capture(graph: &mut GraphForge) -> Uuid {
     let operation = graph
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid: Uuid::now_v7(),
             context_uuid: Uuid::now_v7(),

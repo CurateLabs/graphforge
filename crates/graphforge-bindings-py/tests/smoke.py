@@ -234,6 +234,28 @@ def check_add_node() -> None:
         raise SystemExit("expected TypeError for unsupported node property")
     assert forge.execute("MATCH (n:Person) RETURN n").num_rows == 1
 
+    # #1675 — the construction arguments are positional-only, so a property may
+    # carry the same name as one of them.
+    member = forge.add_node("Member", label="M1", club_id=1)
+    other = forge.add_node("Member", label="M2", club_id=2)
+    assert member.label == "Member", member.label
+    labelled = forge.execute(
+        "MATCH (n:Member) RETURN n.label AS label, n.club_id AS club_id ORDER BY club_id"
+    )
+    assert labelled.column("label").to_pylist() == ["M1", "M2"], labelled
+    forge.add_edge(member, "FRIEND", other, src="a", dst="b", rel_type="c", weight=2)
+    edge = forge.execute(
+        "MATCH (:Member)-[r:FRIEND]->(:Member) "
+        "RETURN r.src AS src, r.dst AS dst, r.rel_type AS rel_type, r.weight AS weight"
+    )
+    assert edge.to_pylist() == [{"src": "a", "dst": "b", "rel_type": "c", "weight": 2}], edge
+    try:
+        forge.add_node(label="Member")
+    except TypeError:
+        pass
+    else:
+        raise SystemExit("expected TypeError: add_node's label is positional-only")
+
 
 def check_parse_error_span() -> None:
     # #586/#588 — a syntax error surfaces as ParseError with a `span`.
@@ -294,8 +316,8 @@ def _expect_lifecycle_error(call) -> None:
 
 def check_close_releases_project_handles() -> None:
     # #1363 — an open persistent instance retains OS handles on the committed
-    # generation it reads from; the authenticated property inventory holds a
-    # directory handle on ``generations/<uuid>/graph``. close() releases the
+    # generation it reads from (its private graph workspace and the committed
+    # generation's files). close() releases the
     # native engine, so the project tree is removable from this process
     # (Windows refuses to remove a directory that still has a live handle)
     # while the committed data reopens unchanged.
@@ -306,7 +328,9 @@ def check_close_releases_project_handles() -> None:
         forge.execute("CREATE (:Person {name: 'Alice'})")
         generations = [entry for entry in (project / "generations").iterdir() if entry.is_dir()]
         assert generations, "expected a published generation"
-        assert any((entry / "graph").is_dir() for entry in generations), generations
+        # A commit publishes a compact graph root, so no generation owns a graph
+        # tree; the open instance holds its handles on a private workspace.
+        assert list(project.glob("graphforge-graph-workspace-*")), "expected an open workspace"
         forge.close()
 
         # The engine is gone, but the inert attributes still answer, and every

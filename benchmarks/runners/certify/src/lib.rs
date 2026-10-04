@@ -583,7 +583,7 @@ impl PhaseExecutor for PublicProcessExecutor {
                 let execution = match if produce_lifecycle_storage {
                     self.execute_cli_observed(&profile.executable, args)
                 } else {
-                    execute_process(&profile.executable, args)
+                    execute_cli_measured(&profile.executable, args)
                 } {
                     Ok(execution) => execution,
                     Err(_) => {
@@ -647,6 +647,8 @@ impl PhaseExecutor for PublicProcessExecutor {
             && matches!(&command.action, PhaseAction::GraphForgeCli { .. })
         {
             self.execute_cli_observed(executable, args)?
+        } else if matches!(&command.action, PhaseAction::GraphForgeCli { .. }) {
+            execute_cli_measured(executable, args)?
         } else {
             execute_process(executable, args)?
         };
@@ -676,6 +678,17 @@ impl PhaseExecutor for PublicProcessExecutor {
     }
 }
 
+/// Certification consumes measured receipts; request the optional collector
+/// explicitly without changing generator or arbitrary subprocess arguments.
+fn execute_cli_measured(executable: &str, args: &[String]) -> Result<Execution, String> {
+    if args == ["--info"] || args.iter().any(|arg| arg == "--diagnostics") {
+        return execute_process(executable, args);
+    }
+    let mut measured = args.to_vec();
+    measured.push("--diagnostics".to_owned());
+    execute_process(executable, &measured)
+}
+
 fn execute_process(executable: &str, args: &[String]) -> Result<Execution, String> {
     execute_process_with_allocation(executable, args, None)
 }
@@ -690,7 +703,7 @@ fn execute_process_with_allocation(
     let mut command = Command::new(executable);
     command.args(args);
     if diagnostic {
-        command.arg("--allocation-diagnostics");
+        command.arg("--allocation-diagnostics").arg("--diagnostics");
     }
     let mut child = command
         .stdin(if diagnostic {
@@ -1107,6 +1120,7 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                             | "registered"
                             | "checkpointed"
                             | "validated"
+                            | "stage+seal"
                             | "committed"
                             | "aborted"
                     )
@@ -1123,7 +1137,7 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
             if object.get("operation_timings").is_some_and(|timings| {
                 !matches!(
                     object.get("outcome").and_then(serde_json::Value::as_str),
-                    Some("validated" | "committed")
+                    Some("validated" | "stage+seal" | "committed")
                 ) || !sanitized_import_operation_timings(timings)
             }) {
                 return None;
@@ -1624,10 +1638,23 @@ fn sanitized_query_evidence(value: &serde_json::Value) -> bool {
         Some(object) => object,
         None => return false,
     };
-    object.len() == KEYS.len()
-        && object.keys().all(|key| KEYS.contains(&key.as_str()))
-        && object.get("contract").and_then(serde_json::Value::as_str)
-            == Some("graphforge-query-evidence/1")
+    let version_shape = match object.get("contract").and_then(serde_json::Value::as_str) {
+        Some("graphforge-query-evidence/1") => {
+            object.len() == KEYS.len() && object.keys().all(|key| KEYS.contains(&key.as_str()))
+        }
+        Some("graphforge-query-evidence/2") => {
+            object.len() == KEYS.len() + 1
+                && object
+                    .keys()
+                    .all(|key| KEYS.contains(&key.as_str()) || key == "adjacency_rebuilds")
+                && object
+                    .get("adjacency_rebuilds")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some()
+        }
+        _ => false,
+    };
+    version_shape
         && sanitized_numeric_fields(value, &KEYS[4..])
         && sanitized_query_records(object.get("hops"), &QUERY_HOP_KEYS, None)
         && sanitized_query_records(object.get("sorts"), &QUERY_SORT_KEYS, Some("fetch_rows"))
@@ -2339,6 +2366,19 @@ mod tests {
     }
 
     #[test]
+    fn cli_measurement_adapter_explicitly_requests_diagnostics() {
+        let args = ["-c", "test \"$1\" = --diagnostics", "gf"].map(str::to_owned);
+        assert_eq!(
+            execute_cli_measured("/bin/sh", &args).unwrap().exit_code,
+            Some(0)
+        );
+        assert_ne!(
+            execute_process("/bin/sh", &args).unwrap().exit_code,
+            Some(0)
+        );
+    }
+
+    #[test]
     fn lifecycle_application_io_is_closed_and_must_reconcile() {
         assert!(super::sanitized_lifecycle_application_io(
             &lifecycle_application_io()
@@ -2419,6 +2459,11 @@ mod tests {
         let receipt = serde_json::json!({"contract":"graphforge-import-session/1", "outcome":"committed", "operation_timings":timings});
         let parsed = parse_receipts(&serde_json::to_vec(&receipt).unwrap(), true).unwrap();
         assert_eq!(parsed[0]["operation_timings"], timings);
+        for outcome in ["validated", "stage+seal"] {
+            let mut candidate = receipt.clone();
+            candidate["outcome"] = serde_json::json!(outcome);
+            assert!(parse_receipts(&serde_json::to_vec(&candidate).unwrap(), true).is_ok());
+        }
         for (phase, key, value) in [
             ("append", "elapsed_ns", serde_json::json!(1)),
             ("append", "errors", serde_json::json!(1)),
@@ -2481,10 +2526,11 @@ mod tests {
             "scalar_u64": 7,
             "application_io": lifecycle_application_io(),
             "query_evidence": {
-                "contract": "graphforge-query-evidence/1",
+                "contract": "graphforge-query-evidence/2",
                 "hops": [],
                 "sorts": [],
                 "operator_rss": [],
+                "adjacency_rebuilds": 0,
                 "max_in_flight_reads": 0,
                 "memory_reserved_before": 0,
                 "memory_reserved_after": 0,
@@ -2523,6 +2569,28 @@ mod tests {
     }
 
     #[test]
+    fn archived_query_receipts_keep_the_closed_legacy_shape() {
+        let archived: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/rungs/integrated-storage/s20-graphforge.json"
+        ))
+        .unwrap();
+        let mut count = 0;
+        for phase in archived["phases"].as_array().unwrap() {
+            for receipt in phase["receipts"].as_array().into_iter().flatten() {
+                if receipt["contract"] != "graphforge-result-sink/2" {
+                    continue;
+                }
+                assert!(sanitized_query_evidence(&receipt["query_evidence"]));
+                let mut with_counter = receipt["query_evidence"].clone();
+                with_counter["adjacency_rebuilds"] = serde_json::json!(0);
+                assert!(!sanitized_query_evidence(&with_counter));
+                count += 1;
+            }
+        }
+        assert_eq!(count, 8);
+    }
+
+    #[test]
     fn query_receipts_preserve_typed_adjacency_probe_evidence() {
         let query = serde_json::json!({
             "contract": "graphforge-result-sink/2",
@@ -2531,7 +2599,7 @@ mod tests {
             "complete": true, "result_sha256": "a".repeat(64), "scalar_u64": null,
             "application_io": lifecycle_application_io(),
             "query_evidence": {
-                "contract": "graphforge-query-evidence/1",
+                "contract": "graphforge-query-evidence/2",
                 "hops": [{
                     "ordinal": 0, "input_batches": 0, "input_rows": 0,
                     "candidates_generated": 2, "adjacency_rows_examined": 3,
@@ -2547,6 +2615,7 @@ mod tests {
                     "identity_revalidation_calls": 1, "identity_revalidation_bytes": 0
                 }],
                 "sorts": [],
+                "adjacency_rebuilds": 1,
                 "operator_rss": [{
                     "ordinal": 0, "operator": "ordered_one_hop",
                     "before_bytes": 100, "peak_bytes": 120, "after_bytes": 110
@@ -2560,6 +2629,29 @@ mod tests {
         let accepted = parse_receipts(&serde_json::to_vec(&query).unwrap(), true).unwrap();
         assert_eq!(accepted[0]["query_evidence"], query["query_evidence"]);
         assert!(accepted[0].get("destination").is_none());
+        let mut legacy = query.clone();
+        legacy["query_evidence"]["contract"] = serde_json::json!("graphforge-query-evidence/1");
+        legacy["query_evidence"]
+            .as_object_mut()
+            .unwrap()
+            .remove("adjacency_rebuilds");
+        let accepted = parse_receipts(&serde_json::to_vec(&legacy).unwrap(), true).unwrap();
+        assert_eq!(accepted[0]["query_evidence"], legacy["query_evidence"]);
+        for bad_value in [
+            serde_json::json!(-1),
+            serde_json::json!("1"),
+            serde_json::Value::Null,
+        ] {
+            let mut invalid = query.clone();
+            invalid["query_evidence"]["adjacency_rebuilds"] = bad_value;
+            assert!(parse_receipts(&serde_json::to_vec(&invalid).unwrap(), true).is_err());
+        }
+        let mut missing_rebuilds = query.clone();
+        missing_rebuilds["query_evidence"]
+            .as_object_mut()
+            .unwrap()
+            .remove("adjacency_rebuilds");
+        assert!(parse_receipts(&serde_json::to_vec(&missing_rebuilds).unwrap(), true).is_err());
         for bad_value in [
             serde_json::json!(-1),
             serde_json::json!("3"),
@@ -3239,6 +3331,30 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// Writes an executable script from a child process. A write descriptor
+    /// opened in this multi-threaded test process can be inherited by a child
+    /// that another test forks concurrently, and it stays open until that
+    /// child execs; executing the script during that window fails with
+    /// `ETXTBSY` (#1722). Writing it from a separate process keeps every write
+    /// descriptor out of this process.
+    #[cfg(unix)]
+    fn write_executable_script(path: &Path, script: &str) {
+        use std::io::Write as _;
+        let mut writer = Command::new("/bin/sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writer
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        assert!(writer.wait().unwrap().success(), "script writer failed");
+    }
+
     fn shell_ingest_profile(script: &Path) -> Profile {
         let mut profile = tiny_profile();
         profile.executable = "/bin/sh".to_owned();
@@ -3262,7 +3378,7 @@ mod tests {
         fs::write(
             &executable,
             format!(
-                "#!/bin/sh\nstate='{}'\nn=0\n[ ! -f \"$state\" ] || n=$(cat \"$state\")\ncase \"$*\" in\n  *'import-session begin') expected=0;;\n  *'import-session register-parquet') if [ \"$n\" = 1 ]; then expected=1; else expected=2; fi;;\n  *'import-session validate') expected=3;;\n  *'import-session commit') expected=4;;\n  *) exit 41;;\nesac\n[ \"$n\" = \"$expected\" ] || exit 42\necho $((n + 1)) > \"$state\"\n",
+                "#!/bin/sh\nstate='{}'\nn=0\n[ ! -f \"$state\" ] || n=$(cat \"$state\")\ncase \"$*\" in\n  *'import-session begin'*) expected=0;;\n  *'import-session register-parquet'*) if [ \"$n\" = 1 ]; then expected=1; else expected=2; fi;;\n  *'import-session validate'*) expected=3;;\n  *'import-session commit'*) expected=4;;\n  *) exit 41;;\nesac\n[ \"$n\" = \"$expected\" ] || exit 42\necho $((n + 1)) > \"$state\"\n",
                 state.display()
             ),
         )
@@ -3385,11 +3501,9 @@ fi
     #[cfg(unix)]
     #[test]
     fn failed_phase_carries_the_bounded_child_error_tail() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("gf");
-        fs::write(
+        write_executable_script(
             &executable,
             concat!(
                 "#!/bin/sh\n",
@@ -3397,9 +3511,7 @@ fi
                 "printf '%s\\n' '{\"error\":{\"code\":\"GF_IO\",\"message\":\"storage error: graph construction session: control record exceeds bound\"}}' >&2\n",
                 "exit 3\n"
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let mut profile = tiny_profile();
         profile.executable = executable.to_string_lossy().into_owned();
         let mut executor = PublicProcessExecutor::default();
@@ -3431,16 +3543,12 @@ fi
     #[cfg(unix)]
     #[test]
     fn passing_phase_publishes_no_error_tail_and_a_chatty_child_cannot_block() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("gf");
-        fs::write(
+        write_executable_script(
             &executable,
             "#!/bin/sh\ni=0\nwhile [ $i -lt 4000 ]; do printf '%s\\n' \"diagnostic chatter line $i\" >&2; i=$((i + 1)); done\n",
-        )
-        .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let mut profile = tiny_profile();
         profile.executable = executable.to_string_lossy().into_owned();
         let execution = PublicProcessExecutor::default()

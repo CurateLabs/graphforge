@@ -5,9 +5,9 @@ use super::recovery::SHAPE_CLEANUP_FAILURES;
 
 use super::{
     ArtifactReceipt, AtomicU64, BLOCK_BYTES, BTreeMap, BTreeSet, BufReader, ChunkReader,
-    Deserialize, DetailCodec, Digest, File, GfError, GraphConstructionEncoding,
+    Deserialize, DetailCodec, File, GfError, GraphConstructionEncoding,
     GraphConstructionEncodingEvidence, GraphConstructionSession, Length, Ordering, OsStr, Path,
-    Read, Serialize, Sha256, StableDirectory, Write, file_identity, hex, read_fixed,
+    Read, Serialize, StableDirectory, Write, file_identity, hex, read_fixed,
     replace_checkpoint_control, shape_publication_io_failure, storage,
 };
 
@@ -614,45 +614,57 @@ impl GraphConstructionEvidence {
 
 pub(super) struct HashingWriter {
     pub(super) inner: graphforge_filesystem::DurableFileCacheWriter,
-    pub(super) digest: Sha256,
-    /// Inline corruption checksum over the same bytes, in the same pass. No
+    /// Inline corruption checksum over the bytes, in the same pass. No
     /// later pass reads the payload back in order to compute it (#1384).
     pub(super) checksum: crate::corruption_checksum::Checksum,
     pub(super) bytes: u64,
     pub(super) operations: u64,
 }
 
-#[derive(Clone, Default)]
+/// Receipt-backed accounting is required by default. Only callers whose values
+/// are never consumed may choose the allocation-free disabled counter.
+#[derive(Clone)]
 pub(crate) struct IoCounter {
-    pub(super) bytes: std::sync::Arc<AtomicU64>,
-    pub(super) operations: std::sync::Arc<AtomicU64>,
+    state: Option<std::sync::Arc<(AtomicU64, AtomicU64)>>,
 }
-
-impl IoCounter {
-    pub(crate) fn account(&self, bytes: usize) {
-        if bytes != 0 {
-            self.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
-            self.operations.fetch_add(1, Ordering::Relaxed);
+impl Default for IoCounter {
+    fn default() -> Self {
+        Self {
+            state: Some(std::sync::Arc::new((AtomicU64::new(0), AtomicU64::new(0)))),
         }
     }
-
+}
+impl IoCounter {
+    pub(crate) fn disabled() -> Self {
+        Self { state: None }
+    }
+    pub(crate) fn account(&self, bytes: usize) {
+        if let Some(state) = &self.state
+            && bytes != 0
+        {
+            state.0.fetch_add(bytes as u64, Ordering::Relaxed);
+            state.1.fetch_add(1, Ordering::Relaxed);
+        }
+    }
     pub(super) fn add_to(&self, evidence: &mut GraphConstructionEvidence) -> Result<(), GfError> {
+        let (bytes, operations) = self.values();
         evidence.parquet_read_bytes = evidence
             .parquet_read_bytes
-            .checked_add(self.bytes.load(Ordering::Relaxed))
+            .checked_add(bytes)
             .ok_or_else(|| storage("Parquet read byte count overflows"))?;
         evidence.parquet_read_operations = evidence
             .parquet_read_operations
-            .checked_add(self.operations.load(Ordering::Relaxed))
+            .checked_add(operations)
             .ok_or_else(|| storage("Parquet read operation count overflows"))?;
         Ok(())
     }
-
     pub(crate) fn values(&self) -> (u64, u64) {
-        (
-            self.bytes.load(Ordering::Relaxed),
-            self.operations.load(Ordering::Relaxed),
-        )
+        self.state.as_ref().map_or((0, 0), |state| {
+            (
+                state.0.load(Ordering::Relaxed),
+                state.1.load(Ordering::Relaxed),
+            )
+        })
     }
 }
 
@@ -790,7 +802,6 @@ impl HashingWriter {
                 || shape_publication_io_failure("writer_construction"),
             )
             .map_err(storage)?,
-            digest: Sha256::new(),
             checksum: crate::corruption_checksum::Checksum::new(),
             bytes: 0,
             operations: 0,
@@ -801,7 +812,6 @@ impl HashingWriter {
 impl Write for HashingWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let written = self.inner.write(bytes)?;
-        self.digest.update(&bytes[..written]);
         self.checksum.update(&bytes[..written]);
         self.bytes = self
             .bytes

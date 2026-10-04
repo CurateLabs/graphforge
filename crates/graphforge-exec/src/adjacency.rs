@@ -13,9 +13,10 @@
 //! - [`PersistentAdjacencyProvider`] (#761) — serves from the on-disk CSR
 //!   index under `indexes/adjacency/` when it is fresh (manifest
 //!   `topology_generation` matches the project counter), lazily rebuilds a
-//!   stale index, and falls back to scan-build whenever the index cannot
-//!   serve a key. A stale, corrupt, or missing index can only cost speed,
-//!   never correctness. The adjacency-aware lowering rule is #763.
+//!   stale or missing index, and scan-builds a key the index has no row for.
+//!   A stale or missing index can only cost speed, never correctness. A
+//!   corrupted one is refused with `GF_VALIDATION`, never rebuilt over (#1388).
+//!   The adjacency-aware lowering rule is #763.
 //!
 //! Surrogate-only (R-ADJ-3): the view holds `node_id` / `edge_id` `u64`
 //! surrogates exclusively; UUIDs are resolved at the API boundary, never here.
@@ -43,9 +44,10 @@ pub enum AdjacencyStatus {
     /// Served from a fresh on-disk CSR index.
     Hit,
     /// The index capability is present but could not serve this key fresh:
-    /// stale or corrupt manifest/counter, a fresh index with no row for the
-    /// relation, or a missing CSR file. The request scan-builds (and, when
-    /// the whole index was stale, lazily rebuilds it).
+    /// a stale manifest, an unreadable counter, a fresh index with no row for
+    /// the relation, or a missing CSR manifest. The request scan-builds (and,
+    /// when the whole index was stale, lazily rebuilds it). A damaged index also
+    /// reports `Miss`, but its request refuses with `GF_VALIDATION` instead.
     Miss,
     /// No index capability for this request: `indexes/adjacency/` absent, a
     /// scan-build-only provider, or the typed-mode `"*"` bypass.
@@ -542,18 +544,14 @@ pub trait AdjacencyProvider: Send + Sync {
         direction: Direction,
     ) -> Result<Arc<Adjacency>, GfError>;
 
-    /// Repair a failed index row read. Other providers preserve the original error.
-    fn repair_adjacency(
-        &self,
-        _rel_type_name: &str,
-        _direction: Direction,
-        error: GfError,
-    ) -> Result<Arc<Adjacency>, GfError> {
-        Err(error)
-    }
-
     /// How [`adjacency`](Self::adjacency) for the same key would be served.
     fn status(&self, rel_type_name: &str, direction: Direction) -> AdjacencyStatus;
+
+    /// Explain how the request would be served, including a required stale rebuild.
+    /// This inspection never rebuilds or reads shard payloads.
+    fn explain_status(&self, rel_type_name: &str, direction: Direction) -> &'static str {
+        self.status(rel_type_name, direction).as_str()
+    }
 
     /// Cardinality of adjacency entries without opening shard payloads.
     ///
@@ -565,7 +563,7 @@ pub trait AdjacencyProvider: Send + Sync {
 }
 
 /// Operation-scoped adjacency view carrying already-admitted graph metadata.
-/// Adjacency lookup, repair, status and cardinality retain the underlying provider's behavior.
+/// Adjacency lookup, status and cardinality retain the underlying provider's behavior.
 pub struct AdmittedAdjacencyProvider<'a> {
     provider: &'a dyn AdjacencyProvider,
     inventory: Arc<graphforge_storage::AuthenticatedPropertyInventory>,
@@ -596,17 +594,12 @@ impl AdjacencyProvider for AdmittedAdjacencyProvider<'_> {
         self.provider.adjacency(relation, direction)
     }
 
-    fn repair_adjacency(
-        &self,
-        relation: &str,
-        direction: Direction,
-        error: GfError,
-    ) -> Result<Arc<Adjacency>, GfError> {
-        self.provider.repair_adjacency(relation, direction, error)
-    }
-
     fn status(&self, relation: &str, direction: Direction) -> AdjacencyStatus {
         self.provider.status(relation, direction)
+    }
+
+    fn explain_status(&self, relation: &str, direction: Direction) -> &'static str {
+        self.provider.explain_status(relation, direction)
     }
 
     fn edge_cardinality(&self, relation: &str, direction: Direction) -> Result<u64, GfError> {
@@ -614,51 +607,44 @@ impl AdjacencyProvider for AdmittedAdjacencyProvider<'_> {
     }
 }
 
-/// Query-local row access: only a failed index read can trigger one repair.
-/// The replacement view is retained so later rows do not reopen the bad artifact.
+/// Query-local row access over one adjacency view.
+///
+/// A failed row read is the query's failure. The index is derived, but a read
+/// that fails after the index was admitted means an object it names is
+/// corrupt, and the query that touched it must refuse (`GF_VALIDATION`) rather
+/// than rebuild the index from the edge table, which would make a bounded
+/// query cost O(E) and never report the damage.
 pub(crate) struct AdjacencyReader<'a> {
-    provider: &'a dyn AdjacencyProvider,
-    relation: &'a str,
-    direction: Direction,
+    /// The reader is scoped to the provider that admitted its view.
+    _provider: std::marker::PhantomData<&'a dyn AdjacencyProvider>,
     view: Arc<Adjacency>,
-    repair_attempted: bool,
 }
 
 impl<'a> AdjacencyReader<'a> {
+    pub(crate) fn for_capture(
+        provider: &'a dyn AdjacencyProvider,
+        relation: &str,
+        direction: Direction,
+        capture_epoch: u64,
+    ) -> Result<Self, GfError> {
+        crate::demand::with_capture_session(capture_epoch, || {
+            Self::new(provider, relation, direction)
+        })
+    }
+
     pub(crate) fn new(
         provider: &'a dyn AdjacencyProvider,
-        relation: &'a str,
+        relation: &str,
         direction: Direction,
     ) -> Result<Self, GfError> {
         Ok(Self {
-            provider,
-            relation,
-            direction,
+            _provider: std::marker::PhantomData,
             view: provider.adjacency(relation, direction)?,
-            repair_attempted: false,
         })
     }
 
     pub(crate) fn node_extent(&self) -> u64 {
         self.view.node_extent()
-    }
-
-    fn read<T>(&mut self, read: impl Fn(&Adjacency) -> Result<T, GfError>) -> Result<T, GfError> {
-        match read(&self.view) {
-            Ok(value) => Ok(value),
-            Err(error) => {
-                if self.repair_attempted {
-                    return Err(error);
-                }
-                self.repair_attempted = true;
-                // These closures only perform adjacency row reads. No query
-                // work or emitted output is retried, and repair failure propagates.
-                self.view = self
-                    .provider
-                    .repair_adjacency(self.relation, self.direction, error)?;
-                read(&self.view)
-            }
-        }
     }
 
     /// Consume a successfully authenticated row once, preserving borrowed
@@ -668,30 +654,33 @@ impl<'a> AdjacencyReader<'a> {
         node: u64,
         visit: impl FnOnce(NeighborRow<'_>) -> T,
     ) -> Result<T, GfError> {
-        let error = match self.view.neighbors(node) {
-            Ok(row) => return Ok(visit(row)),
-            Err(error) => error,
-        };
-        if self.repair_attempted {
-            return Err(error);
-        }
-        self.repair_attempted = true;
-        self.view = self
-            .provider
-            .repair_adjacency(self.relation, self.direction, error)?;
         Ok(visit(self.view.neighbors(node)?))
     }
+
     pub(crate) fn degree(&mut self, node: u64) -> Result<u64, GfError> {
-        self.read(|view| view.degree(node))
+        self.view.degree(node)
     }
+
     pub(crate) fn neighbor_chunk(
         &mut self,
         node: u64,
         skip: usize,
         limit: usize,
     ) -> Result<Vec<(u64, u64)>, GfError> {
-        self.read(|view| view.neighbor_chunk(node, skip, limit))
+        self.view.neighbor_chunk(node, skip, limit)
     }
+}
+
+/// An edge-table read failure as a [`GfError`]. An integrity refusal keeps its
+/// `GF_VALIDATION` code: flattening it to an execution error would let a caller
+/// read corruption as a transient fault.
+fn scan_read_error(error: &datafusion::error::DataFusionError) -> GfError {
+    if let datafusion::error::DataFusionError::External(inner) = error.find_root()
+        && let Some(refusal @ GfError::Validation(_)) = inner.downcast_ref::<GfError>()
+    {
+        return refusal.clone();
+    }
+    GfError::Execution(error.to_string())
 }
 
 /// Scan-build provider: `graphforge_storage::read_edges` + in-memory build on every
@@ -754,7 +743,7 @@ impl AdjacencyProvider for ScanBuildAdjacencyProvider {
             }
             None => graphforge_storage::read_edges(&self.dir, read_name, self.mode),
         }
-        .map_err(|e| GfError::Execution(e.to_string()))?;
+        .map_err(|error| scan_read_error(&error))?;
         build_from_edge_batches(rel_type_name, direction, &batches).map(Arc::new)
     }
 
@@ -855,6 +844,24 @@ fn build_from_edge_batches(
 // Persistent provider (#761)
 // ---------------------------------------------------------------------------
 
+/// Why a manifest row could not be loaded as a view.
+enum LoadFailure {
+    /// A part of the index that is missing or inconsistent with the manifest
+    /// that stamped it: honest derived-artifact state, repaired by a rebuild.
+    Rebuild(GfError),
+    /// A part of the index that is damaged or unreadable: surfaced, never
+    /// rebuilt.
+    Refuse(GfError),
+}
+
+impl LoadFailure {
+    fn into_error(self) -> GfError {
+        match self {
+            Self::Rebuild(error) | Self::Refuse(error) => error,
+        }
+    }
+}
+
 /// What the persistent provider found under `indexes/adjacency/`, read at most
 /// once per provider (= per query) and shared by `status()` and `adjacency()`
 /// so explain output and execution agree.
@@ -862,10 +869,16 @@ fn build_from_edge_batches(
 enum IndexState {
     /// `indexes/adjacency/` does not exist — the capability is not enabled.
     Absent,
-    /// The generation counter or the manifest exists but cannot be read.
-    /// Treated as always-stale WITHOUT rebuild: stamping a rebuilt manifest
-    /// needs a readable counter.
+    /// The generation counter exists but cannot be read. Treated as
+    /// always-stale WITHOUT rebuild: stamping a rebuilt manifest needs a
+    /// readable counter, so the request scan-builds from authenticated topology.
     Unreadable,
+    /// `index_manifest.parquet` exists but cannot be used: it fails its
+    /// integrity check (a flipped byte is refused by project admission), does
+    /// not decode, is in a format this release does not read, or could not be
+    /// read at all. None of these is a missing or stale index, so none is
+    /// repaired by a rebuild; every request refuses with the memoized error.
+    Failed(GfError),
     /// Manifest read. `fresh` = serveable: either the manifest generation
     /// equals the current counter, or it is older and an intact delta chain
     /// (#765) covers the gap.
@@ -887,9 +900,24 @@ enum IndexState {
 
 /// Provider over the on-disk CSR index (#761): serves `Hit`s from
 /// `indexes/adjacency/` when the manifest generation matches the project's
-/// `topology_generation`, lazily rebuilds a stale index, and falls back to
-/// scan-build whenever the index cannot serve a key — a stale, corrupt, or
-/// missing index only ever costs speed, never correctness.
+/// `topology_generation` and lazily rebuilds a missing or stale index.
+///
+/// The index is derived, so absence and staleness are honest states and only
+/// cost speed. Damage is not: an index object that fails its checksum, length
+/// or structure is refused with `GF_VALIDATION` by the request that touches it.
+/// Rebuilding on it would scan the whole edge table, so a bounded query would
+/// silently cost O(E) and the corruption would never be reported (#1388).
+///
+/// | what the provider finds | outcome |
+/// | --- | --- |
+/// | `indexes/adjacency/` absent | rebuild, then serve |
+/// | no manifest rows, older generation without a delta chain, or newer than the counter | stale: rebuild, then serve |
+/// | a manifest row whose shard manifest (`*.csr.json`) is absent | missing: rebuild, then serve |
+/// | shard manifest and index manifest disagree on counts | torn publication, stale: rebuild, then serve |
+/// | a fresh index with no row for the relation | scan-build, no rebuild |
+/// | unreadable generation counter | scan-build, no rebuild |
+/// | checksum or length mismatch, structural decode failure, absent declared shard | `GF_VALIDATION` |
+/// | unsupported index format, I/O error | storage error (`GF_IO`), no rebuild |
 ///
 /// One instance lives per [`ExecutionSession`](crate::ExecutionSession)
 /// (= per query); loaded views are cached per `(stem, direction)` so a
@@ -1029,8 +1057,9 @@ impl PersistentAdjacencyProvider {
         let Ok(generation) = read_topology_generation(dir) else {
             return IndexState::Unreadable;
         };
-        let Ok(rows) = csr::read_manifest(index_root) else {
-            return IndexState::Unreadable;
+        let rows = match csr::read_manifest(index_root) {
+            Ok(rows) => rows,
+            Err(error) => return IndexState::Failed(error),
         };
         // The base generation the CSRs were built at — uniform across rows on a
         // clean build. An empty manifest (torn build) or rows that disagree are
@@ -1085,24 +1114,30 @@ impl PersistentAdjacencyProvider {
         direction: Direction,
         rows: &[AdjacencyManifestRow],
         deltas: &[DeltaSegment],
-    ) -> Result<Adjacency, GfError> {
-        let directed = |d: csr::Direction| -> Result<AdjacencyInner, GfError> {
+    ) -> Result<Adjacency, LoadFailure> {
+        let directed = |d: csr::Direction| -> Result<AdjacencyInner, LoadFailure> {
             let path = csr::csr_path(self.index_root(), stem, d);
             if csr::sharded_csr_exists(&path) {
-                let base = Arc::new(ShardedCsrIndex::open(&path)?);
+                // Opening admits the shard manifest: a corrupt one is refused
+                // here, before any shard is read.
+                let base = Arc::new(ShardedCsrIndex::open(&path).map_err(LoadFailure::Refuse)?);
                 if let Some(row) = rows
                     .iter()
                     .find(|r| r.relation_type == stem && r.direction == d)
                     && (base.node_count() != row.node_count || base.edge_count() != row.edge_count)
                 {
-                    return Err(GfError::Storage(
+                    // Two derived files published separately disagree: a torn
+                    // publication, which is stale rather than damaged (each
+                    // file passed its own integrity check to get here).
+                    return Err(LoadFailure::Rebuild(GfError::Storage(
                         "adjacency sharded CSR disagrees with manifest counts (torn read)".into(),
-                    ));
+                    )));
                 }
                 if deltas.is_empty() {
                     return Ok(AdjacencyInner::Sharded(base));
                 }
-                let (replaced, node_extent) = sharded_overlay_rows(&base, stem, d, deltas)?;
+                let (replaced, node_extent) =
+                    sharded_overlay_rows(&base, stem, d, deltas).map_err(LoadFailure::Refuse)?;
                 if replaced.is_empty() {
                     return Ok(AdjacencyInner::Sharded(base));
                 }
@@ -1112,9 +1147,9 @@ impl PersistentAdjacencyProvider {
                     node_extent,
                 });
             }
-            Err(GfError::Storage(
-                "unsupported or missing current CSR shard manifest".into(),
-            ))
+            Err(LoadFailure::Rebuild(GfError::Storage(
+                "missing current CSR shard manifest".into(),
+            )))
         };
         match direction {
             Direction::Out => Ok(Adjacency {
@@ -1135,9 +1170,12 @@ impl PersistentAdjacencyProvider {
         }
     }
 
-    /// Lazily rebuild the index, refresh the memoized state, and serve from
-    /// the fresh files; any failure falls back to scan-build (a build problem
-    /// must never fail the query).
+    /// Lazily rebuild a missing or stale index, refresh the memoized state, and
+    /// serve from the fresh files. A build problem (an I/O failure writing the
+    /// derived index) falls back to scan-build rather than failing the query,
+    /// but an integrity refusal never does: it reports the same `GF_VALIDATION`
+    /// the scan-build would hit, and a view that fails to load straight after
+    /// the build wrote it is a defect to surface, not to hide.
     fn rebuild_and_serve(
         &self,
         rel_type_name: &str,
@@ -1147,6 +1185,8 @@ impl PersistentAdjacencyProvider {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
+        // Count attempts before starting so failed linear rebuild work is visible.
+        crate::demand::record_adjacency_rebuild();
         match self.rebuild(now) {
             Ok(rows) => {
                 let covered = Self::rows_cover(&rows, stem, direction);
@@ -1160,7 +1200,10 @@ impl PersistentAdjacencyProvider {
                 // A fresh rebuild has no overlay: the new base IS `generation`
                 // and the builder pruned the consumed segments (#765).
                 let view = if covered {
-                    self.load(stem, direction, &rows, &[]).ok()
+                    Some(
+                        self.load(stem, direction, &rows, &[])
+                            .map_err(LoadFailure::into_error)?,
+                    )
                 } else {
                     None
                 };
@@ -1175,6 +1218,7 @@ impl PersistentAdjacencyProvider {
                 }
                 self.scan.adjacency(rel_type_name, direction)
             }
+            Err(error @ GfError::Validation(_)) => Err(error),
             Err(_) => self.scan.adjacency(rel_type_name, direction),
         }
     }
@@ -1198,7 +1242,8 @@ impl PersistentAdjacencyProvider {
     /// status/adjacency snapshot agreement — is untouched.
     ///
     /// Drops the memoized state and view cache when: the prior read was
-    /// `Unreadable` (always retry — rare and cheap), the index was still
+    /// `Unreadable` or `Failed` (always retry — rare and cheap; a refusal is
+    /// memoized by project admission, so the retry costs no re-read), the index was still
     /// `Absent` (no capability dir yet), or the observed generation no
     /// longer matches the counter. A first-access rebuild promotes Absent
     /// to Ready, so the published CSR survives revalidate at the same
@@ -1222,6 +1267,7 @@ impl PersistentAdjacencyProvider {
             Some(
                 IndexState::Absent
                 | IndexState::Unreadable
+                | IndexState::Failed(_)
                 | IndexState::Ready { fresh: false, .. },
             ) => true,
         };
@@ -1295,33 +1341,6 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
         self.scan.admitted_inventory()
     }
 
-    fn repair_adjacency(
-        &self,
-        rel_type_name: &str,
-        direction: Direction,
-        error: GfError,
-    ) -> Result<Arc<Adjacency>, GfError> {
-        if !matches!(error, GfError::Storage(_)) {
-            return Err(error);
-        }
-        let _load = self
-            .load_lock
-            .lock()
-            .map_err(|_| GfError::Storage("adjacency load lock poisoned".into()))?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| {
-                i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
-            });
-        // Unlike initial index admission, failed lazy reads must not hide a
-        // failed rebuild behind scan-build. Perform one rebuild and one load.
-        let rows = self.rebuild(now)?;
-        let stem = Self::stem_for(rel_type_name);
-        let view = self.load(&stem, direction, &rows, &[])?;
-        self.invalidate();
-        Ok(self.cache_view(&stem, direction, view))
-    }
-
     fn adjacency(
         &self,
         rel_type_name: &str,
@@ -1348,6 +1367,7 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
                 // CSR once, then serve it; rebuild failure still scan-builds.
                 self.rebuild_and_serve(rel_type_name, &stem, direction)
             }
+            IndexState::Failed(error) => Err(error),
             IndexState::Unreadable => {
                 // A streaming ExpandExec may request the same view once per
                 // input batch. Scan-build exactly once per session/query and
@@ -1372,9 +1392,14 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
                 }
                 match self.load(&stem, direction, &rows, &deltas) {
                     Ok(view) => Ok(self.cache_view(&stem, direction, view)),
-                    // CSR missing/corrupt, or the torn-read count guard tripped:
-                    // one lazy rebuild repairs the index.
-                    Err(_) => self.rebuild_and_serve(rel_type_name, &stem, direction),
+                    // A shard manifest the index manifest names is absent, or
+                    // the torn-read count guard tripped: one lazy rebuild
+                    // repairs the index.
+                    Err(LoadFailure::Rebuild(_)) => {
+                        self.rebuild_and_serve(rel_type_name, &stem, direction)
+                    }
+                    // Damaged or unreadable: the touching query refuses.
+                    Err(LoadFailure::Refuse(error)) => Err(error),
                 }
             }
             IndexState::Ready { fresh: false, .. } => {
@@ -1387,9 +1412,9 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
         let stem = Self::stem_for(rel_type_name);
         match self.state() {
             IndexState::Absent => AdjacencyStatus::Building,
-            IndexState::Unreadable | IndexState::Ready { fresh: false, .. } => {
-                AdjacencyStatus::Miss
-            }
+            IndexState::Unreadable
+            | IndexState::Failed(_)
+            | IndexState::Ready { fresh: false, .. } => AdjacencyStatus::Miss,
             IndexState::Ready {
                 fresh: true, rows, ..
             } => {
@@ -1414,9 +1439,18 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
         }
     }
 
+    fn explain_status(&self, rel_type_name: &str, direction: Direction) -> &'static str {
+        if matches!(self.state(), IndexState::Ready { fresh: false, .. }) {
+            "miss, adjacency_rebuild=stale"
+        } else {
+            self.status(rel_type_name, direction).as_str()
+        }
+    }
+
     fn edge_cardinality(&self, rel_type_name: &str, direction: Direction) -> Result<u64, GfError> {
         let stem = Self::stem_for(rel_type_name);
         match self.state() {
+            IndexState::Failed(error) => Err(error),
             IndexState::Ready {
                 fresh: true,
                 rows,
@@ -1436,9 +1470,16 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
                 });
                 for row in relevant {
                     let path = csr::csr_path(self.index_root(), &stem, row.direction);
-                    if !ShardedCsrIndex::open(&path).is_ok_and(|index| {
+                    // A shard manifest that is absent, or that disagrees with
+                    // the index manifest's counts, is stale: topology answers.
+                    // One that is damaged or unreadable is refused.
+                    let consistent = if csr::sharded_csr_exists(&path) {
+                        let index = ShardedCsrIndex::open(&path)?;
                         index.node_count() == row.node_count && index.edge_count() == row.edge_count
-                    }) {
+                    } else {
+                        false
+                    };
+                    if !consistent {
                         return footer_edge_cardinality(
                             &self.dir,
                             self.scan.admitted_inventory().as_deref(),
@@ -1784,6 +1825,23 @@ mod tests {
         assert_eq!(AdjacencyStatus::Miss.as_str(), "miss");
     }
 
+    /// Every file under the project's adjacency directory with its bytes.
+    fn adjacency_tree(project: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = std::collections::BTreeMap::new();
+        let mut stack = vec![csr::adjacency_dir(project)];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    files.insert(path.clone(), std::fs::read(&path).unwrap());
+                }
+            }
+        }
+        files
+    }
+
     fn overwrite_sharded_csr_payloads(project: &Path) -> usize {
         let mut overwritten = 0;
         let mut stack = vec![csr::adjacency_dir(project)];
@@ -1877,47 +1935,49 @@ mod tests {
             "first row touch fails checksum; cardinality must not require it"
         );
     }
+    /// A shard that fails its checksum is refused by every row read that
+    /// touches it, with `GF_VALIDATION`. It is not repaired: a rebuild would
+    /// scan the edge table and never report the damage (#1388). The index files
+    /// stay exactly as they were.
     #[test]
-    fn lazy_index_reads_repair_corrupt_shards() {
+    fn corrupt_shard_is_refused_by_every_row_read_and_never_rebuilt() {
         for operation in 0..4 {
             let dir = TempDir::new().unwrap();
             let [src, ..] = write_diamond(dir.path());
             build_adjacency_index(dir.path(), TS).unwrap();
             assert!(overwrite_sharded_csr_payloads(dir.path()) > 0);
+            let before = adjacency_tree(dir.path());
             let provider = persistent_provider(dir.path().to_path_buf(), OntologyMode::Strict);
-            let corrupt = provider.adjacency("KNOWS", Direction::Out).unwrap();
-            assert!(corrupt.neighbors(src).is_err());
-            assert_ne!(
-                corrupt.as_ref(),
-                corrupt.as_ref(),
-                "corrupt views are never valid equality evidence"
-            );
             let mut reader = AdjacencyReader::new(&provider, "KNOWS", Direction::Out).unwrap();
-            match operation {
-                0 => assert_eq!(reader.with_neighbors(src, |row| row.len()).unwrap(), 3),
-                1 => assert_eq!(reader.degree(src).unwrap(), 3),
-                2 => assert_eq!(reader.neighbor_chunk(src, 1, 1).unwrap().len(), 1),
-                _ => {
-                    let graph = crate::algorithm_graph::export_adjacency(
-                        &provider,
-                        dir.path(),
-                        OntologyMode::Strict,
-                        crate::algorithm_graph::AdjacencySelection {
-                            label: graphforge_ir::EntityTypeSelection::All,
-                            via: "KNOWS",
-                            direction: Direction::Out,
-                            weight: None,
-                        },
-                    )
-                    .unwrap();
-                    assert_eq!(graph.neighbors(src).len(), 3);
-                }
-            }
-            let repaired = provider.adjacency("KNOWS", Direction::Out).unwrap();
-            assert_eq!(repaired.neighbors(src).unwrap().len(), 3);
-            if operation < 3 {
-                assert!(Arc::ptr_eq(&reader.view, &repaired));
-            }
+            let error = match operation {
+                0 => reader.with_neighbors(src, |row| row.len()).unwrap_err(),
+                1 => reader.degree(src).unwrap_err(),
+                2 => reader.neighbor_chunk(src, 1, 1).unwrap_err(),
+                _ => crate::algorithm_graph::export_adjacency(
+                    &provider,
+                    dir.path(),
+                    OntologyMode::Strict,
+                    crate::algorithm_graph::AdjacencySelection {
+                        label: graphforge_ir::EntityTypeSelection::All,
+                        via: "KNOWS",
+                        direction: Direction::Out,
+                        weight: None,
+                    },
+                )
+                .map(|_| ())
+                .unwrap_err(),
+            };
+            assert_eq!(
+                error.code(),
+                "GF_VALIDATION",
+                "operation {operation}: {error}"
+            );
+            assert!(error.to_string().contains("checksum"), "{error}");
+            assert_eq!(
+                adjacency_tree(dir.path()),
+                before,
+                "operation {operation}: a refused read must not rebuild the index"
+            );
         }
     }
 
@@ -1962,14 +2022,10 @@ mod tests {
 
     #[test]
     fn private_rebuild_keeps_source_inventory_unchanged() {
-        for corrupt_index in [false, true] {
+        {
             let source = TempDir::new().unwrap();
             let artifacts = TempDir::new().unwrap();
             let [src, ..] = write_diamond(source.path());
-            if corrupt_index {
-                build_adjacency_index(source.path(), TS).unwrap();
-                assert!(overwrite_sharded_csr_payloads(source.path()) > 0);
-            }
             let before = graphforge_storage::capture_graph_files(source.path())
                 .unwrap()
                 .0;
@@ -2002,7 +2058,7 @@ mod tests {
                     .unwrap()
                     .0,
                 before,
-                "lazy build and corruption repair must not modify the pinned source"
+                "a lazy build must not modify the pinned source"
             );
         }
     }
@@ -2064,35 +2120,6 @@ mod tests {
         assert_eq!(retained.neighbors(src).unwrap().len(), 3);
     }
 
-    #[test]
-    fn lazy_index_read_propagates_failed_rebuild() {
-        let dir = TempDir::new().unwrap();
-        let [src, ..] = write_diamond(dir.path());
-        build_adjacency_index(dir.path(), TS).unwrap();
-        assert!(overwrite_sharded_csr_payloads(dir.path()) > 0);
-        let provider = persistent_provider(dir.path().to_path_buf(), OntologyMode::Strict);
-        let mut reader = AdjacencyReader::new(&provider, "KNOWS", Direction::Out).unwrap();
-        // Topology corruption makes the actual rebuild fail; it cannot be
-        // hidden as a successful empty row or a successful scan fallback.
-        std::fs::write(
-            &provider
-                .admitted_inventory()
-                .unwrap()
-                .edge_files(Some("KNOWS"))[0]
-                .1,
-            b"corrupt topology",
-        )
-        .unwrap();
-        let error = reader.with_neighbors(src, |row| row.len()).unwrap_err();
-        assert!(
-            !error.to_string().contains("CSR shard checksum"),
-            "must report the rebuild failure: {error}"
-        );
-        assert!(
-            reader.view.neighbors(src).is_err(),
-            "failed repair must not replace the view with fabricated data"
-        );
-    }
     #[test]
     fn row_callback_borrows_high_degree_map_without_copying() {
         let dir = TempDir::new().unwrap();

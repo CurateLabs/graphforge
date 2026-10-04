@@ -2,8 +2,9 @@
 
 use crate::{GraphFileEntry, GraphFileRole};
 use graphforge_core::GfError;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Canonical v2 compact-root format identifier.
@@ -33,7 +34,7 @@ pub const GRAPH_RADIX_DEPTH: u8 = 64;
 pub const GRAPH_MANIFEST_BRANCH_MAX_BYTES: u64 = 1319;
 /// Maximum extra JSON bytes per manifest entry over its canonical encoding artifact.
 #[cfg(any(test, feature = "test-support"))]
-pub const GRAPH_MANIFEST_ENTRY_ENCODING_OVERHEAD_BYTES: u64 = 78;
+pub const GRAPH_MANIFEST_ENTRY_ENCODING_OVERHEAD_BYTES: u64 = 51;
 
 /// Generation participant root naming one immutable radix root and its totals.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,7 +308,7 @@ pub fn object_digest(bytes: &[u8]) -> String {
 #[must_use]
 /// Hash canonical logical-path UTF-8 bytes for radix routing.
 pub fn logical_path_digest(path: &str) -> [u8; 32] {
-    Sha256::digest(path.as_bytes()).into()
+    graphforge_core::hash_observation::ContractSha256::digest(path.as_bytes()).into()
 }
 #[must_use]
 /// Select one high/low SHA-256 nibble at `depth`.
@@ -979,6 +980,7 @@ mod tests {
                             path: path.into(),
                             bytes,
                             sha256: entry.content_sha256.clone(),
+                            xxh64: entry.content_xxh64,
                         };
                     let entry_bytes = serde_json::to_vec(&entry).unwrap().len() as u64;
                     let artifact_bytes = serde_json::to_vec(&artifact).unwrap().len() as u64;

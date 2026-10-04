@@ -29,6 +29,12 @@ pub enum GraphReadTable {
     Properties(String),
     /// Edge properties, optionally requiring a semantic relation provider.
     EdgeProperties(String, Option<RelationTypeId>),
+    /// The `node_uuid` keys of a node property route, for a plan that reads no
+    /// property value: binding it admits no route content.
+    PropertyKeys(String),
+    /// The `edge_uuid` keys of an edge property route; see
+    /// [`PropertyKeys`](Self::PropertyKeys).
+    EdgePropertyKeys(String),
 }
 
 /// Schema-discovered logical source. Contains no executable provider.

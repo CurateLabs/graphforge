@@ -23,8 +23,8 @@ use super::v4_authority_failure;
 use super::v4_publication_failure;
 use super::v4_publication_io_failure;
 use graphforge_core::GfError;
+use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use sha2::Digest;
-use sha2::Sha256;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fs::File;
@@ -40,6 +40,8 @@ pub(crate) struct V4ConstructionArtifactBundle {
     pub(crate) manifest: crate::V4OrdinalIdentityManifest,
     pub(crate) metrics: V4OrdinalBuildMetrics,
     pub(super) publications: Vec<(String, V4PublicationGuard)>,
+    /// First UUID in ordinal order, for ordering a delta after its parent.
+    pub(crate) first_ordinal_uuid: Option<[u8; 16]>,
 }
 
 // Publication ownership carries the optional observer through explicit cleanup
@@ -48,6 +50,7 @@ pub(crate) struct V4ConstructionArtifactBundle {
 pub(super) struct V4PublicationGuard {
     directory: Option<graphforge_filesystem::StableDirectory>,
     inner: Option<graphforge_filesystem::UnpublishedArtifactGuard>,
+    seal: Option<crate::durable_commit::FileSeal>,
     path: PathBuf,
     allocation: Option<crate::StorageAllocationOperation>,
 }
@@ -62,6 +65,7 @@ impl V4PublicationGuard {
             inner: Some(
                 directory.create_unpublished_replaceable_child(std::ffi::OsStr::new(name))?,
             ),
+            seal: None,
             path: directory.path().join(name),
             allocation: allocation.cloned(),
         })
@@ -83,6 +87,9 @@ impl V4PublicationGuard {
     }
     pub(super) fn take_file(&mut self) -> std::io::Result<File> {
         self.inner_mut().take_file()
+    }
+    pub(super) fn record_seal(&mut self, seal: crate::durable_commit::FileSeal) {
+        self.seal = Some(seal);
     }
     fn open_sibling(&self, name: &std::ffi::OsStr) -> std::io::Result<File> {
         self.inner().open_sibling(name)
@@ -143,7 +150,11 @@ impl V4PublicationGuard {
     }
     pub(super) fn install_child(&mut self, target: &std::ffi::OsStr) -> std::io::Result<()> {
         self.observe_named()?;
-        let installed = self.inner_mut().install_child(target);
+        let seal = self.seal.take().ok_or_else(|| {
+            std::io::Error::other("v4 publication requires a sealed producer descriptor")
+        })?;
+        let installed =
+            crate::durable_commit::install_guarded_sealed(self.inner_mut(), target, seal);
         if installed.is_err() {
             // Installation can rename successfully before a later validation
             // fails. Rebind only the actual retained artifact, never a collision.
@@ -172,9 +183,6 @@ impl V4PublicationGuard {
                 .map_err(std::io::Error::other)?;
         }
         Ok(())
-    }
-    pub(super) fn sync_parent(&mut self) -> std::io::Result<()> {
-        self.inner_mut().sync_parent()
     }
     fn commit(mut self) -> std::io::Result<()> {
         let identity = self.identity().ok();
@@ -272,14 +280,40 @@ where
     F: FnMut() -> bool,
 {
     let bundle = stage_v4_ordinal_bundle(records, generation, index, &mut cancelled)?;
-    index.sync().map_err(storage_err)?;
+    crate::durable_commit::acknowledge_directory(&index).map_err(storage_err)?;
     let V4ConstructionArtifactBundle {
         manifest,
         metrics,
         publications,
+        ..
     } = bundle;
     commit_v4_publications(publications, V4AuthorityTransactionProof)?;
     Ok((manifest, metrics))
+}
+
+/// Like [`stage_v4_ordinal_artifacts`] for pairs in any order: the forward run
+/// is fed in UUID order and the ordinals in node order, so the two projections
+/// can disagree about which comes first, as real construction streams do.
+#[cfg(test)]
+pub(crate) fn stage_v4_ordinal_artifacts_unordered(
+    mut records: Vec<(Uuid, u64)>,
+    generation: u64,
+    index: &graphforge_filesystem::StableDirectory,
+) -> Result<crate::V4OrdinalIdentityManifest, GfError> {
+    let mut cancelled = || false;
+    let mut writer = V4OrdinalConstructionWriter::start(generation, index)?;
+    records.sort_unstable_by_key(|(uuid, _)| *uuid.as_bytes());
+    for (uuid, node_id) in &records {
+        writer.push_forward(*uuid, *node_id, &mut cancelled)?;
+    }
+    records.sort_unstable_by_key(|(_, node_id)| *node_id);
+    for (uuid, node_id) in &records {
+        writer.push_ordinal(*node_id, *uuid, &mut cancelled)?;
+    }
+    let bundle = writer.finish()?;
+    crate::durable_commit::acknowledge_directory(&index).map_err(storage_err)?;
+    commit_v4_publications(bundle.publications, V4AuthorityTransactionProof)?;
+    Ok(bundle.manifest)
 }
 
 #[cfg(test)]
@@ -313,6 +347,10 @@ pub(crate) struct V4OrdinalConstructionWriter<'a> {
     current: Option<V4OrdinalRangeWriter>,
     previous_forward_uuid: Option<[u8; 16]>,
     previous_ordinal_node_id: u64,
+    /// UUID order across the ordinal stream, derived from the records pushed.
+    first_ordinal_uuid: Option<[u8; 16]>,
+    previous_ordinal_uuid: Option<[u8; 16]>,
+    ordinal_uuids_ascend: bool,
     forward_count: u64,
     ordinal_count: u64,
     forward_commitment: [u8; 32],
@@ -374,6 +412,9 @@ impl<'a> V4OrdinalConstructionWriter<'a> {
             current: None,
             previous_forward_uuid: None,
             previous_ordinal_node_id: 0,
+            first_ordinal_uuid: None,
+            previous_ordinal_uuid: None,
+            ordinal_uuids_ascend: true,
             forward_count: 0,
             ordinal_count: 0,
             forward_commitment: [0; 32],
@@ -501,6 +542,14 @@ impl<'a> V4OrdinalConstructionWriter<'a> {
             .checked_add(1)
             .ok_or_else(|| storage_err("v4 ordinal record count overflow"))?;
         self.previous_ordinal_node_id = node_id;
+        if self
+            .previous_ordinal_uuid
+            .is_some_and(|prior| prior >= uuid_bytes)
+        {
+            self.ordinal_uuids_ascend = false;
+        }
+        self.first_ordinal_uuid.get_or_insert(uuid_bytes);
+        self.previous_ordinal_uuid = Some(uuid_bytes);
         let live_temporary_bytes = self
             .metrics
             .artifact_bytes
@@ -570,6 +619,7 @@ impl<'a> V4OrdinalConstructionWriter<'a> {
                 artifact: tombstone.artifact,
                 blocks: Vec::new(),
             }],
+            uuid_order_matches_ordinals: Some(self.ordinal_uuids_ascend),
         };
         v4_publication_failure("manifest_update")?;
         admit_v4_construction_manifest(&manifest)?;
@@ -587,6 +637,7 @@ impl<'a> V4OrdinalConstructionWriter<'a> {
             manifest,
             metrics: self.metrics,
             publications: self.publications,
+            first_ordinal_uuid: self.first_ordinal_uuid,
         })
     }
 }
@@ -604,7 +655,7 @@ pub(super) fn admit_v4_construction_manifest(
 }
 
 fn add_v4_mapping_commitment(commitment: &mut [u8; 32], domain: u8, uuid: [u8; 16], node_id: u64) {
-    let mut digest = Sha256::new();
+    let mut digest = graphforge_core::hash_observation::ContractSha256::new();
     digest.update(b"graphforge-v4-mapping-v1\0");
     digest.update([domain]);
     digest.update(uuid);
@@ -622,6 +673,7 @@ pub(super) struct StreamingV4Artifact {
     pub(super) writer: BufWriter<graphforge_filesystem::DurableFileCacheWriter>,
     publication: V4PublicationGuard,
     digest: Sha256,
+    checksum: crate::corruption_checksum::Checksum,
     pub(super) bytes: u64,
 }
 
@@ -658,6 +710,7 @@ impl StreamingV4Artifact {
             writer: BufWriter::with_capacity(V4_ORDINAL_BLOCK_BYTES, writer),
             publication,
             digest: Sha256::new(),
+            checksum: crate::corruption_checksum::Checksum::new(),
             bytes: 0,
         })
     }
@@ -676,6 +729,7 @@ impl StreamingV4Artifact {
         written?;
         observed?;
         self.digest.update(bytes);
+        self.checksum.update(bytes);
         self.bytes = self
             .bytes
             .checked_add(u64::try_from(bytes.len()).map_err(storage_err)?)
@@ -690,11 +744,8 @@ impl StreamingV4Artifact {
         Result<(), GfError>,
     ) {
         let flushed = self.writer.flush().map_err(storage_err);
-        let synchronized = self
-            .writer
-            .get_mut()
-            .sync_all_and_release()
-            .map_err(storage_err);
+        let synchronized =
+            crate::durable_commit::seal_cache_writer(self.writer.get_mut()).map_err(storage_err);
         let observed = self
             .publication
             .observe(self.writer.get_ref().file())
@@ -726,17 +777,18 @@ pub(super) fn finish_streamed_v4_artifact(
     metrics: &mut V4OrdinalBuildMetrics,
 ) -> Result<GuardedV4Artifact, GfError> {
     let finalized = writer.writer.flush().map_err(storage_err).and_then(|()| {
-        writer
-            .writer
-            .get_mut()
-            .sync_all_and_release()
+        crate::durable_commit::seal_cache_writer_witness(writer.writer.get_mut())
             .map_err(storage_err)
     });
-    if let Err(primary) = finalized {
-        let (cache_release, cleanup) = writer.cleanup_unpublished();
-        merge_cache_release_evidence(&mut metrics.cache_release, cache_release);
-        return combine_v4_cleanup(Err(primary), cleanup, "v4 failed output cleanup");
-    }
+    let seal = match finalized {
+        Ok(seal) => seal,
+        Err(primary) => {
+            let (cache_release, cleanup) = writer.cleanup_unpublished();
+            merge_cache_release_evidence(&mut metrics.cache_release, cache_release);
+            return combine_v4_cleanup(Err(primary), cleanup, "v4 failed output cleanup");
+        }
+    };
+    writer.publication.record_seal(seal);
     writer
         .publication
         .observe(writer.writer.get_ref().file())
@@ -769,6 +821,7 @@ pub(super) fn finish_streamed_v4_artifact(
             generation,
             bytes: writer.bytes,
             sha256,
+            xxh64: writer.checksum.clone().finish(),
         };
         committed_metrics.artifact_bytes = committed_metrics
             .artifact_bytes
@@ -799,7 +852,6 @@ pub(super) fn finish_streamed_v4_artifact(
             .install_child(std::ffi::OsStr::new(&artifact.name))
         {
             Ok(()) => {
-                writer.publication.sync_parent().map_err(storage_err)?;
                 v4_publication_failure("directory_sync")?;
                 v4_publication_failure("post_publication_metric_overflow")?;
                 Ok(true)
@@ -889,7 +941,7 @@ impl V4OrdinalRangeWriter {
         self.blocks.push(crate::V4OrdinalBlock {
             offset,
             count: u64::try_from(self.block.len() / 16).map_err(storage_err)?,
-            sha256: hex_sha256(&self.block),
+            xxh64: crate::corruption_checksum::checksum(&self.block),
         });
         self.block.clear();
         Ok(())
@@ -973,6 +1025,7 @@ pub(crate) fn publish_v4_construction_artifacts(
         mut manifest,
         mut metrics,
         mut publications,
+        ..
     } = bundle;
     let mut local_names = v4_manifest_artifact_names(&manifest);
     let published = (|| {
@@ -1065,6 +1118,17 @@ fn merge_construction_v4_delta(
         .collect::<HashMap<_, _>>();
     let mut combined = prior.clone();
     combined.topology_generation = delta.topology_generation;
+    // The parent's last UUID is not pinned here, so the boundary between the
+    // parent and this delta cannot be proven without authenticating the whole
+    // parent run. An inversion in either side survives the merge; otherwise the
+    // order is unknown and omitted, which readers prove by reading.
+    combined.uuid_order_matches_ordinals = if prior.uuid_order_matches_ordinals == Some(false)
+        || delta.uuid_order_matches_ordinals == Some(false)
+    {
+        Some(false)
+    } else {
+        None
+    };
     combined
         .forward_identities
         .extend(delta.forward_identities.clone());
@@ -1099,8 +1163,12 @@ fn merge_construction_v4_delta(
         .filter(|artifact| first_consumed.is_some_and(|first| artifact.generation >= first))
     {
         construction_ordinal_event("pin", descriptor.generation);
-        let (object, io, cache) =
-            lease.open_for_construction(&descriptor.sha256, descriptor.bytes, cancelled)?;
+        let (object, io, cache) = lease.open_for_construction(
+            &descriptor.sha256,
+            descriptor.bytes,
+            descriptor.xxh64,
+            cancelled,
+        )?;
         read_bytes = read_bytes
             .checked_add(io.read_bytes)
             .ok_or_else(|| storage_err("ordinal authentication bytes overflow"))?;
@@ -1227,11 +1295,12 @@ fn publish_v4_construction_artifacts_inner(
             name: artifact.name.clone(),
             bytes: artifact.bytes,
             sha256: artifact.sha256.clone(),
+            xxh64: artifact.xxh64,
         })
         .collect::<Vec<_>>();
     crate::graph_construction::construction_failpoint("v4_publish.after_artifacts");
     v4_authority_failure("after_artifacts")?;
-    index.sync().map_err(storage_err)?;
+    crate::durable_commit::acknowledge_directory(&index).map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
     crate::graph_construction::construction_failpoint("v4_publish.after_artifacts_fsync");
     let artifact_bytes = outputs.iter().try_fold(0_u64, |total, output| {
@@ -1267,10 +1336,10 @@ fn publish_v4_construction_artifacts_inner(
     outputs.push(lock_output);
     publications.push(("ordinal-v4.lock".to_owned(), lock_publication));
     crate::graph_construction::construction_failpoint("v4_publish.after_lock_install");
-    index.sync().map_err(storage_err)?;
-    topology.sync().map_err(storage_err)?;
-    graph.sync().map_err(storage_err)?;
-    encoded.sync().map_err(storage_err)?;
+    crate::durable_commit::acknowledge_directory(&index).map_err(storage_err)?;
+    crate::durable_commit::acknowledge_directory(&topology).map_err(storage_err)?;
+    crate::durable_commit::acknowledge_directory(&graph).map_err(storage_err)?;
+    crate::durable_commit::acknowledge_directory(encoded).map_err(storage_err)?;
     v4_authority_failure("directory_sync")?;
     work.fsync_operations = work.fsync_operations.saturating_add(4);
     let publication_metrics = V4OrdinalPublicationMetrics {
@@ -1452,7 +1521,7 @@ fn finish_v4_tombstone_block(
         count: u64::try_from(bytes.len() / 8).map_err(storage_err)?,
         first,
         last,
-        sha256: hex_sha256(bytes),
+        xxh64: crate::corruption_checksum::checksum(bytes),
     });
     writer.push(bytes)?;
     *offset = offset

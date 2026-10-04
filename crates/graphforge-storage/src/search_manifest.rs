@@ -8,7 +8,8 @@ use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
 use graphforge_core::GfError;
-use sha2::{Digest as _, Sha256};
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
+use sha2::Digest as _;
 
 use crate::catalog::AdmittedSourceFile;
 
@@ -52,6 +53,17 @@ pub enum SearchArtifactError {
         /// Corrupt derived artifact.
         path: PathBuf,
         /// Backend validation failure.
+        reason: String,
+    },
+    /// A committed search payload failed its manifest length or checksum on first
+    /// touch. Unlike a derived index that is merely stale or absent, this is
+    /// corruption of bytes the project vouched for: it is refused, never treated
+    /// as a reason to rebuild over it.
+    #[error("search payload refused at {}: {reason}", path.display())]
+    PayloadRefused {
+        /// Search artifact root holding the refused payload.
+        path: PathBuf,
+        /// Length or checksum refusal.
         reason: String,
     },
     /// A manifest uses a version this binary cannot consume.
@@ -129,7 +141,8 @@ impl From<SearchArtifactError> for GfError {
     fn from(error: SearchArtifactError) -> Self {
         let message = error.to_string();
         match error {
-            SearchArtifactError::InvalidSelector { .. } => Self::Validation(message),
+            SearchArtifactError::InvalidSelector { .. }
+            | SearchArtifactError::PayloadRefused { .. } => Self::Validation(message),
             SearchArtifactError::Cancelled
             | SearchArtifactError::ResourceExhausted { .. }
             | SearchArtifactError::Build(_) => Self::Execution(message),
@@ -343,17 +356,17 @@ impl SearchSourceSnapshot {
             }
         }
         let mut digest = Sha256::new();
-        digest.update(b"graphforge-admitted-source-v1\0");
+        digest.update(b"graphforge-admitted-checksum-source-v1\0");
         for file in ordered {
             let name = normalize_source_name(&file.name)?;
             digest.update((name.len() as u64).to_le_bytes());
             digest.update(name.as_bytes());
             digest.update(file.byte_length.to_le_bytes());
-            digest.update(file.sha256);
+            digest.update(file.content_xxh64.to_le_bytes());
         }
         Ok(Self {
             generation,
-            fingerprint: format!("gf-sha256-files-v1:{}", hex(&digest.finalize())),
+            fingerprint: format!("gf-sha256-checksums-v1:{}", hex(&digest.finalize())),
         })
     }
 
@@ -888,6 +901,7 @@ fn canonical_fingerprint(value: &str) -> bool {
     value
         .strip_prefix("gf-fnv1a256:")
         .or_else(|| value.strip_prefix("gf-sha256-files-v1:"))
+        .or_else(|| value.strip_prefix("gf-sha256-checksums-v1:"))
         .is_some_and(|digest| {
             digest.len() == 64
                 && digest

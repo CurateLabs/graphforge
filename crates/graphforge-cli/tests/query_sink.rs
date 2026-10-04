@@ -205,6 +205,7 @@ fn repeated_pairs_emit_one_receipt_per_statement_in_order() {
         project.path(),
         &[
             "--json",
+            "--diagnostics",
             "query",
             "--cypher",
             "RETURN 1 AS n",
@@ -389,4 +390,67 @@ fn storage_attribution_recovery_flag_emits_the_recovery_receipt_first() {
         json_lines(&gf(project.path(), &["--json", "storage-attribution"])).len(),
         1
     );
+}
+
+#[test]
+fn json_queries_request_measurements_only_with_diagnostics() {
+    let project = initialized_project();
+    let forge = graphforge_api::GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    forge.execute("CREATE (:Person {n: 1})").unwrap();
+    drop(forge);
+    let sink = project.path().join("default.parquet");
+    let receipt = stdout_json(&gf(
+        project.path(),
+        &[
+            "--json",
+            "query",
+            "--cypher",
+            "MATCH (p:Person) RETURN p.n AS n",
+            "--output",
+            sink.to_str().unwrap(),
+        ],
+    ));
+    assert!(receipt["application_io"].is_null());
+    assert_eq!(receipt["rows"], 1);
+    let sink = project.path().join("measured.parquet");
+    let measured = stdout_json(&gf(
+        project.path(),
+        &[
+            "--json",
+            "--diagnostics",
+            "query",
+            "--cypher",
+            "MATCH (p:Person) RETURN p.n AS n",
+            "--output",
+            sink.to_str().unwrap(),
+        ],
+    ));
+    assert!(measured["application_io"].is_object());
+    assert!(
+        measured["application_io"]["totals"]["read_bytes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(measured["rows"], 1);
+}
+
+#[test]
+fn diagnostics_without_json_is_rejected_before_project_open() {
+    let root = TempDir::new().unwrap();
+    let absent = root.path().join("never-opened");
+    let output = gf(
+        &absent,
+        &[
+            "--diagnostics",
+            "query",
+            "--cypher",
+            "RETURN 1 AS n",
+            "--output",
+            "unused.parquet",
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("diagnostics require --json"));
+    assert!(!absent.exists());
 }

@@ -60,6 +60,12 @@ use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
 use graphforge_storage::ResolvedProjectGeneration;
 /// Non-durable lifecycle region diagnostics for stock callers.
 pub use graphforge_storage::concurrency_attribution;
+/// Prove a proposed durable project location is admissible without creating it.
+pub use graphforge_storage::filesystem_admission::filesystem_durability_preflight;
+/// Explicit, thread-bound lifecycle I/O observation boundary.
+pub use graphforge_storage::lifecycle_io::CaptureScope as LifecycleIoCapture;
+/// Whether lifecycle I/O was explicitly requested on this thread.
+pub use graphforge_storage::lifecycle_io::is_active as lifecycle_io_is_active;
 pub use graphforge_storage::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkReceipt,
     GraphConstructionBudgets, GraphConstructionEvidence, GraphConstructionState,
@@ -126,6 +132,8 @@ mod graph_snapshot;
 #[cfg(test)]
 use graph_publication::participant_encoding;
 use graph_publication::{persist_runtime_catalog, system_time_micros};
+#[cfg(test)]
+mod expanded_generation_test_support;
 mod gsi_profiler;
 #[cfg(feature = "knowledge")]
 mod hypotheses;
@@ -145,6 +153,10 @@ mod mutation_transaction;
 mod mutation_transaction_fault_tests;
 #[cfg(test)]
 mod permanent_parquet_test_support;
+#[cfg(test)]
+mod pinned_workspace_tests;
+#[cfg(test)]
+mod workspace_flip_policy_tests;
 #[cfg(feature = "research")]
 pub use multi_ontology::{
     ActivationProfileChangeRequest, BridgeAdoptionRequest, BridgeCandidate, BridgeDeleteRequest,
@@ -167,12 +179,35 @@ pub use ontology_composition_lifecycle::{
     CompositionPortableReceipt,
 };
 #[cfg(all(feature = "discovery", feature = "portable"))]
+mod discovery_ontology_module;
+#[cfg(all(feature = "discovery", feature = "portable"))]
 mod discovery_portable_v2;
+#[cfg(all(feature = "discovery", feature = "portable"))]
+mod discovery_project_summary;
+#[cfg(all(feature = "discovery", feature = "research"))]
+mod discovery_research_lineage;
+#[cfg(all(feature = "discovery", feature = "portable"))]
+mod discovery_research_version;
 mod paging;
+#[cfg(all(feature = "discovery", feature = "portable"))]
+pub use discovery_ontology_module::{
+    DiscoveryOntologyModuleRequest, ResolvedOntologyModule, resolve_discovered_ontology_module,
+};
 #[cfg(all(feature = "discovery", feature = "portable"))]
 pub use discovery_portable_v2::{
     DiscoveredPortableV2, DiscoveryPortableV2Error, DiscoveryPortableV2Mismatch,
     DiscoveryPortableV2Request, verify_discovered_portable_v2,
+};
+#[cfg(all(feature = "discovery", feature = "portable"))]
+pub use discovery_project_summary::{ProjectSummaryRequest, summarize_verified_portable_v2};
+#[cfg(all(feature = "discovery", feature = "research"))]
+pub use discovery_research_lineage::{
+    BuildResearchLineageRequest, build_research_lineage_from_registry,
+};
+#[cfg(all(feature = "discovery", feature = "portable"))]
+pub use discovery_research_version::{
+    DiscoveredResearchVersion, DiscoveryResearchVersionError, DiscoveryResearchVersionRequest,
+    verify_discovered_research_version,
 };
 #[cfg(feature = "research")]
 pub use research_project::{DiscoverResearchProjectsRequest, UpdateResearchMetadataRequest};
@@ -222,6 +257,11 @@ pub use research_proposals::*;
 pub use research_upstream::*;
 #[cfg(feature = "research")]
 mod research_project;
+mod saved_queries;
+pub use saved_queries::{
+    MAX_SAVED_QUERY_RESULT_BYTES, MAX_SAVED_QUERY_RESULT_ROWS, SavedQuery, SavedQueryParameterType,
+    SavedQuerySource,
+};
 #[cfg(feature = "research")]
 mod research_versions;
 #[cfg(feature = "research")]
@@ -235,7 +275,8 @@ mod slices;
 #[cfg(feature = "research")]
 pub use graphforge_storage::research_versions::{
     ResearchMutation, ResearchOperation, ResearchOperationReceipt, ResearchRegistry,
-    ResearchRetentionRoot, ResearchRootKind, ResearchVersionRecord,
+    ResearchRetentionRoot, ResearchRootKind, ResearchSignature, ResearchVersionProvenance,
+    ResearchVersionRecord,
 };
 #[cfg(feature = "research")]
 pub use research_versions::{PrepareResearchVersionRequest, ResearchVersionView};
@@ -277,7 +318,7 @@ mod workspace_hydration;
 use workspace_hydration::read_runtime_catalog;
 pub(crate) use workspace_hydration::rematerialize_graph_workspace;
 use workspace_hydration::{
-    GenerationPropertyAuthority, GraphWorkspace, PreparedGenerationReadAuthority,
+    GenerationPropertyAuthority, GraphWorkspace, PreparedGenerationReadAuthority, WorkspaceAccess,
     adjacency_provider_for_graph, decode_runtime_catalog, hydrate_graph_workspace,
     load_composition_binding, load_runtime_catalog, load_workspace_ontology,
     ordinal_identity_handle, ordinal_identity_resolver,
@@ -289,13 +330,13 @@ mod write_modes;
 
 pub use graphforge_core::portable::{
     PortableV2Authenticity, PortableV2Compatibility, PortableV2Error, PortableV2ErrorCode,
-    PortableV2ExportProgress, PortableV2GraphSelector, PortableV2GraphSubsetMeta,
-    PortableV2Integrity, PortableV2Limits, PortableV2Mode, PortableV2Output,
-    PortableV2PackageClass, PortableV2ParticipantId, PortableV2PropertyProjection,
-    PortableV2Representation, PortableV2SelectionEntry, PortableV2SelectionPlan,
-    PortableV2SelectionProfile, PortableV2SelectionReason, PortableV2SelectionRequest,
-    PortableV2SubsetClosure, PortableV2SubsetPreview as PortableV2SubsetPlan,
-    PortableV2SubsetRequest,
+    PortableV2ExactIdentity, PortableV2ExportProgress, PortableV2GraphSelector,
+    PortableV2GraphSubsetMeta, PortableV2Integrity, PortableV2Limits, PortableV2Mode,
+    PortableV2Output, PortableV2PackageClass, PortableV2ParticipantId,
+    PortableV2PropertyProjection, PortableV2Representation, PortableV2SelectionEntry,
+    PortableV2SelectionPlan, PortableV2SelectionProfile, PortableV2SelectionReason,
+    PortableV2SelectionRequest, PortableV2SubsetClosure,
+    PortableV2SubsetPreview as PortableV2SubsetPlan, PortableV2SubsetRequest,
 };
 pub use graphforge_core::storage_receipt::{
     ArtifactCategory, ArtifactStorageTotals, StorageAttributionReceipt,
@@ -303,7 +344,8 @@ pub use graphforge_core::storage_receipt::{
 /// Finite portable export budgets.
 pub type PortableV2ExportLimits = PortableV2Limits;
 pub use graphforge_storage::{
-    SemanticMigrationOperation, WorkspaceOntologyComposition, WorkspacePortableOntologyStaging,
+    PortableV2FileRef, PortableV2PackageIndex, SemanticMigrationOperation,
+    WorkspaceOntologyComposition, WorkspacePortableOntologyStaging,
 };
 #[cfg(feature = "portable")]
 #[cfg(feature = "portable")]
@@ -347,7 +389,10 @@ pub use graphforge_core::embedding_options::{
     GraphSageOptions, HashGnnOptions, Node2VecOptions,
 };
 pub use graphforge_core::manifest::{MANIFEST_FILE, ONTOLOGY_FILE, ProjectManifest};
-pub use graphforge_core::uuid::hub_clone_operation;
+pub use graphforge_core::uuid::{
+    hub_clone_operation, hub_publish_operation, hub_research_clone_operation,
+    portable_v2_import_generation,
+};
 pub use graphforge_core::{
     AlgorithmError, AnalyzeOptions, ApiErrorCode, ClusterOptions, EdgeHandle, ExplainStage,
     FindOptions, GfError, LoweringError, NodeHandle, NodeSelector, OntologyFormat, OntologyMode,
@@ -634,7 +679,7 @@ pub struct GraphForge {
     /// Structural evidence for how the graph workspace was opened.
     graph_open_evidence: graphforge_storage::GraphFilesOpenEvidence,
     /// Per-phase application I/O this facade's own open performed (#1389).
-    open_io_attribution: graphforge_storage::LifecyclePhaseAttribution,
+    open_io_attribution: Option<graphforge_storage::LifecyclePhaseAttribution>,
     /// Safe recovery-on-open summary (cleanup, deferral, or checkpoint skip).
     project_open_recovery: graphforge_storage::ProjectOpenRecoveryEvidence,
     /// Keeps an in-memory instance's temp directory alive for the engine's life.
@@ -887,13 +932,15 @@ impl GraphForge {
             provider_refresh_runtimes: Arc::new(Mutex::new(Vec::new())),
             #[cfg(feature = "search")]
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
-            workspace_guard: Arc::new(RwLock::new(GraphWorkspace {
+            workspace_guard: Arc::new(RwLock::new(GraphWorkspace::new(
                 dir,
-                _owner: workspace,
-            })),
+                workspace,
+                &property_inventory,
+            )?)),
             graph_open_evidence,
-            open_io_attribution: graphforge_storage::lifecycle_io_snapshot()
-                .since(&open_io_before)?,
+            open_io_attribution: graphforge_storage::lifecycle_io::snapshot_since(
+                open_io_before.as_ref(),
+            )?,
             project_open_recovery,
             tempdir: Some(Arc::new(tmp)),
             research_materialization: None,
@@ -920,16 +967,16 @@ impl GraphForge {
         &self.graph_open_evidence
     }
 
-    /// Per-phase application I/O performed by this facade's own open.
+    /// Requested per-phase I/O for this facade's own open, or unavailable.
     ///
-    /// The document is the same shape the construction path already emits, so
-    /// the analysis written against construction attribution reads it without
-    /// new tooling. Process-global counters back it, so a facade opened
-    /// concurrently with unrelated storage work over-reports; the benchmark
-    /// ladder opens one project per process.
+    /// Install [`LifecycleIoCapture`] before open to collect this observation.
+    /// Captures route to one operation and its explicitly attached workers.
+    /// Starting a capture after open does not recover retrospective measurements.
     #[must_use]
-    pub const fn open_io_attribution(&self) -> &graphforge_storage::LifecyclePhaseAttribution {
-        &self.open_io_attribution
+    pub const fn open_io_attribution(
+        &self,
+    ) -> Option<&graphforge_storage::LifecyclePhaseAttribution> {
+        self.open_io_attribution.as_ref()
     }
 
     /// Safe recovery-on-open summary for this facade instance.
@@ -968,7 +1015,7 @@ impl GraphForge {
         // Report resolution and recovery-on-open alongside hydration: they are
         // all work an open pays before the first query can run.
         graph.open_io_attribution =
-            graphforge_storage::lifecycle_io_snapshot().since(&open_io_before)?;
+            graphforge_storage::lifecycle_io::snapshot_since(open_io_before.as_ref())?;
         Ok(graph)
     }
 
@@ -1001,7 +1048,9 @@ impl GraphForge {
         Ok(graph)
     }
 
-    #[allow(clippy::too_many_lines)] // open authenticates every coupled generation participant
+    /// Open read-only over the published tree itself, or writable over a
+    /// private copy. A facade that must write opens writable: it never flips a
+    /// pinned alias, whose tree is the generation's own published bytes.
     fn open_resolved_with_options(
         container_dir: PathBuf,
         resolved_generation: ResolvedProjectGeneration,
@@ -1010,12 +1059,37 @@ impl GraphForge {
         resource_policy: resource_policy::NormalizedResourcePolicy,
         project_open_recovery: graphforge_storage::ProjectOpenRecoveryEvidence,
     ) -> Result<Self, GfError> {
+        let access = if read_only {
+            WorkspaceAccess::PinnedReadOnly
+        } else {
+            WorkspaceAccess::Writable
+        };
+        Self::open_resolved_with_access(
+            container_dir,
+            resolved_generation,
+            access,
+            write_options,
+            resource_policy,
+            project_open_recovery,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)] // open authenticates every coupled generation participant
+    fn open_resolved_with_access(
+        container_dir: PathBuf,
+        resolved_generation: ResolvedProjectGeneration,
+        access: WorkspaceAccess,
+        write_options: GraphForgeOptions,
+        resource_policy: resource_policy::NormalizedResourcePolicy,
+        project_open_recovery: graphforge_storage::ProjectOpenRecoveryEvidence,
+    ) -> Result<Self, GfError> {
+        let read_only = access.read_only();
         let generation_uuid = resolved_generation.generation_uuid();
         let open_io_before = graphforge_storage::lifecycle_io_snapshot();
         let (ontology_mode, ontology, ontology_document) =
             load_workspace_ontology(&resolved_generation)?;
         let (dir, workspace, graph_open_evidence) =
-            hydrate_graph_workspace(&resolved_generation, read_only)?;
+            hydrate_graph_workspace(&resolved_generation, access.pins_published_tree())?;
         let (property_inventory, hydrated_inventory) =
             property_and_graph_inventory_for_hydrated_generation(&resolved_generation, &dir)?;
         let ordinal_identities = ordinal_identity_resolver(&resolved_generation, &dir)?;
@@ -1043,7 +1117,8 @@ impl GraphForge {
                 )
             })?;
             bindings.validate_against(context.composition())?;
-            bindings.validate_physical_routes_with_inventory(&dir, Some(&hydrated_inventory))?;
+            bindings
+                .validate_physical_routes_with_read_inventory(&dir, Some(&hydrated_inventory))?;
         }
         let default_composition_context =
             match (default_composition_context, &semantic_storage_bindings) {
@@ -1063,17 +1138,21 @@ impl GraphForge {
                 }
                 (context, None) => context,
             };
+        let topology_authority =
+            graphforge_storage::TopologyFileAuthority::from_inventory(&dir, &property_inventory)?;
         if read_only {
-            graphforge_storage::validate_runtime_entity_label_ids(
+            graphforge_storage::validate_runtime_entity_label_ids_with_topology(
                 &dir,
                 ontology.as_ref(),
                 &runtime_catalog,
+                Arc::clone(&topology_authority),
             )?;
         } else {
-            graphforge_storage::reconcile_runtime_entity_label_ids(
+            graphforge_storage::reconcile_runtime_entity_label_ids_with_topology(
                 &dir,
                 ontology.as_ref(),
                 &runtime_catalog,
+                Arc::clone(&topology_authority),
             )?;
         }
         let heavy_query_admission = Arc::new(resource_policy::HeavyQueryAdmission::new(
@@ -1131,11 +1210,13 @@ impl GraphForge {
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
             workspace_guard: Arc::new(RwLock::new(GraphWorkspace {
                 dir,
-                _owner: workspace,
+                owner: workspace,
+                topology: topology_authority,
             })),
             graph_open_evidence,
-            open_io_attribution: graphforge_storage::lifecycle_io_snapshot()
-                .since(&open_io_before)?,
+            open_io_attribution: graphforge_storage::lifecycle_io::snapshot_since(
+                open_io_before.as_ref(),
+            )?,
             project_open_recovery,
             tempdir: None,
             research_materialization: None,

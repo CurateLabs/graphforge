@@ -194,6 +194,238 @@ fn corrupt_compact_root_never_advances_current() {
     );
 }
 
+fn mutate_compact_payload_preserving_identity_and_length(
+    root: &Path,
+    entry: &crate::GraphFileEntry,
+    original: &[u8],
+) -> Vec<u8> {
+    let payload_path = crate::graph_object_path(root, &entry.content_sha256).unwrap();
+    let before = graphforge_filesystem::file_identity(&File::open(&payload_path).unwrap()).unwrap();
+    let permissions = fs::metadata(&payload_path).unwrap().permissions();
+    let mut mutated = original.to_vec();
+    mutated[0] ^= 1;
+    assert_eq!(mutated.len(), original.len());
+    assert_ne!(
+        hex_digest(Sha256::digest(&mutated).into()),
+        entry.content_sha256,
+        "the changed bytes must conflict with their genuine original SHA address"
+    );
+    crate::graph_object_store::corrupt_sealed_graph_object_for_test(&payload_path, &mutated);
+    fs::set_permissions(&payload_path, permissions).unwrap();
+    assert_eq!(
+        graphforge_filesystem::file_identity(&File::open(&payload_path).unwrap()).unwrap(),
+        before
+    );
+    assert_eq!(
+        fs::metadata(&payload_path).unwrap().len(),
+        entry.byte_length
+    );
+    assert!(
+        fs::metadata(&payload_path)
+            .unwrap()
+            .permissions()
+            .readonly()
+    );
+
+    mutated
+}
+
+const COMPACT_AUTHORITY_PAYLOAD: &[u8] = b"immutable topology payload";
+
+fn compact_authority_fixture(root: &Path) -> (crate::GraphFilesRootV2, crate::GraphFileEntry) {
+    let workspace = tempfile::tempdir().unwrap();
+    let relative = PathBuf::from("topology/edges/knows.parquet");
+    fs::create_dir_all(workspace.path().join(relative.parent().unwrap())).unwrap();
+    fs::write(workspace.path().join(&relative), COMPACT_AUTHORITY_PAYLOAD).unwrap();
+    let mut state = crate::GraphManifestState::empty();
+    let lease = crate::begin_graph_object_publication(root).unwrap();
+    let (files_root, _) =
+        crate::append_graph_files_v2(&lease, workspace.path(), &mut state, &[relative], &[])
+            .unwrap();
+    let original_entry = state.entries().next().expect("one compact payload").clone();
+    assert_eq!(
+        original_entry.content_sha256,
+        hex_digest(Sha256::digest(COMPACT_AUTHORITY_PAYLOAD).into())
+    );
+    (files_root, original_entry)
+}
+
+fn publish_compact_authority_fixture(
+    root: &Path,
+    files_root: &crate::GraphFilesRootV2,
+) -> ProjectPublicationReceipt {
+    let request = request(vec![
+        crate::graph_files_root_participant(files_root).unwrap(),
+    ]);
+    let lease = crate::begin_graph_object_publication(root).unwrap();
+    let ProjectStageOutcome::Staged(staged) = stage_project_generation(root, &request).unwrap()
+    else {
+        panic!("new compact fixture request unexpectedly replayed");
+    };
+    staged
+        .validate(|_| Ok(()), |_, _| Ok(()))
+        .unwrap()
+        .publish_with_graph_objects(&lease)
+        .unwrap()
+}
+
+fn compact_root_with_changed_payload_checksum(
+    root: &Path,
+    mut files_root: crate::GraphFilesRootV2,
+    original_entry: &crate::GraphFileEntry,
+) -> crate::GraphFilesRootV2 {
+    let original_node = crate::graph_object_store::read_graph_control_object_by_digest(
+        root,
+        &files_root.root_node_sha256,
+        crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
+    )
+    .unwrap();
+    let mut node = crate::decode_graph_manifest_node(&original_node).unwrap();
+    let mutated = mutate_compact_payload_preserving_identity_and_length(
+        root,
+        original_entry,
+        COMPACT_AUTHORITY_PAYLOAD,
+    );
+    let crate::GraphManifestNodeKind::Bucket { entries } = &mut node.kind else {
+        panic!("one compact payload must have a bucket root");
+    };
+    assert_eq!(entries.as_slice(), std::slice::from_ref(original_entry));
+    entries[0].content_xxh64 = crate::corruption_checksum::checksum(&mutated);
+    assert_ne!(entries[0].content_xxh64, original_entry.content_xxh64);
+    assert_eq!(entries[0].content_sha256, original_entry.content_sha256);
+    let node_bytes = crate::encode_graph_manifest_node(&node).unwrap();
+    let (fresh_node_sha256, _) = crate::install_graph_object_bytes(root, &node_bytes).unwrap();
+    assert_eq!(
+        fresh_node_sha256,
+        hex_digest(Sha256::digest(&node_bytes).into())
+    );
+    assert_ne!(fresh_node_sha256, files_root.root_node_sha256);
+    assert_eq!(
+        crate::graph_object_store::read_graph_control_object_by_digest(
+            root,
+            &fresh_node_sha256,
+            crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
+        )
+        .unwrap(),
+        node_bytes,
+        "the new control node is valid and authenticated under its own genuine SHA"
+    );
+    files_root.root_node_sha256 = fresh_node_sha256;
+    files_root
+}
+
+fn assert_caller_checksum_cannot_reauthenticate_conflicting_address(publish_parent: bool) {
+    let root = project();
+    let (files_root, original_entry) = compact_authority_fixture(root.path());
+    if publish_parent {
+        publish_compact_authority_fixture(root.path(), &files_root);
+    }
+    let parent = resolve_project_generation(root.path()).unwrap();
+    if publish_parent {
+        assert_eq!(
+            parent.graph_files_inventory().unwrap().unwrap().files,
+            vec![original_entry.clone()]
+        );
+    }
+    let parent_uuid = parent.generation_uuid();
+    let prior_current = fs::read(root.path().join(CURRENT_FILE)).unwrap();
+    let supplied_root =
+        compact_root_with_changed_payload_checksum(root.path(), files_root, &original_entry);
+    let request = request(vec![
+        crate::graph_files_root_participant(&supplied_root).unwrap(),
+    ]);
+    let lease = crate::begin_graph_object_publication(root.path()).unwrap();
+    let result = match stage_project_generation(root.path(), &request) {
+        Ok(ProjectStageOutcome::Staged(staged)) => staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .and_then(|validated| validated.publish_with_graph_objects(&lease)),
+        Ok(_) => panic!("new request unexpectedly replayed"),
+        Err(error) => Err(error),
+    };
+    let error =
+        result.expect_err("caller-supplied checksum must not authorize a SHA address conflict");
+    assert!(
+        error
+            .to_string()
+            .contains("graph object digest does not match its address"),
+        "refusal must belong to payload-address authentication: {error}"
+    );
+    assert_eq!(
+        fs::read(root.path().join(CURRENT_FILE)).unwrap(),
+        prior_current
+    );
+    assert_eq!(
+        resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid(),
+        parent_uuid
+    );
+}
+
+#[test]
+fn caller_supplied_compact_checksum_cannot_reauthenticate_a_conflicting_sha_address() {
+    assert_caller_checksum_cannot_reauthenticate_conflicting_address(false);
+}
+
+#[test]
+fn published_parent_checksum_cannot_be_replaced_to_reauthenticate_a_conflicting_sha_address() {
+    assert_caller_checksum_cannot_reauthenticate_conflicting_address(true);
+}
+
+#[test]
+fn healthy_compact_parent_republication_reuses_authenticated_payload_identity() {
+    use graphforge_core::hash_observation::operation::Capture as HashCapture;
+
+    let root = project();
+    let (files_root, original_entry) = compact_authority_fixture(root.path());
+    let parent = publish_compact_authority_fixture(root.path(), &files_root);
+    let input = request(vec![
+        crate::graph_files_root_participant(&files_root).unwrap(),
+    ]);
+    let generation_uuid = input.generation_uuid;
+    let prepared = PreparedGenerationRequest::new(
+        input.transaction_uuid,
+        input.capabilities,
+        input.participants,
+        |_, _| generation_uuid,
+    )
+    .unwrap();
+    // Preparing a new participant hashes its bytes once. Publication should
+    // reuse that identity and the authenticated parent's payload identity.
+    let capture = HashCapture::start();
+    let lease = crate::begin_graph_object_publication(root.path()).unwrap();
+    let ProjectStageOutcome::Staged(staged) =
+        stage_project_generation(root.path(), &prepared).unwrap()
+    else {
+        panic!("healthy republication unexpectedly replayed");
+    };
+    let receipt = staged
+        .validate(|_| Ok(()), |_, _| Ok(()))
+        .unwrap()
+        .publish_with_graph_objects(&lease)
+        .unwrap();
+    let observed = capture.snapshot();
+    drop(capture);
+    drop(lease);
+    assert_eq!(observed.artifact_payload_sha256_bytes, 0);
+    assert_eq!(observed.unclassified_sha256_bytes, 0);
+    assert!(observed.checksum_bytes >= 2 * original_entry.byte_length);
+    assert!(observed.control_authentication_sha256_bytes > 0);
+    assert_ne!(receipt.generation_uuid, parent.generation_uuid);
+    assert_eq!(receipt.generation_uuid, generation_uuid);
+    let reopened = resolve_project_generation(root.path()).unwrap();
+    assert_eq!(reopened.generation_uuid(), receipt.generation_uuid);
+    assert_eq!(
+        reopened.graph_files_inventory().unwrap().unwrap().files,
+        vec![original_entry.clone()]
+    );
+    assert_eq!(
+        fs::read(crate::graph_object_path(root.path(), &original_entry.content_sha256).unwrap())
+            .unwrap(),
+        COMPACT_AUTHORITY_PAYLOAD
+    );
+}
+
 #[test]
 fn compact_payload_is_reverified_only_at_the_lease_backed_commit_boundary() {
     let root = project();

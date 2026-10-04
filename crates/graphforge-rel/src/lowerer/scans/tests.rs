@@ -84,3 +84,102 @@ fn edge_scan_wildcard_produces_table_scan() {
         "expected TableScan, got {lp:?}"
     );
 }
+
+/// A snapshot captured for a value-free plan names `_untyped` by key alone.
+fn omitted_property_snapshot() -> LoweringSnapshot {
+    let name = PropertyId::runtime(graphforge_value::RuntimePropId::new(1).unwrap());
+    LoweringSnapshot {
+        property_names: HashMap::from([(name, "name".to_owned())]),
+        node_schema: Some(TOPOLOGY_NODES_SCHEMA.clone()),
+        node_properties: std::collections::BTreeMap::from([(
+            "_untyped".to_owned(),
+            graphforge_ir::arrow_schema::PROPERTY_BASE_SCHEMA.clone(),
+        )]),
+        property_schemas_omitted: true,
+        ..LoweringSnapshot::default()
+    }
+}
+
+fn scanned_tables(plan: &DfLogicalPlan, tables: &mut Vec<graphforge_plan::GraphReadTable>) {
+    if let DfLogicalPlan::TableScan(scan) = plan
+        && let Some(source) = scan
+            .source
+            .downcast_ref::<graphforge_plan::GraphReadSource>()
+    {
+        tables.push(source.table.clone());
+    }
+    for input in plan.inputs() {
+        scanned_tables(input, tables);
+    }
+}
+
+#[test]
+fn omitted_property_schemas_join_routes_by_key_and_refuse_value_reads() {
+    let snapshot = omitted_property_snapshot();
+    let lowerer =
+        GraphPlanLowerer::new_for_reads(&snapshot, None, OntologyMode::Exploratory).unwrap();
+    let plan_returning = |value: fn(&mut ExprArena) -> ExprId| {
+        let mut exprs = ExprArena::new();
+        let expr = value(&mut exprs);
+        let mut plan = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::NodeScan {
+                var: VarId(0),
+                ty: None,
+            })
+            .build();
+        plan.ops.push(GraphOp::Project {
+            items: vec![graphforge_ir::ProjectItem {
+                expr,
+                alias: Some("v".into()),
+                out_var: None,
+            }],
+            distinct: false,
+        });
+        plan.exprs = exprs;
+        plan
+    };
+
+    // A value-free plan keeps its route join, by key and without admission.
+    let lowered = lowerer
+        .lower_plan(&plan_returning(|exprs| {
+            exprs.push(IrExpr::Literal(graphforge_ir::IrLiteral::Int(1)))
+        }))
+        .unwrap();
+    let mut tables = Vec::new();
+    scanned_tables(&lowered, &mut tables);
+    assert_eq!(
+        tables,
+        vec![
+            graphforge_plan::GraphReadTable::Nodes,
+            graphforge_plan::GraphReadTable::PropertyKeys("_untyped".into()),
+        ]
+    );
+
+    // Reading a value, a whole node or its keys cannot compile against a
+    // snapshot that never captured the values' schema.
+    for value in [
+        (|exprs: &mut ExprArena| {
+            let base = exprs.push(IrExpr::VarRef(VarId(0)));
+            exprs.push(IrExpr::PropertyAccess {
+                base,
+                prop: PropertyId::runtime(graphforge_value::RuntimePropId::new(1).unwrap()),
+            })
+        }) as fn(&mut ExprArena) -> ExprId,
+        |exprs| exprs.push(IrExpr::VarRef(VarId(0))),
+        |exprs| {
+            let base = exprs.push(IrExpr::VarRef(VarId(0)));
+            exprs.push(IrExpr::FunctionCall {
+                name: "keys".into(),
+                args: vec![base],
+            })
+        },
+    ] {
+        let plan = plan_returning(value);
+        let error = lowerer.lower_plan(&plan).unwrap_err();
+        assert!(
+            matches!(&error, GfError::Plan(message)
+                if message == "lowering snapshot omits the property schemas this plan reads"),
+            "{error:?}"
+        );
+    }
+}

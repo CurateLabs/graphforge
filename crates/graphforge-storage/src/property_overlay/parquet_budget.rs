@@ -1,48 +1,106 @@
 //! Parquet budget for authenticated property overlays.
 
 use super::{
-    Arc, AtomicU64, AuthenticatedPropertyFragment, BTreeSet, BufReader, Bytes, ChunkReader, File,
-    GfError, Length, OpenPropertyFragment, Ordering, PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY,
+    Arc, AtomicU64, BTreeSet, BufReader, Bytes, ChunkReader, File, GfError, Length,
+    OpenPropertyFragment, Ordering, PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY,
     PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT, PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY,
-    PROPERTY_TOMBSTONE_FIELD, ParquetRecordBatchReaderBuilder, PropertyFragmentId,
-    PropertyFragmentLayout, PropertyOverlayLimits, PropertyOverlayMetrics, PropertyRouteKind, Read,
-    RecordBatch, TSerializable, corrupt, io_error, parquet_error,
+    PROPERTY_TOMBSTONE_FIELD, ParquetRecordBatchReaderBuilder, PropertyFile, PropertyFragmentId,
+    PropertyFragmentLayout, PropertyOverlayLimits, PropertyOverlayMetrics, PropertyRead,
+    PropertyRouteKind, Read, RecordBatch, TSerializable, corrupt, io_error, parquet_error,
 };
 
 #[derive(Debug, Default)]
+struct ReadCounterState {
+    bytes: AtomicU64,
+    blocks: AtomicU64,
+    range_seeks: AtomicU64,
+}
+
+/// Exact returned-work APIs explicitly collect; ordinary query readers retain
+/// an allocation-free disabled handle. Decoder/resource admission is separate.
+#[derive(Clone, Debug)]
 pub(super) struct ReadCounts {
-    pub(super) bytes: AtomicU64,
-    pub(super) blocks: AtomicU64,
-    pub(super) range_seeks: AtomicU64,
+    state: Option<Arc<ReadCounterState>>,
+}
+impl Default for ReadCounts {
+    fn default() -> Self {
+        Self::new(true)
+    }
+}
+impl ReadCounts {
+    pub(super) fn new(collect: bool) -> Self {
+        Self {
+            state: collect.then(|| {
+                #[cfg(any(test, feature = "test-support"))]
+                crate::lifecycle_io::observe_work(0);
+                Arc::new(ReadCounterState::default())
+            }),
+        }
+    }
+    fn record(&self, bytes: u64) {
+        if let Some(state) = &self.state {
+            #[cfg(any(test, feature = "test-support"))]
+            crate::lifecycle_io::observe_work(1);
+            state.bytes.fetch_add(bytes, Ordering::Relaxed);
+            state.blocks.fetch_add(1, Ordering::Relaxed);
+            crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, bytes, 1);
+        }
+    }
+    pub(super) fn record_physical(&self, bytes: u64, calls: u64) {
+        if let Some(state) = &self.state {
+            state.bytes.fetch_add(bytes, Ordering::Relaxed);
+            state.blocks.fetch_add(calls, Ordering::Relaxed);
+            crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, bytes, calls);
+        }
+    }
+    fn seek(&self) {
+        if let Some(state) = &self.state {
+            #[cfg(any(test, feature = "test-support"))]
+            crate::lifecycle_io::observe_work(1);
+            state.range_seeks.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    /// Private placeholders are used only inside an unobserved data-only path.
+    /// Such work is never exported as a measured zero by query execution.
+    pub(super) fn values(&self) -> (u64, u64, u64) {
+        self.state.as_ref().map_or((0, 0, 0), |state| {
+            (
+                state.bytes.load(Ordering::Relaxed),
+                state.blocks.load(Ordering::Relaxed),
+                state.range_seeks.load(Ordering::Relaxed),
+            )
+        })
+    }
 }
 
 #[derive(Debug)]
 pub(super) struct CountingChunkReader {
-    pub(super) file: Arc<File>,
+    pub(super) file: Arc<PropertyFile>,
     pub(super) length: u64,
-    pub(super) counts: Arc<ReadCounts>,
+    pub(super) counts: ReadCounts,
 }
 
 pub(super) struct CountingRead<R> {
     inner: R,
-    counts: Arc<ReadCounts>,
+    counts: ReadCounts,
+    physical: bool,
 }
 
-struct HeaderRead {
-    file: Arc<File>,
+struct HeaderRead<'a> {
+    file: &'a dyn PropertyRead,
     position: u64,
     remaining: usize,
     consumed: Arc<AtomicU64>,
-    counts: Arc<ReadCounts>,
+    counts: ReadCounts,
 }
 
-impl Read for HeaderRead {
+impl Read for HeaderRead<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         let limit = buffer.len().min(self.remaining);
         if limit == 0 {
             return Ok(0);
         }
-        let read = retained_read_at(&self.file, &mut buffer[..limit], self.position)?;
+        let read = self.file.read_at(&mut buffer[..limit], self.position)?;
         self.position = self
             .position
             .saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
@@ -50,21 +108,22 @@ impl Read for HeaderRead {
         if read != 0 {
             let read = u64::try_from(read).unwrap_or(u64::MAX);
             self.consumed.fetch_add(read, Ordering::Relaxed);
-            self.counts.bytes.fetch_add(read, Ordering::Relaxed);
-            self.counts.blocks.fetch_add(1, Ordering::Relaxed);
+            if self.file.physical() {
+                self.counts.record(read);
+            }
         }
         Ok(read)
     }
 }
 
 pub(super) struct PositionedRead {
-    file: Arc<File>,
+    file: Arc<PropertyFile>,
     position: u64,
 }
 
 impl Read for PositionedRead {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        let read = retained_read_at(&self.file, buffer, self.position)?;
+        let read = self.file.read_at(buffer, self.position)?;
         self.position = self
             .position
             .checked_add(u64::try_from(read).unwrap_or(u64::MAX))
@@ -96,11 +155,8 @@ impl<R: std::io::Read> std::io::Read for CountingRead<R> {
         const BLOCK_BYTES: usize = 64 * 1024;
         let limit = buffer.len().min(BLOCK_BYTES);
         let read = self.inner.read(&mut buffer[..limit])?;
-        if read != 0 {
-            self.counts
-                .bytes
-                .fetch_add(u64::try_from(read).unwrap_or(u64::MAX), Ordering::Relaxed);
-            self.counts.blocks.fetch_add(1, Ordering::Relaxed);
+        if read != 0 && self.physical {
+            self.counts.record(u64::try_from(read).unwrap_or(u64::MAX));
         }
         Ok(read)
     }
@@ -116,13 +172,14 @@ impl ChunkReader for CountingChunkReader {
     type T = CountingRead<BufReader<PositionedRead>>;
 
     fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
-        self.counts.range_seeks.fetch_add(1, Ordering::Relaxed);
+        self.counts.seek();
         Ok(CountingRead {
             inner: BufReader::new(PositionedRead {
                 file: Arc::clone(&self.file),
                 position: start,
             }),
-            counts: Arc::clone(&self.counts),
+            counts: self.counts.clone(),
+            physical: self.file.physical(),
         })
     }
 
@@ -166,7 +223,7 @@ impl TargetReadAdmission {
 }
 
 pub(super) fn charge_target_batch(
-    metrics: &mut PropertyOverlayMetrics,
+    metrics: Option<&mut PropertyOverlayMetrics>,
     batch: &RecordBatch,
     admission: TargetReadAdmission,
     retained_bytes: u64,
@@ -180,19 +237,25 @@ pub(super) fn charge_target_batch(
         arrow_bytes.saturating_add(decoded_reservation),
         retained_bytes,
     )?;
-    metrics.emitted_batches = metrics.emitted_batches.saturating_add(1);
-    metrics.decoder_peak_rows = metrics.decoder_peak_rows.max(batch.num_rows() as u64);
-    metrics.decoder_peak_bytes = metrics.decoder_peak_bytes.max(arrow_bytes);
-    metrics.peak_buffered_bytes = metrics.peak_buffered_bytes.max(bytes);
+    if let Some(metrics) = metrics {
+        metrics.emitted_batches = metrics.emitted_batches.saturating_add(1);
+        metrics.decoder_peak_rows = metrics.decoder_peak_rows.max(batch.num_rows() as u64);
+        metrics.decoder_peak_bytes = metrics.decoder_peak_bytes.max(arrow_bytes);
+        metrics.peak_buffered_bytes = metrics.peak_buffered_bytes.max(bytes);
+    }
     Ok(())
 }
 
-pub(super) fn admit_target_footer(file: &File, length: u64, budget: usize) -> Result<(), GfError> {
+pub(super) fn admit_target_footer(
+    file: &dyn PropertyRead,
+    length: u64,
+    budget: usize,
+) -> Result<(), GfError> {
     if length < 8 {
         return Err(corrupt("property Parquet footer is truncated"));
     }
     let mut footer = [0_u8; 8];
-    if retained_read_at(file, &mut footer, length - 8).map_err(io_error)? != footer.len()
+    if file.read_at(&mut footer, length - 8).map_err(io_error)? != footer.len()
         || &footer[4..] != b"PAR1"
     {
         return Err(corrupt("property Parquet footer is invalid"));
@@ -208,13 +271,12 @@ pub(super) fn admit_target_footer(file: &File, length: u64, budget: usize) -> Re
 }
 
 pub(super) fn open_counted_retained_property_builder(
-    fragment: &AuthenticatedPropertyFragment,
     opened: &OpenPropertyFragment,
-    counts: Arc<ReadCounts>,
+    counts: ReadCounts,
 ) -> Result<ParquetRecordBatchReaderBuilder<CountingChunkReader>, GfError> {
     ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
         file: Arc::clone(&opened.file),
-        length: fragment.entry.byte_length,
+        length: opened.logical_length,
         counts,
     })
     .map_err(parquet_error)
@@ -283,8 +345,8 @@ pub(super) fn validate_fragment_schema(
 pub(super) fn validate_parquet_resource_admission(
     metadata: &parquet::file::metadata::ParquetMetaData,
     limits: PropertyOverlayLimits,
-    file: &File,
-    counts: &Arc<ReadCounts>,
+    file: &dyn PropertyRead,
+    counts: &ReadCounts,
     projected_columns: Option<&BTreeSet<usize>>,
 ) -> Result<u64, GfError> {
     Ok(parquet_resource_admission(
@@ -328,7 +390,7 @@ pub(crate) fn replay_parquet_reader_reservation(
         metadata,
         limits,
         file,
-        &Arc::new(ReadCounts::default()),
+        &ReadCounts::new(false),
         None,
         batch_rows,
         true,
@@ -356,8 +418,8 @@ pub(crate) fn replay_parquet_reader_reservation(
 pub(super) fn parquet_resource_admission(
     metadata: &parquet::file::metadata::ParquetMetaData,
     limits: PropertyOverlayLimits,
-    file: &File,
-    counts: &Arc<ReadCounts>,
+    file: &dyn PropertyRead,
+    counts: &ReadCounts,
     projected_columns: Option<&BTreeSet<usize>>,
     batch_rows: usize,
     include_codec: bool,
@@ -405,18 +467,18 @@ pub(super) fn parquet_resource_admission(
             let end = start
                 .checked_add(compressed)
                 .ok_or_else(|| corrupt("property column chunk range overflows"))?;
-            if end > file.metadata().map_err(io_error)?.len() {
+            if end > file.length().map_err(io_error)? {
                 return Err(corrupt("property column chunk escapes authenticated file"));
             }
             let mut position = start;
             while position < end {
                 let consumed = Arc::new(AtomicU64::new(0));
                 let transport = HeaderRead {
-                    file: Arc::new(file.try_clone().map_err(io_error)?),
+                    file,
                     position,
                     remaining: MAX_PAGE_HEADER_BYTES,
                     consumed: Arc::clone(&consumed),
-                    counts: Arc::clone(counts),
+                    counts: counts.clone(),
                 };
                 let mut protocol = thrift::protocol::TCompactInputProtocol::new(transport);
                 #[allow(deprecated, reason = "Parquet 58 exposes raw page headers only here")]
@@ -607,3 +669,66 @@ pub(super) fn admitted_batch_rows(limits: PropertyOverlayLimits) -> usize {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn unobserved_targeted_batches_still_enforce_decoder_admission() {
+        let batch = RecordBatch::try_from_iter([(
+            "id",
+            Arc::new(arrow::array::UInt64Array::from(vec![1_u64; 4])) as arrow::array::ArrayRef,
+        )])
+        .unwrap();
+        let admission = TargetReadAdmission {
+            limits: PropertyOverlayLimits {
+                max_buffered_bytes: 64,
+                max_row_bytes: 64,
+                ..PropertyOverlayLimits::default()
+            },
+            page_reservation_bytes: 0,
+            replay: false,
+        };
+        for collect in [false, true] {
+            let mut metrics = collect.then(PropertyOverlayMetrics::default);
+            let error = charge_target_batch(metrics.as_mut(), &batch, admission, 0).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("decode exceeds live-byte budget"),
+                "{error}"
+            );
+            if let Some(metrics) = metrics {
+                assert_eq!(metrics, PropertyOverlayMetrics::default());
+            }
+        }
+    }
+
+    #[test]
+    fn unobserved_property_reads_keep_data_and_allocate_no_read_counter() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"bounded property decoder bytes").unwrap();
+        let before = crate::lifecycle_io::observer_work();
+        let counts = ReadCounts::new(false);
+        assert!(counts.state.is_none());
+        let source = CountingChunkReader {
+            file: Arc::new(PropertyFile::Plain(file)),
+            length: 30,
+            counts: counts.clone(),
+        };
+        assert_eq!(source.get_bytes(8, 8).unwrap().as_ref(), b"property");
+        assert_eq!(crate::lifecycle_io::observer_work(), before);
+        // Explicit returned-work collection remains exact without any lifecycle capture.
+        let counts = ReadCounts::default();
+        let source = CountingChunkReader {
+            file: Arc::clone(&source.file),
+            length: 30,
+            counts: counts.clone(),
+        };
+        assert_eq!(source.get_bytes(8, 8).unwrap().as_ref(), b"property");
+        assert_eq!(counts.values(), (8, 1, 1));
+        assert!(crate::lifecycle_io::snapshot().is_none());
+    }
+}

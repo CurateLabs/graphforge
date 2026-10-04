@@ -3,6 +3,7 @@
 use super::AuthenticatedUuidIndexSnapshot;
 use super::BULK_IO_BYTES;
 use super::CONSTRUCTION_INTENT;
+use super::CONSTRUCTION_INTENT_FORMAT_VERSION;
 use super::ConstructionIndexEncoding;
 use super::ConstructionIndexOutput;
 use super::FORMAT_VERSION;
@@ -36,10 +37,10 @@ use super::validate_run_descriptors;
 use crate::construction_record_layout::BASE_IDENTITY_WIDTH as CONSTRUCTION_IDENTITY_WIDTH;
 use crate::construction_record_layout::IDENTITY_SURROGATE_OFFSET;
 use graphforge_core::GfError;
+use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
-use sha2::Sha256;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
@@ -87,7 +88,7 @@ struct ConstructionRecoveryIntent {
     source_volume: u64,
     source_file_id: String,
     source_bytes: u64,
-    source_sha256: String,
+    source_xxh64: String,
     authority_sha256: String,
 }
 
@@ -124,9 +125,12 @@ impl ConstructionRecoveryIntent {
             self.source_volume,
             &self.source_file_id,
             self.source_bytes,
-            &self.source_sha256,
+            &self.source_xxh64,
         );
-        if self.format_version != FORMAT_VERSION || self.authority_sha256 != expected {
+        if self.format_version != CONSTRUCTION_INTENT_FORMAT_VERSION
+            || !canonical_lower_hex(&self.source_xxh64, 16)
+            || self.authority_sha256 != expected
+        {
             return Err(storage_err(
                 "construction recovery intent authentication failed",
             ));
@@ -144,10 +148,10 @@ fn construction_intent_digest(
     source_volume: u64,
     source_file_id: &str,
     source_bytes: u64,
-    source_sha256: &str,
+    source_xxh64: &str,
 ) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"graphforge.uuid-membership.construction-intent.v2\0");
+    let mut digest = graphforge_core::hash_observation::ControlSha256::new();
+    digest.update(b"graphforge.uuid-membership.construction-intent.v3\0");
     digest.update(format_version.to_be_bytes());
     digest.update(generation.to_be_bytes());
     digest.update(parent_generation.to_be_bytes());
@@ -156,7 +160,7 @@ fn construction_intent_digest(
     digest.update(source_volume.to_be_bytes());
     digest.update(source_file_id.as_bytes());
     digest.update(source_bytes.to_be_bytes());
-    digest.update(source_sha256.as_bytes());
+    digest.update(source_xxh64.as_bytes());
     hex_bytes(&digest.finalize())
 }
 
@@ -167,7 +171,7 @@ fn construction_intent_digest(
 pub(crate) fn encode_construction_index(
     source: &graphforge_filesystem::StableDirectory,
     identities_name: &str,
-    identities_sha256: &str,
+    identities_xxh64: &str,
     encoded: &graphforge_filesystem::StableDirectory,
     generation: u64,
     parent_generation: u64,
@@ -186,7 +190,7 @@ pub(crate) fn encode_construction_index(
     let result = encode_construction_index_inner(
         source,
         identities_name,
-        identities_sha256,
+        identities_xxh64,
         encoded,
         generation,
         parent_generation,
@@ -214,7 +218,7 @@ pub(crate) fn encode_construction_index(
 fn encode_construction_index_inner(
     source: &graphforge_filesystem::StableDirectory,
     identities_name: &str,
-    identities_sha256: &str,
+    identities_xxh64: &str,
     encoded: &graphforge_filesystem::StableDirectory,
     generation: u64,
     parent_generation: u64,
@@ -277,14 +281,14 @@ fn encode_construction_index_inner(
     let source_identity = graphforge_filesystem::file_identity(&input).map_err(storage_err)?;
     let source_file_id = hex_bytes(&source_identity.file_id);
     let mut intent = ConstructionRecoveryIntent {
-        format_version: FORMAT_VERSION,
+        format_version: CONSTRUCTION_INTENT_FORMAT_VERSION,
         generation,
         parent_generation,
         identities_name: identities_name.to_owned(),
         source_volume: source_identity.volume_serial,
         source_file_id: source_file_id.clone(),
         source_bytes: input_len,
-        source_sha256: identities_sha256.to_owned(),
+        source_xxh64: identities_xxh64.to_owned(),
         authority_sha256: String::new(),
     };
     intent.authority_sha256 = construction_intent_digest(
@@ -295,7 +299,7 @@ fn encode_construction_index_inner(
         intent.source_volume,
         &intent.source_file_id,
         intent.source_bytes,
-        &intent.source_sha256,
+        &intent.source_xxh64,
     );
     write_construction_intent(&index, &intent, &mut work)?;
     crate::graph_construction::construction_failpoint("uuid_encode.after_intent");
@@ -340,6 +344,7 @@ fn encode_construction_index_inner(
     let mut node_count = 0_u64;
     let mut edge_count = 0_u64;
     let mut source_digest = Sha256::new();
+    let mut source_checksum = crate::corruption_checksum::Checksum::new();
     let mut remaining = input_len;
     let streamed = (|| -> Result<(), GfError> {
         while remaining != 0 {
@@ -352,6 +357,7 @@ fn encode_construction_index_inner(
                 .read_exact(&mut input_block[..count])
                 .map_err(storage_err)?;
             source_digest.update(&input_block[..count]);
+            source_checksum.update(&input_block[..count]);
             work.read_bytes = work.read_bytes.saturating_add(count as u64);
             work.read_operations = work.read_operations.saturating_add(1);
             let mut packed_len = 0;
@@ -415,7 +421,7 @@ fn encode_construction_index_inner(
             work.write_operations = work.write_operations.saturating_add(1);
             remaining -= count as u64;
         }
-        if hex_bytes(&source_digest.finalize()) != identities_sha256 {
+        if crate::corruption_checksum::hex(source_checksum.finish()) != identities_xxh64 {
             return Err(storage_err("construction identity source digest changed"));
         }
         Ok(())
@@ -462,11 +468,9 @@ fn encode_construction_index_inner(
     }
     identity_writer.flush().map_err(storage_err)?;
     surrogate_writer.flush().map_err(storage_err)?;
-    identity_writer
-        .sync_all_and_release()
+    let identity_seal = crate::durable_commit::seal_cache_writer_witness(&mut identity_writer)
         .map_err(storage_err)?;
-    surrogate_writer
-        .sync_all_and_release()
+    let surrogate_seal = crate::durable_commit::seal_cache_writer_witness(&mut surrogate_writer)
         .map_err(storage_err)?;
     index
         .observe_file(std::ffi::OsStr::new(&identity_temp), identity_writer.file())
@@ -499,6 +503,7 @@ fn encode_construction_index_inner(
         &index,
         &identity_temp,
         identity_identity,
+        identity_seal,
         "identities-v5",
         generation,
         IDENTITY_RECORD_WIDTH,
@@ -509,6 +514,7 @@ fn encode_construction_index_inner(
         &index,
         &surrogate_temp,
         surrogate_identity,
+        surrogate_seal,
         "node-surrogates-v5",
         generation,
         NODE_LOOKUP_RECORD_WIDTH,
@@ -661,10 +667,10 @@ fn encode_construction_index_inner(
         .unlink_child_if_identity(std::ffi::OsStr::new(CONSTRUCTION_INTENT), intent_identity)
         .map_err(storage_err)?;
     crate::graph_construction::construction_failpoint("uuid_encode.after_intent_removal");
-    index.sync().map_err(storage_err)?;
-    topology.sync().map_err(storage_err)?;
-    graph.sync().map_err(storage_err)?;
-    encoded.sync().map_err(storage_err)?;
+    index.acknowledge().map_err(storage_err)?;
+    topology.acknowledge().map_err(storage_err)?;
+    graph.acknowledge().map_err(storage_err)?;
+    encoded.acknowledge().map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(4);
     commit_v4_publications(
         vec![(MANIFEST.to_owned(), manifest_publication)],
@@ -686,6 +692,7 @@ fn encode_construction_index_inner(
         peak_buffer_bytes: work.peak_buffer_bytes,
         peak_temporary_bytes: work.peak_temporary_bytes,
         cache_release: work.cache_release,
+        source_sha256: hex_bytes(&source_digest.finalize()),
     })
 }
 
@@ -772,10 +779,10 @@ fn cleanup_private_construction_index_with_allocation(
             .unlink_child_if_identity(&name, identity)
             .map_err(storage_err)?;
     }
-    index.sync().map_err(storage_err)?;
-    topology.sync().map_err(storage_err)?;
-    graph.sync().map_err(storage_err)?;
-    encoded.sync().map_err(storage_err)
+    index.acknowledge().map_err(storage_err)?;
+    topology.acknowledge().map_err(storage_err)?;
+    graph.acknowledge().map_err(storage_err)?;
+    encoded.acknowledge().map_err(storage_err)
 }
 
 fn authenticate_private_v4_residue(
@@ -835,8 +842,8 @@ fn authenticate_private_v4_residue(
                 "private v4 construction manifest does not match its receipt",
             ));
         }
-        let manifest: crate::V4OrdinalIdentityManifest =
-            serde_json::from_slice(&manifest_body).map_err(storage_err)?;
+        let manifest = crate::ordinal_identity_v4::decode_ordinal_manifest(&manifest_body)
+            .map_err(storage_err)?;
         if manifest.topology_generation != receipt.expected_generation {
             return Err(storage_err(
                 "private v4 construction generation does not match its receipt",
@@ -922,8 +929,8 @@ fn authenticate_private_v4_control_temp(
                 name,
                 crate::ordinal_identity_v4::MAX_MANIFEST_BYTES,
             )?;
-            let manifest: crate::V4OrdinalIdentityManifest =
-                serde_json::from_slice(&body).map_err(storage_err)?;
+            let manifest =
+                crate::ordinal_identity_v4::decode_ordinal_manifest(&body).map_err(storage_err)?;
             if hex_sha256(&body) != receipt.manifest_sha256
                 || manifest.topology_generation != receipt.expected_generation
             {
@@ -1017,7 +1024,7 @@ pub(super) fn authenticate_private_v4_artifact_file(
 ) -> Result<(), GfError> {
     if graphforge_filesystem::file_link_count(&file).map_err(storage_err)? != 1
         || file.metadata().map_err(storage_err)?.len() != artifact.bytes
-        || sha256_reader_streaming(file)? != artifact.sha256
+        || checksum_reader_streaming(file)? != (artifact.xxh64, artifact.bytes)
     {
         return Err(storage_err("private v4 artifact authentication failed"));
     }
@@ -1065,6 +1072,49 @@ fn canonical_lower_hex(value: &str, length: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn checksum_reader_streaming(file: File) -> Result<(u64, u64), GfError> {
+    let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
+    let expected_bytes = file.metadata().map_err(storage_err)?.len();
+    let mut reader =
+        graphforge_filesystem::FileCacheReleasingReader::new(file).map_err(storage_err)?;
+    let checked = (|| {
+        let mut checksum = crate::corruption_checksum::Checksum::new();
+        let mut bytes = 0_u64;
+        let mut buffer = vec![0; BULK_IO_BYTES];
+        loop {
+            let count = reader.read(&mut buffer).map_err(storage_err)?;
+            if count == 0 {
+                break;
+            }
+            bytes = bytes
+                .checked_add(count as u64)
+                .ok_or_else(|| storage_err("private ordinal length overflow"))?;
+            if bytes > expected_bytes {
+                return Err(storage_err("private ordinal artifact grew"));
+            }
+            checksum.update(&buffer[..count]);
+        }
+        if bytes != expected_bytes
+            || graphforge_filesystem::file_identity(reader.file()).map_err(storage_err)? != identity
+            || graphforge_filesystem::file_link_count(reader.file()).map_err(storage_err)? != 1
+            || reader.file().metadata().map_err(storage_err)?.len() != expected_bytes
+        {
+            return Err(storage_err(
+                "private ordinal artifact identity or length changed",
+            ));
+        }
+        Ok((checksum.finish(), bytes))
+    })();
+    let cleanup = reader.finish().map_err(storage_err);
+    match (checked, cleanup) {
+        (Ok(value), Ok(_)) => Ok(value),
+        (Err(primary), Ok(_)) | (Ok(_), Err(primary)) => Err(primary),
+        (Err(primary), Err(cleanup)) => Err(storage_err(format!(
+            "{primary}; private ordinal cache cleanup also failed: {cleanup}"
+        ))),
+    }
+}
+
 fn sha256_reader_streaming(file: File) -> Result<String, GfError> {
     let mut reader =
         graphforge_filesystem::FileCacheReleasingReader::new(file).map_err(storage_err)?;
@@ -1102,7 +1152,6 @@ fn write_construction_intent(
     let mut file = index
         .create_replaceable_child_file(std::ffi::OsStr::new(&temporary))
         .map_err(storage_err)?;
-    let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
     let written = file.write_all(&body).map_err(storage_err);
     let observed = index
         .observe_file(std::ffi::OsStr::new(&temporary), &file)
@@ -1111,20 +1160,39 @@ fn write_construction_intent(
     observed?;
     work.write_bytes = work.write_bytes.saturating_add(body.len() as u64);
     work.write_operations = work.write_operations.saturating_add(1);
-    file.sync_all().map_err(storage_err)?;
+    let seal = crate::durable_commit::seal_file_witness(&file).map_err(storage_err)?;
     index
         .observe_file(std::ffi::OsStr::new(&temporary), &file)
         .map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
-    drop(file);
-    index
-        .replace_child(
-            std::ffi::OsStr::new(&temporary),
-            identity,
+    let sealed = crate::durable_commit::SealedArtifact::adopt_sealed(
+        index.physical(),
+        std::ffi::OsStr::new(&temporary),
+        file,
+        seal,
+        index.allocation(),
+    )
+    .map_err(storage_err)?;
+    let pending = sealed
+        .make_visible(
             std::ffi::OsStr::new(CONSTRUCTION_INTENT),
+            crate::durable_commit::PublishMode::Replace,
+            || Ok(()),
         )
         .map_err(storage_err)?;
-    index.sync().map_err(storage_err)?;
+    let installed = index
+        .open_child_file(std::ffi::OsStr::new(CONSTRUCTION_INTENT))
+        .map_err(storage_err)?;
+    index
+        .record_replacement(
+            std::ffi::OsStr::new(&temporary),
+            std::ffi::OsStr::new(CONSTRUCTION_INTENT),
+            &installed,
+        )
+        .map_err(storage_err)?;
+    pending
+        .acknowledge(index.allocation())
+        .map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
     Ok(())
 }
@@ -1356,7 +1424,8 @@ fn merge_construction_records(
         .map_err(storage_err);
     let merged = combine_v4_cleanup(merged, observed, "construction merge allocation");
     merged?;
-    writer.sync_all_and_release().map_err(storage_err)?;
+    let seal =
+        crate::durable_commit::seal_cache_writer_witness(&mut writer).map_err(storage_err)?;
     output
         .observe_file(std::ffi::OsStr::new(&temporary), writer.file())
         .map_err(storage_err)?;
@@ -1377,7 +1446,7 @@ fn merge_construction_records(
     merge_cache_release_evidence(&mut work.cache_release, right_reader.cache_release);
     drop(writer.into_file());
     describe_and_install_construction_run(
-        output, &temporary, identity, prefix, generation, width, artifacts, work,
+        output, &temporary, identity, seal, prefix, generation, width, artifacts, work,
     )
 }
 
@@ -1389,7 +1458,7 @@ struct ConstructionBlockCursor {
     block_index: usize,
     within: usize,
     records: u64,
-    digest: Sha256,
+    checksum: crate::corruption_checksum::Checksum,
     finished: bool,
     read_bytes: u64,
     read_operations: u64,
@@ -1417,7 +1486,7 @@ impl ConstructionBlockCursor {
             block_index: 0,
             within: 0,
             records: 0,
-            digest: Sha256::new(),
+            checksum: crate::corruption_checksum::Checksum::new(),
             finished: false,
             read_bytes: 0,
             read_operations: 0,
@@ -1463,7 +1532,7 @@ impl ConstructionBlockCursor {
         if self.block_index == self.descriptor.blocks.len() {
             self.finished = true;
             let authenticated = if self.records != self.descriptor.count
-                || hex_bytes(&self.digest.clone().finalize()) != self.descriptor.sha256
+                || self.checksum.clone().finish() != self.descriptor.xxh64
             {
                 Err(storage_err(
                     "construction merge source authentication failed",
@@ -1491,7 +1560,7 @@ impl ConstructionBlockCursor {
         if !block_matches(&self.block, expected, self.width) {
             return Err(storage_err("construction merge source block changed"));
         }
-        self.digest.update(&self.block);
+        self.checksum.update(&self.block);
         self.block_index += 1;
         self.within = 0;
         Ok(())
@@ -1592,11 +1661,11 @@ fn install_empty_construction_run(
         .create_replaceable_child_file(std::ffi::OsStr::new(&temporary))
         .map_err(storage_err)?;
     let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
-    file.sync_all().map_err(storage_err)?;
+    let seal = crate::durable_commit::seal_file_witness(&file).map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
     drop(file);
     describe_and_install_construction_run(
-        output, &temporary, identity, prefix, generation, width, artifacts, work,
+        output, &temporary, identity, seal, prefix, generation, width, artifacts, work,
     )
 }
 
@@ -1605,6 +1674,7 @@ fn describe_and_install_construction_run(
     output: &crate::construction_directory::ConstructionDirectory,
     temporary: &str,
     identity: graphforge_filesystem::FileIdentity,
+    seal: crate::durable_commit::FileSeal,
     prefix: &str,
     generation: u64,
     width: usize,
@@ -1622,7 +1692,7 @@ fn describe_and_install_construction_run(
     work.read_bytes = work.read_bytes.saturating_add(reads.0);
     work.read_operations = work.read_operations.saturating_add(reads.1);
     let released = file.finish().map_err(storage_err);
-    let ((sha256, blocks, count), read_cache_release) = match (described, released) {
+    let ((sha256, xxh64, blocks, count), read_cache_release) = match (described, released) {
         (Ok(described), Ok(released)) => (described, released),
         (Ok(_), Err(release)) => return Err(release),
         (Err(primary), Ok(_)) => return Err(primary),
@@ -1634,24 +1704,58 @@ fn describe_and_install_construction_run(
     };
     merge_cache_release_evidence(&mut work.cache_release, read_cache_release);
     let name = format!("{prefix}-{generation}-{}.uuidx", &sha256[..16]);
-    output
-        .replace_child(
-            std::ffi::OsStr::new(temporary),
-            identity,
+    drop(file);
+    let file = crate::durable_commit::open_publisher(
+        output.physical(),
+        std::ffi::OsStr::new(temporary),
+        identity,
+    )
+    .map_err(storage_err)?;
+    if graphforge_filesystem::file_identity(&file).map_err(storage_err)? != identity {
+        return Err(storage_err(
+            "construction run identity changed before publication",
+        ));
+    }
+    let sealed = crate::durable_commit::SealedArtifact::adopt_sealed(
+        output.physical(),
+        std::ffi::OsStr::new(temporary),
+        file,
+        seal,
+        output.allocation(),
+    )
+    .map_err(storage_err)?;
+    let pending = sealed
+        .make_visible(
             std::ffi::OsStr::new(&name),
+            crate::durable_commit::PublishMode::Replace,
+            || Ok(()),
         )
         .map_err(storage_err)?;
-    output.sync().map_err(storage_err)?;
+    let installed = output
+        .open_child_file(std::ffi::OsStr::new(&name))
+        .map_err(storage_err)?;
+    output
+        .record_replacement(
+            std::ffi::OsStr::new(temporary),
+            std::ffi::OsStr::new(&name),
+            &installed,
+        )
+        .map_err(storage_err)?;
+    pending
+        .acknowledge(output.allocation())
+        .map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
     artifacts.push(ConstructionIndexOutput {
         name: name.clone(),
         bytes,
         sha256: sha256.clone(),
+        xxh64,
     });
     Ok(FileRecord {
         name,
         count,
         sha256,
+        xxh64,
         blocks,
     })
 }
@@ -1676,7 +1780,8 @@ pub(super) fn install_construction_bytes(
     work.peak_temporary_bytes = work
         .peak_temporary_bytes
         .max(u64::try_from(bytes.len()).map_err(storage_err)?);
-    file.sync_all().map_err(storage_err)?;
+    let seal = crate::durable_commit::seal_file_witness(&file).map_err(storage_err)?;
+    publication.record_seal(seal);
     publication.observe(&file).map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
     let failpoint = match name {
@@ -1691,8 +1796,7 @@ pub(super) fn install_construction_bytes(
     drop(file);
     let installed = publication
         .install_child(std::ffi::OsStr::new(name))
-        .map_err(storage_err)
-        .and_then(|()| publication.sync_parent().map_err(storage_err));
+        .map_err(storage_err);
     if let Err(primary) = installed {
         let cleanup = cleanup_v4_publication(&mut publication);
         return combine_v4_cleanup(Err(primary), cleanup, "v4 construction control cleanup");
@@ -1714,7 +1818,14 @@ pub(super) fn install_construction_bytes(
         ConstructionIndexOutput {
             name: name.to_owned(),
             bytes: bytes.len() as u64,
-            sha256: hex_sha256(bytes),
+            xxh64: crate::corruption_checksum::checksum(bytes),
+            sha256: if matches!(name, MANIFEST | V4_ORDINAL_RECEIPT | V4_ORDINAL_MANIFEST) {
+                hex_sha256(bytes)
+            } else {
+                hex_bytes(&graphforge_core::hash_observation::ControlSha256::digest(
+                    bytes,
+                ))
+            },
         },
         publication,
     ))

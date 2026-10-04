@@ -758,7 +758,7 @@ fn read_parquet_filtered_u64_attempt(
     // page index; Optional enables page-level skipping when one is present.
     let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional);
     let builder = ParquetRecordBatchReaderBuilder::try_new_with_options(
-        crate::lifecycle_io::ReadPathFile::new(file),
+        crate::catalog::admitted_path_file(file)?,
         options,
     )
     .map_err(parquet_err)?;
@@ -1062,8 +1062,22 @@ pub fn read_nodes_filtered_observed(
     node_ids: &std::collections::HashSet<u64>,
     observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let paths = crate::mutator::node_parquet_files(dir)
-        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    read_nodes_filtered_observed_from_files(
+        &crate::TopologyFiles::discover_legacy(dir)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+        node_ids,
+        observer,
+    )
+}
+
+/// Read selected topology files; the reader has no directory capability.
+#[allow(clippy::implicit_hasher)]
+pub fn read_nodes_filtered_observed_from_files(
+    files: &crate::TopologyFiles,
+    node_ids: &std::collections::HashSet<u64>,
+    observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let paths = files.nodes.iter().map(|(path, _)| path.clone());
     let mut batches = Vec::new();
     for path in paths {
         batches.extend(normalize_topology_nodes(read_parquet_filtered_u64(
@@ -1092,8 +1106,24 @@ pub fn read_nodes_filtered_projected_observed(
     projection: &[usize],
     observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let paths = crate::mutator::node_parquet_files(dir)
-        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    read_nodes_filtered_projected_observed_from_files(
+        &crate::TopologyFiles::discover_legacy(dir)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+        node_ids,
+        projection,
+        observer,
+    )
+}
+
+/// Read selected topology files; the reader has no directory capability.
+#[allow(clippy::implicit_hasher)]
+pub fn read_nodes_filtered_projected_observed_from_files(
+    files: &crate::TopologyFiles,
+    node_ids: &std::collections::HashSet<u64>,
+    projection: &[usize],
+    observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let paths = files.nodes.iter().map(|(path, _)| path.clone());
     let indices = canonical_projection_with_key(&TOPOLOGY_NODES_SCHEMA, projection, "node_id")?;
     let mut batches = Vec::new();
     for path in paths {
@@ -1139,3 +1169,12 @@ pub fn read_nodes_filtered_projected_observed(
 
 #[cfg(test)]
 mod tests;
+
+/// Filter selected topology files by node identity.
+#[allow(clippy::implicit_hasher)]
+pub fn read_nodes_filtered_from_files(
+    files: &crate::TopologyFiles,
+    node_ids: &std::collections::HashSet<u64>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    read_nodes_filtered_observed_from_files(files, node_ids, None)
+}

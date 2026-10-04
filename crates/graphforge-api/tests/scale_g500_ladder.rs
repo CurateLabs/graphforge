@@ -1059,8 +1059,10 @@ fn bounded_ordered_leaf(
         && hop.projected_columns == 1
         && hop.identity_ranges_selected > 0
         && hop.identity_ranges_selected <= hop.projected_rows
-        && hop.identity_read_calls > 0
-        && hop.identity_bytes_read > 0
+        // The handle holds the blocks it has authenticated (#1388), so a query
+        // that follows another over the same ordinals may read none; calls and
+        // bytes still never disagree.
+        && (hop.identity_read_calls == 0) == (hop.identity_bytes_read == 0)
         && hop.identity_peak_buffer_bytes > 0
         && hop
             .identity_ranges_selected
@@ -1599,7 +1601,7 @@ fn ingest_subphase() -> &'static str {
 }
 
 fn storage_io_value() -> Value {
-    let io = graphforge_storage::io_stats::snapshot();
+    let io = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
     json!({
         "node_full_reads": io.node_full_reads,
         "node_full_rows": io.node_full_rows,
@@ -1631,15 +1633,26 @@ impl IngestHeartbeat {
                 handle: None,
             };
         };
+        Self::start_at(PathBuf::from(path), profile, rung, completed_rungs, steps)
+    }
+
+    fn start_at(
+        path: PathBuf,
+        profile: &ScaleProfile,
+        rung: &Rung,
+        completed_rungs: &[Value],
+        steps: &[Value],
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
-        let path = PathBuf::from(path);
         let profile_schema = profile.schema.clone();
         let rung_id = rung.id.clone();
         let scale = rung.scale;
         let completed_rungs = completed_rungs.to_vec();
         let steps = steps.to_vec();
+        let lifecycle_context = graphforge_storage::lifecycle_io::CaptureContext::current();
         let handle = thread::spawn(move || {
+            let _capture = lifecycle_context.attach();
             loop {
                 let value = json!({
                     "schema": EVIDENCE_SCHEMA,
@@ -1807,6 +1820,7 @@ fn run_rung(
         let ingest_started = Instant::now();
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
             .expect("open GraphForge for ingest");
+        let _io_capture = graphforge_storage::io_stats::CaptureScope::install();
         graphforge_storage::io_stats::reset();
         INGEST_CHUNK_INDEX.store(0, Ordering::Relaxed);
         INGEST_SUBPHASE.store(1, Ordering::Relaxed);
@@ -4101,7 +4115,35 @@ fn run_integrated_certification_config(
         .filter_map(|phase| phase["disk_peak_bytes"].as_u64())
         .max()
         .expect("completed lifecycle phase allocation peaks");
+    // The manifest the catalog category counts chunks of: how many files it
+    // declares, and how many catalog objects are not its chunks (the generation
+    // manifest, each participant and each catalog-class file).
+    let source_manifest = {
+        let generation = graphforge_storage::resolve_project_generation(&source)
+            .expect("resolve the final source generation");
+        let inventory = generation
+            .unadmitted_graph_files_inventory()
+            .expect("source manifest inventory")
+            .expect("source graph inventory");
+        let catalog_files = inventory
+            .files
+            .iter()
+            .filter(|entry| {
+                graphforge_storage::classify_graph_artifact(&entry.relative_path)
+                    == graphforge_storage::ArtifactCategory::CatalogAndManifests
+            })
+            .count();
+        let participants = generation
+            .participant_descriptors()
+            .expect("source participants")
+            .len();
+        json!({
+            "file_count": inventory.file_count,
+            "catalog_fixed_objects": 1 + participants + catalog_files,
+        })
+    };
     let evidence = json!({
+        "source_manifest": source_manifest,
         "source_export_generation_authenticated": source_generation == exported.generation_uuid,
         "import_receipt_reopen_authenticated": current_generation_uuid(&imported_graph) == imported_receipt.generation_uuid,
         "source_import_generations_distinct": exported.generation_uuid != imported_receipt.generation_uuid,
@@ -4391,6 +4433,10 @@ struct LifecycleLinearityObservation {
     encode_fsync_components: [u64; 4],
     hydration_files_copied: u64,
     hydration_uuid_control_bytes: u64,
+    /// Files the final source manifest declares, and the catalog objects that
+    /// are not manifest chunks.
+    manifest_files: u64,
+    catalog_fixed_objects: u64,
     hydration_file_fsync_operations: u64,
     hydration_directory_fsync_operations: u64,
     shape_read_component_calls: [u64; 6],
@@ -4712,6 +4758,12 @@ fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObserv
         hydration_uuid_control_bytes: evidence["storage"]["hydration_uuid_control_bytes"]
             .as_u64()
             .expect("authenticated UUID control bytes"),
+        manifest_files: evidence["source_manifest"]["file_count"]
+            .as_u64()
+            .expect("source manifest file count"),
+        catalog_fixed_objects: evidence["source_manifest"]["catalog_fixed_objects"]
+            .as_u64()
+            .expect("source catalog objects outside the manifest"),
         hydration_file_fsync_operations,
         hydration_directory_fsync_operations,
         shape_read_component_calls,
@@ -5278,10 +5330,56 @@ fn validate_affine_metric(
     Ok(())
 }
 
+/// The regime a phase metric declares (#1433). The redesign stopped doing
+/// work proportional to the data in many phases, so "grows with the rung" is
+/// no longer a safe default: every policy variant names which of these it is,
+/// and [`PhaseMetricPolicy::regime`] is an exhaustive match so a new variant
+/// cannot be added without choosing one.
+///
+/// A flat metric is not evidence of a regime change. Of the rows #1433
+/// catalogued, #1430's fsync flattening was a real durability regression and
+/// #1425's was memoization (while the content check it also removed was a
+/// separate, real integrity loss restored by #1435). Measure `main` on the
+/// same rungs before moving any row out of `DataProportional`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MetricRegime {
+    /// (a) The value tracks the data: it must grow with the rung (affine in
+    /// the live-count denominators) or be derived from a paired byte field
+    /// that does. A held-constant value is the regression.
+    DataProportional,
+    /// (b) Tied to a small, mostly-fixed structural count (objects, files,
+    /// pages, one buffer). Carries an upper bound (a spread tolerance or a
+    /// structural ceiling) AND a floor, because an upper bound alone cannot
+    /// see a component dropped from every rung alike. A value that tracks
+    /// the data is the regression, and so is a value that falls below its
+    /// floor.
+    StructureBounded,
+    /// (c) Genuinely constant: structurally zero, or pinned by a fixed
+    /// protocol. Any movement is the regression.
+    FixedProtocol,
+    /// Not one of the issue's three regimes: the value is a conservation law
+    /// over independently counted components (`read == 2 * write + route
+    /// table`, aggregate `==` the sum of native component counters, and the
+    /// durability relations between them). It asserts no growth at all, so a
+    /// legitimately flat value passes and a value that diverges from its
+    /// components fails. Each such validator also rejects the all-zero state
+    /// (components that stop being counted), because a conservation law over
+    /// zeros holds vacuously: hydration reads need a residual of at least 1,
+    /// the component-call policies reject a zero sum, hydration fsyncs reject
+    /// zero copies and barriers, encode fsyncs need an output barrier, CAS
+    /// needs an installed payload object and manifest root, and shape blocks
+    /// need merge bytes. The tests
+    /// `every_declared_nonzero_phase_metric_rejects_a_uniform_drop_to_zero`
+    /// (aggregate) plus the coherent-zero cases for encode fsyncs, CAS and
+    /// shape blocks exercise that; the policy variants carry no parameter
+    /// for it, so it is not checked from the table itself.
+    Reconciled,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PhaseMetricPolicy {
     ScaleBearing,
-    NodeBearingBytes,
+    ControlCopyBytes,
     /// Hydration read bytes reconcile exactly to the single-link copy
     /// protocol (#1433, #1435) instead of scaling with retained payload.
     /// `materialize_graph_objects` reads the route table once to
@@ -5337,6 +5435,39 @@ enum PhaseMetricPolicy {
     StructurallyZero,
 }
 
+impl PhaseMetricPolicy {
+    /// The declared regime. Deliberately has no wildcard arm.
+    const fn regime(self) -> MetricRegime {
+        match self {
+            // The value follows the data on its axis (affine against the
+            // live-count denominators), or follows a paired byte field that
+            // does (`BufferedCalls`: ceil(bytes / buffer) ..= bytes), or an
+            // exactly reconciled count of data-proportional append batches.
+            Self::ScaleBearing
+            | Self::ControlCopyBytes
+            | Self::BufferedCalls { .. }
+            | Self::AppendObjectInventory => MetricRegime::DataProportional,
+            // Spread cap + absolute floor on a fixed set of authenticated
+            // objects, and a single-buffer ceiling + floor on the control
+            // inventory read.
+            Self::BoundedObjectCalls { .. } | Self::InventoryControlBytes { .. } => {
+                MetricRegime::StructureBounded
+            }
+            Self::StructurallyZero => MetricRegime::FixedProtocol,
+            Self::HydrationReadReconciliation { .. }
+            | Self::ShapeReadComponentCalls
+            | Self::ShapeWriteComponentCalls
+            | Self::EncodeWriteComponentCalls
+            | Self::ShapeBlockInventory
+            | Self::CasFsyncInventory
+            | Self::CasReadComponentCalls
+            | Self::CasWriteComponentCalls
+            | Self::EncodeFsyncInventory
+            | Self::HydrationFsyncInventory => MetricRegime::Reconciled,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct PhasePolicyRow {
     phase: &'static str,
@@ -5381,7 +5512,7 @@ const RECOVERY_REAUTHENTICATION_MIN_ABSOLUTE_CALLS: u64 = 45;
 // The only hydration read that is neither a copy nor a copy verification is
 // the single authentication read of the manifest route table
 // (`MaterializationRoutes::prepare`). Like the UUID control JSON that
-// `NodeBearingBytes` subtracts exactly, it is a control document whose size
+// `ControlCopyBytes` subtracts exactly, it is a control document whose size
 // follows the fixed file set of the fixture, not its payload; the same 2 KiB
 // fixture bound used for the UUID controls applies. Any per-byte re-read of
 // the hard-linked payload - the 3 of 4 redundant sweeps per open that #1435
@@ -5390,7 +5521,46 @@ const RECOVERY_REAUTHENTICATION_MIN_ABSOLUTE_CALLS: u64 = 45;
 const HYDRATION_ROUTE_TABLE_CONTROL_BYTES: u64 = 2 * 1024;
 
 // This is deliberately exhaustive: adding a storage phase or counter requires
-// choosing semantics here instead of silently inheriting an affine assertion.
+// choosing a policy here, and every policy declares its `MetricRegime`
+// (`PhaseMetricPolicy::regime`), instead of silently inheriting an affine
+// assertion (#1433). Per row, the regime of each field and what a regression
+// would have to do to fail it:
+//
+// append_merge: write_bytes and write_calls are data-proportional (the rows
+//   appended; calls derive from the staged-block size), object_count is the
+//   data-proportional batch count reconciled to the append inventory. Reads
+//   and fsyncs are fixed-protocol zero (append reads nothing; its barriers
+//   are accounted in fsync_synchronization).
+// seal_authentication: fixed-protocol zero on every field; no I/O is
+//   attributed to the seal itself (#1623 split it from append).
+// shape_consume_reauthentication: bytes are data-proportional; calls and
+//   blocks reconcile to the native component counters (blocks additionally to
+//   ceil(bytes / staged block) ..= bytes); object count and fsyncs are zero.
+// encode_write_postwrite_authentication: bytes and read calls are data-
+//   proportional; write calls and fsyncs reconcile to the native encoder
+//   components (output, spool, membership, ordinal barriers).
+// publication_preauthentication: the encoded-inventory control read is
+//   structure-bounded by one encoding buffer, and its call count derives from
+//   those bytes; every other field is zero.
+// cas_install_read_write: bytes are data-proportional; calls and fsyncs
+//   reconcile to the CAS publication components and the one-publication,
+//   every-path-installed-or-reused inventory; payload calls are bounded by
+//   the payload bytes.
+// hydration_verification: read_bytes is a conservation law over the copy
+//   protocol (not growth); write_bytes is the small mutable controls, fixed on
+//   both axes since the identity runs are hard-linked (#1388); calls derive
+//   from bytes; fsyncs reconcile to the protocol's file plus directory
+//   barriers.
+// fsync_synchronization: fsync_calls is data-proportional on the ladder
+//   fixture. #1430 measured it as one durable barrier per cut partition with
+//   the cut `min(partition_count, max(1, staged_identity_records / 16))`, so
+//   below saturation it follows the data; above it the row would be
+//   structure-bounded by the recorded partition count and has to be
+//   redeclared before this table is applied at S20 and above. Everything
+//   else is zero.
+// recovery_reauthentication: read_bytes is data-proportional; read_calls is
+//   structure-bounded (spread cap plus floor) by the fixed set of
+//   authenticated objects.
 const PHASE_METRIC_POLICIES: [PhasePolicyRow; 9] = [
     PhasePolicyRow {
         phase: "append_merge",
@@ -5478,7 +5648,7 @@ const PHASE_METRIC_POLICIES: [PhasePolicyRow; 9] = [
             // `graph_files_inventory()`, and is not this phase's I/O. What
             // remains here is exactly the copy protocol for single-link
             // controls, so the field reconciles to `write_bytes` (which
-            // `NodeBearingBytes` already polices exactly) plus one bounded
+            // `ControlCopyBytes` already polices exactly) plus one bounded
             // route-table read rather than asserting growth that would only
             // return if the redundant sweep did. A held-constant value is
             // therefore correct on the edge axis; a value that tracks
@@ -5486,7 +5656,7 @@ const PHASE_METRIC_POLICIES: [PhasePolicyRow; 9] = [
             PhaseMetricPolicy::HydrationReadReconciliation {
                 max_route_table_bytes: HYDRATION_ROUTE_TABLE_CONTROL_BYTES,
             },
-            PhaseMetricPolicy::NodeBearingBytes,
+            PhaseMetricPolicy::ControlCopyBytes,
             PhaseMetricPolicy::BufferedCalls {
                 byte_field: 0,
                 max_bytes_per_call: HYDRATION_BUFFER_BYTES,
@@ -5727,13 +5897,17 @@ fn validate_shape_block_inventory(
             observation.shape_merge_bytes[1],
         ),
     ] {
+        // Floor: `validate_axis_denominators` rejects an empty graph, so the
+        // shape consumed identity records through the counted reader
+        // (merge_read_bytes, shape.rs) and routed them through the partition
+        // writer (merge_written_bytes, partition_shaping.rs). Zero bytes with
+        // zero blocks reconciles trivially and is what a shape that stopped
+        // running (or counting) would report; the ceiling bound below then
+        // forces at least one block.
         if bytes == 0 {
-            if blocks != 0 {
-                return Err(format!(
-                    "{name} {direction} blocks lack merge bytes at rung {rung}"
-                ));
-            }
-            continue;
+            return Err(format!(
+                "{name} {direction} has no merge bytes although a non-empty graph was shaped at rung {rung}"
+            ));
         }
         // Production accumulates ceil(artifact_bytes / block_bytes) for every
         // authenticated artifact. Therefore ceil(total_bytes / block_bytes) is
@@ -5795,6 +5969,87 @@ enum CategoryBehavior {
     Mixed,
     FixedInventory,
     StructurallyZero,
+}
+
+/// The catalog and manifest inventory, from structure rather than from what a
+/// run happened to produce.
+///
+/// A compact manifest is a radix tree over the declared file paths, in chunks of
+/// at most `GRAPH_MANIFEST_BUCKET_CAPACITY` entries, so for `N` declared files
+/// its chunk count `M` satisfies `ceil(N / capacity) <= M <= 2N - 1` whatever the
+/// path text (several of which embed content hashes). Catalog references are
+/// those `M` chunks plus a fixed set of objects the evidence names. A fixed
+/// inventory therefore holds only while `N` is the same in every rung, which is
+/// true while the shard and route counts are, and a rung that adds files is
+/// refused rather than tolerated. Physical objects are at most the references,
+/// and the pages an object takes follow its bytes, so allocation is bounded by
+/// the logical bytes it holds plus a page per object.
+fn validate_manifest_inventory(
+    name: &str,
+    field: usize,
+    values: [u64; 3],
+    observations: &[LifecycleLinearityObservation; 3],
+    category_metrics: impl Fn(usize) -> [u64; 6],
+) -> Result<(), String> {
+    let files = observations
+        .each_ref()
+        .map(|observation| observation.manifest_files);
+    if files[0] == 0 || files[0] != files[1] || files[0] != files[2] {
+        return Err(format!(
+            "{name} manifest file count changed across rungs: {files:?}; a fixed inventory \
+             holds only while the shard count is constant"
+        ));
+    }
+    let files = files[0];
+    let capacity = u64::try_from(graphforge_storage::GRAPH_MANIFEST_BUCKET_CAPACITY)
+        .map_err(|_| "manifest capacity exceeds u64".to_owned())?;
+    match field {
+        0 => {
+            for (rung, observation) in observations.iter().enumerate() {
+                let chunks = values[rung]
+                    .checked_sub(observation.catalog_fixed_objects)
+                    .ok_or_else(|| {
+                        format!("{name} object inventory changed: {values:?} omits fixed objects")
+                    })?;
+                if chunks < files.div_ceil(capacity) || chunks > 2 * files - 1 {
+                    return Err(format!(
+                        "{name} object inventory changed: {chunks} manifest chunks for \
+                         {files} files at rung {rung}"
+                    ));
+                }
+            }
+        }
+        2 => {
+            for rung in 0..3 {
+                let references = category_metrics(rung)[0];
+                if values[rung] == 0 || values[rung] > references {
+                    return Err(format!(
+                        "{name} object inventory changed: {} physical objects for \
+                         {references} references at rung {rung}",
+                        values[rung]
+                    ));
+                }
+            }
+        }
+        _ => {
+            for rung in 0..3 {
+                let metrics = category_metrics(rung);
+                let (objects, logical) = if field == 4 {
+                    (metrics[0], metrics[1])
+                } else {
+                    (metrics[2], metrics[3])
+                };
+                let ceiling = logical + 4096 * objects;
+                if values[rung] < logical || values[rung] > ceiling {
+                    return Err(format!(
+                        "{name} allocation {} is outside [{logical}, {ceiling}] at rung {rung}",
+                        values[rung]
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn category_behavior(category: &str) -> Result<CategoryBehavior, String> {
@@ -5869,8 +6124,10 @@ fn validate_category_taxonomy(
                         // lengths in its JSON manifests can gain digits.
                         validate_positive_normalized_ceiling(&name, values, denominators)?;
                     }
-                    (CategoryBehavior::FixedInventory, 4 | 5) => {
-                        validate_quantized_allocation(&name, values, denominators)?;
+                    (CategoryBehavior::FixedInventory, 0 | 2 | 4 | 5) => {
+                        validate_manifest_inventory(&name, field, values, observations, |rung| {
+                            observations[rung].category_metrics[&key]
+                        })?;
                     }
                     (_, 0 | 2)
                         if values[0] > 0 && values[0] == values[1] && values[0] == values[2] => {}
@@ -6007,8 +6264,13 @@ fn validate_fresh_cas_control_bound(
     let minimum_requests = paths
         .checked_add(1)
         .ok_or("CAS minimum request bound overflows")?;
+    // Fresh control bytes are SHA-authenticated by their resident-byte writer;
+    // only reused objects (including concurrent winners) require a file read.
+    // Windows additionally authenticates fresh sealed handles, which can exceed
+    // this portable minimum. Keep actual I/O receipts separate from SHA inputs.
     if requests < minimum_requests
-        || io.manifest.read_calls < requests
+        || io.manifest.read_calls < io.manifest.reused_objects
+        || io.manifest.write_calls < io.manifest.installed_objects
         || io.manifest_reads.read_calls < paths
     {
         return Err("CAS manifest work is below mandatory bootstrap/update authentication".into());
@@ -6118,11 +6380,14 @@ fn validate_lifecycle_metric_policies_for_axis(
                 PhaseMetricPolicy::ScaleBearing => {
                     validate_affine_metric(&name, values, denominators)?;
                 }
-                PhaseMetricPolicy::NodeBearingBytes => {
-                    // Hydration copies private ordinal-V4 data plus mutable v5
-                    // controls. Control JSON gains count digits along either
-                    // axis; subtract its exact authenticated inventory bytes,
-                    // then retain the fixed-node-map bound on the edge axis.
+                PhaseMetricPolicy::ControlCopyBytes => {
+                    // Hydration copies only the small mutable UUID controls
+                    // (the forward and ordinal runs are hard-linked, #1388).
+                    // Control JSON gains count digits along either axis;
+                    // subtract its exact authenticated inventory bytes, and
+                    // what remains is fixed on both axes. A residual that
+                    // follows the node count is the identity runs being
+                    // copied again.
                     let mut ordinal_values = values;
                     for (rung, observation) in observations.iter().enumerate() {
                         let controls = observation.hydration_uuid_control_bytes;
@@ -6136,16 +6401,12 @@ fn validate_lifecycle_metric_policies_for_axis(
                                 format!("{name} omits authenticated UUID control copies")
                             })?;
                     }
-                    if matches!(axis, LinearityAxis::Nodes) {
-                        validate_affine_metric(&name, ordinal_values, denominators)?;
-                    } else {
-                        validate_fixed_protocol_metric(
-                            &name,
-                            ordinal_values,
-                            ordinal_values[0],
-                            ordinal_values[0],
-                        )?;
-                    }
+                    validate_fixed_protocol_metric(
+                        &name,
+                        ordinal_values,
+                        ordinal_values[0],
+                        ordinal_values[0],
+                    )?;
                 }
                 PhaseMetricPolicy::HydrationReadReconciliation {
                     max_route_table_bytes,
@@ -6317,6 +6578,27 @@ fn validate_lifecycle_metric_policies_for_axis(
                                 .installed_objects
                                 .checked_add(component.reused_objects)
                                 .ok_or_else(|| format!("{name} object request total overflows"))?;
+                            // Floor: the ladder publishes one fresh generation
+                            // into a single-writer store
+                            // (`validate_fresh_cas_control_bound` requires
+                            // `initial_entries == 0`), so nothing can already
+                            // exist on the first request for an object and at
+                            // least one payload object and the manifest root
+                            // (always installed) are installed. This also
+                            // implies the one-directional counter laws
+                            // (`write_bytes > 0` or `installed_bytes > 0`
+                            // only under an attempted, installed object):
+                            // `installation_evidence` is the only path setting
+                            // `attempted_install`, and with
+                            // `install_attempts >= installed_objects >= 1`
+                            // they cannot fail independently. Relies on that
+                            // fresh single-writer store; a resumed or shared
+                            // store may legitimately reuse everything.
+                            if component.installed_objects == 0 {
+                                return Err(format!(
+                                    "{name} {kind} installs nothing in a fresh publication at rung {rung}"
+                                ));
+                            }
                             if component.install_attempts < component.installed_objects
                                 || component.install_attempts > requests
                                 || component.install_attempts.checked_mul(2)
@@ -6356,6 +6638,22 @@ fn validate_lifecycle_metric_policies_for_axis(
                         if values[rung] != expected {
                             return Err(format!(
                                 "{name} does not reconcile output/spool/membership/ordinal barriers at rung {rung}"
+                            ));
+                        }
+                        // Floor: a non-empty graph always writes at least one
+                        // topology parquet artifact, and each lane's namespace
+                        // and file barriers are counted into the output
+                        // component (lanes.rs). Reconciling the aggregate to
+                        // its components alone accepts both reading zero,
+                        // which is what an encoder that stopped issuing (or
+                        // counting) its barriers would produce. Do not
+                        // tighten this to `>= canonical_artifact_objects`:
+                        // adjacency artifacts (adjacency.rs) add write bytes
+                        // but no attributed barrier, so that bound would be
+                        // false.
+                        if observation.encode_fsync_components[0] == 0 {
+                            return Err(format!(
+                                "{name} has no output barrier although encoded output was written at rung {rung}"
                             ));
                         }
                     }
@@ -6494,6 +6792,9 @@ fn validate_lifecycle_metric_policies(
     validate_lifecycle_metric_policies_for_axis(LinearityAxis::Nodes, observations)
 }
 
+/// A manifest of this many files fits in one radix chunk.
+const SYNTHETIC_MANIFEST_FILES: u64 = 8;
+
 fn synthetic_category_metrics(axis: LinearityAxis, factor: u64) -> BTreeMap<String, [u64; 6]> {
     let mut metrics = BTreeMap::new();
     for owner in ["source", "clean_import"] {
@@ -6596,11 +6897,10 @@ fn synthetic_linearity_observations_for_axis(
                     ],
                 ),
                 ("hydration_verification".into(), {
-                    let copied = if matches!(axis, LinearityAxis::Nodes) {
-                        100 + 800 * factor
-                    } else {
-                        900
-                    };
+                    // Only the small mutable controls are copied; the identity
+                    // runs are hard-linked (#1388), so this is fixed on both
+                    // axes.
+                    let copied = 900;
                     // Reads reconcile to the copy protocol: each private
                     // copy read twice, plus one bounded route-table read.
                     [2 * copied + 64, copied, factor, factor, 0, 0, 38]
@@ -6709,6 +7009,8 @@ fn synthetic_linearity_observations_for_axis(
             encode_fsync_components: [10, 5, 8, 20],
             hydration_files_copied: 19,
             hydration_uuid_control_bytes: 100,
+            manifest_files: SYNTHETIC_MANIFEST_FILES,
+            catalog_fixed_objects: 0,
             hydration_file_fsync_operations: 19,
             hydration_directory_fsync_operations: 19,
             shape_read_component_calls: [factor, 0, 0, 0, 0, 0],
@@ -6923,6 +7225,7 @@ fn synthetic_retained_evidence() -> Value {
     let (source, _) = synthetic_attribution_owner("source");
     let (clean_import, _) = synthetic_attribution_owner("clean_import");
     json!({
+        "source_manifest": {"file_count": SYNTHETIC_MANIFEST_FILES, "catalog_fixed_objects": 0},
         "source_nodes": 100,
         "source_edges": 80,
         "storage": {
@@ -6973,7 +7276,8 @@ fn cas_control_proof_accepts_path_variation_and_rejects_coherent_overcounts() {
         let io = &mut observation.cas_publication_io;
         io.manifest.installed_objects = installed;
         io.manifest.install_attempts = installed;
-        io.manifest.read_calls = installed + io.manifest.reused_objects;
+        // The Unix fresh writer needs no redundant file authentication pass.
+        io.manifest.read_calls = io.manifest.reused_objects;
         io.manifest.write_calls = installed;
         io.manifest.file_fsync_calls = installed;
         io.manifest.directory_fsync_calls = 2 * installed;
@@ -6992,6 +7296,20 @@ fn cas_control_proof_accepts_path_variation_and_rejects_coherent_overcounts() {
         );
     }
     validate_lifecycle_metric_policies(&observations).unwrap();
+    let mut missing_fresh_write = observations[0].clone();
+    missing_fresh_write.cas_publication_io.manifest.write_calls = 0;
+    assert!(
+        validate_fresh_cas_control_bound(&missing_fresh_write)
+            .unwrap_err()
+            .contains("mandatory bootstrap")
+    );
+    let mut missing_reuse_read = observations[0].clone();
+    missing_reuse_read.cas_publication_io.manifest.read_calls -= 1;
+    assert!(
+        validate_fresh_cas_control_bound(&missing_reuse_read)
+            .unwrap_err()
+            .contains("mandatory bootstrap")
+    );
     let mut missing_manifest = observations[0].clone();
     missing_manifest.cas_publication_io.manifest = Default::default();
     missing_manifest.cas_publication_io.manifest_reads = Default::default();
@@ -7101,6 +7419,79 @@ fn controlled_fixture_policies_reject_coherent_zero_and_excess_work() {
                 .unwrap_err()
                 .contains("retained encoding inventory changed")
         );
+        // The catalog inventory is structural: for N declared files the manifest
+        // chunks lie in [ceil(N / capacity), 2N - 1], and N is the same in every
+        // rung. A rung may re-shape the radix tree within that range (path text
+        // embeds content hashes); a rung that adds files, or a manifest outside
+        // the range, is refused.
+        let with_manifest = |files: [u64; 3], chunks: [u64; 3]| {
+            let mut changed = observations.clone();
+            for (rung, observation) in changed.iter_mut().enumerate() {
+                observation.manifest_files = files[rung];
+                for owner in ["source", "clean_import"] {
+                    let key = format!("{owner}.catalog_and_manifests");
+                    let before = observation.category_metrics[&key];
+                    let pages = 4096 * chunks[rung];
+                    let (extra_objects, extra_pages) =
+                        (chunks[rung] - before[0], pages - before[4]);
+                    for metrics in [
+                        &mut observation.category_metrics,
+                        &mut observation.category_authority_metrics,
+                    ] {
+                        let fields = metrics.get_mut(&key).unwrap();
+                        fields[0] = chunks[rung];
+                        fields[2] = chunks[rung];
+                        fields[4] = pages;
+                        fields[5] = pages;
+                    }
+                    for name in ["logical_references", "physical_objects"] {
+                        *observation
+                            .retained
+                            .get_mut(&format!("{owner}.{name}"))
+                            .unwrap() += extra_objects;
+                    }
+                    *observation
+                        .retained
+                        .get_mut(&format!("{owner}.allocated_bytes"))
+                        .unwrap() += extra_pages;
+                }
+            }
+            changed
+        };
+        let capacity = u64::try_from(graphforge_storage::GRAPH_MANIFEST_BUCKET_CAPACITY).unwrap();
+        let files = 8 * capacity;
+        let (least, most) = (files.div_ceil(capacity), 2 * files - 1);
+        validate_lifecycle_metric_policies_for_axis(
+            axis,
+            &with_manifest([files; 3], [least + 1, least + 2, least + 1]),
+        )
+        .expect("the radix shape may differ between rungs within its structural range");
+        validate_lifecycle_metric_policies_for_axis(axis, &with_manifest([files; 3], [most; 3]))
+            .expect("the structural ceiling is inclusive");
+        for (label, changed, expected) in [
+            (
+                "a rung that declares more files",
+                with_manifest([files, files, files + capacity], [least + 1; 3]),
+                "manifest file count changed",
+            ),
+            (
+                "fewer chunks than the files need",
+                with_manifest([files; 3], [least - 1; 3]),
+                "object inventory changed",
+            ),
+            (
+                "more chunks than a radix tree over the files has",
+                with_manifest([files; 3], [most + 1; 3]),
+                "object inventory changed",
+            ),
+        ] {
+            let error =
+                validate_lifecycle_metric_policies_for_axis(axis, &changed).expect_err(label);
+            assert!(
+                error.contains("catalog_and_manifests") && error.contains(expected),
+                "{label}: {error}"
+            );
+        }
         for (category, field) in [
             ("catalog_and_manifests", 1),
             ("catalog_and_manifests", 3),
@@ -7248,6 +7639,246 @@ fn lifecycle_hydration_read_policy_reconciles_to_the_copy_protocol() {
             phase[0] = 2 * phase[1];
         }
         assert!(validate_lifecycle_metric_policies_for_axis(axis, &no_route_table_read).is_err());
+    }
+}
+
+#[test]
+fn phase_metric_regimes_are_declared_and_structure_bounds_carry_a_floor() {
+    let mut declared = Vec::new();
+    for row in PHASE_METRIC_POLICIES {
+        for (field, policy) in LINEARITY_PHASE_FIELDS.iter().zip(row.fields) {
+            let regime = policy.regime();
+            declared.push(regime);
+            match (regime, policy) {
+                // (b) must carry both an upper bound and a floor, so that a
+                // component dropped from every rung alike is still caught.
+                (
+                    MetricRegime::StructureBounded,
+                    PhaseMetricPolicy::BoundedObjectCalls {
+                        max_growth_percent,
+                        min_absolute_calls,
+                        ..
+                    },
+                ) => assert!(
+                    (1..100).contains(&max_growth_percent) && min_absolute_calls > 0,
+                    "{}.{field}: spread {max_growth_percent}% and floor {min_absolute_calls}",
+                    row.phase
+                ),
+                (
+                    MetricRegime::StructureBounded,
+                    PhaseMetricPolicy::InventoryControlBytes { maximum },
+                ) => assert!(
+                    (1..=ENCODING_BUFFER_BYTES).contains(&maximum),
+                    "{}.{field}: ceiling {maximum} must be 1..=one encoding buffer",
+                    row.phase
+                ),
+                (MetricRegime::StructureBounded, other) => panic!(
+                    "{}.{field}: {other:?} is structure-bounded but its spread/ceiling and floor are not checked here",
+                    row.phase
+                ),
+                (MetricRegime::FixedProtocol, other)
+                    if other != PhaseMetricPolicy::StructurallyZero =>
+                {
+                    panic!("{}.{field}: {other:?} is not a fixed protocol", row.phase)
+                }
+                (
+                    MetricRegime::FixedProtocol
+                    | MetricRegime::DataProportional
+                    | MetricRegime::Reconciled,
+                    _,
+                ) => {}
+            }
+        }
+    }
+    // Every regime is exercised by the table, so none is dead vocabulary.
+    for regime in [
+        MetricRegime::DataProportional,
+        MetricRegime::StructureBounded,
+        MetricRegime::FixedProtocol,
+        MetricRegime::Reconciled,
+    ] {
+        assert!(declared.contains(&regime), "no row declares {regime:?}");
+    }
+    // Rows this issue relaxed from the pre-redesign "grows with the data"
+    // default keep the named replacement property, not a silent weakening.
+    let policy = |phase: &str, field: &str| {
+        let row = PHASE_METRIC_POLICIES
+            .iter()
+            .find(|row| row.phase == phase)
+            .unwrap();
+        let index = LINEARITY_PHASE_FIELDS
+            .iter()
+            .position(|name| *name == field)
+            .unwrap();
+        row.fields[index]
+    };
+    assert_eq!(
+        policy("recovery_reauthentication", "read_calls").regime(),
+        MetricRegime::StructureBounded
+    );
+    assert_eq!(
+        policy("hydration_verification", "read_bytes").regime(),
+        MetricRegime::Reconciled
+    );
+    // #1430: fsync flattening was a durability regression, not a regime
+    // change; the row stays data-proportional.
+    assert_eq!(
+        policy("fsync_synchronization", "fsync_calls").regime(),
+        MetricRegime::DataProportional
+    );
+}
+
+#[test]
+fn every_declared_nonzero_phase_metric_rejects_a_uniform_drop_to_zero() {
+    // "Stopped running": the whole metric vanishes on every rung alike. A
+    // spread or monotonicity check is blind to that. Only the aggregate is
+    // zeroed here, so the rejection may come from the reconciliation mismatch
+    // against its (unzeroed) components or from a sibling field of the same
+    // phase rather than the field's own floor; coherent zeros of the
+    // components are exercised separately. The error must still name the
+    // mutated phase, so an unrelated validator is not what rejected it.
+    for axis in [LinearityAxis::Nodes, LinearityAxis::Edges] {
+        let base = synthetic_linearity_observations_for_axis(axis);
+        validate_lifecycle_metric_policies_for_axis(axis, &base).expect("synthetic baseline");
+        for row in PHASE_METRIC_POLICIES {
+            for (index, (field, policy)) in
+                LINEARITY_PHASE_FIELDS.iter().zip(row.fields).enumerate()
+            {
+                if policy.regime() == MetricRegime::FixedProtocol {
+                    continue;
+                }
+                let mut dropped = base.clone();
+                for observation in &mut dropped {
+                    observation.phases.get_mut(row.phase).unwrap()[index] = 0;
+                }
+                let error = validate_lifecycle_metric_policies_for_axis(axis, &dropped).expect_err(
+                    &format!(
+                        "{axis:?}: {}.{field} dropped to zero on every rung must fail",
+                        row.phase
+                    ),
+                );
+                // Append bytes carry a second floor anchored to the accepted
+                // input row count (at least one byte per row), checked before
+                // the row's own policy.
+                let append_row_floor = row.phase == "append_merge"
+                    && *field == "write_bytes"
+                    && error.contains("append bytes are below accepted row count");
+                assert!(
+                    error.contains(row.phase) || append_row_floor,
+                    "{}.{field}: {error}",
+                    row.phase
+                );
+            }
+        }
+    }
+}
+
+fn reconcile_cas_phase_aggregate(observation: &mut LifecycleLinearityObservation) {
+    let totals = observation.cas_publication_io.totals().expect("CAS totals");
+    observation.phases.insert(
+        "cas_install_read_write".to_owned(),
+        [
+            totals.read_bytes,
+            totals.write_bytes,
+            totals.read_calls,
+            totals.write_calls,
+            0,
+            0,
+            totals.file_fsync_calls + totals.directory_fsync_calls,
+        ],
+    );
+}
+
+#[test]
+fn cas_fsync_inventory_rejects_a_fresh_publication_that_installed_nothing() {
+    // Reconciling the aggregate to its components accepts a publication whose
+    // objects were all "reused" with no install attempt and no barrier, even
+    // though the ladder publishes into a fresh store (`initial_entries == 0`)
+    // where the first request for any object must install it.
+    for axis in [LinearityAxis::Nodes, LinearityAxis::Edges] {
+        for kind in ["payload", "manifest"] {
+            let mut nothing_installed = synthetic_linearity_observations_for_axis(axis);
+            for observation in &mut nothing_installed {
+                let component = if kind == "payload" {
+                    &mut observation.cas_publication_io.payload
+                } else {
+                    &mut observation.cas_publication_io.manifest
+                };
+                component.reused_objects += component.installed_objects;
+                component.installed_objects = 0;
+                component.install_attempts = 0;
+                component.installed_bytes = 0;
+                if kind == "manifest" {
+                    // The fresh-publication control bound requires one
+                    // manifest write call per install attempt.
+                    component.write_calls = 0;
+                    component.write_bytes = 0;
+                }
+                component.file_fsync_calls = 0;
+                component.directory_fsync_calls = 0;
+                reconcile_cas_phase_aggregate(observation);
+            }
+            let error = validate_lifecycle_metric_policies_for_axis(axis, &nothing_installed)
+                .expect_err("a fresh publication that installed no object must fail");
+            assert!(
+                error.contains("cas_install_read_write.fsync_calls")
+                    && error.contains(kind)
+                    && error.contains("installs nothing"),
+                "{axis:?} {kind}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn shape_block_inventory_rejects_a_shape_that_merged_no_bytes() {
+    // A non-empty graph's identity records are read through the counted
+    // reader and routed through the partition writer, so both merge byte
+    // totals are positive. Zero bytes with zero blocks reconciles trivially.
+    for axis in [LinearityAxis::Nodes, LinearityAxis::Edges] {
+        let mut no_merge = synthetic_linearity_observations_for_axis(axis);
+        for observation in &mut no_merge {
+            observation.shape_merge_bytes = [0, 0];
+            observation.shape_block_components = [0, 0];
+            observation
+                .phases
+                .get_mut("shape_consume_reauthentication")
+                .unwrap()[5] = 0;
+        }
+        let error = validate_lifecycle_metric_policies_for_axis(axis, &no_merge)
+            .expect_err("a non-empty graph shaped with zero merge bytes must fail");
+        assert!(
+            error.contains("shape_consume_reauthentication.block_count")
+                && error.contains("no merge bytes"),
+            "{axis:?}: {error}"
+        );
+    }
+}
+
+#[test]
+fn encode_fsync_inventory_rejects_barriers_that_stop_being_counted() {
+    // The aggregate and its native components can both read zero if the
+    // encoder stops issuing (or stops counting) its durability barriers.
+    // Reconciling the aggregate to the components alone accepts that.
+    for axis in [LinearityAxis::Nodes, LinearityAxis::Edges] {
+        let mut no_barriers = synthetic_linearity_observations_for_axis(axis);
+        let fsync_index = LINEARITY_PHASE_FIELDS
+            .iter()
+            .position(|field| *field == "fsync_calls")
+            .unwrap();
+        for observation in &mut no_barriers {
+            observation.encode_fsync_components = [0; 4];
+            observation
+                .phases
+                .get_mut("encode_write_postwrite_authentication")
+                .unwrap()[fsync_index] = 0;
+        }
+        let error = validate_lifecycle_metric_policies_for_axis(axis, &no_barriers)
+            .expect_err("encoding durable output with zero barriers must fail");
+        assert!(
+            error.contains("encode_write_postwrite_authentication.fsync_calls"),
+            "{error}"
+        );
     }
 }
 
@@ -8033,6 +8664,33 @@ fn submitted_chunk_count(evidence: &graphforge_storage::GraphConstructionEvidenc
         .input_batches
         .checked_add(evidence.replayed_chunks)
         .expect("submitted construction chunk count overflow")
+}
+
+#[test]
+fn ingest_heartbeat_retains_requested_io_capture_on_its_worker() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("heartbeat.json");
+    let profile = load_profile();
+    let _capture = graphforge_storage::io_stats::CaptureScope::install();
+    let batch = RecordBatch::try_from_iter([(
+        "id",
+        Arc::new(UInt64Array::from(vec![1_u64])) as Arc<dyn Array>,
+    )])
+    .unwrap();
+    let mut staged = graphforge_storage::RewriteBatch::new();
+    staged
+        .stage(
+            &root.path().join("observed.parquet"),
+            batch.schema(),
+            &batch,
+        )
+        .unwrap();
+    staged.commit_at(root.path()).unwrap();
+    let heartbeat = IngestHeartbeat::start_at(path.clone(), &profile, &profile.rungs[0], &[], &[]);
+    heartbeat.stop();
+    let value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(value["run_state"], "ingest_heartbeat");
+    assert_eq!(value["storage_io"]["rewrite_commits"], 1);
 }
 
 #[test]

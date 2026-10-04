@@ -1,4 +1,4 @@
-//! Process-global I/O counters for storage reads and staged rewrite commits.
+//! Requested operation-owned I/O counters for storage reads and staged rewrite commits.
 //! The read counters cover [`read_edges`](crate::catalog::read_edges),
 //! [`read_edges_filtered`](crate::catalog::read_edges_filtered), and
 //! [`read_nodes`](crate::catalog::read_nodes).
@@ -26,20 +26,19 @@
 //!   [`RewriteBatch`](crate::RewriteBatch) commit, regardless of how many files
 //!   were staged in that batch.
 //!
-//! # Caveats
-//! Counters are process-global and aggregate across threads *and* queries
-//! (`read_nodes` is also used by the writer/mutator). They are advisory
-//! instrumentation, not per-query state. A test that asserts on them must
-//! [`reset`] immediately before the measured operation and keep that section
-//! single-threaded — the counters cannot attribute concurrent work. Each
-//! increment is one relaxed atomic add, negligible against a Parquet decode.
+//! # Collection
+//! Ordinary operations do not update these counters. Install [`CaptureScope`]
+//! before the measured work; workers attach its lifecycle context. [`snapshot`]
+//! returns `None` when no collector is active. [`reset`] clears only an existing
+//! capture and never enables collection for later unrelated operations.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 static TEST_MEASUREMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Serialize tests that reset and assert the process-global counters.
+/// Legacy serialization for tests sharing storage fixtures. Each measurement
+/// must separately install an operation-owned capture.
 #[cfg(test)]
 pub(crate) fn test_measurement_guard() -> std::sync::MutexGuard<'static, ()> {
     TEST_MEASUREMENT_LOCK
@@ -115,34 +114,40 @@ pub trait FilteredReadObserver: Send + Sync {
     fn pruning(&self, _table: FilteredReadTable, _pruning: FilteredReadPruning) {}
 }
 
-static EDGE_FULL_READS: AtomicU64 = AtomicU64::new(0);
-static EDGE_FULL_ROWS: AtomicU64 = AtomicU64::new(0);
-static EDGE_FILTERED_READS: AtomicU64 = AtomicU64::new(0);
-static EDGE_FILTERED_ROWS: AtomicU64 = AtomicU64::new(0);
-static NODE_FULL_READS: AtomicU64 = AtomicU64::new(0);
-static NODE_FULL_ROWS: AtomicU64 = AtomicU64::new(0);
-static NODE_FILTERED_READS: AtomicU64 = AtomicU64::new(0);
-static NODE_FILTERED_ROWS: AtomicU64 = AtomicU64::new(0);
-static EDGE_SCANNED_ROWS: AtomicU64 = AtomicU64::new(0);
-static NODE_SCANNED_ROWS: AtomicU64 = AtomicU64::new(0);
-static NODE_DENSE_ROW_SELECTION_READS: AtomicU64 = AtomicU64::new(0);
-static NODE_ROW_GROUP_PREDICATE_READS: AtomicU64 = AtomicU64::new(0);
-static NODE_ROW_GROUPS_CONSIDERED: AtomicU64 = AtomicU64::new(0);
-static NODE_ROW_GROUPS_SELECTED: AtomicU64 = AtomicU64::new(0);
-static NODE_PAGES_CONSIDERED: AtomicU64 = AtomicU64::new(0);
-static NODE_PAGES_SELECTED: AtomicU64 = AtomicU64::new(0);
-static NODE_EXACT_ROWS_SELECTED: AtomicU64 = AtomicU64::new(0);
-static NODE_METADATA_FALLBACKS: AtomicU64 = AtomicU64::new(0);
-static NODE_VALIDATION_FALLBACKS: AtomicU64 = AtomicU64::new(0);
-static REWRITE_COMMITS: AtomicU64 = AtomicU64::new(0);
-static TOPOLOGY_REWRITE_EXISTING_ROWS: AtomicU64 = AtomicU64::new(0);
-static TOPOLOGY_REWRITE_NEW_ROWS: AtomicU64 = AtomicU64::new(0);
-static TOPOLOGY_REWRITE_OUTPUT_ROWS: AtomicU64 = AtomicU64::new(0);
-static TOPOLOGY_REWRITE_PEAK_BATCH_ROWS: AtomicU64 = AtomicU64::new(0);
-static UUID_FILES_OPENED: AtomicU64 = AtomicU64::new(0);
-static UUID_FILES_SYNCED: AtomicU64 = AtomicU64::new(0);
+/// Collect optional read/rewrite statistics with an operation-owned lifecycle capture.
+pub use crate::lifecycle_io::CaptureScope;
 
-/// A point-in-time copy of the process-global I/O counters. Difference two
+#[derive(Debug, Default)]
+pub(crate) struct Counters {
+    edge_full_reads: AtomicU64,
+    edge_full_rows: AtomicU64,
+    edge_filtered_reads: AtomicU64,
+    edge_filtered_rows: AtomicU64,
+    node_full_reads: AtomicU64,
+    node_full_rows: AtomicU64,
+    node_filtered_reads: AtomicU64,
+    node_filtered_rows: AtomicU64,
+    edge_scanned_rows: AtomicU64,
+    node_scanned_rows: AtomicU64,
+    node_dense_row_selection_reads: AtomicU64,
+    node_row_group_predicate_reads: AtomicU64,
+    node_row_groups_considered: AtomicU64,
+    node_row_groups_selected: AtomicU64,
+    node_pages_considered: AtomicU64,
+    node_pages_selected: AtomicU64,
+    node_exact_rows_selected: AtomicU64,
+    node_metadata_fallbacks: AtomicU64,
+    node_validation_fallbacks: AtomicU64,
+    rewrite_commits: AtomicU64,
+    topology_rewrite_existing_rows: AtomicU64,
+    topology_rewrite_new_rows: AtomicU64,
+    topology_rewrite_output_rows: AtomicU64,
+    topology_rewrite_peak_batch_rows: AtomicU64,
+    uuid_files_opened: AtomicU64,
+    uuid_files_synced: AtomicU64,
+}
+
+/// A point-in-time copy of requested I/O counters. Difference two
 /// snapshots — or [`reset`] then [`snapshot`] — to attribute work to a region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct IoSnapshot {
@@ -205,150 +210,233 @@ pub struct IoSnapshot {
     pub uuid_files_synced: u64,
 }
 
-/// Capture the current process-global counters.
+/// Capture requested counters, or report an unavailable observation.
 #[must_use]
-pub fn snapshot() -> IoSnapshot {
-    IoSnapshot {
-        edge_full_reads: EDGE_FULL_READS.load(Ordering::Relaxed),
-        edge_full_rows: EDGE_FULL_ROWS.load(Ordering::Relaxed),
-        edge_filtered_reads: EDGE_FILTERED_READS.load(Ordering::Relaxed),
-        edge_filtered_rows: EDGE_FILTERED_ROWS.load(Ordering::Relaxed),
-        node_full_reads: NODE_FULL_READS.load(Ordering::Relaxed),
-        node_full_rows: NODE_FULL_ROWS.load(Ordering::Relaxed),
-        node_filtered_reads: NODE_FILTERED_READS.load(Ordering::Relaxed),
-        node_filtered_rows: NODE_FILTERED_ROWS.load(Ordering::Relaxed),
-        edge_scanned_rows: EDGE_SCANNED_ROWS.load(Ordering::Relaxed),
-        node_scanned_rows: NODE_SCANNED_ROWS.load(Ordering::Relaxed),
-        node_dense_row_selection_reads: NODE_DENSE_ROW_SELECTION_READS.load(Ordering::Relaxed),
-        node_row_group_predicate_reads: NODE_ROW_GROUP_PREDICATE_READS.load(Ordering::Relaxed),
-        node_row_groups_considered: NODE_ROW_GROUPS_CONSIDERED.load(Ordering::Relaxed),
-        node_row_groups_selected: NODE_ROW_GROUPS_SELECTED.load(Ordering::Relaxed),
-        node_pages_considered: NODE_PAGES_CONSIDERED.load(Ordering::Relaxed),
-        node_pages_selected: NODE_PAGES_SELECTED.load(Ordering::Relaxed),
-        node_exact_rows_selected: NODE_EXACT_ROWS_SELECTED.load(Ordering::Relaxed),
-        node_metadata_fallbacks: NODE_METADATA_FALLBACKS.load(Ordering::Relaxed),
-        node_validation_fallbacks: NODE_VALIDATION_FALLBACKS.load(Ordering::Relaxed),
-        rewrite_commits: REWRITE_COMMITS.load(Ordering::Relaxed),
-        topology_rewrite_existing_rows: TOPOLOGY_REWRITE_EXISTING_ROWS.load(Ordering::Relaxed),
-        topology_rewrite_new_rows: TOPOLOGY_REWRITE_NEW_ROWS.load(Ordering::Relaxed),
-        topology_rewrite_output_rows: TOPOLOGY_REWRITE_OUTPUT_ROWS.load(Ordering::Relaxed),
-        topology_rewrite_peak_batch_rows: TOPOLOGY_REWRITE_PEAK_BATCH_ROWS.load(Ordering::Relaxed),
-        uuid_files_opened: UUID_FILES_OPENED.load(Ordering::Relaxed),
-        uuid_files_synced: UUID_FILES_SYNCED.load(Ordering::Relaxed),
-    }
+pub fn snapshot() -> Option<IoSnapshot> {
+    crate::lifecycle_io::with_io_stats(|counters| IoSnapshot {
+        edge_full_reads: counters.edge_full_reads.load(Ordering::Relaxed),
+        edge_full_rows: counters.edge_full_rows.load(Ordering::Relaxed),
+        edge_filtered_reads: counters.edge_filtered_reads.load(Ordering::Relaxed),
+        edge_filtered_rows: counters.edge_filtered_rows.load(Ordering::Relaxed),
+        node_full_reads: counters.node_full_reads.load(Ordering::Relaxed),
+        node_full_rows: counters.node_full_rows.load(Ordering::Relaxed),
+        node_filtered_reads: counters.node_filtered_reads.load(Ordering::Relaxed),
+        node_filtered_rows: counters.node_filtered_rows.load(Ordering::Relaxed),
+        edge_scanned_rows: counters.edge_scanned_rows.load(Ordering::Relaxed),
+        node_scanned_rows: counters.node_scanned_rows.load(Ordering::Relaxed),
+        node_dense_row_selection_reads: counters
+            .node_dense_row_selection_reads
+            .load(Ordering::Relaxed),
+        node_row_group_predicate_reads: counters
+            .node_row_group_predicate_reads
+            .load(Ordering::Relaxed),
+        node_row_groups_considered: counters.node_row_groups_considered.load(Ordering::Relaxed),
+        node_row_groups_selected: counters.node_row_groups_selected.load(Ordering::Relaxed),
+        node_pages_considered: counters.node_pages_considered.load(Ordering::Relaxed),
+        node_pages_selected: counters.node_pages_selected.load(Ordering::Relaxed),
+        node_exact_rows_selected: counters.node_exact_rows_selected.load(Ordering::Relaxed),
+        node_metadata_fallbacks: counters.node_metadata_fallbacks.load(Ordering::Relaxed),
+        node_validation_fallbacks: counters.node_validation_fallbacks.load(Ordering::Relaxed),
+        rewrite_commits: counters.rewrite_commits.load(Ordering::Relaxed),
+        topology_rewrite_existing_rows: counters
+            .topology_rewrite_existing_rows
+            .load(Ordering::Relaxed),
+        topology_rewrite_new_rows: counters.topology_rewrite_new_rows.load(Ordering::Relaxed),
+        topology_rewrite_output_rows: counters
+            .topology_rewrite_output_rows
+            .load(Ordering::Relaxed),
+        topology_rewrite_peak_batch_rows: counters
+            .topology_rewrite_peak_batch_rows
+            .load(Ordering::Relaxed),
+        uuid_files_opened: counters.uuid_files_opened.load(Ordering::Relaxed),
+        uuid_files_synced: counters.uuid_files_synced.load(Ordering::Relaxed),
+    })
 }
 
-/// Reset every counter to zero. Call immediately before a measured operation.
+/// Reset the current capture; an inactive caller remains inactive.
 pub fn reset() {
-    for c in [
-        &EDGE_FULL_READS,
-        &EDGE_FULL_ROWS,
-        &EDGE_FILTERED_READS,
-        &EDGE_FILTERED_ROWS,
-        &NODE_FULL_READS,
-        &NODE_FULL_ROWS,
-        &NODE_FILTERED_READS,
-        &NODE_FILTERED_ROWS,
-        &EDGE_SCANNED_ROWS,
-        &NODE_SCANNED_ROWS,
-        &NODE_DENSE_ROW_SELECTION_READS,
-        &NODE_ROW_GROUP_PREDICATE_READS,
-        &NODE_ROW_GROUPS_CONSIDERED,
-        &NODE_ROW_GROUPS_SELECTED,
-        &NODE_PAGES_CONSIDERED,
-        &NODE_PAGES_SELECTED,
-        &NODE_EXACT_ROWS_SELECTED,
-        &NODE_METADATA_FALLBACKS,
-        &NODE_VALIDATION_FALLBACKS,
-        &REWRITE_COMMITS,
-        &TOPOLOGY_REWRITE_EXISTING_ROWS,
-        &TOPOLOGY_REWRITE_NEW_ROWS,
-        &TOPOLOGY_REWRITE_OUTPUT_ROWS,
-        &TOPOLOGY_REWRITE_PEAK_BATCH_ROWS,
-        &UUID_FILES_OPENED,
-        &UUID_FILES_SYNCED,
-    ] {
-        c.store(0, Ordering::Relaxed);
-    }
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters.edge_full_reads.store(0, Ordering::Relaxed);
+        counters.edge_full_rows.store(0, Ordering::Relaxed);
+        counters.edge_filtered_reads.store(0, Ordering::Relaxed);
+        counters.edge_filtered_rows.store(0, Ordering::Relaxed);
+        counters.node_full_reads.store(0, Ordering::Relaxed);
+        counters.node_full_rows.store(0, Ordering::Relaxed);
+        counters.node_filtered_reads.store(0, Ordering::Relaxed);
+        counters.node_filtered_rows.store(0, Ordering::Relaxed);
+        counters.edge_scanned_rows.store(0, Ordering::Relaxed);
+        counters.node_scanned_rows.store(0, Ordering::Relaxed);
+        counters
+            .node_dense_row_selection_reads
+            .store(0, Ordering::Relaxed);
+        counters
+            .node_row_group_predicate_reads
+            .store(0, Ordering::Relaxed);
+        counters
+            .node_row_groups_considered
+            .store(0, Ordering::Relaxed);
+        counters
+            .node_row_groups_selected
+            .store(0, Ordering::Relaxed);
+        counters.node_pages_considered.store(0, Ordering::Relaxed);
+        counters.node_pages_selected.store(0, Ordering::Relaxed);
+        counters
+            .node_exact_rows_selected
+            .store(0, Ordering::Relaxed);
+        counters.node_metadata_fallbacks.store(0, Ordering::Relaxed);
+        counters
+            .node_validation_fallbacks
+            .store(0, Ordering::Relaxed);
+        counters.rewrite_commits.store(0, Ordering::Relaxed);
+        counters
+            .topology_rewrite_existing_rows
+            .store(0, Ordering::Relaxed);
+        counters
+            .topology_rewrite_new_rows
+            .store(0, Ordering::Relaxed);
+        counters
+            .topology_rewrite_output_rows
+            .store(0, Ordering::Relaxed);
+        counters
+            .topology_rewrite_peak_batch_rows
+            .store(0, Ordering::Relaxed);
+        counters.uuid_files_opened.store(0, Ordering::Relaxed);
+        counters.uuid_files_synced.store(0, Ordering::Relaxed);
+    });
 }
 
 pub(crate) fn record_uuid_file_open() {
-    UUID_FILES_OPENED.fetch_add(1, Ordering::Relaxed);
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters.uuid_files_opened.fetch_add(1, Ordering::Relaxed);
+    });
 }
 
 pub(crate) fn record_uuid_file_sync() {
-    UUID_FILES_SYNCED.fetch_add(1, Ordering::Relaxed);
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters.uuid_files_synced.fetch_add(1, Ordering::Relaxed);
+    });
 }
 
 pub(crate) fn record_edge_full_read(rows: u64) {
-    EDGE_FULL_READS.fetch_add(1, Ordering::Relaxed);
-    EDGE_FULL_ROWS.fetch_add(rows, Ordering::Relaxed);
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters.edge_full_reads.fetch_add(1, Ordering::Relaxed);
+        counters.edge_full_rows.fetch_add(rows, Ordering::Relaxed);
+    });
 }
 
 pub(crate) fn record_edge_filtered_read(rows: u64) {
-    EDGE_FILTERED_READS.fetch_add(1, Ordering::Relaxed);
-    EDGE_FILTERED_ROWS.fetch_add(rows, Ordering::Relaxed);
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters.edge_filtered_reads.fetch_add(1, Ordering::Relaxed);
+        counters
+            .edge_filtered_rows
+            .fetch_add(rows, Ordering::Relaxed);
+    });
 }
 
 pub(crate) fn record_node_full_read(rows: u64) {
-    NODE_FULL_READS.fetch_add(1, Ordering::Relaxed);
-    NODE_FULL_ROWS.fetch_add(rows, Ordering::Relaxed);
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters.node_full_reads.fetch_add(1, Ordering::Relaxed);
+        counters.node_full_rows.fetch_add(rows, Ordering::Relaxed);
+    });
 }
 
 pub(crate) fn record_node_filtered_read(rows: u64) {
-    NODE_FILTERED_READS.fetch_add(1, Ordering::Relaxed);
-    NODE_FILTERED_ROWS.fetch_add(rows, Ordering::Relaxed);
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters.node_filtered_reads.fetch_add(1, Ordering::Relaxed);
+        counters
+            .node_filtered_rows
+            .fetch_add(rows, Ordering::Relaxed);
+    });
 }
 
 pub(crate) fn record_edge_scanned(rows: u64) {
-    EDGE_SCANNED_ROWS.fetch_add(rows, Ordering::Relaxed);
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .edge_scanned_rows
+            .fetch_add(rows, Ordering::Relaxed);
+    });
 }
 
 pub(crate) fn record_node_scanned(rows: u64) {
-    NODE_SCANNED_ROWS.fetch_add(rows, Ordering::Relaxed);
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .node_scanned_rows
+            .fetch_add(rows, Ordering::Relaxed);
+    });
 }
 
 pub(crate) fn record_node_pruning(pruning: FilteredReadPruning) {
-    match pruning.strategy {
-        FilteredReadStrategy::DenseRowSelection => {
-            NODE_DENSE_ROW_SELECTION_READS.fetch_add(1, Ordering::Relaxed);
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        match pruning.strategy {
+            FilteredReadStrategy::DenseRowSelection => {
+                counters
+                    .node_dense_row_selection_reads
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            FilteredReadStrategy::RowGroupPredicate => {
+                counters
+                    .node_row_group_predicate_reads
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            FilteredReadStrategy::FullFallback => {}
         }
-        FilteredReadStrategy::RowGroupPredicate => {
-            NODE_ROW_GROUP_PREDICATE_READS.fetch_add(1, Ordering::Relaxed);
-        }
-        FilteredReadStrategy::FullFallback => {}
-    }
-    NODE_ROW_GROUPS_CONSIDERED.fetch_add(pruning.row_groups_considered, Ordering::Relaxed);
-    NODE_ROW_GROUPS_SELECTED.fetch_add(pruning.row_groups_selected, Ordering::Relaxed);
-    NODE_PAGES_CONSIDERED.fetch_add(pruning.pages_considered, Ordering::Relaxed);
-    NODE_PAGES_SELECTED.fetch_add(pruning.pages_selected, Ordering::Relaxed);
-    NODE_EXACT_ROWS_SELECTED.fetch_add(pruning.exact_rows_selected, Ordering::Relaxed);
-    NODE_METADATA_FALLBACKS.fetch_add(pruning.metadata_fallbacks, Ordering::Relaxed);
-    NODE_VALIDATION_FALLBACKS.fetch_add(pruning.validation_fallbacks, Ordering::Relaxed);
+        counters
+            .node_row_groups_considered
+            .fetch_add(pruning.row_groups_considered, Ordering::Relaxed);
+        counters
+            .node_row_groups_selected
+            .fetch_add(pruning.row_groups_selected, Ordering::Relaxed);
+        counters
+            .node_pages_considered
+            .fetch_add(pruning.pages_considered, Ordering::Relaxed);
+        counters
+            .node_pages_selected
+            .fetch_add(pruning.pages_selected, Ordering::Relaxed);
+        counters
+            .node_exact_rows_selected
+            .fetch_add(pruning.exact_rows_selected, Ordering::Relaxed);
+        counters
+            .node_metadata_fallbacks
+            .fetch_add(pruning.metadata_fallbacks, Ordering::Relaxed);
+        counters
+            .node_validation_fallbacks
+            .fetch_add(pruning.validation_fallbacks, Ordering::Relaxed);
+    });
 }
 
 pub(crate) fn record_rewrite_commit() {
-    REWRITE_COMMITS.fetch_add(1, Ordering::Relaxed);
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters.rewrite_commits.fetch_add(1, Ordering::Relaxed);
+    });
 }
 
 pub(crate) fn record_topology_rewrite(existing_rows: u64, new_rows: u64) {
-    TOPOLOGY_REWRITE_EXISTING_ROWS.fetch_add(existing_rows, Ordering::Relaxed);
-    TOPOLOGY_REWRITE_NEW_ROWS.fetch_add(new_rows, Ordering::Relaxed);
-    TOPOLOGY_REWRITE_OUTPUT_ROWS
-        .fetch_add(existing_rows.saturating_add(new_rows), Ordering::Relaxed);
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .topology_rewrite_existing_rows
+            .fetch_add(existing_rows, Ordering::Relaxed);
+        counters
+            .topology_rewrite_new_rows
+            .fetch_add(new_rows, Ordering::Relaxed);
+        counters
+            .topology_rewrite_output_rows
+            .fetch_add(existing_rows.saturating_add(new_rows), Ordering::Relaxed);
+    });
 }
 
 pub(crate) fn record_topology_rewrite_batch(rows: u64) {
-    let mut prior = TOPOLOGY_REWRITE_PEAK_BATCH_ROWS.load(Ordering::Relaxed);
-    while rows > prior {
-        match TOPOLOGY_REWRITE_PEAK_BATCH_ROWS.compare_exchange_weak(
-            prior,
-            rows,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => break,
-            Err(actual) => prior = actual,
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        let mut prior = counters
+            .topology_rewrite_peak_batch_rows
+            .load(Ordering::Relaxed);
+        while rows > prior {
+            match counters
+                .topology_rewrite_peak_batch_rows
+                .compare_exchange_weak(prior, rows, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => break,
+                Err(actual) => prior = actual,
+            }
         }
-    }
+    });
 }

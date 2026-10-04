@@ -54,6 +54,8 @@ fn cli_proposal_submit_review_history_and_release_use_native_contract() {
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: current(&graph),
                 branch_uuid: branch,
@@ -72,6 +74,8 @@ fn cli_proposal_submit_review_history_and_release_use_native_contract() {
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: current(&graph),
                 branch_uuid: branch,

@@ -4,19 +4,20 @@
 //! enumerate `generations/`, inspect transaction journals, or decode any
 //! participant table.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(windows)]
-use std::sync::{Condvar, Mutex};
+use std::sync::Condvar;
 
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::project_failpoint;
@@ -25,6 +26,8 @@ use crate::project_failpoint;
 pub const FORMAT_FILE: &str = "FORMAT";
 /// Sole committed-generation pointer path.
 pub const CURRENT_FILE: &str = "CURRENT";
+pub(crate) const GENERATION_MANIFEST_VERSION: u32 = 2;
+
 /// Exact bytes accepted for a v0.5 project container.
 pub const PROJECT_FORMAT_BYTES: &[u8] = b"graphforge-project/v1\n";
 
@@ -87,6 +90,9 @@ pub struct ProjectParticipantDescriptor {
     pub content_sha256: [u8; 32],
 }
 
+/// One payload object's memoized admission outcome.
+type PayloadAdmissionCell = Arc<OnceLock<Result<(), GfError>>>;
+
 /// A validated, lifetime-pinned view of one committed project generation.
 ///
 /// The retained lease handle gives publication/cleanup work a stable file
@@ -109,6 +115,33 @@ pub struct ResolvedProjectGeneration {
     /// share one computation instead of independently re-running the full
     /// per-entry admission sweep.
     inventory_cache: Arc<OnceLock<Result<Option<Arc<crate::GraphFilesInventory>>, GfError>>>,
+    /// Per-object payload admission memo for this resolved generation, keyed by
+    /// content-store name so hard-linked duplicates pay once and every clone
+    /// shares the result. The map lock only mints a cell; the checksum runs
+    /// inside `OnceLock::get_or_init`, so concurrent first touches of one
+    /// object wait on a single computation while other objects proceed. A
+    /// refusal is memoized like a success.
+    payload_admissions: Arc<Mutex<BTreeMap<String, PayloadAdmissionCell>>>,
+    /// Memo of [`Self::admit_all_payloads`].
+    all_payloads_admitted: Arc<OnceLock<Result<(), GfError>>>,
+}
+
+/// Portable export authority minted from this generation's authenticated manifest.
+pub(crate) struct PortableParticipantIdentity {
+    byte_length: u64,
+    content_sha256: [u8; 32],
+    content_xxh64: u64,
+}
+impl PortableParticipantIdentity {
+    pub(crate) fn byte_length(&self) -> u64 {
+        self.byte_length
+    }
+    pub(crate) fn content_sha256(&self) -> [u8; 32] {
+        self.content_sha256
+    }
+    pub(crate) fn content_xxh64(&self) -> u64 {
+        self.content_xxh64
+    }
 }
 
 #[derive(Debug)]
@@ -146,7 +179,7 @@ impl ResolvedProjectGeneration {
                     root,
                     crate::GraphManifestLimits::default(),
                     |digest| {
-                        crate::read_graph_object_by_digest(
+                        crate::graph_object_store::read_graph_control_object_by_digest(
                             self.container_root(),
                             digest,
                             crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
@@ -167,10 +200,9 @@ impl ResolvedProjectGeneration {
                     (retained.file, None)
                 }
                 crate::GraphFilesParticipant::V2(_) => {
-                    let lease = crate::graph_object_store::open_graph_object_by_digest(
+                    let lease = crate::graph_object_store::open_graph_object_with_checksum(
                         self.container_root(),
-                        &entry.content_sha256,
-                        entry.byte_length,
+                        &entry,
                     )?;
                     let file = lease.try_clone_file().map_err(|error| {
                         GfError::Storage(format!("retain authenticated graph object: {error}"))
@@ -253,7 +285,7 @@ impl ResolvedProjectGeneration {
                     limits,
                     state,
                     |digest| {
-                        crate::graph_object_store::read_graph_object_counted(
+                        crate::graph_object_store::read_graph_control_object_counted(
                             self.container_root(),
                             digest,
                             crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
@@ -277,7 +309,7 @@ impl ResolvedProjectGeneration {
                 read_stable_graph_control(&graph_root, relative, entry.byte_length, maximum, io)?
             }
             crate::GraphFilesParticipant::V2(_) => {
-                crate::graph_object_store::read_graph_object_counted(
+                crate::graph_object_store::read_graph_control_object_counted(
                     self.container_root(),
                     &entry.content_sha256,
                     maximum,
@@ -323,12 +355,44 @@ impl ResolvedProjectGeneration {
         crate::graph_tree_root(&self.generation_root)
     }
 
-    /// Load and validate the file-backed graph inventory when declared.
+    /// Load and validate the file-backed graph inventory when declared, with
+    /// every declared payload authenticated by exact length and required
+    /// XXH64 checksum. Content authentication is memoized per object, so
+    /// repeat calls are cheap.
+    ///
+    /// Use this wherever the caller will read or republish payload bytes
+    /// without routing each read through [`crate::graph_admission`]. Opening a
+    /// project uses [`Self::unadmitted_graph_files_inventory`] instead and
+    /// admits each payload on first touch.
+    ///
+    /// # Errors
+    /// Returns structured validation/corruption errors for unsupported
+    /// contracts, inventory/tree mismatch, or a corrupted payload.
+    pub fn graph_files_inventory(&self) -> Result<Option<crate::GraphFilesInventory>, GfError> {
+        let inventory = self.unadmitted_graph_files_inventory()?;
+        if inventory.is_some() {
+            self.admit_all_payloads()?;
+        }
+        Ok(inventory)
+    }
+
+    /// Load and validate the file-backed graph inventory without reading any
+    /// payload content. The manifest, route table, and the presence and exact
+    /// length of every payload are authenticated; payload checksums are not
+    /// checked here. A caller must admit each payload before trusting its
+    /// bytes, either by routing reads through [`crate::graph_admission`] after
+    /// hydrating with [`crate::materialize_graph_objects`], or by calling
+    /// [`Self::admit_payload`] / [`Self::admit_all_payloads`].
+    ///
+    /// Expanded (V1) generations still verify their payloads here; only
+    /// compact generations defer content authentication.
     ///
     /// # Errors
     /// Returns structured validation/corruption errors for unsupported
     /// contracts or inventory/tree mismatch.
-    pub fn graph_files_inventory(&self) -> Result<Option<crate::GraphFilesInventory>, GfError> {
+    pub fn unadmitted_graph_files_inventory(
+        &self,
+    ) -> Result<Option<crate::GraphFilesInventory>, GfError> {
         // Memoized: a resolved generation never mutates and `CURRENT` is not
         // re-consulted after resolution (see `inventory_cache`'s doc comment
         // on the struct), so this admits the manifest-authenticated
@@ -345,11 +409,58 @@ impl ResolvedProjectGeneration {
         }
     }
 
-    /// Uncached body of [`Self::graph_files_inventory`]. Every call performs
-    /// full manifest decode and checks each declared graph payload against
-    /// its required checksum and exact length. Control nodes retain SHA-256
-    /// authentication. Call only through the memoized public
-    /// method above.
+    /// Admit one declared payload by exact length and required XXH64
+    /// checksum, memoized per content-store object for this resolved
+    /// generation (clones share the memo). Content-store names were
+    /// authenticated when each object was installed.
+    ///
+    /// # Errors
+    /// Returns the memoized refusal for a missing, truncated, or corrupted object.
+    pub fn admit_payload(&self, entry: &crate::GraphFileEntry) -> Result<(), GfError> {
+        let cell = {
+            let mut admissions = self
+                .payload_admissions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Arc::clone(admissions.entry(entry.content_sha256.clone()).or_default())
+        };
+        cell.get_or_init(|| {
+            crate::graph_object_store::admit_graph_object(self.container_root(), entry)
+        })
+        .clone()
+    }
+
+    /// Admit every declared compact payload. Expanded (V1) payloads were
+    /// verified when the inventory was loaded.
+    ///
+    /// # Errors
+    /// Returns the first refusal; the result is memoized for this generation.
+    pub fn admit_all_payloads(&self) -> Result<(), GfError> {
+        self.all_payloads_admitted
+            .get_or_init(|| {
+                if !matches!(
+                    self.declared_graph_files_participant()?,
+                    Some(crate::GraphFilesParticipant::V2(_))
+                ) {
+                    return Ok(());
+                }
+                let Some(inventory) = self.unadmitted_graph_files_inventory()? else {
+                    return Ok(());
+                };
+                inventory
+                    .files
+                    .iter()
+                    .try_for_each(|entry| self.admit_payload(entry))
+            })
+            .clone()
+    }
+
+    /// Uncached body of [`Self::unadmitted_graph_files_inventory`]. Performs
+    /// full manifest decode and route authentication and checks that each
+    /// declared compact payload is present with its exact length. Content
+    /// checksums are deferred to [`Self::admit_payload`]; expanded (V1)
+    /// payloads are verified here. Control nodes retain SHA-256
+    /// authentication. Call only through the memoized method above.
     fn compute_graph_files_inventory(&self) -> Result<Option<crate::GraphFilesInventory>, GfError> {
         let Some(participant) = self.declared_graph_files_participant()? else {
             return Ok(None);
@@ -365,18 +476,18 @@ impl ResolvedProjectGeneration {
                     &root,
                     crate::GraphManifestLimits::default(),
                     |digest| {
-                        crate::read_graph_object_by_digest(
+                        crate::graph_object_store::read_graph_control_object_by_digest(
                             self.container_root(),
                             digest,
                             crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
                         )
                     },
                 )?;
-                // Refuse payload corruption before exposing any reader by
-                // comparing required XXH64 and exact length. The same-inode
-                // topology regression (#1435) continues to exercise this check.
-                // SHA-256 names are authenticated at installation and existing
-                // trust boundaries; legacy formats and standalone audits are retired.
+                // Open is O(files), not O(bytes): refuse a missing or resized
+                // payload here, and leave the content checksum to the first
+                // reader (#1388). The same-inode topology regression (#1435)
+                // is proven on that first touch. SHA-256 names are
+                // authenticated at installation and existing trust boundaries.
                 for entry in &files {
                     let path =
                         crate::graph_object_path(self.container_root(), &entry.content_sha256)?;
@@ -391,13 +502,12 @@ impl ResolvedProjectGeneration {
                             "graph payload object length does not match manifest".into(),
                         ));
                     }
-                    crate::graph_object_store::admit_graph_object(self.container_root(), entry)?;
                 }
                 crate::route_component::authenticate_manifest_routes(
                     root.format_version,
                     &files,
                     |entry| {
-                        crate::read_graph_object_by_digest(
+                        crate::graph_object_store::read_graph_control_object_by_digest(
                             self.container_root(),
                             &entry.content_sha256,
                             MAX_SEGMENT_BYTES,
@@ -614,6 +724,24 @@ impl ResolvedProjectGeneration {
             .collect()
     }
 
+    pub(crate) fn portable_participant_identity(
+        &self,
+        capability: &str,
+        family: &str,
+    ) -> Result<PortableParticipantIdentity, GfError> {
+        let descriptor = self
+            .manifest
+            .participants
+            .iter()
+            .find(|entry| entry.capability_id == capability && entry.record_family_id == family)
+            .ok_or_else(|| corrupt("portable participant is absent from retained generation"))?;
+        Ok(PortableParticipantIdentity {
+            byte_length: descriptor.byte_length,
+            content_sha256: parse_sha256(&descriptor.content_sha256)?,
+            content_xxh64: descriptor.content_xxh64,
+        })
+    }
+
     /// Read and verify one requested participant without opening any sibling
     /// capability or record family.
     ///
@@ -644,8 +772,12 @@ impl ResolvedProjectGeneration {
         let path =
             self.participant_path(&descriptor.capability_id, &descriptor.record_family_id)?;
         let bytes = read_exact_participant(&path, descriptor.byte_length)?;
-        let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        if digest != parse_sha256(&descriptor.content_sha256)? {
+        if crate::corruption_checksum::checksum(&bytes) != descriptor.content_xxh64 {
+            return Err(corrupt("participant checksum does not match manifest"));
+        }
+        if descriptor.encoding == "json"
+            && <[u8; 32]>::from(Sha256::digest(&bytes)) != parse_sha256(&descriptor.content_sha256)?
+        {
             return Err(corrupt(
                 "participant content digest does not match manifest",
             ));
@@ -775,6 +907,8 @@ struct ParticipantDescriptor {
     row_count: u64,
     schema_fingerprint: String,
     content_sha256: String,
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    content_xxh64: u64,
 }
 
 /// Resolve exactly the generation named by `CURRENT`.
@@ -843,7 +977,7 @@ pub fn resolve_project_generation(
             ));
         }
         let manifest: GenerationManifest =
-            parse_canonical_json_line(&manifest_bytes, "generation manifest")?;
+            parse_generation_manifest(&manifest_bytes, "generation manifest")?;
         validate_manifest(&manifest, generation_uuid)?;
         reject_exact_directory(&selected_dir.join(PARTICIPANTS_DIR))?;
 
@@ -855,6 +989,8 @@ pub fn resolve_project_generation(
             manifest: Arc::new(manifest),
             _lease_handle: Arc::new(lease),
             inventory_cache: Arc::new(OnceLock::new()),
+            payload_admissions: Arc::default(),
+            all_payloads_admitted: Arc::new(OnceLock::new()),
         });
     }
 }
@@ -893,7 +1029,7 @@ pub fn resolve_verified_generation(
         ));
     }
     let manifest: GenerationManifest =
-        parse_canonical_json_line(&manifest_bytes, "generation manifest")?;
+        parse_generation_manifest(&manifest_bytes, "generation manifest")?;
     validate_manifest(&manifest, generation_uuid)?;
     reject_exact_directory(&selected_dir.join(PARTICIPANTS_DIR))?;
     Ok(ResolvedProjectGeneration {
@@ -904,6 +1040,8 @@ pub fn resolve_verified_generation(
         manifest: Arc::new(manifest),
         _lease_handle: Arc::new(lease),
         inventory_cache: Arc::new(OnceLock::new()),
+        payload_admissions: Arc::default(),
+        all_payloads_admitted: Arc::new(OnceLock::new()),
     })
 }
 
@@ -982,6 +1120,16 @@ pub(crate) fn open_or_initialize_project_admitted_with_allocation(
     root: &Path,
     allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<ResolvedProjectGeneration, GfError> {
+    open_or_initialize_project_admitted_with_bootstrap(root, None, allocation)
+}
+
+/// Use explicit (generation, transaction) identities only when bootstrapping.
+/// Existing selected generations and resumable generation identities are retained.
+pub(crate) fn open_or_initialize_project_admitted_with_bootstrap(
+    root: &Path,
+    bootstrap: Option<(Uuid, Uuid)>,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<ResolvedProjectGeneration, GfError> {
     reject_root_link(root)?;
     let _root_lock = lock_project_root(root)?;
     let mut entries = std::fs::read_dir(root).map_err(|error| {
@@ -996,12 +1144,19 @@ pub(crate) fn open_or_initialize_project_admitted_with_allocation(
         return match resolve_project_generation(root) {
             Err(error) if error.code() == "GF_PROJECT_UNINITIALIZED" => {
                 let generation_uuid = validate_resumable_uninitialized_layout(root)?;
-                initialize_empty_generation(root, false, Some(generation_uuid), allocation)
+                initialize_empty_generation(
+                    root,
+                    false,
+                    Some(generation_uuid),
+                    bootstrap.map(|(_, transaction)| transaction),
+                    allocation,
+                )
             }
             result => result,
         };
     }
-    initialize_empty_generation(root, true, None, allocation)
+    let (generation, transaction) = bootstrap.unzip();
+    initialize_empty_generation(root, true, generation, transaction, allocation)
 }
 
 fn validate_resumable_uninitialized_layout(root: &Path) -> Result<Uuid, GfError> {
@@ -1100,17 +1255,20 @@ fn validate_partial_generation(generation: &Path) -> Result<(), GfError> {
 }
 
 fn remove_partial_generation(generations: &Path, generation_uuid: Uuid) -> Result<(), GfError> {
-    let generation = generations.join(generation_uuid.hyphenated().to_string());
-    reset_partial_generation(generations, generation_uuid)?;
-    let participants = generation.join(PARTICIPANTS_DIR);
-    if participants.exists() {
-        std::fs::remove_dir(&participants).map_err(|error| {
+    let name = generation_uuid.hyphenated().to_string();
+    let parent = graphforge_filesystem::StableDirectory::open(generations).map_err(|error| {
+        GfError::Storage(format!("failed to retain interrupted generations: {error}"))
+    })?;
+    crate::durable_commit::retire_owned_tree(
+        &parent,
+        std::ffi::OsStr::new(&name),
+        graphforge_filesystem::path_identity(&generations.join(&name)).map_err(|error| {
             GfError::Storage(format!(
-                "failed to remove interrupted participants directory: {error}"
+                "failed to identify interrupted generation: {error}"
             ))
-        })?;
-    }
-    std::fs::remove_dir(&generation).map_err(|error| {
+        })?,
+    )
+    .map_err(|error| {
         GfError::Storage(format!(
             "failed to remove interrupted generation directory: {error}"
         ))
@@ -1119,34 +1277,52 @@ fn remove_partial_generation(generations: &Path, generation_uuid: Uuid) -> Resul
 
 fn reset_partial_generation(generations: &Path, generation_uuid: Uuid) -> Result<(), GfError> {
     let generation = generations.join(generation_uuid.hyphenated().to_string());
+    let parent = graphforge_filesystem::StableDirectory::open(&generation).map_err(|error| {
+        GfError::Storage(format!("failed to retain interrupted generation: {error}"))
+    })?;
     let workspace = generation.join(PARTICIPANTS_DIR).join("workspace");
     if workspace.exists() {
-        for family in [
-            "configuration.json",
-            "ontology.json",
-            "ontology_composition.json",
-            "research_metadata.json",
-        ] {
-            let path = workspace.join(family);
-            if path.exists() {
-                std::fs::remove_file(&path).map_err(|error| {
-                    GfError::Storage(format!("failed to reset workspace participant: {error}"))
-                })?;
-            }
-        }
-        std::fs::remove_dir(&workspace).map_err(|error| {
+        let participants = parent
+            .open_child_directory(std::ffi::OsStr::new(PARTICIPANTS_DIR))
+            .map_err(|error| {
+                GfError::Storage(format!("failed to retain workspace participants: {error}"))
+            })?;
+        crate::durable_commit::retire_owned_tree(
+            &participants,
+            std::ffi::OsStr::new("workspace"),
+            graphforge_filesystem::path_identity(&workspace).map_err(|error| {
+                GfError::Storage(format!("failed to identify workspace directory: {error}"))
+            })?,
+        )
+        .map_err(|error| {
             GfError::Storage(format!("failed to reset workspace directory: {error}"))
         })?;
     }
+    let mut retirement = crate::durable_commit::RetirementBatch::new(&parent).map_err(|error| {
+        GfError::Storage(format!("failed to retain generation retirement: {error}"))
+    })?;
     for name in [LEASE_FILE, MANIFEST_FILE] {
         let path = generation.join(name);
         if path.exists() {
-            std::fs::remove_file(&path).map_err(|error| {
-                GfError::Storage(format!("failed to reset interrupted generation: {error}"))
-            })?;
+            retirement
+                .unlink(
+                    std::ffi::OsStr::new(name),
+                    graphforge_filesystem::path_identity(&path).map_err(|error| {
+                        GfError::Storage(format!(
+                            "failed to identify interrupted generation file: {error}"
+                        ))
+                    })?,
+                )
+                .map_err(|error| {
+                    GfError::Storage(format!("failed to reset interrupted generation: {error}"))
+                })?;
         }
     }
-    sync_directory(&generation)
+    retirement.acknowledge().map_err(|error| {
+        GfError::Storage(format!(
+            "failed to acknowledge interrupted generation reset: {error}"
+        ))
+    })
 }
 
 fn validate_partial_workspace_participants(participants: &Path) -> Result<(), GfError> {
@@ -1207,10 +1383,11 @@ fn initialize_empty_generation(
     root: &Path,
     write_format: bool,
     generation_uuid: Option<Uuid>,
+    transaction_uuid: Option<Uuid>,
     allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<ResolvedProjectGeneration, GfError> {
     let generation_uuid = generation_uuid.unwrap_or_else(Uuid::now_v7);
-    let transaction_uuid = Uuid::now_v7();
+    let transaction_uuid = transaction_uuid.unwrap_or_else(Uuid::now_v7);
     let generation_root = root
         .join("generations")
         .join(generation_uuid.hyphenated().to_string());
@@ -1256,7 +1433,7 @@ fn initialize_empty_generation(
     )?;
     let manifest = GenerationManifest {
         format: "graphforge-generation".into(),
-        format_version: 1,
+        format_version: GENERATION_MANIFEST_VERSION,
         generation_uuid: generation_uuid.hyphenated().to_string(),
         parent_generation_uuid: None,
         transaction_uuid: transaction_uuid.hyphenated().to_string(),
@@ -1302,7 +1479,6 @@ fn initialize_empty_generation(
         allocation,
     )
     .map_err(|error| GfError::Storage(format!("failed to write CURRENT: {error}")))?;
-    sync_directory(root)?;
     resolve_project_generation(root)
 }
 
@@ -1337,6 +1513,7 @@ fn install_empty_workspace_participants(
             row_count: participant.row_count,
             schema_fingerprint: sha256_hex(participant.schema_fingerprint),
             content_sha256: sha256_hex(Sha256::digest(&participant.bytes).into()),
+            content_xxh64: crate::corruption_checksum::checksum(&participant.bytes),
         });
     }
     descriptors.sort_by(|left, right| {
@@ -1362,18 +1539,21 @@ fn write_new_synced(
     allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), GfError> {
     use std::io::Write as _;
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|error| GfError::Storage(format!("failed to create {name}: {error}")))?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|error| GfError::Storage(format!("failed to write {name}: {error}")))?;
-    if let Some(allocation) = allocation {
-        allocation.replace_file_at(path, &file)?;
-    }
+    let parent = graphforge_filesystem::StableDirectory::open(
+        path.parent()
+            .ok_or_else(|| GfError::Storage(format!("{name} has no parent")))?,
+    )
+    .map_err(|error| GfError::Storage(format!("failed to create {name}: {error}")))?;
+    let file = crate::durable_commit::stage_private_file(
+        &parent,
+        path.file_name()
+            .ok_or_else(|| GfError::Storage(format!("{name} has no name")))?,
+        |file| file.write_all(bytes),
+        || Ok(()),
+        allocation,
+    )
+    .map_err(|error| GfError::Storage(format!("failed to write {name}: {error}")))?;
+    drop(file);
     Ok(())
 }
 
@@ -1445,7 +1625,8 @@ fn lock_project_root(path: &Path) -> Result<WindowsProjectRootLock, GfError> {
     let canonical = std::fs::canonicalize(path)
         .map_err(|error| GfError::Storage(format!("failed to lock project root: {error}")))?;
     let identity = canonical.as_os_str().to_string_lossy().to_lowercase();
-    let digest: [u8; 32] = Sha256::digest(identity.as_bytes()).into();
+    let digest: [u8; 32] =
+        graphforge_core::hash_observation::ContractSha256::digest(identity.as_bytes()).into();
     let name = format!("GraphForge.ProjectRoot.{}", sha256_hex(digest));
     let local = acquire_local_project_root_lock(&name);
     let lock = named_lock::NamedLock::create(&name)
@@ -1490,8 +1671,13 @@ fn validate_format(format: &str, version: u32) -> Result<(), GfError> {
 }
 
 fn validate_manifest(manifest: &GenerationManifest, expected: Uuid) -> Result<(), GfError> {
-    if manifest.format != "graphforge-generation" || manifest.format_version != 1 {
+    if manifest.format != "graphforge-generation" {
         return Err(corrupt("generation manifest format is invalid"));
+    }
+    if manifest.format_version != GENERATION_MANIFEST_VERSION {
+        return Err(unsupported(
+            "generation manifest version is not supported; recreate the pre-v1 project",
+        ));
     }
     if parse_canonical_uuid(&manifest.generation_uuid)? != expected {
         return Err(corrupt("generation manifest UUID does not match CURRENT"));
@@ -1598,7 +1784,7 @@ fn validated_generation_metadata(
         read_bounded_regular_file(&generation_root.join(MANIFEST_FILE), MAX_MANIFEST_BYTES)
             .map_err(|_| corrupt("retained ancestor manifest is missing or invalid"))?;
     let manifest: GenerationManifest =
-        parse_canonical_json_line(&manifest_bytes, "retained ancestor manifest")?;
+        parse_generation_manifest(&manifest_bytes, "retained ancestor manifest")?;
     validate_manifest(&manifest, generation_uuid)?;
     let parent = manifest
         .parent_generation_uuid
@@ -1606,6 +1792,27 @@ fn validated_generation_metadata(
         .map(parse_canonical_uuid)
         .transpose()?;
     Ok((parent, Sha256::digest(&manifest_bytes).into()))
+}
+
+fn parse_generation_manifest(bytes: &[u8], name: &str) -> Result<GenerationManifest, GfError> {
+    // Check the version before decoding required current-format participant fields.
+    // Retired projects must fail clearly rather than appear to be malformed v2 data.
+    #[derive(Deserialize)]
+    struct Header {
+        format: String,
+        format_version: u32,
+    }
+    let header: Header =
+        serde_json::from_slice(bytes).map_err(|_| corrupt(format!("{name} is invalid JSON")))?;
+    if header.format != "graphforge-generation" {
+        return Err(corrupt("generation manifest format is invalid"));
+    }
+    if header.format_version != GENERATION_MANIFEST_VERSION {
+        return Err(unsupported(
+            "generation manifest version is not supported; recreate the pre-v1 project",
+        ));
+    }
+    parse_canonical_json_line(bytes, name)
 }
 
 fn parse_canonical_json_line<T>(bytes: &[u8], name: &str) -> Result<T, GfError>
@@ -1936,7 +2143,7 @@ mod tests {
         fs::write(generation_root.join(LEASE_FILE), []).unwrap();
         let manifest = GenerationManifest {
             format: "graphforge-generation".into(),
-            format_version: 1,
+            format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: generation_uuid.hyphenated().to_string(),
             parent_generation_uuid: None,
             transaction_uuid: Uuid::now_v7().hyphenated().to_string(),
@@ -1962,7 +2169,69 @@ mod tests {
     }
 
     #[test]
+    fn checksum_generation_manifest_refuses_legacy_missing_and_malformed_participant_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let generation = open_or_initialize_project(root.path()).unwrap();
+        let path = generation.generation_root().join(MANIFEST_FILE);
+        let bytes = fs::read(&path).unwrap();
+        let current: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(!current["participants"].as_array().unwrap().is_empty());
+        for mode in ["legacy", "future", "missing", "malformed"] {
+            let mut value = current.clone();
+            match mode {
+                "legacy" | "future" => {
+                    value["format_version"] =
+                        serde_json::json!(if mode == "legacy" { 1 } else { 3 });
+                    value["participants"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("content_xxh64");
+                }
+                "missing" => {
+                    value["participants"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("content_xxh64");
+                }
+                "malformed" => {
+                    value["participants"][0]["content_xxh64"] = serde_json::json!("ABCDEF")
+                }
+                _ => unreachable!(),
+            }
+            let error = parse_generation_manifest(&canonical_line(&value), "generation manifest")
+                .and_then(|manifest| validate_manifest(&manifest, generation.generation_uuid()))
+                .unwrap_err();
+            if matches!(mode, "legacy" | "future") {
+                assert!(
+                    error.to_string().contains("version is not supported"),
+                    "{error}"
+                );
+                assert!(error.to_string().contains("recreate"), "{error}");
+            }
+        }
+        validate_manifest(
+            &serde_json::from_slice::<GenerationManifest>(&bytes).unwrap(),
+            generation.generation_uuid(),
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn future_research_capability_refuses_publication_without_creating_files() {
+        unsupported_research_capability_refuses_publication(
+            crate::research_versions::RESEARCH_VERSION + 1,
+        );
+    }
+
+    #[test]
+    fn pre_legacy_research_capability_refuses_publication_without_creating_files() {
+        // Revision 6 is the oldest readable revision; revision 5 stays refused.
+        unsupported_research_capability_refuses_publication(
+            crate::research_versions::RESEARCH_LEGACY_VERSION - 1,
+        );
+    }
+
+    fn unsupported_research_capability_refuses_publication(capability_version: u32) {
         fn inventory(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
             let mut files = std::collections::BTreeMap::new();
             for entry in fs::read_dir(root).unwrap() {
@@ -1988,7 +2257,7 @@ mod tests {
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
         manifest.capabilities.push(CapabilityDescriptor {
             capability_id: "research".into(),
-            capability_version: crate::research_versions::RESEARCH_VERSION + 1,
+            capability_version,
         });
         let bytes = canonical_line(&manifest);
         fs::write(manifest_path, &bytes).unwrap();
@@ -2097,10 +2366,11 @@ mod tests {
             row_count: participant.row_count,
             schema_fingerprint: sha256_hex(participant.schema_fingerprint),
             content_sha256: sha256_hex(Sha256::digest(&participant.bytes).into()),
+            content_xxh64: crate::corruption_checksum::checksum(&participant.bytes),
         };
         let manifest = GenerationManifest {
             format: "graphforge-generation".into(),
-            format_version: 1,
+            format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: generation_uuid.hyphenated().to_string(),
             parent_generation_uuid: None,
             transaction_uuid: Uuid::now_v7().hyphenated().to_string(),
@@ -2859,7 +3129,7 @@ mod tests {
             .join(generation.hyphenated().to_string());
         let manifest = GenerationManifest {
             format: "graphforge-generation".into(),
-            format_version: 1,
+            format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: generation.hyphenated().to_string(),
             parent_generation_uuid: None,
             transaction_uuid: Uuid::now_v7().hyphenated().to_string(),
@@ -2878,6 +3148,7 @@ mod tests {
                 row_count: 0,
                 schema_fingerprint: "0".repeat(64),
                 content_sha256: "0".repeat(64),
+                content_xxh64: 0,
             }],
         };
         let bytes = canonical_line(&manifest);
@@ -2898,7 +3169,7 @@ mod tests {
             .join(generation.hyphenated().to_string());
         let manifest = GenerationManifest {
             format: "graphforge-generation".into(),
-            format_version: 1,
+            format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: generation.hyphenated().to_string(),
             parent_generation_uuid: None,
             transaction_uuid: Uuid::now_v7().hyphenated().to_string(),
@@ -2923,6 +3194,7 @@ mod tests {
                 row_count: 1,
                 schema_fingerprint: "0".repeat(64),
                 content_sha256: "0".repeat(64),
+                content_xxh64: 0,
             }],
         };
         let bytes = canonical_line(&manifest);
@@ -2990,7 +3262,7 @@ mod tests {
 
         let base = GenerationManifest {
             format: "graphforge-generation".into(),
-            format_version: 1,
+            format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: expected.hyphenated().to_string(),
             parent_generation_uuid: None,
             transaction_uuid: Uuid::now_v7().hyphenated().to_string(),
@@ -3003,7 +3275,7 @@ mod tests {
         assert!(validate_manifest(&base, expected).is_ok());
         let mutations: Vec<Box<dyn Fn(&mut GenerationManifest)>> = vec![
             Box::new(|manifest| manifest.format = "future".into()),
-            Box::new(|manifest| manifest.format_version = 2),
+            Box::new(|manifest| manifest.format_version = 1),
             Box::new(|manifest| manifest.generation_uuid = Uuid::now_v7().to_string()),
             Box::new(|manifest| manifest.transaction_uuid = "bad".into()),
             Box::new(|manifest| manifest.capabilities[0].capability_id = "Upper".into()),
@@ -3027,6 +3299,7 @@ mod tests {
             row_count: 0,
             schema_fingerprint: "0".repeat(64),
             content_sha256: "0".repeat(64),
+            content_xxh64: 0,
         };
         let participant_mutations: Vec<Box<dyn Fn(&mut ParticipantDescriptor)>> = vec![
             Box::new(|entry| entry.capability_id = "missing".into()),

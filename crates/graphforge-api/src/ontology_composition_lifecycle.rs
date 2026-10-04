@@ -6,12 +6,13 @@ use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_ontology::{
     ActivationMode, MigrationEngine, OntologyDoc, ResolveRequest, SymbolKind, TransformKind,
 };
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::{
     WORKSPACE_CAPABILITY_ID, WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY, WorkspaceOntologyComposition,
     WorkspaceOntologyMode,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::{CancellationToken, GraphForge, WriteContext};
@@ -209,12 +210,15 @@ impl GraphForge {
                 .lock()
                 .expect("semantic storage binding lock poisoned")
                 .clone();
-            if let Err(error) = graphforge_storage::SemanticStorageBindings::project_with_graph_scan_identity_equivalent(
-                compiled,
-                current_bindings.as_ref(),
-                &self.dir(),
-                &identity_equivalent,
-            ) {
+            if let Err(error) =
+                graphforge_storage::SemanticStorageBindings::project_with_graph_scan_from_files(
+                    compiled,
+                    current_bindings.as_ref(),
+                    &self.dir(),
+                    &identity_equivalent,
+                    &self.dir().topology_files()?,
+                )
+            {
                 let retained = compiled
                     .modules
                     .iter()
@@ -226,8 +230,8 @@ impl GraphForge {
                     .flat_map(|bindings| bindings.bindings.iter())
                     .filter(|binding| !retained.contains(&binding.symbol))
                     .map(|binding| {
-                        graphforge_storage::SemanticStorageBindings::binding_has_retained_data(
-                            binding, &self.dir(),
+                        graphforge_storage::SemanticStorageBindings::binding_has_retained_data_from_files(
+                            binding, &self.dir(), &self.dir().topology_files()?,
                         )
                         .map(|has_data| has_data.then_some(binding))
                     })
@@ -455,28 +459,32 @@ impl GraphForge {
             (Some(existing), Some(previous))
                 if existing.composition_fingerprint != compiled_candidate.fingerprint =>
             {
-                let plan = graphforge_storage::SemanticStorageBindings::plan_retained_data_migration_identity_equivalent(
+                let plan = graphforge_storage::SemanticStorageBindings::plan_retained_data_migration_from_files(
                     &existing.compile()?, &compiled_candidate, previous, &self.dir(), &identity_equivalent,
+                    &self.dir().topology_files()?,
                 )?;
-                graphforge_storage::materialize_semantic_migration(
-                    &plan,
-                    &self.dir(),
-                    &candidate_graph,
-                    graphforge_storage::SemanticMigrationLimits::default(),
-                    || cancellation.map_or(Ok(()), crate::CancellationToken::checkpoint),
-                )?;
-                Some(plan)
+                let (_, candidate_topology) =
+                    graphforge_storage::materialize_semantic_migration_from_files(
+                        &plan,
+                        &self.dir(),
+                        &candidate_graph,
+                        graphforge_storage::SemanticMigrationLimits::default(),
+                        || cancellation.map_or(Ok(()), crate::CancellationToken::checkpoint),
+                        &self.dir().topology_files()?,
+                    )?;
+                Some((plan, candidate_topology))
             }
             _ => None,
         };
-        let published_bindings = if let Some(plan) = &migration {
+        let published_bindings = if let Some((plan, _)) = &migration {
             plan.bindings.clone()
         } else {
-            graphforge_storage::SemanticStorageBindings::project_with_graph_scan_identity_equivalent(
+            graphforge_storage::SemanticStorageBindings::project_with_graph_scan_from_files(
                 &compiled_candidate,
                 previous_bindings.as_ref(),
                 &self.dir(),
                 &identity_equivalent,
+                &self.dir().topology_files()?,
             )?
         };
         let published_binding = graphforge_ir::CompositionBindingContext::new(
@@ -490,7 +498,7 @@ impl GraphForge {
                 .iter()
                 .map(|binding| (binding.symbol.clone(), binding.storage_id)),
         )?;
-        let publication = if migration.is_some() {
+        let publication = if let Some((_, topology)) = &migration {
             crate::workspace_ontology::publish_workspace_records_with_graph_tree(
                 self,
                 request.context.operation_uuid.0,
@@ -501,6 +509,7 @@ impl GraphForge {
                 &published_bindings,
                 expected_generation_uuid,
                 &candidate_graph,
+                topology,
                 cancellation,
             )
         } else {
@@ -535,7 +544,11 @@ impl GraphForge {
             if migration.is_some() {
                 let (dir, owner, evidence) =
                     crate::hydrate_graph_workspace(&self.resolved_generation, false)?;
-                self.replace_workspace_owner(crate::GraphWorkspace { dir, _owner: owner });
+                let inventory = crate::property_inventory_for_hydrated_generation(
+                    &self.resolved_generation,
+                    &dir,
+                )?;
+                self.replace_workspace_owner(crate::GraphWorkspace::new(dir, owner, &inventory)?);
                 self.graph_open_evidence = evidence;
                 *self
                     .uuid_membership_index
@@ -1721,6 +1734,162 @@ mod tests {
                 .code,
             "migration_transform_unknown"
         );
+    }
+
+    #[test]
+    fn undeclared_topology_cannot_change_composition_removal_or_migration() {
+        for upgrade in [false, true] {
+            for planted in [false, true] {
+                let project = tempfile::tempdir().unwrap();
+                let path = project.path().to_str().unwrap();
+                let mut graph = GraphForge::new(Some(path)).unwrap();
+                let initial = request(
+                    &graph,
+                    99001,
+                    composition("1", ActivationMode::Strict, &["Person"], Vec::new()),
+                );
+                let preview = graph
+                    .preview_ontology_composition_change(&initial, None)
+                    .unwrap();
+                graph
+                    .publish_ontology_composition_change(&initial, &preview, None)
+                    .unwrap();
+                drop(graph);
+                let mut graph = GraphForge::new(Some(path)).unwrap();
+                let binding = graph
+                    .semantic_storage_bindings
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .bindings
+                    .iter()
+                    .find(|binding| {
+                        binding.route_kind == graphforge_storage::SemanticRouteKind::Entity
+                    })
+                    .unwrap()
+                    .clone();
+                let mut stray_name = None;
+                if planted {
+                    let donor = tempfile::tempdir().unwrap();
+                    let fingerprint = graph
+                        .workspace_ontology_composition()
+                        .unwrap()
+                        .unwrap()
+                        .composition_fingerprint;
+                    let mut writer = graphforge_storage::GraphWriter::open_at(
+                        donor.path(),
+                        graphforge_core::OntologyMode::Strict,
+                        1,
+                    )
+                    .unwrap()
+                    .with_semantic_composition_fingerprint(Some(fingerprint));
+                    writer
+                        .create_node(
+                            graphforge_core::uuid::new_v7(),
+                            graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(
+                                binding.storage_id,
+                            ))
+                            .unwrap(),
+                        )
+                        .unwrap();
+                    writer.flush().unwrap();
+                    let source = donor.path().join("topology/nodes.parquet");
+                    let destination = graph
+                        .dir()
+                        .join("topology/nodes")
+                        .join("00000000000000000001-00000000000000000001.parquet");
+                    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                    assert!(!destination.exists());
+                    std::fs::copy(&source, &destination).unwrap();
+                    // The donor's real label must discriminate a raw removal scan.
+                    let batches = graphforge_storage::read_nodes(donor.path()).unwrap();
+                    assert_eq!(
+                        batches
+                            .iter()
+                            .map(arrow::record_batch::RecordBatch::num_rows)
+                            .sum::<usize>(),
+                        1
+                    );
+                    stray_name = Some(
+                        "topology/nodes/00000000000000000001-00000000000000000001.parquet"
+                            .to_owned(),
+                    );
+                }
+                let candidate = if upgrade {
+                    composition(
+                        "2",
+                        ActivationMode::Strict,
+                        &["Person", "Company"],
+                        vec![MigrationDef {
+                            from_version: "1".into(),
+                            to_version: "2".into(),
+                            transform_kind: "add_type:Company".into(),
+                            script_ref: None,
+                            checksum: None,
+                        }],
+                    )
+                } else {
+                    composition_named(
+                        "replacement",
+                        "1",
+                        ActivationMode::Strict,
+                        &["Company"],
+                        Vec::new(),
+                    )
+                };
+                let replacement = request(&graph, 99002, candidate);
+                let preview = graph
+                    .preview_ontology_composition_change(&replacement, None)
+                    .unwrap();
+                assert!(
+                    preview.diagnostics.is_empty(),
+                    "upgrade={upgrade} planted={planted}: {:?}",
+                    preview.diagnostics
+                );
+                graph
+                    .publish_ontology_composition_change(&replacement, &preview, None)
+                    .unwrap();
+                drop(graph);
+                let reopened = GraphForge::new(Some(path)).unwrap();
+                let batches = reopened
+                    .execute("MATCH (n:Company) RETURN n")
+                    .unwrap()
+                    .batches;
+                assert_eq!(
+                    batches
+                        .iter()
+                        .map(arrow::record_batch::RecordBatch::num_rows)
+                        .sum::<usize>(),
+                    0
+                );
+                if upgrade {
+                    let batches = reopened
+                        .execute("MATCH (n:Person) RETURN n")
+                        .unwrap()
+                        .batches;
+                    assert_eq!(
+                        batches
+                            .iter()
+                            .map(arrow::record_batch::RecordBatch::num_rows)
+                            .sum::<usize>(),
+                        0,
+                        "undeclared Person must not enter migrated generation"
+                    );
+                }
+                if let Some(name) = stray_name {
+                    let generation =
+                        graphforge_storage::resolve_project_generation(project.path()).unwrap();
+                    // Resolves compact roots too: a candidate graph publishes compact.
+                    let files = generation
+                        .graph_files_inventory()
+                        .unwrap()
+                        .map(|inventory| inventory.files)
+                        .unwrap_or_default();
+                    assert!(files.iter().all(|entry| entry.relative_path != name));
+                }
+            }
+        }
     }
 
     mod returned_errors;

@@ -7,15 +7,14 @@ use super::{
     CreateAssertionWithStatusRequest, Digest, EPISTEMIC_CAPABILITY_VERSION, GfError, GraphForge,
     ListAssertionStatusRequest, ListAssertionSupersessionsRequest, ListAssertionsRequest,
     OperationId, PageRequest, PageToken, Path, ProjectCapability, ProjectErrorCode,
-    ProjectGenerationRequest, ProjectParticipant, ProjectStageOutcome, ProvenanceLedger,
-    RecordAssertionStatusRequest, RecordBatch, ResolvedProjectGeneration, Sha256,
-    SupersedeAssertionRequest, Uuid, assertion_publication_participants, assertion_result,
-    assertion_status_bundle_participants, concat_or_empty, knowledge_error,
-    knowledge_generation_uuid, lock_graph_visibility, merged_provenance, not_found, not_found_kind,
-    read_confidence_ledger, read_ledger, read_reasoning_ledger, read_status_ledger,
-    read_supersession_ledger, require_uuid, staged_assertion, status_publication_participants,
-    supersession_publication_participants, transaction_conflict, validate_graph_refs,
-    validate_write_context, with_next_token,
+    ProjectParticipant, ProjectStageOutcome, ProvenanceLedger, RecordAssertionStatusRequest,
+    RecordBatch, ResolvedProjectGeneration, SupersedeAssertionRequest, Uuid,
+    assertion_publication_participants, assertion_result, assertion_status_bundle_participants,
+    concat_or_empty, knowledge_error, lock_graph_visibility, merged_provenance, not_found,
+    not_found_kind, prepare_knowledge_request, read_confidence_ledger, read_ledger,
+    read_reasoning_ledger, read_status_ledger, read_supersession_ledger, require_uuid,
+    staged_assertion, status_publication_participants, supersession_publication_participants,
+    transaction_conflict, validate_graph_refs, validate_write_context, with_next_token,
 };
 
 fn publish_status(
@@ -35,16 +34,12 @@ fn publish_status(
             capability_version: entry.capability_version,
         })
         .collect();
-    let publication = ProjectGenerationRequest {
-        transaction_uuid: request.context.operation_uuid.0,
-        generation_uuid: knowledge_generation_uuid(
-            b"assertion-status",
-            request.context.operation_uuid,
-            &participants,
-        ),
+    let publication = prepare_knowledge_request(
+        b"assertion-status",
+        request.context.operation_uuid,
         capabilities,
         participants,
-    };
+    )?;
     let graph_objects = graphforge_storage::begin_graph_object_publication(
         graph.resolved_generation.container_root(),
     )?;
@@ -89,16 +84,12 @@ fn publish_supersession(
             capability_version: entry.capability_version,
         })
         .collect();
-    let publication = ProjectGenerationRequest {
-        transaction_uuid: request.context.operation_uuid.0,
-        generation_uuid: knowledge_generation_uuid(
-            b"assertion-supersession",
-            request.context.operation_uuid,
-            &participants,
-        ),
+    let publication = prepare_knowledge_request(
+        b"assertion-supersession",
+        request.context.operation_uuid,
         capabilities,
         participants,
-    };
+    )?;
     let graph_objects = graphforge_storage::begin_graph_object_publication(
         graph.resolved_generation.container_root(),
     )?;
@@ -154,16 +145,13 @@ fn publish_assertion_status_bundle(
             capability_version: entry.capability_version,
         })
         .collect();
-    let publication = ProjectGenerationRequest {
-        transaction_uuid: request.assertion.context.operation_uuid.0,
-        generation_uuid: knowledge_generation_uuid(
-            b"assertion-status-bundle",
-            request.assertion.context.operation_uuid,
-            &participants,
-        ),
+    let publication = prepare_knowledge_request(
+        b"assertion-status-bundle",
+        request.assertion.context.operation_uuid,
         capabilities,
         participants,
-    };
+    )?;
+    let graph_objects = graph.begin_graph_object_publication()?;
     let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => staged
@@ -178,7 +166,7 @@ fn publish_assertion_status_bundle(
                     Ok(())
                 },
             )?
-            .publish()?,
+            .publish_with_graph_objects(&graph_objects)?,
     };
     *graph
         .current_generation_uuid
@@ -274,19 +262,37 @@ fn validate_status_references(
     Ok(())
 }
 
+/// An assertion publication whose participant identities are computed once and
+/// reused by both its generation UUID and staging.
+fn prepare_assertion_request(
+    operation_uuid: OperationId,
+    capabilities: Vec<ProjectCapability>,
+    participants: Vec<ProjectParticipant>,
+) -> Result<graphforge_storage::PreparedGenerationRequest, GfError> {
+    graphforge_storage::PreparedGenerationRequest::new(
+        operation_uuid.0,
+        capabilities,
+        participants,
+        |participants, content_sha256| {
+            assertion_generation_uuid(operation_uuid, participants, content_sha256)
+        },
+    )
+}
+
 fn assertion_generation_uuid(
     operation_uuid: OperationId,
     participants: &[ProjectParticipant],
+    content_sha256: &[[u8; 32]],
 ) -> Uuid {
-    let mut hasher = Sha256::new();
+    let mut hasher = graphforge_core::hash_observation::ContractSha256::default();
     hasher.update(b"graphforge-assertion-generation/1");
     hasher.update(operation_uuid.0.as_bytes());
-    for participant in participants {
+    for (participant, digest) in participants.iter().zip(content_sha256) {
         hasher.update(participant.capability_id.as_bytes());
         hasher.update([0]);
         hasher.update(participant.record_family_id.as_bytes());
         hasher.update([0]);
-        hasher.update(Sha256::digest(&participant.bytes));
+        hasher.update(digest);
     }
     graphforge_core::canonical::uuid_v8(hasher.finalize().into())
 }
@@ -295,6 +301,7 @@ impl GraphForge {
     /// Atomically create one assertion, its graph references, and provenance.
     #[allow(
         clippy::needless_pass_by_value,
+        clippy::too_many_lines,
         reason = "graphforge-knowledge-api/1 freezes owned request structs"
     )]
     pub fn create_assertion(
@@ -359,14 +366,9 @@ impl GraphForge {
                 capability_version: entry.capability_version,
             })
             .collect();
-        let generation_uuid =
-            assertion_generation_uuid(request.context.operation_uuid, &participants);
-        let publication = ProjectGenerationRequest {
-            transaction_uuid: request.context.operation_uuid.0,
-            generation_uuid,
-            capabilities,
-            participants,
-        };
+        let publication =
+            prepare_assertion_request(request.context.operation_uuid, capabilities, participants)?;
+        let graph_objects = self.begin_graph_object_publication()?;
         let receipt = match self.stage_project_generation(&publication)? {
             ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
             ProjectStageOutcome::Staged(staged_generation) => staged_generation
@@ -383,7 +385,7 @@ impl GraphForge {
                         Ok(())
                     },
                 )?
-                .publish()?,
+                .publish_with_graph_objects(&graph_objects)?,
         };
         *self
             .current_generation_uuid

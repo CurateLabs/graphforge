@@ -9,7 +9,9 @@ use arrow::array::{
 use arrow::compute::concat;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use graphforge_search::{FusedSearchHit, VectorLifecycleLimits, project_label_members};
+use graphforge_search::{
+    FusedSearchHit, VectorLifecycleLimits, project_label_members_snapshot_with_topology,
+};
 use graphforge_storage::{
     AuthenticatedPropertyInventory, PropertyRouteKind, read_properties_from_inventory,
 };
@@ -50,13 +52,36 @@ pub(crate) fn shape_search_output(
     label_id: graphforge_value::EntityTypeSelection,
     hits: &[FusedSearchHit],
 ) -> Result<RecordBatch, GfError> {
+    shape_search_output_with_members(project_dir, inventory, None, label_id, hits, None)
+}
+
+/// `ordinal` is the facade's identity authority for the membership projection
+/// shaping takes when retrieval admitted no members.
+pub(crate) fn shape_search_output_with_members(
+    project_dir: &std::path::Path,
+    inventory: &AuthenticatedPropertyInventory,
+    ordinal: Option<&graphforge_search::SessionOrdinalIdentity>,
+    label_id: graphforge_value::EntityTypeSelection,
+    hits: &[FusedSearchHit],
+    admitted: Option<&BTreeSet<[u8; 16]>>,
+) -> Result<RecordBatch, GfError> {
     validate_hits(hits)?;
-    let eligible = project_label_members(
-        project_dir,
-        label_id,
-        VectorLifecycleLimits::default(),
-        || Ok(()),
-    )?;
+    let captured;
+    let eligible = if let Some(members) = admitted {
+        members
+    } else {
+        captured = project_label_members_snapshot_with_topology(
+            project_dir,
+            Some(&graphforge_storage::TopologyFiles::from_inventory(
+                inventory,
+            )?),
+            ordinal,
+            label_id,
+            VectorLifecycleLimits::default(),
+            || Ok(()),
+        )?;
+        captured.members()
+    };
     if let Some(hit) = hits.iter().find(|hit| !eligible.contains(&hit.node_uuid)) {
         return Err(storage(format!(
             "search hit UUID {:02x?} is not a current member of the requested label",
@@ -64,7 +89,7 @@ pub(crate) fn shape_search_output(
         )));
     }
 
-    let (batches, rows, properties) = load_properties(project_dir, inventory, &eligible)?;
+    let (batches, rows, properties) = load_properties(project_dir, inventory, eligible)?;
     let mut fields = Vec::<Arc<Field>>::with_capacity(properties.len() + 3);
     let mut columns = Vec::<ArrayRef>::with_capacity(properties.len() + 3);
 

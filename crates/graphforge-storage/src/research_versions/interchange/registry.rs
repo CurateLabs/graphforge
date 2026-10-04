@@ -36,6 +36,13 @@ pub(in crate::research_versions) fn validate_registry(
                 ));
             }
         }
+        for (version, parents) in &archive.ancestry {
+            if registry.ancestry.get(version) != Some(parents) {
+                return Err(invalid(
+                    "imported research ancestry differs from permanent ledger",
+                ));
+            }
+        }
         for (id, record) in &archive.genealogy {
             if branches
                 .insert(*id, record)

@@ -1,5 +1,7 @@
 //! Non-enumerating storage attribution over the manifest-authenticated inventory of a committed project.
 
+#[cfg(test)]
+use graphforge_filesystem::ObservedSync as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::Path;
@@ -27,8 +29,9 @@ pub fn storage_attribution_receipt_from_snapshot(
     })
 }
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
+use sha2::Digest as _;
 
 use crate::{
     GraphConstructionEvidence, GraphFileEntry, GraphFilesParticipant, ResolvedProjectGeneration,
@@ -71,10 +74,13 @@ pub enum StorageIoPhase {
     /// Besides the ordinary Parquet reads of committed topology and property
     /// data, this row owns the whole lazy adjacency rebuild a query process
     /// can perform: the projected edge-table reads, the spill-run and CSR
-    /// shard reads and writes, the shard manifest reads, the serving-time
-    /// shard authentication on first row touch, and the rebuild's manifest
-    /// write. Construction publish and clean import build the same index as
-    /// ordinary construction work and scope themselves to
+    /// shard reads and writes, the per-CSR `*.csr.json` manifest reads and
+    /// writes, the serving-time shard authentication on first row touch, the
+    /// rebuild's `index_manifest.parquet` write, and every durability barrier
+    /// those writes complete. Spill-run read calls count reads issued to the
+    /// file beneath the merge buffer, not records decoded. Construction
+    /// publish, clean import and an explicit `index("adjacency")` build the
+    /// same index as construction work and scope themselves to
     /// [`StorageIoPhase::EncodeWritePostwriteAuthentication`], so this row
     /// stays zero for them. What this row does not claim: OS page-cache
     /// effects, and read-ahead or buffering the kernel performs beyond the
@@ -601,7 +607,33 @@ struct PreparedAllocationChange {
     peak: u64,
 }
 
+pub(crate) struct PreparedOwnerAllocationChange {
+    allocation: PreparedAllocationChange,
+    owner: String,
+    mutation: PreparedOwnerMutation,
+}
+
+enum PreparedOwnerMutation {
+    Replace(BTreeSet<String>),
+    Transition {
+        removed: BTreeSet<String>,
+        installed: BTreeSet<String>,
+    },
+    Remove,
+}
+
 impl StorageAllocationLifecycle {
+    #[cfg(test)]
+    pub(crate) fn owner_storage_tokens(&self, owner: &str) -> Vec<usize> {
+        let (owner, identities) = self.owners.get_key_value(owner).expect("retained owner");
+        let mut tokens = vec![owner.as_ptr() as usize];
+        for identity in identities {
+            tokens.push(identity.as_ptr() as usize);
+            tokens.push(self.active.get_key_value(identity).unwrap().0.as_ptr() as usize);
+        }
+        tokens
+    }
+
     /// Check diagnostic raw owner facts against a per-file baseline without exposing identities.
     #[doc(hidden)]
     #[must_use]
@@ -639,13 +671,25 @@ impl StorageAllocationLifecycle {
         owner: impl Into<String>,
         identities: &BTreeMap<String, u64>,
     ) -> Result<(), GfError> {
-        let owner = owner.into();
-        let removed = self.owners.get(&owner).cloned().unwrap_or_default();
-        let prepared = self.prepare_change(component, &removed, identities)?;
-        self.commit_change(prepared);
-        self.owners
-            .insert(owner, identities.keys().cloned().collect());
+        let prepared = self.prepare_owner_replacement(component, owner, identities)?;
+        self.apply_prepared_owner_change(prepared);
         Ok(())
+    }
+
+    pub(crate) fn prepare_owner_replacement(
+        &self,
+        component: TransientComponent,
+        owner: impl Into<String>,
+        identities: &BTreeMap<String, u64>,
+    ) -> Result<PreparedOwnerAllocationChange, GfError> {
+        let owner = owner.into();
+        let empty = BTreeSet::new();
+        let removed = self.owners.get(&owner).unwrap_or(&empty);
+        Ok(PreparedOwnerAllocationChange {
+            allocation: self.prepare_change(component, removed, identities)?,
+            owner,
+            mutation: PreparedOwnerMutation::Replace(identities.keys().cloned().collect()),
+        })
     }
 
     /// Replace an owner from a generation-bound storage snapshot.
@@ -726,6 +770,17 @@ impl StorageAllocationLifecycle {
         owner: impl Into<String>,
         transition: &StorageAllocationTransition,
     ) -> Result<(), GfError> {
+        let prepared = self.prepare_owner_transition(component, owner, transition)?;
+        self.apply_prepared_owner_change(prepared);
+        Ok(())
+    }
+
+    pub(crate) fn prepare_owner_transition(
+        &self,
+        component: TransientComponent,
+        owner: impl Into<String>,
+        transition: &StorageAllocationTransition,
+    ) -> Result<PreparedOwnerAllocationChange, GfError> {
         let owner = owner.into();
         if transition
             .installed
@@ -755,27 +810,65 @@ impl StorageAllocationLifecycle {
                 "allocation transition installs an owned identity",
             ));
         }
-        let prepared =
-            self.prepare_change(component, &transition.removed, &transition.installed)?;
-        self.commit_change(prepared);
-        let identities = self.owners.entry(owner).or_default();
-        for id in &transition.removed {
-            identities.remove(id);
-        }
-        identities.extend(transition.installed.keys().cloned());
-        Ok(())
+        Ok(PreparedOwnerAllocationChange {
+            allocation: self.prepare_change(
+                component,
+                &transition.removed,
+                &transition.installed,
+            )?,
+            owner,
+            mutation: PreparedOwnerMutation::Transition {
+                removed: transition.removed.clone(),
+                installed: transition.installed.keys().cloned().collect(),
+            },
+        })
     }
 
     /// Remove an owner and decrement every exact identity reference.
     pub fn remove_owner(&mut self, owner: &str) -> Result<(), GfError> {
-        let Some(removed) = self.owners.get(owner) else {
-            return Ok(());
-        };
-        let prepared =
-            self.prepare_change(TransientComponent::Unclassified, removed, &BTreeMap::new())?;
-        self.commit_change(prepared);
-        self.owners.remove(owner);
+        if let Some(prepared) = self.prepare_owner_removal(owner)? {
+            self.apply_prepared_owner_change(prepared);
+        }
         Ok(())
+    }
+
+    pub(crate) fn prepare_owner_removal(
+        &self,
+        owner: &str,
+    ) -> Result<Option<PreparedOwnerAllocationChange>, GfError> {
+        let Some(removed) = self.owners.get(owner) else {
+            return Ok(None);
+        };
+        Ok(Some(PreparedOwnerAllocationChange {
+            allocation: self.prepare_change(
+                TransientComponent::Unclassified,
+                removed,
+                &BTreeMap::new(),
+            )?,
+            owner: owner.to_owned(),
+            mutation: PreparedOwnerMutation::Remove,
+        }))
+    }
+
+    /// Apply only a validated owner/identity delta. Callers retain the same
+    /// exclusive state guard from preparation through application.
+    pub(crate) fn apply_prepared_owner_change(&mut self, prepared: PreparedOwnerAllocationChange) {
+        self.commit_change(prepared.allocation);
+        match prepared.mutation {
+            PreparedOwnerMutation::Replace(identities) => {
+                self.owners.insert(prepared.owner, identities);
+            }
+            PreparedOwnerMutation::Transition { removed, installed } => {
+                let identities = self.owners.entry(prepared.owner).or_default();
+                for id in removed {
+                    identities.remove(&id);
+                }
+                identities.extend(installed);
+            }
+            PreparedOwnerMutation::Remove => {
+                self.owners.remove(&prepared.owner);
+            }
+        }
     }
 
     // Validate only changed identities. All fallible arithmetic and consistency
@@ -826,6 +919,11 @@ impl StorageAllocationLifecycle {
                 .unwrap_or_else(|| self.active.get(id).copied());
             let next = if let Some((previous, references)) = previous {
                 if previous != *allocated || references == 0 {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "allocation transition mismatch: identity={id}, old_bytes={previous}, new_bytes={allocated}, references={references}, old_owner={:?}, new_owner={component:?}",
+                        self.identity_components.get(id)
+                    );
                     return Err(validation("active identity allocation changed"));
                 }
                 (*allocated, checked_add(references, 1)?)
@@ -1252,7 +1350,7 @@ pub fn capture_storage_attribution(
                 &root,
                 crate::GraphManifestLimits::default(),
                 |digest| {
-                    let bytes = crate::read_graph_object_by_digest(
+                    let bytes = crate::graph_object_store::read_graph_control_object_by_digest(
                         generation.container_root(),
                         digest,
                         crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
@@ -2359,7 +2457,7 @@ mod tests {
         let generation = crate::open_or_initialize_ephemeral_project(project.path()).unwrap();
         let artifact = tempfile::NamedTempFile::new().unwrap();
         artifact.as_file().write_all(b"shared").unwrap();
-        artifact.as_file().sync_all().unwrap();
+        artifact.as_file().observed_sync_all().unwrap();
         let mut accumulator = Accumulator::new(&generation);
         accumulator
             .add_logical(ArtifactCategory::TopologyNodes, 6)

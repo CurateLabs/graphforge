@@ -28,10 +28,15 @@ pub enum SearchIndexRequest<'a> {
         label: &'a str,
         /// Local catalog identity used only for graph membership projection.
         label_id: graphforge_value::EntityTypeSelection,
+        /// Explicit topology membership for compact/session callers.
+        topology: Option<&'a graphforge_storage::TopologyFiles>,
         /// Explicit properties, or `None` for stable default discovery.
         properties: Option<&'a [String]>,
         /// Force atomic replacement even when an exact fresh artifact exists.
         rebuild: bool,
+        /// The caller's admitted property inventory; see
+        /// [`TextIndexRequest::inventory`].
+        inventory: Option<&'a graphforge_storage::AuthenticatedPropertyInventory>,
     },
     /// Insert or replace one UUID-keyed vector.
     Vector {
@@ -39,6 +44,8 @@ pub enum SearchIndexRequest<'a> {
         label: &'a str,
         /// Local catalog identity used only for graph membership projection.
         label_id: graphforge_value::EntityTypeSelection,
+        /// Explicit topology membership for compact/session callers.
+        topology: Option<&'a graphforge_storage::TopologyFiles>,
         /// Stable graph UUID resolved by the caller.
         node_uuid: [u8; 16],
         /// Finite, non-zero fixed-dimension vector.
@@ -82,8 +89,10 @@ where
         SearchIndexRequest::Text {
             label,
             label_id,
+            topology,
             properties,
             rebuild,
+            inventory,
         } => {
             let mode = if rebuild {
                 SearchPublicationMode::Replace
@@ -94,9 +103,12 @@ where
                 Some(properties) => TextIndexPreparation::Published(prepare_explicit_text_index(
                     project_dir,
                     TextIndexRequest {
+                        topology,
+                        ordinal: None,
                         label,
                         label_id,
                         properties,
+                        inventory,
                     },
                     mode,
                     limits.text,
@@ -104,7 +116,13 @@ where
                 )?),
                 None => prepare_default_text_index(
                     project_dir,
-                    LazyTextRequest { label, label_id },
+                    LazyTextRequest {
+                        topology,
+                        ordinal: None,
+                        label,
+                        label_id,
+                        inventory,
+                    },
                     mode,
                     limits.text,
                     checkpoint,
@@ -115,6 +133,7 @@ where
         SearchIndexRequest::Vector {
             label,
             label_id,
+            topology,
             node_uuid,
             vector,
             space,
@@ -122,6 +141,8 @@ where
         } => upsert_graph_vector(
             project_dir,
             VectorIndexRequest {
+                topology,
+                ordinal: None,
                 label,
                 label_id,
                 space,
@@ -190,17 +211,20 @@ mod tests {
 
     fn text_request<'a>(properties: Option<&'a [String]>, rebuild: bool) -> SearchIndexRequest<'a> {
         SearchIndexRequest::Text {
+            topology: None,
             label: "Person",
             label_id: graphforge_value::EntityTypeSelection::Known(
                 graphforge_value::EntityTypeId::decode(9).unwrap(),
             ),
             properties,
             rebuild,
+            inventory: None,
         }
     }
 
     fn vector_request(vector: &[f32], updated_at_micros: i64) -> SearchIndexRequest<'_> {
         SearchIndexRequest::Vector {
+            topology: None,
             label: "Person",
             label_id: graphforge_value::EntityTypeSelection::Known(
                 graphforge_value::EntityTypeId::decode(9).unwrap(),

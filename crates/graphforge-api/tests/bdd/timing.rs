@@ -1,4 +1,9 @@
-//! Deterministic timing reports and warning policy for the Rust BDD runner.
+//! Diagnostic timing reports for the Rust BDD runner.
+//!
+//! Cucumber scenario timings are shared diagnostics (#1654): distributions and
+//! slowest-scenario lists only. Performance thresholds belong to the
+//! provenance-gated `make tck-perf` consumer, which reads BenchExec and Divan
+//! evidence; do not add threshold consumers in this directory.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -7,7 +12,14 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u32 = 2;
+/// The report schema. Version 3 is the first diagnostic-only version.
+pub const REPORT_SCHEMA_VERSION: u32 = 3;
+pub const REPORT_KIND: &str = "diagnostic";
+pub const THRESHOLD_AUTHORITY: &str = "none; thresholds are owned by make tck-perf";
+/// The schema of the pre-#1654 policy and baseline files.
+pub const LEGACY_SCHEMA_VERSION: u32 = 2;
+/// The versioned TCK fixture profile (see `fixture.rs`).
+pub const FIXTURE_PROFILE: &str = "pooled-isolated-serial-v1";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -129,81 +141,58 @@ impl ScenarioTimer {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct TimingPolicy {
-    pub schema_version: u32,
-    pub baseline_required: bool,
-    pub fixture_profile: String,
-    pub tck_concurrency: usize,
-    pub per_scenario_multiplier: f64,
-    pub per_scenario_min_delta_ms: f64,
-    pub aggregate_multiplier: f64,
-    pub aggregate_min_delta_ms: f64,
-    pub absolute_slow_ms: Option<f64>,
-    pub max_warning_annotations: usize,
+/// A pre-#1654 file under `tests/tck/` (`performance_policy.json` or
+/// `performance_baseline.json`). Schema 2 made Cucumber timings a threshold
+/// authority; they no longer are. These files are only read, to report that
+/// they are legacy diagnostic context, and never drive a comparison.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LegacyFile {
+    Absent,
+    Schema2,
+    /// Present but unreadable, malformed or not schema 2. Reported, never a panic.
+    Unrecognised(String),
 }
 
-impl TimingPolicy {
-    fn validate(&self) -> Result<(), String> {
-        if self.schema_version != SCHEMA_VERSION {
-            return Err(format!(
-                "unsupported timing policy schema {}",
-                self.schema_version
-            ));
-        }
-        if self.per_scenario_multiplier < 1.0
-            || self.aggregate_multiplier < 1.0
-            || self.per_scenario_min_delta_ms < 0.0
-            || self.aggregate_min_delta_ms < 0.0
-            || self.absolute_slow_ms.is_some_and(|value| value <= 0.0)
-            || self.max_warning_annotations == 0
-            || self.fixture_profile.trim().is_empty()
-            || self.tck_concurrency == 0
-        {
-            return Err("invalid TCK timing policy values".to_owned());
-        }
-        Ok(())
+/// The shape both schema-2 files share. Only the version is inspected.
+#[derive(Deserialize)]
+struct LegacyHeader {
+    schema_version: u32,
+}
+
+pub fn load_legacy(path: &Path) -> LegacyFile {
+    let body = match fs::read_to_string(path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return LegacyFile::Absent,
+        Err(error) => return LegacyFile::Unrecognised(format!("unreadable: {}", error.kind())),
+    };
+    match serde_json::from_str::<LegacyHeader>(&body) {
+        Ok(header) if header.schema_version == LEGACY_SCHEMA_VERSION => LegacyFile::Schema2,
+        Ok(header) => LegacyFile::Unrecognised(format!("schema {}", header.schema_version)),
+        Err(error) => LegacyFile::Unrecognised(format!("malformed JSON at line {}", error.line())),
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct TimingBaseline {
-    pub schema_version: u32,
-    pub partial: bool,
-    pub fixture_profile: String,
-    pub tck_concurrency: usize,
-    pub runner: String,
-    pub rust_toolchain: String,
-    pub source_commit: String,
-    pub scenario_count: usize,
-    pub total_elapsed_us: u64,
-    pub features: BTreeMap<String, u64>,
-    pub scenarios: BTreeMap<String, u64>,
-    pub suggested_absolute_slow_ms: f64,
-}
-
-impl TimingBaseline {
-    fn validate(&self) -> Result<(), String> {
-        if self.schema_version != SCHEMA_VERSION {
-            return Err(format!(
-                "unsupported timing baseline schema {}",
-                self.schema_version
-            ));
-        }
-        if self.scenario_count != self.scenarios.len() {
-            return Err(format!(
-                "timing baseline count {} does not match {} scenario entries",
-                self.scenario_count,
-                self.scenarios.len()
-            ));
-        }
-        if self.fixture_profile.trim().is_empty() || self.tck_concurrency == 0 {
-            return Err("invalid timing baseline fixture profile".to_owned());
-        }
-        Ok(())
+/// The single notice for the legacy files, or `None` when neither exists.
+/// `files` pairs a repository-relative display name with its load result.
+pub fn legacy_notice(files: &[(&str, LegacyFile)]) -> Option<String> {
+    let present: Vec<String> = files
+        .iter()
+        .filter_map(|(name, file)| match file {
+            LegacyFile::Absent => None,
+            LegacyFile::Schema2 => Some(format!("{name} (schema 2)")),
+            LegacyFile::Unrecognised(reason) => Some(format!("{name} ({reason})")),
+        })
+        .collect();
+    if present.is_empty() {
+        return None;
     }
+    Some(format!(
+        "legacy diagnostic baseline: {} loaded as diagnostic context only; Cucumber timings are \
+         not a performance threshold authority. Run `make tck-perf` for the provenance-gated \
+         comparison (#1654).",
+        present.join(", ")
+    ))
 }
-
 #[derive(Clone, Debug, Serialize)]
 pub struct Distribution {
     pub count: usize,
@@ -242,50 +231,21 @@ pub struct SuiteReport {
     pub scenarios: Vec<ScenarioReport>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct DeltaContributor {
-    pub feature: String,
-    pub delta_ms: f64,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FindingKind {
-    ScenarioRegression,
-    AggregateRegression,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct PerformanceFinding {
-    pub kind: FindingKind,
-    pub message: String,
-    pub key: Option<String>,
-    pub baseline_ms: f64,
-    pub current_ms: f64,
-    pub threshold_ms: f64,
-    pub delta_ms: f64,
-    pub contributors: Vec<DeltaContributor>,
-}
-
+/// Cucumber timing report. Diagnostic only: it carries distributions and the
+/// slowest scenarios, and never findings or a baseline comparison.
 #[derive(Clone, Debug, Serialize)]
 pub struct TimingReport {
     pub schema_version: u32,
+    pub report_kind: &'static str,
+    pub threshold_authority: &'static str,
     pub partial: bool,
-    pub fixture_profile: String,
+    pub fixture_profile: &'static str,
     pub tck_concurrency: usize,
-    pub baseline_status: String,
+    pub legacy_notice: Option<String>,
     pub suites: Vec<SuiteReport>,
-    pub findings: Vec<PerformanceFinding>,
-    pub unbaselined_tck_scenarios: Vec<String>,
-    pub missing_baseline_tck_scenarios: Vec<String>,
 }
-
 fn micros_to_ms(value: u64) -> f64 {
     value as f64 / 1_000.0
-}
-
-fn ms_to_micros(value: f64) -> f64 {
-    value * 1_000.0
 }
 
 pub fn distribution(values: &[u64]) -> Distribution {
@@ -391,229 +351,34 @@ fn suite_report(records: &[ScenarioTiming], suite: Suite) -> SuiteReport {
     }
 }
 
-fn current_feature_totals(records: &[ScenarioTiming]) -> BTreeMap<String, u64> {
-    let mut totals = BTreeMap::new();
-    for record in records.iter().filter(|record| record.suite == Suite::Tck) {
-        *totals.entry(record.feature.clone()).or_default() += record.elapsed_us;
-    }
-    totals
-}
-
-pub fn baseline_candidate(
-    records: &[ScenarioTiming],
-    partial: bool,
-    policy: &TimingPolicy,
-) -> TimingBaseline {
-    let tck: Vec<&ScenarioTiming> = records
-        .iter()
-        .filter(|record| record.suite == Suite::Tck)
-        .collect();
-    let scenarios = tck
-        .iter()
-        .map(|record| (record.key.clone(), record.elapsed_us))
-        .collect();
-    let features = current_feature_totals(records);
-    let durations: Vec<u64> = tck.iter().map(|record| record.elapsed_us).collect();
-    let stats = distribution(&durations);
-    let suggested = ((2.0 * stats.p99_ms).max(stats.max_ms + 250.0) / 100.0).ceil() * 100.0;
-    TimingBaseline {
-        schema_version: SCHEMA_VERSION,
-        partial,
-        fixture_profile: policy.fixture_profile.clone(),
-        tck_concurrency: policy.tck_concurrency,
-        runner: std::env::var("BDD_RUNNER_LABEL")
-            .or_else(|_| std::env::var("RUNNER_OS"))
-            .unwrap_or_else(|_| "local".to_owned()),
-        rust_toolchain: "1.96.0".to_owned(),
-        source_commit: std::env::var("GITHUB_SHA").unwrap_or_else(|_| "local".to_owned()),
-        scenario_count: tck.len(),
-        total_elapsed_us: tck.iter().map(|record| record.elapsed_us).sum(),
-        features,
-        scenarios,
-        suggested_absolute_slow_ms: suggested,
-    }
-}
-
 pub fn build_report(
     records: &[ScenarioTiming],
-    policy: &TimingPolicy,
-    baseline: Option<&TimingBaseline>,
     partial: bool,
-) -> Result<TimingReport, String> {
-    policy.validate()?;
-    if let Some(baseline) = baseline {
-        baseline.validate()?;
-        if baseline.fixture_profile != policy.fixture_profile
-            || baseline.tck_concurrency != policy.tck_concurrency
-        {
-            return Err(format!(
-                "timing baseline fixture profile {} / concurrency {} does not match policy {} / concurrency {}",
-                baseline.fixture_profile,
-                baseline.tck_concurrency,
-                policy.fixture_profile,
-                policy.tck_concurrency
-            ));
-        }
-    } else if policy.baseline_required && !partial {
-        return Err("required TCK performance baseline is missing".to_owned());
-    }
-
-    let mut findings = Vec::new();
-    let mut unbaselined = Vec::new();
-    let mut missing = Vec::new();
-    let current: BTreeMap<&str, &ScenarioTiming> = records
-        .iter()
-        .filter(|record| record.suite == Suite::Tck)
-        .map(|record| (record.key.as_str(), record))
-        .collect();
-
-    if !partial && let Some(baseline) = baseline {
-        for (key, record) in &current {
-            let Some(baseline_us) = baseline.scenarios.get(*key) else {
-                unbaselined.push((*key).to_owned());
-                continue;
-            };
-            if record.outcome != ScenarioOutcome::Passed {
-                continue;
-            }
-            let relative_threshold = (*baseline_us as f64 * policy.per_scenario_multiplier)
-                .max(*baseline_us as f64 + ms_to_micros(policy.per_scenario_min_delta_ms));
-            let threshold = policy
-                .absolute_slow_ms
-                .map(ms_to_micros)
-                .map_or(relative_threshold, |absolute| {
-                    absolute.min(relative_threshold)
-                });
-            if record.elapsed_us as f64 > threshold {
-                let baseline_ms = micros_to_ms(*baseline_us);
-                let current_ms = micros_to_ms(record.elapsed_us);
-                let threshold_ms = threshold / 1_000.0;
-                findings.push(PerformanceFinding {
-                    kind: FindingKind::ScenarioRegression,
-                    message: format!(
-                        "{key}: {current_ms:.3} ms (baseline {baseline_ms:.3} ms, warning threshold {threshold_ms:.3} ms)"
-                    ),
-                    key: Some((*key).to_owned()),
-                    baseline_ms,
-                    current_ms,
-                    threshold_ms,
-                    delta_ms: current_ms - baseline_ms,
-                    contributors: Vec::new(),
-                });
-            }
-        }
-        missing.extend(
-            baseline
-                .scenarios
-                .keys()
-                .filter(|key| !current.contains_key(key.as_str()))
-                .cloned(),
-        );
-
-        let current_total: u64 = current.values().map(|record| record.elapsed_us).sum();
-        let aggregate_threshold = (baseline.total_elapsed_us as f64 * policy.aggregate_multiplier)
-            .max(baseline.total_elapsed_us as f64 + ms_to_micros(policy.aggregate_min_delta_ms));
-        if current_total as f64 > aggregate_threshold {
-            let current_features = current_feature_totals(records);
-            let mut contributors: Vec<DeltaContributor> = current_features
-                .iter()
-                .filter_map(|(feature, current_us)| {
-                    let baseline_us = baseline.features.get(feature).copied().unwrap_or(0);
-                    current_us
-                        .checked_sub(baseline_us)
-                        .map(|delta| DeltaContributor {
-                            feature: feature.clone(),
-                            delta_ms: micros_to_ms(delta),
-                        })
-                })
-                .collect();
-            contributors.sort_by(|left, right| {
-                right
-                    .delta_ms
-                    .total_cmp(&left.delta_ms)
-                    .then_with(|| left.feature.cmp(&right.feature))
-            });
-            contributors.truncate(10);
-            let baseline_ms = micros_to_ms(baseline.total_elapsed_us);
-            let current_ms = micros_to_ms(current_total);
-            let threshold_ms = aggregate_threshold / 1_000.0;
-            findings.push(PerformanceFinding {
-                kind: FindingKind::AggregateRegression,
-                message: format!(
-                    "openCypher TCK total: {current_ms:.3} ms (baseline {baseline_ms:.3} ms, warning threshold {threshold_ms:.3} ms)"
-                ),
-                key: None,
-                baseline_ms,
-                current_ms,
-                threshold_ms,
-                delta_ms: current_ms - baseline_ms,
-                contributors,
-            });
-        }
-    } else if baseline.is_none() {
-        unbaselined.extend(current.keys().map(|key| (*key).to_owned()));
-    }
-
-    findings.sort_by(|left, right| {
-        right
-            .delta_ms
-            .total_cmp(&left.delta_ms)
-            .then_with(|| left.key.cmp(&right.key))
-    });
-    Ok(TimingReport {
-        schema_version: SCHEMA_VERSION,
+    tck_concurrency: usize,
+    legacy_notice: Option<String>,
+) -> TimingReport {
+    TimingReport {
+        schema_version: REPORT_SCHEMA_VERSION,
+        report_kind: REPORT_KIND,
+        threshold_authority: THRESHOLD_AUTHORITY,
         partial,
-        fixture_profile: policy.fixture_profile.clone(),
-        tck_concurrency: policy.tck_concurrency,
-        baseline_status: if partial {
-            "partial_not_compared"
-        } else if baseline.is_some() {
-            "compared"
-        } else {
-            "unbaselined"
-        }
-        .to_owned(),
+        fixture_profile: FIXTURE_PROFILE,
+        tck_concurrency,
+        legacy_notice,
         suites: vec![
             suite_report(records, Suite::Api),
             suite_report(records, Suite::Tck),
         ],
-        findings,
-        unbaselined_tck_scenarios: unbaselined,
-        missing_baseline_tck_scenarios: missing,
-    })
-}
-
-pub fn load_policy(path: &Path) -> Result<TimingPolicy, String> {
-    let body = fs::read_to_string(path)
-        .map_err(|error| format!("failed to read timing policy {}: {error}", path.display()))?;
-    let policy: TimingPolicy = serde_json::from_str(&body)
-        .map_err(|error| format!("invalid timing policy {}: {error}", path.display()))?;
-    policy.validate()?;
-    Ok(policy)
-}
-
-pub fn load_baseline(path: &Path, required: bool) -> Result<Option<TimingBaseline>, String> {
-    let body = match fs::read_to_string(path) {
-        Ok(body) => body,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required => return Ok(None),
-        Err(error) => {
-            return Err(format!(
-                "failed to read timing baseline {}: {error}",
-                path.display()
-            ));
-        }
-    };
-    let baseline: TimingBaseline = serde_json::from_str(&body)
-        .map_err(|error| format!("invalid timing baseline {}: {error}", path.display()))?;
-    baseline.validate()?;
-    Ok(Some(baseline))
+    }
 }
 
 pub fn render_markdown(report: &TimingReport) -> String {
     let mut lines = vec![
-        "# Rust BDD timing report".to_owned(),
+        "# Rust BDD timing report (diagnostic)".to_owned(),
         String::new(),
-        format!("Baseline status: `{}`", report.baseline_status),
+        "Diagnostic only: these timings drive no performance threshold. \
+         Run `make tck-perf` for the provenance-gated comparison."
+            .to_owned(),
         format!(
             "Fixture profile: `{}` with TCK concurrency `{}`",
             report.fixture_profile, report.tck_concurrency
@@ -678,30 +443,14 @@ pub fn render_markdown(report: &TimingReport) -> String {
             ));
         }
     }
-    lines.extend([
-        String::new(),
-        "## Performance warnings".to_owned(),
-        String::new(),
-    ]);
-    if report.findings.is_empty() {
-        lines.push("None.".to_owned());
-    } else {
-        lines.extend(
-            report
-                .findings
-                .iter()
-                .map(|finding| format!("- {}", finding.message)),
-        );
+    if let Some(notice) = &report.legacy_notice {
+        lines.extend([String::new(), format!("Notice: {notice}")]);
     }
     lines.push(String::new());
     lines.join("\n")
 }
 
-pub fn write_artifacts(
-    output_dir: &Path,
-    report: &TimingReport,
-    candidate: &TimingBaseline,
-) -> Result<String, String> {
+pub fn write_artifacts(output_dir: &Path, report: &TimingReport) -> Result<String, String> {
     fs::create_dir_all(output_dir).map_err(|error| {
         format!(
             "failed to create timing output directory {}: {error}",
@@ -710,49 +459,10 @@ pub fn write_artifacts(
     })?;
     let report_json = serde_json::to_string_pretty(report)
         .map_err(|error| format!("failed to serialize timing report: {error}"))?;
-    let candidate_json = serde_json::to_string_pretty(candidate)
-        .map_err(|error| format!("failed to serialize timing baseline candidate: {error}"))?;
     let markdown = render_markdown(report);
     fs::write(output_dir.join("report.json"), format!("{report_json}\n"))
         .map_err(|error| format!("failed to write timing report: {error}"))?;
-    fs::write(
-        output_dir.join("tck-baseline-candidate.json"),
-        format!("{candidate_json}\n"),
-    )
-    .map_err(|error| format!("failed to write timing baseline candidate: {error}"))?;
     fs::write(output_dir.join("summary.md"), &markdown)
         .map_err(|error| format!("failed to write timing summary: {error}"))?;
     Ok(markdown)
-}
-
-pub fn escape_github_command(value: &str) -> String {
-    value
-        .replace('%', "%25")
-        .replace('\r', "%0D")
-        .replace('\n', "%0A")
-        .replace(':', "%3A")
-        .replace(',', "%2C")
-}
-
-pub fn annotation_messages(report: &TimingReport, maximum: usize) -> Vec<String> {
-    assert!(maximum > 0, "annotation maximum must be positive");
-    if report.findings.len() <= maximum {
-        return report
-            .findings
-            .iter()
-            .map(|finding| finding.message.clone())
-            .collect();
-    }
-    let detailed = maximum.saturating_sub(1);
-    let mut messages: Vec<String> = report
-        .findings
-        .iter()
-        .take(detailed)
-        .map(|finding| finding.message.clone())
-        .collect();
-    messages.push(format!(
-        "{} TCK performance warning(s); {detailed} detailed annotation(s) emitted — see report.json",
-        report.findings.len()
-    ));
-    messages
 }

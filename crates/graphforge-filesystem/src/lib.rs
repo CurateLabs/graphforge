@@ -38,7 +38,6 @@ use platform::link_count;
 use platform::path_identity_platform;
 use platform::path_link_count_platform;
 use platform::rename_no_replace_platform;
-use platform::replace_file_platform;
 use platform::stable_child_names;
 use platform::stable_child_names_bounded;
 use platform::stable_create_child_directory;
@@ -49,10 +48,12 @@ use platform::stable_open_directory;
 #[cfg(windows)]
 use platform::stable_open_directory_for_sync;
 use platform::stable_open_or_create_child_file;
+use platform::stable_open_publishing_child_file;
 use platform::stable_open_replaceable_child_file;
 use platform::stable_remove_child_directory_if_identity;
 use platform::stable_unlink_child_if_identity;
 use platform::visit_regular_files_platform;
+use platform::{replace_file_from_platform, replace_file_platform};
 #[cfg(windows)]
 pub use windows_cas::{WindowsCasWriter, WindowsLegacyCasAdopter, WindowsSealedCasFile};
 
@@ -204,6 +205,14 @@ impl UnpublishedArtifactGuard {
         Ok(observed)
     }
 
+    /// Borrow the private original candidate name for durability-owner validation.
+    pub fn temporary_name(&self) -> io::Result<&OsStr> {
+        self.candidate_names
+            .first()
+            .map(OsString::as_os_str)
+            .ok_or_else(|| io::Error::other("unpublished artifact has no temporary name"))
+    }
+
     /// Open one sibling through the retained no-follow parent capability.
     ///
     /// # Errors
@@ -229,6 +238,45 @@ impl UnpublishedArtifactGuard {
         self.file
             .take()
             .ok_or_else(|| io::Error::other("unpublished artifact file already transferred"))
+    }
+
+    /// Transfer exclusive unpublished cleanup to a new owner of this same file.
+    /// A published guard cannot relinquish its semantic commit obligations.
+    pub fn transfer_unpublished_owner(
+        self,
+        file: &File,
+    ) -> io::Result<(StableDirectory, OsString, FileIdentity)> {
+        let directory = self.directory.try_clone()?;
+        self.transfer_unpublished_owner_in(directory, file)
+    }
+
+    /// Transfer an already-owned retained parent without duplicating its handle.
+    pub fn transfer_unpublished_owner_in(
+        mut self,
+        directory: StableDirectory,
+        file: &File,
+    ) -> io::Result<(StableDirectory, OsString, FileIdentity)> {
+        if self.published || self.file.is_some() || self.candidate_names.len() != 1 {
+            return Err(io::Error::other(
+                "unpublished owner transfer invariants are incomplete",
+            ));
+        }
+        let expected = self.identity()?;
+        self.directory.revalidate_named()?;
+        directory.revalidate_named()?;
+        let name = self.candidate_names[0].clone();
+        let named = directory.open_child_file(&name)?;
+        if directory.identity() != self.directory.identity()
+            || file_identity(file)? != expected
+            || file_identity(&named)? != expected
+            || file_link_count(file)? != 1
+        {
+            return Err(io::Error::other(
+                "unpublished owner transfer identity changed",
+            ));
+        }
+        self.armed = false;
+        Ok((directory, name, expected))
     }
 
     /// Atomically install `target` while retaining cleanup ownership.
@@ -257,7 +305,15 @@ impl UnpublishedArtifactGuard {
     /// # Errors
     /// Returns an error when the directory durability barrier fails.
     pub fn sync_parent(&mut self) -> io::Result<()> {
-        self.directory.sync()?;
+        self.sync_parent_with(StableDirectory::sync)
+    }
+
+    /// Acknowledge through the caller's durability owner, then mark this guard.
+    pub fn sync_parent_with(
+        &mut self,
+        acknowledge: impl FnOnce(&StableDirectory) -> io::Result<()>,
+    ) -> io::Result<()> {
+        acknowledge(&self.directory)?;
         self.parent_synced = true;
         Ok(())
     }
@@ -503,6 +559,9 @@ impl StableDirectory {
                 io::Error::other("stable directory path is linked or special"),
             ));
         }
+        #[cfg(unix)]
+        let named_identity = platform::metadata_identity(&named);
+        #[cfg(not(unix))]
         let named_identity = path_identity(&self.path)
             .map_err(|error| DirectoryValidationError::new(Stage::NamedIdentity, error))?;
         if named_identity != self.identity {
@@ -511,6 +570,9 @@ impl StableDirectory {
                 io::Error::other("stable directory identity changed"),
             ));
         }
+        #[cfg(unix)]
+        let retained_identity = platform::metadata_identity(&retained);
+        #[cfg(not(unix))]
         let retained_identity = file_identity(&self.file)
             .map_err(|error| DirectoryValidationError::new(Stage::RetainedIdentity, error))?;
         if retained_identity != self.identity {
@@ -559,6 +621,39 @@ impl StableDirectory {
         let path = self.path.join(name);
         let file = stable_open_child_file(&self.file, &path, name, false)?;
         validate_stable_child_file(&file, &path)?;
+        self.revalidate_named()?;
+        Ok(file)
+    }
+
+    /// Revalidate a retained regular child against its current named path.
+    ///
+    /// Performs the same fresh directory and child observations as opening
+    /// the child, without replacing the retained handle or its seek position.
+    pub fn revalidate_child_file(&self, name: &OsStr, file: &File) -> io::Result<()> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        validate_stable_child_file(file, &self.path.join(name))?;
+        self.revalidate_named()
+    }
+
+    /// Reopen an already-admitted private publication source with write access
+    /// for its file barrier and Windows delete sharing for its native rename.
+    /// Ordinary immutable readers retain their existing anti-delete sharing.
+    pub fn open_publishing_child_file(
+        &self,
+        name: &OsStr,
+        expected: FileIdentity,
+    ) -> io::Result<File> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        let path = self.path.join(name);
+        let file = stable_open_publishing_child_file(&self.file, &path, name)?;
+        validate_stable_child_file(&file, &path)?;
+        if file_identity(&file)? != expected || file_link_count(&file)? != 1 {
+            return Err(io::Error::other(
+                "publication source identity or link count changed",
+            ));
+        }
         self.revalidate_named()?;
         Ok(file)
     }
@@ -848,41 +943,60 @@ impl StableDirectory {
         expected_temporary: FileIdentity,
         target: &OsStr,
     ) -> io::Result<()> {
-        validate_child_name(temporary)?;
-        validate_child_name(target)?;
-        self.revalidate_named()?;
-        let temporary_file = self.open_child_file(temporary)?;
-        if file_identity(&temporary_file)? != expected_temporary
-            || file_link_count(&temporary_file)? != 1
-        {
-            return Err(io::Error::other(
-                "atomic temporary child identity or link count changed",
-            ));
-        }
-        drop(temporary_file);
-        let target_exists = match self.open_child_file(target) {
-            Ok(target_file) => {
-                drop(target_file);
-                true
+        self.replace_child_typed(temporary, expected_temporary, target)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    /// Replace one child while retaining native visibility uncertainty.
+    pub fn replace_child_typed(
+        &self,
+        temporary: &OsStr,
+        expected_temporary: FileIdentity,
+        target: &OsStr,
+    ) -> Result<(), ReplaceFileError> {
+        let prepare = || -> io::Result<bool> {
+            validate_child_name(temporary)?;
+            validate_child_name(target)?;
+            self.revalidate_named()?;
+            let temporary_file = self.open_child_file(temporary)?;
+            if file_identity(&temporary_file)? != expected_temporary
+                || file_link_count(&temporary_file)? != 1
+            {
+                return Err(io::Error::other(
+                    "atomic temporary child identity or link count changed",
+                ));
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-            Err(error) => return Err(error),
+            match self.open_child_file(target) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error),
+            }
         };
-        let result = if target_exists {
+        if prepare().map_err(ReplaceFileError::NotReplaced)? {
             replace_file_platform(
                 &self.file,
                 temporary,
                 target,
                 Some(expected_temporary),
                 None,
-            )
-            .map_err(|error| io::Error::other(error.to_string()))
+            )?;
         } else {
             install_new_file_platform(&self.file, temporary, target, Some(expected_temporary))
-        };
-        result?;
+                .map_err(ReplaceFileError::StateUnknown)?;
+        }
+        self.validate_replaced_child(target, expected_temporary)
+            .map_err(ReplaceFileError::StateUnknown)
+    }
+
+    fn validate_replaced_child(&self, target: &OsStr, expected: FileIdentity) -> io::Result<()> {
         self.revalidate_named()?;
-        self.open_child_file(target).map(|_| ())
+        let installed = self.open_child_file(target)?;
+        if file_identity(&installed)? != expected || file_link_count(&installed)? != 1 {
+            return Err(io::Error::other(
+                "replacement target identity or link count changed",
+            ));
+        }
+        Ok(())
     }
 
     /// Atomically replace an authenticated prior child, which may share its inode
@@ -896,25 +1010,75 @@ impl StableDirectory {
         target: &OsStr,
         expected_target: FileIdentity,
     ) -> io::Result<()> {
-        validate_child_name(temporary)?;
-        validate_child_name(target)?;
-        self.revalidate_named()?;
+        self.replace_authenticated_child_typed(
+            temporary,
+            expected_temporary,
+            target,
+            expected_target,
+        )
+        .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    /// Replace an authenticated prior child without losing native error state.
+    pub fn replace_authenticated_child_typed(
+        &self,
+        temporary: &OsStr,
+        expected_temporary: FileIdentity,
+        target: &OsStr,
+        expected_target: FileIdentity,
+    ) -> Result<(), ReplaceFileError> {
+        validate_child_name(temporary).map_err(ReplaceFileError::NotReplaced)?;
+        validate_child_name(target).map_err(ReplaceFileError::NotReplaced)?;
+        self.revalidate_named()
+            .map_err(ReplaceFileError::NotReplaced)?;
         replace_file_platform(
             &self.file,
             temporary,
             target,
             Some(expected_temporary),
             Some(expected_target),
-        )
-        .map_err(|error| io::Error::other(error.to_string()))?;
-        self.revalidate_named()?;
-        let installed = self.open_child_file(target)?;
-        if file_identity(&installed)? != expected_temporary || file_link_count(&installed)? != 1 {
-            return Err(io::Error::other(
-                "authenticated replacement identity changed",
-            ));
-        }
-        Ok(())
+        )?;
+        self.validate_replaced_child(target, expected_temporary)
+            .map_err(ReplaceFileError::StateUnknown)
+    }
+
+    /// Atomically move an authenticated temporary from another retained
+    /// directory over this directory's exact authenticated target.
+    ///
+    /// The temporary must already be durably sealed: this renames it without
+    /// write access, so it neither flushes nor needs to open its payload for
+    /// writing. On Windows the caller must not retain its own handle to the
+    /// temporary, and a retained reader of the target that denies delete
+    /// sharing makes the replacement fail with nothing replaced.
+    #[doc(hidden)]
+    pub fn replace_authenticated_child_from(
+        &self,
+        source_directory: &Self,
+        temporary: &OsStr,
+        expected_temporary: FileIdentity,
+        target: &OsStr,
+        expected_target: FileIdentity,
+    ) -> Result<(), ReplaceFileError> {
+        validate_child_name(temporary).map_err(ReplaceFileError::NotReplaced)?;
+        validate_child_name(target).map_err(ReplaceFileError::NotReplaced)?;
+        source_directory
+            .revalidate_named()
+            .map_err(ReplaceFileError::NotReplaced)?;
+        self.revalidate_named()
+            .map_err(ReplaceFileError::NotReplaced)?;
+        replace_file_from_platform(
+            &source_directory.file,
+            &self.file,
+            temporary,
+            target,
+            Some(expected_temporary),
+            Some(expected_target),
+        )?;
+        source_directory
+            .revalidate_named()
+            .map_err(ReplaceFileError::StateUnknown)?;
+        self.validate_replaced_child(target, expected_temporary)
+            .map_err(ReplaceFileError::StateUnknown)
     }
 
     /// Atomically install a retained temporary child without replacing an
@@ -948,6 +1112,39 @@ impl StableDirectory {
         self.open_child_file(target).map(|_| ())
     }
 
+    /// Preserve whether create-only publication definitely did not install or
+    /// reached a native visibility boundary whose result needs reconciliation.
+    pub fn install_child_typed(
+        &self,
+        temporary: &OsStr,
+        expected_temporary: FileIdentity,
+        target: &OsStr,
+    ) -> Result<(), ReplaceFileError> {
+        let prepare = || -> io::Result<()> {
+            validate_child_name(temporary)?;
+            validate_child_name(target)?;
+            self.revalidate_named()?;
+            let file = self.open_child_file(temporary)?;
+            if file_identity(&file)? != expected_temporary || file_link_count(&file)? != 1 {
+                return Err(io::Error::other(
+                    "atomic temporary child identity or link count changed",
+                ));
+            }
+            Ok(())
+        };
+        prepare().map_err(ReplaceFileError::NotReplaced)?;
+        install_new_file_platform(&self.file, temporary, target, Some(expected_temporary))
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    ReplaceFileError::NotReplaced(error)
+                } else {
+                    ReplaceFileError::StateUnknown(error)
+                }
+            })?;
+        self.validate_replaced_child(target, expected_temporary)
+            .map_err(ReplaceFileError::StateUnknown)
+    }
+
     /// Flush this retained directory capability.
     pub fn sync(&self) -> io::Result<()> {
         self.revalidate_named()?;
@@ -959,12 +1156,12 @@ impl StableDirectory {
                     "stable directory identity changed before sync",
                 ));
             }
-            directory.sync_all()?;
+            directory.observed_sync_all()?;
             self.revalidate_named()
         }
         #[cfg(not(windows))]
         {
-            self.file.sync_all()?;
+            self.file.observed_sync_all()?;
             self.revalidate_named()
         }
     }
@@ -1197,3 +1394,7 @@ fn verify_space_usage_metadata(metadata: &std::fs::Metadata) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+/// Optional, process-wide diagnostic work counters.
+pub mod observation;
+pub use observation::ObservedSync;

@@ -17,6 +17,7 @@ pub mod find;
 pub mod fusion;
 pub mod indexing;
 pub mod lifecycle;
+pub mod node_identity;
 pub mod provider;
 pub mod provider_adapter;
 pub mod provider_batching;
@@ -65,6 +66,7 @@ pub use lifecycle::{
     inspect_text_index_freshness, prepare_default_text_index, prepare_explicit_text_index,
     prepare_text_index, search_default_text, search_published_text,
 };
+pub use node_identity::SessionOrdinalIdentity;
 pub use provider::{
     DEFAULT_REMOTE_PROVIDER, ProviderCapabilities, ProviderCapability, ProviderError,
     ProviderFailureClass, ProviderModelContract, ProviderRequestLimits, ProviderResult,
@@ -108,8 +110,8 @@ pub use text_index::{
     search_text_index, validate_text_index,
 };
 pub use vector_lifecycle::{
-    VectorIndexRequest, VectorLifecycleLimits, project_label_members, search_graph_vectors,
-    upsert_graph_vector,
+    VectorIndexRequest, VectorLifecycleLimits, project_label_members,
+    project_label_members_snapshot_with_topology, search_graph_vectors, upsert_graph_vector,
 };
 
 /// Named resource bounds shared by text projection, indexing, and search.

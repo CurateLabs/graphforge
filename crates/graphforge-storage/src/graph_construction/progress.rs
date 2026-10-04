@@ -297,7 +297,7 @@ fn staged_identity_records(
 
 fn sha256_of_body(body: &[u8]) -> String {
     use sha2::Digest;
-    super::hex(sha2::Sha256::digest(body).as_slice())
+    super::hex(graphforge_core::hash_observation::ControlSha256::digest(body).as_slice())
 }
 
 /// Remove every progress control. Only valid once the shape is complete and
@@ -465,7 +465,7 @@ fn unlink_segment_file(root: &StableDirectory, name: &str) -> Result<(), GfError
     drop(file);
     root.unlink_child_if_identity(OsStr::new(name), identity)
         .map_err(storage)?;
-    root.sync().map_err(storage)
+    root.acknowledge().map_err(storage)
 }
 
 /// Authenticate every claimed segment payload once at the resume boundary and

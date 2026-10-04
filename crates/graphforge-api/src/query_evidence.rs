@@ -2,9 +2,10 @@
 
 use arrow::array::{Array, Int64Array, UInt64Array};
 use arrow::ipc::{reader::StreamReader, writer::StreamWriter};
+use graphforge_core::hash_observation::EvidenceSha256 as Sha256;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::fs::File;
 use std::io::{BufReader, Write};
 
@@ -24,6 +25,10 @@ pub struct QueryExecutionEvidence {
     pub sorts: Vec<QuerySortEvidence>,
     /// Sanitized operator RSS samples.
     pub operator_rss: Vec<QueryOperatorRssEvidence>,
+    /// Adjacency rebuild attempts because an index was missing or stale,
+    /// including attempts that fail after starting rebuild work.
+    /// Construction-published generations serve their current index with zero.
+    pub adjacency_rebuilds: u64,
     /// Maximum concurrent filtered reads.
     pub max_in_flight_reads: u64,
     /// Query memory reservation before execution.
@@ -322,10 +327,11 @@ impl From<graphforge_exec::demand::DemandSnapshot> for QueryExecutionEvidence {
             .max()
             .unwrap_or(0);
         Self {
-            contract: "graphforge-query-evidence/1",
+            contract: "graphforge-query-evidence/2",
             hops,
             sorts,
             operator_rss,
+            adjacency_rebuilds: snapshot.adjacency_rebuilds,
             max_in_flight_reads: snapshot.max_in_flight_reads,
             memory_reserved_before: snapshot.memory_reserved_before,
             memory_reserved_after: snapshot.memory_reserved_after,

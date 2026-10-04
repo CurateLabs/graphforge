@@ -21,6 +21,8 @@ fn count(graph: &GraphForge, query: &str) -> i64 {
 }
 fn create(graph: &mut GraphForge, label: &str) -> CreateResearchBranchRequest {
     let request = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(graph),
         branch_uuid: Uuid::now_v7(),
@@ -40,6 +42,8 @@ fn create(graph: &mut GraphForge, label: &str) -> CreateResearchBranchRequest {
 }
 fn edit(graph: &mut GraphForge, branch_uuid: Uuid, query: &str) -> ExecuteResearchBranchRequest {
     let request = ExecuteResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(graph),
         branch_uuid,
@@ -124,6 +128,8 @@ fn two_branches_restore_independently_of_parent_and_keep_receipts_after_reopen()
         );
     }
     let restore = RestoreResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: a.branch_uuid,
@@ -192,6 +198,8 @@ fn exact_branch_retries_refresh_parent_changes_from_another_facade() {
         "CREATE (:Story {name:'Local'})",
     );
     let restore = RestoreResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: branch.branch_uuid,
@@ -239,6 +247,8 @@ fn capture(graph: &mut GraphForge) -> Uuid {
     let version_uuid = Uuid::now_v7();
     let operation = graph
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid,
             context_uuid: Uuid::now_v7(),
@@ -292,6 +302,8 @@ fn slice_branch_preserves_selected_identity_without_parent_graph_membership() {
         frozen_ipc: frozen_character(&graph, version),
     };
     let request = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: Uuid::now_v7(),
@@ -501,6 +513,8 @@ fn assertion_slice_branch_retains_only_selected_evidence_after_reopen() {
     }
     writer.finish().unwrap();
     let request = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: Uuid::now_v7(),
@@ -537,7 +551,13 @@ fn assertion_slice_branch_retains_only_selected_evidence_after_reopen() {
     assert!(version.artifact_payload(artifact).is_ok());
     assert!(version.artifact_payload(outside).is_err());
     assert!(graph.artifact(outside).is_ok());
+    let prior = graph
+        .open_research_branch(request.branch_uuid)
+        .unwrap()
+        .version_uuid();
     let suppression = SuppressResearchBranchAssertionRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: request.branch_uuid,
@@ -548,6 +568,13 @@ fn assertion_slice_branch_retains_only_selected_evidence_after_reopen() {
     graph
         .suppress_research_branch_assertion(&suppression, &CancellationToken::new())
         .unwrap();
+    assert_eq!(
+        graph
+            .research_version(suppression.version_uuid)
+            .unwrap()
+            .parents,
+        vec![prior]
+    );
     let suppressed = graph.open_research_branch(request.branch_uuid).unwrap();
     assert!(suppressed.graph().assertion(assertion, None).is_err());
     assert!(
@@ -631,6 +658,8 @@ fn field_origins_and_contributions_survive_local_edits_and_slice_children() {
     );
     assert_eq!(changed[10], "local");
     let child = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: Uuid::now_v7(),
@@ -717,6 +746,8 @@ fn source_only_slice_branch_has_empty_graph_and_selected_source_membership() {
     writer.write(&frozen.batches[0]).unwrap();
     writer.finish().unwrap();
     let request = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: Uuid::now_v7(),
@@ -794,7 +825,13 @@ fn local_composition_is_exact_and_does_not_change_parent_or_sibling() {
     .unwrap();
     let candidate =
         graphforge_storage::WorkspaceOntologyComposition::from_compiled(&compiled, vec![]);
+    let prior = graph
+        .open_research_branch(a.branch_uuid)
+        .unwrap()
+        .version_uuid();
     let request = ChangeResearchBranchOntologyRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: a.branch_uuid,
@@ -807,6 +844,13 @@ fn local_composition_is_exact_and_does_not_change_parent_or_sibling() {
     graph
         .change_research_branch_ontology(&request, &CancellationToken::new())
         .unwrap();
+    assert_eq!(
+        graph
+            .research_version(request.version_uuid)
+            .unwrap()
+            .parents,
+        vec![prior]
+    );
     let view = graph.open_research_branch(a.branch_uuid).unwrap();
     assert_eq!(
         view.graph()
@@ -851,6 +895,8 @@ fn reference_does_not_expand_but_bring_preserves_selected_uuid_and_origin() {
     let shared = shared_uuid(&graph);
     let base = capture(&mut graph);
     let branch = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: Uuid::now_v7(),
@@ -870,6 +916,8 @@ fn reference_does_not_expand_but_bring_preserves_selected_uuid_and_origin() {
         .unwrap();
     let source = capture(&mut graph);
     let reference = ReferenceResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: branch.branch_uuid,
@@ -897,6 +945,8 @@ fn reference_does_not_expand_but_bring_preserves_selected_uuid_and_origin() {
     writer.write(&frozen.batches[0]).unwrap();
     writer.finish().unwrap();
     let bring = BringResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: branch.branch_uuid,
@@ -1015,6 +1065,8 @@ fn selected_branch_releases_large_parent_after_evolution_and_cleanup() {
         let source = capture(&mut graph);
         let source_record = graph.research_version(source).unwrap();
         let request = CreateResearchBranchRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             expected_generation_uuid: current(&graph),
             branch_uuid: Uuid::now_v7(),
@@ -1094,6 +1146,8 @@ fn selected_branch_releases_large_parent_after_evolution_and_cleanup() {
         graph.execute("MATCH (n:Noise) DELETE n").unwrap();
         let replacement = graph
             .prepare_research_version(PrepareResearchVersionRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 version_uuid: Uuid::now_v7(),
                 context_uuid: source_record.context_uuid,
@@ -1128,8 +1182,26 @@ fn selected_branch_releases_large_parent_after_evolution_and_cleanup() {
             graphforge_storage::ProjectRetentionLimits::default(),
         )
         .unwrap();
-        let retained = bytes(&root.join("graph-objects/sha256"));
-        assert!(retained < before);
+        let retained_total = bytes(&root.join("graph-objects/sha256"));
+        assert!(retained_total < before);
+        // A compact owner's generations keep their own payloads in the content
+        // store, and those grow with the history of the project (retired
+        // identities stay indexed). The branch under test is accountable for
+        // what is retained beyond them.
+        let mut generation_objects = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(root.join("generations")).unwrap() {
+            let uuid = Uuid::parse_str(entry.unwrap().file_name().to_str().unwrap()).unwrap();
+            let generation = graphforge_storage::resolve_generation_by_uuid(&root, uuid).unwrap();
+            for file in generation
+                .graph_files_inventory()
+                .unwrap()
+                .into_iter()
+                .flat_map(|inventory| inventory.files)
+            {
+                generation_objects.insert(file.content_sha256, file.byte_length);
+            }
+        }
+        let retained = retained_total - generation_objects.values().sum::<u64>();
         let graph = GraphForge::new(root.to_str()).unwrap();
         let view = graph.open_research_branch(request.branch_uuid).unwrap();
         assert_eq!(count_nodes(view.graph()), 1);
@@ -1158,8 +1230,9 @@ fn selected_branch_releases_large_parent_after_evolution_and_cleanup() {
             graph.research_version(request.version_uuid).unwrap(),
             selected
         );
-        // This facade fixture uses the authenticated generation tree directly.
-        assert_eq!(projection.source_materialization_bytes_copied, 0);
+        // The owner is compact, so the projection hard-links its payloads and
+        // copies only the small mutable controls; that cost is checked below
+        // not to move with the parent's size.
         assert!(projection.source_materialization_bytes_copied < projection.source_payload_bytes);
         measurements.push((
             parent_noise_nodes,
@@ -1173,6 +1246,10 @@ fn selected_branch_releases_large_parent_after_evolution_and_cleanup() {
         ));
     }
     assert!(measurements[1].1 > measurements[0].1);
+    assert_eq!(
+        measurements[0].3, measurements[1].3,
+        "materialization copy cost must not grow with the parent's payload"
+    );
     assert!(measurements[1].2.abs_diff(measurements[0].2) < 1024);
     assert!(measurements[1].4 <= measurements[0].4 + 8192);
     eprintln!(
@@ -1235,6 +1312,8 @@ fn required_roles_survive_branch_and_historical_branch_version_creation() {
     }
     writer.finish().unwrap();
     let parent = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: Uuid::now_v7(),
@@ -1308,6 +1387,8 @@ fn required_roles_survive_branch_and_historical_branch_version_creation() {
         },
     ] {
         let child = CreateResearchBranchRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             expected_generation_uuid: current(&graph),
             branch_uuid: Uuid::now_v7(),
@@ -1338,6 +1419,8 @@ fn branch_cancel_stale_current_and_conflicting_retry_preserve_authority() {
     let mut graph = GraphForge::new(root.to_str()).unwrap();
     graph.execute("CREATE (:Story {name:'Original'})").unwrap();
     let create_request = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: Uuid::now_v7(),
@@ -1375,6 +1458,8 @@ fn branch_cancel_stale_current_and_conflicting_retry_preserve_authority() {
         .unwrap();
 
     let edit_request = ExecuteResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: create_request.branch_uuid,

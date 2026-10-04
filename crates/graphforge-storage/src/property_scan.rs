@@ -25,6 +25,9 @@ pub(crate) struct PropertyScanOptions<'a> {
     pub(crate) projection: Option<&'a Vec<usize>>,
     pub(crate) limit: Option<usize>,
     pub(crate) batch_size: usize,
+    /// Whether planning may admit the route for a footer row bound. A
+    /// key-only scan of an unread route reports a manifest estimate instead.
+    pub(crate) footer_statistics: bool,
 }
 
 #[derive(Clone)]
@@ -37,11 +40,13 @@ pub(crate) struct PropertyOverlayExec {
     projection: Option<Vec<String>>,
     limit: Option<usize>,
     batch_size: usize,
-    row_upper_bound: Option<usize>,
+    planned_rows: Option<usize>,
     props: Arc<PlanProperties>,
-    metrics: ExecutionPlanMetricsSet,
-    work_counts: [Count; 3],
-    decoder_peak: Gauge,
+    #[cfg(any(test, feature = "test-support"))]
+    digest_context: graphforge_core::hash_observation::operation::Context,
+    metrics: Option<ExecutionPlanMetricsSet>,
+    work_counts: Option<([Count; 3], Gauge)>,
+    lifecycle_context: crate::lifecycle_io::CaptureContext,
 }
 
 impl fmt::Debug for PropertyOverlayExec {
@@ -89,10 +94,22 @@ impl PropertyOverlayExec {
         } else {
             crate::PropertyRouteKind::Node
         };
-        let row_upper_bound = inventory.as_ref().map(|inventory| {
-            let rows = inventory.route_row_upper_bound(kind, &route);
-            options.limit.map_or(rows, |limit| rows.min(limit))
-        });
+        // A key-only scan of an unread route must not admit it for a footer
+        // bound; the manifest's declared lengths still give the planner an
+        // estimate, so a small route is not repartitioned as if unbounded.
+        let planned_rows = inventory
+            .as_ref()
+            .map(|inventory| {
+                let rows = if options.footer_statistics {
+                    inventory
+                        .route_row_upper_bound(kind, &route)
+                        .map_err(|error| DataFusionError::External(Box::new(error)))?
+                } else {
+                    inventory.route_row_estimate(kind, &route)
+                };
+                Ok::<_, DataFusionError>(options.limit.map_or(rows, |limit| rows.min(limit)))
+            })
+            .transpose()?;
         let props = Arc::new(
             PlanProperties::new(
                 EquivalenceProperties::new(Arc::clone(&schema)),
@@ -104,14 +121,19 @@ impl PropertyOverlayExec {
             // backpressured channel, so polling never blocks the async worker.
             .with_scheduling_type(SchedulingType::Cooperative),
         );
-        let metrics = ExecutionPlanMetricsSet::new();
-        let work_counts = [
-            "property_spill_bytes",
-            "property_authentication_bytes",
-            "property_physical_rows",
-        ]
-        .map(|name| MetricBuilder::new(&metrics).counter(name, 0));
-        let decoder_peak = MetricBuilder::new(&metrics).gauge("property_decoder_peak_bytes", 0);
+        let (metrics, work_counts) = if crate::lifecycle_io::is_active() {
+            let metrics = ExecutionPlanMetricsSet::new();
+            let work_counts = [
+                "property_spill_bytes",
+                "property_authentication_bytes",
+                "property_physical_rows",
+            ]
+            .map(|name| MetricBuilder::new(&metrics).counter(name, 0));
+            let decoder_peak = MetricBuilder::new(&metrics).gauge("property_decoder_peak_bytes", 0);
+            (Some(metrics), Some((work_counts, decoder_peak)))
+        } else {
+            (None, None)
+        };
         Ok(Self {
             project,
             inventory,
@@ -121,11 +143,13 @@ impl PropertyOverlayExec {
             projection,
             limit: options.limit,
             batch_size: options.batch_size.max(1),
-            row_upper_bound,
+            planned_rows,
             props,
             metrics,
             work_counts,
-            decoder_peak,
+            #[cfg(any(test, feature = "test-support"))]
+            digest_context: graphforge_core::hash_observation::operation::Context::capture(),
+            lifecycle_context: crate::lifecycle_io::CaptureContext::current(),
         })
     }
 }
@@ -166,13 +190,15 @@ impl ExecutionPlan for PropertyOverlayExec {
         partition: Option<usize>,
     ) -> Result<Arc<Statistics>, DataFusionError> {
         let rows = match partition {
-            None | Some(0) => self.row_upper_bound,
+            None | Some(0) => self.planned_rows,
             Some(_) => None,
         };
         let num_rows = match rows {
             Some(0) => Precision::Exact(0),
             // Physical footer rows are a sound upper bound, but overlays and
-            // tombstones can reduce the logical output.
+            // tombstones can reduce the logical output; a key-only scan's
+            // manifest estimate is no bound at all. Zero is exact either way:
+            // the route declares no object, or the limit admits no row.
             Some(rows) => Precision::Inexact(rows),
             None => Precision::Absent,
         };
@@ -189,7 +215,9 @@ impl ExecutionPlan for PropertyOverlayExec {
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
-        Some(self.metrics.clone_inner())
+        self.metrics
+            .as_ref()
+            .map(ExecutionPlanMetricsSet::clone_inner)
     }
 
     fn execute(
@@ -211,8 +239,13 @@ impl ExecutionPlan for PropertyOverlayExec {
         let mut remaining = self.limit;
         let batch_size = self.batch_size;
         let work_counts = self.work_counts.clone();
-        let decoder_peak = self.decoder_peak.clone();
+        #[cfg(any(test, feature = "test-support"))]
+        let digest_context = self.digest_context.clone();
+        let lifecycle_context = self.lifecycle_context.clone();
         tokio::task::spawn_blocking(move || {
+            #[cfg(any(test, feature = "test-support"))]
+            let _digest_guard = digest_context.attach();
+            let _lifecycle_capture = lifecycle_context.attach();
             let selected_properties = projection
                 .as_ref()
                 .map(|names| names.iter().cloned().collect());
@@ -255,6 +288,9 @@ impl ExecutionPlan for PropertyOverlayExec {
                 },
             );
             let result = result.and_then(|work| {
+                let (Some((work_counts, decoder_peak)), Some(work)) = (work_counts, work) else {
+                    return Ok(());
+                };
                 // Completed reader work only; these logical counters are not native RSS.
                 let measured = |value| {
                     usize::try_from(value).map_err(|_| {

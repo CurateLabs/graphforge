@@ -22,8 +22,7 @@ pub(crate) use control::{
 };
 use control::{
     CancelledBeforeReplace, CapabilityRecord, CurrentRecord, GenerationManifestRecord,
-    canonical_line, failpoint_as_io, hex_digest, parse_digest, publish_atomic_bytes_in,
-    verify_exact_file, write_new,
+    canonical_line, failpoint_as_io, hex_digest, parse_digest, verify_exact_file,
 };
 
 #[cfg(test)]
@@ -31,16 +30,16 @@ pub(crate) use control::write_journal;
 #[cfg(test)]
 use participants::request_metadata;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
 
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_core::{ApiErrorCode, GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::project_failpoint;
@@ -139,8 +138,136 @@ pub(crate) struct ProjectFileParticipant {
 
 #[derive(Clone, Copy)]
 enum ParticipantPayloads<'a> {
-    Memory,
-    Files(&'a [ProjectFileParticipant], Option<&'a AtomicBool>, usize),
+    Memory(Option<&'a ParticipantIdentities>),
+    Files(
+        &'a [ProjectFileParticipant],
+        Option<&'a AtomicBool>,
+        usize,
+        Option<&'a BTreeMap<PathBuf, &'a crate::project_portable_v2::MaterializedCapture>>,
+    ),
+}
+
+/// Exact-byte identity of one in-memory participant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParticipantIdentity {
+    byte_length: u64,
+    content_sha256: [u8; 32],
+    content_xxh64: u64,
+}
+
+/// Exact-byte identities of in-memory participants, computed once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParticipantIdentities(Vec<ParticipantIdentity>);
+
+impl ParticipantIdentities {
+    fn compute(participants: &[ProjectParticipant]) -> Result<Self, GfError> {
+        participants
+            .iter()
+            .map(|participant| {
+                Ok(ParticipantIdentity {
+                    byte_length: u64::try_from(participant.bytes.len()).map_err(|_| {
+                        project_error(
+                            ProjectErrorCode::PublicationFailed,
+                            "participant byte length exceeds u64",
+                        )
+                    })?,
+                    content_sha256: graphforge_core::hash_observation::ArtifactSha256::digest(
+                        &participant.bytes,
+                    )
+                    .into(),
+                    content_xxh64: crate::corruption_checksum::checksum(&participant.bytes),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|identities| {
+                for identity in &identities {
+                    crate::graph_construction::diagnostics::hashed_bytes(identity.byte_length, 2);
+                }
+                Self(identities)
+            })
+    }
+}
+
+/// An immutable publication request whose participant identities were
+/// computed once, before the caller derived its generation UUID from them.
+///
+/// Staging reuses these identities instead of hashing participant bytes again.
+/// Fields are private and there is no mutable access, so an identity can never
+/// describe bytes other than the request's own.
+#[derive(Debug, Clone)]
+pub struct PreparedGenerationRequest {
+    request: ProjectGenerationRequest,
+    identities: ParticipantIdentities,
+}
+
+impl PreparedGenerationRequest {
+    /// Compute each participant's SHA-256 and XXH64 once, then derive the
+    /// generation UUID from the participants and their SHA-256 digests.
+    ///
+    /// # Errors
+    /// Returns a publication error when a participant length exceeds `u64`.
+    pub fn new(
+        transaction_uuid: Uuid,
+        capabilities: Vec<ProjectCapability>,
+        participants: Vec<ProjectParticipant>,
+        generation_uuid: impl FnOnce(&[ProjectParticipant], &[[u8; 32]]) -> Uuid,
+    ) -> Result<Self, GfError> {
+        let identities = ParticipantIdentities::compute(&participants)?;
+        let digests = identities
+            .0
+            .iter()
+            .map(|identity| identity.content_sha256)
+            .collect::<Vec<_>>();
+        let generation_uuid = generation_uuid(&participants, &digests);
+        Ok(Self {
+            request: ProjectGenerationRequest {
+                transaction_uuid,
+                generation_uuid,
+                capabilities,
+                participants,
+            },
+            identities,
+        })
+    }
+
+    /// The immutable request.
+    #[must_use]
+    pub fn request(&self) -> &ProjectGenerationRequest {
+        &self.request
+    }
+}
+
+impl std::ops::Deref for PreparedGenerationRequest {
+    type Target = ProjectGenerationRequest;
+
+    fn deref(&self) -> &Self::Target {
+        &self.request
+    }
+}
+
+/// A staging input: a plain request, or one with precomputed identities.
+#[derive(Clone, Copy)]
+pub struct StageRequest<'a> {
+    request: &'a ProjectGenerationRequest,
+    identities: Option<&'a ParticipantIdentities>,
+}
+
+impl<'a> From<&'a ProjectGenerationRequest> for StageRequest<'a> {
+    fn from(request: &'a ProjectGenerationRequest) -> Self {
+        Self {
+            request,
+            identities: None,
+        }
+    }
+}
+
+impl<'a> From<&'a PreparedGenerationRequest> for StageRequest<'a> {
+    fn from(prepared: &'a PreparedGenerationRequest) -> Self {
+        Self {
+            request: &prepared.request,
+            identities: Some(&prepared.identities),
+        }
+    }
 }
 
 /// Safe participant metadata available to domain validators.
@@ -166,6 +293,8 @@ pub struct StagedParticipant {
     pub schema_fingerprint: String,
     /// SHA-256 over exact persisted bytes.
     pub content_sha256: String,
+    /// XXH64 over exact persisted bytes for default read admission.
+    pub content_xxh64: u64,
 }
 
 /// Durable publication result.
@@ -306,9 +435,9 @@ pub struct ValidatedProjectGeneration(StagedProjectGeneration);
 /// # Errors
 /// Returns a stable project error for a busy writer, malformed participant,
 /// conflicting transaction replay, corrupt parent, or I/O failure.
-pub fn stage_project_generation(
+pub fn stage_project_generation<'r>(
     container_root: impl AsRef<Path>,
-    request: &ProjectGenerationRequest,
+    request: impl Into<StageRequest<'r>>,
 ) -> Result<ProjectStageOutcome, GfError> {
     stage_project_generation_with_graph_tree(container_root, request, None)
 }
@@ -321,9 +450,9 @@ pub fn stage_project_generation(
 ///
 /// # Errors
 /// Returns the same stable staging errors as [`stage_project_generation`].
-pub fn stage_project_generation_with_graph_tree(
+pub fn stage_project_generation_with_graph_tree<'r>(
     container_root: impl AsRef<Path>,
-    request: &ProjectGenerationRequest,
+    request: impl Into<StageRequest<'r>>,
     graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
     stage_project_generation_with_graph_tree_mode(
@@ -343,14 +472,15 @@ pub fn stage_project_generation_with_graph_tree(
 /// # Errors
 /// Returns the same stable staging errors as
 /// [`stage_project_generation_with_graph_tree`].
-pub fn stage_project_generation_with_graph_tree_mode(
+pub fn stage_project_generation_with_graph_tree_mode<'r>(
     container_root: impl AsRef<Path>,
-    request: &ProjectGenerationRequest,
+    request: impl Into<StageRequest<'r>>,
     graph_tree: Option<&Path>,
     mode: crate::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<ProjectStageOutcome, GfError> {
-    stage_project_generation_inner(container_root.as_ref(), request, graph_tree, mode)
-        .map_err(|error| map_stage_error(request, error))
+    let stage = request.into();
+    stage_project_generation_inner(container_root.as_ref(), stage, graph_tree, mode)
+        .map_err(|error| map_stage_error(stage.request, error))
 }
 
 /// Stage a complete private generation while allowing other transaction
@@ -364,9 +494,9 @@ pub fn stage_project_generation_with_graph_tree_mode(
 ///
 /// # Errors
 /// Returns a stable busy, idempotency, validation, corruption, or storage error.
-pub fn stage_project_generation_optimistic(
+pub fn stage_project_generation_optimistic<'r>(
     container_root: impl AsRef<Path>,
-    request: &ProjectGenerationRequest,
+    request: impl Into<StageRequest<'r>>,
     operation_fingerprint: [u8; 32],
 ) -> Result<ProjectStageOutcome, GfError> {
     stage_project_generation_optimistic_with_graph_tree(
@@ -382,9 +512,9 @@ pub fn stage_project_generation_optimistic(
 /// # Errors
 /// Returns the same stable staging errors as
 /// [`stage_project_generation_optimistic`].
-pub fn stage_project_generation_optimistic_with_graph_tree(
+pub fn stage_project_generation_optimistic_with_graph_tree<'r>(
     container_root: impl AsRef<Path>,
-    request: &ProjectGenerationRequest,
+    request: impl Into<StageRequest<'r>>,
     operation_fingerprint: [u8; 32],
     graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
@@ -403,21 +533,22 @@ pub fn stage_project_generation_optimistic_with_graph_tree(
 /// # Errors
 /// Returns the same stable staging errors as
 /// [`stage_project_generation_optimistic_with_graph_tree`].
-pub fn stage_project_generation_optimistic_with_graph_tree_mode(
+pub fn stage_project_generation_optimistic_with_graph_tree_mode<'r>(
     container_root: impl AsRef<Path>,
-    request: &ProjectGenerationRequest,
+    request: impl Into<StageRequest<'r>>,
     operation_fingerprint: [u8; 32],
     graph_tree: Option<&Path>,
     mode: crate::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<ProjectStageOutcome, GfError> {
+    let stage = request.into();
     stage_project_generation_optimistic_inner(
         container_root.as_ref(),
-        request,
+        stage,
         operation_fingerprint,
         graph_tree,
         mode,
     )
-    .map_err(|error| map_stage_error(request, error))
+    .map_err(|error| map_stage_error(stage.request, error))
 }
 
 /// Stage against one caller-prepared, lifetime-pinned CURRENT generation.
@@ -447,6 +578,26 @@ pub(crate) fn stage_project_generation_from_admitted_parent_with_fingerprint(
     graph_tree: Option<&Path>,
     allocation: Option<&crate::StorageAllocationOperation>,
     operation_fingerprint: Option<[u8; 32]>,
+) -> Result<ProjectStageOutcome, GfError> {
+    stage_project_generation_from_installed_objects(
+        admission,
+        parent,
+        request,
+        graph_tree,
+        allocation,
+        operation_fingerprint,
+        None,
+    )
+}
+
+pub(crate) fn stage_project_generation_from_installed_objects(
+    admission: crate::filesystem_admission::ProjectLifecycleAdmission,
+    parent: ResolvedProjectGeneration,
+    request: &ProjectGenerationRequest,
+    graph_tree: Option<&Path>,
+    allocation: Option<&crate::StorageAllocationOperation>,
+    operation_fingerprint: Option<[u8; 32]>,
+    installed_objects: Option<&crate::GraphObjectPublicationLease>,
 ) -> Result<ProjectStageOutcome, GfError> {
     let result = (|| {
         validate_request(request)?;
@@ -490,8 +641,9 @@ pub(crate) fn stage_project_generation_from_admitted_parent_with_fingerprint(
             None,
             operation_fingerprint,
             graph_tree,
-            ParticipantPayloads::Memory,
+            ParticipantPayloads::Memory(None),
             allocation,
+            installed_objects,
         )
     })();
     result.map_err(|error| map_stage_error(request, error))
@@ -507,6 +659,8 @@ pub(crate) fn stage_project_generation_from_files_admitted(
     cancelled: Option<&AtomicBool>,
     copy_buffer_bytes: usize,
     allocation: Option<&crate::StorageAllocationOperation>,
+    installed_objects: Option<&crate::GraphObjectPublicationLease>,
+    captures: Option<&BTreeMap<PathBuf, &crate::project_portable_v2::MaterializedCapture>>,
 ) -> Result<ProjectStageOutcome, GfError> {
     let result = (|| {
         validate_request(request)?;
@@ -543,8 +697,9 @@ pub(crate) fn stage_project_generation_from_files_admitted(
             None,
             None,
             graph_tree,
-            ParticipantPayloads::Files(files, cancelled, copy_buffer_bytes),
+            ParticipantPayloads::Files(files, cancelled, copy_buffer_bytes, captures),
             allocation,
+            installed_objects,
         )
     })();
     result.map_err(|error| map_stage_error(request, error))
@@ -559,10 +714,11 @@ fn map_stage_error(request: &ProjectGenerationRequest, error: GfError) -> GfErro
 
 fn stage_project_generation_inner(
     container_root: &Path,
-    request: &ProjectGenerationRequest,
+    stage: StageRequest<'_>,
     graph_tree: Option<&Path>,
     mode: crate::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<ProjectStageOutcome, GfError> {
+    let request = stage.request;
     // Reject malformed contracts before taking the writer lock so concurrent
     // readers/writers are never blocked by validation-only failures.
     validate_request(request)?;
@@ -592,18 +748,20 @@ fn stage_project_generation_inner(
         None,
         None,
         graph_tree,
-        ParticipantPayloads::Memory,
+        ParticipantPayloads::Memory(stage.identities),
+        None,
         None,
     )
 }
 
 fn stage_project_generation_optimistic_inner(
     container_root: &Path,
-    request: &ProjectGenerationRequest,
+    stage: StageRequest<'_>,
     operation_fingerprint: [u8; 32],
     graph_tree: Option<&Path>,
     mode: crate::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<ProjectStageOutcome, GfError> {
+    let request = stage.request;
     validate_request(request)?;
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         container_root,
@@ -624,7 +782,8 @@ fn stage_project_generation_optimistic_inner(
         None,
         Some(operation_fingerprint),
         graph_tree,
-        ParticipantPayloads::Memory,
+        ParticipantPayloads::Memory(stage.identities),
+        None,
         None,
     )
 }
@@ -653,7 +812,8 @@ pub(crate) fn stage_project_generation_with_lock(
         revert,
         None,
         graph_tree,
-        ParticipantPayloads::Memory,
+        ParticipantPayloads::Memory(None),
+        None,
         None,
     )
 }
@@ -683,6 +843,7 @@ fn stage_project_generation_inner_with_locks(
     graph_tree: Option<&Path>,
     payloads: ParticipantPayloads<'_>,
     allocation: Option<&crate::StorageAllocationOperation>,
+    installed_objects: Option<&crate::GraphObjectPublicationLease>,
 ) -> Result<ProjectStageOutcome, GfError> {
     validate_request(request)?;
     let (capabilities, participants, request_fingerprint) =
@@ -739,6 +900,7 @@ fn stage_project_generation_inner_with_locks(
         &generation_root,
         graph_tree,
         allocation,
+        installed_objects,
     )?;
     project_failpoint::hit(
         "project.after_participant_dir_fsync",
@@ -940,7 +1102,7 @@ fn cleanup_aborted_attempts(
         ));
     }
     crate::project_recovery::remove_recovery_tree_with_allocation(&transaction_root, allocation)?;
-    sync_directory(&attempts_root)
+    Ok(())
 }
 
 /// Load the canonical revert extension for direct idempotent replay lookup.
@@ -1352,14 +1514,14 @@ impl ValidatedProjectGeneration {
             )?;
             prepare(&candidate)?;
         }
-        replace_current(
+        let pending = replace_current(
             staged,
             manifest_sha256,
             graph_object_lease,
             lifecycle_admission,
             cancellation,
         )?;
-        finish_published_generation(staged, manifest_sha256)?;
+        finish_published_generation(staged, manifest_sha256, pending)?;
         Ok(ProjectPublicationReceipt {
             transaction_uuid: staged.transaction_uuid,
             generation_uuid: staged.generation_uuid,
@@ -1441,27 +1603,56 @@ fn abort_stale_generation(staged: &StagedProjectGeneration) -> Result<(), GfErro
             &staged.generation_root,
             staged.allocation.as_ref(),
         )?;
-        sync_directory(
-            staged
-                .generation_root
-                .parent()
-                .expect("machine attempt path has a parent"),
-        )?;
     }
     Ok(())
 }
 
+fn stage_generation_manifest(
+    staged: &StagedProjectGeneration,
+    generation_parent: &graphforge_filesystem::StableDirectory,
+    manifest_bytes: &[u8],
+) -> Result<(), GfError> {
+    let manifest_failure = std::cell::RefCell::new(None);
+    let manifest_result = crate::durable_commit::stage_private_file(
+        generation_parent,
+        std::ffi::OsStr::new(MANIFEST_FILE),
+        |file| file.write_all(manifest_bytes),
+        || {
+            project_failpoint::hit(
+                "project.after_manifest_write",
+                Some(staged.transaction_uuid),
+                Some(staged.generation_uuid),
+                "DURABLE",
+                false,
+            )
+            .map_err(|error| {
+                let cause = std::io::Error::other(error.to_string());
+                *manifest_failure.borrow_mut() = Some(error);
+                cause
+            })
+        },
+        staged.allocation.as_ref(),
+    );
+    let manifest_file = manifest_result.map_err(|error| {
+        manifest_failure
+            .into_inner()
+            .unwrap_or_else(|| publication_io(error))
+    })?;
+    drop(manifest_file);
+    Ok(())
+}
+
 fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32], GfError> {
-    let lease_path = staged.generation_root.join(LEASE_FILE);
-    let lease = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lease_path)
+    let generation_parent = graphforge_filesystem::StableDirectory::open(&staged.generation_root)
         .map_err(publication_io)?;
-    lease.sync_all().map_err(publication_io)?;
-    if let Some(allocation) = &staged.allocation {
-        allocation.replace_file_at(&lease_path, &lease)?;
-    }
+    let lease = crate::durable_commit::stage_private_file(
+        &generation_parent,
+        std::ffi::OsStr::new(LEASE_FILE),
+        |_| Ok(()),
+        || Ok(()),
+        staged.allocation.as_ref(),
+    )
+    .map_err(publication_io)?;
     // Windows rejects a parent-directory rename while a descendant file handle
     // is still live. The transaction lock, not this newly created lease file,
     // owns the staged attempt, so release the handle after its durability sync.
@@ -1469,7 +1660,7 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
 
     let manifest = GenerationManifestRecord {
         format: "graphforge-generation".into(),
-        format_version: 1,
+        format_version: crate::project_generation::GENERATION_MANIFEST_VERSION,
         generation_uuid: staged.generation_uuid.hyphenated().to_string(),
         parent_generation_uuid: Some(staged.parent.generation_uuid().hyphenated().to_string()),
         transaction_uuid: staged.transaction_uuid.hyphenated().to_string(),
@@ -1485,21 +1676,8 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
     };
     let manifest_bytes = canonical_line(&manifest)?;
     let manifest_path = staged.generation_root.join(MANIFEST_FILE);
-    let manifest_file = write_new(&manifest_path, &manifest_bytes, staged.allocation.as_ref())?;
-    project_failpoint::hit(
-        "project.after_manifest_write",
-        Some(staged.transaction_uuid),
-        Some(staged.generation_uuid),
-        "DURABLE",
-        false,
-    )?;
-    manifest_file.sync_all().map_err(publication_io)?;
-    if let Some(allocation) = &staged.allocation {
-        allocation.replace_file_at(&manifest_path, &manifest_file)?;
-    }
-    // Optimistic publication promotes the complete staging directory below.
-    // Close the manifest handle before that rename for Windows parity.
-    drop(manifest_file);
+    stage_generation_manifest(staged, &generation_parent, &manifest_bytes)?;
+    drop(generation_parent);
     project_failpoint::hit(
         "project.after_manifest_fsync",
         Some(staged.transaction_uuid),
@@ -1564,15 +1742,27 @@ fn promote_optimistic_generation(staged: &StagedProjectGeneration) -> Result<(),
             ),
         ));
     }
-    std::fs::rename(&staged.generation_root, &destination).map_err(publication_io)?;
+    crate::durable_commit::promote_no_replace(
+        &staged.generation_root,
+        &destination,
+        || Ok(()),
+        || Ok(()),
+    )
+    .map_err(publication_io)?;
     let transaction_attempt_root = staged
         .generation_root
         .parent()
         .expect("machine attempt path has a parent");
-    sync_directory(transaction_attempt_root)?;
-    std::fs::remove_dir(transaction_attempt_root).map_err(publication_io)?;
-    sync_directory(&staged.root.join(ATTEMPTS_DIR))?;
-    sync_directory(&generations_root)?;
+    let attempts = graphforge_filesystem::StableDirectory::open(&staged.root.join(ATTEMPTS_DIR))
+        .map_err(publication_io)?;
+    crate::durable_commit::retire_directory(
+        &attempts,
+        transaction_attempt_root
+            .file_name()
+            .expect("attempt root has a name"),
+        graphforge_filesystem::path_identity(transaction_attempt_root).map_err(publication_io)?,
+    )
+    .map_err(publication_io)?;
     project_failpoint::hit(
         "project.after_optimistic_promotion",
         Some(staged.transaction_uuid),
@@ -1588,7 +1778,7 @@ fn replace_current(
     graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
     lifecycle_admission: Option<&crate::filesystem_admission::ProjectLifecycleAdmission>,
     mut cancellation: Option<&mut dyn FnMut() -> bool>,
-) -> Result<(), GfError> {
+) -> Result<crate::durable_commit::PendingCommit, GfError> {
     let current = CurrentRecord {
         format: "graphforge-project".into(),
         format_version: 1,
@@ -1596,81 +1786,93 @@ fn replace_current(
         generation_manifest_sha256: hex_digest(manifest_sha256),
     };
     let current_bytes = canonical_line(&current)?;
-    let current_path = staged.root.join(CURRENT_FILE);
     let stable_root =
         graphforge_filesystem::StableDirectory::open(&staged.root).map_err(publication_io)?;
-    let replace_result = publish_atomic_bytes_in(
-        &stable_root,
-        &current_path,
+    let replace_result = crate::durable_commit::publish_atomic_in(
+        stable_root,
         std::ffi::OsStr::new(CURRENT_FILE),
         &current_bytes,
-        || {
-            failpoint_as_io(
-                "project.after_current_temp_write",
-                staged.transaction_uuid,
-                staged.generation_uuid,
-                "CURRENT",
-                false,
-            )
-        },
-        || {
-            failpoint_as_io(
-                "project.after_current_temp_fsync",
-                staged.transaction_uuid,
-                staged.generation_uuid,
-                "CURRENT",
-                false,
-            )
-        },
-        || {
-            failpoint_as_io(
-                "project.before_current_replace",
-                staged.transaction_uuid,
-                staged.generation_uuid,
-                "CURRENT",
-                false,
-            )?;
-            if let Some(admission) = lifecycle_admission {
-                admission
-                    .revalidate_identity()
-                    .map_err(std::io::Error::other)?;
-            } else {
-                staged
-                    .admission
-                    .revalidate_identity()
-                    .map_err(std::io::Error::other)?;
-            }
-            if let Some(lease) = graph_object_lease {
-                lease
-                    .revalidate_for_root(staged.parent.container_root())
-                    .map_err(std::io::Error::other)?;
-            }
-            // This is deliberately the final fallible predicate before the
-            // single native replacement commit point. After replacement,
-            // reconciliation owns the result and cancellation cannot undo it.
-            if cancellation.as_mut().is_some_and(|cancelled| cancelled()) {
-                return Err(std::io::Error::other(CancelledBeforeReplace));
-            }
-            Ok(())
+        crate::durable_commit::AtomicHooks {
+            after_write: || {
+                failpoint_as_io(
+                    "project.after_current_temp_write",
+                    staged.transaction_uuid,
+                    staged.generation_uuid,
+                    "CURRENT",
+                    false,
+                )
+            },
+            after_seal: || {
+                failpoint_as_io(
+                    "project.after_current_temp_fsync",
+                    staged.transaction_uuid,
+                    staged.generation_uuid,
+                    "CURRENT",
+                    false,
+                )
+            },
+            before_visible: || {
+                failpoint_as_io(
+                    "project.before_current_replace",
+                    staged.transaction_uuid,
+                    staged.generation_uuid,
+                    "CURRENT",
+                    false,
+                )?;
+                if let Some(admission) = lifecycle_admission {
+                    admission
+                        .revalidate_identity()
+                        .map_err(std::io::Error::other)?;
+                } else {
+                    staged
+                        .admission
+                        .revalidate_identity()
+                        .map_err(std::io::Error::other)?;
+                }
+                if let Some(lease) = graph_object_lease {
+                    lease
+                        .revalidate_for_root(staged.parent.container_root())
+                        .map_err(std::io::Error::other)?;
+                }
+                // This is deliberately the final fallible predicate before the
+                // single native replacement commit point. After replacement,
+                // reconciliation owns the result and cancellation cannot undo it.
+                if cancellation.as_mut().is_some_and(|cancelled| cancelled()) {
+                    return Err(std::io::Error::other(CancelledBeforeReplace));
+                }
+                Ok(())
+            },
         },
         staged.allocation.as_ref(),
     );
-    if let Err(error) = replace_result {
-        reconcile_current_replacement_error(
-            &staged.root,
-            staged.transaction_uuid,
-            staged.generation_uuid,
-            manifest_sha256,
-            &error,
-        )?;
-    }
+    let pending = match replace_result {
+        Ok(pending) => pending,
+        Err(mut failure) => {
+            let pending = failure.pending.take().map(|pending| *pending);
+            let error = AtomicPublishError::from(failure.cause);
+            reconcile_current_replacement_error(
+                &staged.root,
+                staged.transaction_uuid,
+                staged.generation_uuid,
+                manifest_sha256,
+                &error,
+            )?;
+            pending.ok_or_else(|| {
+                project_error(
+                    ProjectErrorCode::ProjectCorrupt,
+                    "CURRENT became authoritative without a retained pending commit",
+                )
+            })?
+        }
+    };
     project_failpoint::hit(
         "project.after_current_replace",
         Some(staged.transaction_uuid),
         Some(staged.generation_uuid),
         "CURRENT",
         true,
-    )
+    )?;
+    Ok(pending)
 }
 
 fn reconcile_current_replacement_error(
@@ -1723,18 +1925,21 @@ fn reconcile_current_replacement_error(
 fn finish_published_generation(
     staged: &StagedProjectGeneration,
     manifest_sha256: [u8; 32],
+    pending: crate::durable_commit::PendingCommit,
 ) -> Result<(), GfError> {
     // Past the sole linearization point: any later failure reports
     // committed=true and never attempts rollback.
-    sync_directory(&staged.root).map_err(|error| {
-        publication_error_from_parts(
-            staged.transaction_uuid,
-            staged.generation_uuid,
-            "CURRENT",
-            true,
-            &error.to_string(),
-        )
-    })?;
+    pending
+        .acknowledge(staged.allocation.as_ref())
+        .map_err(|error| {
+            publication_error_from_parts(
+                staged.transaction_uuid,
+                staged.generation_uuid,
+                "CURRENT",
+                true,
+                &error.to_string(),
+            )
+        })?;
     project_failpoint::hit(
         "project.after_root_fsync",
         Some(staged.transaction_uuid),
@@ -1811,26 +2016,12 @@ pub(crate) fn ensure_machine_directory(root: &Path, relative: &Path) -> Result<P
                 ));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                match std::fs::create_dir(&current) {
-                    Ok(()) => {
-                        sync_directory(
-                            current
-                                .parent()
-                                .expect("machine directory beneath project has a parent"),
-                        )?;
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        let metadata =
-                            std::fs::symlink_metadata(&current).map_err(publication_io)?;
-                        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-                            return Err(project_error(
-                                ProjectErrorCode::ProjectCorrupt,
-                                "concurrently created machine path is linked or not a directory",
-                            ));
-                        }
-                    }
-                    Err(error) => return Err(publication_io(error)),
-                }
+                let parent = graphforge_filesystem::StableDirectory::open(
+                    current.parent().expect("machine directory has a parent"),
+                )
+                .map_err(publication_io)?;
+                crate::durable_commit::create_directory(&parent, component)
+                    .map_err(publication_io)?;
             }
             Err(error) => return Err(publication_io(error)),
         }

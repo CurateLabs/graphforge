@@ -1,5 +1,7 @@
 //! Durable, bounded staged graph-import sessions (#738).
 
+#[cfg(test)]
+use graphforge_filesystem::ObservedSync as _;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
@@ -10,20 +12,22 @@ use arrow::ipc::writer::FileWriter as ArrowFileWriter;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use graphforge_core::GfError;
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::concurrency_attribution::RegionScope;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::{ChunkReader, Length};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::{BulkInputKind, CancellationToken, GraphConstructionBudgets, GraphForge, OperationId};
 
 #[cfg(test)]
 mod cpu_budget_report;
+mod journal;
 mod normalization;
 
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const SESSION_DIR: &str = "import-sessions";
 const MANIFEST: &str = "manifest.json";
 
@@ -330,6 +334,7 @@ struct SourceRecord {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SessionManifest {
     format_version: u32,
+    journal_sequence: u64,
     session_uuid: Uuid,
     operation_uuid: Uuid,
     base_generation_uuid: Uuid,
@@ -413,12 +418,21 @@ struct CallStart {
 }
 
 impl CallStart {
-    fn now() -> Self {
-        Self {
-            wall: Instant::now(),
-            cpu: graphforge_storage::concurrency_attribution::process_cpu_time(),
-        }
+    fn now() -> Option<Self> {
+        graphforge_storage::lifecycle_io::is_active().then(|| {
+            #[cfg(test)]
+            CALL_TIMING_SAMPLES.with(|samples| samples.set(samples.get() + 1));
+            Self {
+                wall: Instant::now(),
+                cpu: graphforge_storage::concurrency_attribution::process_cpu_time(),
+            }
+        })
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CALL_TIMING_SAMPLES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Disjoint call timings from the latest import validation or commit invocation.
@@ -445,7 +459,8 @@ pub struct GraphImportSession {
     root: PathBuf,
     manifest: SessionManifest,
     observed: Instant,
-    operation_timings: ImportOperationTimings,
+    operation_timings: Option<ImportOperationTimings>,
+    journal: journal::Journal,
 }
 
 impl GraphForge {
@@ -467,6 +482,7 @@ impl GraphForge {
         fs::create_dir_all(root.join("sources")).map_err(storage)?;
         let manifest = SessionManifest {
             format_version: FORMAT_VERSION,
+            journal_sequence: 0,
             session_uuid,
             operation_uuid: operation_uuid.0,
             base_generation_uuid: *self
@@ -483,13 +499,15 @@ impl GraphForge {
             construction_session_uuid: None,
             updated_unix_millis: unix_millis()?,
         };
+        let journal = journal::Journal::open(&root, &manifest, self.allocation_operation.as_ref())?;
         write_manifest_with_allocation(&root, &manifest, self.allocation_operation.as_ref())?;
         Ok(GraphImportSession {
             allocation_operation: self.allocation_operation.clone(),
+            journal,
             root,
             manifest,
             observed: Instant::now(),
-            operation_timings: ImportOperationTimings::default(),
+            operation_timings: None,
         })
     }
 
@@ -509,10 +527,11 @@ impl GraphForge {
         }
         Ok(GraphImportSession {
             allocation_operation: self.allocation_operation.clone(),
+            journal: journal::Journal::open(&root, &manifest, self.allocation_operation.as_ref())?,
             root,
             manifest,
             observed: Instant::now(),
-            operation_timings: ImportOperationTimings::default(),
+            operation_timings: None,
         })
     }
 
@@ -558,10 +577,15 @@ impl GraphForge {
             }
             GraphImportSession {
                 allocation_operation: self.allocation_operation.clone(),
+                journal: journal::Journal::open(
+                    &root,
+                    &manifest,
+                    self.allocation_operation.as_ref(),
+                )?,
                 root,
                 manifest,
                 observed: Instant::now(),
-                operation_timings: ImportOperationTimings::default(),
+                operation_timings: None,
             }
             .abort(self)?;
             cleaned = cleaned.saturating_add(1);
@@ -572,55 +596,104 @@ impl GraphForge {
 
 impl GraphImportSession {
     /// Timings from the latest validation or commit on this handle, including
-    /// calls that returned errors. Reading these observations performs no I/O.
+    /// calls that returned errors. `None` means no optional capture was requested.
+    /// Reading these observations performs no I/O.
     #[must_use]
-    pub fn operation_timings(&self) -> ImportOperationTimings {
+    pub fn operation_timings(&self) -> Option<ImportOperationTimings> {
         self.operation_timings
     }
-    fn publish_source(&self, temporary: &Path, destination: &Path) -> Result<(), GfError> {
-        let observed = if let Some(allocation) = &self.allocation_operation {
-            let directory = graphforge_filesystem::StableDirectory::open(
-                temporary
-                    .parent()
-                    .ok_or_else(|| storage("import temporary has no parent"))?,
-            )
-            .map_err(storage)?;
-            let file = directory
-                .open_child_file(
-                    temporary
-                        .file_name()
-                        .ok_or_else(|| storage("import temporary has no name"))?,
-                )
-                .map_err(storage)?;
-            allocation.replace_file_at(temporary, &file)?;
-            Some(file)
-        } else {
-            None
-        };
-        fs::rename(temporary, destination).map_err(storage)?;
-        if let (Some(allocation), Some(file)) = (&self.allocation_operation, observed) {
-            allocation.remove_file_at(destination)?;
-            allocation.replace_file_at(destination, &file)?;
-            allocation.remove_file_at(temporary)?;
+    fn publish_source(
+        &mut self,
+        temporary: &Path,
+        destination: &Path,
+        seal: graphforge_storage::durable_commit::FileSeal,
+    ) -> Result<(), GfError> {
+        self.journal.ensure_writable()?;
+        let result = journal::publish_source(
+            temporary,
+            destination,
+            seal,
+            self.allocation_operation.as_ref(),
+        );
+        if result.is_err() {
+            self.journal.poison();
         }
-        Ok(())
+        result
     }
 
-    fn persist_manifest(&self) -> Result<(), GfError> {
-        write_manifest_with_allocation(
+    fn persist_manifest(&mut self) -> Result<(), GfError> {
+        self.persist_manifest_with_source_cleanup(None)
+    }
+
+    fn persist_manifest_with_source_cleanup(
+        &mut self,
+        unpublished_source: Option<&Path>,
+    ) -> Result<(), GfError> {
+        self.journal.ensure_writable()?;
+        if let Err(error) = self.journal.sync(self.allocation_operation.as_ref()) {
+            return Err(self.poison_checkpoint_failure(error, false, unpublished_source));
+        }
+        let mut publication_started = false;
+        let result = journal::write_checkpoint(
             &self.root,
             &self.manifest,
             self.allocation_operation.as_ref(),
-        )
+            &mut publication_started,
+        );
+        if let Err(error) = result {
+            return Err(self.poison_checkpoint_failure(
+                error,
+                publication_started,
+                unpublished_source,
+            ));
+        }
+        Ok(())
+    }
+
+    fn poison_checkpoint_failure(
+        &mut self,
+        error: GfError,
+        publication_started: bool,
+        unpublished_source: Option<&Path>,
+    ) -> GfError {
+        // Only the failing registration operation can supply its new source.
+        // A failed journal barrier has poisoned the writer, but this source is
+        // still absent from the prior checkpoint: cleaning it is completion of
+        // the failed operation, never admission of a new session mutation.
+        // Once replacement was attempted, the source may be authoritative.
+        let cleanup = if publication_started {
+            Ok(None)
+        } else {
+            unpublished_source
+                .map(|source| journal::cleanup_source(source, self.allocation_operation.as_ref()))
+                .transpose()
+        };
+        self.journal.poison();
+        match cleanup {
+            Ok(_) => error,
+            Err(cleanup) => storage(format!("{error}; source cleanup failed: {cleanup}")),
+        }
+    }
+
+    fn persist_progress(&mut self, source_index: usize) -> Result<(), GfError> {
+        self.journal.ensure_writable()?;
+        self.journal.append(
+            &mut self.manifest,
+            source_index,
+            self.allocation_operation.as_ref(),
+        )?;
+        #[cfg(test)]
+        journal::failure("append_before_fsync")?;
+        #[cfg(test)]
+        if self.manifest.sources[source_index].inflight_batch.is_none() {
+            journal::failure("completed_before_fsync")?;
+        }
+        Ok(())
     }
 
     fn cleanup_source(&self, destination: &Path) -> Result<(), GfError> {
-        if fs::remove_file(destination).is_ok()
-            && let Some(allocation) = &self.allocation_operation
-        {
-            allocation.remove_file_at(destination)?;
-        }
-        Ok(())
+        self.journal.ensure_writable()?;
+        journal::cleanup_source(destination, self.allocation_operation.as_ref())
     }
 
     /// Durable identifier used for resume.
@@ -641,6 +714,7 @@ impl GraphImportSession {
         kind: BulkInputKind,
         batches: &[RecordBatch],
     ) -> Result<(), GfError> {
+        self.journal.ensure_writable()?;
         let _region = RegionScope::named("register_arrow");
         self.ensure_open()?;
         if batches.is_empty() {
@@ -675,12 +749,12 @@ impl GraphImportSession {
         }
         writer.finish().map_err(storage)?;
         writer.flush().map_err(storage)?;
-        writer
-            .get_mut()
-            .get_mut()
-            .sync_all_and_release()
-            .map_err(storage)?;
-        self.publish_source(&temporary, &destination)?;
+        let seal = graphforge_storage::durable_commit::seal_cache_writer_witness(
+            writer.get_mut().get_mut(),
+        )
+        .map_err(storage)?;
+        drop(writer);
+        self.publish_source(&temporary, &destination, seal)?;
         let result = self.register_record(
             source_kind,
             name,
@@ -688,7 +762,9 @@ impl GraphImportSession {
             rows,
         );
         if result.is_err() {
-            self.cleanup_source(&destination)?;
+            if self.journal.ensure_writable().is_ok() {
+                self.cleanup_source(&destination)?;
+            }
         } else {
             RegionScope::record_work("rows", rows);
         }
@@ -697,6 +773,7 @@ impl GraphImportSession {
 
     /// Register a local Parquet source by copying it into durable session ownership.
     pub fn register_parquet(&mut self, kind: BulkInputKind, source: &Path) -> Result<(), GfError> {
+        self.journal.ensure_writable()?;
         let _region = RegionScope::named("register_parquet");
         self.ensure_open()?;
         reject_unsafe_path(source)?;
@@ -719,7 +796,7 @@ impl GraphImportSession {
         let name = format!("{sequence:020}.parquet");
         let destination = self.root.join("sources").join(&name);
         let temporary = self.root.join("sources").join(format!(".{name}.tmp"));
-        let (bytes, cache_release) = copy_parquet_source(source, &temporary)?;
+        let (bytes, cache_release, seal) = copy_parquet_source(source, &temporary)?;
         let writer_release = cache_release.writer;
         debug_assert!(writer_release.sync_operations > 0);
         #[cfg(target_os = "linux")]
@@ -734,12 +811,18 @@ impl GraphImportSession {
             );
         }
         #[cfg(not(target_os = "linux"))]
-        let _ = cache_release.peak_combined_window_bytes;
+        {
+            // No file-cache release is supported off Linux, so neither stream
+            // may report released bytes.
+            debug_assert_eq!(cache_release.reader.released_bytes, 0);
+            debug_assert_eq!(cache_release.writer.released_bytes, 0);
+            let _ = cache_release.peak_combined_window_bytes;
+        }
         if bytes != metadata.len() {
             let _ = fs::remove_file(&temporary);
             return Err(storage("Parquet source length changed while copying"));
         }
-        self.publish_source(&temporary, &destination)?;
+        self.publish_source(&temporary, &destination, seal)?;
         let result = self.register_record(
             match kind {
                 BulkInputKind::Node => ImportSourceKind::ParquetNodes,
@@ -750,7 +833,9 @@ impl GraphImportSession {
             0,
         );
         if result.is_err() {
-            self.cleanup_source(&destination)?;
+            if self.journal.ensure_writable().is_ok() {
+                self.cleanup_source(&destination)?;
+            }
         } else {
             RegionScope::record_work("bytes", bytes);
         }
@@ -759,6 +844,14 @@ impl GraphImportSession {
 
     /// Persist counters and source ordering without publishing graph state.
     pub fn checkpoint(&mut self) -> Result<ImportProgress, GfError> {
+        self.checkpoint_with_source_cleanup(None)
+    }
+
+    fn checkpoint_with_source_cleanup(
+        &mut self,
+        unpublished_source: Option<&Path>,
+    ) -> Result<ImportProgress, GfError> {
+        self.journal.ensure_writable()?;
         let _region = RegionScope::named("checkpoint");
         self.manifest.progress.elapsed_millis =
             self.manifest.progress.elapsed_millis.saturating_add(
@@ -766,7 +859,7 @@ impl GraphImportSession {
             );
         self.observed = Instant::now();
         self.manifest.updated_unix_millis = unix_millis()?;
-        self.persist_manifest()?;
+        self.persist_manifest_with_source_cleanup(unpublished_source)?;
         Ok(self.manifest.progress.clone())
     }
 
@@ -781,8 +874,10 @@ impl GraphImportSession {
         graph: &GraphForge,
         cancellation: Option<&CancellationToken>,
     ) -> Result<ImportProgress, GfError> {
-        let _region = RegionScope::named("validate");
-        self.operation_timings = ImportOperationTimings::default();
+        self.journal.ensure_writable()?;
+        let _region = RegionScope::named("stage+seal");
+        self.operation_timings =
+            graphforge_storage::lifecycle_io::is_active().then(ImportOperationTimings::default);
         self.ensure_open()?;
         self.ensure_base(graph)?;
         let mut construction = self.open_construction(graph)?;
@@ -802,85 +897,123 @@ impl GraphImportSession {
                     self.manifest.operation_uuid,
                     cancellation,
                     |index, batch| {
-                        let mut batch_index = index;
-                        if cancellation.is_some_and(CancellationToken::is_cancelled) {
-                            return Err(cancelled());
-                        }
-                        if batch.num_rows() == 0 {
-                            batch_index += 1;
-                            self.manifest.sources[source_index].batches_staged = batch_index;
-                            self.manifest.sources[source_index].inflight_batch = None;
-                            self.persist_manifest()?;
-                            return Ok(());
-                        }
-                        let recovering = source.inflight_batch == Some(batch_index);
-                        if !recovering {
-                            self.manifest.sources[source_index].inflight_batch = Some(batch_index);
-                            self.persist_manifest()?;
-                        }
-                        let chunk_id =
-                            format!("import-{:020}-{:020}", source.sequence, batch_index);
-                        let region = RegionScope::named("append");
-                        let started = CallStart::now();
-                        let staged = match (input_kind, cancellation) {
-                            (BulkInputKind::Node, Some(token)) => construction
-                                .append_nodes_with_cancellation(&chunk_id, &batch, token),
-                            (BulkInputKind::Node, None) => {
-                                construction.append_nodes(&chunk_id, &batch)
-                            }
-                            (BulkInputKind::Edge, Some(token)) => construction
-                                .append_edges_with_cancellation(&chunk_id, &batch, token),
-                            (BulkInputKind::Edge, None) => {
-                                construction.append_edges(&chunk_id, &batch)
-                            }
-                        };
-                        self.operation_timings
-                            .append
-                            .record(started, staged.is_err());
-                        if staged.is_ok() {
-                            RegionScope::record_work("rows", batch.num_rows() as u64);
-                        }
-                        drop(region);
-                        if let Err(error) = staged {
-                            self.manifest.sources[source_index].inflight_batch = None;
-                            let remaining = self
-                                .manifest
-                                .limits
-                                .max_rejected_rows
-                                .saturating_sub(self.manifest.progress.rows_rejected);
-                            self.manifest.progress.rows_rejected = self
-                                .manifest
-                                .progress
-                                .rows_rejected
-                                .saturating_add((batch.num_rows() as u64).min(remaining));
-                            self.persist_manifest()?;
-                            return Err(error);
-                        }
-                        batch_index += 1;
-                        self.manifest.sources[source_index].batches_staged = batch_index;
-                        self.manifest.sources[source_index].inflight_batch = None;
-                        self.manifest.progress.rows_accepted = self
-                            .manifest
-                            .progress
-                            .rows_accepted
-                            .saturating_add(batch.num_rows() as u64);
-                        self.manifest.progress.peak_batch_rows = self
-                            .manifest
-                            .progress
-                            .peak_batch_rows
-                            .max(batch.num_rows() as u64);
-                        self.update_construction_progress(&construction.progress())?;
-                        self.persist_manifest()?;
-                        Ok(())
+                        self.append_source_batch(
+                            &mut construction,
+                            source_index,
+                            index,
+                            &batch,
+                            cancellation,
+                        )
                     },
                 )?;
                 self.manifest.sources[source_index].staged = true;
                 self.manifest.progress.files_pending =
                     self.manifest.progress.files_pending.saturating_sub(1);
+                self.persist_progress(source_index)?;
+            }
+            // Construction refuses new nodes after accepting its first edge.
+            // Make the node prefix a durable checkpoint before that boundary,
+            // so losing the edge-phase tail never replays a node after edges.
+            if input_kind == BulkInputKind::Node {
                 self.persist_manifest()?;
             }
         }
         self.seal_construction(&mut construction, cancellation)
+    }
+
+    fn append_source_batch(
+        &mut self,
+        construction: &mut crate::GraphConstructionSession<'_>,
+        source_index: usize,
+        index: u64,
+        batch: &RecordBatch,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), GfError> {
+        self.journal.ensure_writable()?;
+        let input_kind = self.manifest.sources[source_index].kind.input_kind();
+        let mut batch_index = index;
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err(cancelled());
+        }
+        if batch.num_rows() == 0 {
+            batch_index += 1;
+            self.manifest.sources[source_index].batches_staged = batch_index;
+            self.manifest.sources[source_index].inflight_batch = None;
+            self.persist_progress(source_index)?;
+            return Ok(());
+        }
+        let recovering = self.manifest.sources[source_index].inflight_batch == Some(batch_index);
+        if !recovering {
+            self.manifest.sources[source_index].inflight_batch = Some(batch_index);
+            self.persist_progress(source_index)?;
+        }
+        let chunk_id = format!(
+            "import-{:020}-{:020}",
+            self.manifest.sources[source_index].sequence, batch_index
+        );
+        let region = RegionScope::named(append_region_name(input_kind));
+        let started = CallStart::now();
+        let staged = match (input_kind, cancellation) {
+            (BulkInputKind::Node, Some(token)) => {
+                construction.append_nodes_with_cancellation(&chunk_id, batch, token)
+            }
+            (BulkInputKind::Node, None) => construction.append_nodes(&chunk_id, batch),
+            (BulkInputKind::Edge, Some(token)) => {
+                construction.append_edges_with_cancellation(&chunk_id, batch, token)
+            }
+            (BulkInputKind::Edge, None) => construction.append_edges(&chunk_id, batch),
+        };
+        self.record_append_timing(started, staged.is_err());
+        if staged.is_ok() {
+            RegionScope::record_work("rows", batch.num_rows() as u64);
+        }
+        drop(region);
+        if let Err(error) = staged {
+            self.manifest.sources[source_index].inflight_batch = None;
+            let remaining = self
+                .manifest
+                .limits
+                .max_rejected_rows
+                .saturating_sub(self.manifest.progress.rows_rejected);
+            self.manifest.progress.rows_rejected = self
+                .manifest
+                .progress
+                .rows_rejected
+                .saturating_add((batch.num_rows() as u64).min(remaining));
+            self.persist_progress(source_index)?;
+            // Refusal is an explicit operation boundary: retain
+            // diagnostics even if the caller never checkpoints.
+            self.persist_manifest()?;
+            return Err(error);
+        }
+        #[cfg(test)]
+        journal::failure("accepted_before_progress")?;
+        #[cfg(test)]
+        if input_kind == BulkInputKind::Edge {
+            journal::failure("edge_accepted_before_progress")?;
+        }
+        batch_index += 1;
+        self.manifest.sources[source_index].batches_staged = batch_index;
+        self.manifest.sources[source_index].inflight_batch = None;
+        self.manifest.progress.rows_accepted = self
+            .manifest
+            .progress
+            .rows_accepted
+            .saturating_add(batch.num_rows() as u64);
+        self.manifest.progress.peak_batch_rows = self
+            .manifest
+            .progress
+            .peak_batch_rows
+            .max(batch.num_rows() as u64);
+        self.update_construction_progress(&construction.progress())?;
+        self.persist_progress(source_index)?;
+        Ok(())
+    }
+
+    fn record_append_timing(&mut self, started: Option<CallStart>, failed: bool) {
+        if let (Some(timings), Some(started)) = (&mut self.operation_timings, started) {
+            timings.append.record(started, failed);
+        }
     }
 
     fn seal_construction(
@@ -888,10 +1021,16 @@ impl GraphImportSession {
         construction: &mut crate::GraphConstructionSession<'_>,
         cancellation: Option<&CancellationToken>,
     ) -> Result<ImportProgress, GfError> {
+        self.journal.ensure_writable()?;
         let _region = RegionScope::named("seal");
+        self.persist_manifest()?;
+        #[cfg(test)]
+        journal::failure("fsync_before_seal")?;
         let started = CallStart::now();
         let sealed = construction.validate_and_seal(cancellation);
-        self.operation_timings.seal.record(started, sealed.is_err());
+        if let (Some(timings), Some(started)) = (&mut self.operation_timings, started) {
+            timings.seal.record(started, sealed.is_err());
+        }
         sealed?;
         self.update_construction_progress(&construction.progress())?;
         self.manifest.phase = ImportPhase::Validated;
@@ -900,6 +1039,7 @@ impl GraphImportSession {
 
     /// Abort without changing CURRENT; removes staged sources or quarantines on cleanup failure.
     pub fn abort(mut self, graph: &GraphForge) -> Result<ImportProgress, GfError> {
+        self.journal.ensure_writable()?;
         if self.manifest.phase == ImportPhase::Committed {
             return Err(validation("committed import cannot be aborted"));
         }
@@ -935,8 +1075,10 @@ impl GraphImportSession {
         graph: &GraphForge,
         cancellation: Option<&CancellationToken>,
     ) -> Result<Uuid, GfError> {
+        self.journal.ensure_writable()?;
         let _region = RegionScope::named("commit");
-        self.operation_timings = ImportOperationTimings::default();
+        self.operation_timings =
+            graphforge_storage::lifecycle_io::is_active().then(ImportOperationTimings::default);
         if self.manifest.phase != ImportPhase::Validated
             || self.manifest.progress.files_pending != 0
         {
@@ -950,9 +1092,9 @@ impl GraphImportSession {
             Some(token) => construction.seal_and_publish_with_cancellation(token),
             None => construction.seal_and_publish(),
         };
-        self.operation_timings
-            .publish
-            .record(started, publication.is_err());
+        if let (Some(timings), Some(started)) = (&mut self.operation_timings, started) {
+            timings.publish.record(started, publication.is_err());
+        }
         drop(region);
         let publication = publication?;
         self.update_construction_progress(&construction.progress())?;
@@ -996,20 +1138,21 @@ impl GraphImportSession {
         &mut self,
         graph: &'a GraphForge,
     ) -> Result<crate::GraphConstructionSession<'a>, GfError> {
+        self.journal.ensure_writable()?;
         let _region = RegionScope::named("open_construction");
         let budgets = self.construction_budgets();
         let started = CallStart::now();
         if let Some(session_uuid) = self.manifest.construction_session_uuid {
             let resumed = graph.resume_graph_construction(session_uuid, budgets);
-            self.operation_timings
-                .resume
-                .record(started, resumed.is_err());
+            if let (Some(timings), Some(started)) = (&mut self.operation_timings, started) {
+                timings.resume.record(started, resumed.is_err());
+            }
             return resumed;
         }
         let session = graph.begin_graph_construction(budgets);
-        self.operation_timings
-            .begin
-            .record(started, session.is_err());
+        if let (Some(timings), Some(started)) = (&mut self.operation_timings, started) {
+            timings.begin.record(started, session.is_err());
+        }
         let session = session?;
         self.manifest.construction_session_uuid = Some(session.session_uuid());
         self.persist_manifest()?;
@@ -1020,6 +1163,7 @@ impl GraphImportSession {
         &mut self,
         progress: &crate::GraphConstructionProgress,
     ) -> Result<(), GfError> {
+        self.journal.ensure_writable()?;
         let application_io = graphforge_storage::ConstructionPhaseAttribution::from_construction(
             &progress.evidence,
         )?;
@@ -1084,6 +1228,8 @@ impl GraphImportSession {
         bytes: u64,
         rows: u64,
     ) -> Result<(), GfError> {
+        self.journal.ensure_writable()?;
+        let destination = self.root.join("sources").join(&name);
         let total = self.manifest.progress.bytes_accepted.saturating_add(bytes);
         if total > self.manifest.limits.max_source_bytes {
             return Err(limit("import max_source_bytes exceeded"));
@@ -1102,7 +1248,8 @@ impl GraphImportSession {
         self.manifest.progress.bytes_accepted = total;
         self.manifest.progress.files_accepted += 1;
         self.manifest.progress.files_pending += 1;
-        self.checkpoint().map(|_| ())
+        self.checkpoint_with_source_cleanup(Some(&destination))
+            .map(|_| ())
     }
 }
 
@@ -1114,6 +1261,13 @@ fn unix_millis() -> Result<u64, GfError> {
             .as_millis(),
     )
     .unwrap_or(u64::MAX))
+}
+
+fn append_region_name(kind: BulkInputKind) -> &'static str {
+    match kind {
+        BulkInputKind::Node => "append_nodes",
+        BulkInputKind::Edge => "append_edges",
+    }
 }
 
 fn for_each_source_batch(
@@ -1173,7 +1327,15 @@ fn consume_source_batches(
     batches: impl Iterator<Item = Result<RecordBatch, GfError>>,
     consume: &mut impl FnMut(Option<RecordBatch>) -> Result<(), GfError>,
 ) -> Result<(), GfError> {
-    for batch in batches {
+    let mut batches = batches;
+    loop {
+        let batch = {
+            let _region = RegionScope::named("source_read");
+            batches.next()
+        };
+        let Some(batch) = batch else {
+            break;
+        };
         match batch {
             Ok(batch) => consume(Some(batch))?,
             Err(error) => {
@@ -1272,17 +1434,25 @@ fn finish_parquet_copy_source(
 
 fn synchronize_parquet_copy_output(
     writer: &mut graphforge_filesystem::DurableFileCacheWriter,
-) -> Result<(), GfError> {
-    writer.sync_all_and_release().map_err(storage)?;
+) -> Result<graphforge_storage::durable_commit::FileSeal, GfError> {
+    let seal =
+        graphforge_storage::durable_commit::seal_cache_writer_witness(writer).map_err(storage)?;
     #[cfg(test)]
     copy_parquet_failure("writer release")?;
-    Ok(())
+    Ok(seal)
 }
 
 fn copy_parquet_source(
     source: &Path,
     temporary: &Path,
-) -> Result<(u64, CopyCacheReleaseEvidence), GfError> {
+) -> Result<
+    (
+        u64,
+        CopyCacheReleaseEvidence,
+        graphforge_storage::durable_commit::FileSeal,
+    ),
+    GfError,
+> {
     let parent = source
         .parent()
         .ok_or_else(|| validation("Parquet source must have a parent directory"))?;
@@ -1325,7 +1495,14 @@ fn copy_parquet_source(
     let writer_release = synchronize_parquet_copy_output(&mut writer);
     let mut result =
         append_copy_cleanup(copied_result, reader_release.map(|_| ()), "source release");
-    result = append_copy_cleanup(result, writer_release, "writer synchronization/release");
+    let mut seal = None;
+    result = append_copy_cleanup(
+        result,
+        writer_release.map(|witness| {
+            seal = Some(witness);
+        }),
+        "writer synchronization/release",
+    );
     let reader_evidence = tracker.evidence();
     let writer_evidence = writer.evidence();
     let peak_combined_window_bytes = reader_evidence
@@ -1345,6 +1522,7 @@ fn copy_parquet_source(
             writer: writer_evidence,
             peak_combined_window_bytes,
         },
+        seal.expect("successful writer release supplies its seal"),
     ))
 }
 
@@ -1403,26 +1581,7 @@ fn write_manifest_with_allocation(
     manifest: &SessionManifest,
     allocation: Option<&graphforge_storage::StorageAllocationOperation>,
 ) -> Result<(), GfError> {
-    let temporary = root.join("manifest.tmp");
-    let mut file = BufWriter::new(File::create(&temporary).map_err(storage)?);
-    serde_json::to_writer(&mut file, manifest).map_err(storage)?;
-    file.flush().map_err(storage)?;
-    file.get_ref().sync_all().map_err(storage)?;
-    let observed = if let Some(allocation) = allocation {
-        allocation.replace_file_at(&temporary, file.get_ref())?;
-        Some(file.get_ref().try_clone().map_err(storage)?)
-    } else {
-        None
-    };
-    drop(file);
-    let target = root.join(MANIFEST);
-    fs::rename(&temporary, &target).map_err(storage)?;
-    if let (Some(allocation), Some(file)) = (allocation, observed) {
-        allocation.remove_file_at(&target)?;
-        allocation.replace_file_at(&target, &file)?;
-        allocation.remove_file_at(&temporary)?;
-    }
-    Ok(())
+    journal::write_checkpoint(root, manifest, allocation, &mut false)
 }
 
 fn read_manifest(root: &Path) -> Result<SessionManifest, GfError> {
@@ -1430,6 +1589,10 @@ fn read_manifest(root: &Path) -> Result<SessionManifest, GfError> {
         File::open(root.join(MANIFEST)).map_err(storage)?,
     ))
     .map_err(storage)?;
+    if manifest.format_version != FORMAT_VERSION {
+        return Err(validation("incompatible import manifest format"));
+    }
+    journal::replay(root, &mut manifest)?;
     if let Some(construction) = manifest.progress.construction.as_mut()
         && construction.publication_work.contract.is_empty()
     {
@@ -1504,14 +1667,11 @@ fn cancelled() -> GfError {
     }
 }
 
-#[cfg(all(test, feature = "portable"))]
-mod tests {
-    use std::collections::HashMap;
+#[cfg(test)]
+mod test_fixtures {
     use std::sync::Arc;
 
     use arrow::array::{FixedSizeBinaryArray, StringArray};
-    use arrow::datatypes::DataType;
-    use parquet::arrow::ArrowWriter;
 
     use super::*;
     use crate::{bulk_edge_input_schema, bulk_node_input_schema};
@@ -1525,7 +1685,7 @@ mod tests {
         )
     }
 
-    fn nodes(values: &[Uuid]) -> RecordBatch {
+    pub(super) fn nodes(values: &[Uuid]) -> RecordBatch {
         RecordBatch::try_new(
             bulk_node_input_schema(Vec::new()).unwrap(),
             vec![
@@ -1536,7 +1696,7 @@ mod tests {
         .unwrap()
     }
 
-    fn edges(edge: Uuid, source: Uuid, target: Uuid) -> RecordBatch {
+    pub(super) fn edges(edge: Uuid, source: Uuid, target: Uuid) -> RecordBatch {
         RecordBatch::try_new(
             bulk_edge_input_schema(Vec::new()).unwrap(),
             vec![
@@ -1549,13 +1709,25 @@ mod tests {
         .unwrap()
     }
 
-    fn fixture() -> (tempfile::TempDir, PathBuf, GraphForge) {
+    pub(super) fn fixture() -> (tempfile::TempDir, PathBuf, GraphForge) {
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("project");
         fs::create_dir(&project).unwrap();
         let graph = GraphForge::new(project.to_str()).unwrap();
         (directory, project, graph)
     }
+}
+
+#[cfg(all(test, feature = "portable"))]
+mod tests {
+    use std::collections::HashMap;
+
+    use arrow::datatypes::DataType;
+    use parquet::arrow::ArrowWriter;
+
+    use super::test_fixtures::{edges, fixture, nodes};
+    use super::*;
+    use crate::{bulk_edge_input_schema, bulk_node_input_schema};
 
     fn construction_root(graph: &GraphForge, session_uuid: Uuid) -> PathBuf {
         graph
@@ -1566,7 +1738,37 @@ mod tests {
     }
 
     #[test]
+    fn default_import_has_no_optional_timing_samples_and_preserves_progress() {
+        let (_directory, _project, graph) = fixture();
+        let before = CALL_TIMING_SAMPLES.with(std::cell::Cell::get);
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        let ids = [Uuid::now_v7()];
+        session
+            .append_arrow(BulkInputKind::Node, &[nodes(&ids)])
+            .unwrap();
+        let prior = *graph.current_generation_uuid.lock().unwrap();
+        let progress = session.validate(&graph).unwrap();
+        assert_eq!(progress.rows_accepted, 1);
+        assert!(session.operation_timings().is_none());
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert_eq!(
+            session.commit(&graph, Some(&cancelled)).unwrap_err().code(),
+            "GF_CANCELLED"
+        );
+        assert_eq!(*graph.current_generation_uuid.lock().unwrap(), prior);
+        assert!(session.operation_timings().is_none());
+        session.commit(&graph, None).unwrap();
+        assert_eq!(graph.node_count("Person").unwrap(), 1);
+        assert!(session.operation_timings().is_none());
+        assert_eq!(CALL_TIMING_SAMPLES.with(std::cell::Cell::get), before);
+    }
+
+    #[test]
     fn operation_timings_carry_process_cpu_for_every_measured_call() {
+        let _capture = graphforge_storage::lifecycle_io::CaptureScope::install();
         // Real import operations carry process CPU in ordinary receipts;
         // CPU/wall is effective cores, never an inferred serial fraction.
         let (_directory, _project, graph) = fixture();
@@ -1590,7 +1792,9 @@ mod tests {
             )
             .unwrap();
         session.validate(&graph).unwrap();
-        let timing = session.operation_timings();
+        let timing = session
+            .operation_timings()
+            .expect("requested import timings");
 
         for (name, call) in [
             ("begin", timing.begin),
@@ -1617,6 +1821,7 @@ mod tests {
 
     #[test]
     fn operation_timings_are_scoped_non_durable_and_preserve_cancelled_commit() {
+        let _capture = graphforge_storage::lifecycle_io::CaptureScope::install();
         let (_directory, _project, graph) = fixture();
         let mut session = graph
             .begin_import_session(
@@ -1639,7 +1844,9 @@ mod tests {
             .unwrap();
         let prior = *graph.current_generation_uuid.lock().unwrap();
         session.validate(&graph).unwrap();
-        let timing = session.operation_timings();
+        let timing = session
+            .operation_timings()
+            .expect("requested import timings");
         assert_eq!(
             (
                 timing.begin.calls,
@@ -1654,7 +1861,9 @@ mod tests {
             assert_eq!(call.errors, 0);
         }
         session.validate(&graph).unwrap();
-        let timing = session.operation_timings();
+        let timing = session
+            .operation_timings()
+            .expect("requested import timings");
         assert_eq!(
             (
                 timing.begin.calls,
@@ -1672,16 +1881,15 @@ mod tests {
         let session_uuid = session.session_uuid();
         drop(session);
         let mut session = graph.resume_import_session(session_uuid).unwrap();
-        assert_eq!(
-            session.operation_timings(),
-            ImportOperationTimings::default()
-        );
+        assert!(session.operation_timings().is_none());
         assert_eq!(fs::read(&manifest_path).unwrap(), persisted);
         let cancelled = CancellationToken::new();
         cancelled.cancel();
         let error = session.commit(&graph, Some(&cancelled)).unwrap_err();
         assert_eq!(error.code(), "GF_CANCELLED");
-        let timing = session.operation_timings();
+        let timing = session
+            .operation_timings()
+            .expect("requested import timings");
         assert_eq!(
             (
                 timing.resume.calls,
@@ -1694,7 +1902,9 @@ mod tests {
         assert_eq!(session.status().0, ImportPhase::Validated);
         assert_eq!(fs::read(&manifest_path).unwrap(), persisted);
         session.commit(&graph, None).unwrap();
-        let timing = session.operation_timings();
+        let timing = session
+            .operation_timings()
+            .expect("requested import timings");
         assert_eq!(
             (
                 timing.begin.calls,
@@ -1722,7 +1932,7 @@ mod tests {
         assert!(session.commit(&graph, None).is_err());
         assert_eq!(
             session.operation_timings(),
-            ImportOperationTimings::default()
+            Some(ImportOperationTimings::default())
         );
     }
 
@@ -1775,9 +1985,10 @@ mod tests {
             .iter()
             .any(|entry| entry.relative_path == "topology/runtime_entity_label_encoding.json");
         drop(graph);
-        let before = graphforge_storage::io_stats::snapshot();
+        let _io_capture = graphforge_storage::io_stats::CaptureScope::install();
+        let before = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
         let reopened = GraphForge::new(project.to_str()).unwrap();
-        let reads = graphforge_storage::io_stats::snapshot();
+        let reads = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
         assert_eq!(
             reads.node_full_reads - before.node_full_reads,
             0,
@@ -1816,10 +2027,14 @@ mod tests {
             None,
         )
         .unwrap();
-        let before = graphforge_storage::io_stats::snapshot();
+        let _io_capture = graphforge_storage::io_stats::CaptureScope::install();
+        let before = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
         let portable = GraphForge::new(imported.to_str()).unwrap();
         assert_eq!(
-            graphforge_storage::io_stats::snapshot().node_full_reads - before.node_full_reads,
+            graphforge_storage::io_stats::snapshot()
+                .expect("requested I/O statistics")
+                .node_full_reads
+                - before.node_full_reads,
             0
         );
         assert_eq!(portable.node_count("Person").unwrap(), 2);
@@ -2034,10 +2249,10 @@ mod tests {
             output.write_all(&chunk[..bytes]).unwrap();
             remaining -= bytes as u64;
         }
-        output.sync_all().unwrap();
+        output.observed_sync_all().unwrap();
         drop(output);
 
-        let (copied, evidence) = copy_parquet_source(&source, &destination).unwrap();
+        let (copied, evidence, _seal) = copy_parquet_source(&source, &destination).unwrap();
         assert_eq!(copied, length);
         assert_eq!(destination.metadata().unwrap().len(), length);
         #[cfg(target_os = "linux")]

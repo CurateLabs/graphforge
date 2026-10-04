@@ -17,7 +17,7 @@ Sub-issues may split a canonical issue only to satisfy existing acceptance crite
 
 ### Finish and merge before starting more work
 
-- A coordinated agent team holds at most **three unmerged changes** across all agents and worktrees: open PRs (including drafts) plus implemented local branches without PRs. Multiple branches for one concern count once. Unrelated contributors' and automated dependency PRs do not count.
+- A coordinated agent team holds at most **six unmerged changes** across all agents and worktrees: open PRs (including drafts) plus implemented local branches without PRs. Multiple branches for one concern count once. Unrelated contributors' and automated dependency PRs do not count.
 - Before starting or delegating implementation, inspect the live PR queue and local work. At or above the limit, review, test, fix, and merge existing changes first. Do not close PRs or hide work in local branches to satisfy the limit.
 - The coordinating agent owns integration. Merge the first PR that can meet the gate now, respecting live dependencies, without waiting for the rest of the batch. Recheck the queue after each merge and before assigning more implementation.
 - Refresh and run final CI for the next merge candidate only; do not rebase the whole queue after every merge. Start dependent implementation after its prerequisite merges; use waiting time for review, diagnosis, or acceptance-test planning.
@@ -34,28 +34,31 @@ Rust owns behavior. Python and Node are thin bindings, never fallback engines.
 - Analyst verbs bypass the Cypher parser.
 - Runtime catalog IDs and ontology IDs are distinct. Never substitute one for the other.
 - Logical plans and wrapper tests are not end-to-end proof.
+- Name code by its subject. Files, identifiers, tests, env vars, CI jobs and steps, Make and bench targets, fixtures, and contract IDs never carry a milestone (`M6`) or issue number; cite issues in comments, commits, and PRs.
 - Durable projects require an `ext4`/`xfs`/`btrfs` volume at the process root; other filesystems fail with `GF_UNSUPPORTED_FILESYSTEM` by design. In-memory projects (`GraphForge()` with no path) run the full engine. See `docs/development/agent-environment.md`.
 
 See `docs/book/architecture/`.
 
 ## Validation
 
-Use targeted checks while iterating; run the gates for the changed surface before pushing.
+Iterate on the narrowest test that covers the change. Run `make check` before pushing. CI runs the full suite on every PR; do not reproduce it locally unless a CI failure needs it.
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --workspace -- -D warnings
-make pre-push-fast   # Python/policy/inventory checks; not Rust fmt or clippy
-make pre-push
+make check                                    # fmt, clippy, ruff, mypy, workflow lint, repo checks; no tests
+make test-rust ARGS="-p graphforge-storage"   # the CI Rust lane, narrowed to what changed
+make test-python                              # every Python binding suite, after rebuilding the wheel
+make test-node                                # every Node binding suite, after rebuilding the addon
 ```
 
-Cargo with nextest is the CI compile/test authority (ADR 0048). The CI Gate Rust lane is the `rust-tests` job in `.github/workflows/test.yml`; `docs/development/agent-environment.md` gives its exact local commands. Adding a Rust test file needs no edit beyond Cargo. After changing Rust, rebuild the native bindings before running Python or Node tests (commands in the same doc).
+Cargo with nextest is the CI compile/test authority (ADR 0048). `.github/workflows/test.yml` is the whole PR gate: lint, the Rust suite, the lean feature builds, the bindings built from the same tree, and the platform storage tests. Adding a Rust test file needs no edit beyond Cargo. After changing Rust, rebuild the native bindings before running Python or Node tests (commands in `docs/development/agent-environment.md`).
+
+A check belongs in the PR gate only if it lints, builds, or tests product code. Do not add checks whose subject is a workflow, a ledger, an inventory, or another check, and do not add a lane that re-runs tests another lane already runs.
 
 Run formatting after the final edit. Review intentional snapshot changes before accepting them. Keep native builds isolated with `CARGO_TARGET_DIR`; run at most two heavy builds concurrently and monitor disk.
 
 ## PR gate
 
-`config/gate-registry.json` is the machine-readable gate authority. Its sole required PR status is `github-status/CI Gate` with `sha_rule=exact_head`, matching repository ruleset 19988544. Scheduled stress, operator qualification, and release certification evidence are not required PR checks. Validate registry changes with `make gate-registry-check`.
+The sole required PR status is `CI Gate`, the last job of `.github/workflows/test.yml`, enforced by repository ruleset 19988544. Scheduled stress and operator qualification lanes are not required PR checks; `config/gate-registry.json` lists them and `make check` validates it.
 
 Merge only when:
 
@@ -73,13 +76,15 @@ The ruleset enforces a squash merge queue: `gh pr merge --squash` enqueues the P
 
 Close an issue when its acceptance-criteria **outcomes** are met: merged work (or an explicit documented non-code disposition), tests or other deterministic evidence for the stated criteria, and green checks for the changed surface before merge.
 
-Ordinary implementation, construction, infrastructure, and gate-tracker issues do **not** require a multi-workflow release gate cascade (Rust surface → Binding RC → release aggregate) or release-only certification workflows unrelated to the changed surface. Manual SHA-bound workflows apply only to publication and human release close (the current publication close-out issue and `publish.yaml` readiness).
+## Release
+
+Pushing a `v<version>` tag runs `.github/workflows/publish.yaml`: it builds every artifact from that commit, publishes to crates.io, PyPI, and npm, and installs the wheel and the main npm packages from the registries. A pull request that touches the release path runs the same workflow as a dry run. `RELEASING.md` has the steps. Do not add release gates, candidate retention, or evidence records around it.
 
 ## Failure handling
 
 Fix root causes. Never hide failures with skips, retries, sleeps, blanket ignores, fallback behavior, or weakened assertions.
 
-For matrix, release-candidate, or publication failures:
+For matrix or publication failures:
 
 1. Let all safe independent lanes finish.
 2. Build one complete failure census.
@@ -99,7 +104,7 @@ Claims require evidence appropriate to the claim:
 - the exact command and result for local or CI verification;
 - real Rust-facade or binding execution where the issue requires it;
 - reopen/recovery evidence for persistence claims;
-- for release publication claims, the SHA-bound evidence required by the release process.
+- for release publication claims, the tag's `Publish` run and the registry versions it installed.
 
 Do not lie, skip tests, weaken assertions, or claim green without running the relevant checks. Do not invent SHA-citation rituals for ordinary issue close.
 

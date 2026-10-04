@@ -4,6 +4,13 @@
 //! authority is the numeric `(generation, ordinal)` encoded in its canonical
 //! filename; directory order and mtimes never select a winner.
 
+pub(crate) mod fragment_cap;
+pub(crate) use fragment_cap::{
+    FragmentSplitter, row_charges, split_into_fragments, with_fragment_ordinal,
+};
+pub use fragment_cap::{MAX_PROPERTY_FRAGMENT_BYTES, MAX_PROPERTY_FRAGMENT_ROWS};
+pub(crate) mod bounded_object;
+pub use bounded_object::MAX_PROPERTY_OBJECT_BYTES;
 mod inventory;
 #[cfg(test)]
 use inventory::digest_hex;
@@ -22,11 +29,16 @@ pub use projected_reads::{
 };
 mod targeted_reads;
 use targeted_reads::read_property_targets;
-pub(crate) use targeted_reads::read_replay_property_targets;
 pub use targeted_reads::{
-    EdgeOwnerProbeWork, PropertyTargetSnapshots,
+    EdgeOwnerProbeWork, PropertyTargetData, PropertyTargetSnapshots,
     read_authenticated_property_presence_for_inventory,
-    read_authenticated_property_targets_for_inventory, resolve_existing_edge_property_owners,
+    read_authenticated_property_snapshot_data_for_inventory,
+    read_authenticated_property_target_data_for_inventory,
+    read_authenticated_property_targets_for_inventory, resolve_existing_edge_property_owner_data,
+    resolve_existing_edge_property_owners,
+};
+pub(crate) use targeted_reads::{
+    read_property_presence_data_for_inventory, read_replay_property_targets,
 };
 mod parquet_budget;
 pub(crate) use parquet_budget::replay_parquet_reader_reservation;
@@ -46,18 +58,22 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use arrow::array::{Array, BooleanArray, FixedSizeBinaryArray, RecordBatch};
 use bytes::Bytes;
 use graphforge_core::GfError;
+#[cfg(test)]
+use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use graphforge_ir::IrLiteral;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::errors::ParquetError;
 use parquet::file::reader::{ChunkReader, Length};
 use parquet::thrift::TSerializable;
+#[cfg(test)]
+use sha2::Digest;
+
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// On-disk property overlay format marker.
@@ -169,7 +185,24 @@ pub struct AuthenticatedPropertyInventory {
     root_path: Option<PathBuf>,
     routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>>,
     edge_routes: BTreeMap<String, Vec<AdmittedEdgeFile>>,
+    /// Node topology files the inventory declares (`topology/nodes.parquet`
+    /// and `topology/nodes/<range>.parquet`), in canonical order. `None` for
+    /// a route-scoped inventory, which carries no topology authority; a reader
+    /// then falls back to the directory listing. #1388: the node table reads
+    /// only declared files, so an unregistered file in the hydrated directory
+    /// is never opened.
+    node_files: Option<Vec<AdmittedEdgeFile>>,
+    /// Semantic owners that have no fragment yet; routes with fragments are
+    /// described by `route_summaries`.
     schemas: BTreeMap<(PropertyRouteKind, String), arrow::datatypes::SchemaRef>,
+    /// Footer-derived schema and row bound of each route that has fragments.
+    /// Filled at admission when fragments are authenticated eagerly, and on the
+    /// first touch of the route when they are admitted lazily.
+    route_summaries: BTreeMap<(PropertyRouteKind, String), OnceLock<RouteSummaryOutcome>>,
+    /// Node-topology objects named by the manifest, with their declared length
+    /// and XXH64. Present only when the inventory covers the whole graph rather
+    /// than one requested route.
+    node_topology_files: Option<Vec<crate::catalog::AdmittedSourceFile>>,
     authority_bytes: u64,
     authority_block_equivalents: u64,
     authority_read_calls: u64,
@@ -211,18 +244,162 @@ pub struct PropertyInventoryOpenMetrics {
     pub authentication_read_calls: u64,
 }
 
+/// When a fragment's bytes are checked against the manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FragmentAdmission {
+    /// At admission, and again by a private snapshot copy on every read. Raw
+    /// workspaces, whose files writers replace in place of an immutable object.
+    Eager,
+    /// Admission checks each part's exact length only. Content (exact length
+    /// and XXH64) is checked when the fragment's footer is first needed.
+    /// Payload reads always authenticate a private snapshot, including reads
+    /// after successful footer admission.
+    FirstTouch,
+}
+
+/// Facts of one fragment's physical objects that only their bytes carry: the
+/// bounded-object envelope and the length of the logical Parquet stream.
+#[derive(Debug, Clone, Copy)]
+struct FragmentObject {
+    envelope: Option<bounded_object::EnvelopeLayout>,
+    logical_length: u64,
+}
+
+/// Footer facts of one fragment's logical Parquet, which the manifest does not
+/// carry.
+#[derive(Debug)]
+struct FragmentFooter {
+    physical_rows: usize,
+    schema: arrow::datatypes::SchemaRef,
+}
+
+/// Schema of one route, derived from its fragments' footers.
+#[derive(Debug)]
+struct RouteSummary {
+    schema: arrow::datatypes::SchemaRef,
+}
+
+type RouteSummaryOutcome = Result<Arc<RouteSummary>, GfError>;
+
 #[derive(Debug)]
 struct AuthenticatedPropertyFragment {
     id: PropertyFragmentId,
     layout: PropertyFragmentLayout,
-    entry: crate::GraphFileEntry,
+    entry: crate::GraphReadFileEntry,
     physical_relative: PathBuf,
     identity: graphforge_filesystem::FileIdentity,
-    physical_rows: usize,
-    schema: arrow::datatypes::SchemaRef,
+    /// Every physical object of the fragment, anchor first, as the manifest
+    /// names them. Known without reading any of them.
+    parts: Vec<PropertyObjectPart>,
+    /// Set at admission when fragments are admitted eagerly; otherwise set by
+    /// the first touch, which checks every part's content against the manifest.
+    object: OnceLock<Result<FragmentObject, GfError>>,
+    footer: OnceLock<Result<FragmentFooter, GfError>>,
     authentication_bytes: u64,
     authentication_block_equivalents: u64,
     authentication_read_calls: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PropertyObjectPart {
+    entry: crate::GraphReadFileEntry,
+    physical_relative: PathBuf,
+    identity: graphforge_filesystem::FileIdentity,
+}
+
+#[derive(Debug, Default)]
+struct PartAuthentication {
+    bytes: AtomicU64,
+    blocks: AtomicU64,
+    calls: AtomicU64,
+    read_bytes: AtomicU64,
+    read_calls: AtomicU64,
+}
+
+impl PartAuthentication {
+    fn add(&self, bytes: u64, blocks: u64, calls: u64) {
+        self.bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.blocks.fetch_add(blocks, Ordering::Relaxed);
+        self.calls.fetch_add(calls, Ordering::Relaxed);
+    }
+
+    fn values(&self) -> (u64, u64, u64) {
+        (
+            self.bytes.load(Ordering::Relaxed),
+            self.blocks.load(Ordering::Relaxed),
+            self.calls.load(Ordering::Relaxed),
+        )
+    }
+}
+
+#[derive(Debug)]
+enum PropertyFile {
+    Plain(File),
+    Segmented {
+        source: bounded_object::SegmentedSource,
+        authentication: Arc<PartAuthentication>,
+    },
+}
+
+impl PropertyFile {
+    fn authentication(&self) -> (u64, u64, u64) {
+        match self {
+            Self::Plain(_) => (0, 0, 0),
+            Self::Segmented { authentication, .. } => authentication.values(),
+        }
+    }
+
+    fn physical_reads(&self) -> (u64, u64) {
+        match self {
+            Self::Plain(_) => (0, 0),
+            Self::Segmented { authentication, .. } => (
+                authentication.read_bytes.load(Ordering::Relaxed),
+                authentication.read_calls.load(Ordering::Relaxed),
+            ),
+        }
+    }
+
+    fn reservation_bytes(&self) -> u64 {
+        match self {
+            Self::Plain(_) => 0,
+            Self::Segmented { .. } => 2 * bounded_object::MAX_PROPERTY_OBJECT_BYTES as u64,
+        }
+    }
+}
+
+trait PropertyRead: std::fmt::Debug {
+    fn read_at(&self, buffer: &mut [u8], offset: u64) -> std::io::Result<usize>;
+    fn length(&self) -> std::io::Result<u64>;
+    fn physical(&self) -> bool {
+        true
+    }
+}
+
+impl PropertyRead for File {
+    fn read_at(&self, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+        retained_read_at(self, buffer, offset)
+    }
+    fn length(&self) -> std::io::Result<u64> {
+        self.metadata().map(|metadata| metadata.len())
+    }
+}
+
+impl PropertyRead for PropertyFile {
+    fn physical(&self) -> bool {
+        matches!(self, Self::Plain(_))
+    }
+    fn read_at(&self, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(file) => retained_read_at(file, buffer, offset),
+            Self::Segmented { source, .. } => source.read_at(buffer, offset),
+        }
+    }
+    fn length(&self) -> std::io::Result<u64> {
+        match self {
+            Self::Plain(file) => file.length(),
+            Self::Segmented { source, .. } => Ok(source.len()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,11 +412,28 @@ enum PropertyFragmentLayout {
 /// directory capability and immutable identity/digest authority; this guard
 /// keeps the corresponding OS handle scoped to one decoder.
 struct OpenPropertyFragment {
-    file: Arc<File>,
+    file: Arc<PropertyFile>,
+    /// Length of the logical Parquet stream `file` presents.
+    logical_length: u64,
     authentication_bytes: u64,
     authentication_block_equivalents: u64,
     authentication_read_calls: u64,
     handle: FragmentHandleGuard,
+}
+
+/// Streaming logical property fragment decoder retaining authenticated capabilities.
+pub(crate) struct PropertyFragmentBatches {
+    reader: ParquetRecordBatchReader,
+    _opened: OpenPropertyFragment,
+}
+
+impl Iterator for PropertyFragmentBatches {
+    type Item = Result<RecordBatch, GfError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.reader
+            .next()
+            .map(|batch| batch.map_err(authenticated_arrow_error))
+    }
 }
 
 struct FragmentHandleGuard {
@@ -291,7 +485,7 @@ pub struct PropertyOverlayMetrics {
     pub physical_rows: u64,
     /// Total authentication plus decoder bytes read.
     pub physical_bytes: u64,
-    /// Full-file bytes read for SHA-256 authentication. Cached inventories
+    /// Full-file bytes read for checksum admission and control authentication. Cached inventories
     /// stream each bounded on-demand handle into an authenticated immutable snapshot.
     pub authentication_bytes: u64,
     /// Raw graph-files authority bytes included in authentication bytes.

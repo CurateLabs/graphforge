@@ -154,13 +154,44 @@ fn fingerprint_graph_paths_with_runtime_names(
         table_paths.sort();
         writer.text(&relative).map_err(canonical_error)?;
         let mut batches = Vec::new();
-        for path in table_paths {
-            let fragments = read_parquet(&path)?;
-            if relative == "topology/nodes.parquet" {
-                batches
-                    .extend(crate::catalog::normalize_topology_nodes(fragments).map_err(storage)?);
-            } else {
-                batches.extend(fragments);
+        let property = relative
+            .strip_prefix("properties/")
+            .map(|route| (route, false))
+            .or_else(|| {
+                relative
+                    .strip_prefix("edge_properties/")
+                    .map(|route| (route, true))
+            });
+        if let Some((route, edge)) = property {
+            let route = route
+                .strip_suffix(".parquet")
+                .ok_or_else(|| validation("property fingerprint route lacks suffix"))?;
+            // A bounded physical object may contain only part of a logical
+            // Parquet fragment. Fingerprints describe decoded graph values,
+            // using the same authenticated property authority as queries.
+            batches = authority.property_batches(root, route, edge)?;
+            if batches.is_empty() {
+                let kind = if edge {
+                    crate::PropertyRouteKind::Edge
+                } else {
+                    crate::PropertyRouteKind::Node
+                };
+                let schema = authority
+                    .properties
+                    .route_schema(kind, route)?
+                    .ok_or_else(|| validation("property fingerprint route has no schema"))?;
+                batches.push(RecordBatch::new_empty(schema));
+            }
+        } else {
+            for path in table_paths {
+                let fragments = read_parquet(&path)?;
+                if relative == "topology/nodes.parquet" {
+                    batches.extend(
+                        crate::catalog::normalize_topology_nodes(fragments).map_err(storage)?,
+                    );
+                } else {
+                    batches.extend(fragments);
+                }
             }
         }
         let schema = batches

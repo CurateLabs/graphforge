@@ -25,6 +25,8 @@ pub(super) fn freeze(
         ));
     }
     let mut spec = RegisterResearchVersion {
+        author: None,
+        committer: None,
         version_uuid: identity(request.operation_uuid, "payload"),
         context_uuid: identity(request.operation_uuid, "payload_context"),
         source_generation_uuid: selected.version.content.generation_uuid,

@@ -137,7 +137,9 @@ async fn exploratory_mode_routes_to_catch_all_files() {
         .unwrap();
     assert_eq!(col.value(0), "UNKNOWN_REL");
 
-    let schema = PropertyTable::open_discovered(dir.path(), "_untyped").schema_ref();
+    let schema = PropertyTable::open_discovered(dir.path(), "_untyped")
+        .unwrap()
+        .schema_ref();
     assert!(schema.field_with_name("node_uuid").is_ok());
     assert!(schema.field_with_name("name").is_ok());
     assert!(schema.field_with_name("age").is_ok());
@@ -865,7 +867,7 @@ async fn edge_property_table_sql_and_direct_reads_merge_cross_fragment_mutations
     let ctx = SessionContext::new();
     ctx.register_table(
         "edge_props",
-        Arc::new(EdgePropertyTable::open_discovered(dir.path(), "KNOWS")),
+        Arc::new(EdgePropertyTable::open_discovered(dir.path(), "KNOWS").unwrap()),
     )
     .unwrap();
     let batches = ctx

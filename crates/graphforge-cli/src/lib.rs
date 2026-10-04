@@ -25,11 +25,14 @@ include!(concat!(env!("OUT_DIR"), "/project_skills.rs"));
 
 mod hub_clone;
 pub mod hub_fixture_artifacts;
+mod hub_http;
+mod hub_publish;
 mod maintenance_cli;
 mod ontology_cli;
 mod portable_cli;
 mod research_cli;
 mod research_versions_cli;
+mod saved_queries_cli;
 mod source_artifact_cli;
 mod storage_attribution_cli;
 
@@ -225,10 +228,6 @@ fn load_skill_bundle(root: &Path) -> Result<OwnedSkillBundle, graphforge_api::Gf
 #[derive(Parser)]
 #[command(name = "graphforge", version, about = "GraphForge CLI")]
 struct Cli {
-    /// First-party qualification channel; input contains no graph payload.
-    #[arg(long, global = true, hide = true)]
-    allocation_diagnostics: bool,
-
     /// Print version info and exit.
     #[arg(long)]
     info: bool,
@@ -240,6 +239,9 @@ struct Cli {
     /// Code repository root; defaults to discovery from the current directory.
     #[arg(long, global = true)]
     project_dir: Option<PathBuf>,
+
+    #[command(flatten)]
+    diagnostics: storage_attribution_cli::DiagnosticsArgs,
 
     /// Emit the stable machine-readable JSON result when supported.
     #[arg(long, global = true)]
@@ -257,8 +259,8 @@ struct Cli {
 enum Command {
     /// Validate and exercise the Rust-owned telemetry lifecycle.
     Telemetry(TelemetryArgs),
-    /// Clone a verified portable project from GraphForge Hub.
     Clone(hub_clone::CloneArgs),
+    Publish(hub_publish::PublishArgs),
     /// Initialize repository-local GraphForge definitions and state.
     Init(InitArgs),
     /// Compare or reconcile declared definitions and source digests without ingesting data.
@@ -298,6 +300,11 @@ enum Command {
     },
     /// Stream a Cypher result to Parquet or Arrow IPC without full materialization.
     Query(portable_cli::QueryArgs),
+    /// Save, inspect, edit, and explicitly execute reusable project queries.
+    SavedQuery {
+        #[command(subcommand)]
+        command: saved_queries_cli::SavedQueryCommand,
+    },
     /// Staged Arrow/Parquet graph-import sessions.
     ImportSession {
         #[command(subcommand)]
@@ -1194,7 +1201,8 @@ impl From<graphforge_api::MultiOntologyError> for CliRuntimeError {
 
 #[allow(clippy::too_many_lines)]
 fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
-    let allocation = if cli.allocation_diagnostics {
+    let _capture = storage_attribution_cli::capture(&cli)?;
+    let allocation = if cli.diagnostics.allocation_diagnostics {
         if !cli.json {
             return Err(graphforge_api::GfError::Validation(
                 "allocation diagnostics require --json".into(),
@@ -1263,10 +1271,13 @@ fn run_with_allocation(
         )
         .map_err(Into::into);
     }
-    if let Command::Clone(args) = command {
-        return hub_clone::run_clone(args, cli.json, output)
-            .map(|()| 0)
-            .map_err(Into::into);
+    if let hub @ (Command::Clone(_) | Command::Publish(_)) = command {
+        return hub_publish::run_hub_command(hub, cli.project, cli.project_dir, cli.json, output);
+    }
+    if let Command::Ontology { command } = &command
+        && let Some(result) = ontology_cli::run_without_project(command, cli.json, output)
+    {
+        return result.map(|()| 0).map_err(Into::into);
     }
     // Repository-independent portable commands must not call RepositoryContext::discover.
     if let Command::Portable { command } = command {
@@ -1322,6 +1333,11 @@ fn run_with_allocation(
     let command = match command {
         Command::Export(args) => {
             return run_export(&graph, args, cli.json, output)
+                .map(|()| 0)
+                .map_err(Into::into);
+        }
+        Command::SavedQuery { command } => {
+            return saved_queries_cli::run(&mut graph, command, cli.json, output)
                 .map(|()| 0)
                 .map_err(Into::into);
         }
@@ -1681,8 +1697,9 @@ fn error_exit_code(error: &CliRuntimeError) -> i32 {
 pub fn run_process() {
     let cli = Cli::parse();
     let json = cli.json;
-    let stdout = io::stdout();
-    let mut output = stdout.lock();
+    let mut output = io::stdout().lock();
+    hub_publish::allow_device_flow();
+    hub_clone::attach_to_process();
     match run(cli, &mut output) {
         Ok(exit_code) if exit_code != 0 => {
             let _ = output.flush();
@@ -2815,30 +2832,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_json_uuid_conversion_is_exact_and_rejects_malformed_hex() {
-        let ty = DataType::FixedSizeBinary(16);
-        assert_eq!(
-            canonical_json_value(
-                serde_json::Value::String("000102030405060708090a0b0c0d0e0f".into()),
-                &ty,
-            )
-            .unwrap(),
-            serde_json::Value::String("00010203-0405-0607-0809-0a0b0c0d0e0f".into())
-        );
-        for value in ["00", "zz0102030405060708090a0b0c0d0e0f"] {
-            assert!(matches!(
-                canonical_json_value(serde_json::Value::String(value.into()), &ty),
-                Err(graphforge_api::GfError::Execution(_))
-            ));
-        }
-        let ordinary = serde_json::json!({"nested": [true, 1, null]});
-        assert_eq!(
-            canonical_json_value(ordinary.clone(), &DataType::Utf8).unwrap(),
-            ordinary
-        );
-    }
-
-    #[test]
     fn selector_requires_exactly_one_source_and_preserves_named_current() {
         assert!(selector(None, false, "from").is_err());
         assert!(selector(Some("named".into()), true, "from").is_err());
@@ -2851,144 +2844,10 @@ mod tests {
             CheckpointSelector::Current
         ));
     }
-
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn arrow_result_export_preserves_geoarrow_fields_values_and_nulls() {
-        use std::collections::HashMap;
-        use std::io::Cursor;
-
-        use arrow::array::{
-            Array, FixedSizeListArray, Float64Array, LargeListArray, ListArray, StructArray,
-        };
-        use arrow::ipc::reader::StreamReader;
-        use graphforge_api::{PropValue, SpatialValue};
-
-        fn flatten_value(array: &dyn Array, row: usize, output: &mut Vec<f64>) {
-            if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
-                output.push(values.value(row));
-            } else if let Some(values) = array.as_any().downcast_ref::<StructArray>() {
-                for column in values.columns() {
-                    flatten_value(column.as_ref(), row, output);
-                }
-            } else if let Some(values) = array.as_any().downcast_ref::<ListArray>() {
-                let values = values.value(row);
-                for index in 0..values.len() {
-                    flatten_value(values.as_ref(), index, output);
-                }
-            } else if let Some(values) = array.as_any().downcast_ref::<LargeListArray>() {
-                let values = values.value(row);
-                for index in 0..values.len() {
-                    flatten_value(values.as_ref(), index, output);
-                }
-            } else if let Some(values) = array.as_any().downcast_ref::<FixedSizeListArray>() {
-                let values = values.value(row);
-                for index in 0..values.len() {
-                    flatten_value(values.as_ref(), index, output);
-                }
-            } else {
-                panic!(
-                    "unexpected GeoArrow coordinate array: {:?}",
-                    array.data_type()
-                );
-            }
-        }
-
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/contracts/geoarrow-interchange-v1.json"
-        ))
-        .unwrap();
-        let cases = fixture["cases"].as_array().unwrap();
-        let properties = cases
-            .iter()
-            .map(|case| {
-                let name = case["name"].as_str().unwrap().to_owned();
-                let spatial: SpatialValue = serde_json::from_value(serde_json::json!({
-                    "spatial_type": {
-                        "geometry": case["geometry"],
-                        "crs": case["crs"],
-                    },
-                    "coordinates": case["coordinates"],
-                        "extension_name": case.get("preservedOnly").and_then(serde_json::Value::as_bool).unwrap_or(false).then(|| case["extensionName"].clone()),
-                        "extension_metadata": case.get("preservedOnly").and_then(serde_json::Value::as_bool).unwrap_or(false).then(|| case["extensionMetadata"].clone()),
-                }))
-                .unwrap();
-                (name, PropValue::Spatial(spatial))
-            })
-            .collect::<HashMap<_, _>>();
-        let graph = GraphForge::new(None).unwrap();
-        graph.add_node("Geometry", &properties).unwrap();
-        graph.add_node("Geometry", &HashMap::new()).unwrap();
-        let projection = cases
-            .iter()
-            .map(|case| {
-                let name = case["name"].as_str().unwrap();
-                format!("n.{name} AS {name}")
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let result = graph
-            .execute(&format!(
-                "MATCH (n:Geometry) RETURN {projection} ORDER BY n.node_uuid"
-            ))
-            .unwrap();
-        let mut ipc = Vec::new();
-        write_result(&result, &mut ipc).unwrap();
-        let batches = StreamReader::try_new(Cursor::new(ipc), None)
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        let expected_batches = fixture["rows"]["batchSizes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|value| usize::try_from(value.as_u64().unwrap()).unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            batches
-                .iter()
-                .map(arrow::array::RecordBatch::num_rows)
-                .collect::<Vec<_>>(),
-            expected_batches
-        );
-        assert_eq!(
-            batches
-                .iter()
-                .map(arrow::array::RecordBatch::num_rows)
-                .sum::<usize>(),
-            2
-        );
-        for case in cases {
-            let name = case["name"].as_str().unwrap();
-            let field = batches[0].schema().field_with_name(name).unwrap().clone();
-            assert_eq!(
-                field.metadata()["ARROW:extension:name"],
-                case["extensionName"]
-            );
-            assert_eq!(
-                field.metadata()["ARROW:extension:metadata"],
-                case["extensionMetadata"]
-            );
-            let column = batches[0].column_by_name(name).unwrap();
-            let mut coordinates = Vec::new();
-            flatten_value(
-                column.as_ref(),
-                usize::try_from(fixture["rows"]["populated"].as_u64().unwrap()).unwrap(),
-                &mut coordinates,
-            );
-            let expected = case["flat"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|value| value.as_f64().unwrap())
-                .collect::<Vec<_>>();
-            assert_eq!(coordinates, expected);
-            assert!(
-                column.is_null(usize::try_from(fixture["rows"]["null"].as_u64().unwrap()).unwrap())
-            );
-        }
-    }
 }
 
 #[cfg(test)]
 mod command_retirement_tests;
+
+#[cfg(test)]
+mod result_output_tests;

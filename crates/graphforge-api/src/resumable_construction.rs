@@ -4,9 +4,10 @@
 mod codec_tests;
 
 use arrow::record_batch::RecordBatch;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_core::uuid::Uuid;
 use graphforge_storage::concurrency_attribution::RegionScope;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::{
     ConstructionChunkReceipt, GfError, GraphConstructionBudgets, GraphConstructionEvidence,
@@ -207,16 +208,18 @@ impl GraphConstructionSession<'_> {
         self.session_uuid
     }
 
-    /// Append one canonical node Arrow chunk.
+    /// Append one node Arrow chunk. Accepted property columns are normalized
+    /// to their canonical persisted types first.
     pub fn append_nodes(
         &mut self,
         chunk_id: &str,
         batch: &RecordBatch,
     ) -> Result<ConstructionChunkReceipt, GfError> {
-        self.inner.append(
+        self.append(
             graphforge_storage::ConstructionChunkKind::Node,
             chunk_id,
             batch,
+            None,
         )
     }
 
@@ -227,24 +230,26 @@ impl GraphConstructionSession<'_> {
         batch: &RecordBatch,
         cancellation: &crate::CancellationToken,
     ) -> Result<ConstructionChunkReceipt, GfError> {
-        self.inner.append_with_cancellation(
+        self.append(
             graphforge_storage::ConstructionChunkKind::Node,
             chunk_id,
             batch,
-            || cancellation.is_cancelled(),
+            Some(cancellation),
         )
     }
 
-    /// Append one canonical edge Arrow chunk after all node chunks.
+    /// Append one edge Arrow chunk after all node chunks. Accepted property
+    /// columns are normalized to their canonical persisted types first.
     pub fn append_edges(
         &mut self,
         chunk_id: &str,
         batch: &RecordBatch,
     ) -> Result<ConstructionChunkReceipt, GfError> {
-        self.inner.append(
+        self.append(
             graphforge_storage::ConstructionChunkKind::Edge,
             chunk_id,
             batch,
+            None,
         )
     }
 
@@ -255,12 +260,30 @@ impl GraphConstructionSession<'_> {
         batch: &RecordBatch,
         cancellation: &crate::CancellationToken,
     ) -> Result<ConstructionChunkReceipt, GfError> {
-        self.inner.append_with_cancellation(
+        self.append(
             graphforge_storage::ConstructionChunkKind::Edge,
             chunk_id,
             batch,
-            || cancellation.is_cancelled(),
+            Some(cancellation),
         )
+    }
+
+    /// The single construction boundary every bulk producer crosses: import
+    /// sessions (CLI, Python, Node) and direct Rust construction alike.
+    fn append(
+        &mut self,
+        kind: graphforge_storage::ConstructionChunkKind,
+        chunk_id: &str,
+        batch: &RecordBatch,
+        cancellation: Option<&crate::CancellationToken>,
+    ) -> Result<ConstructionChunkReceipt, GfError> {
+        let batch = canonical_property_columns(kind, batch)?;
+        match cancellation {
+            Some(token) => self
+                .inner
+                .append_with_cancellation(kind, chunk_id, &batch, || token.is_cancelled()),
+            None => self.inner.append(kind, chunk_id, &batch),
+        }
     }
 
     /// Return durable content-free lifecycle and bounded-work progress.
@@ -363,10 +386,11 @@ impl GraphConstructionSession<'_> {
                         graph.prepare_generation_read_authority(candidate, &prepared_dir)?;
                     drop(read_authority);
                     prepared = Some(PreparedGenerationRefresh {
-                        workspace: super::GraphWorkspace {
-                            dir: prepared_dir,
-                            _owner: prepared_guard,
-                        },
+                        workspace: super::GraphWorkspace::new(
+                            prepared_dir,
+                            prepared_guard,
+                            &read_authority_prepared.properties,
+                        )?,
                         runtime_catalog,
                         read_authority: read_authority_prepared,
                         hydration_evidence,
@@ -431,10 +455,11 @@ impl GraphConstructionSession<'_> {
                     drop(read_authority);
                     refresh_boundary(RefreshBoundary::BeforeInstall)?;
                     Ok(PreparedGenerationRefresh {
-                        workspace: super::GraphWorkspace {
-                            dir: prepared_dir,
-                            _owner: prepared_guard,
-                        },
+                        workspace: super::GraphWorkspace::new(
+                            prepared_dir,
+                            prepared_guard,
+                            &read_authority_prepared.properties,
+                        )?,
                         runtime_catalog,
                         read_authority: read_authority_prepared,
                         hydration_evidence,
@@ -558,6 +583,73 @@ thread_local! {
     static REFRESH_FAILURE: std::cell::Cell<Option<RefreshBoundary>> = const { std::cell::Cell::new(None) };
 }
 
+/// Rewrite every accepted property column into its canonical persisted type
+/// (`graphforge_storage::schemas::canonical_property_data_type`): narrower
+/// integers to `Int64`, `Float32` to `Float64`, `LargeUtf8` to `Utf8` and
+/// `LargeList` to `List`, recursively. Each conversion is lossless and keeps
+/// nulls, field names, nullability and metadata. Columns that are already
+/// canonical, required topology columns, and columns no canonical form exists
+/// for are passed through unchanged, so storage refuses the last.
+fn canonical_property_columns(
+    kind: graphforge_storage::ConstructionChunkKind,
+    batch: &RecordBatch,
+) -> Result<RecordBatch, GfError> {
+    let required = match kind {
+        graphforge_storage::ConstructionChunkKind::Node => {
+            graphforge_storage::CONSTRUCTION_NODE_SCHEMA.fields().len()
+        }
+        graphforge_storage::ConstructionChunkKind::Edge => {
+            graphforge_storage::CONSTRUCTION_EDGE_SCHEMA.fields().len()
+        }
+    };
+    let schema = batch.schema();
+    let target = |field: &arrow::datatypes::Field| {
+        graphforge_storage::schemas::canonical_property_data_type(field.data_type())
+            .filter(|canonical| canonical != field.data_type())
+    };
+    if schema
+        .fields()
+        .iter()
+        .skip(required)
+        .all(|field| target(field).is_none())
+    {
+        return Ok(batch.clone());
+    }
+    let lossless = arrow::compute::CastOptions {
+        safe: false,
+        ..arrow::compute::CastOptions::default()
+    };
+    let mut fields = Vec::with_capacity(schema.fields().len());
+    let mut columns = Vec::with_capacity(batch.num_columns());
+    for (index, (field, column)) in schema.fields().iter().zip(batch.columns()).enumerate() {
+        if let Some(canonical) = (index >= required).then(|| target(field)).flatten() {
+            let normalized = arrow::compute::cast_with_options(column, &canonical, &lossless)
+                .map_err(|error| {
+                    validation(format!(
+                        "property column {} cannot be normalized from {} to {canonical}: {error}",
+                        field.name(),
+                        field.data_type()
+                    ))
+                })?;
+            fields.push(std::sync::Arc::new(
+                field.as_ref().clone().with_data_type(canonical),
+            ));
+            columns.push(normalized);
+        } else {
+            fields.push(std::sync::Arc::clone(field));
+            columns.push(std::sync::Arc::clone(column));
+        }
+    }
+    RecordBatch::try_new(
+        std::sync::Arc::new(arrow::datatypes::Schema::new_with_metadata(
+            fields,
+            schema.metadata().clone(),
+        )),
+        columns,
+    )
+    .map_err(|error| validation(error.to_string()))
+}
+
 fn derived_uuid(operation: Uuid, domain: &[u8]) -> Uuid {
     let mut digest = Sha256::new();
     digest.update(b"graphforge-construction-publication/v1\0");
@@ -623,8 +715,10 @@ mod tests {
 
     /// A published construction ships its adjacency CSR (#1388): a fresh
     /// process finds it current in the hydrated workspace without rebuilding,
-    /// hop queries answer from it, and a corrupted published shard is refused
-    /// by the open-time digest sweep like every other graph object.
+    /// hop queries answer from it, and a corrupted published shard is never
+    /// served. Opening reads no shard, so the refusal is on the shard's first
+    /// touch: the shard reader refuses it by checksum and the provider answers
+    /// the hop from authenticated topology instead.
     #[test]
     fn published_construction_serves_its_adjacency_index_and_refuses_corruption() {
         use graphforge_storage::adjacency::AdjacencyFreshnessState;
@@ -656,6 +750,17 @@ mod tests {
         assert_eq!(inspection.artifact_source_generation, Some(1));
         drop(graph);
 
+        let hop_count = |graph: &GraphForge| {
+            graph
+                .execute("MATCH (a)-[r]->(b)-[s]->(c) RETURN count(*) AS n")
+                .unwrap()
+                .batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .unwrap()
+                .value(0)
+        };
         let reopened = GraphForge::new(Some(path)).unwrap();
         assert!(graphforge_storage::adjacency::manifest_path(&reopened.dir()).is_file());
         let inspection = reopened.inspect_adjacency().unwrap();
@@ -669,18 +774,7 @@ mod tests {
                 [node_ids[2], edge_ids[2], node_ids[3]],
             ],
         );
-        let hops = reopened
-            .execute("MATCH (a)-[r]->(b)-[s]->(c) RETURN count(*) AS n")
-            .unwrap();
-        assert_eq!(
-            hops.batches[0]
-                .column(0)
-                .as_any()
-                .downcast_ref::<arrow::array::Int64Array>()
-                .unwrap()
-                .value(0),
-            2
-        );
+        assert_eq!(hop_count(&reopened), 2);
         drop(reopened);
 
         let generation = graphforge_storage::resolve_project_generation(directory.path()).unwrap();
@@ -710,8 +804,37 @@ mod tests {
         let mut bytes = std::fs::read(&object).unwrap();
         bytes[0] ^= 1;
         std::fs::write(&object, bytes).unwrap();
-        let error = GraphForge::new(Some(path)).unwrap_err();
-        assert!(error.to_string().contains("XXH64 checksum"), "{error}");
+        // The full-admission API still names the corrupted object.
+        let fresh = graphforge_storage::resolve_project_generation(directory.path()).unwrap();
+        assert!(fresh.graph_files_inventory().is_err());
+        drop(fresh);
+
+        // Opening reads no shard payload, so it succeeds.
+        let corrupted = GraphForge::new(Some(path)).unwrap();
+        // The shard's own reader refuses it on first touch.
+        let mut refused = 0;
+        for manifest in inventory
+            .files
+            .iter()
+            .filter(|entry| entry.relative_path.ends_with(".csr.json"))
+        {
+            let logical = corrupted
+                .dir()
+                .join(manifest.relative_path.trim_end_matches(".json"));
+            let index = graphforge_storage::adjacency::ShardedCsrIndex::open(&logical).unwrap();
+            for node in 0..index.node_count() {
+                if let Err(error) = index.row(node) {
+                    assert!(error.to_string().contains("checksum mismatch"), "{error}");
+                    refused += 1;
+                    break;
+                }
+            }
+        }
+        // Identical shard bytes are one content-addressed object linked at
+        // several logical paths, so every path that names it is refused.
+        assert!(refused >= 1, "the corrupted shard must be refused");
+        // Hop queries stay correct: a refused shard is never served.
+        assert_eq!(hop_count(&corrupted), 2);
     }
 
     #[test]
@@ -1221,6 +1344,10 @@ mod tests {
     #[test]
     fn construction_application_reads_reconcile_and_scale_at_one_two_four() {
         let mut observations = Vec::new();
+        // Hydration no longer owns node-linear reads (#1388): the forward and
+        // ordinal identity runs are hard-linked, not copied and verified, so
+        // its reads are the small controls and may not grow with the rows.
+        let mut hydration_reads = Vec::new();
         // Each node retains 16 identity bytes and at least 18 compact detail bytes.
         // 4,096 rows therefore exceed 100,000 payload bytes before Parquet/control
         // overhead; retain the same dominance threshold and every phase ceiling.
@@ -1289,11 +1416,19 @@ mod tests {
                     evidence.shape_application_read_bytes,
                     evidence.encode_application_read_bytes,
                     evidence.cas_application_read_bytes,
-                    evidence.hydration_application_read_bytes,
                     evidence.recovery_application_read_bytes,
                     reconciled,
                 ],
             ));
+            hydration_reads.push((scale as u64, evidence.hydration_application_read_bytes));
+        }
+        for adjacent in hydration_reads.windows(2) {
+            let ((prior_rows, prior), (next_rows, next)) = (adjacent[0], adjacent[1]);
+            assert!(
+                next.saturating_sub(prior) < next_rows - prior_rows,
+                "hydration reads grew {prior} -> {next} bytes for {} added rows",
+                next_rows - prior_rows
+            );
         }
         for adjacent in observations.windows(2) {
             let (prior_payload, prior_phases) = adjacent[0];

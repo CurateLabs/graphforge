@@ -67,59 +67,57 @@ impl MaterializationRoutes {
             "semantic-routes.json.{}.tmp",
             uuid::Uuid::new_v4().simple()
         ));
-        let mut file = directory
-            .create_replaceable_child_file(&name)
+        let mut guard = directory
+            .create_unpublished_replaceable_child(&name)
             .map_err(|_| invalid("materialized route table cannot be staged"))?;
-        let identity = graphforge_filesystem::file_identity(&file)
-            .map_err(|_| invalid("materialized route table identity unavailable"))?;
-        let result = (|| {
-            let mut remaining = bytes.as_slice();
-            while !remaining.is_empty() {
-                let written = file
-                    .write(&remaining[..remaining.len().min(64 * 1024)])
-                    .map_err(|_| invalid("materialized route table write failed"))?;
-                if written == 0 {
-                    return Err(invalid("materialized route table write stopped"));
-                }
-                evidence.application_write_bytes = evidence
-                    .application_write_bytes
-                    .checked_add(written as u64)
-                    .ok_or_else(|| invalid("materialized route write bytes overflow"))?;
-                evidence.application_write_calls = evidence
-                    .application_write_calls
-                    .checked_add(1)
-                    .ok_or_else(|| invalid("materialized route write calls overflow"))?;
-                remaining = &remaining[written..];
+        let mut file = guard
+            .take_file()
+            .map_err(|_| invalid("materialized route table cannot be staged"))?;
+        let mut remaining = bytes.as_slice();
+        while !remaining.is_empty() {
+            let written = file
+                .write(&remaining[..remaining.len().min(64 * 1024)])
+                .map_err(|_| invalid("materialized route table write failed"))?;
+            if written == 0 {
+                return Err(invalid("materialized route table write stopped"));
             }
-            file.sync_all()
-                .map_err(|_| invalid("materialized route table sync failed"))?;
-            evidence.file_fsync_calls = evidence
-                .file_fsync_calls
+            evidence.application_write_bytes = evidence
+                .application_write_bytes
+                .checked_add(written as u64)
+                .ok_or_else(|| invalid("materialized route write bytes overflow"))?;
+            evidence.application_write_calls = evidence
+                .application_write_calls
                 .checked_add(1)
-                .ok_or_else(|| invalid("materialized file sync count overflow"))?;
-            evidence.fsync_calls = evidence
-                .fsync_calls
-                .checked_add(1)
-                .ok_or_else(|| invalid("materialized sync count overflow"))?;
-            directory
-                .install_child(&name, identity, std::ffi::OsStr::new(TABLE_FILE))
-                .map_err(|_| invalid("materialized route table install failed"))?;
-            directory
-                .sync()
-                .map_err(|_| invalid("materialized route directory sync failed"))?;
-            evidence.directory_fsync_calls = evidence
-                .directory_fsync_calls
-                .checked_add(1)
-                .ok_or_else(|| invalid("materialized directory sync count overflow"))?;
-            evidence.fsync_calls = evidence
-                .fsync_calls
-                .checked_add(1)
-                .ok_or_else(|| invalid("materialized sync count overflow"))?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = directory.unlink_child_if_identity(&name, identity);
+                .ok_or_else(|| invalid("materialized route write calls overflow"))?;
+            remaining = &remaining[written..];
         }
-        result
+        let sealed = crate::durable_commit::seal_guarded(guard, file, None)
+            .map_err(|_| invalid("materialized route table sync failed"))?;
+        evidence.file_fsync_calls = evidence
+            .file_fsync_calls
+            .checked_add(1)
+            .ok_or_else(|| invalid("materialized file sync count overflow"))?;
+        evidence.fsync_calls = evidence
+            .fsync_calls
+            .checked_add(1)
+            .ok_or_else(|| invalid("materialized sync count overflow"))?;
+        sealed
+            .make_visible(
+                std::ffi::OsStr::new(TABLE_FILE),
+                crate::durable_commit::PublishMode::CreateOnly,
+                || Ok(()),
+            )
+            .map_err(|_| invalid("materialized route table install failed"))?
+            .acknowledge(None)
+            .map_err(|_| invalid("materialized route directory sync failed"))?;
+        evidence.directory_fsync_calls = evidence
+            .directory_fsync_calls
+            .checked_add(1)
+            .ok_or_else(|| invalid("materialized directory sync count overflow"))?;
+        evidence.fsync_calls = evidence
+            .fsync_calls
+            .checked_add(1)
+            .ok_or_else(|| invalid("materialized sync count overflow"))?;
+        Ok(())
     }
 }

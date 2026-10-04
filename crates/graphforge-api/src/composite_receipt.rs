@@ -13,12 +13,13 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
 use graphforge_core::canonical::uuid_v8;
-use sha2::{Digest, Sha256};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::composite_transaction::{
     COMPOSITE_KNOWLEDGE_PARTICIPANT_KINDS, COMPOSITE_TRANSACTION_CONTRACT_VERSION,
-    CompositeTransactionRequest,
+    CompositeTransactionRequest, PreparedCompositeOperation,
 };
 use crate::composite_validation::CompositeValidationSnapshot;
 
@@ -98,22 +99,34 @@ impl CompositeTransactionRequest {
         snapshot: &CompositeValidationSnapshot,
         prior: Option<([u8; 32], &RecordBatch)>,
     ) -> Result<RecordBatch, GfError> {
+        PreparedCompositeOperation::new(self)?.authorize_pre_staging(snapshot, prior)
+    }
+}
+
+impl PreparedCompositeOperation<'_> {
+    pub(crate) fn authorize_pre_staging(
+        &self,
+        snapshot: &CompositeValidationSnapshot,
+        prior: Option<([u8; 32], &RecordBatch)>,
+    ) -> Result<RecordBatch, GfError> {
         if let Some(prior_receipt) = self.retry_decision(prior)? {
             validate_receipt_schema(&prior_receipt)?;
             return Ok(prior_receipt);
         }
         let identities = self.validate_ontology_and_identities(snapshot)?;
-        self.validate_graph_and_participant_references(snapshot, &identities)?;
-        build_composite_receipt(self)
+        self.request()
+            .validate_graph_and_participant_references(snapshot, &identities)?;
+        self.receipt()
     }
 }
 
 pub(crate) fn build_composite_receipt(
-    request: &CompositeTransactionRequest,
+    prepared: &PreparedCompositeOperation<'_>,
 ) -> Result<RecordBatch, GfError> {
-    let fingerprint = request.canonical_fingerprint()?;
+    let request = prepared.request();
+    let fingerprint = prepared.fingerprint();
     let request_identity = request.request_identity().0;
-    let generation_uuid = composite_generation_uuid(request_identity, fingerprint);
+    let generation_uuid = prepared.generation_uuid();
     let counts = request.knowledge.counts();
 
     let request_identities = fixed_uuid_column(&[request_identity])?;
@@ -403,6 +416,121 @@ mod tests {
             assert!(!schema.field(6 + index).is_nullable());
         }
         assert_eq!(schema.fields().len(), 20);
+    }
+
+    #[test]
+    fn prepared_authorization_preserves_fingerprint_envelope_and_prior_error_order() {
+        let mut request = aligned_request();
+        let valid_receipt = request
+            .authorize_pre_staging(&CompositeValidationSnapshot::default(), None)
+            .unwrap();
+        request.contract_version = u32::MAX;
+        request.context.actor_uuid = Some(Uuid::nil());
+        let assertion_version = request.knowledge.assertions[0].contract_version;
+        request.knowledge.assertions[0].contract_version = u32::MAX;
+        let fingerprint_error = request.canonical_fingerprint().unwrap_err();
+        let capture = graphforge_core::hash_observation::operation::Capture::start();
+        let error = request
+            .authorize_pre_staging(&CompositeValidationSnapshot::default(), None)
+            .unwrap_err();
+        assert_eq!(error.to_string(), fingerprint_error.to_string());
+        assert!(error.to_string().contains("invalid composite participant"));
+        assert_eq!(capture.snapshot().composite_request_fingerprints, 0);
+        drop(capture);
+
+        request.knowledge.assertions[0].contract_version = assertion_version;
+        let capture = graphforge_core::hash_observation::operation::Capture::start();
+        let prepared = PreparedCompositeOperation::new(&request).unwrap();
+        let error = prepared
+            .authorize_pre_staging(&CompositeValidationSnapshot::default(), None)
+            .unwrap_err();
+        assert_eq!(error.code(), "GF_VALIDATION");
+        assert!(error.to_string().contains("unsupported contract version"));
+        assert_eq!(
+            prepared
+                .authorize_pre_staging(
+                    &CompositeValidationSnapshot::default(),
+                    Some((prepared.fingerprint(), &valid_receipt)),
+                )
+                .unwrap(),
+            valid_receipt,
+            "identical prior receipt bypasses envelope validation"
+        );
+        let malformed_prior = RecordBatch::new_empty(Arc::new(Schema::empty()));
+        assert_eq!(
+            prepared
+                .authorize_pre_staging(
+                    &CompositeValidationSnapshot::default(),
+                    Some(([0; 32], &malformed_prior)),
+                )
+                .unwrap_err()
+                .code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
+        let error = prepared
+            .authorize_pre_staging(
+                &CompositeValidationSnapshot::default(),
+                Some((prepared.fingerprint(), &malformed_prior)),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("prior receipt schema"));
+        assert_eq!(capture.snapshot().composite_request_fingerprints, 1);
+    }
+
+    #[test]
+    fn prepared_authorization_reuses_identity_and_arrow_receipt_but_revalidates_parent() {
+        let request = empty_optional_request();
+        let expected = request
+            .authorize_pre_staging(&CompositeValidationSnapshot::default(), None)
+            .unwrap();
+        let capture = graphforge_core::hash_observation::operation::Capture::start();
+        let prepared = PreparedCompositeOperation::new(&request).unwrap();
+        let first = prepared
+            .authorize_pre_staging(&CompositeValidationSnapshot::default(), None)
+            .unwrap();
+        let repeated = prepared
+            .authorize_pre_staging(&CompositeValidationSnapshot::default(), None)
+            .unwrap();
+        assert_eq!(first, expected);
+        assert_eq!(repeated, expected);
+        for column in 0..first.num_columns() {
+            assert!(Arc::ptr_eq(first.column(column), repeated.column(column)));
+        }
+
+        let mut occupied = CompositeValidationSnapshot::default();
+        occupied.nodes.insert(uuid7(42));
+        assert_eq!(
+            prepared
+                .authorize_pre_staging(&occupied, None)
+                .unwrap_err()
+                .code(),
+            "GF_IDENTITY_CONFLICT"
+        );
+        let prior = prepared
+            .authorize_pre_staging(&occupied, Some((prepared.fingerprint(), &first)))
+            .unwrap();
+        assert_eq!(
+            prior, first,
+            "exact prior receipt bypasses newly occupied identities"
+        );
+        assert_eq!(
+            prepared
+                .authorize_pre_staging(&occupied, Some(([0; 32], &first)))
+                .unwrap_err()
+                .code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
+
+        let mut strict = CompositeValidationSnapshot::default();
+        strict.ontology.mode = graphforge_core::OntologyMode::Strict;
+        assert_eq!(
+            prepared
+                .authorize_pre_staging(&strict, None)
+                .unwrap_err()
+                .code(),
+            "GF_ONTOLOGY"
+        );
+        assert_eq!(capture.snapshot().composite_request_fingerprints, 1);
     }
 
     #[test]

@@ -71,6 +71,36 @@ def observations():
 
 
 class LifecycleGrowthTests(unittest.TestCase):
+    def test_stage_seal_receipts_retain_disjoint_operation_timings(self):
+        receipts = [
+            {
+                "contract": "graphforge-import-session/1",
+                "outcome": outcome,
+                "operation_timings": {
+                    name: {"calls": count, "errors": 0}
+                    for name, count in zip(
+                        ("begin", "resume", "append", "seal", "publish"), counts, strict=True
+                    )
+                },
+            }
+            for outcome, counts in (
+                ("stage+seal", (1, 0, 2, 1, 0)),
+                ("committed", (0, 1, 0, 0, 1)),
+            )
+        ]
+        evidence = {"phases": [{"receipts": receipts}]}
+        GROWTH.validate_operation_timings(evidence)
+        for mutate in (
+            lambda rows: rows[0].__setitem__("outcome", "validated"),
+            lambda rows: rows[0]["operation_timings"].pop("seal"),
+            lambda rows: rows[0]["operation_timings"]["append"].__setitem__("calls", 1),
+            lambda rows: rows[1]["operation_timings"]["publish"].__setitem__("errors", 1),
+        ):
+            invalid = copy.deepcopy(evidence)
+            mutate(invalid["phases"][0]["receipts"])
+            with self.assertRaises(SystemExit):
+                GROWTH.validate_operation_timings(invalid)
+
     @staticmethod
     def with_peaks(peaks):
         changed = observations()
@@ -88,8 +118,8 @@ class LifecycleGrowthTests(unittest.TestCase):
             GROWTH.positive_slopes("counterexample", peaks, work)
         GROWTH.validate_growth(self.with_peaks(peaks))
 
-    def test_real_lower_peaks_from_failed_1271_run(self):
-        path = Path(__file__).parent / "fixtures/lifecycle-peak-crossover-1272.json"
+    def test_real_lower_peaks_from_a_failed_run(self):
+        path = Path(__file__).parent / "fixtures/lifecycle-peak-crossover.json"
         recorded = json.loads(path.read_text())["observations"]
         self.assertEqual(
             [o["receipt"]["transient_peak_storage_bytes"] for o in recorded],

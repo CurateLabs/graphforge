@@ -7,6 +7,9 @@ license.workspace = true
 license-file.workspace = true
 repository.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 thiserror = { workspace = true }
 serde = { workspace = true }

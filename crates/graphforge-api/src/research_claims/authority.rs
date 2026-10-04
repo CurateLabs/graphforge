@@ -2,8 +2,9 @@
 use super::{ResearchContext, ledger};
 use crate::{GfError, GraphForge};
 use graphforge_knowledge::research::ResearchAuthority;
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::{ResolvedProjectGeneration, research_versions::read_research_registry};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 pub(crate) fn project_uuid(g: &ResolvedProjectGeneration) -> Result<Uuid, GfError> {

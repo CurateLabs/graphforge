@@ -4,8 +4,9 @@ use super::{
     CompositionBindingContext, CompositionBindingLimits, GfError, GraphForge, OntologyDoc,
     OntologyHandle, OntologyMode, ResolvedProjectGeneration, RuntimeCatalog,
 };
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use graphforge_ontology::OntologyCompiler;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -14,12 +15,70 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub(super) struct GraphWorkspace {
     pub(super) dir: PathBuf,
-    pub(super) _owner: Arc<tempfile::TempDir>,
+    pub(super) owner: Arc<tempfile::TempDir>,
+    pub(super) topology: Arc<graphforge_storage::TopologyFileAuthority>,
 }
 
 impl GraphWorkspace {
+    pub(super) fn new(
+        dir: PathBuf,
+        owner: Arc<tempfile::TempDir>,
+        inventory: &graphforge_storage::AuthenticatedPropertyInventory,
+    ) -> Result<Self, GfError> {
+        let topology = graphforge_storage::TopologyFileAuthority::from_inventory(&dir, inventory)?;
+        Ok(Self {
+            dir,
+            owner,
+            topology,
+        })
+    }
+
+    pub(super) fn topology_files(&self) -> Result<graphforge_storage::TopologyFiles, GfError> {
+        graphforge_storage::enumerate_topology_files(&self.topology, None)
+    }
     pub(super) fn path(&self) -> &Path {
         &self.dir
+    }
+
+    /// Whether this workspace is a read-only alias of a published generation's
+    /// own `graph/` tree rather than a private copy. A private workspace always
+    /// lives inside its owner; a pinned alias reads a path outside it, so the
+    /// answer cannot drift from the paths the workspace actually holds.
+    pub(super) fn is_pinned_alias(&self) -> bool {
+        !self.dir.starts_with(self.owner.path())
+    }
+}
+
+/// How a facade's graph workspace relates to its generation's published tree.
+/// A pinned alias is never copied and so can never be written; the write-capable
+/// state is only constructible over a private copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WorkspaceAccess {
+    /// Read-only; the workspace is the published tree itself.
+    PinnedReadOnly,
+    /// Read-only semantics (no reconciliation) over a private copy, for a
+    /// facade that becomes writable once its generation is selected.
+    PrivateReadOnly,
+    /// Writable over a private copy.
+    Writable,
+}
+
+impl WorkspaceAccess {
+    pub(super) fn read_only(self) -> bool {
+        !matches!(self, Self::Writable)
+    }
+
+    pub(super) fn pins_published_tree(self) -> bool {
+        matches!(self, Self::PinnedReadOnly)
+    }
+}
+
+fn pinned_write_refused() -> GfError {
+    GfError::Project {
+        code: graphforge_core::ProjectErrorCode::ReadOnlyView,
+        message: "graph workspace is a pinned alias of a published generation tree; \
+                  a write would modify that generation in place"
+            .into(),
     }
 }
 
@@ -57,6 +116,23 @@ impl GraphForge {
                 self.resolved_generation.container_root(),
             )
         }
+    }
+
+    /// Fail closed when the workspace is a pinned alias of a published tree.
+    /// Every write and publication path calls this before touching the tree.
+    pub(super) fn require_private_workspace(&self) -> Result<(), GfError> {
+        if self.workspace_for_session().is_pinned_alias() {
+            return Err(pinned_write_refused());
+        }
+        Ok(())
+    }
+
+    /// The only transition out of read-only: refused while the workspace is a
+    /// pinned alias, so a writable facade can never sit on a published tree.
+    pub(super) fn enable_writes(&mut self) -> Result<(), GfError> {
+        self.require_private_workspace()?;
+        self.read_only = false;
+        Ok(())
     }
 
     pub(super) fn workspace_for_session(&self) -> GraphWorkspace {
@@ -152,6 +228,9 @@ impl GraphForge {
         generation: &ResolvedProjectGeneration,
     ) -> Result<(), GfError> {
         let prepared = self.prepare_generation_read_authority(generation, &self.dir())?;
+        self.dir()
+            .topology
+            .replace_from_inventory(&prepared.properties)?;
         self.install_prepared_generation_read_authority(generation.generation_uuid(), prepared);
         Ok(())
     }
@@ -268,11 +347,12 @@ pub(super) fn property_and_graph_inventory_for_hydrated_generation(
 ) -> Result<
     (
         Arc<graphforge_storage::AuthenticatedPropertyInventory>,
-        graphforge_storage::GraphFilesInventory,
+        graphforge_storage::GraphReadInventory,
     ),
     GfError,
 > {
-    let inventory = generation.graph_files_inventory()?;
+    // Payload content is admitted on first touch; opening reads none of it.
+    let inventory = generation.unadmitted_graph_files_inventory()?;
     let has_deltas = match inventory.as_ref() {
         Some(inventory) => !graphforge_storage::list_delta_runs(
             inventory,
@@ -288,12 +368,12 @@ pub(super) fn property_and_graph_inventory_for_hydrated_generation(
             graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
                 generation,
             )?,
-            inventory,
+            graphforge_storage::GraphReadInventory::from_published(&inventory)?,
         ),
         _ => {
-            let (materialized, _) = graphforge_storage::capture_graph_files(hydrated_root)?;
+            let materialized = graphforge_storage::capture_graph_read_inventory(hydrated_root)?;
             let admitted =
-                graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
+                graphforge_storage::AuthenticatedPropertyInventory::from_private_workspace_inventory(
                     generation,
                     hydrated_root,
                     materialized.clone(),
@@ -369,7 +449,7 @@ fn create_graph_workspace(
 
 pub(super) fn hydrate_graph_workspace(
     generation: &ResolvedProjectGeneration,
-    read_only: bool,
+    pin_published_tree: bool,
 ) -> Result<
     (
         PathBuf,
@@ -392,7 +472,7 @@ pub(super) fn hydrate_graph_workspace(
                 | graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
         ) {
             let inventory = generation
-                .graph_files_inventory()?
+                .unadmitted_graph_files_inventory()?
                 .ok_or_else(|| GfError::Validation("compact graph root disappeared".into()))?;
             return hydrate_compact_graph_workspace(generation, &inventory);
         }
@@ -414,7 +494,7 @@ pub(super) fn hydrate_graph_workspace(
             )?;
             return Ok((workspace.path().to_path_buf(), workspace, evidence));
         }
-        if read_only {
+        if pin_published_tree {
             let guard = Arc::new(
                 tempfile::Builder::new()
                     .prefix("graphforge-graph-pinned-")
@@ -530,6 +610,10 @@ fn materialize_compact_graph_target(
             .bytes_validated
             .checked_add(copied.bytes_validated)
             .ok_or_else(|| GfError::Storage("hydration validated-byte count overflows".into()))?,
+        bytes_checksummed: reused
+            .bytes_checksummed
+            .checked_add(copied.bytes_checksummed)
+            .ok_or_else(|| GfError::Storage("hydration checksummed-byte count overflows".into()))?,
         files_copied: copied.files_copied,
         bytes_copied: copied.bytes_copied,
         files_opened_in_place: 0,
@@ -614,7 +698,7 @@ pub(crate) fn rematerialize_graph_workspace(
                 | graphforge_storage::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
         ) {
             let inventory = generation
-                .graph_files_inventory()?
+                .unadmitted_graph_files_inventory()?
                 .ok_or_else(|| GfError::Validation("compact graph root disappeared".into()))?;
             materialize_compact_graph_target(generation, &inventory, target)?;
         } else {

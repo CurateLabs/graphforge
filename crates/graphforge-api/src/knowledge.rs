@@ -20,12 +20,12 @@ pub(crate) use ledger::encode_reasoning_ledger;
 pub(crate) use ledger::encode_status_ledger;
 pub(crate) use ledger::encode_supersession_ledger;
 use ledger::evidence_publication_participants;
-pub(crate) use ledger::knowledge_generation_uuid;
 use ledger::merged_assertion_evidence_provenance;
 use ledger::merged_confidence_provenance;
 use ledger::merged_evidence_provenance;
 use ledger::merged_provenance;
 pub(crate) use ledger::participant;
+pub(crate) use ledger::prepare_knowledge_request;
 pub(crate) use ledger::read_confidence_ledger;
 pub(crate) use ledger::read_evidence_ledger;
 pub(crate) use ledger::read_ledger;
@@ -48,7 +48,6 @@ pub use source_artifact::{
 };
 
 use std::collections::HashSet;
-use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -68,12 +67,12 @@ use graphforge_provenance::{
     EventKind, LineageRecord, LineageRole, ProvenanceEvent, ProvenanceLedger, SubjectKind,
 };
 use graphforge_storage::{
-    ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
-    ProjectStageOutcome, ResolvedProjectGeneration,
+    ProjectCapability, ProjectParticipant, ProjectParticipantEncoding, ProjectStageOutcome,
+    ResolvedProjectGeneration,
 };
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::{CancellationToken, GraphForge, OperationId, PageRequest, PageToken, WriteContext};
@@ -399,7 +398,7 @@ pub(crate) fn match_requested_node_uuids(
     if pending.is_empty() {
         return Ok(());
     }
-    let batches = graphforge_storage::read_nodes(&graph.dir())
+    let batches = graphforge_storage::read_nodes_from_files(&graph.dir().topology_files()?)
         .map_err(|error| GfError::Storage(error.to_string()))?;
     match_requested_uuids(batches, "node_uuid", pending)
 }

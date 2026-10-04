@@ -1,0 +1,54 @@
+{
+  "schema": "graphforge-gdc-graphalytics-scorecard-ladder/1",
+  "suite_id": "graphalytics",
+  "counts_source": "https://ldbcouncil.org/benchmarks/graphalytics/datasets/",
+  "edge_storage": "one_edge_per_listed_pair",
+  "datasets": [
+    {
+      "id": "wiki-Talk",
+      "order": 1,
+      "archive_url": "https://datasets.ldbcouncil.org/graphalytics/wiki-Talk.tar.zst",
+      "directed": true,
+      "weighted": false,
+      "vertices": 2394385,
+      "edges": 5021410,
+      "listed_edges": 5021410,
+      "load_mapping": "profiles/gdc/graphalytics-wiki-Talk-load-mapping.json"
+    },
+    {
+      "id": "cit-Patents",
+      "order": 2,
+      "archive_url": "https://datasets.ldbcouncil.org/graphalytics/cit-Patents.tar.zst",
+      "directed": true,
+      "weighted": false,
+      "vertices": 3774768,
+      "edges": 16518948,
+      "listed_edges": 16518947,
+      "load_mapping": "profiles/gdc/graphalytics-cit-Patents-load-mapping.json",
+      "discrepancy": "The archive's .e file lists 16,518,947 edges while LDBC publishes (and its .properties file states) 16,518,948; a loaded graph reconciles to listed_edges, one fewer than the published count."
+    },
+    {
+      "id": "datagen-7_5-fb",
+      "order": 3,
+      "archive_url": "https://datasets.ldbcouncil.org/graphalytics/datagen-7_5-fb.tar.zst",
+      "directed": false,
+      "weighted": true,
+      "vertices": 633432,
+      "edges": 34185747,
+      "listed_edges": 34185747,
+      "load_mapping": "profiles/gdc/graphalytics-datagen-7_5-fb-load-mapping.json"
+    },
+    {
+      "id": "graph500-22",
+      "order": 4,
+      "archive_url": "https://datasets.ldbcouncil.org/graphalytics/graph500-22.tar.zst",
+      "directed": false,
+      "weighted": false,
+      "vertices": 2396657,
+      "edges": 64155735,
+      "listed_edges": 64155735,
+      "load_mapping": "profiles/gdc/graphalytics-graph500-22-load-mapping.json"
+    }
+  ],
+  "counts_note": "edges is the LDBC-published count; listed_edges is the number of lines in the archive's .e file, which is what a faithful load stores."
+}

@@ -1,16 +1,26 @@
-.PHONY: install smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-storage-qualification progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness ingest-ladder-bundle parity-gate progressive-host-ladder-binaries progressive-host-ladder-plan progressive-host-ladder-run progressive-host-ladder-inventory progressive-host-ladder-reclaim retain-ladder-evidence
+.PHONY: install gdc-acquire smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-storage-qualification progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness ingest-ladder-bundle parity-gate progressive-host-ladder-binaries progressive-host-ladder-plan progressive-host-ladder-run progressive-host-ladder-inventory progressive-host-ladder-reclaim retain-ladder-evidence
 
 install:
 	uv sync --locked
 
 smoke: smoke-python smoke-rust
 
+# Download, pin-verify and extract GDC Graphalytics archives into DATASET_CACHE.
+# DATASETS is a space-separated list of ids pinned by the scorecard profile.
+# DATASET_CACHE must be on the same device as / and outside the repository and
+# WORK_ROOT; a checksum mismatch is a typed failure and is never retried.
+gdc-acquire: install
+	test -n "$(DATASET_CACHE)" && test -n "$(WORK_ROOT)" && test -n "$(DATASETS)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.gdc_dataset_cache \
+		--cache-root "$(DATASET_CACHE)" --work-root "$(WORK_ROOT)" \
+		$(foreach dataset,$(DATASETS),--dataset "$(dataset)")
+
 parity-gate: install
 	PYTHONPATH=harness uv run --locked python -m graphforge_bench.parity_gate_cli
 
 smoke-python: install
 	PYTHONPATH=harness uv run --locked python -m graphforge_bench.smoke
-	PYTHONPATH=harness uv run --locked python -m unittest discover -s tests -p 'test_*.py'
+	PYTHONPATH=harness uv run --locked python -m unittest discover -s tests -t . -p 'test_*.py'
 
 smoke-rust: install
 	cargo fmt --all -- --check

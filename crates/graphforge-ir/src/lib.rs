@@ -525,5 +525,8 @@ mod tests {
 pub mod lowering_snapshot;
 pub use lowering_snapshot::LoweringSnapshot;
 
+pub mod property_demand;
+pub use property_demand::{PropertyDemand, property_demand};
+
 /// Shared Arrow schema definitions, independent of storage implementations.
 pub mod arrow_schema;

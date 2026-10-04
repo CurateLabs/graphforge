@@ -213,8 +213,10 @@ lock metadata beyond machine-owned IDs.
 
 ## Required verification
 
-- Contract schema validation and documentation link checks via
-  `scripts/ci/durability-isolation-gate.py`.
+- `tests/contracts/durability-isolation-matrix.json` is the reference ledger.
+  Its schema is not mechanically validated; the scheduled
+  `durability-certification-gate.yml` checks only its seeded-certification and
+  write-skew rows.
 - Matrix maps crash phases and anomalies to covered evidence or later M6 owner
   issues (#749–#756).
 - Public docs reference this ADR and do not claim generic ACID or SSI.

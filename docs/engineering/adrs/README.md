@@ -52,7 +52,7 @@ left Accepted; superseded records name their successor in `superseded_by`.
 
 Mirrors [`../../adr/README.md`](../../adr/README.md). This table and that one must
 agree with `docs/adr/` itself, and `scripts/ci/adr-index.py check` enforces it in
-the Repository Policy job (#1390).
+the CI Lint job (#1390).
 
 | ADR | Title | Status | Revisit when | Path |
 | --- | --- | --- | --- | --- |
@@ -102,6 +102,12 @@ the Repository Policy job (#1390).
 | 0047 | Over-budget construction partitions succeed; one CPU budget per instance | Accepted | External partitions dominate ingest wall on a real workload, row partitions need the external path, or a second subsystem needs its own CPU admission | [`../../adr/0047-over-budget-partitions-and-instance-cpu-budget.md`](../../adr/0047-over-budget-partitions-and-instance-cpu-budget.md) |
 | 0048 | Cargo with nextest is the CI build authority; Bazel is removed | Accepted | Merge-queue Rust reruns dominate CI Gate latency, a Cargo lane measures more than 1.25x the replaced Bazel lane on Rust-changing PRs, or a hermetic release build becomes a publication requirement | [`../../adr/0048-cargo-is-the-ci-build-authority.md`](../../adr/0048-cargo-is-the-ci-build-authority.md) |
 | 0049 | Versioned checksums for published graph payload admission | Accepted | The same-identity adversary assumption changes, or published graph payloads move to a substrate with authoritative data checksums | [`../../adr/0049-published-payload-checksums.md`](../../adr/0049-published-payload-checksums.md) |
+| 0050 | The read path keeps its adjacency operators and chooses fast paths in the lowerer | Accepted | DataFusion gains a lookup join over a TableProvider index, a query shape that only the physical rewrites caught is found after migration, or a paired timing shows lowerer selection costs more than physical selection | [`../../adr/0050-read-path-fast-path-selection.md`](../../adr/0050-read-path-fast-path-selection.md) |
+| 0051 | Discovery carries a digest-addressed Project summary and exact ontology descriptors | Accepted | A summary field needs required interpretation by readers, module packages must become independent of the publishing Project (which requires a portable-v2 manifest change), or a Hub needs summary data that cannot be derived from a verified package | [`../../adr/0051-discovery-project-summary-and-ontology-descriptors.md`](../../adr/0051-discovery-project-summary-and-ontology-descriptors.md) |
+| 0052 | Discovery carries a digest-addressed research lineage document | Accepted | Clone or publish paths need identities this document cannot express, or Hub moderation requires cross-owner Proposal submission semantics | [`../../adr/0052-discovery-research-lineage-document.md`](../../adr/0052-discovery-research-lineage-document.md) |
+| 0053 | Hub publish wire contract | Accepted | The control-plane publish session shape, data-plane upload URL policy, or ref precondition encoding needs a breaking wire change | [`../../adr/0053-hub-publish-wire-contract.md`](../../adr/0053-hub-publish-wire-contract.md) |
+| 0054 | GraphForge component boundaries: Core, XYG, editor, and Hub | Accepted | A component needs to own a contract assigned here to another component, or the Hub needs to store data GraphForge Core does not define | [`../../adr/0054-product-component-boundaries.md`](../../adr/0054-product-component-boundaries.md) |
+| 0055 | Research Versions are commits | Proposed | A head-moving operation needs more than one merge parent, a host needs identity that free-form signatures cannot express, or revision 6 Projects no longer need to be read | [`../../adr/0055-versions-are-commits.md`](../../adr/0055-versions-are-commits.md) |
 
 ### Superseded
 

@@ -7,7 +7,7 @@ license.workspace = true
 license-file.workspace = true
 repository.workspace = true
 # `benches/ingest_gate.rs` is a shared module (the two-sided ingest gate's
-# judgment, #1476) included by the `m6_storage_io` bench and by
+# judgment, #1476) included by the `storage_io` bench and by
 # `tests/ingest_gate_verdict.rs`, not a bench binary, so bench autodiscovery
 # is off; the two benches are declared explicitly below.
 autobenches = false
@@ -18,9 +18,10 @@ default = []
 # workspace tests. Production consumers do not enable this feature.
 test-failpoints = []
 # Exposes compact-root builders only to higher-level cross-crate tests.
-test-support = []
+test-support = ["graphforge-core/test-support"]
 
 [dependencies]
+graphforge-cypher = { version = "0.5.2", path = "../graphforge-cypher" }
 graphforge-value = { version = "0.5.2", path = "../graphforge-value" }
 graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
 graphforge-filesystem = { version = "0.5.2", path = "../graphforge-filesystem" }
@@ -55,15 +56,16 @@ rustix = { version = "1.1", features = ["fs"] }
 named-lock = "0.4.1"
 
 [dev-dependencies]
+graphforge-core = { version = "0.5.2", path = "../graphforge-core", features = ["test-support"] }
 divan = { workspace = true }
 wait-timeout = "0.2"
 
 [[bench]]
-name = "m6_storage"
+name = "storage_kernels"
 harness = false
 
 [[bench]]
-name = "m6_storage_io"
+name = "storage_io"
 harness = false
 
 [lints]

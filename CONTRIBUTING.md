@@ -41,8 +41,7 @@ gives the exact commands the CI Gate Rust lane runs.
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace -- -D warnings
-make pre-push-fast   # Python/policy/inventory checks, then ruff format/lint/…
-make pre-push
+make check   # Python format/lint/type-check/security, workflow lint, repo-checks
 ```
 
 ## Getting help

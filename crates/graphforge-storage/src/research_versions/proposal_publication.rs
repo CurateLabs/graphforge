@@ -154,7 +154,13 @@ fn review_proposal(
         );
     }
     if let Some(destination) = destination {
-        publish_destination(root, registry, &proposal.destination, destination)?;
+        // Accepting the whole Proposal merges its source Version; a partial
+        // acceptance only advances the prior head (the review records the items).
+        let whole = proposal.items.iter().all(|item| {
+            review.decisions.get(&item.item_uuid) == Some(&ResearchProposalDecision::Accept)
+        });
+        let merged = whole.then_some(proposal.source_version_uuid);
+        publish_destination(root, registry, &proposal.destination, destination, merged)?;
     }
     for mapping in mappings {
         if registry
@@ -180,6 +186,7 @@ fn publish_destination(
     registry: &mut ResearchRegistry,
     authority: &ResearchProposalDestination,
     destination: &super::ResearchVersionRecord,
+    merged: Option<Uuid>,
 ) -> Result<(), GfError> {
     match authority {
         ResearchProposalDestination::Branch { branch_uuid } => {
@@ -188,7 +195,7 @@ fn publish_destination(
                     "accepted destination is not the immediate parent Branch",
                 ));
             }
-            super::branches::publish(root, registry, None, destination)?;
+            super::branches::publish(root, registry, None, destination, merged)?;
         }
         ResearchProposalDestination::Project { project_uuid } => {
             if destination.content.source_version.is_some()
@@ -199,6 +206,10 @@ fn publish_destination(
                     "accepted Project destination is not a fresh complete Version",
                 ));
             }
+            super::ancestry::require(
+                destination,
+                &super::ancestry::prior_head_then(registry, *project_uuid, merged),
+            )?;
             super::retained_content::inspect(root, destination, None)?;
             let id = super::insert_version(registry, destination.clone())?;
             registry.materialized.insert(id);

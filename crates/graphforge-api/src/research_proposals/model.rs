@@ -72,6 +72,12 @@ pub struct ReviewResearchProposalRequest {
     pub explanation: String,
     /// Bounded caller policy context.
     pub policy: String,
+    /// Credited author of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<graphforge_storage::research_versions::ResearchSignature>,
+    /// Credited committer of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committer: Option<graphforge_storage::research_versions::ResearchSignature>,
 }
 
 /// Release an obsolete frozen proposal payload without expiring its receipts.

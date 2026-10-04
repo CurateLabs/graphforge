@@ -1,5 +1,25 @@
 {
   "$defs": {
+    "bridge_descriptor": {
+      "additionalProperties": false,
+      "properties": {
+        "content_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "id": {
+          "$ref": "#/$defs/identity_text"
+        },
+        "version": {
+          "$ref": "#/$defs/identity_text"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "content_digest"
+      ],
+      "type": "object"
+    },
     "digest": {
       "pattern": "^sha256:[0-9a-f]{64}$",
       "type": "string"
@@ -24,6 +44,54 @@
       "required": [
         "owner",
         "repository"
+      ],
+      "type": "object"
+    },
+    "identity_text": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    },
+    "lineage_reference": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "const": "graphforge-research-lineage/1"
+        },
+        "lineage_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "object_digest": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "format",
+        "lineage_digest",
+        "object_digest"
+      ],
+      "type": "object"
+    },
+    "module_descriptor": {
+      "additionalProperties": false,
+      "properties": {
+        "content_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "id": {
+          "$ref": "#/$defs/identity_text"
+        },
+        "package": {
+          "$ref": "#/$defs/package_reference"
+        },
+        "version": {
+          "$ref": "#/$defs/identity_text"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "content_digest"
       ],
       "type": "object"
     },
@@ -61,6 +129,54 @@
       ],
       "type": "object"
     },
+    "ontology_inventory": {
+      "additionalProperties": false,
+      "properties": {
+        "bridge_sets": {
+          "items": {
+            "$ref": "#/$defs/bridge_descriptor"
+          },
+          "maxItems": 4096,
+          "type": "array"
+        },
+        "composition_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "modules": {
+          "items": {
+            "$ref": "#/$defs/module_descriptor"
+          },
+          "maxItems": 4096,
+          "type": "array"
+        }
+      },
+      "required": [
+        "composition_digest",
+        "modules",
+        "bridge_sets"
+      ],
+      "type": "object"
+    },
+    "package_reference": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "const": "graphforge-project/2"
+        },
+        "object_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "package_digest": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "format",
+        "package_digest",
+        "object_digest"
+      ],
+      "type": "object"
+    },
     "semantic": {
       "additionalProperties": false,
       "properties": {
@@ -86,6 +202,26 @@
       "minLength": 1,
       "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$",
       "type": "string"
+    },
+    "summary_reference": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "const": "graphforge-project-summary/1"
+        },
+        "object_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "summary_digest": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "format",
+        "summary_digest",
+        "object_digest"
+      ],
+      "type": "object"
     },
     "version": {
       "additionalProperties": false,
@@ -133,6 +269,9 @@
     "immutable_version": {
       "$ref": "#/$defs/digest"
     },
+    "lineage": {
+      "$ref": "#/$defs/lineage_reference"
+    },
     "objects": {
       "items": {
         "$ref": "#/$defs/object"
@@ -140,6 +279,9 @@
       "maxItems": 1000000,
       "minItems": 1,
       "type": "array"
+    },
+    "ontology": {
+      "$ref": "#/$defs/ontology_inventory"
     },
     "package": {
       "additionalProperties": false,
@@ -175,6 +317,9 @@
       "maxLength": 4096,
       "minLength": 1,
       "type": "string"
+    },
+    "summary": {
+      "$ref": "#/$defs/summary_reference"
     },
     "version": {
       "$ref": "#/$defs/version"

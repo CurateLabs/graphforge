@@ -1,5 +1,5 @@
 //! Current private construction wire layout; permanent index layouts are separate.
-pub(crate) const FORMAT_VERSION: u32 = 10;
+pub(crate) const FORMAT_VERSION: u32 = 11;
 // UUID, kind, retained marker, full-width surrogate.
 pub(crate) const BASE_IDENTITY_WIDTH: usize = 26;
 pub(crate) const IDENTITY_SURROGATE_OFFSET: usize = 18;

@@ -10,6 +10,8 @@ fn cli_comparison_returns_native_arrow_after_reopen() {
     g.execute("CREATE (:Item {x:0})").unwrap();
     let capture = g
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid: Uuid::now_v7(),
             context_uuid: Uuid::now_v7(),

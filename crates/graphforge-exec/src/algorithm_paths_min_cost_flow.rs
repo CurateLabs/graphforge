@@ -343,11 +343,17 @@ fn checked_path_cost(
     Ok(cost)
 }
 
+/// Find the return leg of a tie cycle using only edges after `refined_edge`.
+///
+/// Earlier edges are already lexicographically fixed. The refined edge is
+/// locked too: every candidate arc runs against its stored orientation, so any
+/// other arc of that edge in a simple cycle runs with it and cancels the
+/// change, making the cycle a no-op that refinement would repeat forever.
 fn shortest_path_with_locked_edges(
     graph: &[Vec<Arc>],
     source: usize,
     sink: usize,
-    first_unlocked_edge: usize,
+    refined_edge: usize,
     control: &AlgorithmControl,
 ) -> Result<Option<Vec<(usize, usize)>>, AlgorithmError> {
     let mut distance = vec_with(graph.len(), f64::INFINITY, "tie-distance state")?;
@@ -361,7 +367,7 @@ fn shortest_path_with_locked_edges(
                 continue;
             }
             for (arc_index, arc) in graph[from].iter().enumerate() {
-                if arc.residual <= 0.0 || arc.edge < first_unlocked_edge {
+                if arc.residual <= 0.0 || arc.edge <= refined_edge {
                     continue;
                 }
                 let candidate = checked_add(
@@ -1063,5 +1069,185 @@ mod tests {
                 .collect::<Vec<_>>(),
             best.2.into_iter().map(f64::from).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn partially_used_edges_refine_without_exhausting_iterations() {
+        // A partly used edge keeps forward residual beside its reverse arc.
+        // That pair is a zero-cost no-op cycle that refinement must not apply.
+        let tight = AlgorithmControl::new(
+            AlgorithmLimits {
+                iterations: 50,
+                ..AlgorithmLimits::default()
+            },
+            AlgorithmCancellation::default(),
+        );
+        for directed in [true, false] {
+            for (upstream, downstream) in [(10.0, 5.0), (5.0, 10.0), (5.0, 5.0)] {
+                let solution = solve(
+                    &[1, 2, 3],
+                    &[
+                        edge(10, 1, 2, upstream, 1.0),
+                        edge(11, 2, 3, downstream, 1.0),
+                    ],
+                    1,
+                    3,
+                    directed,
+                    &tight,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("directed={directed} {upstream}->{downstream}: {error:?}")
+                });
+                assert_eq!((solution.flow, solution.cost), (5.0, 10.0));
+                assert_eq!(
+                    solution
+                        .edge_flows
+                        .iter()
+                        .map(|row| (row.flow, row.flow_cost))
+                        .collect::<Vec<_>>(),
+                    vec![(5.0, 5.0), (5.0, 5.0)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn genuine_zero_cost_tie_still_moves_flow_off_earlier_edges() {
+        // Edge 10 is partly used and has a zero-cost alternative through
+        // edges 12 and 13, so refinement must still shift its flow there.
+        let edges = [
+            edge(10, 1, 2, 4.0, 1.0),
+            edge(11, 2, 4, 2.0, 0.0),
+            edge(12, 1, 3, 4.0, 1.0),
+            edge(13, 3, 2, 4.0, 0.0),
+        ];
+        let solution = solve(&[1, 2, 3, 4], &edges, 1, 4, true, &control()).unwrap();
+        assert_eq!((solution.flow, solution.cost), (2.0, 2.0));
+        assert_eq!(
+            solution
+                .edge_flows
+                .iter()
+                .map(|row| row.flow)
+                .collect::<Vec<_>>(),
+            vec![0.0, 2.0, 2.0, 2.0]
+        );
+    }
+
+    /// Deterministic generator for small exhaustive-oracle networks.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self, bound: u64) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 33) % bound
+        }
+    }
+
+    /// Maximize flow, then minimize cost, then minimize the signed per-edge
+    /// flow vector in edge-UUID order over every integral assignment.
+    fn exhaustive_min_cost_flow(
+        nodes: u8,
+        edges: &[(u8, u8, i32, i32)],
+        directed: bool,
+    ) -> (i32, i32, Vec<i32>) {
+        let (source, sink) = (1, nodes);
+        // Self-loops retain zero flow by contract.
+        let upper = edges
+            .iter()
+            .map(|&(from, to, capacity, _)| if from == to { 0 } else { capacity })
+            .collect::<Vec<_>>();
+        let lower = |capacity: i32| if directed { 0 } else { -capacity };
+        let mut best: Option<(i32, i32, Vec<i32>)> = None;
+        let mut flows = upper
+            .iter()
+            .map(|&capacity| lower(capacity))
+            .collect::<Vec<_>>();
+        loop {
+            let mut balance = vec![0; usize::from(nodes) + 1];
+            let mut cost = 0;
+            for (&flow, &(from, to, _, unit_cost)) in flows.iter().zip(edges) {
+                balance[usize::from(from)] -= flow;
+                balance[usize::from(to)] += flow;
+                cost += unit_cost * flow.abs();
+            }
+            let conserved = (1..=nodes)
+                .filter(|&node| node != source && node != sink)
+                .all(|node| balance[usize::from(node)] == 0);
+            if conserved {
+                let candidate = (-balance[usize::from(source)], cost, flows.clone());
+                if best.as_ref().is_none_or(|current| {
+                    candidate.0 > current.0
+                        || (candidate.0 == current.0
+                            && (candidate.1 < current.1
+                                || (candidate.1 == current.1 && candidate.2 < current.2)))
+                }) {
+                    best = Some(candidate);
+                }
+            }
+            let Some(position) = flows
+                .iter()
+                .zip(&upper)
+                .position(|(flow, capacity)| flow < capacity)
+            else {
+                break;
+            };
+            flows[position] += 1;
+            for (flow, &capacity) in flows[..position].iter_mut().zip(&upper) {
+                *flow = lower(capacity);
+            }
+        }
+        best.unwrap()
+    }
+
+    #[test]
+    fn random_small_networks_match_exhaustive_oracle() {
+        // Capacities include partly used and unused edges; costs include
+        // zero and repeated values so tie refinement runs on most networks.
+        let mut random = Lcg(0x1660);
+        for case in 0..300 {
+            let directed = case % 2 == 0;
+            let nodes = 3 + u8::try_from(random.next(2)).unwrap();
+            let edge_count = 3 + usize::try_from(random.next(3)).unwrap();
+            let edges = (0..edge_count)
+                .map(|_| {
+                    let from = 1 + u8::try_from(random.next(u64::from(nodes))).unwrap();
+                    let to = 1 + u8::try_from(random.next(u64::from(nodes))).unwrap();
+                    let capacity = i32::try_from(random.next(4)).unwrap();
+                    let unit_cost = i32::try_from(random.next(3)).unwrap();
+                    (from, to, capacity, unit_cost)
+                })
+                .collect::<Vec<_>>();
+            let selected = edges
+                .iter()
+                .zip(10_u8..)
+                .map(|(&(from, to, capacity, unit_cost), id)| {
+                    edge(id, from, to, f64::from(capacity), f64::from(unit_cost))
+                })
+                .collect::<Vec<_>>();
+            let node_ids = (1..=nodes).collect::<Vec<_>>();
+            let solution = solve(&node_ids, &selected, 1, nodes, directed, &control())
+                .unwrap_or_else(|error| panic!("case {case} {edges:?}: {error:?}"));
+            let (flow, cost, flows) = exhaustive_min_cost_flow(nodes, &edges, directed);
+            assert_eq!(
+                (
+                    solution.flow,
+                    solution.cost,
+                    solution
+                        .edge_flows
+                        .iter()
+                        .map(|row| row.flow)
+                        .collect::<Vec<_>>()
+                ),
+                (
+                    f64::from(flow),
+                    f64::from(cost),
+                    flows.into_iter().map(f64::from).collect::<Vec<_>>()
+                ),
+                "case {case} directed={directed} {edges:?}"
+            );
+        }
     }
 }

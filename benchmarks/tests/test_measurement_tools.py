@@ -6,8 +6,8 @@ import math
 import os
 from pathlib import Path
 import subprocess
-
-import pytest
+import tempfile
+import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 
@@ -25,7 +25,7 @@ def executable(path, text):
     return str(path)
 
 
-def test_perf_zero_missing_and_integer_times(tmp_path):
+def perf_zero_missing_and_integer_times(tmp_path):
     parser = module("perf-stat-validate/summarize-perf.py")
     raw = tmp_path / "perf.txt"
     raw.write_text(
@@ -41,7 +41,7 @@ def test_perf_zero_missing_and_integer_times(tmp_path):
     assert math.isnan(parser.ratio(1, 0))
 
 
-def test_fio_job_options_override_global(tmp_path):
+def fio_job_options_override_global(tmp_path):
     parser = module("f1-fio/summarize.py")
     section = {
         "runtime": 1000,
@@ -65,8 +65,7 @@ def test_fio_job_options_override_global(tmp_path):
     assert parser.row(tmp_path / "run.out", {}, job).split()[-4:-1] == ["nan"] * 3
 
 
-@pytest.mark.parametrize("reply", ["exit 7", "echo BROKEN"])
-def test_helper_errors_fail_without_waiting(tmp_path, reply):
+def helper_errors_fail_without_waiting(tmp_path, reply):
     helper = executable(tmp_path / "helper", reply)
     result = subprocess.run(
         [
@@ -77,6 +76,7 @@ def test_helper_errors_fail_without_waiting(tmp_path, reply):
             str(TOOLS / "measurement-common.sh"),
         ],
         env=os.environ | {"QUIET_HELPER": helper, "OUT": str(tmp_path)},
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         check=False,
         timeout=5,
@@ -84,8 +84,7 @@ def test_helper_errors_fail_without_waiting(tmp_path, reply):
     assert result.returncode != 0
 
 
-@pytest.mark.parametrize("mode", ["success", "failed", "invalid", "missing"])
-def test_scaling_waits_for_children_and_validates_receipts(tmp_path, mode):
+def scaling_waits_for_children_and_validates_receipts(tmp_path, mode):
     bins = tmp_path / "bin"
     bins.mkdir()
     executable(bins / "sync", "exit 0")
@@ -100,7 +99,7 @@ if [[ "$*" == *'import-session validate'* ]]; then
     failed) exit 9 ;;
     invalid) echo '{"outcome":"rejected"}' ;;
     missing) exit 0 ;;
-    *) echo '{"outcome":"validated"}' ;;
+    *) echo '{"outcome":"stage+seal"}' ;;
   esac
 fi
 """,
@@ -121,19 +120,21 @@ fi
         "18",
         "2",
     ]
-    result = subprocess.run(command, env=env, capture_output=True, check=False, timeout=10)
+    result = subprocess.run(
+        command, env=env, stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=10
+    )
     assert (result.returncode == 0) == (mode == "success"), result.stderr
     assert len(list(out.glob("scaling-*-p*.json"))) == 2
     marker = out / "preserve"
     marker.write_text("original")
-    repeat = subprocess.run(command, env=env, capture_output=True, check=False, timeout=10)
+    repeat = subprocess.run(
+        command, env=env, stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=10
+    )
     assert repeat.returncode != 0
     assert marker.read_text() == "original"
 
 
-@pytest.mark.parametrize("original", ["0", "1"])
-@pytest.mark.parametrize("mode", ["success", "failed", "invalid"])
-def test_perf_restores_original_watchdog_and_propagates_failure(tmp_path, original, mode):
+def perf_restores_original_watchdog_and_propagates_failure(tmp_path, original, mode):
     bins = tmp_path / "bin"
     bins.mkdir()
     executable(bins / "sync", "exit 0")
@@ -163,7 +164,7 @@ esac
         """if [[ "$MODE" == invalid ]]; then
   echo '{"outcome":"rejected"}'
 else
-  echo '{"outcome":"validated"}'
+  echo '{"outcome":"stage+seal"}'
 fi
 """,
     )
@@ -187,6 +188,7 @@ fi
             generator,
         ],
         env=env,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         check=False,
         timeout=10,
@@ -198,8 +200,7 @@ fi
     ]
 
 
-@pytest.mark.parametrize("fail", ["0", "1"])
-def test_fio_isolates_data_and_fails_truthfully(tmp_path, fail):
+def fio_isolates_data_and_fails_truthfully(tmp_path, fail):
     bins = tmp_path / "bin"
     bins.mkdir()
     executable(bins / "sudo", "cat >/dev/null")
@@ -253,6 +254,7 @@ touch "$F1_DIR/pat.test" "$F1_DIR/app.test" "$F1_DIR/ctrl.bin"
             str(data),
         ],
         env=env,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         check=False,
         timeout=10,
@@ -262,3 +264,42 @@ touch "$F1_DIR/pat.test" "$F1_DIR/app.test" "$F1_DIR/ctrl.bin"
     paths = (tmp_path / "data.log").read_text().splitlines()
     assert paths
     assert all(Path(path).parent == data and Path(path) != data for path in paths)
+
+
+class MeasurementToolTests(unittest.TestCase):
+    """Run each case, and each parameter combination, in a fresh directory."""
+
+    def run_case(self, case, **parameters):
+        with self.subTest(**parameters), tempfile.TemporaryDirectory() as directory:
+            case(Path(directory), **parameters)
+
+    def test_perf_zero_missing_and_integer_times(self):
+        self.run_case(perf_zero_missing_and_integer_times)
+
+    def test_fio_job_options_override_global(self):
+        self.run_case(fio_job_options_override_global)
+
+    def test_helper_errors_fail_without_waiting(self):
+        for reply in ("exit 7", "echo BROKEN"):
+            self.run_case(helper_errors_fail_without_waiting, reply=reply)
+
+    def test_scaling_waits_for_children_and_validates_receipts(self):
+        for mode in ("success", "failed", "invalid", "missing"):
+            self.run_case(scaling_waits_for_children_and_validates_receipts, mode=mode)
+
+    def test_perf_restores_original_watchdog_and_propagates_failure(self):
+        for original in ("0", "1"):
+            for mode in ("success", "failed", "invalid"):
+                self.run_case(
+                    perf_restores_original_watchdog_and_propagates_failure,
+                    original=original,
+                    mode=mode,
+                )
+
+    def test_fio_isolates_data_and_fails_truthfully(self):
+        for fail in ("0", "1"):
+            self.run_case(fio_isolates_data_and_fails_truthfully, fail=fail)
+
+
+if __name__ == "__main__":
+    unittest.main()

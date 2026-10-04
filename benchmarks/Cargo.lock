@@ -1830,6 +1830,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "graphforge-benchmark-gdc-scorecard"
+version = "0.0.0"
+dependencies = [
+ "arrow",
+ "parquet",
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "graphforge-benchmark-gdc-snb-bi"
 version = "0.0.0"
 dependencies = [
@@ -2048,6 +2061,7 @@ name = "graphforge-search"
 version = "0.5.2"
 dependencies = [
  "arrow",
+ "graphforge-core",
  "graphforge-storage",
  "graphforge-value",
  "serde",
@@ -2070,6 +2084,7 @@ dependencies = [
  "fs4 1.1.0",
  "futures",
  "graphforge-core",
+ "graphforge-cypher",
  "graphforge-filesystem",
  "graphforge-ir",
  "graphforge-ontology",

@@ -6,8 +6,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::{
     EmbeddingCompatibilityId, EmbeddingSourceFingerprint, SearchArtifactError,
@@ -1079,24 +1080,48 @@ fn persist_synced_file(path: &Path, bytes: &[u8]) -> Result<(), SearchArtifactEr
         .map_err(|source| io("create embedding refresh temp", path, source))?;
     temp.write_all(bytes)
         .map_err(|source| io("write embedding refresh temp", path, source))?;
-    temp.as_file()
-        .sync_all()
+    let directory = graphforge_filesystem::StableDirectory::open(parent)
+        .map_err(|source| io("publish embedding refresh config", path, source))?;
+    let temporary = temp
+        .path()
+        .file_name()
+        .expect("named temporary has a child name");
+    let identity = graphforge_filesystem::file_identity(temp.as_file())
         .map_err(|source| io("sync embedding refresh temp", path, source))?;
-    temp.persist(path)
-        .map_err(|error| io("publish embedding refresh config", path, error.error))?;
-    sync_directory(parent)
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), SearchArtifactError> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|source| io("sync embedding refresh directory", path, source))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<(), SearchArtifactError> {
+    let file = temp
+        .as_file()
+        .try_clone()
+        .map_err(|source| io("sync embedding refresh temp", path, source))?;
+    crate::durable_commit::SealedArtifact::seal_existing(
+        &directory, temporary, file, identity, None,
+    )
+    .map_err(|source| io("sync embedding refresh temp", path, source))?
+    .make_visible(
+        path.file_name().expect("publication has a child name"),
+        crate::durable_commit::PublishMode::Replace,
+        || Ok(()),
+    )
+    .map_err(|error| {
+        io(
+            "publish embedding refresh config",
+            path,
+            std::io::Error::other(error),
+        )
+    })?
+    .acknowledge(None)
+    .map_err(|error| {
+        io(
+            "publish embedding refresh config",
+            path,
+            std::io::Error::other(error),
+        )
+    })?;
     Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<(), SearchArtifactError> {
+    crate::durable_commit::sync_directory(path)
+        .map_err(|source| io("sync embedding refresh directory", path, source))
 }
 
 fn path_exists(path: &Path) -> Result<bool, SearchArtifactError> {
@@ -1153,6 +1178,27 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     use super::*;
+
+    #[test]
+    fn config_checksum_accounts_authentication_of_control_json() {
+        use graphforge_core::hash_observation::operation::{Capture, Snapshot};
+        let material = br#"{"version":1,"proactive":true}"#;
+        let mut preimage = CHECKSUM_DOMAIN.to_vec();
+        preimage.extend_from_slice(material);
+        let expected = sha2::Sha256::digest(&preimage)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let capture = Capture::start();
+        assert_eq!(checksum(material), expected);
+        assert_eq!(
+            capture.snapshot(),
+            Snapshot {
+                control_authentication_sha256_bytes: preimage.len() as u64,
+                ..Snapshot::default()
+            }
+        );
+    }
 
     fn id(value: u8) -> EmbeddingCompatibilityId {
         EmbeddingCompatibilityId::from_hex(&format!("{value:02x}").repeat(32)).unwrap()

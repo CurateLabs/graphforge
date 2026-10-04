@@ -304,10 +304,10 @@ def validate_operation_timings(evidence: dict[str, object]) -> None:
         for phase in evidence["phases"]
         for receipt in phase.get("receipts", [])
         if receipt.get("contract") == "graphforge-import-session/1"
-        and receipt.get("outcome") in {"validated", "committed"}
+        and receipt.get("outcome") in {"stage+seal", "committed"}
     ]
-    if [receipt["outcome"] for receipt in receipts] != ["validated", "committed"]:
-        raise SystemExit("tiny lifecycle omitted validation/publication timing receipts")
+    if [receipt["outcome"] for receipt in receipts] != ["stage+seal", "committed"]:
+        raise SystemExit("tiny lifecycle omitted stage+seal/publication timing receipts")
     expected_calls = (
         {"begin": 1, "resume": 0, "append": None, "seal": 1, "publish": 0},
         {"begin": 0, "resume": 1, "append": 0, "seal": 0, "publish": 1},

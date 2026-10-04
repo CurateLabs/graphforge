@@ -13,8 +13,9 @@ use crate::{
     PortableV2SelectionPlan, PortableV2SelectionProfile, PortableV2SelectionRequest,
     ResolvedProjectGeneration, preview_portable_v2_selection, project_portable_v2::canonical_json,
 };
+use graphforge_core::hash_observation::{ContractSha256, ControlSha256 as Sha256, PortableSha256};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::io::Read;
 use unicode_normalization::UnicodeNormalization;
 
@@ -68,7 +69,15 @@ impl PortableV2ExportPlan {
             let relative =
                 crate::graph_files::canonical_inventory_relative_text(&entry.relative_path)?;
             let path = format!("data/components/graph-data/graph-tree/{relative}");
-            let planned = inspect(&source, &path, limits, &mut total)?;
+            let planned = inspect_admitted(
+                &source,
+                &path,
+                entry.byte_length,
+                parse_sha256(&entry.content_sha256)?,
+                entry.content_xxh64,
+                limits,
+                &mut total,
+            )?;
             if planned.length != entry.byte_length || hex(planned.digest) != entry.content_sha256 {
                 return Err(err(
                     "GF_SOURCE_CHANGED",
@@ -334,6 +343,23 @@ struct RuntimeCapability {
     capability_id: String,
     capability_version: u32,
 }
+/// Exports are written at the current research revision. A revision 6 Project
+/// is relabelled exactly as its first research write would relabel it: the
+/// participant bytes, and so every file digest, are unchanged.
+fn current_research_revision(participant: &mut RuntimeParticipant) {
+    use crate::research_versions::{RESEARCH_CAPABILITY, RESEARCH_REGISTRY, RESEARCH_VERSION};
+    if participant.capability_id != RESEARCH_CAPABILITY
+        || participant.capability_version == RESEARCH_VERSION
+    {
+        return;
+    }
+    participant.capability_version = RESEARCH_VERSION;
+    if participant.record_family_id == RESEARCH_REGISTRY {
+        participant.record_version = RESEARCH_VERSION;
+        participant.schema_fingerprint = hex(crate::research_versions::current_registry_schema());
+    }
+}
+
 #[derive(Serialize)]
 struct RuntimeParticipant {
     participant_id: String,
@@ -706,7 +732,16 @@ pub fn plan_selected_portable_v2(
             "data/components/{kind}/{id}/participant.{}",
             extension(&d.encoding)
         );
-        let f = inspect(&source, &path, limits, &mut total)?;
+        let authority = g.portable_participant_identity(&d.capability_id, &d.record_family_id)?;
+        let f = inspect_admitted(
+            &source,
+            &path,
+            authority.byte_length(),
+            authority.content_sha256(),
+            authority.content_xxh64(),
+            limits,
+            &mut total,
+        )?;
         let cf = ComponentFile {
             media_type: media_type(&d.encoding).into(),
             path: path.clone(),
@@ -720,7 +755,7 @@ pub fn plan_selected_portable_v2(
         {
             graph_inventory_participant = Some(id.clone());
         }
-        runtime_participants.push(RuntimeParticipant {
+        let mut runtime = RuntimeParticipant {
             participant_id: id.clone(),
             capability_id: d.capability_id,
             capability_version: d.capability_version,
@@ -729,7 +764,9 @@ pub fn plan_selected_portable_v2(
             encoding: d.encoding,
             schema_fingerprint: hex(d.schema_fingerprint),
             row_count: d.row_count,
-        });
+        };
+        current_research_revision(&mut runtime);
+        runtime_participants.push(runtime);
         components.push(Component {
             kind: kind.into(),
             participant_id: id,
@@ -766,20 +803,27 @@ pub fn plan_selected_portable_v2(
                 crate::graph_files::canonical_inventory_relative_text(&e.relative_path)?;
             let path = format!("data/components/graph-data/{id}/{canonical}");
             let f = match &graph_authority {
-                Some(crate::GraphFilesParticipant::V1(_)) => inspect(
+                Some(crate::GraphFilesParticipant::V1(_)) => inspect_admitted(
                     &crate::graph_files::resolve_v1_inventory_entry(&g.graph_tree_root(), &e)?,
                     &path,
-                    limits,
-                    &mut total,
-                )?,
-                Some(crate::GraphFilesParticipant::V2(_)) => inspect_cas(
-                    graph_cas.as_ref().expect("compact authority has CAS lease"),
-                    &e.content_sha256,
                     e.byte_length,
-                    &path,
+                    parse_sha256(&e.content_sha256)?,
+                    e.content_xxh64,
                     limits,
                     &mut total,
                 )?,
+                Some(crate::GraphFilesParticipant::V2(_)) => {
+                    let mut file = inspect_cas(
+                        graph_cas.as_ref().expect("compact authority has CAS lease"),
+                        &e.content_sha256,
+                        e.byte_length,
+                        &path,
+                        limits,
+                        &mut total,
+                    )?;
+                    file.checksum = Some(e.content_xxh64);
+                    file
+                }
                 None => return Err(err("GF_SOURCE_CHANGED", "graph authority disappeared")),
             };
             if f.length != e.byte_length || hex(f.digest) != e.content_sha256 {
@@ -847,8 +891,14 @@ pub fn plan_selected_portable_v2(
                     .contains(&capability.capability_id)
             })
             .map(|capability| RuntimeCapability {
+                capability_version: if capability.capability_id
+                    == crate::research_versions::RESEARCH_CAPABILITY
+                {
+                    crate::research_versions::RESEARCH_VERSION
+                } else {
+                    capability.capability_version
+                },
                 capability_id: capability.capability_id,
-                capability_version: capability.capability_version,
             })
             .collect(),
         participants: &runtime_participants,
@@ -926,7 +976,10 @@ pub fn plan_selected_portable_v2(
     let selection_fingerprint = if let Some(registry) = &research {
         format!(
             "sha256:{}",
-            hex(Sha256::digest(serde_json::to_vec(&registry.interchange).map_err(storage)?).into())
+            hex(ContractSha256::digest(
+                serde_json::to_vec(&registry.interchange).map_err(storage)?
+            )
+            .into())
         )
     } else {
         selection.selection_fingerprint.clone()
@@ -1054,7 +1107,8 @@ pub(super) fn inspect(
     if *total > limits.max_total_bytes {
         return Err(limit("total too large"));
     }
-    let mut digest = Sha256::new();
+    let mut digest = PortableSha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut buffer = vec![0; limits.copy_buffer_bytes];
     let mut bytes_read = 0;
     loop {
@@ -1063,6 +1117,7 @@ pub(super) fn inspect(
             break;
         }
         digest.update(&buffer[..count]);
+        checksum.update(&buffer[..count]);
         bytes_read += count as u64;
     }
     if bytes_read != before.len || identity(&input.metadata().map_err(storage)?)? != before {
@@ -1076,8 +1131,45 @@ pub(super) fn inspect(
         path: path.into(),
         length: bytes_read,
         digest: digest.finalize().into(),
+        checksum: Some(checksum.finish()),
     })
 }
+fn inspect_admitted(
+    source: &Path,
+    path: &str,
+    length: u64,
+    digest: [u8; 32],
+    checksum: u64,
+    limits: PortableV2ExportLimits,
+    total: &mut u64,
+) -> Result<PlannedFile, ExportError> {
+    valid_path(path)?;
+    if path.len() > limits.max_path_bytes || length > limits.max_entry_bytes {
+        return Err(limit("admitted entry exceeds configured limit"));
+    }
+    *total = total
+        .checked_add(length)
+        .ok_or_else(|| limit("size overflow"))?;
+    if *total > limits.max_total_bytes {
+        return Err(limit("total too large"));
+    }
+    let input = open_source_no_follow(source)?;
+    let before = identity(&input.metadata().map_err(storage)?)?;
+    if before.len != length {
+        return Err(err("GF_SOURCE_CHANGED", "admitted source length changed"));
+    }
+    Ok(PlannedFile {
+        source: PlannedSource::File {
+            path: source.into(),
+            identity: before,
+        },
+        path: path.into(),
+        length,
+        digest,
+        checksum: Some(checksum),
+    })
+}
+
 fn inspect_cas(
     lease: &crate::graph_object_store::GraphObjectReadLease,
     digest: &str,
@@ -1096,7 +1188,7 @@ fn inspect_cas(
     if *total > limits.max_total_bytes {
         return Err(limit("total too large"));
     }
-    let _authenticated = lease.open(digest, expected_length)?;
+    let _descriptor = lease.open_for_attribution(digest, expected_length)?;
     let digest_bytes = parse_sha256(digest)?;
     Ok(PlannedFile {
         source: PlannedSource::Cas {
@@ -1107,6 +1199,7 @@ fn inspect_cas(
         path: path.into(),
         length: expected_length,
         digest: digest_bytes,
+        checksum: None,
     })
 }
 fn inline_control(
@@ -1128,6 +1221,7 @@ fn inline_control(
         path: path.into(),
         length: bytes.len() as u64,
         digest: Sha256::digest(&bytes).into(),
+        checksum: Some(crate::corruption_checksum::checksum(&bytes)),
         source: PlannedSource::Control(bytes),
     })
 }
@@ -1186,7 +1280,7 @@ pub(super) fn portable_id(s: &str) -> String {
 pub(crate) fn portable_participant_id(capability: &str, family: &str) -> String {
     let mut prefix = portable_id(&format!("{capability}-{family}"));
     prefix.truncate(220);
-    let mut digest = Sha256::new();
+    let mut digest = ContractSha256::new();
     digest.update(capability.as_bytes());
     digest.update([0]);
     digest.update(family.as_bytes());

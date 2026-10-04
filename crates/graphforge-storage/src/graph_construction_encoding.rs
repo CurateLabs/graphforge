@@ -25,22 +25,24 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
 use graphforge_core::OntologyMode;
+use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use graphforge_filesystem::{file_identity, file_link_count};
 use graphforge_ir::{CompositionBindingContext, SymbolBinding};
 use graphforge_ontology::{QualifiedSymbol, SymbolKind};
 use graphforge_value::{EntityTypeId, RelationTypeId, TaggedTypeId};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::graph_construction::{
     ArtifactReceipt, ConstructionSemanticAuthority, ConstructionShape, CountingChunkReader,
-    GraphConstructionBudgets, IoCounter, open_authenticated_shape_source, shaped_output_sha256,
+    GraphConstructionBudgets, IoCounter, open_authenticated_shape_source, shaped_output_xxh64,
 };
 use crate::property_overlay::{
     PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
     PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD, PropertyRouteKind,
+    split_into_fragments,
 };
 use crate::schemas::{
     TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, uuid_field, with_semantic_route_metadata,
@@ -51,12 +53,17 @@ use crate::uuid_membership::{
 use crate::{SemanticRouteKind, SemanticStorageBindings};
 
 mod adjacency;
+mod inventory;
 mod lanes;
+#[cfg(test)]
+pub(crate) use inventory::authenticate_inventory_payloads;
+pub(crate) use inventory::{authenticate_inventory, authenticate_inventory_control};
 #[cfg(any(test, feature = "test-support"))]
 mod seam_spike;
 
 const ENCODED_ROOT: &str = "encoded-v1";
 const INVENTORY: &str = "inventory.json";
+const ENCODING_FORMAT_VERSION: u32 = 2;
 const ENCODING_INTENT: &str = "encoding-intent.json";
 const MAX_INVENTORY_BYTES: u64 = 16 << 20;
 use crate::construction_record_layout::{
@@ -102,6 +109,7 @@ struct CountingWriter {
     inner: graphforge_filesystem::DurableFileCacheWriter,
     counter: IoCounter,
     digest: Sha256,
+    checksum: crate::corruption_checksum::Checksum,
 }
 
 struct CountingInput<R> {
@@ -135,7 +143,7 @@ impl Drop for EncodingTempGuard<'_> {
             let _ = self
                 .directory
                 .unlink_child_if_identity(OsStr::new(&self.name), self.identity);
-            let _ = self.directory.sync();
+            let _ = self.directory.acknowledge();
         }
     }
 }
@@ -150,7 +158,7 @@ fn authenticated_source_spool<'a>(
     let authenticated = open_authenticated_shape_source(source, outputs, name)?;
     let expected_identity = authenticated.identity;
     let expected_bytes = authenticated.bytes;
-    let expected_sha256 = authenticated.sha256;
+    let expected_xxh64 = authenticated.xxh64;
     let cache_window =
         graphforge_filesystem::cache_release_window_for_streams(2).map_err(storage)?;
     let mut authenticated = graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
@@ -173,7 +181,7 @@ fn authenticated_source_spool<'a>(
         identity: spool_identity,
         armed: true,
     };
-    let mut digest = Sha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut bytes = 0_u64;
     let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
     let authentication = (|| -> Result<(), GfError> {
@@ -184,7 +192,7 @@ fn authenticated_source_spool<'a>(
             if read == 0 {
                 break;
             }
-            digest.update(&buffer[..read]);
+            checksum.update(&buffer[..read]);
             spool.write_all(&buffer[..read]).map_err(storage)?;
             add_evidence_counter(&mut bytes, read as u64, "read bytes")?;
             account_spooled_bytes(evidence, read as u64)?;
@@ -192,7 +200,7 @@ fn authenticated_source_spool<'a>(
         if file_identity(authenticated.file()).map_err(storage)? != expected_identity
             || file_link_count(authenticated.file()).map_err(storage)? != 1
             || bytes != expected_bytes
-            || hex(&digest.finalize()) != expected_sha256
+            || crate::corruption_checksum::hex(checksum.finish()) != expected_xxh64
         {
             return Err(storage(
                 "shaped source changed during authenticated spooling",
@@ -213,7 +221,7 @@ fn authenticated_source_spool<'a>(
     };
     account_cache_release(source_release, evidence)?;
     spool.flush().map_err(storage)?;
-    spool.sync_all_and_release().map_err(storage)?;
+    output.seal_cache_writer(&mut spool).map_err(storage)?;
     add_evidence_counter(
         &mut evidence.source_spool_fsync_operations,
         spool.evidence().sync_operations,
@@ -231,6 +239,7 @@ fn authenticated_source_spool<'a>(
         evidence.source_spool_peak_temporary_bytes.max(bytes);
     let mut spool = spool.into_file();
     spool.rewind().map_err(storage)?;
+    crate::graph_construction::diagnostics::sealed_payload(bytes, 1);
     Ok((spool, guard))
 }
 
@@ -274,6 +283,7 @@ impl Write for CountingWriter {
         let written = self.inner.write(buffer)?;
         self.counter.account(written);
         self.digest.update(&buffer[..written]);
+        self.checksum.update(&buffer[..written]);
         Ok(written)
     }
 
@@ -312,6 +322,7 @@ fn storage(error: impl std::fmt::Display) -> GfError {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 /// One private canonical artifact authenticated by the completed inventory.
 pub struct ConstructionEncodedArtifact {
     /// Normalized graph-root-relative path.
@@ -320,9 +331,13 @@ pub struct ConstructionEncodedArtifact {
     pub bytes: u64,
     /// Lowercase SHA-256 of the file.
     pub sha256: String,
+    /// Required seed-zero checksum of the exact artifact bytes.
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    pub xxh64: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 /// Exact authenticated parent object that a publisher must structurally retain.
 pub struct ConstructionRetainedArtifact {
     /// Stable authenticated parent directory supplied to the publisher.
@@ -343,6 +358,9 @@ pub struct ConstructionRetainedArtifact {
     pub bytes: u64,
     /// Exact retained object digest.
     pub sha256: String,
+    /// Required seed-zero checksum of the exact artifact bytes.
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    pub xxh64: u64,
     /// Authenticated parent index manifest that authorized this reference.
     pub parent_manifest_sha256: String,
 }
@@ -458,6 +476,8 @@ pub struct GraphConstructionEncodingEvidence {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 /// Completed private canonical artifact inventory.
 pub struct GraphConstructionEncoding {
+    /// Version of the checksum-bearing inventory wire format.
+    pub format_version: u32,
     /// Directory below the private operation root containing this inventory.
     pub root: String,
     /// Generation the eventual publisher must bind.
@@ -507,8 +527,8 @@ struct EncodingIntent {
 pub(crate) fn inventory_authority_sha256(
     inventory: &GraphConstructionEncoding,
 ) -> Result<String, GfError> {
-    let mut digest = Sha256::new();
-    digest.update(b"graphforge-construction-encoding-inventory/v1\0");
+    let mut digest = graphforge_core::hash_observation::ControlSha256::default();
+    digest.update(b"graphforge-construction-encoding-inventory/v2\0");
     digest.update(serde_json::to_vec(inventory).map_err(storage)?);
     Ok(hex(&digest.finalize()))
 }
@@ -560,7 +580,6 @@ pub(crate) fn encode(
         .map_err(storage)?;
     cleanup_encoding_temps(&output, budgets)?;
     if let Some(mut existing) = read_inventory(&output)? {
-        let authentication = authenticate_inventory(&output, &existing, parent_index)?;
         if !existing
             .artifacts
             .iter()
@@ -576,6 +595,7 @@ pub(crate) fn encode(
         let actual_authority = inventory_authority_sha256(&existing)?;
         match expected_inventory_sha256 {
             Some(expected) if expected == actual_authority => {
+                let authentication = authenticate_inventory(&output, &existing, parent_index)?;
                 remove_encoding_intent(&output)?;
                 existing.invocation = GraphConstructionEncodingInvocationEvidence {
                     performed: false,
@@ -688,13 +708,13 @@ pub(crate) fn encode(
         "ordinal control calls",
     )?;
 
-    let identities_sha256 = shaped_output_sha256(shape_outputs, &shape.identities)?;
+    let identities_xxh64 = shaped_output_xxh64(shape_outputs, &shape.identities)?;
     let membership_region =
         crate::concurrency_attribution::RegionScope::named("membership_encoding");
     let mut index = crate::uuid_membership::encode_construction_index(
         source.physical(),
         &shape.identities,
-        identities_sha256,
+        identities_xxh64,
         output.physical(),
         generation,
         shape.parent_topology_generation,
@@ -748,7 +768,7 @@ pub(crate) fn encode(
                 output.physical(),
                 bundle,
                 generation,
-                identities_sha256,
+                &index.source_sha256,
                 parent_ordinal
                     .as_ref()
                     .and_then(|(_, manifest)| parent_generation.map(|parent| (parent, manifest))),
@@ -870,6 +890,7 @@ pub(crate) fn encode(
         return Err(storage("canonical encoding contains duplicate paths"));
     }
     let mut completed = GraphConstructionEncoding {
+        format_version: ENCODING_FORMAT_VERSION,
         root: ENCODED_ROOT.to_owned(),
         generation,
         ontology_mode: shape.ontology_mode,
@@ -921,7 +942,7 @@ fn construction_parent_routes(
                 &root,
                 crate::GraphManifestLimits::default(),
                 |digest| {
-                    crate::graph_object_store::read_graph_object_counted(
+                    crate::graph_object_store::read_graph_control_object_counted(
                         parent.container_root(),
                         digest,
                         crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
@@ -981,6 +1002,7 @@ fn retained_artifact(value: ConstructionIndexReference) -> ConstructionRetainedA
         target_path: value.target_path,
         bytes: value.bytes,
         sha256: value.sha256,
+        xxh64: value.xxh64,
         parent_manifest_sha256: value.parent_manifest_sha256,
     }
 }
@@ -990,6 +1012,7 @@ fn index_artifact(value: ConstructionIndexOutput) -> ConstructionEncodedArtifact
         path: format!("topology/uuid-membership/{}", value.name),
         bytes: value.bytes,
         sha256: value.sha256,
+        xxh64: value.xxh64,
     }
 }
 
@@ -1426,23 +1449,25 @@ fn encode_node_properties(
                         } else {
                             property
                         };
-                        let path = format!(
-                            "properties/{}/{:020}-{ordinal:020}.parquet",
-                            encoded_route_component(route_table, &route)?,
-                            shape.parent_topology_generation + 1
-                        );
-                        encoding_lanes.push(
-                            output,
-                            &path,
-                            &property,
-                            cache_window,
-                            evidence,
-                            cancelled,
-                            artifacts,
-                        )?;
-                        *ordinal = ordinal
-                            .checked_add(1)
-                            .ok_or_else(|| storage("encoded ordinal overflows"))?;
+                        for fragment in split_into_fragments(&property, *ordinal)? {
+                            let path = format!(
+                                "properties/{}/{:020}-{ordinal:020}.parquet",
+                                encoded_route_component(route_table, &route)?,
+                                shape.parent_topology_generation + 1
+                            );
+                            encoding_lanes.push(
+                                output,
+                                &path,
+                                &fragment,
+                                cache_window,
+                                evidence,
+                                cancelled,
+                                artifacts,
+                            )?;
+                            *ordinal = ordinal
+                                .checked_add(1)
+                                .ok_or_else(|| storage("encoded ordinal overflows"))?;
+                        }
                     }
                 }
             }
@@ -1847,23 +1872,25 @@ fn encode_edge_properties(
                         } else {
                             property
                         };
-                        let path = format!(
-                            "edge_properties/{}/{:020}-{ordinal:020}.parquet",
-                            encoded_route_component(route_table, &property_route)?,
-                            shape.parent_topology_generation + 1
-                        );
-                        encoding_lanes.push(
-                            output,
-                            &path,
-                            &property,
-                            cache_window,
-                            evidence,
-                            cancelled,
-                            artifacts,
-                        )?;
-                        *ordinal = ordinal
-                            .checked_add(1)
-                            .ok_or_else(|| storage("encoded ordinal overflows"))?;
+                        for fragment in split_into_fragments(&property, *ordinal)? {
+                            let path = format!(
+                                "edge_properties/{}/{:020}-{ordinal:020}.parquet",
+                                encoded_route_component(route_table, &property_route)?,
+                                shape.parent_topology_generation + 1
+                            );
+                            encoding_lanes.push(
+                                output,
+                                &path,
+                                &fragment,
+                                cache_window,
+                                evidence,
+                                cancelled,
+                                artifacts,
+                            )?;
+                            *ordinal = ordinal
+                                .checked_add(1)
+                                .ok_or_else(|| storage("encoded ordinal overflows"))?;
+                        }
                     }
                 }
             }
@@ -2159,7 +2186,7 @@ fn write_surrogate_tails(
     .map_err(storage)?;
     let cache_window =
         graphforge_filesystem::cache_release_window_for_streams(1).map_err(storage)?;
-    artifacts.push(write_parquet(
+    artifacts.extend(write_parquet(
         output,
         "topology/surrogate_tails.parquet",
         &batch,
@@ -2177,7 +2204,7 @@ fn write_parquet(
     cache_window: std::num::NonZeroU64,
     evidence: &mut GraphConstructionEncodingEvidence,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<ConstructionEncodedArtifact, GfError> {
+) -> Result<Vec<ConstructionEncodedArtifact>, GfError> {
     lanes::write_parquet_chunks(
         root,
         relative,
@@ -2230,14 +2257,13 @@ fn copy_artifact<R: Read + Seek>(
             .map_err(storage)?,
             counter: write_counter.clone(),
             digest: Sha256::new(),
+            checksum: crate::corruption_checksum::Checksum::new(),
         },
     );
     let bytes = std::io::copy(&mut input, &mut writer).map_err(storage)?;
     writer.flush().map_err(storage)?;
-    writer
-        .get_mut()
-        .inner
-        .sync_all_and_release()
+    directory
+        .seal_cache_writer(&mut writer.get_mut().inner)
         .map_err(storage)?;
     let cache_release = writer.get_ref().inner.evidence();
     account_cache_release(cache_release, evidence)?;
@@ -2250,6 +2276,7 @@ fn copy_artifact<R: Read + Seek>(
         path: relative.to_owned(),
         bytes: write_bytes,
         sha256: hex(&writer.digest.finalize()),
+        xxh64: writer.checksum.finish(),
     };
     if artifact.bytes != bytes {
         return Err(storage("copied canonical artifact length changed"));
@@ -2258,7 +2285,7 @@ fn copy_artifact<R: Read + Seek>(
         .replace_child(OsStr::new(&temporary), identity, OsStr::new(&name))
         .map_err(storage)?;
     temporary_guard.disarm();
-    directory.sync().map_err(storage)?;
+    directory.acknowledge().map_err(storage)?;
     crate::graph_construction::construction_failpoint(&format!(
         "encode.copy.after_install.{relative}"
     ));
@@ -2269,6 +2296,7 @@ fn copy_artifact<R: Read + Seek>(
         (write_bytes, write_operations),
         cache_release.sync_operations,
     )?;
+    crate::graph_construction::diagnostics::sealed_payload(artifact.bytes, 2);
     artifacts.push(artifact);
     Ok(())
 }
@@ -2405,6 +2433,7 @@ fn authenticate_file_cancellable(
 > {
     let mut file = graphforge_filesystem::FileCacheReleasingReader::new(file).map_err(storage)?;
     let mut digest = Sha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut bytes = 0_u64;
     let mut operations = 0_u64;
     let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
@@ -2417,6 +2446,7 @@ fn authenticate_file_cancellable(
                 break;
             }
             digest.update(&buffer[..read]);
+            checksum.update(&buffer[..read]);
             add_evidence_counter(&mut bytes, read as u64, "read bytes")?;
             add_evidence_counter(&mut operations, 1, "read operations")?;
         }
@@ -2424,11 +2454,15 @@ fn authenticate_file_cancellable(
             path: path.to_owned(),
             bytes,
             sha256: hex(&digest.finalize()),
+            xxh64: checksum.finish(),
         })
     })();
     let released = file.finish().map_err(storage);
     match (authentication, released) {
-        (Ok(artifact), Ok(released)) => Ok((artifact, released, operations)),
+        (Ok(artifact), Ok(released)) => {
+            crate::graph_construction::diagnostics::hashed_bytes(artifact.bytes, 2);
+            Ok((artifact, released, operations))
+        }
         (Ok(_), Err(error)) => Err(error),
         (Err(primary), Ok(_)) => Err(primary),
         (Err(primary), Err(release)) => Err(storage(format!(
@@ -2448,9 +2482,34 @@ pub(crate) fn read_inventory(
     if file.metadata().map_err(storage)?.len() > MAX_INVENTORY_BYTES {
         return Err(storage("canonical inventory exceeds bound"));
     }
-    serde_json::from_reader(BufReader::with_capacity(COPY_BUFFER_BYTES, file))
-        .map(Some)
-        .map_err(storage)
+    decode_encoding_inventory(
+        BufReader::with_capacity(COPY_BUFFER_BYTES, file).take(MAX_INVENTORY_BYTES + 1),
+    )
+    .map(Some)
+}
+
+pub(crate) fn decode_encoding_inventory(
+    reader: impl Read,
+) -> Result<GraphConstructionEncoding, GfError> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_INVENTORY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(storage)?;
+    if bytes.len() as u64 > MAX_INVENTORY_BYTES {
+        return Err(storage("canonical inventory exceeds bound"));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(storage)?;
+    if value
+        .get("format_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(u64::from(ENCODING_FORMAT_VERSION))
+    {
+        return Err(storage(
+            "unsupported encoded inventory format; recreate the project",
+        ));
+    }
+    serde_json::from_value(value).map_err(storage)
 }
 
 fn read_encoding_intent(root: &StableDirectory) -> Result<Option<EncodingIntent>, GfError> {
@@ -2484,7 +2543,7 @@ fn remove_encoding_control(root: &StableDirectory, name: &str) -> Result<(), GfE
     drop(file);
     root.unlink_child_if_identity(OsStr::new(name), identity)
         .map_err(storage)?;
-    root.sync().map_err(storage)
+    root.acknowledge().map_err(storage)
 }
 
 fn cleanup_encoding_temps(
@@ -2540,7 +2599,7 @@ fn cleanup_encoding_directory(
         cleanup_encoding_directory(&child, limit, visited)?;
     }
     if changed {
-        directory.sync().map_err(storage)?;
+        directory.acknowledge().map_err(storage)?;
     }
     Ok(())
 }
@@ -2555,142 +2614,6 @@ fn is_encoding_temp(name: &str) -> bool {
     body.rsplit_once('-').is_some_and(|(_, nonce)| {
         nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
     })
-}
-
-pub(crate) fn authenticate_inventory(
-    root: &StableDirectory,
-    inventory: &GraphConstructionEncoding,
-    parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
-) -> Result<GraphConstructionEncodingEvidence, GfError> {
-    let _diagnostic_scope =
-        crate::graph_construction::diagnostics::Scope::start("inventory_authentication");
-    let evidence = authenticate_inventory_payloads(root, inventory, &mut || false)?;
-    authenticate_inventory_references(inventory, parent_index)?;
-    Ok(evidence)
-}
-
-/// The control half of [`authenticate_inventory`]: the inventory's structural
-/// invariants and its retained-parent references, without reading a payload
-/// byte. The encoder runs this after installing the inventory it just wrote.
-///
-/// The payloads are not re-read here. Every artifact digest in the inventory
-/// was computed by the single pass that wrote the bytes, and the boundary that
-/// consumes those bytes — the CAS install at publication — copies and hashes
-/// each artifact against this inventory and refuses a mismatch on its own
-/// (`install_graph_object_file_with_lease`). Re-reading bytes this process
-/// wrote a moment ago, from its own page cache, names no failure that the
-/// consuming copy does not already refuse (#1384; the reasoning #1392 applied
-/// to shape outputs).
-pub(crate) fn authenticate_inventory_control(
-    inventory: &GraphConstructionEncoding,
-    parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
-) -> Result<(), GfError> {
-    validate_inventory_invariants(inventory)?;
-    authenticate_inventory_references(inventory, parent_index)
-}
-
-fn authenticate_inventory_references(
-    inventory: &GraphConstructionEncoding,
-    parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
-) -> Result<(), GfError> {
-    if inventory.retained_artifacts.is_empty() {
-        if inventory.evidence.retained_index_runs != 0 {
-            return Err(storage("retained-index evidence lacks references"));
-        }
-        return Ok(());
-    }
-    let parent = parent_index
-        .ok_or_else(|| storage("retained artifacts lack authenticated parent snapshot"))?;
-    let mut previous = None;
-    let mut references = Vec::with_capacity(inventory.retained_artifacts.len());
-    for retained in &inventory.retained_artifacts {
-        if previous.is_some_and(|value: &str| value >= retained.target_path.as_str()) {
-            return Err(storage(
-                "retained artifact targets are not unique and sorted",
-            ));
-        }
-        references.push(
-            crate::uuid_membership::ConstructionReferenceAuthentication {
-                source_root: &retained.source_root,
-                source_root_volume: retained.source_root_volume,
-                source_root_file_id: &retained.source_root_file_id,
-                source_path: &retained.source_path,
-                source_volume: retained.source_volume,
-                source_file_id: &retained.source_file_id,
-                target_path: &retained.target_path,
-                bytes: retained.bytes,
-                sha256: &retained.sha256,
-                parent_manifest_sha256: &retained.parent_manifest_sha256,
-            },
-        );
-        previous = Some(retained.target_path.as_str());
-    }
-    parent.authenticate_construction_references(&references)?;
-    Ok(())
-}
-
-fn validate_inventory_invariants(inventory: &GraphConstructionEncoding) -> Result<(), GfError> {
-    if inventory.root != ENCODED_ROOT
-        || inventory.shape_inputs_sha256.len() != 64
-        || inventory.shape_authority_sha256.len() != 64
-        || inventory
-            .semantic_authority_sha256
-            .as_ref()
-            .is_some_and(|digest| {
-                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-        || !inventory
-            .shape_inputs_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-        || !inventory
-            .shape_authority_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-        || inventory
-            .artifacts
-            .windows(2)
-            .any(|pair| pair[0].path >= pair[1].path)
-        || inventory.evidence.prior_topology_rows_decoded != 0
-        || inventory.evidence.retained_topology_bytes_copied != 0
-    {
-        return Err(storage("canonical inventory invariants are invalid"));
-    }
-    Ok(())
-}
-
-pub(crate) fn authenticate_inventory_payloads(
-    root: &StableDirectory,
-    inventory: &GraphConstructionEncoding,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<GraphConstructionEncodingEvidence, GfError> {
-    let _diagnostic_scope =
-        crate::graph_construction::diagnostics::Scope::start("inventory_payload_authentication");
-    validate_inventory_invariants(inventory)?;
-    let mut evidence = GraphConstructionEncodingEvidence::default();
-    for expected in &inventory.artifacts {
-        let (directory, name) = directory_for(root, &expected.path)?;
-        let file = directory
-            .open_child_file(OsStr::new(&name))
-            .map_err(storage)?;
-        let (actual, released, operations) =
-            authenticate_file_cancellable(&expected.path, file, cancelled)?;
-        if &actual != expected {
-            return Err(storage("canonical artifact differs from inventory"));
-        }
-        add_evidence_counter(
-            &mut evidence.input_read_bytes,
-            actual.bytes,
-            "input read bytes",
-        )?;
-        add_evidence_counter(
-            &mut evidence.input_read_operations,
-            operations,
-            "input read operations",
-        )?;
-        account_cache_release(released, &mut evidence)?;
-    }
-    Ok(evidence)
 }
 
 /// Bind publication to the durable encoding control record without rereading
@@ -2709,14 +2632,13 @@ pub(crate) fn authenticate_inventory_control_for_publication(
         return Err(storage("canonical inventory exceeds bound"));
     }
     let counter = IoCounter::default();
-    let recorded: GraphConstructionEncoding = serde_json::from_reader(BufReader::with_capacity(
+    let recorded = decode_encoding_inventory(BufReader::with_capacity(
         COPY_BUFFER_BYTES,
         CountingInput {
             inner: file,
             counter: counter.clone(),
         },
-    ))
-    .map_err(storage)?;
+    ))?;
     if inventory_authority_sha256(&recorded)? != inventory_authority_sha256(inventory)? {
         return Err(storage(
             "publication inventory differs from durable encoding",
@@ -2755,7 +2677,7 @@ fn install_json<T: Serialize>(
     serde_json::to_writer(&mut writer, value).map_err(storage)?;
     writer.flush().map_err(storage)?;
     drop(writer);
-    file.sync_all().map_err(storage)?;
+    root.seal_file(&file).map_err(storage)?;
     crate::graph_construction::construction_failpoint(&format!(
         "encode.control.after_temp_fsync.{name}"
     ));
@@ -2763,7 +2685,7 @@ fn install_json<T: Serialize>(
     root.replace_child(OsStr::new(&temporary), identity, OsStr::new(name))
         .map_err(storage)?;
     temporary_guard.disarm();
-    root.sync().map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     crate::graph_construction::construction_failpoint(&format!(
         "encode.control.after_install.{name}"
     ));
@@ -2776,8 +2698,8 @@ struct FixedReader<const N: usize> {
     counter: IoCounter,
     identity: graphforge_filesystem::FileIdentity,
     expected_bytes: u64,
-    expected_sha256: String,
-    digest: Sha256,
+    expected_xxh64: String,
+    checksum: crate::corruption_checksum::Checksum,
     consumed_bytes: u64,
 }
 
@@ -2823,8 +2745,8 @@ impl<const N: usize> FixedReader<N> {
             counter,
             identity: authenticated.identity,
             expected_bytes: authenticated.bytes,
-            expected_sha256: authenticated.sha256,
-            digest: Sha256::new(),
+            expected_xxh64: authenticated.xxh64,
+            checksum: crate::corruption_checksum::Checksum::new(),
             consumed_bytes: 0,
         })
     }
@@ -2854,7 +2776,7 @@ impl<const N: usize> FixedReader<N> {
             Some(codec) => codec.wire(&record).map_err(storage)?,
             None => &record,
         };
-        self.digest.update(wire);
+        self.checksum.update(wire);
         self.consumed_bytes = self
             .consumed_bytes
             .checked_add(u64::try_from(wire.len()).map_err(storage)?)
@@ -2873,7 +2795,8 @@ impl<const N: usize> FixedReader<N> {
                     != self.identity
                     || file_link_count(self.reader.get_ref().inner.file()).map_err(storage)? != 1
                     || self.consumed_bytes != self.expected_bytes
-                    || hex(&self.digest.clone().finalize()) != self.expected_sha256
+                    || crate::corruption_checksum::hex(self.checksum.finish())
+                        != self.expected_xxh64
                 {
                     return Err(storage(
                         "fixed-width shaped source changed during consumption",

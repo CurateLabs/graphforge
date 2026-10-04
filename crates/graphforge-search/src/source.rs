@@ -5,9 +5,12 @@ use std::path::Path;
 
 use arrow::array::{Array, FixedSizeBinaryArray, ListArray, StringArray, UInt32Array, UInt64Array};
 use arrow::datatypes::DataType;
-use graphforge_storage::{AdmittedSourceFile, SearchArtifactError, SearchSourceSnapshot};
+use graphforge_storage::{
+    AdmittedSourceFile, AuthenticatedPropertyInventory, SearchArtifactError, SearchSourceSnapshot,
+};
 
 use crate::TextSearchLimits;
+use crate::node_identity::{NodeIdentityCheck, SessionOrdinalIdentity};
 
 type TextFieldsByUuid = BTreeMap<[u8; 16], BTreeMap<String, String>>;
 type ProjectedProperties = (BTreeSet<String>, TextFieldsByUuid);
@@ -53,6 +56,116 @@ pub fn project_text_source<C>(
     label_id: graphforge_value::EntityTypeSelection,
     selected_properties: Option<&[String]>,
     limits: TextSearchLimits,
+    checkpoint: C,
+) -> Result<TextSourceProjection, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    let topology = graphforge_storage::TopologyFiles::discover_legacy(project_dir)
+        .map_err(|error| source(error.to_string()))?;
+    project_text_source_from_files(
+        project_dir,
+        &topology,
+        label_id,
+        selected_properties,
+        limits,
+        checkpoint,
+    )
+}
+
+/// Project the selected canonical topology files.
+pub fn project_text_source_from_files<C>(
+    project_dir: &Path,
+    topology: &graphforge_storage::TopologyFiles,
+    label_id: graphforge_value::EntityTypeSelection,
+    selected_properties: Option<&[String]>,
+    limits: TextSearchLimits,
+    checkpoint: C,
+) -> Result<TextSourceProjection, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    project_text_source_selected(
+        None,
+        project_dir,
+        topology,
+        None,
+        label_id,
+        selected_properties,
+        limits,
+        checkpoint,
+    )
+}
+
+/// The freshness identity of the whole text source, taken from the manifest of
+/// `inventory` without reading any payload: every node-topology and
+/// node-property object it names (name, declared length, declared XXH64) bound
+/// to the live search generation. `None` when the inventory is narrowed to one
+/// route and so does not name the node topology.
+///
+/// The fingerprint format is the one [`project_text_source`] produces from the
+/// handles it reads, so an index published by either is fresh for the other.
+pub(crate) fn text_source_snapshot(
+    project_dir: &Path,
+    inventory: &AuthenticatedPropertyInventory,
+) -> Result<Option<SearchSourceSnapshot>, SearchArtifactError> {
+    let Some(files) = inventory.text_source_files() else {
+        return Ok(None);
+    };
+    let generation = SearchSourceSnapshot::generation(project_dir)?;
+    SearchSourceSnapshot::from_admitted_files(project_dir, generation, &files).map(Some)
+}
+
+/// Project the session's explicit `topology`, or the legacy directory when the
+/// caller has none, reading node properties through the caller's admitted
+/// `inventory` when one is supplied.
+/// `ordinal` is the session's identity authority (see [`crate::node_identity`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn project_text_source_with<C>(
+    inventory: Option<&AuthenticatedPropertyInventory>,
+    project_dir: &Path,
+    topology: Option<&graphforge_storage::TopologyFiles>,
+    ordinal: Option<&SessionOrdinalIdentity>,
+    label_id: graphforge_value::EntityTypeSelection,
+    selected_properties: Option<&[String]>,
+    limits: TextSearchLimits,
+    checkpoint: C,
+) -> Result<TextSourceProjection, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    let discovered;
+    let topology = if let Some(files) = topology {
+        files
+    } else {
+        discovered = graphforge_storage::TopologyFiles::discover_legacy(project_dir)
+            .map_err(|error| source(error.to_string()))?;
+        &discovered
+    };
+    project_text_source_selected(
+        inventory,
+        project_dir,
+        topology,
+        ordinal,
+        label_id,
+        selected_properties,
+        limits,
+        checkpoint,
+    )
+}
+
+/// Project `topology`, reading node properties through the caller's admitted
+/// `inventory` when one is supplied, and binding the projection to the
+/// manifest's source identity rather than to a second read of every object.
+#[allow(clippy::too_many_arguments)]
+fn project_text_source_selected<C>(
+    inventory: Option<&AuthenticatedPropertyInventory>,
+    project_dir: &Path,
+    topology: &graphforge_storage::TopologyFiles,
+    ordinal: Option<&SessionOrdinalIdentity>,
+    label_id: graphforge_value::EntityTypeSelection,
+    selected_properties: Option<&[String]>,
+    limits: TextSearchLimits,
     mut checkpoint: C,
 ) -> Result<TextSourceProjection, SearchArtifactError>
 where
@@ -61,6 +174,16 @@ where
     checkpoint()?;
     let source_generation = SearchSourceSnapshot::generation(project_dir)?;
     let mut source_evidence = Vec::<AdmittedSourceFile>::new();
+    // With a manifest-bound source identity the evidence the readers collect is
+    // only a byte account; the identity itself comes from the manifest.
+    let manifest_files = inventory.and_then(AuthenticatedPropertyInventory::text_source_files);
+    let bind = |project_dir: &Path, evidence: &[AdmittedSourceFile]| {
+        SearchSourceSnapshot::from_admitted_files(
+            project_dir,
+            source_generation,
+            manifest_files.as_deref().unwrap_or(evidence),
+        )
+    };
     let explicit = selected_properties
         .map(|properties| normalize_properties(properties, limits))
         .transpose()?;
@@ -71,6 +194,8 @@ where
     let mut source_bytes = 0_u64;
     let eligible = select_eligible_nodes(
         project_dir,
+        topology,
+        ordinal,
         label_id,
         limits,
         &mut checkpoint,
@@ -81,11 +206,7 @@ where
         return Err(exhausted("text_documents", limits.documents));
     }
     if eligible.is_empty() {
-        let source_snapshot = SearchSourceSnapshot::from_admitted_files(
-            project_dir,
-            source_generation,
-            &source_evidence,
-        )?;
+        let source_snapshot = bind(project_dir, &source_evidence)?;
         return Ok(TextSourceProjection {
             properties: explicit.unwrap_or_default(),
             documents: Vec::new(),
@@ -95,6 +216,7 @@ where
     }
 
     let (observed_properties, mut fields_by_uuid) = project_properties(
+        inventory,
         project_dir,
         &eligible,
         explicit_set.as_ref(),
@@ -105,11 +227,7 @@ where
     )?;
     let properties = explicit.unwrap_or_else(|| observed_properties.into_iter().collect());
     if properties.is_empty() {
-        let source_snapshot = SearchSourceSnapshot::from_admitted_files(
-            project_dir,
-            source_generation,
-            &source_evidence,
-        )?;
+        let source_snapshot = bind(project_dir, &source_evidence)?;
         return Ok(TextSourceProjection {
             properties,
             documents: Vec::new(),
@@ -130,11 +248,7 @@ where
             TextDocument { node_uuid, fields }
         })
         .collect();
-    let source_snapshot = SearchSourceSnapshot::from_admitted_files(
-        project_dir,
-        source_generation,
-        &source_evidence,
-    )?;
+    let source_snapshot = bind(project_dir, &source_evidence)?;
     Ok(TextSourceProjection {
         properties,
         documents,
@@ -143,9 +257,11 @@ where
     })
 }
 
-#[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // one streaming callback preserves one admitted handle
 fn select_eligible_nodes<C>(
     project_dir: &Path,
+    topology: &graphforge_storage::TopologyFiles,
+    ordinal: Option<&SessionOrdinalIdentity>,
     label_id: graphforge_value::EntityTypeSelection,
     limits: TextSearchLimits,
     checkpoint: &mut C,
@@ -158,16 +274,12 @@ where
     let mut eligible = BTreeSet::new();
     let mut topology_rows = 0_usize;
     let mut last_surrogate = None;
-    let mut index = graphforge_storage::uuid_membership_index_present(project_dir)
-        .then(|| graphforge_storage::UuidMembershipIndex::open(project_dir))
-        .transpose()
-        .map_err(|error| source(error.to_string()))?;
     // Pre-index legacy graphs are bounded by `topology_rows`; current durable
-    // generations authenticate UUID uniqueness through the disk index instead.
-    let mut legacy_seen = index.is_none().then(BTreeSet::new);
+    // generations authenticate every row against their identity authority.
+    let mut identity = NodeIdentityCheck::open(project_dir, ordinal)?;
     let mut failure = None;
-    let admitted = graphforge_storage::visit_node_fragments_admitted(
-        project_dir,
+    let admitted = graphforge_storage::visit_node_fragments_admitted_from_files(
+        topology,
         8192,
         limits.source_bytes,
         source_evidence,
@@ -186,21 +298,8 @@ where
                     .column_by_name("node_id")
                     .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
                     .ok_or_else(|| source("topology node_id is not UInt64"))?;
-                let mut batch_uuids = Vec::with_capacity(batch.num_rows());
-                for row in 0..batch.num_rows() {
-                    let bytes: [u8; 16] = uuids
-                        .value(row)
-                        .try_into()
-                        .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
-                    batch_uuids.push(uuid::Uuid::from_bytes(bytes));
-                }
-                let indexed = index
-                    .as_mut()
-                    .map(|index| index.lookup_node_surrogates(&batch_uuids))
-                    .transpose()
-                    .map_err(|error| source(error.to_string()))?
-                    .map(|(values, _)| values);
-                for row in 0..batch.num_rows() {
+                let agrees = identity.resolve_batch(uuids, surrogates, &mut *checkpoint)?;
+                for (row, agrees) in agrees.into_iter().enumerate() {
                     checkpoint()?;
                     topology_rows = topology_rows.saturating_add(1);
                     if topology_rows > limits.topology_rows {
@@ -215,15 +314,11 @@ where
                         .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
                     let surrogate = surrogates.value(row);
                     if last_surrogate.is_some_and(|prior| surrogate <= prior)
-                        || indexed
-                            .as_ref()
-                            .is_some_and(|values| values[row] != Some(surrogate))
-                        || legacy_seen
-                            .as_mut()
-                            .is_some_and(|seen| !seen.insert(node_uuid))
+                        || !agrees
+                        || !identity.distinct(node_uuid)
                     {
                         return Err(source(
-                            "topology identity disagrees with authenticated UUID index",
+                            "topology identity disagrees with authenticated node identity",
                         ));
                     }
                     last_surrogate = Some(surrogate);
@@ -268,18 +363,13 @@ where
         return Err(error);
     }
     *source_bytes = admitted;
-    if index.as_ref().is_some_and(|index| {
-        topology_rows as u64 != index.count(graphforge_storage::UuidIndexKind::Node)
-    }) {
-        return Err(source(
-            "topology row count disagrees with authenticated UUID index",
-        ));
-    }
+    identity.finish(topology_rows, checkpoint)?;
     Ok(eligible)
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn project_properties<C>(
+    inventory: Option<&AuthenticatedPropertyInventory>,
     project_dir: &Path,
     eligible: &BTreeSet<[u8; 16]>,
     explicit: Option<&BTreeSet<String>>,
@@ -304,6 +394,7 @@ where
     let mut failure = None;
     let admitted = graphforge_storage::visit_node_property_overlay_admitted(
         project_dir,
+        inventory,
         8192,
         remaining,
         projected_columns.as_ref(),

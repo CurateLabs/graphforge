@@ -9,6 +9,7 @@ use super::TopologyIndexReceipt;
 use super::UuidIndexOrphanGcWork;
 use super::V4_ORDINAL_MANIFEST;
 use super::V4_ORDINAL_RECEIPT;
+use super::decode_manifest;
 use super::storage_err;
 use super::topology_delta::hex_sha256;
 use super::topology_delta::read_bounded;
@@ -204,7 +205,7 @@ pub(super) fn standalone_v4_pinned_update(
     )
     .map_err(storage_err)?
     {
-        crate::V4OrdinalIdentityOpen::Ready(handle) => {
+        crate::V4OrdinalIdentityOpen::Ready(mut handle) => {
             handle.pinned_update_inputs().map(Some).map_err(storage_err)
         }
         crate::V4OrdinalIdentityOpen::RebuildRequired { .. } => Err(storage_err(
@@ -221,7 +222,7 @@ pub(crate) fn maintain_uuid_membership_orphans_with_ordinal_authority(
 ) -> Result<UuidIndexOrphanGcWork, GfError> {
     let manifest_bytes =
         fs::read(project_dir.join(INDEX_DIR).join(MANIFEST)).map_err(storage_err)?;
-    let manifest: Manifest = serde_json::from_slice(&manifest_bytes).map_err(storage_err)?;
+    let manifest = decode_manifest(&manifest_bytes)?;
     let membership_authority = AuthenticatedV3MembershipAuthority {
         topology_generation: manifest.current_generation,
         manifest_sha256: hex_sha256(&manifest_bytes),
@@ -284,7 +285,7 @@ pub(super) fn collect_uuid_orphans_locked(
             "UUID membership manifest differs from selected generation authority",
         ));
     }
-    let manifest: Manifest = serde_json::from_slice(&manifest_bytes).map_err(storage_err)?;
+    let manifest = decode_manifest(&manifest_bytes)?;
     if manifest.current_generation != membership_authority.topology_generation {
         return Err(storage_err(
             "UUID membership generation differs from selected generation authority",
@@ -299,6 +300,8 @@ pub(super) fn collect_uuid_orphans_locked(
     let mut names = index.child_names().map_err(storage_err)?;
     names.sort();
     let mut work = UuidIndexOrphanGcWork::default();
+    let mut retirement =
+        crate::durable_commit::RetirementBatch::new(&index).map_err(storage_err)?;
     for name in names {
         let Some(text) = name.to_str() else { continue };
         if referenced.contains(text) || !is_canonical_run_name(text) {
@@ -331,9 +334,7 @@ pub(super) fn collect_uuid_orphans_locked(
                 false,
             )?;
         }
-        index
-            .unlink_child_if_identity(&name, identity)
-            .map_err(storage_err)?;
+        retirement.unlink(&name, identity).map_err(storage_err)?;
         if text.starts_with("forward-v4-")
             || text.starts_with("ordinal-v4-")
             || text.starts_with("tombstones-v4-")
@@ -350,7 +351,7 @@ pub(super) fn collect_uuid_orphans_locked(
         work.bytes = work.bytes.saturating_add(bytes);
     }
     if work.removed != 0 {
-        index.sync().map_err(storage_err)?;
+        retirement.acknowledge().map_err(storage_err)?;
     }
     index.revalidate_named().map_err(storage_err)?;
     topology.revalidate_named().map_err(storage_err)?;
@@ -432,16 +433,18 @@ pub(super) fn cleanup_superseded_files(
 ) -> Result<(), GfError> {
     let retained = manifest_file_names(manifest);
     let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
+    let mut retirement =
+        crate::durable_commit::RetirementBatch::new(&directory).map_err(storage_err)?;
     for name in prior.difference(&retained) {
         let file = directory
             .open_child_file(std::ffi::OsStr::new(name))
             .map_err(storage_err)?;
         let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
-        directory
-            .unlink_child_if_identity(std::ffi::OsStr::new(name), identity)
+        retirement
+            .unlink(std::ffi::OsStr::new(name), identity)
             .map_err(storage_err)?;
     }
-    directory.sync().map_err(storage_err)
+    retirement.acknowledge().map_err(storage_err)
 }
 
 #[cfg(test)]

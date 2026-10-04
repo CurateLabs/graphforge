@@ -2,7 +2,7 @@
 
 use super::AdmittedSourceFile;
 use super::admit_decoded_parquet;
-use super::hash_admitted_source;
+use super::checksum_admitted_source;
 use super::io_err;
 use super::parquet_err;
 use super::preflight_parquet_handle;
@@ -96,12 +96,12 @@ pub(crate) fn visit_property_overlay_batched_projected<F>(
     batch_size: usize,
     selected_properties: Option<&std::collections::BTreeSet<String>>,
     mut visit: F,
-) -> Result<crate::PropertyOverlayMetrics, DataFusionError>
+) -> Result<Option<crate::PropertyOverlayMetrics>, DataFusionError>
 where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
 {
     if !dir.exists() {
-        return Ok(crate::PropertyOverlayMetrics::default());
+        return Ok(crate::lifecycle_io::is_active().then(crate::PropertyOverlayMetrics::default));
     }
     let kind = if is_edge {
         crate::property_overlay::PropertyRouteKind::Edge
@@ -117,14 +117,23 @@ where
                 .map_err(|error| DataFusionError::External(Box::new(error)))?;
         &captured
     };
-    let schema = inventory.route_schema(kind, stem);
+    let schema = inventory
+        .route_schema(kind, stem)
+        .and_then(|schema| {
+            schema
+                .map(|schema| {
+                    project_property_schema(schema, kind.uuid_field(), selected_properties)
+                })
+                .transpose()
+        })
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
     let scratch = inventory
         .create_snapshot_scratch()
         .map_err(|error| DataFusionError::External(Box::new(error)))?;
     let mut rows = Vec::with_capacity(batch_size.max(1));
     let mut stopped = false;
     let metrics = inventory
-        .visit_route_projected(
+        .visit_route_projected_optional(
             kind,
             stem,
             scratch.path(),
@@ -165,6 +174,31 @@ where
         let _ = visit(&batch)?;
     }
     Ok(metrics)
+}
+
+// Normalize decoded columns against their selected schema. Omitted required
+// fields must not become null placeholders before projection removes them.
+fn project_property_schema(
+    schema: SchemaRef,
+    uuid_field: &str,
+    selected_properties: Option<&std::collections::BTreeSet<String>>,
+) -> Result<SchemaRef, graphforge_core::GfError> {
+    let Some(selected_properties) = selected_properties else {
+        return Ok(schema);
+    };
+    let indices = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| {
+            field.name() == uuid_field || selected_properties.contains(field.name())
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    schema
+        .project(&indices)
+        .map(Arc::new)
+        .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))
 }
 
 fn project_property_batch(
@@ -265,8 +299,14 @@ where
 /// `visit` receives only the newest live row for each UUID in a route. This
 /// keeps consumers from mistaking superseded immutable snapshots for duplicate
 /// logical rows.
+///
+/// `retained` is the session's already admitted inventory. Without it the
+/// project's current authority is captured here, which checksums every payload
+/// of a raw workspace; a caller that holds the inventory must pass it so the
+/// read costs the property sources it touches, not the graph.
 pub fn visit_node_property_overlay_admitted<F>(
     dir: &Path,
+    retained: Option<&crate::AuthenticatedPropertyInventory>,
     batch_size: usize,
     byte_limit: u64,
     projected_columns: Option<&std::collections::BTreeSet<String>>,
@@ -276,11 +316,16 @@ pub fn visit_node_property_overlay_admitted<F>(
 where
     F: FnMut(&str, &RecordBatch) -> Result<bool, DataFusionError>,
 {
-    let inventory = crate::property_overlay::authenticated_property_inventory(dir)
-        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
-    let admitted = inventory
-        .admitted_source_files(crate::property_overlay::PropertyRouteKind::Node)
-        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let captured;
+    let inventory = if let Some(retained) = retained {
+        retained
+    } else {
+        captured = crate::property_overlay::authenticated_property_inventory(dir)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+        &captured
+    };
+    let admitted =
+        inventory.admitted_source_files(crate::property_overlay::PropertyRouteKind::Node);
     let total = admitted.iter().try_fold(0_u64, |sum, file| {
         sum.checked_add(file.byte_length).ok_or_else(|| {
             DataFusionError::ResourcesExhausted("property source bytes overflow".into())
@@ -303,11 +348,12 @@ where
     for route in routes {
         let mut rows = Vec::with_capacity(batch_size.max(1));
         inventory
-            .visit_route(
+            .visit_route_projected_optional(
                 crate::property_overlay::PropertyRouteKind::Node,
                 &route,
                 scratch.path(),
                 crate::property_overlay::PropertyOverlayLimits::default(),
+                None,
                 |mut row| {
                     if stopped {
                         return Ok(());
@@ -388,13 +434,13 @@ where
             )));
         }
         preflight_parquet_handle(&mut file, metadata.len())?;
-        evidence.push(hash_admitted_source(
+        evidence.push(checksum_admitted_source(
             property_relative_name(stem, path)?,
             &mut file,
             metadata.len(),
         )?);
         let mut builder =
-            ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
+            ParquetRecordBatchReaderBuilder::try_new(crate::catalog::admitted_path_file(file)?)
                 .map_err(parquet_err)?;
         admit_decoded_parquet(&builder)?;
         if let Some(columns) = projected_columns {

@@ -62,7 +62,7 @@ use super::ordinal_artifacts::write_v4_tombstone_artifact;
 use super::ordinal_compaction::compact_v4_binary_carry;
 use super::ordinal_compaction::read_v4_forward_record;
 use super::rebuild::build_surrogate_run;
-use super::rebuild::ensure_uuid_membership_migrated;
+
 use super::rebuild::flush_entity_surrogate_run;
 use super::rebuild::merge_node_surrogate_runs;
 #[cfg(test)]
@@ -76,7 +76,6 @@ use super::record_length;
 use super::reject_retained_identity_collisions;
 use super::reject_retained_surrogate_collisions;
 use super::storage_err;
-use super::sync_uuid_file;
 use super::uuid_membership_index_present;
 use super::v4_publication_failure;
 use super::validate_block_records;
@@ -84,8 +83,8 @@ use super::validate_block_records;
 use super::validate_run_contents;
 use super::validate_run_descriptors;
 use graphforge_core::GfError;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use sha2::Digest;
-use sha2::Sha256;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
@@ -116,7 +115,10 @@ pub(crate) fn commit_uuid_topology_rewrite(
     if delta_is_empty && staged.is_empty() {
         return Ok(CommittedUuidTopologyRewrite::NoTopologyChange);
     }
-    ensure_uuid_membership_migrated(project_dir)?;
+    super::rebuild::ensure_uuid_membership_migrated_with_topology(
+        project_dir,
+        staged.topology_authority().cloned(),
+    )?;
     let selected = selected_generation_for_graph_root(project_dir)?;
     let ordinal_authority = selected
         .as_ref()
@@ -130,7 +132,7 @@ pub(crate) fn commit_uuid_topology_rewrite(
                 .open(project_dir, crate::V4OrdinalIdentityLimits::default())
                 .map_err(storage_err)?
             {
-                crate::V4OrdinalIdentityOpen::Ready(handle) => {
+                crate::V4OrdinalIdentityOpen::Ready(mut handle) => {
                     handle.pinned_update_inputs().map(Some).map_err(storage_err)
                 }
                 crate::V4OrdinalIdentityOpen::RebuildRequired { .. } => Err(storage_err(
@@ -298,6 +300,15 @@ pub(crate) fn commit_uuid_topology_rewrite(
             }
             Ok(receipt)
         });
+    // Retain this batch's exact membership before the rewrite consumes it.
+    // UUID participants stage only their reserved namespace; a reconciled
+    // durable commit must install the same topology as ordinary success.
+    let topology = staged.topology_authority().cloned();
+    let topology_candidate = topology
+        .as_ref()
+        .map(|authority| authority.prepare_installed(&staged))
+        .transpose()?;
+    let mut reconciled = false;
     let commit =
         crate::generation::commit_topology_aware_with_participant(staged, &root, participant);
     let token = prepared.borrow_mut().take();
@@ -324,7 +335,10 @@ pub(crate) fn commit_uuid_topology_rewrite(
                 Ok(Some((
                     crate::durable_rewrite::AuxiliaryReconcileOutcome::Committed,
                     generation,
-                ))) => Some(generation),
+                ))) => {
+                    reconciled = true;
+                    Some(generation)
+                }
                 Ok(Some((crate::durable_rewrite::AuxiliaryReconcileOutcome::NotCommitted, _))) => {
                     if let Some(value) = snapshot.as_mut()
                         && let Err(restore) = value.restore_owned_manifest()
@@ -369,6 +383,9 @@ pub(crate) fn commit_uuid_topology_rewrite(
         }) {
             *snapshot = None;
             return Err(error);
+        }
+        if reconciled && let (Some(topology), Some(candidate)) = (topology, topology_candidate) {
+            topology.install(candidate);
         }
         committed_metrics = token.metrics().clone();
         let refresh = injected_snapshot_refresh_failure().map_or_else(
@@ -495,7 +512,7 @@ pub(crate) fn prepare_uuid_membership_delta(
         metrics,
         manifest,
         auxiliary: crate::AuxiliaryReceipt {
-            kind: "uuid-membership/v5".to_owned(),
+            kind: "uuid-membership/v7".to_owned(),
             schema_version: FORMAT_VERSION,
             path: format!("{INDEX_DIR}/{TOPOLOGY_RECEIPT}"),
             digest: hex_bytes(&digest),
@@ -700,10 +717,8 @@ pub(super) fn plan_uuid_membership_delta(
     if current == 0 && manifest.runs.is_empty() {
         let empty_identity_path = scratch.join("identities-base.run");
         let empty_surrogate_path = scratch.join("surrogates-base.run");
-        let empty_identity = create_uuid_file(&empty_identity_path)?;
-        sync_uuid_file(&empty_identity)?;
-        let empty_surrogate = create_uuid_file(&empty_surrogate_path)?;
-        sync_uuid_file(&empty_surrogate)?;
+        create_uuid_file(&empty_identity_path)?;
+        create_uuid_file(&empty_surrogate_path)?;
         let base_identities = describe_run(
             &empty_identity_path,
             "identities-v5-base",
@@ -1051,7 +1066,7 @@ fn merge_identity_handles(
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    sync_uuid_file(&out)?;
+    out.flush().map_err(storage_err)?;
     for reader in readers {
         metrics.validation_scan_bytes = metrics
             .validation_scan_bytes
@@ -1108,7 +1123,7 @@ fn merge_surrogate_handles(
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    sync_uuid_file(&out)?;
+    out.flush().map_err(storage_err)?;
     for reader in readers {
         metrics.validation_scan_bytes = metrics
             .validation_scan_bytes
@@ -1130,7 +1145,7 @@ pub(super) fn topology_delta_sha256(
     nodes.sort_unstable_by_key(|(uuid, _)| *uuid.as_bytes());
     let mut edges = edges.to_vec();
     edges.sort_unstable_by_key(|uuid| *uuid.as_bytes());
-    let mut hasher = Sha256::new();
+    let mut hasher = graphforge_core::hash_observation::ContractSha256::new();
     hasher.update(b"graphforge/uuid-index-topology-delta/v1");
     for (uuid, surrogate) in nodes {
         hasher.update([0]);
@@ -1215,9 +1230,7 @@ pub(super) fn append_uuid_membership_delta_with_tombstones(
                 .tempdir_in(staging)
                 .map_err(storage_err)?;
             let empty = scratch.path().join("empty.run");
-            File::create(&empty)
-                .and_then(|file| file.sync_all())
-                .map_err(storage_err)?;
+            File::create(&empty).map_err(storage_err)?;
             let identities = publish_data(
                 &empty,
                 &root,
@@ -1501,7 +1514,7 @@ pub(super) fn write_identity_records(
         file.write_all(&bytes).map_err(storage_err)?;
         blocks += 1;
     }
-    sync_uuid_file(&file)?;
+    file.flush().map_err(storage_err)?;
     Ok(blocks)
 }
 
@@ -1522,7 +1535,7 @@ fn write_surrogate_records(path: &Path, records: &[(u64, Uuid)]) -> Result<u64, 
         file.write_all(&bytes).map_err(storage_err)?;
         blocks += 1;
     }
-    sync_uuid_file(&file)?;
+    file.flush().map_err(storage_err)?;
     Ok(blocks)
 }
 
@@ -1538,11 +1551,11 @@ fn publish_manifest(root: &Path, staging: &Path, manifest: &Manifest) -> Result<
     let result = (|| -> Result<(), GfError> {
         serde_json::to_writer(&mut temp, manifest).map_err(storage_err)?;
         temp.flush().map_err(storage_err)?;
-        temp.sync_all().map_err(storage_err)?;
+        crate::durable_commit::seal_file(&temp).map_err(storage_err)?;
         directory
             .replace_child(&temp_name, identity, std::ffi::OsStr::new(MANIFEST))
             .map_err(storage_err)?;
-        directory.sync().map_err(storage_err)
+        crate::durable_commit::acknowledge_directory(&directory).map_err(storage_err)
     })();
     if result.is_err() {
         let _ = directory.unlink_child_if_identity(&temp_name, identity);
@@ -1690,8 +1703,7 @@ fn merge_identity_v3(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    out.flush().map_err(storage_err)?;
-    out.sync_all().map_err(storage_err)
+    out.flush().map_err(storage_err)
 }
 
 /// Stage one incremental v4 node-ordinal delta beside the canonical topology
@@ -1812,6 +1824,7 @@ pub(crate) fn prepare_v4_ordinal_delta(
         manifest: delta_manifest,
         metrics: build,
         publications: delta_publications,
+        first_ordinal_uuid: delta_first_uuid,
     } = writer.finish()?;
     let (tombstones, tombstone_bytes, tombstone_blocks) =
         write_v4_tombstone_artifact(&artifacts, generation, &deleted)?;
@@ -1824,6 +1837,7 @@ pub(crate) fn prepare_v4_ordinal_delta(
         false,
     )?;
 
+    let delta_uuid_order = delta_manifest.uuid_order_matches_ordinals;
     let mut manifest = pinned.manifest.clone();
     manifest.topology_generation = generation;
     manifest
@@ -1836,6 +1850,14 @@ pub(crate) fn prepare_v4_ordinal_delta(
     manifest
         .ordinal_ranges
         .sort_unstable_by_key(|range| range.first_node_id);
+    // Derived from the streamed delta and the authenticated tail of the parent,
+    // never assumed. Compaction below re-packs the same sequence, so it keeps it.
+    manifest.uuid_order_matches_ordinals = crate::ordinal_identity_v4::combine_uuid_order(
+        pinned.manifest.uuid_order_matches_ordinals,
+        pinned.last_ordinal_uuid()?,
+        delta_uuid_order,
+        delta_first_uuid,
+    );
 
     let mut created = manifest
         .forward_identities
@@ -1973,7 +1995,7 @@ pub(crate) fn prepare_v4_ordinal_delta(
     let prepared = PreparedV4OrdinalDelta {
         expected_generation: generation,
         auxiliary: crate::AuxiliaryReceipt {
-            kind: "uuid-membership/v4".to_owned(),
+            kind: "uuid-membership/ordinal-v6".to_owned(),
             schema_version: crate::ORDINAL_IDENTITY_V4,
             path: format!("{INDEX_DIR}/{V4_ORDINAL_RECEIPT}"),
             digest: hex_sha256(&receipt_bytes),
@@ -2018,7 +2040,7 @@ fn open_v4_plan_root(
     let name = std::ffi::OsStr::new(V4_PLAN_ROOT);
     let root = match index.create_child_directory(name) {
         Ok(root) => {
-            index.sync().map_err(storage_err)?;
+            crate::durable_commit::acknowledge_directory(&index).map_err(storage_err)?;
             root
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -2073,7 +2095,7 @@ fn cleanup_abandoned_v4_plan_directories(
             "V4_PLAN_CLEANUP_AFTER_UNLINK",
             false,
         )?;
-        plan_root.sync().map_err(storage_err)?;
+        crate::durable_commit::acknowledge_directory(plan_root).map_err(storage_err)?;
     }
     plan_root.revalidate_named().map_err(storage_err)?;
     Ok(())
@@ -2099,7 +2121,7 @@ fn cleanup_v4_plan_directory(
             cleanup_v4_plan_file(directory, &name, &mut bytes)?;
         }
     }
-    directory.sync().map_err(storage_err)
+    crate::durable_commit::acknowledge_directory(directory).map_err(storage_err)
 }
 
 fn cleanup_v4_plan_files(
@@ -2112,7 +2134,7 @@ fn cleanup_v4_plan_files(
     for name in names {
         cleanup_v4_plan_file(directory, &name, bytes)?;
     }
-    directory.sync().map_err(storage_err)
+    crate::durable_commit::acknowledge_directory(directory).map_err(storage_err)
 }
 
 fn cleanup_v4_plan_file(
@@ -2197,9 +2219,7 @@ fn external_sort_v4_nodes(
     }
     if runs.is_empty() {
         let path = scratch.join("v4-delta-empty.run");
-        File::create(&path)
-            .and_then(|file| file.sync_all())
-            .map_err(storage_err)?;
+        File::create(&path).map_err(storage_err)?;
         runs.push(path);
     }
     merge_node_surrogate_runs(runs, scratch, limits.merge_fan_in, metrics)

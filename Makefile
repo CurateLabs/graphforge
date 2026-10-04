@@ -1,4 +1,4 @@
-.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-clean pre-push-preflight pre-push-fast clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-build-walltime codspeed-run bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal bench-m4-entry bench-adjacency-200m m4-entry-matrix-check durability-isolation-check native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
+.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test test-rust test-python test-node test-scripts check clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-build-walltime codspeed-run bench-traversal bench-tck-scenarios tck-perf bench-fixed-hop-limit bench-fixed-hop-livejournal bench-embedded-performance bench-adjacency-200m native-consumers bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build install build release-version-check package-license-verify publish-dry-run
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -35,20 +35,8 @@ release-version-check:  ## Verify Cargo/Python/Node/skills versions align
 package-license-verify:  ## Verify packaged Cargo/npm/Python artifacts include LICENSE+NOTICE
 	python3 scripts/verify_package_licenses.py
 
-publish-dry-run:  ## Local v0.5 publish dry-runs (npm/docs/python); never prod registries
-	python3 scripts/publish_dry_run.py --surface npm,docs,python --report target/publish-dry-run/evidence.json
-publish-dry-run-npm:  ## npm publish --dry-run for Node binding + agent-skills
-	python3 scripts/publish_dry_run.py --surface npm
-publish-dry-run-docs:  ## Docs preview build (pnpm docs:build)
-	python3 scripts/publish_dry_run.py --surface docs
-publish-dry-run-python:  ## Local maturin sdist packaging check (not TestPyPI upload)
-	python3 scripts/publish_dry_run.py --surface python
-publish-dry-run-cargo:  ## cargo package --list for all crates.io packages in plan order
-	python3 scripts/publish_dry_run.py --surface cargo-package
-
-record-release-artifacts:  ## Hash artifacts in DIST_DIR into a release record JSON
-	python3 scripts/record_release_artifacts.py --version $${VERSION:?set VERSION} --dist-dir $${DIST_DIR:?set DIST_DIR} --out $${OUT:-docs/releases/records/v$${VERSION}-artifacts.json}
-
+publish-dry-run:  ## Package every crate in publish order without uploading
+	python3 scripts/publish_crates.py --dry-run
 third-party-notices:  ## Regenerate third-party Rust license notices (requires cargo-about)
 	python3 scripts/generate_third_party_notices.py
 
@@ -91,8 +79,8 @@ _ensure-graphforge:  ## Fail fast unless the native graphforge package is import
 		 echo "   maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml"; \
 		 exit 1)
 
-# Default maintainer loop: make pre-push-fast (~30s). Use this full coverage
-# gate for coverage-sensitive changes or floor claims.
+# Default maintainer loop: make check, then the targeted tests. Use this full
+# coverage run for coverage-sensitive changes or floor claims.
 # Rust adapter acceptance is not pytest-cov/c8 evidence, so wrapper reports
 # remain separate fail-closed measurements rather than being silently skipped.
 coverage:  ## Rust + Python + Node coverage with per-surface thresholds
@@ -203,58 +191,35 @@ check-patch-coverage:  ## Validate patch coverage for changed files (90% thresho
 		echo "✅ Patch coverage meets 90% threshold"; \
 	fi
 
-pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstrings (no coverage, ~30s)
-	@echo "━━━ Committed Python lock ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@uv lock --check
-	@python3 scripts/ci/test-python-lock-policy.py
-	@python3 scripts/ci/test-test-environment.py
-	@echo "━━━ Cargo metadata + Python build mode ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@cargo metadata --locked --manifest-path benchmarks/Cargo.toml --format-version 1 >/dev/null
-	@python3 scripts/ci/python-build-mode-check.py
-	@python3 scripts/ci/test-python-build-mode-check.py
-	@python3 scripts/ci/test-uuid-derivation-policy.py
-	@echo "━━━ Source size policy ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@python3 scripts/source_size_policy.py
-	@python3 scripts/ci/test-source-size-policy.py
-	@echo "━━━ Benchmark measurement policy ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@python3 scripts/ci/benchmark-measurement-policy.py
-	@python3 scripts/ci/test-benchmark-measurement-policy.py
-	@echo "━━━ Public API BDD policy ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@python3 scripts/ci/api-bdd-policy.py --check-issues
-	@python3 scripts/ci/test-api-bdd-policy.py
-	@echo "━━━ Multi-ontology contract fixtures ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@python3 scripts/ci/multi-ontology-contract-check.py
-	@python3 scripts/ci/test-multi-ontology-surface-gate.py
-	@python3 scripts/ci/multi-ontology-surface-gate.py
-	@python3 scripts/ci/test-compare-multi-ontology-parity.py
-	@python3 scripts/ci/test-compare-multi-ontology-certification.py
-	@echo "━━━ Property-overlay contract ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@python3 scripts/ci/property-overlay-contract.py
-	@python3 scripts/ci/test-property-overlay-contract.py
-	@echo "━━━ Format check ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@$(MAKE) format-check
-	@echo "━━━ Lint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@$(MAKE) lint
-	@echo "━━━ Type check ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@$(MAKE) type-check
-	@echo "━━━ Security ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@$(MAKE) security
-	@echo "━━━ Workflow validation ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@$(MAKE) workflow-lint
-	@echo "━━━ License policy ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@$(MAKE) license-check
-	@echo "━━━ Docstring coverage ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@$(MAKE) docstring-coverage
-	@echo "✅ Fast checks passed! Run 'make pre-push' to include coverage."
+check:  ## Format, lint, and static checks for every surface (no test run)
+	cargo fmt --all -- --check
+	cargo clippy --workspace -- -D warnings
+	# Benches build only in the nightly CodSpeed workflow; compile them here so
+	# an API change that breaks one fails the PR, not the next nightly.
+	cargo check --workspace --benches --locked
+	uv run ruff format --check .
+	uv run ruff check .
+	uv run mypy crates/graphforge-bindings-py/python/graphforge --strict-optional --show-error-codes
+	uv run bandit -q -c pyproject.toml -r crates/graphforge-bindings-py/python
+	scripts/check-workflows.sh
+	scripts/ci/repo-checks.sh
 
-pre-push:  ## Run prerequisite-aware, resumable full local validation
-	@python3 scripts/test_environment.py -- python3 scripts/pre_push_validation.py run
+# Both binding targets need the native artifacts built from this tree first
+# (docs/development/agent-environment.md).
+test-python:  ## Run every Python binding suite against the installed wheel
+	python3 scripts/test_environment.py -- sh -c 'find crates/graphforge-bindings-py/tests -maxdepth 1 -name "*.py" ! -name "test_*.py" -print0 | sort -z | xargs -0 -n 1 -P $${PYTHON_BINDING_WORKERS:-4} uv run --no-sync python'
+	python3 scripts/test_environment.py -- uv run --no-sync pytest tests/unit tests/integration crates/graphforge-bindings-py/tests/test_*.py -q -n $${PYTEST_WORKERS:-4}
 
-pre-push-clean:  ## Discard local validation evidence and force a full revalidation
-	@python3 scripts/test_environment.py -- python3 scripts/pre_push_validation.py run --force-clean
+test-node:  ## Run every Node binding and CLI suite against the built addon
+	python3 scripts/test_environment.py -- pnpm --filter @curatelabs/graphforge test
+	pnpm --filter @curatelabs/graphforge format:check
+	python3 scripts/test_environment.py -- pnpm test:node-cli
+	pnpm format:node-cli
+	python3 scripts/test_environment.py -- pnpm smoke:node-cli
+	python3 scripts/test_environment.py -- pnpm --filter @curatelabs/graphforge-cli test:lifecycle
 
-pre-push-preflight:  ## Check local pre-push prerequisites and disk before compilation
-	@python3 scripts/test_environment.py -- python3 scripts/pre_push_validation.py preflight
+test-scripts:  ## Run the scripts/ci self-test suites (needs uv sync --all-extras and pnpm install)
+	scripts/ci/run-self-tests.sh
 
 clean:  ## Clean up cache files
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
@@ -283,6 +248,11 @@ cargo-build:  ## Build all Rust workspace crates
 cargo-test:  ## Run all Rust workspace tests
 	python3 scripts/test_environment.py -- cargo test --workspace
 
+# The CI Rust lane. Narrow it while iterating: make test-rust ARGS="-p graphforge-storage"
+test-rust:  ## Run the Rust suite the way CI does (nextest; ARGS narrows it)
+	python3 scripts/test_environment.py -- cargo nextest run $(if $(ARGS),$(ARGS),--workspace) --locked --no-fail-fast \
+		-E 'not ((package(graphforge-api) and binary(bdd)) or (package(graphforge-observability) and binary(disabled_allocations)))'
+
 # Rust llvm-cov workspace coverage. Requires:
 #   cargo install cargo-llvm-cov
 #   rustup component add llvm-tools-preview
@@ -300,16 +270,22 @@ coverage-rust:  ## Core + same-SHA Python/Node adapter Rust coverage ledger
 
 codspeed-build:  ## Build the CodSpeed benchmark targets (simulation mode; see docs/development/benchmarking.md)
 	cargo codspeed build -m simulation -p graphforge-core -p graphforge-cypher
-	cargo codspeed build -m simulation -p graphforge-storage --bench m6_storage
+	cargo codspeed build -m simulation -p graphforge-storage --bench storage_kernels
 
-codspeed-build-walltime:  ## Build only M6 durable I/O benchmarks in walltime mode
-	cargo codspeed build -m walltime -p graphforge-storage --bench m6_storage_io
+codspeed-build-walltime:  ## Build only the durable storage I/O benchmarks in walltime mode
+	cargo codspeed build -m walltime -p graphforge-storage --bench storage_io
 
 codspeed-run:  ## Run the CodSpeed benchmarks locally (requires the codspeed CLI)
 	codspeed run --mode simulation -- cargo codspeed run
 
 bench-traversal:  ## Run the #767 traversal scaling Divan benchmarks (release, manual; see benchmarks/traversal_scaling.md)
 	cargo bench -p graphforge-exec --bench traversal_scaling -- --sample-count 5
+
+bench-tck-scenarios:  ## Run the #1653 per-scenario openCypher TCK Divan benchmark (manual; raw results under CODSPEED_ENV)
+	cargo bench -p graphforge-api --bench tck_scenarios
+
+tck-perf:  ## Host-local TCK performance run: BenchExec whole-TCK + Divan per-scenario, provenance-gated (#1654; manual, native Linux)
+	PYTHONPATH=$(CURDIR)/benchmarks/harness /usr/bin/python3 -m graphforge_bench.tck_perf run --repo-root $(CURDIR) $(TCK_PERF_ARGS)
 
 bench-merge-scaling:  ## Run the #1400 node MERGE scaling Divan benchmarks (release, manual)
 	cargo bench -p graphforge-exec --bench merge_scaling -- --sample-count 5
@@ -321,21 +297,13 @@ bench-fixed-hop-livejournal:  ## Run the #1269/#1271 cached LiveJournal LIMIT ma
 	@test -n "$$GF_LIVEJOURNAL_PROJECT" || (echo "GF_LIVEJOURNAL_PROJECT is required" && exit 2)
 	cargo test -p graphforge-api --release --test fixed_hop_limit release_livejournal_fixed_hop_limits -- --ignored --nocapture --test-threads=1
 
-m4-entry-matrix-check:  ## Validate the versioned M4 entry baseline contract (#334)
-	python3 scripts/ci/m4-entry-matrix.py validate
-	python3 scripts/ci/test-m4-entry-matrix.py
-
-durability-isolation-check:  ## Validate acknowledged durability/isolation contract (#748)
-	python3 scripts/ci/durability-isolation-gate.py validate
-	python3 scripts/ci/test-durability-isolation-gate.py
-
 .PHONY: durability-certification-check
 durability-certification-check:  ## Validate seeded durability certification gate (#756)
 	python3 scripts/ci/durability-certification-gate.py validate
 	python3 scripts/ci/test-durability-certification-gate.py
 
-bench-m4-entry:  ## Emit the M4 entry large/manual evidence envelope (#334; hardware-specific)
-	cargo test -p graphforge-api --release --test m4_entry_baseline large_manual_matrix_emits_hardware_dataset_evidence -- --ignored --nocapture --test-threads=1
+bench-embedded-performance:  ## Emit the embedded performance baseline large/manual evidence envelope (#334; hardware-specific)
+	cargo test -p graphforge-api --release --test embedded_performance_baseline large_manual_matrix_emits_hardware_dataset_evidence -- --ignored --nocapture --test-threads=1
 
 bench-adjacency-200m:  ## >200M-edge public adjacency build evidence (#336; ignored, scale-host)
 	GF_ADJACENCY_SCALE_EVIDENCE_OUT="$(CURDIR)/build/adjacency-200m-evidence.json" \
@@ -352,34 +320,6 @@ bench-file-backed-128m:  ## 8M/128M densified public file-backed reopen evidence
 native-consumers:  ## Run audited algorithm/search consumers against the installed native wheel
 	python scripts/ci/run-native-consumers.py
 
-release-load-matrix-check:  ## Validate the versioned XS-XL release-load contracts
-	python3 scripts/ci/release-load-matrix.py validate
-	python3 scripts/ci/test-release-load-matrix.py
-	python3 scripts/ci/test-release-load-executor.py
-	python3 scripts/ci/test-release-load-probe-parity.py
-
-release-load-matrix:  ## Run the complete local/release-machine matrix against built native artifacts
-	@test -n "$$GF_LOAD_SHA" || (echo "GF_LOAD_SHA is required" && exit 2)
-	python3 scripts/ci/release-load-matrix.py run \
-		--sha "$$GF_LOAD_SHA" \
-		--work "$${GF_LOAD_WORK:-build/release-load}" \
-		--output "$${GF_LOAD_OUTPUT:-build/release-load-evidence.json}"
-
-clean-env-verify-check:  ## Unit-test the post-publication clean-env harness (#2795)
-	python3 scripts/ci/test-clean-env-verify.py
-
-clean-env-verify-preflight:  ## Probe public registries for VERSION (fails closed if unpublished)
-	@test -n "$(VERSION)" || (echo "VERSION is required (e.g. VERSION=0.5.0)" && exit 2)
-	python3 scripts/ci/clean-env-verify.py preflight --version "$(VERSION)" \
-		$(if $(OUTPUT),--output "$(OUTPUT)",)
-
-clean-env-verify:  ## Run clean-env lanes against public registries (post-§6 only)
-	@test -n "$(VERSION)" || (echo "VERSION is required (e.g. VERSION=0.5.0)" && exit 2)
-	python3 scripts/ci/clean-env-verify.py run --version "$(VERSION)" \
-		$(if $(RELEASE_RECORD),--release-record "$(RELEASE_RECORD)" --all,--default) \
-		$(if $(OUTPUT),--output "$(OUTPUT)",) \
-		$(if $(WORK),--work "$(WORK)",)
-
 bulk-construction-conformance-check:  ## Validate the opt-in bulk construction conformance contract
 	python3 scripts/ci/bulk-construction-conformance.py validate
 	python3 scripts/ci/test-bulk-construction-conformance.py
@@ -389,10 +329,6 @@ bulk-construction-conformance:  ## Run same-SHA Rust/Python/Node bulk constructi
 		--output "$${GF_BULK_OUTPUT:-build/bulk-construction-conformance}"
 
 .PHONY: bulk-construction-conformance-check bulk-construction-conformance
-
-.PHONY: release-certification-check
-release-certification-check:  ## Validate the final release certification aggregate gate
-	python3 scripts/ci/test-release-certification.py
 
 cargo-check:  ## Type-check all Rust workspace crates (fast)
 	cargo check --workspace

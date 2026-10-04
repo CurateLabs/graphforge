@@ -6,10 +6,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use super::{
-    process_cpu_time,
-    scheduler::{self, SchedulerSample},
-};
+use super::scheduler::{SchedulerReader, SchedulerSample};
 
 thread_local! {
     static ACTIVE: RefCell<Vec<Rc<RefCell<State>>>> = const { RefCell::new(Vec::new()) };
@@ -22,6 +19,16 @@ pub struct RegionMeasurement {
     pub wall_ns: u64,
     /// Upper bound for the two sequential sampling windows, excluding CPU tick quantization.
     pub sampling_uncertainty_ns: u64,
+    /// Bytes accepted by process write syscalls, including worker threads (Linux wchar).
+    pub written_bytes: Option<u64>,
+    /// Input bytes passed to instrumented SHA-256 sites; see the diagnostic method.
+    pub hashed_bytes: Option<u64>,
+    /// Sum of SHA-256 update/finalize elapsed intervals across process threads.
+    pub hash_elapsed_ns: Option<u64>,
+    /// Instrumented file and directory barrier attempts across process threads.
+    pub fsync_calls: Option<u64>,
+    /// Sum of instrumented barrier elapsed intervals across process threads.
+    pub fsync_elapsed_ns: Option<u64>,
     /// All process threads, including unrelated work; Linux has 10 ms resolution.
     pub process_cpu_ns: Option<u64>,
     /// Calling-thread on-CPU runtime from Linux schedstat, not pool occupancy.
@@ -45,6 +52,12 @@ impl RegionMeasurement {
             .sampling_uncertainty_ns
             .saturating_add(other.sampling_uncertainty_ns);
         self.process_cpu_ns = add(self.process_cpu_ns, other.process_cpu_ns);
+        self.written_bytes = add(self.written_bytes, other.written_bytes);
+        self.hashed_bytes = add(self.hashed_bytes, other.hashed_bytes);
+        self.hash_elapsed_ns = add(self.hash_elapsed_ns, other.hash_elapsed_ns);
+        self.fsync_calls = add(self.fsync_calls, other.fsync_calls);
+        self.fsync_elapsed_ns = add(self.fsync_elapsed_ns, other.fsync_elapsed_ns);
+
         self.thread_running_ns = add(self.thread_running_ns, other.thread_running_ns);
         self.thread_runnable_ns = add(self.thread_runnable_ns, other.thread_runnable_ns);
         self.thread_sleeping_ns = add(self.thread_sleeping_ns, other.thread_sleeping_ns);
@@ -63,6 +76,12 @@ impl RegionMeasurement {
                 .sampling_uncertainty_ns
                 .saturating_add(children.sampling_uncertainty_ns),
             process_cpu_ns: subtract(self.process_cpu_ns, children.process_cpu_ns),
+            written_bytes: subtract(self.written_bytes, children.written_bytes),
+            hashed_bytes: subtract(self.hashed_bytes, children.hashed_bytes),
+            hash_elapsed_ns: subtract(self.hash_elapsed_ns, children.hash_elapsed_ns),
+            fsync_calls: subtract(self.fsync_calls, children.fsync_calls),
+            fsync_elapsed_ns: subtract(self.fsync_elapsed_ns, children.fsync_elapsed_ns),
+
             thread_running_ns: subtract(self.thread_running_ns, children.thread_running_ns),
             thread_runnable_ns: subtract(self.thread_runnable_ns, children.thread_runnable_ns),
             thread_sleeping_ns: subtract(self.thread_sleeping_ns, children.thread_sleeping_ns),
@@ -89,6 +108,12 @@ fn zero() -> RegionMeasurement {
         wall_ns: 0,
         sampling_uncertainty_ns: 0,
         process_cpu_ns: Some(0),
+        written_bytes: Some(0),
+        hashed_bytes: Some(0),
+        hash_elapsed_ns: Some(0),
+        fsync_calls: Some(0),
+        fsync_elapsed_ns: Some(0),
+
         thread_running_ns: Some(0),
         thread_runnable_ns: Some(0),
         thread_sleeping_ns: Some(0),
@@ -117,6 +142,8 @@ pub struct RegionSnapshot {
     /// Versioned observation contract.
     pub contract: &'static str,
     /// Process CPU is shared; worker thread scopes are not captured by this tree.
+    pub io_scope: &'static str,
+    /// Process CPU includes every thread.
     pub cpu_scope: &'static str,
     /// Scheduler counters cover the calling thread, not the process or PSI.
     pub scheduler_scope: &'static str,
@@ -128,31 +155,42 @@ pub struct RegionSnapshot {
 
 #[derive(Debug, Default)]
 struct State {
+    readers: BoundaryReaders,
     stack: Vec<(u64, String, RegionMeasurement)>,
     next_id: u64,
     invalid: bool,
     rows: BTreeMap<String, RegionRow>,
+    phases: BTreeMap<crate::StorageIoPhase, super::RegionConcurrency>,
     work: BTreeMap<String, BTreeMap<String, u64>>,
 }
 
 /// Isolated, thread-bound capture of nested lifecycle regions.
 ///
-/// Nested captures restore the previous capture. Captures never reset or
-/// difference a global counter. Spawned worker threads are intentionally not
+/// Nested captures restore the previous capture. Captures never
+/// reset global counters. I/O samples difference shared process totals. Worker thread scopes are not
 /// attributed as though their process CPU deltas were disjoint.
 pub struct RegionCapture {
     state: Rc<RefCell<State>>,
     root: Option<CaptureRegion>,
+    _observation: graphforge_filesystem::observation::Observation,
+    _hash_observation: graphforge_core::hash_observation::HashObservation,
 }
 
 impl RegionCapture {
     /// Start a capture with a static root name. Finish after child guards drop.
     #[must_use]
     pub fn start(name: &'static str) -> Self {
+        let observation = graphforge_filesystem::observation::Observation::start();
+        let hash_observation = graphforge_core::hash_observation::HashObservation::start();
         let state = Rc::new(RefCell::new(State::default()));
         ACTIVE.with(|active| active.borrow_mut().push(state.clone()));
         let root = CaptureRegion::enter(name);
-        Self { state, root }
+        Self {
+            state,
+            root,
+            _observation: observation,
+            _hash_observation: hash_observation,
+        }
     }
 
     /// Finish the root and return the complete tree, including explicit residuals.
@@ -160,7 +198,8 @@ impl RegionCapture {
     pub fn finish(mut self) -> RegionSnapshot {
         drop(self.root.take());
         RegionSnapshot {
-            contract: "graphforge-region-diagnostics/1",
+            contract: "graphforge-region-diagnostics/2",
+            io_scope: "shared_process_inclusive_write_syscalls_instrumented_sha256_and_barriers",
             cpu_scope: "shared_process_inclusive_do_not_sum",
             scheduler_scope: "calling_thread_only_unknown_is_not_blocked_or_psi",
             regions: self.state.borrow().rows.clone(),
@@ -180,6 +219,24 @@ impl Drop for RegionCapture {
     }
 }
 
+pub(super) fn phase_snapshot() -> Option<BTreeMap<crate::StorageIoPhase, super::RegionConcurrency>>
+{
+    ACTIVE.with(|active| {
+        let states = active.borrow();
+        let state = states.last()?.borrow();
+        (!state.invalid).then(|| state.phases.clone())
+    })
+}
+pub(super) fn reset_phases() {
+    ACTIVE.with(|active| {
+        if let Some(state) = active.borrow().last() {
+            state.borrow_mut().phases.clear();
+        }
+    });
+}
+#[cfg(any(test, feature = "test-support"))]
+thread_local! { pub(super) static SAMPLE_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+
 #[derive(Debug)]
 pub(super) struct CaptureRegion {
     state: Rc<RefCell<State>>,
@@ -188,6 +245,20 @@ pub(super) struct CaptureRegion {
 }
 
 impl CaptureRegion {
+    pub(super) fn record_phase(
+        &self,
+        phase: crate::StorageIoPhase,
+        region: super::RegionConcurrency,
+    ) {
+        let mut state = self.state.borrow_mut();
+        if !state.invalid {
+            state
+                .phases
+                .entry(phase)
+                .and_modify(|total| total.merge(&region))
+                .or_insert(region);
+        }
+    }
     pub(super) fn enter(name: &'static str) -> Option<Self> {
         ACTIVE.with(|active| {
             let state = active.borrow().last()?.clone();
@@ -210,18 +281,15 @@ impl CaptureRegion {
             let id = state.borrow().next_id;
             state.borrow_mut().next_id += 1;
             state.borrow_mut().stack.push((id, path, zero()));
-            Some(Self {
-                state,
-                sample: Sample::now(),
-                id,
-            })
+            let sample = Sample::now(&mut state.borrow_mut().readers);
+            Some(Self { state, sample, id })
         })
     }
 }
 
 impl Drop for CaptureRegion {
     fn drop(&mut self) {
-        let measured = self.sample.elapsed();
+        let measured = self.sample.elapsed(&mut self.state.borrow_mut().readers);
         let mut state = self.state.borrow_mut();
         if state.invalid || state.stack.last().is_none_or(|frame| frame.0 != self.id) {
             state.invalid = true;
@@ -286,23 +354,34 @@ struct Sample {
     cpu: Option<u64>,
     scheduler: SchedulerSample,
     sampling_ns: u64,
+    writes: Option<u64>,
+    hashes: (u64, u64),
+    barriers: (u64, u64),
 }
 
 impl Sample {
-    fn now() -> Self {
+    fn now(readers: &mut BoundaryReaders) -> Self {
+        #[cfg(any(test, feature = "test-support"))]
+        SAMPLE_COUNT.with(|count| count.set(count.get() + 1));
         let wall = Instant::now();
-        let cpu = process_cpu_time().and_then(|d| u64::try_from(d.as_nanos()).ok());
-        let scheduler = scheduler::sample();
+        let cpu = readers.cpu().and_then(|d| u64::try_from(d.as_nanos()).ok());
+        let scheduler = readers.scheduler.sample();
+        let writes = readers.writes();
+        let hashes = graphforge_core::hash_observation::totals();
+        let barriers = graphforge_filesystem::observation::fsync_totals();
         Self {
             wall,
             cpu,
             scheduler,
+            writes,
+            hashes,
+            barriers,
             sampling_ns: u64::try_from(wall.elapsed().as_nanos()).unwrap_or(u64::MAX),
         }
     }
 
-    fn elapsed(&self) -> RegionMeasurement {
-        let end = Self::now();
+    fn elapsed(&self, readers: &mut BoundaryReaders) -> RegionMeasurement {
+        let end = Self::now(readers);
         let wall_ns =
             u64::try_from(end.wall.duration_since(self.wall).as_nanos()).unwrap_or(u64::MAX);
         let running = subtract(end.scheduler.running, self.scheduler.running);
@@ -312,6 +391,11 @@ impl Sample {
             wall_ns,
             sampling_uncertainty_ns: self.sampling_ns.saturating_add(end.sampling_ns),
             process_cpu_ns: subtract(end.cpu, self.cpu),
+            written_bytes: subtract(end.writes, self.writes),
+            hashed_bytes: end.hashes.0.checked_sub(self.hashes.0),
+            hash_elapsed_ns: end.hashes.1.checked_sub(self.hashes.1),
+            fsync_calls: end.barriers.0.checked_sub(self.barriers.0),
+            fsync_elapsed_ns: end.barriers.1.checked_sub(self.barriers.1),
             thread_running_ns: running,
             thread_runnable_ns: runnable,
             thread_sleeping_ns: sleeping,
@@ -328,6 +412,74 @@ impl Sample {
             }),
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct BoundaryReaders {
+    scheduler: SchedulerReader,
+    #[cfg(target_os = "linux")]
+    process: ProcessReaders,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct ProcessReaders {
+    cpu: super::proc_reader::ProcReader,
+    writes: super::proc_reader::ProcReader,
+}
+
+#[cfg(target_os = "linux")]
+impl Default for ProcessReaders {
+    fn default() -> Self {
+        Self {
+            cpu: super::proc_reader::ProcReader::open("/proc/self/stat"),
+            writes: super::proc_reader::ProcReader::open("/proc/self/io"),
+        }
+    }
+}
+
+impl BoundaryReaders {
+    fn cpu(&mut self) -> Option<std::time::Duration> {
+        #[cfg(target_os = "linux")]
+        {
+            super::parse_proc_stat_cpu(self.process.cpu.read()?)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
+    fn writes(&mut self) -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        {
+            self.process.writes.read()?.lines().find_map(|line| {
+                line.strip_prefix("wchar: ")
+                    .and_then(|n| n.trim().parse().ok())
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(super) enum CapturedProcessCpu {
+    Inactive,
+    Active(Option<std::time::Duration>),
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn captured_process_cpu() -> CapturedProcessCpu {
+    ACTIVE.with(|active| {
+        let Some(state) = active.borrow().last().cloned() else {
+            return CapturedProcessCpu::Inactive;
+        };
+        let cpu = state.borrow_mut().readers.cpu();
+        CapturedProcessCpu::Active(cpu)
+    })
 }
 
 #[cfg(test)]
@@ -420,4 +572,36 @@ mod tests {
         assert!(inner.finish().complete);
         assert!(RegionScope::named("after").is_none());
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn retained_boundary_readers_observe_fresh_cpu_and_write_counts() {
+    use super::proc_reader::ProcReader;
+    let temporary = tempfile::tempdir().unwrap();
+    let cpu = temporary.path().join("cpu");
+    let writes = temporary.path().join("writes");
+    let stat = "42 (name) S 1 42 42 0 -1 4194304 100 0 0 0 1500 500 0 0 20 0 1 0";
+    std::fs::write(&cpu, stat).unwrap();
+    std::fs::write(&writes, "wchar: 42\n").unwrap();
+    let mut readers = BoundaryReaders {
+        process: ProcessReaders {
+            cpu: ProcReader::open(cpu.to_str().unwrap()),
+            writes: ProcReader::open(writes.to_str().unwrap()),
+        },
+        scheduler: SchedulerReader::default(),
+    };
+    let before = Sample::now(&mut readers);
+    assert_eq!(before.cpu, Some(20_000_000_000));
+    assert_eq!(before.writes, Some(42));
+    std::fs::write(&cpu, stat.replace("1500 500", "1600 500")).unwrap();
+    std::fs::write(&writes, "wchar: 87\n").unwrap();
+    let after = Sample::now(&mut readers);
+    assert_eq!(after.cpu, Some(21_000_000_000));
+    assert_eq!(after.writes, Some(87));
+    std::fs::write(&cpu, "broken").unwrap();
+    std::fs::write(&writes, "broken").unwrap();
+    let unavailable = Sample::now(&mut readers);
+    assert_eq!(unavailable.cpu, None);
+    assert_eq!(unavailable.writes, None);
 }

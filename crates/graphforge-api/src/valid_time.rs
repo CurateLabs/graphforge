@@ -13,8 +13,7 @@ use graphforge_knowledge::{
     ASSERTION_VALIDITY_SCHEMA, AssertionValidityEvent, AssertionValidityLedger, schema_registry,
 };
 use graphforge_storage::{
-    ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectStageOutcome,
-    ResolvedProjectGeneration,
+    ProjectCapability, ProjectParticipant, ProjectStageOutcome, ResolvedProjectGeneration,
 };
 use uuid::Uuid;
 
@@ -390,16 +389,13 @@ fn publish(
             capability_version: entry.capability_version,
         })
         .collect();
-    let request = ProjectGenerationRequest {
-        transaction_uuid: context.operation_uuid.0,
-        generation_uuid: crate::knowledge::knowledge_generation_uuid(
-            b"valid-time",
-            context.operation_uuid,
-            &participants,
-        ),
+    let request = crate::knowledge::prepare_knowledge_request(
+        b"valid-time",
+        context.operation_uuid,
         capabilities,
         participants,
-    };
+    )?;
+    let graph_objects = graph.begin_graph_object_publication()?;
     let receipt = match graph.stage_project_generation(&request)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => staged
@@ -414,7 +410,7 @@ fn publish(
                     Ok(())
                 },
             )?
-            .publish()?,
+            .publish_with_graph_objects(&graph_objects)?,
     };
     *graph
         .current_generation_uuid

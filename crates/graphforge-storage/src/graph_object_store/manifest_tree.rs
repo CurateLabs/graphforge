@@ -20,19 +20,53 @@ use super::GraphPublicationIo;
 use super::Path;
 use super::PathBuf;
 use super::ReadIoEvidence;
-use super::Sha256;
 use super::fs;
 use super::hash_regular_file;
 use super::hex_digest;
-use super::install_graph_object_bytes_with_lease;
+use super::install_graph_manifest_node_with_lease;
+use super::install_graph_object_file_repairing_with_lease;
 use super::install_graph_object_file_with_lease;
-use super::read_graph_object_by_digest_file_counted;
+use super::read_graph_object_by_digest_file_counted_in_domain;
 use super::returned_error_boundary;
 use super::storage;
 use super::validate_digest;
 use super::validate_logical_path;
 use super::validate_publication_identity;
 use super::validation;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
+
+#[derive(Clone, Copy)]
+enum CapturedGraphInventory<'a, 'b> {
+    Encoded(&'a crate::graph_construction::CapturedEncodedInventory<'b>),
+    Portable(&'a BTreeMap<PathBuf, &'b crate::project_portable_v2::MaterializedCapture>),
+    Workspace(&'a BTreeMap<String, crate::graph_files::CapturedWorkspaceFile>),
+}
+
+/// Only the import owner's privately authenticated copies can choose this path.
+pub(crate) fn append_captured_portable_graph_files(
+    lease: &GraphObjectPublicationLease,
+    workspace: &Path,
+    state: &mut GraphManifestState,
+    files: &[AuthenticatedGraphFile],
+    routes: Option<&crate::route_component::RouteTable>,
+    captures: &BTreeMap<PathBuf, &crate::project_portable_v2::MaterializedCapture>,
+) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
+    let paths = files
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect::<Vec<_>>();
+    append_graph_files_v2_inner(
+        lease,
+        workspace,
+        state,
+        &paths,
+        Some(files),
+        &[],
+        routes,
+        Some(CapturedGraphInventory::Portable(captures)),
+        &mut || false,
+    )
+}
 
 /// Storage-owned, root-bound state for a sequence of path-copy publications.
 ///
@@ -65,11 +99,12 @@ impl GraphManifestState {
         validate_publication_identity(lease)?;
         let mut read_calls = 0_u64;
         let (entries, mut evidence) = crate::resolve_graph_manifest(&root, limits, |digest| {
-            let (bytes, io) = read_graph_object_by_digest_file_counted(
+            let (bytes, io) = read_graph_object_by_digest_file_counted_in_domain(
                 lease.cas.open_digest(digest)?,
                 digest,
                 crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
                 &lease.cas.diagnostic_root,
+                graphforge_core::hash_observation::HashDomain::ControlAuthentication,
             )?;
             read_calls = read_calls
                 .checked_add(io.calls)
@@ -81,11 +116,12 @@ impl GraphManifestState {
             root.format_version,
             &entries,
             |entry| {
-                let (bytes, io) = read_graph_object_by_digest_file_counted(
+                let (bytes, io) = read_graph_object_by_digest_file_counted_in_domain(
                     lease.cas.open_digest(&entry.content_sha256)?,
                     &entry.content_sha256,
                     64 * 1024 * 1024,
                     &lease.cas.diagnostic_root,
+                    graphforge_core::hash_observation::HashDomain::ControlAuthentication,
                 )?;
                 authority_read_bytes = authority_read_bytes
                     .checked_add(io.bytes)
@@ -144,12 +180,20 @@ pub fn append_graph_files_v2(
         None,
         tombstones,
         None,
+        None,
+        &mut || false,
     )
 }
 
-/// Prepare an authenticated canonical candidate while preserving its parent ownership.
-/// CAS parents reuse unchanged objects; generation-owned parents retain their
-/// existing graph-tree publication path. Keep the returned lease through CURRENT.
+/// Prepare a compact (V2) root for a private candidate over any parent.
+///
+/// Every parent shape publishes a compact root, so a mutating commit never
+/// leaves an expanded inventory behind: a compact parent reuses its unchanged
+/// objects and installs only changed files and tombstones; an expanded or
+/// absent parent (the first commit on an empty project, or a pre-existing
+/// expanded generation converting on its next commit) installs the candidate
+/// once into an empty state. Keep the returned lease through CURRENT and stage
+/// without a graph tree.
 ///
 /// # Errors
 /// Rejects invalid inventories, route authority, or object publication failures.
@@ -160,47 +204,128 @@ pub fn prepare_graph_files_replacement(
 ) -> Result<
     (
         crate::ProjectParticipant,
-        Option<crate::GraphObjectPublicationLease>,
+        crate::GraphObjectPublicationLease,
     ),
     GfError,
 > {
-    let mut files_participant = crate::graph_files::inventory_participant(
-        crate::graph_files::encode_inventory(inventory)?,
-        inventory.file_count,
+    prepare_compact_root(parent, workspace, inventory, None, false)
+}
+
+/// Capture a private workspace over `parent` and publish it as a compact root:
+/// the commit path of every graph mutation. Its topology payloads are exactly
+/// `topology`, the session's declared and staged membership. Unchanged files install nothing and
+/// read nothing beyond the parent's declared identities; each changed file is
+/// hashed once, while it is captured, and installed against that capture.
+/// Keep the returned lease through CURRENT and stage without a graph tree.
+///
+/// # Errors
+/// Rejects unsafe workspaces, corrupted payloads, invalid route authority, or
+/// object publication failures.
+pub fn prepare_compact_graph_publication(
+    parent: &crate::ResolvedProjectGeneration,
+    workspace: &Path,
+    topology: &crate::TopologyFiles,
+) -> Result<
+    (
+        crate::ProjectParticipant,
+        crate::GraphObjectPublicationLease,
+    ),
+    GfError,
+> {
+    let capture = crate::graph_files::capture_workspace_over_parent(workspace, parent, topology)?;
+    prepare_compact_root(
+        parent,
+        workspace,
+        &capture.inventory,
+        Some(&capture.captured),
+        false,
+    )
+}
+
+/// Capture a compact publication for the explicit adjacency repair action.
+/// The resulting lease can replace an existing corrupt CAS object only when
+/// the changed logical path is an adjacency index and the staged source hashes
+/// to that object's declared digest.
+pub fn prepare_compact_graph_publication_repairing_adjacency(
+    parent: &crate::ResolvedProjectGeneration,
+    workspace: &Path,
+    topology: &crate::TopologyFiles,
+) -> Result<
+    (
+        crate::ProjectParticipant,
+        crate::GraphObjectPublicationLease,
+    ),
+    GfError,
+> {
+    let capture = crate::graph_files::capture_workspace_over_parent_repairing_adjacency(
+        workspace, parent, topology,
     )?;
-    let publication_lease = match parent.declared_graph_files_participant()? {
+    let (participant, lease) = prepare_compact_root(
+        parent,
+        workspace,
+        &capture.inventory,
+        Some(&capture.captured),
+        true,
+    )?;
+    Ok((participant, lease))
+}
+
+fn prepare_compact_root(
+    parent: &crate::ResolvedProjectGeneration,
+    workspace: &Path,
+    inventory: &GraphFilesInventory,
+    captured: Option<&BTreeMap<String, crate::graph_files::CapturedWorkspaceFile>>,
+    repair_corrupt_adjacency: bool,
+) -> Result<
+    (
+        crate::ProjectParticipant,
+        crate::GraphObjectPublicationLease,
+    ),
+    GfError,
+> {
+    // Validate the complete expanded contract before installing one object.
+    crate::graph_files::encode_inventory(inventory)?;
+    let mut lease = crate::begin_graph_object_publication(parent.container_root())?;
+    lease.repair_corrupt_adjacency = repair_corrupt_adjacency;
+    let mut state = match parent.declared_graph_files_participant()? {
         Some(crate::GraphFilesParticipant::V2(root)) => {
-            let lease = crate::begin_graph_object_publication(parent.container_root())?;
-            let (mut state, _) = crate::graph_object_store::GraphManifestState::open(
+            crate::graph_object_store::GraphManifestState::open(
                 &lease,
                 root,
                 crate::GraphManifestLimits::default(),
-            )?;
-            let (root, _) = crate::graph_object_store::replace_replayed_graph_files(
-                &lease, workspace, &mut state, inventory,
-            )?;
-            files_participant = crate::graph_files::graph_files_root_participant(&root)?;
-            Some(lease)
+            )?
+            .0
         }
-        _ => None,
+        Some(crate::GraphFilesParticipant::V1(_)) | None => {
+            crate::graph_object_store::GraphManifestState::empty()
+        }
     };
-    Ok((files_participant, publication_lease))
+    let (root, _) =
+        replace_replayed_graph_files(&lease, workspace, &mut state, inventory, captured)?;
+    Ok((
+        crate::graph_files::graph_files_root_participant(&root)?,
+        lease,
+    ))
 }
 
 /// Publish a private replay candidate using its authenticated route contract.
-pub(crate) fn replace_replayed_graph_files(
+fn replace_replayed_graph_files(
     lease: &GraphObjectPublicationLease,
     workspace: &Path,
     state: &mut GraphManifestState,
     inventory: &GraphFilesInventory,
+    captured: Option<&BTreeMap<String, crate::graph_files::CapturedWorkspaceFile>>,
 ) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
     let changed = inventory
         .files
         .iter()
         .filter(|entry| {
-            state.entries.get(&entry.relative_path).is_none_or(|old| {
-                old.content_sha256 != entry.content_sha256 || old.byte_length != entry.byte_length
-            })
+            (lease.repair_corrupt_adjacency
+                && entry.relative_path.starts_with("indexes/adjacency/"))
+                || state.entries.get(&entry.relative_path).is_none_or(|old| {
+                    old.content_sha256 != entry.content_sha256
+                        || old.byte_length != entry.byte_length
+                })
         })
         .map(|entry| PathBuf::from(&entry.relative_path))
         .collect::<Vec<_>>();
@@ -215,7 +340,15 @@ pub(crate) fn replace_replayed_graph_files(
         })
         .cloned()
         .collect::<Vec<_>>();
-    append_replayed_graph_files(lease, workspace, state, inventory, &changed, &tombstones)
+    append_replayed_graph_files(
+        lease,
+        workspace,
+        state,
+        inventory,
+        &changed,
+        &tombstones,
+        captured,
+    )
 }
 
 /// Append selected replay outputs without changing their authenticated route contract.
@@ -226,6 +359,7 @@ pub(crate) fn append_replayed_graph_files(
     inventory: &GraphFilesInventory,
     sealed_paths: &[PathBuf],
     tombstones: &[String],
+    captured: Option<&BTreeMap<String, crate::graph_files::CapturedWorkspaceFile>>,
 ) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
     let routes = crate::route_component::authenticate_manifest_routes(
         inventory.format_version,
@@ -234,14 +368,38 @@ pub(crate) fn append_replayed_graph_files(
             crate::graph_files::read_route_table_counted(workspace, entry).map(|(bytes, _)| bytes)
         },
     )?;
+    // The inventory already holds each changed file's digest and length, from
+    // the capture that read these exact bytes. Installing authenticates them
+    // again as it copies, so a stale claim fails there; passing them only spares
+    // a redundant standalone pre-hash of every changed payload.
+    let authenticated = sealed_paths
+        .iter()
+        .map(|path| {
+            let name = path
+                .to_str()
+                .ok_or_else(|| validation("sealed graph path is not UTF-8"))?;
+            let index = inventory
+                .files
+                .binary_search_by(|entry| entry.relative_path.as_str().cmp(name))
+                .map_err(|_| validation("sealed graph path is absent from its inventory"))?;
+            let entry = &inventory.files[index];
+            Ok(AuthenticatedGraphFile {
+                relative_path: path.clone(),
+                byte_length: entry.byte_length,
+                content_sha256: entry.content_sha256.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, GfError>>()?;
     append_graph_files_v2_inner(
         lease,
         workspace,
         state,
         sealed_paths,
-        None,
+        Some(&authenticated),
         tombstones,
         routes.as_ref(),
+        captured.map(CapturedGraphInventory::Workspace),
+        &mut || false,
     )
 }
 
@@ -260,11 +418,14 @@ pub(crate) fn append_mapped_import_graph_files(
         None,
         &[],
         Some(routes),
+        None,
+        &mut || false,
     )
 }
 
 /// Publish writer-authenticated files with one copy-and-hash authentication
 /// pass. The expected digest is never trusted without that install-time pass.
+#[cfg(test)]
 pub(crate) fn append_authenticated_graph_files_v2(
     lease: &GraphObjectPublicationLease,
     workspace: &Path,
@@ -284,15 +445,20 @@ pub(crate) fn append_authenticated_graph_files_v2(
         Some(sealed_files),
         tombstones,
         None,
+        None,
+        &mut || false,
     )
 }
 
-/// Append a checkpoint-authorized mapped encoding, retaining legacy payload objects by digest.
-pub(crate) fn append_authenticated_mapped_graph_files(
+/// Append only sources admitted by the owning checkpoint publication boundary.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn append_captured_mapped_graph_files(
     lease: &GraphObjectPublicationLease,
     workspace: &Path,
     state: &mut GraphManifestState,
-    sealed_files: &[AuthenticatedGraphFile],
+    artifacts: &[crate::graph_construction_encoding::ConstructionEncodedArtifact],
+    captured: &crate::graph_construction::CapturedEncodedInventory<'_>,
+    cancelled: &mut impl FnMut() -> bool,
     tombstones: &[String],
     routes: &crate::route_component::RouteTable,
 ) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
@@ -354,18 +520,20 @@ pub(crate) fn append_authenticated_mapped_graph_files(
         root.root_node_sha256 = digest;
         root.format_version = crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION;
     }
-    let paths = sealed_files
+    let paths = artifacts
         .iter()
-        .map(|file| file.relative_path.clone())
+        .map(|file| PathBuf::from(&file.path))
         .collect::<Vec<_>>();
     let (root, mut evidence) = append_graph_files_v2_inner(
         lease,
         workspace,
         &mut staged,
         &paths,
-        Some(sealed_files),
+        None,
         tombstones,
         Some(routes),
+        Some(CapturedGraphInventory::Encoded(captured)),
+        cancelled,
     )?;
     evidence.publication_io.checked_add_assign(&migration_io)?;
     let totals = evidence.publication_io.totals()?;
@@ -385,7 +553,14 @@ pub(crate) fn append_authenticated_mapped_graph_files(
     Ok((root, evidence))
 }
 
-#[allow(clippy::too_many_lines)]
+fn manifest_relative_path_text(relative: &Path) -> Result<String, GfError> {
+    let text = relative
+        .to_str()
+        .ok_or_else(|| validation("sealed graph path is not UTF-8"))?;
+    crate::graph_files::canonical_inventory_relative_text(text)
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn append_graph_files_v2_inner(
     lease: &GraphObjectPublicationLease,
     workspace: &Path,
@@ -394,6 +569,8 @@ fn append_graph_files_v2_inner(
     authenticated: Option<&[AuthenticatedGraphFile]>,
     tombstones: &[String],
     mapped_routes: Option<&crate::route_component::RouteTable>,
+    captured: Option<CapturedGraphInventory<'_, '_>>,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
     validate_publication_identity(lease)?;
     if state
@@ -432,36 +609,103 @@ fn append_graph_files_v2_inner(
         .map_or(0, |root| root.logical_byte_length);
     for (index, relative) in sealed_paths.iter().enumerate() {
         let source = workspace.join(relative);
-        let (digest, expected_length, prehash_io) = if let Some(files) = authenticated {
-            let expected = files
-                .get(index)
-                .ok_or_else(|| validation("authenticated graph inventory is incomplete"))?;
-            if expected.relative_path != *relative {
-                return Err(validation("authenticated graph file metadata changed"));
+        let portable = match captured {
+            Some(CapturedGraphInventory::Portable(authorities)) => {
+                authorities.get(&source).copied()
             }
-            validate_digest(&expected.content_sha256)?;
-            (
-                expected.content_sha256.clone(),
-                expected.byte_length,
-                ReadIoEvidence::default(),
-            )
-        } else {
-            let metadata = fs::symlink_metadata(&source)
-                .map_err(|error| storage("inspect sealed graph file", &source, error))?;
-            if !metadata.is_file() || metadata.file_type().is_symlink() {
-                return Err(validation("sealed graph path is not a regular file"));
-            }
-            let (digest, io) = hash_regular_file(&source)?;
-            (hex_digest(digest), metadata.len(), io)
+            _ => None,
         };
-        let installed =
-            install_graph_object_file_with_lease(lease, &source, &digest, expected_length)?;
+        let workspace_capture = match captured {
+            Some(CapturedGraphInventory::Workspace(files)) => {
+                relative.to_str().and_then(|name| files.get(name))
+            }
+            _ => None,
+        };
+        let (digest, expected_length, prehash_io) =
+            if let Some(CapturedGraphInventory::Encoded(captured)) = captured {
+                let source = captured.open(relative)?;
+                (
+                    source.content_sha256().to_owned(),
+                    source.bytes(),
+                    ReadIoEvidence::default(),
+                )
+            } else if let Some(capture) = workspace_capture {
+                (
+                    capture.content_sha256().to_owned(),
+                    capture.bytes(),
+                    ReadIoEvidence::default(),
+                )
+            } else if let Some(files) = authenticated {
+                let expected = files
+                    .get(index)
+                    .ok_or_else(|| validation("authenticated graph inventory is incomplete"))?;
+                if expected.relative_path != *relative {
+                    return Err(validation("authenticated graph file metadata changed"));
+                }
+                validate_digest(&expected.content_sha256)?;
+                (
+                    expected.content_sha256.clone(),
+                    expected.byte_length,
+                    ReadIoEvidence::default(),
+                )
+            } else {
+                let metadata = fs::symlink_metadata(&source)
+                    .map_err(|error| storage("inspect sealed graph file", &source, error))?;
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return Err(validation("sealed graph path is not a regular file"));
+                }
+                let (digest, io) = hash_regular_file(&source)?;
+                (hex_digest(digest), metadata.len(), io)
+            };
+        // Only the explicit adjacency repair action may replace a corrupt
+        // object, and only at an adjacency index path (#1738).
+        let repair_corrupt_adjacency = lease.repair_corrupt_adjacency
+            && relative
+                .to_str()
+                .is_some_and(|path| path.starts_with("indexes/adjacency/"));
+        let installed = if let Some(CapturedGraphInventory::Encoded(captured)) = captured {
+            let source = captured.open(relative)?;
+            super::install_captured_encoded_artifact_with_lease(lease, &source, cancelled)?
+        } else if let Some(capture) = portable {
+            let source = capture
+                .open_source(&source)
+                .map_err(|error| validation(error.to_string()))?;
+            if source.content_sha256() != digest || source.bytes() != expected_length {
+                return Err(validation(
+                    "portable graph capture disagrees with file metadata",
+                ));
+            }
+            super::install_captured_portable_source_with_lease(lease, &source, cancelled)?
+        } else if let Some(capture) = workspace_capture {
+            super::install_captured_workspace_file_with_lease(
+                lease,
+                capture,
+                repair_corrupt_adjacency,
+                cancelled,
+            )?
+        } else if repair_corrupt_adjacency {
+            // A capture retains a bounded number of sources. Repair authority
+            // belongs to the path, not to whether its capture was retained.
+            install_graph_object_file_repairing_with_lease(
+                lease,
+                &source,
+                &digest,
+                expected_length,
+            )?
+        } else {
+            install_graph_object_file_with_lease(lease, &source, &digest, expected_length)?
+        };
+        evidence.payload_bytes_hashed = evidence
+            .payload_bytes_hashed
+            .checked_add(installed.bytes_hashed)
+            .and_then(|bytes| bytes.checked_add(prehash_io.bytes))
+            .ok_or_else(|| validation("graph payload SHA bytes overflow"))?;
         evidence.publication_io.payload.add_install(&installed)?;
         evidence.publication_io.payload.add_read(prehash_io)?;
-        let relative_path = relative
-            .to_str()
-            .ok_or_else(|| validation("sealed graph path is not UTF-8"))?
-            .to_owned();
+        // Manifest routes use platform-independent forward-slash paths. A
+        // native Windows PathBuf string uses backslashes, which would hide
+        // every routed file from semantic route closure validation.
+        let relative_path = manifest_relative_path_text(relative)?;
         let entry = crate::GraphFileEntry {
             content_xxh64: installed.content_xxh64.ok_or_else(|| {
                 validation("graph object installation omitted its payload checksum")
@@ -585,7 +829,6 @@ fn append_graph_files_v2_inner(
         logical_byte_length,
     };
     let totals = evidence.publication_io.totals()?;
-    evidence.payload_bytes_hashed = evidence.publication_io.payload.read_bytes;
     evidence.bytes_installed = totals.installed_bytes;
     evidence.read_calls = totals.read_calls;
     evidence.write_calls = totals.write_calls;
@@ -701,8 +944,7 @@ fn install_manifest_node(
     node: &GraphManifestNode,
     publication_io: &mut GraphPublicationIo,
 ) -> Result<String, GfError> {
-    let bytes = crate::encode_graph_manifest_node(node)?;
-    let (digest, evidence) = install_graph_object_bytes_with_lease(lease, &bytes)?;
+    let (digest, evidence) = install_graph_manifest_node_with_lease(lease, node)?;
     publication_io.manifest.add_install(&evidence)?;
     Ok(digest)
 }
@@ -713,11 +955,12 @@ fn load_manifest_node(
     expected_depth: u8,
     publication_io: &mut GraphPublicationIo,
 ) -> Result<GraphManifestNode, GfError> {
-    let (bytes, io) = read_graph_object_by_digest_file_counted(
+    let (bytes, io) = read_graph_object_by_digest_file_counted_in_domain(
         lease.cas.open_digest(digest)?,
         digest,
         crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
         &lease.cas.diagnostic_root,
+        graphforge_core::hash_observation::HashDomain::ControlAuthentication,
     )?;
     publication_io.manifest_reads.add_read(io)?;
     let node = crate::decode_graph_manifest_node(&bytes)?;

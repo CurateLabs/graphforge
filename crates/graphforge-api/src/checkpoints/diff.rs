@@ -11,8 +11,9 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::{ApiErrorCode, GfError};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -489,17 +490,13 @@ fn record_adapters() -> Result<BTreeMap<(&'static str, &'static str), RecordAdap
 }
 
 fn read_parquet(bytes: &[u8], page: &PageRequest) -> Result<Vec<RecordBatch>, GfError> {
-    let file =
-        tempfile::NamedTempFile::new().map_err(|error| GfError::Storage(error.to_string()))?;
-    std::fs::write(file.path(), bytes).map_err(|error| GfError::Storage(error.to_string()))?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(
-        file.reopen()
-            .map_err(|error| GfError::Storage(error.to_string()))?,
-    )
-    .map_err(|error| GfError::Validation(format!("invalid checkpoint parquet: {error}")))?
-    .with_batch_size(4096)
-    .build()
-    .map_err(|error| GfError::Validation(format!("invalid checkpoint parquet: {error}")))?;
+    // The participant bytes are already bounded in memory; reading them in
+    // place writes nothing to the system temporary directory.
+    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::copy_from_slice(bytes))
+        .map_err(|error| GfError::Validation(format!("invalid checkpoint parquet: {error}")))?
+        .with_batch_size(4096)
+        .build()
+        .map_err(|error| GfError::Validation(format!("invalid checkpoint parquet: {error}")))?;
     let mut batches = Vec::new();
     for batch in reader {
         cancellation(page)?;

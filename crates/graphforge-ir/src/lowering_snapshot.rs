@@ -41,6 +41,11 @@ pub struct LoweringSnapshot {
     pub semantic_edge_properties: HashMap<RelationTypeId, SchemaRef>,
     /// Names of registered typed edge tables.
     pub typed_edge_tables: HashSet<String>,
+    /// Captured for a plan that reads no property value
+    /// ([`PropertyDemand::None`](crate::PropertyDemand::None)): the property
+    /// maps name each stored route with its key column only, and no route's
+    /// content was admitted to describe its values.
+    pub property_schemas_omitted: bool,
 }
 
 impl LoweringSnapshot {

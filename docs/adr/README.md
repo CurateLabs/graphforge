@@ -55,6 +55,12 @@ Roadmap-only ADRs are not retained in this tree.
 | 0047 | [Over-budget construction partitions succeed; one CPU budget per instance](0047-over-budget-partitions-and-instance-cpu-budget.md) | `0047-over-budget-partitions-and-instance-cpu-budget.md` |
 | 0048 | [Cargo with nextest is the CI build authority; Bazel is removed](0048-cargo-is-the-ci-build-authority.md) | `0048-cargo-is-the-ci-build-authority.md` |
 | 0049 | [Versioned checksums for published graph payload admission](0049-published-payload-checksums.md) | `0049-published-payload-checksums.md` |
+| 0050 | [The read path keeps its adjacency operators and chooses fast paths in the lowerer](0050-read-path-fast-path-selection.md) | `0050-read-path-fast-path-selection.md` |
+| 0051 | [Discovery carries a digest-addressed Project summary and exact ontology descriptors](0051-discovery-project-summary-and-ontology-descriptors.md) | `0051-discovery-project-summary-and-ontology-descriptors.md` |
+| 0052 | [Discovery carries a digest-addressed research lineage document](0052-discovery-research-lineage-document.md) | `0052-discovery-research-lineage-document.md` |
+| 0053 | [Hub publish wire contract](0053-hub-publish-wire-contract.md) | `0053-hub-publish-wire-contract.md` |
+| 0054 | [GraphForge component boundaries: Core, XYG, editor, and Hub](0054-product-component-boundaries.md) | `0054-product-component-boundaries.md` |
+| 0055 | [Research Versions are commits](0055-versions-are-commits.md) | `0055-versions-are-commits.md` |
 
 ## Superseded records
 
@@ -110,6 +116,6 @@ not duplicate or renumber bodies. Do not fork a second ADR sequence.
 
 Both indexes and this directory must agree, and so do the two docs-site files
 that the published build consumes. `scripts/ci/adr-index.py check` enforces all
-four in the Repository Policy job; the docs-site regions are generated, so run
-`python3 scripts/ci/adr-index.py generate` after adding or superseding a record
-rather than editing them by hand.
+four in `make check` and the CI Lint job; the docs-site regions are generated,
+so run `python3 scripts/ci/adr-index.py generate` after adding or superseding a
+record rather than editing them by hand.

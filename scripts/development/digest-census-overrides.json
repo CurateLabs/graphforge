@@ -1,0 +1,2521 @@
+{
+  "format_version": 2,
+  "roles": {
+    "a": "Required durable artifact identity or external trust boundary.",
+    "b": "Required semantic/contract identity; no whole-artifact read admission pass.",
+    "c": "Optional diagnostic/certification evidence requested explicitly.",
+    "control_authentication": "Required content-free authority/control authentication.",
+    "caller_selected": "Shared producer accepts more than one class; edge arguments refine the role.",
+    "primitive_implementation": "Underlying crypto implementation, not an application site.",
+    "producer_delegate": "Wrapper delegates to one underlying producer; never an extra byte pass.",
+    "portable_authentication": "Required cryptographic authentication of complete portable archive, member or payload transport bytes; separate from local durable artifact naming and bounded control authentication."
+  },
+  "function_overrides": [
+    {
+      "path": "crates/graphforge-api/src/algorithm_runs.rs",
+      "function": "generation_uuid",
+      "role": "contract_identity",
+      "input_contract": "Domain-separated operation/run UUID and published participant descriptors form deterministic operation identity; inner participant digest is distinguished separately.",
+      "function_bodies_sha256": [
+        "ad4ae2307fa969546be35769d4e08ae4a79695d2c4b13e00c5a509f5ba2c6c07"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/algorithm_runs.rs",
+      "function": "recovery_operation_uuid",
+      "role": "contract_identity",
+      "input_contract": "Domain-separated operation/run UUID and published participant descriptors form deterministic operation identity; inner participant digest is distinguished separately.",
+      "function_bodies_sha256": [
+        "ab9674f0eaf3bd6e7303487eaf06f029e9e7fd0d29fea31aca16cf7d65811d0e"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/algorithm_runs.rs",
+      "function": "terminal_uuid",
+      "role": "contract_identity",
+      "input_contract": "Domain-separated operation/run UUID and published participant descriptors form deterministic operation identity; inner participant digest is distinguished separately.",
+      "function_bodies_sha256": [
+        "9bbc98cb0a98bdf297667f16ad11d3899c4099b63545d963e121169288a05a3f"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/branches/baseline.rs",
+      "function": "contribution",
+      "role": "contract_identity",
+      "input_contract": "Canonical selected contribution fields, baseline UUID and branch values define semantic branch comparison.",
+      "function_bodies_sha256": [
+        "316ca6e87caf8ebb8c934ac7771b7ada1534a351548393191019c246618a6cbd"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/branches/baseline.rs",
+      "function": "fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Canonical selected contribution fields, baseline UUID and branch values define semantic branch comparison.",
+      "function_bodies_sha256": [
+        "c0f8a7c09dfcb21f37e898696a63e037eadcabc4e0b7d3b0d209589505fb4b14"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/branches/context_fields.rs",
+      "function": "context_identity",
+      "role": "contract_identity",
+      "input_contract": "Canonical context metadata bytes define branch field and context identity.",
+      "function_bodies_sha256": [
+        "dda1d8ca50c1c1a2e34e1b3d47e99795580f6a90f62b5bf21bae29b711a29f92"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/branches/context_fields.rs",
+      "function": "read",
+      "role": "contract_identity",
+      "input_contract": "Canonical context metadata bytes define branch field and context identity.",
+      "function_bodies_sha256": [
+        "9bc7a84981560a8b25777b262767d6dd9f2d3a461f1665c06203d82a3d785343"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/branches/context_fields.rs",
+      "function": "record",
+      "role": "contract_identity",
+      "input_contract": "Canonical context metadata bytes define branch field and context identity.",
+      "function_bodies_sha256": [
+        "daaeb2bd3745c2ed17f315c76ffa0c7461ef0652c5788475d48aa856205b9b74"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/branches/create.rs",
+      "function": "create_research_branch",
+      "role": "contract_identity",
+      "input_contract": "Canonical branch request binds caller intent to branch identity.",
+      "function_bodies_sha256": [
+        "6b7d759123ce32d89f3cc6bce6ae478ddb0b76368af4c25c20624c6383bf188f"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/branches/field_application.rs",
+      "function": "identity",
+      "role": "contract_identity",
+      "input_contract": "Field application request metadata and operation identity bind the applied change.",
+      "function_bodies_sha256": [
+        "54462c83a2a9f2dbcf59eccd152f3591bd0da40d480178743e7fe2b3358ab4a1"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/branches/fields.rs",
+      "function": "collect",
+      "role": "contract_identity",
+      "input_contract": "Canonical logical field/row values and serialized selected domain objects define comparison identities.",
+      "function_bodies_sha256": [
+        "b00f7a83c87025cd7f9aa1e53ad6b69e9bd323ee22d12e84e816c4bdc5fdde30"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/branches/fields.rs",
+      "function": "domain_objects",
+      "role": "contract_identity",
+      "input_contract": "Canonical logical field/row values and serialized selected domain objects define comparison identities.",
+      "function_bodies_sha256": [
+        "cb4f52e3879c44605644774a6d15eaada3b8bfd1e229f32d8c48cc7d48ce1940"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/branches/fields.rs",
+      "function": "fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Canonical logical field/row values and serialized selected domain objects define comparison identities.",
+      "function_bodies_sha256": [
+        "a9eedc0473d0436f7e100ee06ef0e709b7bac5d372cd4ad2c309b41f630ef701"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/branches/publication.rs",
+      "function": "begin",
+      "role": "contract_identity",
+      "input_contract": "Canonical branch publication intent binds operation UUID and expected generation.",
+      "function_bodies_sha256": [
+        "ea7a58d85825c8a59ec3ee9af04fd29da0228b929ea7dbf645966556b83b6c6b"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/branches/reference.rs",
+      "function": "fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Serialized branch reference fields identify the reference value.",
+      "function_bodies_sha256": [
+        "3df8c7915968e3e58a67a8b11895b5b1c1b22a626f2052dd9cbc86d20b8338b7"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/branches/source_fields.rs",
+      "function": "read",
+      "role": "contract_identity",
+      "input_contract": "Selected source fields encode the semantic value being compared.",
+      "function_bodies_sha256": [
+        "272711bd36fe2abe501d508ac7c9339c22c4672436153c448f583144f596c6bd"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/bulk_construction/normalization.rs",
+      "function": "generated_uuid",
+      "role": "contract_identity",
+      "input_contract": "Domain plus operation/source/row coordinates define deterministic normalized row UUID.",
+      "function_bodies_sha256": [
+        "2b52f1efc9db445a9ecb703d24d2deda2bb7ecfd4c41f5c71ab4d3f3ed8b806e"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/bulk_construction/publication.rs",
+      "function": "bulk_edge_generation_uuid",
+      "role": "contract_identity",
+      "input_contract": "Operation UUID and construction publication context define deterministic generation UUID.",
+      "function_bodies_sha256": [
+        "cfed1a0f31c0e7d55dfdd3b4b62bd28f99e3b146573ed7be439cde4157fae744"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/bulk_construction/publication.rs",
+      "function": "bulk_node_generation_uuid",
+      "role": "contract_identity",
+      "input_contract": "Operation UUID and construction publication context define deterministic generation UUID.",
+      "function_bodies_sha256": [
+        "1e18b078a8792334dc9c5fb007bf2db44b620f01ae7f1aadf5abd6583587ea06"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/capabilities.rs",
+      "function": "capability_generation_uuid",
+      "role": "contract_identity",
+      "input_contract": "Capability operation/actor/source-generation metadata derives deterministic generation UUID.",
+      "function_bodies_sha256": [
+        "c7ac9d4f0ecf6a48a14770c460353f7fdfe89fda1bc17d6b45de8804780e7596"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/checkpoint_graph_diff.rs",
+      "function": "logical_fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Schema-aware Arrow row values define logical diff equality independent of physical artifact encoding.",
+      "function_bodies_sha256": [
+        "6d739930b2574a7711ac6ffdc92901d05fca9c2680aac995f79c07973d4a22c2"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/checkpoints.rs",
+      "function": "checkpoint_list_snapshot",
+      "role": "contract_identity",
+      "input_contract": "Checkpoint list revision and request/cursor metadata bind pagination to a stable list.",
+      "function_bodies_sha256": [
+        "eff76223669be17206366df28280e8f71e733fa02ad1f1ae9052eb95ae9c40a7"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/checkpoints.rs",
+      "function": "page_cursor",
+      "role": "contract_identity",
+      "input_contract": "Checkpoint list revision and request/cursor metadata bind pagination to a stable list.",
+      "function_bodies_sha256": [
+        "2f04d995f0721d28ed7ed4b9db66a05ef3e2ad598095b70354f312e28cc0e8b4"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/checkpoints.rs",
+      "function": "request_binding",
+      "role": "contract_identity",
+      "input_contract": "Checkpoint list revision and request/cursor metadata bind pagination to a stable list.",
+      "function_bodies_sha256": [
+        "182b5d31de6e6d645e06851168b3e4eee7f70ab9c58c1812afb47446a67ccb8b"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/checkpoints/diff.rs",
+      "function": "current_endpoint_uuid",
+      "role": "contract_identity",
+      "input_contract": "Logical row fingerprints and endpoint/request metadata define checkpoint diff identity and paging bindings.",
+      "function_bodies_sha256": [
+        "ca2caebe81103b4d9b96ea2d349153863ffc6bbd6810266a7961f1c414ec3bb6"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/checkpoints/diff.rs",
+      "function": "diff_endpoint_snapshot",
+      "role": "contract_identity",
+      "input_contract": "Logical row fingerprints and endpoint/request metadata define checkpoint diff identity and paging bindings.",
+      "function_bodies_sha256": [
+        "d843d12ce0bc8b3c3d04dc09e0a0ec230a8464a6e3dd9f03640924b2a62ddbfb"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/checkpoints/diff.rs",
+      "function": "diff_request_binding_parts",
+      "role": "contract_identity",
+      "input_contract": "Logical row fingerprints and endpoint/request metadata define checkpoint diff identity and paging bindings.",
+      "function_bodies_sha256": [
+        "6ba43271e8342177b273320faf5096e92914442f2e40338f222885947722c68c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/checkpoints/diff.rs",
+      "function": "logical_records",
+      "role": "contract_identity",
+      "input_contract": "Logical row fingerprints and endpoint/request metadata define checkpoint diff identity and paging bindings.",
+      "function_bodies_sha256": [
+        "801214ebf7059bb74a31b3b141aafb641bda32be7554039b0a87bf94be1616d6"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/composite_receipt.rs",
+      "function": "composite_generation_uuid",
+      "role": "contract_identity",
+      "input_contract": "Composite operation metadata determines stable generation UUID.",
+      "function_bodies_sha256": [
+        "857b65019faefe3b48a08c24a2271d638caef1699057fea66c7e1c5afd711312"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/generation_diff.rs",
+      "function": "diff_committed_generations",
+      "role": "contract_identity",
+      "input_contract": "Logical Arrow output encoding and selected row values identify semantic generation differences.",
+      "function_bodies_sha256": [
+        "7afa2594ee257586e3396fde9949fb5e352e13c24c516eb3618f30db11f81ff3"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/generation_diff.rs",
+      "function": "row_fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Logical Arrow output encoding and selected row values identify semantic generation differences.",
+      "function_bodies_sha256": [
+        "ac389e2484fdf4d66a2ade3cfeec0317dbc90563fbe828583498ac1442330ed2"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/graph_publication.rs",
+      "function": "mutation_generation_uuid",
+      "role": "contract_identity",
+      "input_contract": "Domain plus mutation operation UUID, participant descriptors and each participant's exact-byte SHA-256 supplied by PreparedGenerationRequest determine generation identity; the participant digest is computed once and reused by staging.",
+      "function_bodies_sha256": [
+        "7fcf6056cab971068219146d9770c877a23493e261947bdaa3eb4e9626a2c943"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/import_session.rs",
+      "function": "import_batch_operation",
+      "role": "contract_identity",
+      "input_contract": "Session/source/row coordinates define deterministic construction chunk UUID for replay.",
+      "function_bodies_sha256": [
+        "05e4d109ab343c4d46989125368269aff1d35cfca7fee28a5fccb4a01daffd3d"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/import_session/journal.rs",
+      "function": "append",
+      "role": "control_authentication",
+      "input_contract": "MAGIC, encoded length/sequence and bounded JSON session/source/progress metadata authenticate a journal control frame; source registration contains identities and counts, never Arrow/Parquet payload rows. Journal scan checks the frame before progress replay; construction receipts remain separate row authority.",
+      "function_bodies_sha256": [
+        "e298d5063a01c06fa3808048382cc1ba1e0752865b9b7f685c881efbb99fd659"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/import_session/journal.rs",
+      "function": "scan",
+      "role": "control_authentication",
+      "input_contract": "Retained frame header and bounded JSON control body are compared with stored SHA before sequence/session/source validation and checkpoint progress replay. Payload rows are not hash inputs. Checkpointed/interior corruption refusal and uncheckpointed torn-tail policy are unchanged.",
+      "function_bodies_sha256": [
+        "4454e1bc0057168f3597a679f29042a5c1d8fc854105137e544515d9a72f5f82"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/knowledge/assertions.rs",
+      "function": "assertion_generation_uuid",
+      "role": "contract_identity",
+      "input_contract": "Assertion operation, participant descriptors and each participant's exact-byte SHA-256 supplied by PreparedGenerationRequest determine generation UUID; the participant digest is computed once and reused by staging.",
+      "function_bodies_sha256": [
+        "e37e9fadb62f27177cca7a3198dde3107f93f20c6f2e1a4102a33e8e7790ab73"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/knowledge/ledger.rs",
+      "function": "knowledge_generation_uuid",
+      "role": "contract_identity",
+      "input_contract": "Knowledge mutation operation, participant descriptors and each participant's exact-byte SHA-256 supplied by the caller determine generation UUID; publishers obtain the digests from PreparedGenerationRequest, which staging reuses.",
+      "function_bodies_sha256": [
+        "e265ac01d0f8452a6dcce79f76590b9a297bede7dfa6d82c811f3ce3cd062394"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/knowledge/ledger.rs",
+      "function": "participant_content_sha256",
+      "role": "durable_artifact",
+      "input_contract": "Exact bytes of a replacement-participant subset covered by a research generation UUID; staging hashes the merged request independently.",
+      "function_bodies_sha256": [
+        "6af95ffd1f38e857779c92baabc38214c5889e107281b712cc3fdb22d01bf4ce"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/knowledge/source_artifact.rs",
+      "function": "resolve_payload",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "LocalBytes payload is hashed into named LocalSha256 artifact identity, not diagnostic output.",
+      "function_bodies_sha256": [
+        "4a2b55e6dd3db6f9f723c7a99750baa64459b566523f60effdc5087b8280d120"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/multi_ontology/candidate.rs",
+      "function": "migration_generation_uuid",
+      "role": "contract_identity",
+      "input_contract": "Migration operation, composition and request fingerprints determine candidate generation UUID.",
+      "function_bodies_sha256": [
+        "e349db02dede27261064513974166db5e44c2fd4628e5962bc68de921d9fea2b"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/ontology_composition_lifecycle.rs",
+      "function": "composition_request_fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Canonical composition/change request and pinned generation metadata bind preview, publication and replay to the same operation.",
+      "function_bodies_sha256": [
+        "f506357309dc2558ad4415c8c6ce6a60f867025cb5472d5025d3d3ab95735ecb"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/ontology_composition_lifecycle.rs",
+      "function": "preview_ontology_composition_change",
+      "role": "contract_identity",
+      "input_contract": "Canonical composition/change request and pinned generation metadata bind preview, publication and replay to the same operation.",
+      "function_bodies_sha256": [
+        "4f4a16efd092e6fe50ff46bac8a11d65bc986099c0c75df7c60d896be7d4e18a"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/ontology_composition_lifecycle.rs",
+      "function": "publish_ontology_composition_change",
+      "role": "contract_identity",
+      "input_contract": "Canonical composition/change request and pinned generation metadata bind preview, publication and replay to the same operation.",
+      "function_bodies_sha256": [
+        "652c74a8d5456f9cd637d3201fee3c5417c244ee2796acc5a9b638a3454ab994"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/ontology_composition_lifecycle.rs",
+      "function": "replay_ontology_composition_change",
+      "role": "contract_identity",
+      "input_contract": "Canonical composition/change request and pinned generation metadata bind preview, publication and replay to the same operation.",
+      "function_bodies_sha256": [
+        "6d389ea7eb84ce7f072b791c13f5ecd79157ef9020a8da14933f476a1988b017"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/ontology_lifecycle.rs",
+      "function": "hex_sha256",
+      "role": "contract_identity",
+      "input_contract": "Canonical authored ontology JSON is used as ontology fingerprint in preview contract.",
+      "function_bodies_sha256": [
+        "072e78f83393384223c6a04a745aa7db8c601c0a447aa7fbb25d431763a6527e"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/paging.rs",
+      "function": "digest_hex",
+      "role": "control_authentication",
+      "input_contract": "Opaque page-token digest authenticates method/request/snapshot/limit/offset/cursor metadata.",
+      "function_bodies_sha256": [
+        "53d351cc41080d81644c7f3b1f055971271a7ff5e38e259e221dbf980d6e23d8"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/query_evidence.rs",
+      "function": "published_result_metadata",
+      "role": "optional_evidence",
+      "input_contract": "Logical Arrow IPC encoding of published result is hashed only via execute_to_result_sink_with_evidence opt-in.",
+      "function_bodies_sha256": [
+        "4de6e058f1c08d91b68418faf3ca9e996651e9df39c842327b3b59ec7ce076fd"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/repository.rs",
+      "function": "desired_repository_snapshot",
+      "role": "control_authentication",
+      "input_contract": "Canonical repository inventory metadata is authenticated or bound to the published snapshot.",
+      "function_bodies_sha256": [
+        "877736aeb04c80e41ede92cd0c90835480c31eb75aa1091e8f3e79ad9e156c6b"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/repository.rs",
+      "function": "publish_repository_snapshot",
+      "role": "control_authentication",
+      "input_contract": "Canonical repository inventory metadata is authenticated or bound to the published snapshot.",
+      "function_bodies_sha256": [
+        "d2e4b6a067534a66ef65e681e8a422c4451a1683e6266c3e0d579b891fd8539a"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/repository.rs",
+      "function": "repository_sync_generation_uuid",
+      "role": "contract_identity",
+      "input_contract": "Repository operation and participant descriptors determine generation UUID; inner participant digest distinguished separately.",
+      "function_bodies_sha256": [
+        "bb64a6a7d20a2940c961b24de1ed3740691e5656398e0ba9100da720d5271c2c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/repository.rs",
+      "function": "validate_repository_snapshot_inventory",
+      "role": "control_authentication",
+      "input_contract": "Canonical repository inventory metadata is authenticated or bound to the published snapshot.",
+      "function_bodies_sha256": [
+        "8e9f712bb961aa0297b4d3843e8b6d94cb5aeda0c10a7c7c59eb4f0827258f84"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/repository/configuration.rs",
+      "function": "digest_definition_tree",
+      "role": "contract_identity",
+      "input_contract": "Declared definition tree fingerprint folds validated definition relative names, byte lengths and authored file bytes.",
+      "function_bodies_sha256": [
+        "7fd2c7ed2466818a77ed2267b6cfcf21bbe9012178469617a96c83cece496258"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/repository/configuration.rs",
+      "function": "validate_infra_target",
+      "role": "contract_identity",
+      "input_contract": "Canonical resolved project config JSON defines infrastructure validation result identity.",
+      "function_bodies_sha256": [
+        "b4990987f2014a9fe764ce32ba4ad773baebb2d72ceab3faed2048ee042ac0e8"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/repository/skills.rs",
+      "function": "validate_skill_bundle",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "Packaged or installed skill bytes are checked against expected artifact SHA before accepting the external artifact.",
+      "function_bodies_sha256": [
+        "0084981ad3e3e71d9e0c4fc4d799af890c7864061907ec84865f65c7fdb51ba3"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/repository/skills.rs",
+      "function": "verify_installed_files",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "Packaged or installed skill bytes are checked against expected artifact SHA before accepting the external artifact.",
+      "function_bodies_sha256": [
+        "97ad0f28f43c0f593914dbcb09b3db317d3a57666804e36467c49fd38e6d95cc"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/research_claims/authority.rs",
+      "function": "project_uuid",
+      "role": "contract_identity",
+      "input_contract": "Admitted project-root identity bytes produce stable project identifier.",
+      "function_bodies_sha256": [
+        "2e2beacabfb54a57d0e27bbdbe762cb9e752b9cdf5720ac766847f048a2c1484"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/research_claims/branch.rs",
+      "function": "step",
+      "role": "contract_identity",
+      "input_contract": "Canonical proposed branch fields bind step intent and semantic result.",
+      "function_bodies_sha256": [
+        "ef066171b127c46f5842e5586c95bb835980ff26308652208a0a4ca6eae8406e"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/research_claims/decisions.rs",
+      "function": "record_research_decisions",
+      "role": "contract_identity",
+      "input_contract": "Decision request/proposal/change bytes bind accepted operation and replay identity.",
+      "function_bodies_sha256": [
+        "73d8b7a8e29010ac2f0dde67ba418458641fc88a21d1fdc132dd0e91651d4d30"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/research_claims/decisions.rs",
+      "function": "request_fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Decision request/proposal/change bytes bind accepted operation and replay identity.",
+      "function_bodies_sha256": [
+        "07f29d10758cee437c0f0326edff0e4c3d7d61cf453e6481b137177214fbffb5"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/research_claims/publication.rs",
+      "function": "begin",
+      "role": "contract_identity",
+      "input_contract": "Domain plus canonical publication intent binds proposed claims to operation identity.",
+      "function_bodies_sha256": [
+        "31378d522e90d42c39a2bf1ccd0701eeb915526653a0e60a2cde1b867f900553"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/research_comparison/output.rs",
+      "function": "render",
+      "role": "contract_identity",
+      "input_contract": "Canonical comparison output values define comparison output identity.",
+      "function_bodies_sha256": [
+        "d313a02153f34031b884aa47a4d268558073efe5b7bfe037d7dd9216a088d48c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/research_comparison/state.rs",
+      "function": "canonical",
+      "role": "contract_identity",
+      "input_contract": "Canonical comparison state metadata defines pinned state identity.",
+      "function_bodies_sha256": [
+        "60a19a9d0ab154ba5d7198a9d3183f2b866a4e3b705fb010dca226291f371ccb"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/research_interchange/accepted.rs",
+      "function": "proof_identity",
+      "role": "contract_identity",
+      "input_contract": "Canonical acceptance proof metadata defines semantic proof identity.",
+      "function_bodies_sha256": [
+        "335bfa1bef76f961f1adb0fc9aa5ecebdc18d749ebd1bed847a5776b00c1f3f3"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/research_interchange/fork.rs",
+      "function": "intent",
+      "role": "contract_identity",
+      "input_contract": "Canonical fork request metadata defines operation intent identity.",
+      "function_bodies_sha256": [
+        "9008e6e5f1dc5a8a1d405e4e5afb93eb6333109f397ea0c719f14750094f1e55"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/research_interchange/projection.rs",
+      "function": "prepare",
+      "role": "contract_identity",
+      "input_contract": "Canonical projection request/selected content commitments define projection intent.",
+      "function_bodies_sha256": [
+        "842e6e8cb8575e2a5df70e6a973604678cc0b910a51ae6af5b53b4a61b90a0f1"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/research_project.rs",
+      "function": "research_metadata_generation_uuid",
+      "role": "contract_identity",
+      "input_contract": "Research metadata mutation operation and participant descriptors determine generation UUID; inner participant digest distinguished separately.",
+      "function_bodies_sha256": [
+        "9ae14f53220fbe2a1064bf2d5943a2dcedee54d62eeab6a4e4a0b9255c2f347a"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/research_proposals/history.rs",
+      "function": "research_proposal_history",
+      "role": "contract_identity",
+      "input_contract": "Canonical proposal history page/state bytes bind the history snapshot.",
+      "function_bodies_sha256": [
+        "7ff67c42a33130722d4059516f60de92f167a9c1e7d3762991fa1c4200c451f4"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/research_proposals/mod.rs",
+      "function": "identity",
+      "role": "contract_identity",
+      "input_contract": "Domain and canonical proposal operation metadata define proposal identity.",
+      "function_bodies_sha256": [
+        "127638d62d1ab8dc90651340d099e87e8540ea8e5db6c8f513166209d64a6a04"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/research_proposals/preview.rs",
+      "function": "load",
+      "role": "contract_identity",
+      "input_contract": "Canonical proposal metadata and selected branch values bind preview to exact state.",
+      "function_bodies_sha256": [
+        "815e6e86cc606cb1c7f6d3a283b3e9f1ba1496cd6afcd497aa9c4576eb0ddc18"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/research_upstream/history.rs",
+      "function": "research_upstream_history",
+      "role": "contract_identity",
+      "input_contract": "Canonical upstream history metadata defines page snapshot identity.",
+      "function_bodies_sha256": [
+        "ccc396d2a93ce72d12c826840e1d2a887edc590df7677fe76c2d8e3eb414e860"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/research_upstream/preview.rs",
+      "function": "identity",
+      "role": "contract_identity",
+      "input_contract": "Canonical upstream request and selected changes bind preview and subsequent operation.",
+      "function_bodies_sha256": [
+        "99b82ff602a5e1ff24a3d0c60ac94c2760a7da81296cab7c3bf647459a91ccdf"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/research_upstream/preview.rs",
+      "function": "load",
+      "role": "contract_identity",
+      "input_contract": "Canonical upstream request and selected changes bind preview and subsequent operation.",
+      "function_bodies_sha256": [
+        "be9d2f870c3bab7f144c26ecdcdb51badb2f0dcc5a12b1eb5dd029200402b1c5"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/resumable_construction.rs",
+      "function": "derived_uuid",
+      "role": "contract_identity",
+      "input_contract": "Domain plus operation/session coordinates define deterministic resumable construction identity.",
+      "function_bodies_sha256": [
+        "a4e88998d7b4b72a9fb5e1b394c192d1ce120163bc3de07b390a104cad97b9e1"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/slices/branch.rs",
+      "function": "authenticate",
+      "role": "control_authentication",
+      "input_contract": "Retained Version content commitments authenticate the branch slice context.",
+      "function_bodies_sha256": [
+        "80a5934cc83e5118633180ac5f90708dcdb36b6017d1b0b6611526e5c7466230"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/slices/frozen.rs",
+      "function": "digest_hex",
+      "role": "control_authentication",
+      "input_contract": "Canonical frozen metadata bytes in Arrow schema authenticate the frozen capsule on decode.",
+      "function_bodies_sha256": [
+        "b55711df7c105249f65dee98570cbb515d0294f4f94605786f9968235f5d245b"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/slices/frozen.rs",
+      "function": "freeze_slice",
+      "role": "contract_identity",
+      "input_contract": "Retained Version content metadata and selector request JSON define frozen context commitments.",
+      "function_bodies_sha256": [
+        "486babc765d89219532d647b40191b92197c4d18b532613b02d8634ef9814735"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/slices/output.rs",
+      "function": "fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Canonical selected slice row/output values define deterministic selection fingerprint.",
+      "function_bodies_sha256": [
+        "f660306640a269676696b18348ab0778abb5175a89427de390d6024cf6b7b53c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/workspace_hydration.rs",
+      "function": "load_composition_binding",
+      "role": "contract_identity",
+      "input_contract": "Constant workspace composition family/version descriptor validates schema contract.",
+      "function_bodies_sha256": [
+        "eb1c63ced2b956d9eec7e11e7915c809fecff206718d926d60548501efb375b0"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/workspace_ontology.rs",
+      "function": "adopt_ontology_cancellable",
+      "role": "contract_identity",
+      "input_contract": "Canonical authored ontology document fingerprint and schema contract literal define adoption identity.",
+      "function_bodies_sha256": [
+        "774108397beefd758da047f6cde10591fca641125b72a2141f7689f1e9ef42dd"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/workspace_ontology.rs",
+      "function": "workspace_generation_uuid",
+      "role": "contract_identity",
+      "input_contract": "Workspace operation and participant descriptors determine generation UUID; inner participant digest distinguished separately.",
+      "function_bodies_sha256": [
+        "66774066ccbb82dbf3ef4574867e83e1aa9aced228c7d2835e5943c444165daf"
+      ]
+    },
+    {
+      "path": "crates/graphforge-api/src/workspace_ontology.rs",
+      "function": "workspace_participant",
+      "role": "contract_identity",
+      "input_contract": "Constant workspace/family/version schema descriptor determines schema fingerprint.",
+      "function_bodies_sha256": [
+        "ca700589606747caeb7f5970f5f1ab2d242c5e434a473790482bb511dba419f6"
+      ]
+    },
+    {
+      "path": "crates/graphforge-cli/src/hub_clone.rs",
+      "function": "hash_reader",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "Remote hub bytes are SHA-authenticated against requested artifact digest.",
+      "function_bodies_sha256": [
+        "eb7ecc5226306f6b5f867c602bf90297130f1f54b9281e033198752ace28803f"
+      ]
+    },
+    {
+      "path": "crates/graphforge-cli/src/hub_fixture_artifacts.rs",
+      "function": "digest_bytes",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "Generated fixture artifact bytes are content addressed and checked against selected digest.",
+      "function_bodies_sha256": [
+        "2257c8dcbfcf25355a8e45dbc0fc7e6ed760967d781353df4feec38538e3c2fe"
+      ]
+    },
+    {
+      "path": "crates/graphforge-cli/src/hub_fixture_artifacts.rs",
+      "function": "generator_source_digest",
+      "role": "contract_identity",
+      "input_contract": "Fixture generator source code and source tree path/length/content form reproducibility identity required by fixture metadata validation.",
+      "function_bodies_sha256": [
+        "2f50e568779ec4b1dda60581e5729cfc0ec4593cb2adc524adb8ec53b15c30b1"
+      ]
+    },
+    {
+      "path": "crates/graphforge-cli/src/hub_fixture_artifacts.rs",
+      "function": "tree_digest",
+      "role": "contract_identity",
+      "input_contract": "Fixture generator source code and source tree path/length/content form reproducibility identity required by fixture metadata validation.",
+      "function_bodies_sha256": [
+        "dff0e052f601597f4ed274c4472d0365307b6047009fab9cc71c7d0c1d7a081a"
+      ]
+    },
+    {
+      "path": "crates/graphforge-core/src/canonical.rs",
+      "function": "fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Canonical logical values and domain-separated contract metadata define semantic identity.",
+      "function_bodies_sha256": [
+        "97bf96b037cc5e0e5e72dda3d407e1c4d8909bf76563c6c4f93f77521f13ae3f"
+      ]
+    },
+    {
+      "path": "crates/graphforge-core/src/hash_observation.rs",
+      "function": "default",
+      "role": "producer_delegate",
+      "input_contract": "DomainSha256 default delegates to ObservedSha256::for_domain with statically selected domain; not a second application producer.",
+      "function_bodies_sha256": [
+        "847f4a1c196bbd1c807831bbaa75e1054b3107edb86b213729b7e6c2590b1c45",
+        "012efcadffa7e8cbfe57b4d810fc42bd858ff2e3dd86cc811e0e94805a9de9fd"
+      ]
+    },
+    {
+      "path": "crates/graphforge-core/src/hash_observation.rs",
+      "function": "for_domain",
+      "role": "primitive_implementation",
+      "input_contract": "One underlying sha2 instance implements the wrapper; exclude from application-site totals to avoid counting wrapper and primitive twice.",
+      "function_bodies_sha256": [
+        "776140a4b3f5e048e2f89b03b88efd8aceb6b77eda65f9935044dd15c76c146f"
+      ]
+    },
+    {
+      "path": "crates/graphforge-discovery/src/lib.rs",
+      "function": "canonical_digest",
+      "role": "contract_identity",
+      "input_contract": "Canonical discovery document JSON defines discovery identity.",
+      "function_bodies_sha256": [
+        "b1d3edd9ef7217d2679dba50023ad63f8344c7de1e39d59a2bcd29d148a73cb2"
+      ]
+    },
+    {
+      "path": "crates/graphforge-discovery/src/lib.rs",
+      "function": "sha256_digest",
+      "role": "contract_identity",
+      "input_contract": "Canonical discovery document JSON bytes, for a manifest or a Project summary, define discovery identity; this helper only hashes and formats them.",
+      "function_bodies_sha256": [
+        "14aa04b3bd93c883ef6802969b4d331410989603bdfbeff4fd82f0229fb82e00"
+      ]
+    },
+    {
+      "path": "crates/graphforge-discovery/src/summary.rs",
+      "function": "canonical_digest",
+      "role": "contract_identity",
+      "input_contract": "Canonical Project summary JSON defines summary identity; the manifest's summary_digest binds to it.",
+      "function_bodies_sha256": [
+        "b1d3edd9ef7217d2679dba50023ad63f8344c7de1e39d59a2bcd29d148a73cb2"
+      ]
+    },
+    {
+      "path": "crates/graphforge-exec/src/algorithm_analyze.rs",
+      "function": "analyze_projection_fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Prepared projection identity and algorithm partition/options metadata define invocation identity.",
+      "function_bodies_sha256": [
+        "849888a1a8ea4781cff19bdffd8b75d9f28ca4970593946d8349adcb538d5bd7"
+      ]
+    },
+    {
+      "path": "crates/graphforge-exec/src/algorithm_analyze/embedding.rs",
+      "function": "embedding_descriptor_projection_fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Embedding descriptor projection identity, type tokens and UUID bytes define algorithm input contract.",
+      "function_bodies_sha256": [
+        "ba6d037d19bd7ba70ce87dac8f31c108d4975b08c0981fc67eaa60509a989f2d"
+      ]
+    },
+    {
+      "path": "crates/graphforge-exec/src/algorithm_graph.rs",
+      "function": "descriptor_projection_fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Topology identity plus selected UUID/property-vector commitments define descriptor identity.",
+      "function_bodies_sha256": [
+        "9c22ecf0f57ed525a9cb5c0cefbf86074ccc1d3c08c0d976ff6063f532c2d517"
+      ]
+    },
+    {
+      "path": "crates/graphforge-exec/src/algorithm_graph.rs",
+      "function": "projection_fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Canonical sorted public UUID graph topology defines projection identity.",
+      "function_bodies_sha256": [
+        "340436e66dd3f2c52516e90b0c03763aa409a4a2a6cf4e86a5631c12e3731034"
+      ]
+    },
+    {
+      "path": "crates/graphforge-exec/src/algorithm_paths.rs",
+      "function": "paths_projection_fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Graph/cost descriptor identities and path options define invocation identity.",
+      "function_bodies_sha256": [
+        "fa9a391f6af98e60d0466db9fd9f32c0b2698b62e906335755f7e960e76d14e0"
+      ]
+    },
+    {
+      "path": "crates/graphforge-ontology/src/compiler.rs",
+      "function": "build_ontology_meta",
+      "role": "contract_identity",
+      "input_contract": "Canonical authored ontology document JSON defines ontology checksum.",
+      "function_bodies_sha256": [
+        "f64bc545c34b9ebe4b6b0d611e4151edafdb05ac756a0bd473fa2825d3d7735c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-ontology/src/composition/canonical.rs",
+      "function": "domain_digest",
+      "role": "contract_identity",
+      "input_contract": "Domain and canonical authored ontology/composition JSON define semantic identity.",
+      "function_bodies_sha256": [
+        "279ed5b0abc6352897b554e88f0474830e93b23f07f28b2b68cf7dee659ce994"
+      ]
+    },
+    {
+      "path": "crates/graphforge-portable-oci/src/lib.rs",
+      "function": "digest_sha256",
+      "role": "durable_artifact",
+      "input_contract": "Complete OCI layer/config/manifest transport bytes authenticate explicit external import/publication.",
+      "function_bodies_sha256": [
+        "1970363ed4f09d782d70b9fdd617830bc3c1adc5bd48930f1c1464f497a1214d"
+      ]
+    },
+    {
+      "path": "crates/graphforge-portable-oci/src/lib.rs",
+      "function": "signature_mac",
+      "role": "control_authentication",
+      "input_contract": "Secret, signer and OCI signature metadata authenticate trusted signature envelope.",
+      "function_bodies_sha256": [
+        "eea2c2dbae1d940449cccd7caea1831dcdcd938018d3f407892ad90685a01315"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/adjacency.rs",
+      "function": "entries_fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Sorted adjacency BuildEntry UUID/index/edge coordinate tuples define deterministic adjacency construction identity.",
+      "function_bodies_sha256": [
+        "62a441c8e8895dfd35469a3721e5755e0088783a80ab460fa4dc029992a04586"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/adjacency.rs",
+      "function": "finish",
+      "role": "contract_identity",
+      "input_contract": "Domain plus node/edge counts and recorded shard bounds/digests define stable shard-set identity; does not hash shard payload here.",
+      "function_bodies_sha256": [
+        "e49f3594103b8e2d9401dcd39f72d48311d2ea50f5fd62ab7510c19c7cd5675c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/adjacency.rs",
+      "function": "sha256_hex",
+      "role": "caller_selected",
+      "input_contract": "Shared helper hashes complete CSR shard bytes for artifact identity or the previously computed shard-set identity digest for stable namespace; classify caller edges separately.",
+      "function_bodies_sha256": [
+        "b94410260b7e047a09f5527cdd14e74be0f1e62f8ca3e67023328b1e5be5fb6a"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/adjacency/codec.rs",
+      "function": "shard_set_identity",
+      "role": "contract_identity",
+      "input_contract": "Domain plus node/edge counts and recorded shard bounds/digests define immutable shard-set identity. The preserved second SHA pass consumes only the first32-byte digest; neither pass reads shard payload.",
+      "function_bodies_sha256": [
+        "f27d96c1956d554acfbffbf09740c947e400ca5ad2ca4c2af85e1288d1cb7f55"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/allocation_operation.rs",
+      "function": "file_owner",
+      "role": "contract_identity",
+      "input_contract": "Encoded filesystem path bytes identify allocation ownership route.",
+      "function_bodies_sha256": [
+        "ef54a1e81325d24d0f62a3df8d9c959e5ce9902f657d77360b11df9b2dd3bcef"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/durable_rewrite.rs",
+      "function": "checksum",
+      "role": "control_authentication",
+      "input_contract": "Canonical rewrite intent JSON body is authenticated in its envelope.",
+      "function_bodies_sha256": [
+        "5c754402f0f43e32e034573cf5986ee7886977ea98fdced08d5efc1d48017674"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/durable_rewrite.rs",
+      "function": "hash_reader_in_domain",
+      "role": "caller_selected",
+      "input_contract": "Domain chosen by retained rewrite source: semantic-routes/topology generation JSON control authority or full replacement artifact payload.",
+      "function_bodies_sha256": [
+        "c42a7c059ffcb8735c3382e82a08f065f67b40f3a36e03a9fbf90e5085984e5b"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/embedding_batch.rs",
+      "function": "validate_embedding_batch",
+      "role": "contract_identity",
+      "input_contract": "Canonical UUID/Float32 row content defines the frozen embedding-v1 generation identity and content-idempotent publication contract (embedding-v1.md; EmbeddingGenerationManifest::new and publish_embedding_generation). This full canonical-row SHA work remains counted as contract identity; persisted Parquet publication integrity is a separate artifact producer.",
+      "function_bodies_sha256": [
+        "78a056b4bcbd2a70f4d699f27bbd15a3de6e49aff959fe96b81f95a458ecbd38"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/embedding_identity.rs",
+      "function": "for_generation",
+      "role": "contract_identity",
+      "input_contract": "Canonical embedding descriptor/source compatibility content commitments define embedding compatibility/generation identity.",
+      "function_bodies_sha256": [
+        "e7616204241e87af66298a33e2a700940d45635161d9d991c02594089130de0f"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/embedding_identity.rs",
+      "function": "hash_bytes",
+      "role": "contract_identity",
+      "input_contract": "Canonical embedding descriptor/source compatibility content commitments define embedding compatibility/generation identity.",
+      "function_bodies_sha256": [
+        "1c29bf6e1785c4ecd9c2ca9e530e1d064c514abd5db259f3f310468a5ea6137c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/embedding_manifest.rs",
+      "function": "digest",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "Published vector artifact byte stream fingerprint is persisted and validated against manifest.",
+      "function_bodies_sha256": [
+        "b755330588e0b018f8ef0b8f5c0cf5d4dcfe3a4326f44865bff36c6d1586ab9d"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/embedding_manifest.rs",
+      "function": "new",
+      "role": "contract_identity",
+      "input_contract": "Source generation membership, dependency digests and count define source-manifest identity.",
+      "function_bodies_sha256": [
+        "9e9ca604b346e9172dd3c8c1fda82d5f58c3f1f4aa294dd29bf6a67e8d579afa",
+        "b2829c682a22cff3da857782e1366bfa6e3ee89bc4c14a1dfc338b1b5452f358"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/embedding_publication.rs",
+      "function": "active_checksum",
+      "role": "control_authentication",
+      "input_contract": "Compatibility UUID and active generation UUID authenticate active pointer metadata.",
+      "function_bodies_sha256": [
+        "0da64ffdb38ca4ece46c77e4ccf8d7006153e015385172b112753fb2eaa012bb"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/embedding_publication.rs",
+      "function": "hash_file",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "Full vector file or canonical UUID/vector payload authenticates persisted embedding generation; active reopen currently executes both.",
+      "function_bodies_sha256": [
+        "c29d27723be583e6da9c1b4665003ed780973e7ac27fcab9eae123ed6127fdec"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/embedding_refresh_config.rs",
+      "function": "checksum",
+      "role": "control_authentication",
+      "input_contract": "Canonical refresh config JSON body is authenticated in its envelope.",
+      "function_bodies_sha256": [
+        "8e914117e041de541bb2c37306f43351009e47f2d760d7beba095a6e2a335b4a"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/filesystem_admission.rs",
+      "function": "lifecycle_lock_name",
+      "role": "contract_identity",
+      "input_contract": "Project/root path identity bytes derive stable lock/probe namespace.",
+      "function_bodies_sha256": [
+        "c848e538ceb648183ffc69ea414109c10eb6a436dad1da828e39b6ee060d2110"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/filesystem_admission.rs",
+      "function": "stable_probe_name",
+      "role": "contract_identity",
+      "input_contract": "Project/root path identity bytes derive stable lock/probe namespace.",
+      "function_bodies_sha256": [
+        "4e6191df56ab64aa9d0ec9f502c3305738e941090a197113f9b4fb7ed2ae508b"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_construction.rs",
+      "function": "digest",
+      "role": "contract_identity",
+      "input_contract": "Canonical semantic composition and storage binding JSON define semantic construction authority identity.",
+      "function_bodies_sha256": [
+        "17979c0e1c1f1c59111e50b45da41a1cf03476a81f1d055635aec2a8ccf5117a"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_construction.rs",
+      "function": "ordinal_publication_tombstones",
+      "role": "control_authentication",
+      "input_contract": "Ordinal manifest, canonical shape-authority envelope or canonical receipt body authenticate construction control chain.",
+      "function_bodies_sha256": [
+        "2d7d22ee16071f60e167fc1b644f872212e3d274e3f8103373be2f5307edb6ce"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_construction.rs",
+      "function": "sha256",
+      "role": "caller_selected",
+      "input_contract": "Shared helper authenticates canonical construction receipt/control bodies and derives names from authority/key/route text; classify caller inputs separately.",
+      "function_bodies_sha256": [
+        "77cc3d884173e825315d9746a8f81cbd31b0511b4eec6a8c87fd92dda634d3aa"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_construction.rs",
+      "function": "shape_authority_sha256",
+      "role": "control_authentication",
+      "input_contract": "Domain-separated canonical shape and sorted receipt metadata (names, identities, lengths and expected XXH64) authenticate the checkpoint-bound construction control envelope; no payload bytes are SHA inputs.",
+      "function_bodies_sha256": [
+        "4d243dccbebe8384e901551b6b9924289b18d5a37b7d755147a194c9f733e3e2"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_construction/catalog.rs",
+      "function": "load_parent_runtime_catalog",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "Runtime catalog Parquet bytes are authenticated at construction parent admission.",
+      "function_bodies_sha256": [
+        "b5b6b65b97fc5d82b24a14cccb0de71dc193dd3046b0586fcbc6994581e2c03a"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_construction/encoding_publication.rs",
+      "function": "publish_canonical_with_cancellation",
+      "role": "control_authentication",
+      "input_contract": "Canonical route table bytes authenticate sealed route-authority receipt.",
+      "function_bodies_sha256": [
+        "7b75072b42e59d1be3913ab43069032f7ecb956ab5cf3e462423a8928ff37faf"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_construction/intake.rs",
+      "function": "logical_batch_digest",
+      "role": "contract_identity",
+      "input_contract": "Normalized logical Arrow rows or field/type/nullability/schema metadata define chunk replay identity.",
+      "function_bodies_sha256": [
+        "fa0a695e6fb198d0f6afc4a5f59274d28e4e51ef046ac08bafa71f96d15156bf"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_construction/intake.rs",
+      "function": "normalized_schema_digest",
+      "role": "contract_identity",
+      "input_contract": "Normalized logical Arrow rows or field/type/nullability/schema metadata define chunk replay identity.",
+      "function_bodies_sha256": [
+        "fe3064edb10356e567b5ab1389a3c664fb7fd63702076be68f00e116b8b0ac50"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_construction/progress.rs",
+      "function": "sha256_of_body",
+      "role": "control_authentication",
+      "input_contract": "Already bounded canonical shape-progress JSON body is hashed to authenticate the prior-boundary control chain; artifact bytes are not SHA inputs.",
+      "function_bodies_sha256": [
+        "32ba1388f5290cd8dc1ae26c6bb78f0214ac2efe8f8837859c160a129eb29e21"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_construction/shape.rs",
+      "function": "shape_canonical_inner",
+      "role": "control_authentication",
+      "input_contract": "Per sealed chunk, kind byte, schema SHA text and admitted Parquet XXH64 text authenticate the exact normalized inputs bound into shape/encoding control replay; no row or artifact payload enters this SHA producer.",
+      "function_bodies_sha256": [
+        "ace041bb4b4d35ee4f5555269923600bce5a664c13b73f5343b874e33ac47eb6"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_construction_encoding.rs",
+      "function": "authenticate_file_cancellable",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "Construction source/run/artifact byte stream authenticates input or computes output publication receipt.",
+      "function_bodies_sha256": [
+        "874805143350fc2df18c545f41909496946f2b96cf7eacc012b0c0cea173726f"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_construction_encoding.rs",
+      "function": "copy_artifact",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "Construction source/run/artifact byte stream authenticates input or computes output publication receipt.",
+      "function_bodies_sha256": [
+        "7574839ae7d2ad0cab95e83e31332861dd94a9cc48dcf8ee7ca91bd4c93d9524"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_construction_encoding.rs",
+      "function": "inventory_authority_sha256",
+      "role": "control_authentication",
+      "input_contract": "Domain-separated canonical encoding inventory JSON (artifact descriptors and generation/shape bindings) authenticates checkpoint control authority; artifact payloads are not SHA inputs.",
+      "function_bodies_sha256": [
+        "7be7954b9597f7aa5b1765f60228738fc4f8bb9275c9718284e7cfeffab6f459"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_construction_encoding/lanes.rs",
+      "function": "write_parquet_chunks",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "Newly written Parquet payload bytes produce durable construction artifact receipt.",
+      "function_bodies_sha256": [
+        "8f2cde76c2c909c8012026d529855b62f0840eaa5667475f5d1f1e61f6aeff5f"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_delta_compaction.rs",
+      "function": "inventory_state_fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Inventory relative paths and already recorded content identities define compaction state fingerprint; no fresh file hashing here.",
+      "function_bodies_sha256": [
+        "21f88d058b5247b0f43da4a7c22733888f5438e45835c94a39331778410b404a"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_delta_journal.rs",
+      "function": "bounded_materialized_fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Materialized inventory paths, lengths and content digests define graph state identity; replay-rewritten files of the temporary view are hashed once as contract identity and unchanged files reuse inventory digests only when their fresh XXH64 matches.",
+      "function_bodies_sha256": [
+        "7459c88b354812b040dfda0fdefe95a5569b9c949a5ac67304188710a7b4b403"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_delta_journal.rs",
+      "function": "fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Canonical logical values and domain-separated contract metadata define semantic identity.",
+      "function_bodies_sha256": [
+        "0b8650e3728435b7303be6ce76f5330ca7d1ee9d9412172d70e387d3cda1e8f0"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_delta_journal.rs",
+      "function": "prepare_graph_delta_inner",
+      "role": "durable_artifact",
+      "input_contract": "Newly encoded delta run payload bytes receive required durable artifact content digest.",
+      "function_bodies_sha256": [
+        "752dac2d1dbb8b0b238737f6dfd48d869081b68bbe55ba0e2409eb00ba3c33e8"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_files.rs",
+      "function": "authenticate_route_table",
+      "role": "control_authentication",
+      "input_contract": "Canonical semantic route table JSON bytes authenticate retained control authority.",
+      "function_bodies_sha256": [
+        "0f6939a7d00b32e008211485aac8488208772054c328dfe4b88ab1c444403959"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_files.rs",
+      "function": "hash_reader_with_checksum",
+      "role": "caller_selected",
+      "input_contract": "Complete source stream receives one SHA-256 in the caller-selected domain (artifact identity for published captures, contract identity for a temporary replay view) and its corruption checksum in the same pass.",
+      "function_bodies_sha256": [
+        "ce71ec96b1b4440abd648e212b75a4ec2b4d0999dd1a88b1ce3708ef9d7f7821"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_manifest.rs",
+      "function": "logical_path_digest",
+      "role": "contract_identity",
+      "input_contract": "Logical path UTF-8 bytes derive deterministic radix routing identity.",
+      "function_bodies_sha256": [
+        "314da21fb033fa251d098498716a06ca3d4bd1abd8913181a7be347868c358bd"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_manifest.rs",
+      "function": "object_digest",
+      "role": "control_authentication",
+      "input_contract": "Canonical manifest root/radix control node bytes define authority object address.",
+      "function_bodies_sha256": [
+        "52cfe4bc1c23a4487c2e94708b38a5baab0cab1d049d89fbca9f943996efd1a0"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store.rs",
+      "function": "hash_regular_file",
+      "role": "durable_artifact",
+      "input_contract": "Complete newly sealed graph artifact bytes define required CAS address.",
+      "function_bodies_sha256": [
+        "8b704c6b2d93054556a44af031d6050d7a8c11ea15095cf3c20dbaf242331ac3"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store.rs",
+      "function": "open_graph_object_with_read_lease",
+      "role": "caller_selected",
+      "input_contract": "Complete retained sealed CAS object bytes undergo unchanged genuine SHA/length authentication. GraphObjectReadLease::open selects ArtifactPayload; its private open_for_portable entry point selects PortableAuthentication for portable source admission and copying. Default checksum admission uses a separate path.",
+      "function_bodies_sha256": [
+        "669a18b2dedfd3b1af70126eb00f7319d9d0ad32cb150e8f6be55c0576dbfc18"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store.rs",
+      "function": "read_graph_object",
+      "role": "durable_artifact",
+      "input_contract": "Complete artifact bytes authenticate the SHA-addressed object trust-boundary API.",
+      "function_bodies_sha256": [
+        "af6a32fbdaec5b1c704dc58b7e267ce2cbee94fe6be2ba8cbb117271dd41eaa8"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store.rs",
+      "function": "read_graph_object_by_digest_file_counted_in_domain",
+      "role": "caller_selected",
+      "input_contract": "Bounded CAS bytes are authenticated with domain selected by caller: ControlAuthentication for manifest nodes, ArtifactPayload for full artifact objects.",
+      "function_bodies_sha256": [
+        "2a1747391e73f279fffd51d509be318bd4803af0af0c4404e322c3eac0f50425"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store.rs",
+      "function": "verify_file_counted",
+      "role": "durable_artifact",
+      "input_contract": "Generic artifact file-verification wrapper selects ArtifactPayload and delegates unchanged full SHA/address, length and checksum verification to verify_file_counted_in_domain; the wrapper creates no separate SHA producer.",
+      "function_bodies_sha256": [
+        "9f77c0097a8f89ad6a65075818ed2839dcf4e52b87014571c7e100c60037d3b5"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store.rs",
+      "function": "verify_file_counted_in_domain",
+      "role": "caller_selected",
+      "input_contract": "Complete opened CAS or temporary bytes undergo genuine SHA/address, exact-length and XXH64 verification. Selected callers preserve ArtifactPayload for generic/untrusted artifacts, ControlAuthentication for validated bounded radix nodes, and PortableAuthentication for actual portable transport. Separate private encoded checksum capabilities do not select this SHA producer unless existing CAS identity is unknown; native read and actual SHA evidence remain distinct.",
+      "function_bodies_sha256": [
+        "25f57d9191a21f15dea4f209fd5ef1a62268fc892e82da8849c5f7e826b4ee4c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store.rs",
+      "function": "verify_stream_counted",
+      "role": "durable_artifact",
+      "input_contract": "Generic artifact stream-verification wrapper selects ArtifactPayload and delegates unchanged full SHA/address, length and checksum verification to verify_stream_counted_in_domain; the wrapper creates no separate SHA producer.",
+      "function_bodies_sha256": [
+        "d8c6abdd74ab6b33c648c445616375b0b201b58629f082643bce22740f8033a0"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store.rs",
+      "function": "verify_stream_counted_in_domain",
+      "role": "caller_selected",
+      "input_contract": "Complete opened CAS or temporary bytes undergo genuine SHA/address, exact-length and XXH64 verification. Selected callers preserve ArtifactPayload for generic/untrusted artifacts, ControlAuthentication for validated bounded radix nodes, and PortableAuthentication for actual portable transport. Separate private encoded checksum capabilities do not select this SHA producer unless existing CAS identity is unknown; native read and actual SHA evidence remain distinct.",
+      "function_bodies_sha256": [
+        "c924045e479f6f385169c60da62bf7e2292c78b70ff4d2d6bb6fa110bd33a137"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
+      "function": "finalize_temporary_object",
+      "role": "caller_selected",
+      "input_contract": "Finalization preserves native sealing, identity, allocation, barrier and cleanup order. Generic callers retain selected genuine SHA domains. Privately captured encoded temporaries use expected checksums; an unknown or different-inode concurrent winner requires genuine Artifact SHA, while exact lease-recorded identities may use their checksum. This delegate creates no SHA state or extra pass.",
+      "function_bodies_sha256": [
+        "137d34416910062f2eb8d65479bd3c03de365c95038870abae9e2fa0f896f735"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
+      "function": "install_graph_manifest_node_with_lease",
+      "role": "control_authentication",
+      "input_contract": "Typed GraphManifestNode is structurally validated, canonically encoded and bounded to 256 KiB before its private ControlAuthentication installation call. Only paths, lengths, payload SHA/XXH64/role descriptors or child-digest references occur in these control bytes; this wrapper delegates one genuine SHA producer and adds no crypto pass.",
+      "function_bodies_sha256": [
+        "8c65f0b85e5abcb045a9ad5c3bd8495478d31eb06c971e5e1aaa57efe0da763c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
+      "function": "install_graph_object_bytes_in_domain",
+      "role": "caller_selected",
+      "input_contract": "Exact resident bytes receive the genuine SHA-256 CAS name. Generic byte installation selects ArtifactPayload; only the private typed GraphManifestNode installer validates and bounds canonical radix control JSON then selects ControlAuthentication. The selected domain propagates to every existing-object, concurrent-winner and platform sealing SHA check; all crypto bytes remain counted inclusively.",
+      "function_bodies_sha256": [
+        "9d93f0a259f70a0998ca506044974c88a288a88a7ca78adb844bc81600ce99bd"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
+      "function": "install_graph_object_bytes_with_lease",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "Generic resident-byte installation wrapper selects ArtifactPayload and delegates first SHA naming and durable installation to install_graph_object_bytes_in_domain; it creates no additional SHA pass. Arbitrary resident payload cannot select the typed manifest Control path.",
+      "function_bodies_sha256": [
+        "33553a7ed32f67862ef0bc4770da7b2fcef90ed84634600bedb2b2569d9f802e"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
+      "function": "install_graph_object_file_with_lease",
+      "role": "durable_artifact",
+      "input_contract": "Copied graph artifact bytes undergo unchanged genuine SHA/address and checksum authentication in one streamed pass; installation explicitly keeps ArtifactPayload for initial copy, reuse, concurrent winners and platform sealing. Successful installation captures private final-inode, length and checksum authority.",
+      "function_bodies_sha256": [
+        "5df6c5dd1a613557b57ed7403706f74248873ec139fc207a98162a927c0798ad"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/installation.rs",
+      "function": "install_object",
+      "role": "caller_selected",
+      "input_contract": "Generic installation delegates genuine SHA to its selected Artifact or private typed bounded-manifest Control domain. Encoded sources use a separate checkpoint-admitted private checksum capability; public file/byte installation retains genuine SHA. This wrapper creates no SHA state or extra pass.",
+      "function_bodies_sha256": [
+        "2431640cac200e069aa9f3c31975d0e919856f38f77780f7cda038bdfc95f9df"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/manifest_tree.rs",
+      "function": "append_graph_files_v2_inner",
+      "role": "control_authentication",
+      "input_contract": "Canonical sealed semantic route table JSON authenticates mapped publication authority.",
+      "function_bodies_sha256": [
+        "37b8ecd6a6822bf511c9645fb08b09a666d3ca1bd4ef571e89ee949d7e994561"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/manifest_tree.rs",
+      "function": "install_manifest_node",
+      "role": "control_authentication",
+      "input_contract": "Radix manifest publication passes the typed GraphManifestNode to its validated bounded ControlAuthentication installer and records manifest I/O; this delegate creates no extra SHA producer or payload fast path.",
+      "function_bodies_sha256": [
+        "e565a15b929a48690def17a73bf3757114004add168cfba037df461f2a795eb3"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_object_store/materialization.rs",
+      "function": "link_materialized_object",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "Retained explicit hard-link materialization helper authenticates full artifact bytes against its CAS address; default private read materialization uses retained checksum admission instead.",
+      "function_bodies_sha256": [
+        "95712511e429abe52ea08b8f3748f57619c5f187c778f4fa30c265c9d75efa46",
+        "fab8caaf3af789ff025fef47d7dc00f0e864540a18eb4b256cc2aaf826b843fc",
+        "cb4032dfab62a311eec22febe3569acc9118723e9d5d59685e803c15467d8d4f"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_read_inventory.rs",
+      "function": "authenticate_routes",
+      "role": "control_authentication",
+      "input_contract": "Canonical semantic route table JSON authenticates checksum read inventory authority.",
+      "function_bodies_sha256": [
+        "bc6a31085e8d7a085611a2f9761adc446cdd91799bfd7a0ea27595158133c3bb"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/graph_read_inventory.rs",
+      "function": "capture_graph_read_inventory_excluding",
+      "role": "control_authentication",
+      "input_contract": "Conditional constructor callback runs only for the exact semantic route table path, bounded to 64 MiB; it hashes route authority JSON while other retained payloads, excluding a rewrite's identity-pinned temporaries, receive XXH64 checksums.",
+      "function_bodies_sha256": [
+        "da0237d957e344130e6641962db7fc444d2f93e3da4c80de059a8717d7ba5699"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/lib.rs",
+      "function": "install_project_object_bytes",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "Installed bytes define durable project CAS object digest.",
+      "function_bodies_sha256": [
+        "efd23f669c683ac9cac9ecdbc31bc628c719045ec48ebeeb51bb24d6df9392bd"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/ordinal_identity_v4.rs",
+      "function": "add",
+      "role": "contract_identity",
+      "input_contract": "Canonical logical UUID and assigned ordinal commitments identify mapping independent of physical layout.",
+      "function_bodies_sha256": [
+        "ba69a84910647c20dec4cdd82a862edbd9d28af575a5bcf5f39074018312acdb"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/ordinal_identity_v4.rs",
+      "function": "authenticate_manifest_authority",
+      "role": "control_authentication",
+      "input_contract": "Canonical ordinal manifest body authenticates recorded authority.",
+      "function_bodies_sha256": [
+        "8cb60b408dc4229393bb2db3957f9cc3c4901b51687e1e585e00d60300db632f"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/ordinal_identity_v4.rs",
+      "function": "authenticated_v4_ordinal_manifest",
+      "role": "control_authentication",
+      "input_contract": "Canonical ordinal manifest JSON authenticates pinned manifest authority.",
+      "function_bodies_sha256": [
+        "60050c219a6a9df1199b7cbef156c4a18ea4ac59422443e9ee07fb1363cb15be"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/payload_digest.rs",
+      "function": "for_domain",
+      "role": "caller_selected",
+      "input_contract": "File payload bytes streamed into one SHA-256 of the caller's domain: artifact payload for published identities, contract identity for a temporary replay view.",
+      "function_bodies_sha256": [
+        "ba0bfd80b4487533920d6a202b517b64618627e78bbe38537566fcd501340846"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/payload_digest.rs",
+      "function": "new",
+      "role": "producer_delegate",
+      "input_contract": "PayloadSha256::new delegates to for_domain(ArtifactPayload); not a second producer implementation or byte pass.",
+      "function_bodies_sha256": [
+        "49c228de92b9938cb12345fe1ef9c8f26b38d1f80e89c63119fe178a8d9ff715"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_certification.rs",
+      "function": "digest_bytes",
+      "role": "optional_evidence",
+      "input_contract": "Certification evidence JSON and model evidence are hashed only by explicit qualification/certification operations.",
+      "function_bodies_sha256": [
+        "79b74ddd0a2bf84872779744a0fc0fc756299563376646c95139bb0dc11211fb"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_checkpoints.rs",
+      "function": "checkpoint_uuid",
+      "role": "contract_identity",
+      "input_contract": "Operation UUID and request digest derive deterministic checkpoint UUID.",
+      "function_bodies_sha256": [
+        "835cb5832799f7e8b49c95d288a4afbf6ff6d5a854ff429dc1217824c3285945"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_checkpoints.rs",
+      "function": "create_request_digest_values",
+      "role": "contract_identity",
+      "input_contract": "Checkpoint creation operation/name/description/actor/source metadata defines replay request identity.",
+      "function_bodies_sha256": [
+        "0d2640a726e11a0ed6c7f84c4cbe6fdc115c0c20627dbbc020e3808a83f5d3b1"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_checkpoints.rs",
+      "function": "delete_request_digest_values",
+      "role": "contract_identity",
+      "input_contract": "Checkpoint deletion operation/name/actor metadata defines replay request identity.",
+      "function_bodies_sha256": [
+        "4c6371691be1e5f4ac3b19caeba70231a32d1035b034b4903be67f41d24cb3a6"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_checkpoints/registry.rs",
+      "function": "commit_registry",
+      "role": "control_authentication",
+      "input_contract": "Canonical checkpoint registry JSON authenticates registry/checksum pair and durable replacement intent.",
+      "function_bodies_sha256": [
+        "d6f8c096e7ce9d855c72617adbd8167d4a3be90682cf0c1fb077174e3dc4ae46"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_checkpoints/registry.rs",
+      "function": "read_registry",
+      "role": "control_authentication",
+      "input_contract": "Canonical checkpoint registry JSON authenticates registry/checksum pair and durable replacement intent.",
+      "function_bodies_sha256": [
+        "e7f9be0f2a443f5a17f04d6a47c68d6ade02f7044209c7b3ea53ed4cb765fc13"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_checkpoints/registry.rs",
+      "function": "read_valid_pair",
+      "role": "control_authentication",
+      "input_contract": "Canonical checkpoint registry JSON authenticates registry/checksum pair and durable replacement intent.",
+      "function_bodies_sha256": [
+        "f3790dfd0fd88d6c6d109015e8d25323b19a8f4669103736961ecc4598b2c1d0"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_checkpoints/registry.rs",
+      "function": "recover_pair",
+      "role": "control_authentication",
+      "input_contract": "Canonical checkpoint registry JSON authenticates registry/checksum pair and durable replacement intent.",
+      "function_bodies_sha256": [
+        "07a7c8114548d4c835904d99b02983506dc4c03859d72bedfc3476dee0c9b120"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_checkpoints/registry.rs",
+      "function": "validate_staged_pair",
+      "role": "control_authentication",
+      "input_contract": "Canonical checkpoint registry JSON authenticates registry/checksum pair and durable replacement intent.",
+      "function_bodies_sha256": [
+        "2993b062de0fabb0b2082c0dc12f141a9f3d534f6e5d05f23fa4b4c5280b9c34"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_checkpoints/restoration.rs",
+      "function": "restoration_uuid",
+      "role": "contract_identity",
+      "input_contract": "Checkpoint revert operation/source/actor/reason and existing manifest digest define deterministic replay/transition identity.",
+      "function_bodies_sha256": [
+        "7f176d6f7d2ad4fc504f8417e993452fa2e02c7e87244d74b18a93e2bdf19029"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_checkpoints/restoration.rs",
+      "function": "restored_generation_uuid",
+      "role": "contract_identity",
+      "input_contract": "Checkpoint revert operation/source/actor/reason and existing manifest digest define deterministic replay/transition identity.",
+      "function_bodies_sha256": [
+        "d327a3218b7aa9cd112b91c4ecf713820a7c198a0318bf2b65de50e13d7f614f"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_checkpoints/restoration.rs",
+      "function": "revert_request_digest",
+      "role": "contract_identity",
+      "input_contract": "Checkpoint revert operation/source/actor/reason and existing manifest digest define deterministic replay/transition identity.",
+      "function_bodies_sha256": [
+        "51e46675f44e3dfc0ffdf425681ea0cd3c0d3cdcbce8d178d8e714ad95540b48"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_checkpoints/restoration.rs",
+      "function": "revert_transaction_uuid",
+      "role": "contract_identity",
+      "input_contract": "Checkpoint revert operation/source/actor/reason and existing manifest digest define deterministic replay/transition identity.",
+      "function_bodies_sha256": [
+        "8f988ef653b71bea63561f2a01e709899f88a5fc1b16343a3931ba7d1d78e607"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_fault_oracle.rs",
+      "function": "child_manifest_bytes",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "Persistence oracle hashes participant fixture bytes to model immutable artifact identity; schema literal distinguished separately.",
+      "function_bodies_sha256": [
+        "9998f6de0fbb3bf1cb1fb6c9551a6a0d0eaea5b23901ed21016526739d15e1ca"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_fault_oracle.rs",
+      "function": "current_bytes_for",
+      "role": "control_authentication",
+      "input_contract": "Persistence oracle generation manifest JSON digest models CURRENT authentication.",
+      "function_bodies_sha256": [
+        "c2f51d7e749abc609ecbfa0581f526601014de4a672a7d908737cf7468f0320b"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_generation.rs",
+      "function": "initialize_empty_generation",
+      "role": "control_authentication",
+      "input_contract": "Canonical empty generation manifest JSON receives CURRENT authority commitment.",
+      "function_bodies_sha256": [
+        "25088cdc136f6c67987ea8689b197e19dc5363e10999ee259d7f7dbfc660f362"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_generation.rs",
+      "function": "install_empty_workspace_participants",
+      "role": "control_authentication",
+      "input_contract": "Canonical workspace participant JSON metadata receives required descriptor commitment.",
+      "function_bodies_sha256": [
+        "25aa569e770760fc7ecb9e2ea8634e50831fdeb9f301918d2b230d0623ece525"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_generation.rs",
+      "function": "lock_project_root",
+      "role": "contract_identity",
+      "input_contract": "Admitted root identity string derives stable project lock namespace.",
+      "function_bodies_sha256": [
+        "79f253e8366b49a6b24cb1f302b7de7d2ba3013960792343e74bdda3341f8cf6",
+        "f00fec657a4b4108ece608ea0b9637ed09f235d969f05b3439fc37d9a462d193",
+        "d73b57b633bdffa7afb08fca1aab3fcd93de937a236e530f576ba32dda3b4cb6"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_generation.rs",
+      "function": "read_participant_snapshot",
+      "role": "control_authentication",
+      "input_contract": "Only JSON participant bytes receive SHA authentication against the manifest descriptor; Arrow/Parquet participant payloads are admitted with persisted XXH64 checksums and do not execute this SHA producer.",
+      "function_bodies_sha256": [
+        "58c036abdb59fbc70b7ec3e74b053b9cd1ecb9c3c73a3c087b31a64a2cca2f27"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_generation.rs",
+      "function": "resolve_project_generation",
+      "role": "control_authentication",
+      "input_contract": "Canonical generation manifest JSON authenticates CURRENT-selected authority.",
+      "function_bodies_sha256": [
+        "2b33fb50068240bdd4777794bbf8bc1614624007891470cc7c08d2c79cdebcb1"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_generation.rs",
+      "function": "resolve_verified_generation",
+      "role": "control_authentication",
+      "input_contract": "Canonical generation manifest JSON authenticates checkpoint-selected authority.",
+      "function_bodies_sha256": [
+        "ff83ffebbd2cb865f3012fb3b67fd484c10c1bdb7b136fce82ba8f5e9de22feb"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_generation.rs",
+      "function": "validated_generation_metadata",
+      "role": "control_authentication",
+      "input_contract": "Canonical generation manifest JSON authenticates admitted generation metadata.",
+      "function_bodies_sha256": [
+        "303b67244e3f0b744cb6f85827f620df0863a65540d677bc01cac82eba163dff"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable.rs",
+      "function": "encode_portable_project",
+      "role": "portable_authentication",
+      "input_contract": "Portable member bytes are committed to the interchange inventory; complete envelope bytes define its transport receipt. Neither producer establishes a new durable CAS artifact.",
+      "function_bodies_sha256": [
+        "18b2edfc5066156968a0038d01b126ee1ca023d7f3929223bb01a6580a990f7c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable.rs",
+      "function": "validate_envelope",
+      "role": "portable_authentication",
+      "input_contract": "The complete imported envelope is cryptographically identified at its portable trust boundary after participant verification.",
+      "function_bodies_sha256": [
+        "f91f50ffbb5b821a2ed577333fbf18bbc78a540c013ca236f1162b03e83ec41c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable.rs",
+      "function": "validate_participants",
+      "role": "portable_authentication",
+      "input_contract": "Imported complete member bytes must match the declared portable participant SHA before any target is admitted.",
+      "function_bodies_sha256": [
+        "5d2d2bdec9470b8b00682f5bebc573fb9835bbe26c053bfcfe48780e907ed8c3"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2.rs",
+      "function": "admit_manifest",
+      "role": "control_authentication",
+      "input_contract": "Domain plus canonical package manifest excluding its digest authenticates package authority metadata.",
+      "function_bodies_sha256": [
+        "b77624dca92ade07cdaada473e75992dd3db21e581465290f9635fe07fbfa23f"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2.rs",
+      "function": "expanded_transport",
+      "role": "contract_identity",
+      "input_contract": "Ordered entry path/length/already computed digests plus tagmanifest bytes define expanded transport identity.",
+      "function_bodies_sha256": [
+        "253787f9fc76a8380bbc2307548e4d3c9d57b98c48e86d049d7e16abe94de145"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2.rs",
+      "function": "hash_file",
+      "role": "portable_authentication",
+      "input_contract": "Existing portable regular member bytes are fully authenticated for package verification/import, separate from subsequent durable participant naming.",
+      "function_bodies_sha256": [
+        "7e34534f9f5a2dc60aea7df75e6f083b505ceb4578413c903d0d39ea91576d72"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2.rs",
+      "function": "hash_payload",
+      "role": "portable_authentication",
+      "input_contract": "Each complete archive member is cryptographically authenticated against its portable manifest identity; the enclosing archive producer separately counts all physical transport bytes.",
+      "function_bodies_sha256": [
+        "aa1e1ade47150506cb9310b71fd1cd769fb761f59bdba95edbc093b46d1fc690"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2.rs",
+      "function": "require_exact",
+      "role": "control_authentication",
+      "input_contract": "Exact expected portable control tag bytes are authenticated against tag entry digest.",
+      "function_bodies_sha256": [
+        "0cd4630925fefb31ebdef9ef5660b944b051c86d0ef1adc1373877abc49a7486"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2.rs",
+      "function": "validate_package",
+      "role": "control_authentication",
+      "input_contract": "Domain plus canonical package manifest excluding its digest authenticates package authority metadata.",
+      "function_bodies_sha256": [
+        "2db102cf6ebe4be6d6cdf9507e379c48859d3b9f73cda5eb744e4c6c25974934"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2.rs",
+      "function": "verify_bundle",
+      "role": "caller_selected",
+      "input_contract": "Full archive headers/member bytes/padding form the genuine transport identity; the separate path-only digest chooses a canonical PAX name.",
+      "function_bodies_sha256": [
+        "470e576f2d7b0bf4944cb71fa44ef1e49b87f5b91be6822b29df7248486add24"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2/authenticated_entries.rs",
+      "function": "new",
+      "role": "portable_authentication",
+      "input_contract": "Untrusted archive/member buffers select genuine Portable SHA; private writer authority selects XXH instead, never a new SHA pass.",
+      "function_bodies_sha256": [
+        "e728b6d743e265640400496de1303172e386fb76919a84c4270495766ac2224c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2/authenticated_entries.rs",
+      "function": "read",
+      "role": "control_authentication",
+      "input_contract": "Bounded semantic control bytes are reauthenticated against the previously admitted member digest and native source identity.",
+      "function_bodies_sha256": [
+        "5774890e087f266b4c23d4ef29b17515cef9d45effa985394042a67450fefef2"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2/participant_files.rs",
+      "function": "read",
+      "role": "control_authentication",
+      "input_contract": "Bounded manifest-listed file bytes are reauthenticated against the listed SHA-256 and length before a semantic consumer receives them; no additional whole-package pass.",
+      "function_bodies_sha256": [
+        "9c9db8a9dc3419d6b53bd7410061eb8158f1feffacfa2ed28cc3aed2f0df81e2"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2/materialization/compact_root.rs",
+      "function": "publish_compact_import_root",
+      "role": "control_authentication",
+      "input_contract": "The factory encodes bounded canonical GraphFilesRootV2 JSON itself, names that control with SHA once, publishes its own bytes and checks actual output checksum/native identity before minting private capture. It receives no caller-provided payload digest tuple and never hashes Arrow/Parquet rows.",
+      "function_bodies_sha256": [
+        "2b016a1ca9ca4b5bc608219862f83da8dc5a90550c0bb6e30e0a89c2b5c73859"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2/materialization/composition_control.rs",
+      "function": "write_control",
+      "role": "control_authentication",
+      "input_contract": "Only typed ontology staging/composition canonical encoders reach this private writer. Enforced manifest byte bound precedes genuine ControlSHA naming; completed output CRC/native identity/length/link/allocation validation mints the exact-byte private capture.",
+      "function_bodies_sha256": [
+        "862afc3521db6518d0207a5728dc51b84a78b9e9ff577b75292519720f812669"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2/materialization/derived.rs",
+      "function": "hash_uncaptured",
+      "role": "durable_artifact",
+      "input_contract": "Actual just-derived files without a writer capture receive one bounded real naming SHA and XXH from consumed buffers; sealed private proof forwards that identity into checksum-only copy.",
+      "function_bodies_sha256": [
+        "f3e8a68d12f3ecd1037012f8ca3f977d732586a9498772692e5e407d023fb2c5"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2/semantic_validation.rs",
+      "function": "validate_ontology_composition",
+      "role": "control_authentication",
+      "input_contract": "Domain plus bounded canonical composition JSON authenticates the declared composition control authority; no data-bearing member is hashed here.",
+      "function_bodies_sha256": [
+        "07ff8e296e3396cfc0e72acfbe2498a586cbbf7fc533e4871a793dd85569887b"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_export/planning.rs",
+      "function": "inline_control",
+      "role": "control_authentication",
+      "input_contract": "Canonical authored ontology module and bridge definitions, composition descriptors, runtime maps and graph inventories supply bounded package control member commitments; no graph data payload bytes are hashed here.",
+      "function_bodies_sha256": [
+        "21172bf314bdeb33bcd8990ec1dba1e03358aef2587b819345b6e075f9adb55a"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_export/planning.rs",
+      "function": "inspect",
+      "role": "portable_authentication",
+      "input_contract": "Complete existing regular-file member bytes are authenticated for portable export planning, preserving original byte work.",
+      "function_bodies_sha256": [
+        "56a626ecd30e3ff4b58b702b13abf9fa52621f1ef5f29f8c3d77aaea341a3070"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_export/planning.rs",
+      "function": "plan_selected_portable_v2",
+      "role": "caller_selected",
+      "input_contract": "Canonical registry interchange metadata defines selection contract identity; domain plus canonical package manifest defines package control authority.",
+      "function_bodies_sha256": [
+        "84e0d1dc677d72f4b14d87fea5657cf8d6eb9b39cf7c9585855ce0f48533479f"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_export/planning.rs",
+      "function": "portable_participant_id",
+      "role": "contract_identity",
+      "input_contract": "Capability/family text bytes determine stable portable member identifier.",
+      "function_bodies_sha256": [
+        "017a39bf72e0adcfeaaebaac5ab75c1c6f31987db0c8842918572d5d2679e949"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_export/planning.rs",
+      "function": "project_ontology_composition",
+      "role": "control_authentication",
+      "input_contract": "Domain plus canonical composition descriptors/module identities/activation controls authenticates portable composition authority.",
+      "function_bodies_sha256": [
+        "e5c247fa92ffdc96114bcf0caf6373a0ed35d33a5c6b0de71d1ca3fea9e4af9f"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_export/planning.rs",
+      "function": "replace_graph_tree_with_subset",
+      "role": "control_authentication",
+      "input_contract": "Canonical package manifest metadata or registry interchange metadata binds authored export package authority.",
+      "function_bodies_sha256": [
+        "7ebc2325631b5184f9280e6b31d5a399b59c99bd2b77305b55778c439fa6274b"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "function": "bundle",
+      "role": "control_authentication",
+      "input_contract": "Bounded resident canonical tag/control bytes receive their emitted member identity; actual enclosing transport SHA is owned separately by TransportHash.",
+      "function_bodies_sha256": [
+        "2e86c8e98a4c3c83e88c374552bbf7f2a1dffe341dcb90b1499a3e12fe46415d"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "function": "capture_controls",
+      "role": "control_authentication",
+      "input_contract": "Bounded resident canonical portable control/tag bytes are genuinely authenticated once to capture their emitted identity for later private checksum readback.",
+      "function_bodies_sha256": [
+        "184bdd2973a9261a801c894d64aefa81a36a49a82dcc690becf7cd7f000a40cf"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "function": "copy",
+      "role": "caller_selected",
+      "input_contract": "Bounded resident canonical control bytes select explicit ControlSha256; uncaptured regular-file members select genuine Portable SHA and admitted writer sources use actual copy CRC.",
+      "function_bodies_sha256": [
+        "cb2a766897b6633aaa2ca64edf44aeaa363776e43b0a0fe9bbcc730e8d804b8e"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "function": "digest",
+      "role": "producer_delegate",
+      "input_contract": "Private WrittenPackage getter returns stored exact writer-produced digest bytes; it invokes no hash implementation.",
+      "function_bodies_sha256": [
+        "831e8c6758033f3f340c9f161714a48a1804611dddc0f04398766786a6f43071"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "function": "entries",
+      "role": "control_authentication",
+      "input_contract": "Manifest/tag/inventory control bytes or ordered path/length/digest metadata form authenticated portable namespace; aggregate identity distinguished separately.",
+      "function_bodies_sha256": [
+        "f7ab31aa86b6f377929dfce967a0fd6dc4a863b2c1dc6a1cce4b5476ce558de5"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "function": "expanded",
+      "role": "caller_selected",
+      "input_contract": "Manifest and fixed tag/control inventory bytes authenticate package controls; ordered path/length/already-computed digests define expanded transport contract identity.",
+      "function_bodies_sha256": [
+        "300a6d279a4f7c773cd6e41adf206dad3d21be7eca70748805087d105ceeb65e"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "function": "header",
+      "role": "contract_identity",
+      "input_contract": "Long portable path bytes derive deterministic PAX header suffix.",
+      "function_bodies_sha256": [
+        "9d1d7c75176cc987d3fd3be315bb4c3efc6394187e52b233748434bd2e370c1c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "function": "new",
+      "role": "portable_authentication",
+      "input_contract": "Genuine SHA over actual canonical transport buffers emitted by the private writer, captured together with XXH for checksum readback.",
+      "function_bodies_sha256": [
+        "37a86caab5d91afe684a39a65491363efd6a70dd11cf119e0e3c27d2c5bff4b0"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "function": "stream",
+      "role": "caller_selected",
+      "input_contract": "Bounded resident canonical control bytes select explicit ControlSha256; uncaptured regular-file members select genuine Portable SHA and admitted writer sources use actual copy CRC.",
+      "function_bodies_sha256": [
+        "d220d64cc1293a029b31b3ea10adf4ef6b7c43c5bc4480c94ab5d3f5921ef2a4"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_import.rs",
+      "function": "build_staged_composition",
+      "role": "producer_delegate",
+      "input_contract": "Typed canonical staging composition delegates to the bounded actual control writer; no additional SHA byte pass.",
+      "function_bodies_sha256": [
+        "421c756be28c57d596eb1a036b2287ddb5aa6031dca8f7b520cd52bf8eb9445b"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_import/materialized_graph.rs",
+      "function": "capture_graph_sources",
+      "role": "durable_artifact",
+      "input_contract": "Generic private/test untrusted tree boundary computes actual bounded file naming SHA; production requires complete scanner/writer private captures and does not enter this branch.",
+      "function_bodies_sha256": [
+        "b4e95aa48725305fbb1d0e24bedaef72b3ad9a0ad6261ed6625b929cc1dd7fa2"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_import/materialized_graph.rs",
+      "function": "prepare_compact_import_graph_with_allocation",
+      "role": "control_authentication",
+      "input_contract": "Bounded canonical graph root participant JSON authenticates the radix graph manifest authority; opaque payloads use their private consumed-byte captures.",
+      "function_bodies_sha256": [
+        "4b9a51b76e1cffebbd09d9e598d1ca9789fd4b76b5a60d6d47c0a2c4027cd6da"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_selection.rs",
+      "function": "fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Domain plus canonical selection metadata defines portable selection identity.",
+      "function_bodies_sha256": [
+        "4d20423a249aab477ca88abe34acc3df216989a49a33c14f2e5ab30a299ef1cb"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_subset.rs",
+      "function": "selector_digest",
+      "role": "contract_identity",
+      "input_contract": "Domain plus canonical signed subset/selector metadata defines portable request identity.",
+      "function_bodies_sha256": [
+        "699168075ef3707e9a38d677b8b73bd8798ef50f53b6194c473dd84ea1a5cc3c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_portable_v2_subset.rs",
+      "function": "subset_fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Domain plus canonical signed subset/selector metadata defines portable request identity.",
+      "function_bodies_sha256": [
+        "3eab3233e8c9f64b8c07fd6c729379d43ca3833f7adf4b5f3997f029eeb387a5"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_publication.rs",
+      "function": "compute",
+      "role": "durable_artifact",
+      "input_contract": "Exact in-memory participant bytes receive their artifact SHA-256 and XXH64 once; generation UUID derivation and staging reuse the identity.",
+      "function_bodies_sha256": [
+        "ca9a064e1df80e7dd8be5668471d4a7240ab2c91b92f0bf87b8f0074c8998012"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_publication.rs",
+      "function": "handle_existing_journal",
+      "role": "control_authentication",
+      "input_contract": "Published generation manifest JSON authenticates durable transaction journal commitment.",
+      "function_bodies_sha256": [
+        "1daa6050d69fc7890497c6b1bc04b32784e8846b0960165bbfc28119784d29b7"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_publication.rs",
+      "function": "make_generation_durable",
+      "role": "control_authentication",
+      "input_contract": "New generation manifest JSON receives durable authority commitment.",
+      "function_bodies_sha256": [
+        "9deffab7de5376708a003a67d9652384f3c390c3cb7142e7fda81c0be9859460"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_publication.rs",
+      "function": "published_project_transaction",
+      "role": "control_authentication",
+      "input_contract": "Published generation manifest JSON authenticates transaction journal commitment.",
+      "function_bodies_sha256": [
+        "4f65ae10510bdcfb86dc6fa9ccc822524a8db694dab95e2f66f26bd13abaae37"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/durable_commit/atomic.rs",
+      "function": "temporary_name",
+      "role": "contract_identity",
+      "input_contract": "Target path text and fresh UUID derive publication temporary namespace.",
+      "function_bodies_sha256": [
+        "6992c8672cfe5ff1e5adee27cd8a960c4ff7e74bd6a34a7f04c9318849c50a80"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_publication/participants.rs",
+      "function": "copy_file_participant",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "Generic untrusted participant Files copies genuinely authenticate consumed bytes; privately captured copier identity selects checksum-only staging. Partial destination allocation is observed by the enclosing staging owner even on failure.",
+      "function_bodies_sha256": [
+        "f8ac2385dcc0adfccb6057519eb9f3be70858bd26b7d442d8f1a3eed7aff7cb7"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/project_publication/participants.rs",
+      "function": "request_metadata_with_payloads",
+      "role": "contract_identity",
+      "input_contract": "Canonical publication fingerprint request metadata defines idempotent publication identity; in-memory participant identities are reused from PreparedGenerationRequest after exact length and XXH64 binding, otherwise the participant bytes are hashed once here.",
+      "function_bodies_sha256": [
+        "d8cdaeb5ba4c50937b759929dd1f7b17f7cd864c30356b25ae9b2fdebf90ccc6"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/research_versions.rs",
+      "function": "identity_digest",
+      "role": "contract_identity",
+      "input_contract": "Canonical logical research content or mutation request metadata defines semantic/replay operation identity.",
+      "function_bodies_sha256": [
+        "2ac7c4c64aafbd56608cfdc45909c741146c8d2f50af7ecd9a9602f6f56e049c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/research_versions.rs",
+      "function": "participant",
+      "role": "contract_identity",
+      "input_contract": "Constant research-registry schema descriptor defines supported schema contract fingerprint.",
+      "function_bodies_sha256": [
+        "b58d707fd5fe128ba95e639bd69b283ac30b2b6474edc562f4add6e095b78a34"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/research_versions.rs",
+      "function": "publish_research_operation_with_mode",
+      "role": "contract_identity",
+      "input_contract": "Canonical logical research content or mutation request metadata defines semantic/replay operation identity.",
+      "function_bodies_sha256": [
+        "beab05c6c78b2137fe6163a7d87850cb4ecdabca0a5e3eaf682a94873bbfbf00"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/research_versions.rs",
+      "function": "read_research_registry",
+      "role": "contract_identity",
+      "input_contract": "Constant research-registry schema descriptor defines supported schema contract fingerprint.",
+      "function_bodies_sha256": [
+        "f0294cc23e34c144d334198fa09c32507ca4750b7f8eae43b7029403b80219f8"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/research_versions.rs",
+      "function": "validate_publication_transition",
+      "role": "contract_identity",
+      "input_contract": "Constant research-registry schema descriptor defines supported schema contract fingerprint.",
+      "function_bodies_sha256": [
+        "d87f5e1c847353817052be5f98727def0430021ff79fe05fc7782aaf036cc5c6"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/research_versions/branch_content.rs",
+      "function": "install_graph",
+      "role": "control_authentication",
+      "input_contract": "Canonical graph-files inventory participant metadata defines retained content commitment.",
+      "function_bodies_sha256": [
+        "9effd56ce76885fffa111a493b56a0715f2f4bbd589e83d9c8ca9dad402fc5c3"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/research_versions/branch_selection.rs",
+      "function": "replace_domains",
+      "role": "control_authentication",
+      "input_contract": "Canonical replacement domain participant metadata defines retained Version commitment.",
+      "function_bodies_sha256": [
+        "3402386245951e899b057ca5d85b696b127ad3207cf1768cb0d5766fb897c14c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/research_versions/branches.rs",
+      "function": "publication_fingerprint",
+      "role": "contract_identity",
+      "input_contract": "Operation UUID, expected generation and intent SHA define publication replay identity.",
+      "function_bodies_sha256": [
+        "56f0871f1d616a8dfe7e317ef0f856e17803d4cfd14ee1bf234c9789a1aa2313"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/research_versions/interchange/canonical_projection.rs",
+      "function": "canonicalize_prepared_research_projection",
+      "role": "control_authentication",
+      "input_contract": "Canonical replacement research participant metadata defines retained projection commitment.",
+      "function_bodies_sha256": [
+        "d08086def25e8543fa6f17190fc3c6382c008df568438fdb5db854b5ebec2822"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/research_versions/interchange/portable.rs",
+      "function": "portable_objects",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "Exported/imported research object bytes are authenticated against retained artifact identity.",
+      "function_bodies_sha256": [
+        "87361c411aba401c227b929c317ae5d37e96a884747390f936a4d025a7598cd6"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/research_versions/projection.rs",
+      "function": "register",
+      "role": "control_authentication",
+      "input_contract": "Canonical projected configuration metadata gets retained participant commitment.",
+      "function_bodies_sha256": [
+        "7a60aa6ceacd789acd07bdb8d457716d3f05cc143efd15443e4cc242362111f9"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/research_versions/proposals.rs",
+      "function": "identity",
+      "role": "contract_identity",
+      "input_contract": "Canonical accepted contribution proof/request metadata defines accepted contribution UUID.",
+      "function_bodies_sha256": [
+        "2622b1fa8869c27295e588ff55642925c00c90724e6995c00821dd55f5a9b053"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/research_versions/retained_content.rs",
+      "function": "compact",
+      "role": "durable_artifact_or_trust_boundary",
+      "input_contract": "Participant snapshot bytes are authenticated against retained Version content digest before installing CAS object.",
+      "function_bodies_sha256": [
+        "3cbf15f8d6100545a919b7e1afa769a7b26b24385ea5be902d8bddf45920917a"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/route_component.rs",
+      "function": "authenticate_manifest_routes",
+      "role": "control_authentication",
+      "input_contract": "Canonical semantic route table JSON authenticates manifest route authority.",
+      "function_bodies_sha256": [
+        "2e630fd5e21ad790695409f2c3459879bf0101300884e26faed50e9265d4278e"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/route_component.rs",
+      "function": "component",
+      "role": "contract_identity",
+      "input_contract": "Domain plus semantic route text derives stable physical route name.",
+      "function_bodies_sha256": [
+        "183f82df3f1639260a839b84855dde6369d86108e0d1f1bc120e125a5d44246c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/route_component/owned.rs",
+      "function": "authenticate_staged_inventory_copy",
+      "role": "control_authentication",
+      "input_contract": "Staged canonical graph inventory JSON authenticates retained route-publication ownership.",
+      "function_bodies_sha256": [
+        "17a80017ea25564d240933821ffd5b95f44ad838db11f7ed76d38f0206d0b77b"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/route_component/owned.rs",
+      "function": "prepare",
+      "role": "control_authentication",
+      "input_contract": "Canonical staged semantic route table JSON receives retained ownership commitment.",
+      "function_bodies_sha256": [
+        "b590221a63f22facae611946618c53291d66667ad3ade4d5a20a3969ae426c05"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/route_component/owned.rs",
+      "function": "verify",
+      "role": "control_authentication",
+      "input_contract": "Installed canonical semantic route table JSON authenticates retained ownership.",
+      "function_bodies_sha256": [
+        "40893440259407601d350fb475cd003588f4bb07a1026099fbeeb55309bec364"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/search_manifest.rs",
+      "function": "from_admitted_files",
+      "role": "contract_identity",
+      "input_contract": "Names, lengths and already admitted corruption checksums derive logical source identity; no fresh artifact SHA.",
+      "function_bodies_sha256": [
+        "debdb1d7418a8177ec6c2c8499fd5a757a8995d1f4420e3acf758bfe64d883e6"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/semantic_bindings.rs",
+      "function": "opaque_route",
+      "role": "contract_identity",
+      "input_contract": "Route kind/qualified symbol metadata or constant semantic-bindings schema descriptor define physical route/schema identity.",
+      "function_bodies_sha256": [
+        "3d252056e7aa2b36a2913175a562f32717e9ba2022540f8f1b6fe32497b247f3"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/semantic_bindings.rs",
+      "function": "semantic_storage_bindings",
+      "role": "contract_identity",
+      "input_contract": "Route kind/qualified symbol metadata or constant semantic-bindings schema descriptor define physical route/schema identity.",
+      "function_bodies_sha256": [
+        "f84eadf0a251bdec0fd1b2e405454747a2378539940cf02b2859c6c9ba8c7d86"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/semantic_bindings.rs",
+      "function": "to_project_participant",
+      "role": "contract_identity",
+      "input_contract": "Route kind/qualified symbol metadata or constant semantic-bindings schema descriptor define physical route/schema identity.",
+      "function_bodies_sha256": [
+        "73e721e2b348074567c0918c046e3761f37ac25d6682d3f2e72a242b56571aeb"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/semantic_bindings/legacy_routes.rs",
+      "function": "apply_legacy_route_moves",
+      "role": "control_authentication",
+      "input_contract": "Canonical semantic route table bytes authenticate installed rollback ownership.",
+      "function_bodies_sha256": [
+        "e76c3a378dcc0b7d4418dbefdd0df706035b6e25d74afe4508daa87e59fd6fc6"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/semantic_bindings/legacy_routes.rs",
+      "function": "still_owned",
+      "role": "control_authentication",
+      "input_contract": "Canonical semantic route table bytes authenticate installed rollback ownership.",
+      "function_bodies_sha256": [
+        "bcb3ff96328540aa5d0e12cf9cb587cb6c8a7a62704297e11ca34669476b6400"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/semantic_bindings/migration/materialization.rs",
+      "function": "materialize_semantic_migration",
+      "role": "control_authentication",
+      "input_contract": "Canonical source/candidate graph inventory metadata binds planned migration source and resulting authority.",
+      "function_bodies_sha256": [
+        "2ececc8be2d251dd93d6cff842dbba9962fcc7bf0ab75300bb87964826148c80"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/semantic_bindings/migration/planning.rs",
+      "function": "plan_retained_data_migration_identity_equivalent",
+      "role": "contract_identity",
+      "input_contract": "Canonical source inventory or migration plan metadata binds retained-data migration identity.",
+      "function_bodies_sha256": [
+        "7053ea31cb5e4effc035037beeb96d0fdbea8a0ff9eda6af54ba4b4f7439f2b2"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/storage_attribution.rs",
+      "function": "artifact_category_authority_commitment",
+      "role": "optional_evidence",
+      "input_contract": "Content-free authority context and allocation/category totals produce explicitly requested storage attribution evidence.",
+      "function_bodies_sha256": [
+        "36f01b2fdefcbdf9fe48ea9660f321f9de9abe586336febe461aca23da6135d7"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/storage_attribution.rs",
+      "function": "artifact_category_peak_authority_commitment",
+      "role": "optional_evidence",
+      "input_contract": "Content-free authority context and allocation/category totals produce explicitly requested storage attribution evidence.",
+      "function_bodies_sha256": [
+        "212374e35a2d7910757d0f5137cb7ac14161a6b6625a1ab01b478c71597ab966"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/storage_attribution.rs",
+      "function": "category_map_authority_sha256",
+      "role": "optional_evidence",
+      "input_contract": "Content-free authority context and allocation/category totals produce explicitly requested storage attribution evidence.",
+      "function_bodies_sha256": [
+        "c59c2919f9b7ba0eec864ca99d2f60f5bebeeb810bc40f716a29a4cbbcca5804"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/storage_attribution.rs",
+      "function": "identity_map_authority_sha256",
+      "role": "optional_evidence",
+      "input_contract": "Content-free authority context and allocation/category totals produce explicitly requested storage attribution evidence.",
+      "function_bodies_sha256": [
+        "8ab874d0257fb6b495dbf3da2404d3d30d37c7c62ec2ebf0d8ddc89d4d90ee56"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/uuid_membership.rs",
+      "function": "describe_stream",
+      "role": "durable_artifact",
+      "input_contract": "Actual newly produced UUID identity stream receives one whole-artifact SHA identity and whole/block XXH64 checksums. UUID wire7 retires unused per-block SHA; no block SHA input remains.",
+      "function_bodies_sha256": [
+        "9c9c3537bfad35212e280fabd29d3cc0ce9a5ebab1847865313a8f478abfc12c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/uuid_membership/construction.rs",
+      "function": "construction_intent_digest",
+      "role": "control_authentication",
+      "input_contract": "Domain-v3 intent version, generation/parent, name, retained native source identity, length and expected XXH64 text authenticate private construction intent metadata; no source payload is hashed here.",
+      "function_bodies_sha256": [
+        "f88d7b2f45f4dce58c4779264935586667490f7eea1a40310127f8355a68b985"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/uuid_membership/construction.rs",
+      "function": "encode_construction_index_inner",
+      "role": "durable_artifact",
+      "input_contract": "Full raw 26-byte identity-run records are SHA-hashed while encoding, independently of their expected XXH64 check; the actual source SHA is forwarded to the existing topology receipt binding. This whole-file work remains Artifact rather than control.",
+      "function_bodies_sha256": [
+        "93281d6e1c5169b3388a03e2880ab6b4bf0fcd271df4b1a745944772a4678e5e"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/uuid_membership/construction.rs",
+      "function": "install_construction_bytes",
+      "role": "control_authentication",
+      "input_contract": "The direct SHA invocation hashes only the empty ordinal-v4.lock control marker at its sole fallback caller; manifest and receipt JSON use the separate control helper. Payload writers retain their own Artifact producers.",
+      "function_bodies_sha256": [
+        "f1c682942803d7900f1a9510b1bd958a333bb8fde61770cce573b5b948812e1c"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/uuid_membership/construction.rs",
+      "function": "sha256_reader_streaming",
+      "role": "durable_artifact",
+      "input_contract": "Complete construction-owned artifact input authenticates write/trust boundary.",
+      "function_bodies_sha256": [
+        "900e6bca8e4a3d3db6238c9a752da69f1c091064b351d58ffb0c9ffe84578f83"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/uuid_membership/ordinal_artifacts.rs",
+      "function": "add_v4_mapping_commitment",
+      "role": "contract_identity",
+      "input_contract": "Domain plus UUID and assigned ordinal identify logical mapping independent of physical artifact layout.",
+      "function_bodies_sha256": [
+        "c7118d1ca1841cbba61b81d06e0dded270d3621f3b4d0068f818997a88d71d08"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/uuid_membership/ordinal_artifacts.rs",
+      "function": "create_with_window",
+      "role": "durable_artifact",
+      "input_contract": "New ordinal artifact bytes are hashed inline with required construction output.",
+      "function_bodies_sha256": [
+        "7b8ec2a6d5b1990650a23c6888d0644ff10c35c1b7ce135ca31b3b0b6c8a1dcc"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/uuid_membership/topology_delta.rs",
+      "function": "hex_sha256",
+      "role": "caller_selected",
+      "input_contract": "Shared helper receives control manifest/receipt bodies, construction payload/block bytes, and constant rebuild contract markers; edge semantics differ despite Control alias.",
+      "function_bodies_sha256": [
+        "614288861bb729709352f47efdcad228707ed91f50da7c0cd757678e3a56bfa2"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/uuid_membership/topology_delta.rs",
+      "function": "prepare_uuid_membership_delta",
+      "role": "control_authentication",
+      "input_contract": "Canonical UUID index receipt JSON receives control authority commitment.",
+      "function_bodies_sha256": [
+        "6a9da3185acf07710966c030c495186465ab9789fb86ae0a7142baacb075f1f1"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/uuid_membership/topology_delta.rs",
+      "function": "topology_delta_sha256",
+      "role": "contract_identity",
+      "input_contract": "Domain plus logical node UUID/surrogate and edge UUID/source/target tuples define topology delta identity.",
+      "function_bodies_sha256": [
+        "cfd016176037fe317c191d160da42b947c569ef5b62515a511a825f1621d45a3"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/workspace_participants.rs",
+      "function": "participant",
+      "role": "contract_identity",
+      "input_contract": "Literal workspace family/version schema text defines required schema contract identity; participant payload is not input to this producer.",
+      "function_bodies_sha256": [
+        "b299830fc9dba88939f346cbed9dbd2d1a393e4d402bff6bdf337b25886e1a4e"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/workspace_participants.rs",
+      "function": "validate_ontology",
+      "role": "contract_identity",
+      "input_contract": "Workspace schema literal or canonical authored ontology JSON defines required schema/ontology identity.",
+      "function_bodies_sha256": [
+        "09f523fbb4492e74253e4e6dbf74b0ef4fa6050028b2b1dc1aedd9489cb9c483"
+      ]
+    },
+    {
+      "path": "crates/graphforge-storage/src/workspace_research_metadata.rs",
+      "function": "participant",
+      "role": "contract_identity",
+      "input_contract": "Literal workspace family/version schema text defines required schema contract identity; participant payload is not input to this producer.",
+      "function_bodies_sha256": [
+        "940724fa2a4e8d8c2b6a2d4b0fd60883d2909e79bfa833b08300b3c0dd908996"
+      ]
+    }
+  ],
+  "specialization_note": "Per-call arguments specialize mixed helpers in the companion method script. Missing source functions, new unclassified producer/call candidates, unreviewed algorithms and changed sources are explicit review gaps.",
+  "nonproducer_symbols": [
+    {
+      "name": "HashGnn",
+      "classification": "enum_variant_or_pattern",
+      "input_contract": "Algorithm option enum variant stores HashGnnOptions; does not construct cryptographic producer."
+    },
+    {
+      "name": "DigestWriter",
+      "classification": "borrowed_hash_update_callback",
+      "input_contract": "Borrowed existing result-evidence SHA receives Arrow writer callback bytes; producer already counted at published_result_metadata."
+    },
+    {
+      "name": "Sha256Digest",
+      "classification": "recorded_digest_newtype",
+      "input_contract": "Newtype wraps already computed textual SHA identity without invoking hashing."
+    },
+    {
+      "name": "AlgorithmProjectionFingerprint",
+      "classification": "recorded_digest_newtype",
+      "input_contract": "Newtype wraps already computed logical projection digest without invoking hashing."
+    },
+    {
+      "name": "HashObservation",
+      "classification": "observer_guard_constructor",
+      "input_contract": "Guard activates optional hash observation; creates no SHA state or byte pass."
+    },
+    {
+      "name": "EmbeddingPublicationFingerprint",
+      "classification": "recorded_digest_newtype",
+      "input_contract": "Newtype stores already computed embedding artifact publication identity without constructing a producer."
+    }
+  ],
+  "body_pin_contract": "function_bodies_sha256 pins the exact original UTF-8 fn keyword through closing brace for every matching production definition, in source order. Review actual input and consumer before updating pins."
+}

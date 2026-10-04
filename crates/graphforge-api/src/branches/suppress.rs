@@ -48,6 +48,11 @@ impl GraphForge {
         )?;
         version.version_uuid = request.version_uuid;
         version.created_at = request.created_at;
+        edit::sign(
+            &mut version,
+            request.author.as_ref(),
+            request.committer.as_ref(),
+        )?;
         let mut prepared =
             prepare_branch_content(&command.root, &generation, version, cancellation.flag())?;
         let keep = prepared

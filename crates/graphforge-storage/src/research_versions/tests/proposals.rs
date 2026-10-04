@@ -19,6 +19,7 @@ fn branch(root: &Path) -> ResearchVersionRecord {
     version.version_uuid = Uuid::now_v7();
     version.context_uuid = Uuid::now_v7();
     version.content.source_version = Some(origin);
+    version.parents = vec![origin];
     execute(
         root,
         &ResearchOperation {
@@ -50,6 +51,7 @@ fn submission(root: &Path, source: &ResearchVersionRecord) -> ResearchOperation 
     payload.version_uuid = Uuid::now_v7();
     payload.context_uuid = Uuid::now_v7();
     payload.content.source_version = Some(source.version_uuid);
+    payload.parents.clear();
     let operation_uuid = Uuid::now_v7();
     let proposal = ResearchProposalRecord {
         proposal_uuid: Uuid::now_v7(),
@@ -109,6 +111,8 @@ fn frozen_payload_never_advances_branch_and_release_keeps_identity_and_receipt()
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(root),
         mutation: ResearchMutation::Restore {
+            author: None,
+            committer: None,
             context_uuid: source.context_uuid,
             source_version: payload.version_uuid,
             version_uuid: Uuid::now_v7(),
@@ -169,7 +173,9 @@ fn project_acceptance_installs_content_review_mapping_and_receipt_in_one_generat
     spec.created_at = 3;
     let draft = prepare_project_draft(root, &spec, &AtomicBool::new(false)).unwrap();
     fixture(draft.path(), "accepted parent content");
-    let destination = draft.finish(vec![], &AtomicBool::new(false)).unwrap();
+    let mut destination = draft.finish(vec![], &AtomicBool::new(false)).unwrap();
+    // Whole acceptance into a Project with no prior head merges only the source.
+    destination.version.parents = vec![source.version_uuid];
     let mut proof = *payload.clone();
     proof.version_uuid = Uuid::now_v7();
     proof.context_uuid = Uuid::now_v7();

@@ -245,8 +245,8 @@ fn batch_partition_and_resume_produce_identical_canonical_data_fingerprints() {
     let two_identity = receipt_for_existing(&resumed.root, &two_shape.identities).unwrap();
     let two_details =
         receipt_for_existing(&resumed.root, two_shape.node_details.as_ref().unwrap()).unwrap();
-    assert_eq!(one_identity.sha256, two_identity.sha256);
-    assert_eq!(one_details.sha256, two_details.sha256);
+    assert_eq!(one_identity.xxh64, two_identity.xxh64);
+    assert_eq!(one_details.xxh64, two_details.xxh64);
     assert_eq!((one_shape.node_count, one_shape.edge_count), (8, 0));
     assert_eq!((two_shape.node_count, two_shape.edge_count), (8, 0));
 }
@@ -574,7 +574,8 @@ fn packed_endpoint_wire_preserves_full_width_fields_and_refuses_malformed_roles(
         std::fs::write(&path, &malformed).unwrap();
         let mut authority = receipt.clone();
         authority.bytes = malformed.len() as u64;
-        authority.sha256 = sha256(&malformed);
+        authority.xxh64 =
+            crate::corruption_checksum::hex(crate::corruption_checksum::checksum(&malformed));
         assert!(authenticate_artifact(&session.root, &authority, DetailCodec::Compact).is_err());
         assert_eq!(std::fs::read(root.path().join("CURRENT")).unwrap(), current);
     }
@@ -862,4 +863,60 @@ fn segment_retirement_is_schedule_independent_including_failure() {
     // Every real segment is retired on either path, so none remain.
     assert_eq!(serial.1, 0);
     assert_eq!(serial, parallel);
+}
+
+#[test]
+fn retained_identity_sampling_seeks_and_switches_extents_exactly() {
+    let temporary = TempDir::new().unwrap();
+    let root = StableDirectory::open(temporary.path()).unwrap();
+    let first = [11_u8; IDENTITY_WIDTH];
+    let second = [22_u8; IDENTITY_WIDTH];
+    std::fs::write(temporary.path().join("first.run"), [first, second].concat()).unwrap();
+    std::fs::write(temporary.path().join("second.run"), second).unwrap();
+    let mut retained = None;
+    assert_eq!(
+        read_identity_sample(&root, "first.run", &mut retained, 0).unwrap(),
+        first
+    );
+    assert_eq!(
+        read_identity_sample(&root, "first.run", &mut retained, IDENTITY_WIDTH as u64).unwrap(),
+        second
+    );
+    assert_eq!(
+        read_identity_sample(&root, "second.run", &mut retained, 0).unwrap(),
+        second
+    );
+    assert_eq!(retained.as_ref().unwrap().0, "second.run");
+}
+
+#[cfg(unix)]
+#[test]
+fn retained_identity_sampling_refuses_fresh_child_substitution() {
+    let temporary = TempDir::new().unwrap();
+    let root = StableDirectory::open(temporary.path()).unwrap();
+    let path = temporary.path().join("sample.run");
+    std::fs::write(&path, [11_u8; IDENTITY_WIDTH]).unwrap();
+    let mut retained = None;
+    read_identity_sample(&root, "sample.run", &mut retained, 0).unwrap();
+    std::fs::rename(&path, temporary.path().join("displaced.run")).unwrap();
+    std::fs::write(&path, [22_u8; IDENTITY_WIDTH]).unwrap();
+    assert!(read_identity_sample(&root, "sample.run", &mut retained, 0).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn retained_identity_sampling_refuses_fresh_root_substitution() {
+    let parent = TempDir::new().unwrap();
+    let path = parent.path().join("session");
+    std::fs::create_dir(&path).unwrap();
+    let root = StableDirectory::open(&path).unwrap();
+    std::fs::write(path.join("sample.run"), [11_u8; IDENTITY_WIDTH]).unwrap();
+    let mut retained = None;
+    read_identity_sample(&root, "sample.run", &mut retained, 0).unwrap();
+    let displaced = parent.path().join("displaced");
+    std::fs::rename(&path, &displaced).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    // Keep the child identity identical; only directory authority can refuse.
+    std::fs::rename(displaced.join("sample.run"), path.join("sample.run")).unwrap();
+    assert!(read_identity_sample(&root, "sample.run", &mut retained, 0).is_err());
 }

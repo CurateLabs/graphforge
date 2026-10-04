@@ -89,6 +89,7 @@ pub struct VarLenExpandExec {
     /// Adjacency source for the BFS — the session-scoped provider injected
     /// by the extension planner (#761).
     provider: Arc<dyn AdjacencyProvider>,
+    capture_epoch: u64,
 }
 
 impl VarLenExpandExec {
@@ -131,6 +132,7 @@ impl VarLenExpandExec {
             schema,
             props,
             provider,
+            capture_epoch: demand::stamp_capture_epoch().unwrap_or(0),
         }
     }
 }
@@ -158,8 +160,7 @@ impl DisplayAs for VarLenExpandExec {
             self.min_hops,
             max,
             self.provider
-                .status(&self.rel_type_name, self.direction)
-                .as_str()
+                .explain_status(&self.rel_type_name, self.direction)
         )
     }
 }
@@ -197,6 +198,7 @@ impl ExecutionPlan for VarLenExpandExec {
             schema: self.schema.clone(),
             props: self.props.clone(),
             provider: self.provider.clone(),
+            capture_epoch: self.capture_epoch,
         }))
     }
 
@@ -224,6 +226,7 @@ impl ExecutionPlan for VarLenExpandExec {
             src_col_idx: self.src_col_idx,
             out_schema: self.schema.clone(),
             provider: self.provider.clone(),
+            capture_epoch: self.capture_epoch,
         };
         let schema = self.schema.clone();
         let fut = async move {
@@ -343,6 +346,7 @@ pub(super) struct ExpandConfig {
     pub(super) out_schema: SchemaRef,
     /// Adjacency source (#762) — moved into the `'static` execute future.
     pub(super) provider: Arc<dyn AdjacencyProvider>,
+    pub(super) capture_epoch: u64,
 }
 
 /// One in-progress path during the variable-length BFS.
@@ -393,8 +397,12 @@ fn expand_bfs(cfg: &ExpandConfig, input_batches: &[RecordBatch]) -> Result<Recor
     let src_ids = u64_column(&input, cfg.src_col_idx)?;
 
     // --- Obtain the directed adjacency the traversal needs (#762). ---
-    let mut adjacency =
-        adjacency::AdjacencyReader::new(cfg.provider.as_ref(), &cfg.rel_type_name, cfg.direction)?;
+    let mut adjacency = adjacency::AdjacencyReader::for_capture(
+        cfg.provider.as_ref(),
+        &cfg.rel_type_name,
+        cfg.direction,
+        cfg.capture_epoch,
+    )?;
 
     // --- BFS per source row, with per-path edge deduplication. ---
     // Run the traversal BEFORE any edge-file read: the BFS needs only the
@@ -441,8 +449,11 @@ fn expand_bfs(cfg: &ExpandConfig, input_batches: &[RecordBatch]) -> Result<Recor
     // row's seed, which is in `emissions`), so an index Hit no longer scans the
     // whole node table. Source columns come from the input batch, not here.
     let reached: std::collections::HashSet<u64> = emissions.iter().map(|(_, id, _)| *id).collect();
-    let node_batches = graphforge_storage::read_nodes_filtered(&cfg.dir, &reached)
-        .map_err(|e| exec_err(e.to_string()))?;
+    let node_batches = graphforge_storage::read_nodes_filtered_from_files(
+        &topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?,
+        &reached,
+    )
+    .map_err(|e| exec_err(e.to_string()))?;
     // `read_nodes_filtered` always returns at least one (possibly empty) batch,
     // but guard defensively: with no node batch there is nothing to reach, so
     // emit zero rows rather than indexing into an empty Vec.
@@ -757,7 +768,7 @@ fn read_target_edge_properties(
     property_names: &[String],
     owners: &mut std::collections::BTreeSet<[u8; 16]>,
 ) -> Result<Vec<arrow::record_batch::RecordBatch>, GfError> {
-    let selected = graphforge_storage::read_authenticated_property_targets_for_inventory(
+    let selected = graphforge_storage::read_authenticated_property_target_data_for_inventory(
         inventory,
         graphforge_storage::PropertyRouteKind::Edge,
         stem,
@@ -769,7 +780,7 @@ fn read_target_edge_properties(
             message: "edge properties have multiple authenticated owners".into(),
         });
     }
-    let schema = inventory.route_schema(graphforge_storage::PropertyRouteKind::Edge, stem);
+    let schema = inventory.route_schema(graphforge_storage::PropertyRouteKind::Edge, stem)?;
     match schema {
         Some(schema) => {
             let indices = schema
@@ -794,8 +805,8 @@ fn edge_property_stems(
     inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
     dir: &Path,
     rel_type_name: &str,
-) -> Vec<String> {
-    if rel_type_name == "*" {
+) -> Result<Vec<String>, GfError> {
+    Ok(if rel_type_name == "*" {
         match inventory {
             Some(inventory) => inventory
                 .routes(graphforge_storage::PropertyRouteKind::Edge)
@@ -807,7 +818,7 @@ fn edge_property_stems(
         let mut candidates = vec![rel_type_name.to_owned()];
         let has_shared = match inventory {
             Some(inventory) => inventory
-                .route_schema(graphforge_storage::PropertyRouteKind::Edge, "_exploratory")
+                .route_schema(graphforge_storage::PropertyRouteKind::Edge, "_exploratory")?
                 .is_some(),
             None => graphforge_storage::list_edge_property_stems(dir)
                 .iter()
@@ -818,7 +829,7 @@ fn edge_property_stems(
         }
         candidates.sort();
         candidates
-    }
+    })
 }
 
 /// Build one child array per edge-property struct field (#755), in field order.
@@ -848,7 +859,7 @@ fn build_edge_prop_children(
     }
 
     // Resolve selected rows once per candidate route, then assemble hop order.
-    let stems = edge_property_stems(inventory, dir, rel_type_name);
+    let stems = edge_property_stems(inventory, dir, rel_type_name)?;
     let targets = hop_edge_uuids.iter().copied().collect();
     let mut owners = std::collections::BTreeSet::new();
     let mut prop_batches_by_rel = Vec::with_capacity(stems.len());
@@ -990,6 +1001,34 @@ impl V4OrdinalIdentityResolver {
             handle.map(|handle| Arc::new(Mutex::new(handle)));
     }
 
+    /// The exact generation this resolver serves, revalidated (by stat, no
+    /// artifact bytes) for one caller outside query execution, such as search
+    /// membership projection. `None` when the facade has no ordinal authority.
+    ///
+    /// # Errors
+    /// Returns the refusal when the retained artifacts no longer match the
+    /// generation the handle authenticated.
+    pub fn revalidated_handle(
+        &self,
+    ) -> Result<
+        Option<Arc<Mutex<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>>>,
+        GfError,
+    > {
+        let handle = self
+            .handle
+            .read()
+            .expect("ordinal identity lock poisoned")
+            .clone();
+        if let Some(handle) = &handle {
+            handle
+                .lock()
+                .expect("ordinal identity handle poisoned")
+                .revalidate_for_session()
+                .map_err(GfError::from)?;
+        }
+        Ok(handle)
+    }
+
     pub(super) fn pin(&self) -> Result<V4OrdinalIdentityPin, GfError> {
         let handle = self
             .handle
@@ -1006,7 +1045,7 @@ impl V4OrdinalIdentityResolver {
             .lock()
             .expect("ordinal identity handle poisoned")
             .revalidate_for_session()
-            .map_err(GfError::from_execution_error)?;
+            .map_err(GfError::from)?;
         Ok(V4OrdinalIdentityPin {
             session: Some(Arc::new(V4OrdinalIdentitySession {
                 handle,
@@ -1035,11 +1074,15 @@ impl V4OrdinalIdentitySession {
             .max_requested_ids()
     }
 
-    pub(crate) fn uuid_order_matches_ordinals(&self) -> bool {
+    /// Whether node-ordinal order is UUID order. The first call reads and
+    /// authenticates every ordinal block once; a corrupted block is an error,
+    /// never an "unordered" answer.
+    pub(crate) fn uuid_order_matches_ordinals(&self) -> Result<bool, GfError> {
         self.handle
             .lock()
             .expect("ordinal identity handle poisoned")
             .uuid_order_matches_ordinals()
+            .map_err(GfError::from)
     }
 
     pub(crate) fn lookup_node_uuids(
@@ -1051,7 +1094,7 @@ impl V4OrdinalIdentitySession {
             .lock()
             .expect("ordinal identity handle poisoned")
             .lookup_node_uuids_pinned(requested)
-            .map_err(GfError::from_execution_error)?;
+            .map_err(GfError::from)?;
         if self.attribution_available.swap(false, Ordering::AcqRel) {
             lookup.metrics.revalidation_calls = self.revalidation.calls;
             lookup.metrics.revalidation_bytes = self.revalidation.bytes_read;
@@ -1065,10 +1108,9 @@ impl V4OrdinalIdentitySession {
 ///
 /// Probes the session's [`AdjacencyProvider`] per frontier row instead of
 /// hash-joining the full edge table; emits exactly the rows (and column
-/// layout) the join chain would have produced. For `Undirected` the lowerer
-/// wraps the node in `DISTINCT` (mirroring the join path's union+distinct),
-/// so this node emits the provider's merged view raw — including a
-/// self-loop's two entries, which the `DISTINCT` collapses.
+/// layout) the join chain would have produced. For `Undirected` this node
+/// reads the provider's merged view and skips an edge already emitted for the
+/// same source row, so a self-loop's two entries yield one row.
 pub struct ExpandExec {
     pub(super) input: Arc<dyn ExecutionPlan>,
     rel_type_name: String,
@@ -1207,60 +1249,26 @@ impl ExpandExec {
         })
     }
 
-    pub(crate) fn rel_type_name(&self) -> &str {
-        &self.rel_type_name
-    }
-
-    pub(crate) fn direction(&self) -> graphforge_ir::Direction {
-        self.direction
-    }
-
-    pub(crate) fn provider(&self) -> &Arc<dyn AdjacencyProvider> {
-        &self.provider
-    }
-
-    pub(crate) fn ordinal_identities(&self) -> Option<Arc<V4OrdinalIdentitySession>> {
-        self.ordinal_identities.clone()
-    }
-
-    pub(crate) fn is_destination_identity_only(&self) -> bool {
-        self.is_identity_projection_only(true)
-    }
-
-    pub(crate) fn is_intermediate_topology_only(&self) -> bool {
-        self.is_identity_projection_only(false)
-    }
-
-    fn is_identity_projection_only(&self, require_destination_uuid: bool) -> bool {
-        let Some(required) = self.required_output.as_deref() else {
-            return false;
-        };
-        let dst_width = graphforge_storage::TOPOLOGY_NODES_SCHEMA.fields().len();
-        let edge_end = self.schema.fields().len().saturating_sub(dst_width);
-        let destination_uuid_index = edge_end;
-        let destination_id_index = edge_end + 1;
-        let edge_materialization_unused =
-            required
-                .get(self.input_width..edge_end)
-                .is_some_and(|fields| {
-                    fields.iter().enumerate().all(|(offset, needed)| {
-                        !needed || self.schema.field(self.input_width + offset).name() == "edge_id"
-                    })
-                });
-        let required_destination = if require_destination_uuid {
-            destination_uuid_index
-        } else {
-            destination_id_index
-        };
-        edge_materialization_unused
-            && required
-                .iter()
-                .enumerate()
-                .skip(edge_end)
-                .all(|(index, needed)| {
-                    !needed || index == destination_uuid_index || index == destination_id_index
-                })
-            && required.get(required_destination).copied().unwrap_or(false)
+    /// The owned per-stream configuration of one `execute` call.
+    fn single_hop_config(&self, context: &TaskContext) -> SingleHopConfig {
+        SingleHopConfig {
+            rel_type_name: self.rel_type_name.clone(),
+            direction: self.direction,
+            dir: self.dir.clone(),
+            mode: self.mode,
+            src_col_idx: self.src_col_idx,
+            edge_prop_count: self.edge_prop_count,
+            input_width: self.input_width,
+            out_schema: self.schema.clone(),
+            provider: self.provider.clone(),
+            edge_var: self.edge_var,
+            capture_epoch: self.capture_epoch,
+            demand: self.demand.clone(),
+            required_output: self.required_output.clone(),
+            ordinal_identities: self.ordinal_identities.clone(),
+            ordinal_identity_required: self.ordinal_identity_required,
+            reservation: std::sync::Mutex::new(crate::fast_path::expand_reservation(context)),
+        }
     }
 }
 
@@ -1286,8 +1294,7 @@ impl DisplayAs for ExpandExec {
             "ExpandExec: rel={}, dir={arrow}, adjacency={}, identity={}, fetch={}, demand_batch={}, projection={}, cancel={}",
             self.rel_type_name,
             self.provider
-                .status(&self.rel_type_name, self.direction)
-                .as_str(),
+                .explain_status(&self.rel_type_name, self.direction),
             if self.ordinal_identities.is_some() {
                 "v4"
             } else if self.ordinal_identity_required {
@@ -1402,23 +1409,7 @@ impl ExecutionPlan for ExpandExec {
             )));
         }
         let input = self.input.clone();
-        let cfg = SingleHopConfig {
-            rel_type_name: self.rel_type_name.clone(),
-            direction: self.direction,
-            dir: self.dir.clone(),
-            mode: self.mode,
-            src_col_idx: self.src_col_idx,
-            edge_prop_count: self.edge_prop_count,
-            input_width: self.input_width,
-            out_schema: self.schema.clone(),
-            provider: self.provider.clone(),
-            edge_var: self.edge_var,
-            capture_epoch: self.capture_epoch,
-            demand: self.demand.clone(),
-            required_output: self.required_output.clone(),
-            ordinal_identities: self.ordinal_identities.clone(),
-            ordinal_identity_required: self.ordinal_identity_required,
-        };
+        let cfg = self.single_hop_config(&context);
         let schema = self.schema.clone();
         let batch_size = context.session_config().batch_size();
         let input_stream = datafusion::physical_plan::execute_stream(input, context)?;
@@ -1461,6 +1452,7 @@ impl ExecutionPlan for ExpandExec {
                         if position.row >= input_batch.num_rows() {
                             pending = None;
                         }
+                        cfg.account(pending.as_ref().map(|(batch, _)| batch), &output)?;
                         if let Some(left) = remaining.as_mut() {
                             *left = left.saturating_sub(output.num_rows());
                         }
@@ -1487,6 +1479,10 @@ impl ExecutionPlan for ExpandExec {
                     };
                     let input_batch = input_batch?;
                     demand::record_input(cfg.capture_epoch, cfg.edge_var, input_batch.num_rows());
+                    cfg.account(
+                        Some(&input_batch),
+                        &RecordBatch::new_empty(cfg.out_schema.clone()),
+                    )?;
                     pending = Some((input_batch, SingleHopPosition::default()));
                 }
             },
@@ -1513,6 +1509,25 @@ struct SingleHopConfig {
     required_output: Option<Arc<[bool]>>,
     ordinal_identities: Option<Arc<V4OrdinalIdentitySession>>,
     ordinal_identity_required: bool,
+    /// #1688 candidate C: the memory-pool reservation for held batches.
+    /// Memory-pool reservation for the batches this hop holds (ADR 0050).
+    reservation: std::sync::Mutex<datafusion::execution::memory_pool::MemoryReservation>,
+}
+
+impl SingleHopConfig {
+    /// Charge the held input batch and the output batch to the session memory pool.
+    fn account(
+        &self,
+        held: Option<&RecordBatch>,
+        output: &RecordBatch,
+    ) -> Result<(), DataFusionError> {
+        let bytes =
+            held.map_or(0, RecordBatch::get_array_memory_size) + output.get_array_memory_size();
+        self.reservation
+            .lock()
+            .map_err(|_| DataFusionError::Internal("ExpandExec reservation poisoned".into()))?
+            .try_resize(bytes)
+    }
 }
 
 /// Resumable position within one input batch. Keeping the raw adjacency offset
@@ -1610,8 +1625,12 @@ fn expand_single_hop_chunk(
 
     // The adjacency view: directional for Out/In, merged for Undirected
     // (dedup per input row happens in the emit pass below).
-    let mut adjacency =
-        adjacency::AdjacencyReader::new(cfg.provider.as_ref(), &cfg.rel_type_name, cfg.direction)?;
+    let mut adjacency = adjacency::AdjacencyReader::for_capture(
+        cfg.provider.as_ref(),
+        &cfg.rel_type_name,
+        cfg.direction,
+        cfg.capture_epoch,
+    )?;
 
     // Pass 1: walk the frontier collecting (input row, edge_id, neighbor)
     // triples and the distinct traversed edge ids, so the edge read below
@@ -1922,14 +1941,18 @@ fn expand_single_hop_chunk(
             .saturating_add(1_usize.saturating_sub(node_key_already_demanded)),
     );
     let node_batches = if required.is_some() {
-        graphforge_storage::read_nodes_filtered_projected_observed(
-            &cfg.dir,
+        graphforge_storage::read_nodes_filtered_projected_observed_from_files(
+            &topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?,
             &reached,
             &node_projection,
             node_observer.as_ref(),
         )
     } else {
-        graphforge_storage::read_nodes_filtered_observed(&cfg.dir, &reached, node_observer.as_ref())
+        graphforge_storage::read_nodes_filtered_observed_from_files(
+            &topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?,
+            &reached,
+            node_observer.as_ref(),
+        )
     }
     .map_err(|e| exec_err(e.to_string()))?;
     drop(node_permit);
@@ -2072,3 +2095,13 @@ fn expand_single_hop_chunk(
 
 #[cfg(test)]
 mod tests;
+
+fn topology_for_provider(
+    provider: &dyn AdjacencyProvider,
+    legacy_root: &Path,
+) -> Result<graphforge_storage::TopologyFiles, GfError> {
+    match provider.admitted_inventory() {
+        Some(inventory) => graphforge_storage::TopologyFiles::from_inventory(&inventory),
+        None => graphforge_storage::TopologyFiles::discover_legacy(legacy_root),
+    }
+}

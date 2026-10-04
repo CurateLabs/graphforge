@@ -118,9 +118,18 @@ pub(crate) fn is_staged_temp_name(name: &std::ffi::OsStr) -> bool {
 pub struct RewriteBatch {
     /// `(staged temp, final destination)` in insertion = commit order.
     staged: Vec<(NamedTempFile, PathBuf)>,
+    // Opaque barriers belong to current retained temporaries, never public metadata.
+    seals: BTreeMap<PathBuf, crate::durable_commit::FileSeal>,
     pending_routes: crate::route_component::owned::PendingRoutes,
     property_windows: BTreeMap<PropertyWindowKey, PendingPropertyWindow>,
     moves: BTreeMap<PathBuf, crate::durable_rewrite::moves::SourceRetirement>,
+    topology: Option<std::sync::Arc<crate::TopologyFileAuthority>>,
+}
+
+pub(crate) struct StagedRewrite {
+    pub(crate) staged: Vec<(NamedTempFile, PathBuf)>,
+    pub(crate) moves: BTreeMap<PathBuf, crate::durable_rewrite::moves::SourceRetirement>,
+    pub(crate) seals: BTreeMap<PathBuf, crate::durable_commit::FileSeal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -142,6 +151,51 @@ impl RewriteBatch {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Retain the session that owns this batch's topology output destinations.
+    pub fn bind_topology_authority(
+        &mut self,
+        authority: std::sync::Arc<crate::TopologyFileAuthority>,
+    ) -> Result<(), GfError> {
+        if self
+            .topology
+            .as_ref()
+            .is_some_and(|prior| !std::sync::Arc::ptr_eq(prior, &authority))
+        {
+            return Err(GfError::Storage(
+                "rewrite cannot mix topology authorities".into(),
+            ));
+        }
+        self.topology = Some(authority);
+        Ok(())
+    }
+
+    pub(crate) fn topology_authority(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::TopologyFileAuthority>> {
+        self.topology.as_ref()
+    }
+
+    pub(crate) fn retired_relative_paths(&self) -> std::collections::BTreeSet<String> {
+        self.moves
+            .values()
+            .map(crate::durable_rewrite::moves::SourceRetirement::relative_path)
+            .collect()
+    }
+
+    pub(crate) fn semantic_relative_path(
+        &self,
+        root: &Path,
+        relative: &str,
+    ) -> Result<String, GfError> {
+        let table_path = root.join(crate::route_component::TABLE_FILE);
+        if let Some(temporary) = self.staged_temp(&table_path) {
+            let bytes = std::fs::read(temporary).map_err(|error| io_err(&error))?;
+            return crate::route_component::RouteTable::decode(&bytes, 64 * 1024 * 1024, 100_000)?
+                .semantic_relative_path(relative);
+        }
+        self.pending_routes.semantic_relative_path(root, relative)
     }
 
     pub(crate) fn route_component(&mut self, root: &Path, route: &str) -> Result<String, GfError> {
@@ -185,7 +239,11 @@ impl RewriteBatch {
                 "duplicate rewrite move destination".into(),
             ));
         }
-        let (temporary, retirement) = crate::durable_rewrite::moves::stage_retained(
+        let crate::durable_rewrite::moves::StagedMove {
+            temporary,
+            retirement,
+            seal,
+        } = crate::durable_rewrite::moves::stage_retained(
             project_root,
             directory,
             source,
@@ -193,6 +251,7 @@ impl RewriteBatch {
             "semantic-route-move.parquet.",
         )?;
         self.moves.insert(destination.to_owned(), retirement);
+        self.seals.insert(temporary.path().to_path_buf(), seal);
         self.staged.push((temporary, destination.to_owned()));
         Ok(())
     }
@@ -209,13 +268,18 @@ impl RewriteBatch {
                 "duplicate rewrite move destination".into(),
             ));
         }
-        let (temporary, retirement) = crate::durable_rewrite::moves::stage(
+        let crate::durable_rewrite::moves::StagedMove {
+            temporary,
+            retirement,
+            seal,
+        } = crate::durable_rewrite::moves::stage(
             project_root,
             source,
             destination,
             temporary_prefix,
         )?;
         self.moves.insert(destination.to_owned(), retirement);
+        self.seals.insert(temporary.path().to_path_buf(), seal);
         self.staged.push((temporary, destination.to_owned()));
         Ok(())
     }
@@ -270,10 +334,12 @@ impl RewriteBatch {
             crate::io_stats::record_uuid_file_open();
         }
         std::io::Write::write_all(&mut temp, bytes).map_err(|error| io_err(&error))?;
-        temp.as_file().sync_all().map_err(|error| io_err(&error))?;
+        let seal = crate::durable_commit::seal_file_witness(temp.as_file())
+            .map_err(|error| io_err(&error))?;
         if uuid_participant {
             crate::io_stats::record_uuid_file_sync();
         }
+        self.seals.insert(temp.path().to_path_buf(), seal);
         self.staged.push((temp, final_path.to_path_buf()));
         Ok(())
     }
@@ -304,10 +370,12 @@ impl RewriteBatch {
             std::io::Write::write_all(&mut temp, &block[..count])
                 .map_err(|error| io_err(&error))?;
         }
-        temp.as_file().sync_all().map_err(|error| io_err(&error))?;
+        let seal = crate::durable_commit::seal_file_witness(temp.as_file())
+            .map_err(|error| io_err(&error))?;
         if uuid_participant {
             crate::io_stats::record_uuid_file_sync();
         }
+        self.seals.insert(temp.path().to_path_buf(), seal);
         self.staged.push((temp, final_path.to_path_buf()));
         Ok(())
     }
@@ -357,6 +425,80 @@ impl RewriteBatch {
         Ok(())
     }
 
+    /// Stage one logical property fragment as bounded physical objects.
+    pub(crate) fn stage_property_batches<I>(
+        &mut self,
+        final_path: &Path,
+        schema: SchemaRef,
+        batches: I,
+    ) -> Result<(), GfError>
+    where
+        I: IntoIterator<Item = Result<RecordBatch, GfError>>,
+    {
+        let tmp = stage_parquet_batches_temp(final_path, schema, batches)?;
+        if tmp
+            .as_file()
+            .metadata()
+            .map_err(|error| io_err(&error))?
+            .len()
+            <= crate::property_overlay::bounded_object::MAX_PROPERTY_OBJECT_BYTES as u64
+        {
+            if self.staged.iter().any(|(_, path)| path == final_path) {
+                return Err(GfError::Storage(format!(
+                    "destination staged twice in one rewrite batch: {}",
+                    final_path.display()
+                )));
+            }
+            self.staged.push((tmp, final_path.to_path_buf()));
+            return Ok(());
+        }
+        self.stage_property_file(final_path, tmp.path())
+    }
+
+    /// Reframe a closed property file without exposing its oversized encoding.
+    pub(crate) fn stage_property_file(
+        &mut self,
+        final_path: &Path,
+        source: &Path,
+    ) -> Result<(), GfError> {
+        use crate::property_overlay::bounded_object::{
+            MAX_PROPERTY_OBJECT_BYTES, encode_parts, part_path,
+        };
+        let mut input = std::fs::File::open(source).map_err(|error| io_err(&error))?;
+        let length = input.metadata().map_err(|error| io_err(&error))?.len();
+        if length <= MAX_PROPERTY_OBJECT_BYTES as u64 {
+            return self.stage_file(final_path, source);
+        }
+        let parent = final_path
+            .parent()
+            .ok_or_else(|| GfError::Storage("staged property file has no parent".into()))?;
+        std::fs::create_dir_all(parent).map_err(|error| io_err(&error))?;
+        let mut parts = Vec::new();
+        encode_parts(&mut input, length, |index, bytes| {
+            let destination = part_path(final_path, index);
+            self.refuse_move_replacement(&destination)?;
+            if self.staged.iter().any(|(_, path)| path == &destination) {
+                return Err(GfError::Storage(format!(
+                    "destination staged twice in one rewrite batch: {}",
+                    destination.display()
+                )));
+            }
+            let name = destination.file_name().ok_or_else(|| {
+                GfError::Storage("staged property object has no file name".into())
+            })?;
+            let mut temporary = tempfile::Builder::new()
+                .prefix(&format!("{}.", name.to_string_lossy()))
+                .suffix(".tmp")
+                .tempfile_in(parent)
+                .map_err(|error| io_err(&error))?;
+            std::io::Write::write_all(&mut temporary, &bytes).map_err(|error| io_err(&error))?;
+            parts.push((temporary, destination));
+            Ok(())
+        })?;
+        self.staged.extend(parts);
+        Ok(())
+    }
+
     /// Stage `batch` for `final_path`, **replacing** any prior staged content
     /// for the same destination at its original commit position; stages like
     /// [`stage`](Self::stage) when the destination is new to this batch.
@@ -377,6 +519,7 @@ impl RewriteBatch {
         self.refuse_move_replacement(final_path)?;
         let tmp = stage_parquet_temp(final_path, schema, batch)?;
         if let Some(entry) = self.staged.iter_mut().find(|(_, p)| p == final_path) {
+            self.seals.remove(entry.0.path());
             entry.0 = tmp; // the replaced NamedTempFile is removed on drop
         } else {
             self.staged.push((tmp, final_path.to_path_buf()));
@@ -438,7 +581,9 @@ impl RewriteBatch {
             ArrowWriter::try_new(tmp.as_file(), schema, Some(properties)).map_err(pq_err)?;
         let mut existing_rows = 0_u64;
         if read_path.exists() {
-            let input = std::fs::File::open(&read_path).map_err(|error| io_err(&error))?;
+            // Existing rows are carried into the rewritten file, so a hydrated
+            // payload is admitted before its corruption can be republished.
+            let input = crate::graph_admission::open_admitted(&read_path)?;
             let reader = ParquetRecordBatchReaderBuilder::try_new(input)
                 .map_err(pq_err)?
                 .with_batch_size(ROW_GROUP_SIZE)
@@ -456,6 +601,7 @@ impl RewriteBatch {
         writer.write(batch).map_err(pq_err)?;
         writer.close().map_err(pq_err)?;
         if let Some(entry) = self.staged.iter_mut().find(|(_, path)| path == final_path) {
+            self.seals.remove(entry.0.path());
             entry.0 = tmp;
         } else {
             self.staged.push((tmp, final_path.to_path_buf()));
@@ -549,15 +695,56 @@ impl RewriteBatch {
             return Ok(());
         }
         self.commit_retained(&root_handle, &relative_destinations, allocation)
+            .map(|_| ())
     }
 
-    fn commit_retained(
+    /// Commit a batch of retained, non-authoritative files only, returning the
+    /// directory barriers the install completed so the caller can attribute
+    /// them to its lifecycle phase (#1449).
+    ///
+    /// # Errors
+    /// Refuses any batch that would need a sealed or durable-rewrite path —
+    /// moves, pending routes, property windows or a reserved authority — so
+    /// the returned count always describes the barriers actually performed.
+    pub(crate) fn commit_retained_at_observed(
         self,
+        project_root: &Path,
+        allocation: Option<&crate::StorageAllocationOperation>,
+    ) -> Result<u64, GfError> {
+        if !self.moves.is_empty()
+            || !self.pending_routes.is_empty()
+            || !self.property_windows.is_empty()
+        {
+            return Err(GfError::Storage(
+                "counted retained install requires non-authoritative files".into(),
+            ));
+        }
+        let (root_handle, relative_destinations) = admit_commit_root(project_root, &self.staged)?;
+        if relative_destinations
+            .iter()
+            .any(|relative| is_reserved_authority(relative))
+        {
+            return Err(GfError::Storage(
+                "reserved graph authority must commit through its sealed publication path".into(),
+            ));
+        }
+        self.commit_retained(&root_handle, &relative_destinations, allocation)
+    }
+
+    /// Install every staged file and return the directory barriers completed.
+    fn commit_retained(
+        mut self,
         root: &graphforge_filesystem::StableDirectory,
         destinations: &[PathBuf],
         allocation: Option<&crate::StorageAllocationOperation>,
-    ) -> Result<(), GfError> {
+    ) -> Result<u64, GfError> {
         let non_empty = !self.staged.is_empty();
+        let topology = self.topology.clone();
+        let candidate = topology
+            .as_ref()
+            .map(|authority| authority.prepare_installed(&self))
+            .transpose()?;
+        let mut barriers = 0_u64;
         for ((temporary, destination), relative) in self.staged.into_iter().zip(destinations) {
             let (parent, target) = retained_parent(root, relative)?;
             let temporary_path = temporary.path();
@@ -569,14 +756,30 @@ impl RewriteBatch {
             let temporary_name = temporary_path
                 .file_name()
                 .ok_or_else(|| GfError::Storage("staged temporary has no child name".into()))?;
-            let expected = graphforge_filesystem::file_identity(temporary.as_file())
-                .map_err(|error| GfError::Storage(error.to_string()))?;
             if let Some(allocation) = allocation {
                 allocation.replace_file_at(temporary_path, temporary.as_file())?;
             }
-            run_before_retained_install_hook();
-            parent
-                .replace_child(temporary_name, expected, &target)
+            let seal = match self.seals.remove(temporary_path) {
+                Some(seal) => seal,
+                None => crate::durable_commit::seal_file_witness(temporary.as_file())
+                    .map_err(|error| io_err(&error))?,
+            };
+            let sealed = crate::durable_commit::SealedArtifact::adopt_sealed(
+                &parent,
+                temporary_name,
+                temporary
+                    .as_file()
+                    .try_clone()
+                    .map_err(|error| io_err(&error))?,
+                seal,
+                allocation,
+            )
+            .map_err(|error| io_err(&error))?;
+            let pending = sealed
+                .make_visible(&target, crate::durable_commit::PublishMode::Replace, || {
+                    run_before_retained_install_hook();
+                    Ok(())
+                })
                 .map_err(|error| GfError::Storage(error.to_string()))?;
             if let Some(allocation) = allocation {
                 allocation.remove_file_at(destination.as_path())?;
@@ -586,14 +789,18 @@ impl RewriteBatch {
                     .map_err(|error| GfError::Storage(error.to_string()))?;
                 allocation.replace_file_at(destination.as_path(), &installed)?;
             }
-            parent
-                .sync()
+            pending
+                .acknowledge(allocation)
                 .map_err(|error| GfError::Storage(error.to_string()))?;
+            barriers += 1;
         }
         if non_empty {
             crate::io_stats::record_rewrite_commit();
         }
-        Ok(())
+        if let (Some(topology), Some(candidate)) = (topology, candidate) {
+            topology.install(candidate);
+        }
+        Ok(barriers)
     }
 
     #[cfg(test)]
@@ -764,13 +971,12 @@ impl RewriteBatch {
         std::mem::take(&mut self.property_windows)
     }
 
-    pub(crate) fn into_staged(
-        self,
-    ) -> (
-        Vec<(NamedTempFile, PathBuf)>,
-        BTreeMap<PathBuf, crate::durable_rewrite::moves::SourceRetirement>,
-    ) {
-        (self.staged, self.moves)
+    pub(crate) fn into_staged(self) -> StagedRewrite {
+        StagedRewrite {
+            staged: self.staged,
+            moves: self.moves,
+            seals: self.seals,
+        }
     }
 
     pub(crate) fn move_staged_destination_to_end(&mut self, destination: &Path) {
@@ -1171,6 +1377,8 @@ mod tests {
         first.stage(&path, Arc::clone(&schema), &initial).unwrap();
         first.commit_unsealed_for_test().unwrap();
 
+        let _io_capture = crate::io_stats::CaptureScope::install();
+
         crate::io_stats::reset();
         let (_, appended) = int_batch(&[900_001, 900_002, 900_003]);
         let mut rewrite = RewriteBatch::new();
@@ -1180,7 +1388,7 @@ mod tests {
         rewrite.commit_unsealed_for_test().unwrap();
 
         assert_eq!(existing, initial_values.len() as u64);
-        let io = crate::io_stats::snapshot();
+        let io = crate::io_stats::snapshot().expect("requested I/O statistics");
         assert_eq!(io.topology_rewrite_peak_batch_rows, ROW_GROUP_SIZE as u64);
         let values = read_values(&path);
         assert_eq!(&values[..initial_values.len()], initial_values.as_slice());

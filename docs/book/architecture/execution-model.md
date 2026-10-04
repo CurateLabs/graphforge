@@ -103,6 +103,17 @@ comparisons are recorded in
 [the #1241 evidence](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/input-predicates-1241.json).
 Timing observations are not CI assertions; sampled peaks are not hard bounds.
 
+## Delete frontier demand
+
+For a terminal sequence of direct-variable `DELETE` clauses, the Rust write
+driver projects the matched frontier to the targets' qualified node or edge
+UUID columns before optimization. Predicate dependencies remain in the read
+prefix, so properties used to select targets are still read and verified.
+Deletion resolves labels, incident edges, property counts and tombstones from
+the session's storage authority. Unused edge properties are not materialized
+once per expansion chunk. Expression targets, mixed writes and later reads
+retain their existing frontier requirements.
+
 ## List expression execution
 
 `graphforge-rel` keeps quantifier and list-comprehension UDF execution in the
@@ -143,20 +154,38 @@ already flattened errors can be reconstructed.
 
 ## Custom Graph Execution Nodes
 
-GraphForge registers custom `ExecutionPlan` implementations with DataFusion for operators
-that cannot be faithfully expressed as relational algebra:
+GraphForge registers custom `ExecutionPlan` implementations with DataFusion, planned from
+`graphforge-plan` logical extension nodes by `GraphForgeExtensionPlanner` or substituted by
+physical rewrite rules:
 
 | Node | Description |
-| -------------------- | -------------------------------------------------------------------------- |
-| `VarLenExpand` | Iterative or recursive expansion for `*min..max` path patterns |
-| `OptionalMatch` | Left-join semantics with Cypher null-shaping (distinct from SQL LEFT JOIN) |
-| `PathUnique` | Path isomorphism/homomorphism enforcement |
-| `ProvenanceSemijoin` | Semijoin with confidence propagation |
-| `OntologyInfer` | Transitive/symmetric closure materialization |
-| `GraphMerge` | Partial MERGE upsert (standalone new node or referenced-endpoint relationship) with write-path locking |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `ExpandExec` | Adjacency-backed single hop; one per hop for fixed multi-hop patterns (see below) |
+| `VarLenExpandExec` | Breadth-first expansion for `*min..max` patterns with relationship isomorphism |
+| `OntologyInferExec` | Pass-through that carries the inference rule into the plan and `explain()` |
+| `OptionalMatchExec` | Left-join semantics with Cypher null-shaping (distinct from SQL LEFT JOIN) |
+| `UnwindExec` | Cypher list unwinding |
+| `EdgeCountExec` | `count(r)` answered from the adjacency edge-entry count |
+| `OrderedOneHopExec` | One hop `ORDER BY` destination UUID `LIMIT k`, emitted in ordinal order |
+| `OrderedTwoHopPathCountExec` | Two-hop equivalent, counting path multiplicity per destination |
+| `SortRunCoalesceExec` | Coalesces sort input into memory-pool-sized runs ahead of `SortExec` |
+| `DemandGuardExec` | Cancels traversal once a terminal `LIMIT` is satisfied |
 
-All other operators (scan, filter, project, aggregate, sort, limit) run through standard
-DataFusion physical nodes.
+Storage contributes the scan nodes `GraphForgeParquetExec`, `OrderedPartitionStreamExec`,
+and `PropertyOverlayExec`. Writes plan into `GraphCreateExec`, `GraphDeleteExec`,
+`GraphSetExec`, and `GraphRemoveExec`.
+
+`EdgeCountExec` and the two ordered nodes are chosen by the lowerer from the Graph IR, through a
+`FastPath` logical node ([ADR 0050](../../adr/0050-read-path-fast-path-selection.md)). The choice
+never reads the physical plan, so DataFusion's partitioning and transport operators cannot remove a
+fast path. When a session precondition fails (for example, no ordinal identity authority), the
+generic plan runs under `FastPathFallbackExec`, which names the reason in `explain()`. `ExpandExec`
+charges the batches it holds to the session memory pool.
+
+Filter, project, aggregate, sort, limit, joins, union, and Cartesian products run through
+standard DataFusion physical nodes. The full operator and rewrite inventory, with source
+locations, stock DataFusion candidates, and memory-pool accounting, is in
+[cypher-read-path-inventory.md](../../development/cypher-read-path-inventory.md) (#1619).
 
 ---
 
@@ -175,7 +204,7 @@ execution paths consume it through a single `AdjacencyProvider` abstraction:
 | Node | Description |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `VarLenExpandExec` | Iterative BFS over the `AdjacencyProvider` for `*min..max` patterns (replaces the per-query in-memory adjacency build) |
-| `ExpandExec` | Adjacency-backed single-hop expansion: chosen at lowering time when the provider reports a `hit` for a typed relation (any direction; undirected wraps in `DISTINCT`, mirroring the join path's union+distinct). Exploratory single-hop and uncovered patterns keep the DataFusion join chain. |
+| `ExpandExec` | Adjacency-backed single-hop expansion: chosen at lowering time for every project-backed hop whose relationship is not already bound; the provider owns hit, miss, and building fallback. Undirected hops read the merged adjacency view and drop a repeated edge within each source row. Schema-only lowering, an already-bound relationship, and an unknown relationship type keep the DataFusion join chain. |
 
 `ExpandExec` receives exact physical column demand through projections, filters,
 sorts, and limits; unknown or multi-input physical operators are conservative
@@ -204,8 +233,13 @@ cancellation.
 
 Ordinary streaming result sinks retain the same aggregate evidence through the
 terminal stream boundary. `gf --json query` emits `graphforge-result-sink/2`
-with nested `graphforge-query-evidence/1`: named hop reader, logical-row,
+with nested `graphforge-query-evidence/2`: named hop reader, logical-row,
 projection, identity-byte, TopK/spill, memory-release, and operator-RSS fields.
+Version 2 adds `adjacency_rebuilds`, counting rebuild attempts for missing or stale
+indexes, including failed attempts so their linear work remains visible. Fresh
+construction-published indexes report zero. Certification consumers also accept
+the closed eleven-field version 1 shape from archived receipts; version 2 has
+twelve fields and requires the unsigned rebuild-attempt counter.
 The receipt also includes the SHA-256 of a bounded logical Arrow encoding of the
 published result and an optional `scalar_u64` only for an exact one-row integer
 result representable as `u64`. Evidence is content-free: it contains no graph

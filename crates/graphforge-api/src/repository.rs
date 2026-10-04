@@ -1,5 +1,6 @@
 //! Safe integration between a code repository and an embedded GraphForge project.
 
+use graphforge_filesystem::ObservedSync as _;
 mod configuration;
 mod skills;
 
@@ -15,9 +16,10 @@ use std::process::Command;
 use fs4::FileExt;
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_storage as storage;
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 const CONFIG: &str = ".graphforge/graphforge.yaml";
@@ -183,7 +185,7 @@ impl DesiredRepositorySnapshot {
 #[cfg(not(windows))]
 fn sync_directory(path: &Path) -> Result<(), GfError> {
     fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
+        .and_then(|directory| directory.observed_sync_all())
         .map_err(|error| GfError::Storage(error.to_string()))
 }
 
@@ -196,7 +198,7 @@ fn sync_directory(path: &Path) -> Result<(), GfError> {
         .write(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)
-        .and_then(|directory| directory.sync_all())
+        .and_then(|directory| directory.observed_sync_all())
         .map_err(|error| GfError::Storage(error.to_string()))
 }
 
@@ -208,7 +210,7 @@ fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), GfError> {
         .open(path)
         .map_err(|error| GfError::Storage(error.to_string()))?;
     file.write_all(bytes)
-        .and_then(|()| file.sync_all())
+        .and_then(|()| file.observed_sync_all())
         .map_err(|error| GfError::Storage(error.to_string()))?;
     sync_directory(
         path.parent()
@@ -804,7 +806,7 @@ impl RepositoryContext {
         }
         staged
             .as_file()
-            .sync_all()
+            .observed_sync_all()
             .map_err(|error| GfError::Storage(error.to_string()))?;
         staged
             .persist(&path)
@@ -1208,6 +1210,7 @@ mod tests {
             byte_length: 1,
             row_count: 1,
             schema_fingerprint: encode_hex(&Sha256::digest("workspace/repository_snapshot@1")),
+            content_xxh64: 0,
             content_sha256: content_sha256.into(),
         }
     }
@@ -1237,6 +1240,7 @@ mod tests {
                 ..valid.clone()
             },
             graphforge_storage::StagedParticipant {
+                content_xxh64: 0,
                 content_sha256: "wrong".into(),
                 ..valid
             },

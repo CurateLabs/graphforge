@@ -184,7 +184,7 @@ The existing delta/compaction integration suites also pass (26 tests), alongside
 10 unit/crash tests, 19 composite tests and 30 bulk-construction tests. A focused
 storage test installs real CAS catalog/marker objects and verifies that durable
 persistence replaces both private aliases while preserving the original objects;
-the Windows and macOS native CI lanes run this exact test.
+the Windows native CI lane runs this exact test.
 
 | Nodes | Base logical bytes | Reused payload bytes | Private controls + run allocated |
 | ---: | ---: | ---: | ---: |

@@ -2,9 +2,9 @@
 
 use super::{
     ATTEMPTS_DIR, Digest, File, GENERATIONS_DIR, GfError, MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
-    OpenOptions, Ordering, PARTICIPANTS_DIR, ParticipantPayloads, Path, PathBuf, ProjectCapability,
+    Ordering, PARTICIPANTS_DIR, ParticipantPayloads, Path, PathBuf, ProjectCapability,
     ProjectErrorCode, ProjectGenerationRequest, ProjectParticipantEncoding, Read,
-    ResolvedProjectGeneration, Serialize, Sha256, StagedParticipant, Write, canonical_line,
+    ResolvedProjectGeneration, Serialize, StagedParticipant, Write, canonical_line,
     ensure_machine_directory, hex_digest, project_error, project_failpoint, publication_io,
     sync_directory, transaction_conflict,
 };
@@ -36,6 +36,7 @@ pub(super) fn stage_optional_graph_tree(
     generation_root: &Path,
     graph_tree: Option<&Path>,
     allocation: Option<&crate::StorageAllocationOperation>,
+    installed_objects: Option<&crate::GraphObjectPublicationLease>,
 ) -> Result<(), GfError> {
     let files_participant = participants.iter().find(|participant| {
         participant.capability_id == crate::GRAPH_CAPABILITY_ID
@@ -91,7 +92,7 @@ pub(super) fn stage_optional_graph_tree(
                     "graph/files v2 root must reference project objects, not a generation graph tree",
                 ));
             }
-            verify_compact_graph_root(parent.container_root(), &root)?;
+            verify_compact_graph_root(parent, &root, installed_objects)?;
             sync_directory(generation_root)?;
             return Ok(());
         }
@@ -172,26 +173,71 @@ pub(super) fn verify_optional_graph_tree_with_lease(
 }
 
 fn verify_compact_graph_root(
-    container_root: &Path,
+    parent: &ResolvedProjectGeneration,
     root: &crate::GraphFilesRootV2,
+    installed_objects: Option<&crate::GraphObjectPublicationLease>,
 ) -> Result<(), GfError> {
+    let container_root = parent.container_root();
     let (files, _) =
         crate::resolve_graph_manifest(root, crate::GraphManifestLimits::default(), |digest| {
-            crate::read_graph_object_by_digest(
+            crate::graph_object_store::read_graph_control_object_by_digest(
                 container_root,
                 digest,
                 crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
             )
         })?;
     crate::route_component::authenticate_manifest_routes(root.format_version, &files, |entry| {
-        crate::read_graph_object_by_digest(
+        crate::graph_object_store::read_graph_control_object_by_digest(
             container_root,
             &entry.content_sha256,
             MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
         )
     })?;
-    for entry in files {
-        crate::verify_graph_object(container_root, &entry.content_sha256, entry.byte_length)?;
+    // A caller's newly supplied checksum is not authority for a SHA address.
+    // Reuse only identities declared by the authenticated published parent;
+    // other objects cross the public input boundary and need SHA authentication.
+    let known = match parent.declared_graph_files_participant()? {
+        Some(crate::GraphFilesParticipant::V2(parent_root)) => {
+            crate::resolve_graph_manifest(
+                &parent_root,
+                crate::GraphManifestLimits::default(),
+                |digest| {
+                    crate::graph_object_store::read_graph_control_object_by_digest(
+                        container_root,
+                        digest,
+                        crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
+                    )
+                },
+            )?
+            .0
+        }
+        Some(crate::GraphFilesParticipant::V1(_)) | None => Vec::new(),
+    };
+    let known = known
+        .iter()
+        .map(|entry| {
+            (
+                entry.content_sha256.as_str(),
+                (entry.byte_length, entry.content_xxh64),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    if let Some(lease) = installed_objects {
+        lease.revalidate_for_root(container_root)?;
+    }
+    for entry in &files {
+        if let Some(lease) = installed_objects
+            && lease.admit_captured_object(entry)?
+        {
+            continue;
+        }
+        if known.get(entry.content_sha256.as_str())
+            == Some(&(entry.byte_length, entry.content_xxh64))
+        {
+            crate::graph_object_store::admit_graph_object(container_root, entry)?;
+        } else {
+            crate::graph_object_store::authenticate_graph_object_entry(container_root, entry)?;
+        }
     }
     Ok(())
 }
@@ -202,25 +248,21 @@ fn verify_compact_graph_root_with_lease(
 ) -> Result<(), GfError> {
     let (files, _) =
         crate::resolve_graph_manifest(root, crate::GraphManifestLimits::default(), |digest| {
-            crate::graph_object_store::read_graph_object_by_digest_with_lease(
+            crate::graph_object_store::read_graph_control_object_by_digest_with_lease(
                 lease,
                 digest,
                 crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
             )
         })?;
     crate::route_component::authenticate_manifest_routes(root.format_version, &files, |entry| {
-        crate::graph_object_store::read_graph_object_by_digest_with_lease(
+        crate::graph_object_store::read_graph_control_object_by_digest_with_lease(
             lease,
             &entry.content_sha256,
             MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
         )
     })?;
-    for entry in files {
-        crate::graph_object_store::verify_graph_object_with_lease(
-            lease,
-            &entry.content_sha256,
-            entry.byte_length,
-        )?;
+    for entry in &files {
+        crate::graph_object_store::admit_graph_object_with_lease(lease, entry)?;
     }
     Ok(())
 }
@@ -252,65 +294,66 @@ pub(super) fn stage_participant_files(
             .strip_prefix(generation_root)
             .expect("machine-derived participant parent is contained");
         ensure_machine_directory(generation_root, relative_parent)?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&destination)
-            .map_err(publication_io)?;
-        let write_result = (|| -> Result<(), GfError> {
-            match payloads {
-                ParticipantPayloads::Memory => {
-                    file.write_all(&input.bytes).map_err(publication_io)?;
-                }
-                ParticipantPayloads::Files(files, cancelled, copy_buffer_bytes) => {
-                    let source = &files[index];
-                    let mut input = crate::project_portable::open_regular_nofollow(&source.source)
-                        .map_err(publication_io)?;
-                    let mut hash = Sha256::new();
-                    let mut copied = 0;
-                    let mut buffer = vec![0; copy_buffer_bytes];
-                    loop {
-                        if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-                            return Err(project_error(
-                                ProjectErrorCode::PublicationFailed,
-                                "portable import cancelled during staging",
-                            ));
+        let parent =
+            graphforge_filesystem::StableDirectory::open(parent_dir).map_err(publication_io)?;
+        let primary = std::cell::RefCell::new(None);
+        let copied_hash_streams = std::cell::Cell::new(0);
+        let result = crate::durable_commit::stage_private_file(
+            &parent,
+            destination.file_name().expect("participant has a name"),
+            |file| {
+                let write_result = (|| -> Result<(), GfError> {
+                    match payloads {
+                        ParticipantPayloads::Memory(_) => {
+                            file.write_all(&input.bytes).map_err(publication_io)?;
                         }
-                        let count = input.read(&mut buffer).map_err(publication_io)?;
-                        if count == 0 {
-                            break;
+                        ParticipantPayloads::Files(
+                            files,
+                            cancelled,
+                            copy_buffer_bytes,
+                            captures,
+                        ) => {
+                            copied_hash_streams.set(copy_file_participant(
+                                file,
+                                &files[index],
+                                metadata,
+                                cancelled,
+                                copy_buffer_bytes,
+                                captures
+                                    .and_then(|authorities| authorities.get(&files[index].source))
+                                    .copied(),
+                            )?);
                         }
-                        file.write_all(&buffer[..count]).map_err(publication_io)?;
-                        hash.update(&buffer[..count]);
-                        copied += count as u64;
                     }
-                    let digest: [u8; 32] = hash.finalize().into();
-                    if copied != source.byte_length || digest != source.content_sha256 {
-                        return Err(project_error(
-                            ProjectErrorCode::PublicationFailed,
-                            "portable participant changed during staging",
-                        ));
-                    }
-                }
-            }
-            Ok(())
-        })();
-        let observed = allocation.map_or(Ok(()), |allocation| {
-            allocation.replace_file_at(&destination, &file)
-        });
-        write_result?;
-        observed?;
-        project_failpoint::hit(
-            "project.after_participant_write",
-            Some(request.transaction_uuid),
-            Some(request.generation_uuid),
-            "STAGED",
-            false,
-        )?;
-        file.sync_all().map_err(publication_io)?;
-        if let Some(allocation) = allocation {
-            allocation.replace_file_at(&destination, &file)?;
-        }
+                    Ok(())
+                })();
+                write_result.map_err(|error| {
+                    let cause = std::io::Error::other(error.to_string());
+                    *primary.borrow_mut() = Some(error);
+                    cause
+                })
+            },
+            || {
+                project_failpoint::hit(
+                    "project.after_participant_write",
+                    Some(request.transaction_uuid),
+                    Some(request.generation_uuid),
+                    "STAGED",
+                    false,
+                )
+                .map_err(|error| {
+                    let cause = std::io::Error::other(error.to_string());
+                    *primary.borrow_mut() = Some(error);
+                    cause
+                })
+            },
+            allocation,
+        );
+        let file = result.map_err(|error| {
+            primary
+                .into_inner()
+                .unwrap_or_else(|| publication_io(error))
+        })?;
         project_failpoint::hit(
             "project.after_participant_fsync",
             Some(request.transaction_uuid),
@@ -318,9 +361,85 @@ pub(super) fn stage_participant_files(
             "STAGED",
             false,
         )?;
+        drop(file);
         verify_participant_file(&destination, metadata)?;
+        crate::graph_construction::diagnostics::sealed_payload(
+            metadata.byte_length,
+            copied_hash_streams.get(),
+        );
     }
     Ok(())
+}
+
+// Preserve the exact FD/copy boundary while keeping allocation observation
+// in stage_participant_files even when a partially written copy fails.
+fn copy_file_participant(
+    file: &mut File,
+    source: &super::ProjectFileParticipant,
+    metadata: &StagedParticipant,
+    cancelled: Option<&super::AtomicBool>,
+    copy_buffer_bytes: usize,
+    capture: Option<&crate::project_portable_v2::MaterializedCapture>,
+) -> Result<u8, GfError> {
+    let mut input =
+        crate::project_portable::open_regular_nofollow(&source.source).map_err(publication_io)?;
+    let admitted = capture.is_some_and(|capture| {
+        capture.matches_file(
+            &input,
+            source.byte_length,
+            source.content_sha256,
+            metadata.content_xxh64,
+        )
+    });
+    let identity = graphforge_filesystem::file_identity(&input).map_err(publication_io)?;
+    let mut hash = (!admitted).then(graphforge_core::hash_observation::ArtifactSha256::new);
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut copied = 0;
+    let mut buffer = vec![0; copy_buffer_bytes];
+    let bound = source.byte_length.checked_add(1).ok_or_else(|| {
+        project_error(
+            ProjectErrorCode::PublicationFailed,
+            "portable participant length overflows",
+        )
+    })?;
+    let mut reader = (&mut input).take(bound);
+    loop {
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Err(project_error(
+                ProjectErrorCode::PublicationFailed,
+                "portable import cancelled during staging",
+            ));
+        }
+        let count = reader.read(&mut buffer).map_err(publication_io)?;
+        if count == 0 {
+            break;
+        }
+        copied += count as u64;
+        if copied > source.byte_length {
+            return Err(project_error(
+                ProjectErrorCode::PublicationFailed,
+                "portable participant grew during staging",
+            ));
+        }
+        file.write_all(&buffer[..count]).map_err(publication_io)?;
+        if let Some(hash) = &mut hash {
+            hash.update(&buffer[..count]);
+        }
+        checksum.update(&buffer[..count]);
+    }
+    let digest: [u8; 32] = hash.map_or(source.content_sha256, |hash| hash.finalize().into());
+    if copied != source.byte_length
+        || digest != source.content_sha256
+        || checksum.finish() != metadata.content_xxh64
+        || graphforge_filesystem::path_identity(&source.source).map_err(publication_io)? != identity
+        || input.metadata().map_err(publication_io)?.len() != source.byte_length
+    {
+        return Err(project_error(
+            ProjectErrorCode::PublicationFailed,
+            "portable participant changed during staging",
+        ));
+    }
+    Ok(if admitted { 1 } else { 2 })
 }
 
 #[derive(Debug, Serialize)]
@@ -350,6 +469,8 @@ impl Serialize for StagedParticipant {
             row_count: u64,
             schema_fingerprint: &'a str,
             content_sha256: &'a str,
+            #[serde(with = "crate::corruption_checksum::wire_hex")]
+            content_xxh64: u64,
         }
         Ordered {
             capability_id: &self.capability_id,
@@ -362,6 +483,7 @@ impl Serialize for StagedParticipant {
             row_count: self.row_count,
             schema_fingerprint: &self.schema_fingerprint,
             content_sha256: &self.content_sha256,
+            content_xxh64: self.content_xxh64,
         }
         .serialize(serializer)
     }
@@ -400,7 +522,7 @@ pub(super) fn validate_request(request: &ProjectGenerationRequest) -> Result<(),
 pub(super) fn request_metadata(
     request: &ProjectGenerationRequest,
 ) -> Result<(Vec<ProjectCapability>, Vec<StagedParticipant>, String), GfError> {
-    request_metadata_with_payloads(request, ParticipantPayloads::Memory)
+    request_metadata_with_payloads(request, ParticipantPayloads::Memory(None))
 }
 
 #[expect(
@@ -433,19 +555,54 @@ pub(super) fn request_metadata_with_payloads(
             "every generation must declare graph capability version 1",
         ));
     }
+    if let ParticipantPayloads::Memory(Some(identities)) = payloads
+        && identities.0.len() != request.participants.len()
+    {
+        return Err(project_error(
+            ProjectErrorCode::PublicationFailed,
+            "prepared participant identities do not match the request",
+        ));
+    }
     let mut participants = Vec::with_capacity(request.participants.len());
+    let mut resident_hashed_bytes = 0_u64;
     for (index, participant) in request.participants.iter().enumerate() {
-        let (byte_length, content_sha256) = match payloads {
-            ParticipantPayloads::Memory => (
-                u64::try_from(participant.bytes.len()).map_err(|_| {
+        let (byte_length, content_sha256, content_xxh64) = match payloads {
+            ParticipantPayloads::Memory(identities) => {
+                let byte_length = u64::try_from(participant.bytes.len()).map_err(|_| {
                     project_error(
                         ProjectErrorCode::PublicationFailed,
                         "participant byte length exceeds u64",
                     )
-                })?,
-                Sha256::digest(&participant.bytes).into(),
-            ),
-            ParticipantPayloads::Files(files, _, _) => {
+                })?;
+                let content_xxh64 = crate::corruption_checksum::checksum(&participant.bytes);
+                let streams = if identities.is_some() { 1 } else { 2 };
+                for _ in 0..streams {
+                    resident_hashed_bytes = resident_hashed_bytes.saturating_add(byte_length);
+                }
+                let content_sha256 = match identities.map(|identities| identities.0[index]) {
+                    // The prepared SHA-256 describes these exact bytes: its
+                    // length and checksum were computed over them in the same
+                    // pass and still match.
+                    Some(identity)
+                        if identity.byte_length == byte_length
+                            && identity.content_xxh64 == content_xxh64 =>
+                    {
+                        identity.content_sha256
+                    }
+                    Some(_) => {
+                        return Err(project_error(
+                            ProjectErrorCode::PublicationFailed,
+                            "prepared participant identity does not match its bytes",
+                        ));
+                    }
+                    None => graphforge_core::hash_observation::ArtifactSha256::digest(
+                        &participant.bytes,
+                    )
+                    .into(),
+                };
+                (byte_length, content_sha256, content_xxh64)
+            }
+            ParticipantPayloads::Files(files, cancelled, _, captures) => {
                 let file = files.get(index).ok_or_else(|| {
                     project_error(
                         ProjectErrorCode::PublicationFailed,
@@ -460,7 +617,21 @@ pub(super) fn request_metadata_with_payloads(
                         "participant file identity mismatch",
                     ));
                 }
-                (file.byte_length, file.content_sha256)
+                // A compact graph root can be freshly rewritten after archive
+                // materialization. Its old capture grants no authority to the
+                // new inode/bytes; retain ordinary checksum and copy-SHA checks.
+                let sealed_source = captures
+                    .and_then(|captures| captures.get(&file.source))
+                    .and_then(|capture| capture.open_source(&file.source).ok())
+                    .filter(|source| {
+                        source.bytes() == file.byte_length
+                            && source.content_sha256() == hex_digest(file.content_sha256)
+                    });
+                let checksum = match sealed_source {
+                    Some(source) => source.checksum(),
+                    None => checksum_participant_source(&file.source, file.byte_length, cancelled)?,
+                };
+                (file.byte_length, file.content_sha256, checksum)
             }
         };
         participants.push(StagedParticipant {
@@ -479,6 +650,7 @@ pub(super) fn request_metadata_with_payloads(
             row_count: participant.row_count,
             schema_fingerprint: hex_digest(participant.schema_fingerprint),
             content_sha256: hex_digest(content_sha256),
+            content_xxh64,
         });
     }
     participants.sort_by(|left, right| {
@@ -529,7 +701,8 @@ pub(super) fn request_metadata_with_payloads(
         participants: &participants,
     };
     let bytes = canonical_line(&fingerprint_input)?;
-    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    let digest: [u8; 32] = graphforge_core::hash_observation::ContractSha256::digest(bytes).into();
+    crate::graph_construction::diagnostics::hashed_bytes(resident_hashed_bytes, 1);
     Ok((capabilities, participants, hex_digest(digest)))
 }
 
@@ -552,7 +725,12 @@ pub(super) fn verify_participant_file(
     path: &Path,
     expected: &StagedParticipant,
 ) -> Result<(), GfError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(publication_io)?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        GfError::Storage(format!(
+            "inspect staged participant at {}: {error}",
+            path.display()
+        ))
+    })?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(project_error(
             ProjectErrorCode::PublicationFailed,
@@ -575,23 +753,40 @@ pub(super) fn verify_participant_file(
             "staged participant byte length changed",
         ));
     }
-    let mut file = File::open(path).map_err(publication_io)?;
-    let mut hasher = Sha256::new();
+    // The participant's SHA-256 identity was captured from the exact bytes
+    // that staging wrote. Later boundaries refuse corruption by exact length
+    // and the mandatory XXH64 recorded beside that identity.
+    let file = File::open(path).map_err(|error| {
+        GfError::Storage(format!(
+            "open staged participant at {}: {error}",
+            path.display()
+        ))
+    })?;
+    let bound = expected.byte_length.checked_add(1).ok_or_else(|| {
+        project_error(
+            ProjectErrorCode::PublicationFailed,
+            "staged participant length overflow",
+        )
+    })?;
+    let mut reader = file.take(bound);
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut count = 0_u64;
     let mut buffer = [0_u8; 8192];
     loop {
-        let read = std::io::Read::read(&mut file, &mut buffer).map_err(publication_io)?;
+        let read = reader.read(&mut buffer).map_err(publication_io)?;
         if read == 0 {
             break;
         }
-        hasher.update(&buffer[..read]);
+        count += read as u64;
+        checksum.update(&buffer[..read]);
     }
-    let actual: [u8; 32] = hasher.finalize().into();
-    if hex_digest(actual) != expected.content_sha256 {
+    if count != expected.byte_length || checksum.finish() != expected.content_xxh64 {
         return Err(project_error(
             ProjectErrorCode::PublicationFailed,
-            "staged participant digest changed",
+            "staged participant checksum changed",
         ));
     }
+    crate::graph_construction::diagnostics::hashed_bytes(count, 1);
     Ok(())
 }
 
@@ -619,3 +814,60 @@ pub(super) fn sync_participant_directories(
 
 #[cfg(test)]
 mod tests;
+
+fn checksum_participant_source(
+    path: &Path,
+    expected_length: u64,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<u64, GfError> {
+    let file = crate::project_portable::open_regular_nofollow(path).map_err(publication_io)?;
+    let identity = graphforge_filesystem::file_identity(&file).map_err(publication_io)?;
+    if file.metadata().map_err(publication_io)?.len() != expected_length {
+        return Err(project_error(
+            ProjectErrorCode::PublicationFailed,
+            "participant source length changed",
+        ));
+    }
+    let bound = expected_length.checked_add(1).ok_or_else(|| {
+        project_error(
+            ProjectErrorCode::PublicationFailed,
+            "participant source length overflow",
+        )
+    })?;
+    let mut reader = (&file).take(bound);
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut count = 0_u64;
+    let mut calls = 0_u64;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Err(project_error(
+                ProjectErrorCode::PublicationFailed,
+                "portable import cancelled during checksum capture",
+            ));
+        }
+        let read = reader.read(&mut buffer).map_err(publication_io)?;
+        if read == 0 {
+            break;
+        }
+        count += read as u64;
+        calls += 1;
+        checksum.update(&buffer[..read]);
+    }
+    if count != expected_length
+        || file.metadata().map_err(publication_io)?.len() != expected_length
+        || graphforge_filesystem::path_identity(path).map_err(publication_io)? != identity
+    {
+        return Err(project_error(
+            ProjectErrorCode::PublicationFailed,
+            "participant source changed during checksum capture",
+        ));
+    }
+    crate::lifecycle_io::record_read(
+        crate::StorageIoPhase::PublicationPreauthentication,
+        count,
+        calls,
+    );
+    crate::graph_construction::diagnostics::hashed_bytes(count, 1);
+    Ok(checksum.finish())
+}

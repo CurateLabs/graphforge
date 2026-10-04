@@ -299,12 +299,19 @@ fn compact_retained_reference_authentication_is_batched_and_linear() {
             target_path: &reference.target_path,
             bytes: reference.bytes,
             sha256: &reference.sha256,
+            xxh64: reference.xxh64,
             parent_manifest_sha256: &reference.parent_manifest_sha256,
         })
         .collect::<Vec<_>>();
+    let capture = graphforge_core::hash_observation::operation::Capture::start();
     let work = snapshot
         .authenticate_construction_references(&references)
         .unwrap();
+    let observed = capture.snapshot();
+    drop(capture);
+    assert_eq!(observed.artifact_payload_sha256_bytes, 0);
+    assert_eq!(observed.unclassified_sha256_bytes, 0);
+    assert!(observed.checksum_bytes >= work.referenced_payload_bytes);
     assert_eq!(
         work.global_revalidation_bytes,
         snapshot.snapshot_authentication_bytes() * 2
@@ -351,7 +358,7 @@ fn compact_retained_reference_authentication_is_batched_and_linear() {
     assert!(
         error
             .to_string()
-            .contains("digest does not match its address"),
+            .contains("XXH64 checksum does not match its inventory"),
         "{error}"
     );
 }
@@ -386,9 +393,11 @@ fn lookup_lazily_rejects_authenticated_pair_inconsistency() {
     bytes[8..24].copy_from_slice(Uuid::from_u128(999).as_bytes());
     fs::write(&path, &bytes).unwrap();
     let mut file = File::open(&path).unwrap();
-    let (sha256, blocks, count) = describe_blocks(&mut file, NODE_LOOKUP_RECORD_BYTES).unwrap();
+    let (sha256, xxh64, blocks, count) =
+        describe_blocks(&mut file, NODE_LOOKUP_RECORD_BYTES).unwrap();
     assert_eq!(count, run.node_surrogates.count);
     run.node_surrogates.sha256 = sha256;
+    run.node_surrogates.xxh64 = xxh64;
     run.node_surrogates.blocks = blocks;
     fs::write(root.join(MANIFEST), serde_json::to_vec(&manifest).unwrap()).unwrap();
 
@@ -402,4 +411,115 @@ fn lookup_lazily_rejects_authenticated_pair_inconsistency() {
             .to_string()
             .contains("pair is inconsistent")
     );
+}
+
+#[test]
+fn checksum_uuid_manifest_refuses_legacy_missing_and_malformed_metadata() {
+    let (dir, _, _) = fixture();
+    rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+    let path = dir.path().join(INDEX_DIR).join(MANIFEST);
+    let original: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for mode in 0..8 {
+        let mut changed = original.clone();
+        match mode {
+            0 => {
+                changed["format_version"] = serde_json::json!(6);
+                for run in changed["runs"].as_array_mut().unwrap() {
+                    for file in ["identities", "node_surrogates"] {
+                        for block in run[file]["blocks"].as_array_mut().unwrap() {
+                            block.as_object_mut().unwrap().remove("xxh64");
+                        }
+                    }
+                }
+            }
+            1 => changed["format_version"] = serde_json::json!(8),
+            4 => {
+                changed.as_object_mut().unwrap().remove("format_version");
+            }
+            5 => {
+                changed["runs"][0]["identities"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("xxh64");
+            }
+            6 => changed["runs"][0]["identities"]["xxh64"] = serde_json::json!("bad"),
+            7 => {
+                changed["runs"][0]["identities"]["blocks"][0]["sha256"] =
+                    serde_json::json!("a".repeat(64))
+            }
+            2 => {
+                changed["runs"][0]["identities"]["blocks"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("xxh64");
+            }
+            _ => {
+                changed["runs"][0]["identities"]["blocks"][0]["xxh64"] =
+                    serde_json::json!("not-a-checksum")
+            }
+        }
+        fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        let generation = crate::read_topology_generation(dir.path()).unwrap();
+        let errors = [
+            UuidMembershipIndex::open(dir.path())
+                .unwrap_err()
+                .to_string(),
+            AuthenticatedUuidIndexSnapshot::open_at_generation(dir.path(), generation)
+                .err()
+                .unwrap()
+                .to_string(),
+            uuid_membership_index_is_fresh(dir.path())
+                .unwrap_err()
+                .to_string(),
+            super::super::rebuild::manifest_generation(dir.path())
+                .unwrap_err()
+                .to_string(),
+        ];
+        for error in errors {
+            assert_eq!(
+                error.contains("unsupported UUID membership format version"),
+                mode < 2 || mode == 4,
+                "mode={mode}: {error}"
+            );
+            if mode < 2 || mode == 4 {
+                assert!(error.contains("recreate the index"), "{error}");
+            }
+        }
+        let (inventory, _) = crate::capture_graph_files(dir.path()).unwrap();
+        let container = tempfile::tempdir().unwrap();
+        crate::open_or_initialize_project(container.path()).unwrap();
+        let lease = crate::begin_graph_object_publication(container.path()).unwrap();
+        let paths = inventory
+            .files
+            .iter()
+            .map(|entry| PathBuf::from(&entry.relative_path))
+            .collect::<Vec<_>>();
+        crate::append_graph_files_v2(
+            &lease,
+            dir.path(),
+            &mut crate::GraphManifestState::empty(),
+            &paths,
+            &[],
+        )
+        .unwrap();
+        let error = AuthenticatedUuidIndexSnapshot::open_from_compact_inventory(
+            container.path(),
+            &inventory,
+            generation,
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert_eq!(
+            error.contains("unsupported UUID membership format version"),
+            mode < 2 || mode == 4,
+            "compact mode={mode}: {error}"
+        );
+        if mode < 2 || mode == 4 {
+            assert!(error.contains("recreate the index"), "{error}");
+        }
+    }
+    fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+    UuidMembershipIndex::open(dir.path()).unwrap();
+    assert!(uuid_membership_index_is_fresh(dir.path()).unwrap());
 }

@@ -172,12 +172,8 @@ fn remove_owned_migration_temps(root: &StableDirectory) -> Result<(), GfError> {
             let identity = graphforge_filesystem::file_identity(&file)
                 .map_err(|_| invalid("migration temporary identity failed"))?;
             drop(file);
-            directory
-                .unlink_child_if_identity(&name, identity)
-                .map_err(|_| invalid("migration temporary cleanup failed"))?;
-            directory
-                .sync()
-                .map_err(|_| invalid("migration cleanup sync failed"))?;
+            crate::durable_commit::retire_files(directory, [(name.as_os_str(), identity)])
+                .map_err(|_| invalid("migration temporary retirement failed"))?;
         }
         Ok(())
     }
@@ -190,12 +186,10 @@ fn create_destination_parent(root: &StableDirectory, relative: &str) -> Result<(
         .map_err(|_| invalid("owned graph root changed"))?;
     let parts = relative.split('/').collect::<Vec<_>>();
     for name in &parts[..parts.len() - 1] {
-        directory = directory
-            .create_child_directory(std::ffi::OsStr::new(name))
+        directory = crate::durable_commit::create_directory(&directory, std::ffi::OsStr::new(name))
             .map_err(|_| invalid("owned route destination parent admission failed"))?;
     }
-    directory
-        .sync()
+    crate::durable_commit::acknowledge_directory(&directory)
         .map_err(|_| invalid("owned route destination parent sync failed"))
 }
 
@@ -206,7 +200,8 @@ fn authenticate_staged_inventory_copy(
     source: &crate::graph_files::RetainedV1InventoryEntry,
     expected: &crate::GraphFileEntry,
 ) -> Result<(), GfError> {
-    use sha2::{Digest, Sha256};
+    use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
+    use sha2::Digest;
     use std::io::Read;
     let current = crate::graph_files::resolve_v1_inventory_entry_retained(root, expected)?;
     if current.identity != source.identity {
@@ -269,6 +264,7 @@ fn authenticate_staged_inventory_copy(
 fn remove_owned_table_temps(root: &Path) -> Result<(), GfError> {
     let directory = StableDirectory::open(root)
         .map_err(|_| invalid("owned route cleanup root admission failed"))?;
+    let mut retired = Vec::new();
     for name in directory
         .child_names_bounded(100_000)
         .map_err(|_| limit("owned route cleanup entry budget exceeded"))?
@@ -292,13 +288,15 @@ fn remove_owned_table_temps(root: &Path) -> Result<(), GfError> {
         let identity = graphforge_filesystem::file_identity(&file)
             .map_err(|_| invalid("owned route temporary identity failed"))?;
         drop(file);
-        directory
-            .unlink_child_if_identity(&name, identity)
-            .map_err(|_| invalid("owned route temporary changed during cleanup"))?;
+        retired.push((name, identity));
     }
-    directory
-        .sync()
-        .map_err(|_| invalid("owned route cleanup sync failed"))
+    crate::durable_commit::retire_files(
+        &directory,
+        retired
+            .iter()
+            .map(|(name, identity)| (name.as_os_str(), *identity)),
+    )
+    .map_err(|_| invalid("owned route cleanup retirement failed"))
 }
 
 #[cfg(test)]
@@ -502,6 +500,34 @@ mod tests {
     }
 
     #[test]
+    fn legacy_prefix_route_materialization_preserves_declared_membership() {
+        let source = tempfile::tempdir().unwrap();
+        write_legacy_fixture(source.path(), "Legacy");
+        std::fs::rename(
+            source.path().join("topology/edges/REL.parquet"),
+            source.path().join("topology/edges/r-old.parquet"),
+        )
+        .unwrap();
+        let admitted = crate::AuthenticatedPropertyInventory::capture(source.path()).unwrap();
+        let mut inventory = crate::capture_graph_files(source.path()).unwrap().0;
+        inventory.format_version = crate::GRAPH_FILES_CHECKSUM_RECORD_VERSION;
+        let owner = tempfile::tempdir().unwrap();
+        let target = owner.path().join("private");
+        crate::materialize_graph_tree(source.path(), &inventory, &target).unwrap();
+        let authority = crate::TopologyFileAuthority::from_inventory(&target, &admitted).unwrap();
+        let files = crate::enumerate_topology_files(&authority, None).unwrap();
+        assert_eq!(files.edge_fragments().len(), 1);
+        assert_eq!(files.edge_fragments()[0].0, "r-old");
+        assert_eq!(
+            files.edge_fragments()[0].1,
+            target
+                .join("topology/edges")
+                .join(format!("{}.parquet", super::super::component("r-old")))
+        );
+        assert!(files.edge_fragments()[0].1.is_file());
+    }
+
+    #[test]
     fn bare_writer_migrates_legacy_routes_and_reopens_exact_bytes_and_ids() {
         let root = tempfile::tempdir().unwrap();
         let original = write_legacy_fixture(root.path(), "Legacy");
@@ -672,7 +698,7 @@ mod tests {
     fn rewrite_baseline_excludes_only_exact_retained_temporary_routes() {
         let root = tempfile::tempdir().unwrap();
         admit_owned_workspace(root.path()).unwrap();
-        let before = crate::capture_graph_files(root.path()).unwrap().0;
+        let before = crate::capture_graph_read_inventory(root.path()).unwrap();
         let mut batch = crate::RewriteBatch::new();
         let component = batch.route_component(root.path(), "CON").unwrap();
         let output = root
@@ -681,9 +707,7 @@ mod tests {
             .join(format!("{component}.parquet"));
         batch.stage_bytes(&output, b"payload").unwrap();
         assert_eq!(
-            crate::graph_files::capture_rewrite_baseline(root.path(), &batch)
-                .unwrap()
-                .0,
+            crate::graph_files::capture_rewrite_baseline(root.path(), &batch).unwrap(),
             before
         );
         let temporary = batch.staged_temp(&output).unwrap().to_path_buf();
@@ -827,6 +851,25 @@ pub(crate) struct PendingRoutes {
 }
 
 impl PendingRoutes {
+    pub(crate) fn semantic_relative_path(
+        &self,
+        root: &Path,
+        relative: &str,
+    ) -> Result<String, GfError> {
+        let Some(component) = super::route_position(relative)? else {
+            return Ok(relative.to_owned());
+        };
+        let directory = StableDirectory::open(root).map_err(|error| invalid(&error.to_string()))?;
+        let mut table = read_owned_layout_table(&directory)?.unwrap_or_default();
+        for route in &self.routes {
+            table.insert(route, MAX_TABLE_BYTES, MAX_ROUTES)?;
+        }
+        if component.starts_with(super::PREFIX) {
+            table.semantic_relative_path(relative)
+        } else {
+            Ok(relative.to_owned())
+        }
+    }
     pub(crate) fn is_empty(&self) -> bool {
         self.routes.is_empty()
     }
@@ -861,7 +904,8 @@ impl PendingRoutes {
         root: &StableDirectory,
         batch: &mut crate::RewriteBatch,
     ) -> Result<Option<TablePrior>, GfError> {
-        use sha2::{Digest, Sha256};
+        use graphforge_core::hash_observation::ControlSha256 as Sha256;
+        use sha2::Digest;
         use std::io::Read;
         if self.routes.is_empty() {
             return Ok(None);
@@ -949,7 +993,8 @@ pub(crate) struct TablePrior {
 
 impl TablePrior {
     pub(crate) fn verify(&self, root: &StableDirectory) -> Result<(), GfError> {
-        use sha2::{Digest, Sha256};
+        use graphforge_core::hash_observation::ControlSha256 as Sha256;
+        use sha2::Digest;
         use std::io::Read;
         let file = root
             .open_child_file(std::ffi::OsStr::new(TABLE_FILE))

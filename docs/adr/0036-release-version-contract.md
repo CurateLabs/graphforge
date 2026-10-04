@@ -217,13 +217,15 @@ Independent publication and resumability mean that already verified nodes may
 skip work; they do not permit independent version selection. After a partial
 publication failure, maintainers may:
 
-1. resume missing artifacts at the same version only when their immutable
-   candidate bytes remain valid and the registry version is absent; or
+1. resume missing artifacts at the same version only when the registry version
+   is absent (re-running `publish.yaml` skips versions already published); or
 2. issue a coordinated new version for the entire shared release set.
 
 They may not advance only one registry, adapter, CLI, skills package, native
 package or crate. Temporary divergence is still divergence. A recovery plan
-containing more than one release version fails before every registry write.
+containing more than one release version fails before every registry write;
+`publish.yaml` publishes one workspace version per tag, so this holds by
+construction rather than through a recovery planner.
 
 Historical partial artifacts remain accurately documented. Tags, GitHub
 Releases, registry files and checksum records are never moved, replaced, or
@@ -239,16 +241,17 @@ it came from.
 
 Version tooling validates the Cargo workspace, Cargo lockfile, Python metadata,
 Node binding, CLI, skills package and skills compatibility metadata as one set,
-applying the canonical spelling for each surface. Candidate validation verifies
-that every recorded Python, npm and crates.io artifact carries the root version
-in that surface's spelling, and that the candidate holds the exact expected
-package inventory. Publication preflight admits only `vMAJOR.MINOR.PATCH` and
-`vMAJOR.MINOR.PATCH-rc.N` as release tags, re-parses them through the same
-authority so that no noncanonical tag reaches the surface comparison, and
-verifies the tag, the repository version surfaces and the candidate record
-before credentials can write. Candidate-manifest, registry-observation,
-rehearsal and clean-environment verification all resolve the spelling through
-that authority rather than re-deriving it.
+applying the canonical spelling for each surface. The `version` job of
+`.github/workflows/publish.yaml` runs `set_release_version.py --check` and
+requires the pushed tag to equal `v` plus the workspace version, so a
+noncanonical tag cannot match a canonical version, and no registry write runs
+before it passes. `scripts/publish_npm.py` requires every packed npm tarball to
+carry that version and derives the dist-tag from it. The PyPI spelling is
+derived by `packaging` in the `verify-published` job. The earlier candidate
+manifest, registry-observation and rehearsal checks that compared every
+recorded artifact against the root version, and the clean-environment
+verification workflow, no longer exist: Python wheels and crates are built from
+the tagged tree and are no longer compared against the version after the fact.
 
 A release whose surfaces disagree on the logical version fails before every
 registry write. Workflow job state never authorizes a version override.
@@ -298,10 +301,11 @@ No published GraphForge release carries a prerelease identifier, so nothing
 existing is invalidated by the candidate rules. The incomplete v0.5.0 npm
 package and other partial v0.5.0 artifacts remain historical registry facts.
 
-Issue #288 owns the manifest, observation, recovery and orchestration changes
-that apply the shared-release-set and recovery rules without replaying already
-verified work. Issue #1378 owns prerelease support across the publish surfaces
+Issue #288 owned the manifest, observation, recovery and orchestration changes
+that applied the shared-release-set and recovery rules without replaying already
+verified work; that machinery has been replaced by the single `publish.yaml`
+workflow (see `RELEASING.md`). Issue #1378 owns prerelease support across the publish surfaces
 and the audit of every release-path assumption that a single literal version
 string appears in a crate, a tarball and a wheel filename alike. Issue #858
 remains the owner of the coordinated prerelease contract across preparation,
-Binding RC, publication, recovery, registry observation and closeout evidence.
+the publication workflow, recovery and closeout.

@@ -8,7 +8,7 @@ use graphforge_knowledge::{
     ArtifactPreferenceLedger, DerivationRole, DerivationSubjectKind, RETENTION_DEPENDENCY_SCHEMA,
     SOURCE_SCHEMA, Source, SourceKind, SourceLedger,
 };
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use super::ledger::{
     merged_artifact_provenance, merged_preference_provenance, merged_source_provenance,
@@ -16,12 +16,12 @@ use super::ledger::{
 };
 use super::{
     ApiErrorCode, EventKind, GfError, GraphForge, PageRequest, ProjectCapability,
-    ProjectGenerationRequest, ProjectStageOutcome, ProvenanceEvent, ResolvedProjectGeneration,
-    Uuid, WriteContext, assertion_result, concat_or_empty, knowledge_error,
-    knowledge_generation_uuid, lock_graph_visibility, match_requested_edge_uuids,
-    match_requested_node_uuids, not_found_kind, provenance_error, read_artifact_ledger,
-    read_derivation_ledger, read_evidence_ledger, read_ledger, read_source_ledger, require_uuid,
-    transaction_conflict, validate_write_context, with_next_token,
+    ProjectStageOutcome, ProvenanceEvent, ResolvedProjectGeneration, Uuid, WriteContext,
+    assertion_result, concat_or_empty, knowledge_error, lock_graph_visibility,
+    match_requested_edge_uuids, match_requested_node_uuids, not_found_kind,
+    prepare_knowledge_request, provenance_error, read_artifact_ledger, read_derivation_ledger,
+    read_evidence_ledger, read_ledger, read_source_ledger, require_uuid, transaction_conflict,
+    validate_write_context, with_next_token,
 };
 use crate::PageToken;
 use crate::algorithm_runs::read_ledger as read_algorithm_run_ledger;
@@ -704,7 +704,8 @@ type ResolvedArtifactPayload = (
 fn resolve_payload(payload: &ArtifactPayloadRequest) -> Result<ResolvedArtifactPayload, GfError> {
     match payload {
         ArtifactPayloadRequest::LocalBytes(bytes) => {
-            let digest = Sha256::digest(bytes.as_slice()).into();
+            let digest =
+                graphforge_core::hash_observation::ArtifactSha256::digest(bytes.as_slice()).into();
             let length = u64::try_from(bytes.len())
                 .map_err(|_| GfError::Validation("artifact bytes exceed u64".into()))?;
             Ok((
@@ -738,7 +739,7 @@ fn resolve_payload(payload: &ArtifactPayloadRequest) -> Result<ResolvedArtifactP
     }
 }
 
-#[allow(clippy::too_many_arguments)] // publication bundles every coupled ledger participant
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // publication bundles every coupled ledger participant
 fn publish_source_artifact(
     graph: &GraphForge,
     context: &WriteContext,
@@ -771,16 +772,13 @@ fn publish_source_artifact(
             capability_version: entry.capability_version,
         })
         .collect();
-    let publication = ProjectGenerationRequest {
-        transaction_uuid: context.operation_uuid.0,
-        generation_uuid: knowledge_generation_uuid(
-            b"source_artifact",
-            context.operation_uuid,
-            &participants,
-        ),
+    let publication = prepare_knowledge_request(
+        b"source_artifact",
+        context.operation_uuid,
         capabilities,
         participants,
-    };
+    )?;
+    let graph_objects = graph.begin_graph_object_publication()?;
     let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => {
@@ -791,7 +789,6 @@ fn publish_source_artifact(
                 Ok(())
             };
             if local_bytes.is_some() {
-                let lease = graphforge_storage::begin_graph_object_publication(root)?;
                 staged
                     .validate(
                         |_| Ok(()),
@@ -804,7 +801,7 @@ fn publish_source_artifact(
                             Ok(())
                         },
                     )?
-                    .publish_with_reader_preparation(Some(&lease), &mut prepare)?
+                    .publish_with_reader_preparation(Some(&graph_objects), &mut prepare)?
             } else {
                 staged
                     .validate(
@@ -818,7 +815,7 @@ fn publish_source_artifact(
                             Ok(())
                         },
                     )?
-                    .publish()?
+                    .publish_with_graph_objects(&graph_objects)?
             }
         }
     };

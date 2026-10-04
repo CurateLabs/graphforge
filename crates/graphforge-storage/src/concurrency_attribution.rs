@@ -3,7 +3,7 @@
 //! # Why
 //! #1387 budgets a *serialized fraction* of the ingest path, and nothing on that
 //! path computes one (#1462). `effective_cores` existed only in
-//! `benches/m6_storage_io.rs`, so no receipt, ladder rung or test could report
+//! `benches/storage_io.rs`, so no receipt, ladder rung or test could report
 //! it, and every "the ingest path is ~68-80% serial" figure in the plan is
 //! inferred from phase totals rather than measured.
 //!
@@ -56,15 +56,18 @@
 //! # Cost
 //! Boundary reads of Linux proc counters and `Instant`, per region. Captures
 //! report their sampling windows; they are not atomic or zero-overhead.
-//! Named scopes are inert without a capture. Global snapshots are inclusive
-//! shared-process totals and must never be summed across overlapping phases.
+//! Named and phase scopes are inert without a capture. Phase snapshots are
+//! unavailable by default; requested CPU measurements include every process
+//! thread and must never be summed across overlapping phases.
 
 mod capture;
+pub use graphforge_core::hash_observation::ObservedSha256;
+#[cfg(target_os = "linux")]
+mod proc_reader;
 mod scheduler;
 pub use capture::{RegionCapture, RegionMeasurement, RegionRow, RegionSnapshot};
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -134,7 +137,12 @@ pub fn serial_fraction(speedup: f64, workers: u32) -> Option<f64> {
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn process_cpu_time() -> Option<Duration> {
-    parse_proc_stat_cpu(&std::fs::read_to_string("/proc/self/stat").ok()?)
+    match capture::captured_process_cpu() {
+        capture::CapturedProcessCpu::Active(cpu) => cpu,
+        capture::CapturedProcessCpu::Inactive => {
+            parse_proc_stat_cpu(&std::fs::read_to_string("/proc/self/stat").ok()?)
+        }
+    }
 }
 
 /// `utime + stime` from the body of a `/proc/<pid>/stat` line.
@@ -212,16 +220,13 @@ fn phase_name(phase: StorageIoPhase) -> &'static str {
     }
 }
 
-static PHASES: Mutex<BTreeMap<StorageIoPhase, RegionConcurrency>> = Mutex::new(BTreeMap::new());
-
 /// Time a lifecycle phase and fold the result into the process-wide table when
 /// the guard drops.
 #[derive(Debug)]
 pub struct RegionScope {
     phase: StorageIoPhase,
     capture: Option<capture::CaptureRegion>,
-    started: Instant,
-    cpu_before: Option<Duration>,
+    timing: Option<(Instant, Option<Duration>)>,
 }
 
 impl RegionScope {
@@ -243,20 +248,25 @@ impl RegionScope {
     }
 
     pub(crate) fn enter_named(phase: StorageIoPhase, name: &'static str) -> Self {
+        let capture = capture::CaptureRegion::enter(name);
+        let timing = capture
+            .as_ref()
+            .map(|_| (Instant::now(), process_cpu_time()));
         Self {
             phase,
-            capture: capture::CaptureRegion::enter(name),
-            started: Instant::now(),
-            cpu_before: process_cpu_time(),
+            capture,
+            timing,
         }
     }
 }
 
 impl Drop for RegionScope {
     fn drop(&mut self) {
-        drop(self.capture.take());
-        let wall = self.started.elapsed();
-        let (cpu_nanos, cpu_available) = match (self.cpu_before, process_cpu_time()) {
+        let Some((started, cpu_before)) = self.timing else {
+            return;
+        };
+        let wall = started.elapsed();
+        let (cpu_nanos, cpu_available) = match (cpu_before, process_cpu_time()) {
             (Some(before), Some(after)) => (
                 u64::try_from(after.saturating_sub(before).as_nanos()).unwrap_or(u64::MAX),
                 true,
@@ -268,35 +278,58 @@ impl Drop for RegionScope {
             cpu_nanos,
             cpu_available,
         };
-        if let Ok(mut phases) = PHASES.lock() {
-            phases
-                .entry(self.phase)
-                .and_modify(|total| total.merge(&region))
-                .or_insert(region);
+        if let Some(capture) = self.capture.as_ref() {
+            capture.record_phase(self.phase, region);
         }
+        drop(self.capture.take());
     }
 }
 
-/// Every phase timed so far in this process.
+/// Requested phase timings from this thread's current region capture.
+/// An inactive caller has no observation.
 #[must_use]
-pub fn snapshot() -> BTreeMap<StorageIoPhase, RegionConcurrency> {
-    PHASES
-        .lock()
-        .map(|phases| phases.clone())
-        .unwrap_or_default()
+pub fn snapshot() -> Option<BTreeMap<StorageIoPhase, RegionConcurrency>> {
+    capture::phase_snapshot()
 }
 
-/// Zero the process-wide table.
+/// Clear only the current capture's phase table.
 #[doc(hidden)]
 pub fn reset() {
-    if let Ok(mut phases) = PHASES.lock() {
-        phases.clear();
-    }
+    capture::reset_phases();
+}
+
+/// Test-only count of actual optional region boundary samples on this thread.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn observer_samples() -> u64 {
+    capture::SAMPLE_COUNT.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_region_scope_samples_no_optional_clocks_or_proc_state() {
+        let before = capture::SAMPLE_COUNT.with(std::cell::Cell::get);
+        {
+            let scope = RegionScope::enter(StorageIoPhase::SealAuthentication);
+            assert!(scope.timing.is_none());
+        }
+        assert!(snapshot().is_none());
+        assert_eq!(capture::SAMPLE_COUNT.with(std::cell::Cell::get), before);
+        let requested = RegionCapture::start("requested");
+        {
+            let scope = RegionScope::enter(StorageIoPhase::SealAuthentication);
+            assert!(scope.timing.is_some());
+        }
+        assert!(capture::SAMPLE_COUNT.with(std::cell::Cell::get) > before);
+        assert!(snapshot().unwrap()[&StorageIoPhase::SealAuthentication].wall_nanos > 0);
+        let tree = requested.finish();
+        assert!(tree.complete);
+        assert!(snapshot().is_none());
+    }
 
     /// Burn CPU for roughly `millis`, in a way the optimiser cannot elide.
     fn burn(millis: u64) -> u64 {
@@ -372,11 +405,12 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn first_valid_global_sample_preserves_cpu_availability() {
+    fn requested_phase_sample_preserves_cpu_availability() {
+        let _capture = RegionCapture::start("test");
         {
             let _scope = RegionScope::enter(StorageIoPhase::RecoveryReauthentication);
         }
-        assert!(snapshot()[&StorageIoPhase::RecoveryReauthentication].cpu_available);
+        assert!(snapshot().unwrap()[&StorageIoPhase::RecoveryReauthentication].cpu_available);
     }
 
     #[test]

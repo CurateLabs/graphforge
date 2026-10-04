@@ -12,6 +12,119 @@ use super::{DEFAULT_CSR_SHARD_EDGES, DEFAULT_CSR_SHARD_NODES, storage_err};
 // estimate of Arrow's parser or allocator overhead.
 const METADATA_MAX_BYTES: usize = 16 * 1024;
 
+/// A derived-index object that is present but fails its own integrity checks:
+/// a checksum or length that disagrees with the manifest that names it, or
+/// bytes that do not decode as what that manifest declares. This is never a
+/// reason to rebuild. A rebuild would answer the query by scanning the edge
+/// table, so the bounded query silently costs O(E) and the damage is never
+/// reported. It surfaces as `GF_VALIDATION`, like every other refusal of a
+/// corrupted graph payload.
+pub(super) fn corrupt_index(message: impl Into<String>) -> GfError {
+    GfError::Validation(message.into())
+}
+
+/// Re-label a structural failure of an index object as corruption. Admission
+/// code reports a malformed encoding as a storage error because a writer
+/// producing one is a defect; a reader that meets one in bytes the manifest
+/// names has found damage.
+pub(super) fn corrupt_structure(error: GfError) -> GfError {
+    match error {
+        GfError::Storage(message) => corrupt_index(message),
+        other => other,
+    }
+}
+
+/// An I/O failure reading a shard the manifest declares. A declared shard that
+/// is absent is damage (hydration and the builders guarantee presence); any
+/// other failure is a genuine I/O error and stays one.
+pub(super) fn shard_io_error(file: &str, error: &std::io::Error) -> GfError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        corrupt_index(format!("missing CSR shard {file}"))
+    } else {
+        GfError::Storage(format!("read CSR shard {file}: {error}"))
+    }
+}
+
+pub(super) fn corrupt_index_from(error: impl std::fmt::Display) -> GfError {
+    corrupt_index(format!("adjacency index object does not decode: {error}"))
+}
+
+/// Read a shard manifest. It is the authority for every shard checksum, so it
+/// is admitted against the project's own manifest first: a flipped byte is
+/// refused there, not read as a damaged or stale index.
+pub(super) fn read_admitted_manifest(path: &Path) -> Result<Vec<u8>, GfError> {
+    let mut file = crate::graph_admission::open_admitted(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(storage_err)?;
+    Ok(bytes)
+}
+
+pub(super) fn shard_set_identity(
+    node_count: u64,
+    edge_count: u64,
+    records: &[super::CsrShardRecord],
+) -> String {
+    use graphforge_core::hash_observation::ContractSha256;
+    use sha2::Digest as _;
+    use std::fmt::Write as _;
+
+    let mut identity = ContractSha256::new();
+    identity.update(b"graphforge/csr-shards/v2\0");
+    identity.update(node_count.to_le_bytes());
+    identity.update(edge_count.to_le_bytes());
+    for record in records {
+        identity.update(record.first_node.to_le_bytes());
+        identity.update(record.node_count.to_le_bytes());
+        identity.update(record.edge_count.to_le_bytes());
+        identity.update(record.sha256.as_bytes());
+    }
+    ContractSha256::digest(identity.finalize()).iter().fold(
+        String::with_capacity(64),
+        |mut output, byte| {
+            let _ = write!(output, "{byte:02x}");
+            output
+        },
+    )
+}
+
+pub(super) fn decode_manifest(
+    bytes: &[u8],
+    path: &Path,
+) -> Result<super::CsrShardManifest, GfError> {
+    #[derive(serde::Deserialize)]
+    struct Header {
+        version: u32,
+    }
+    // The shard manifest is written whole and published by rename, so bytes
+    // that do not parse as one are damaged, not a partial write.
+    let header: Header = serde_json::from_slice(bytes)
+        .map_err(|error| manifest_parse_error(error, path, bytes.len()))?;
+    if header.version != super::SHARDED_CSR_VERSION {
+        return Err(GfError::Storage(format!(
+            "unsupported sharded CSR format version {}; recreate the index ({})",
+            header.version,
+            path.display()
+        )));
+    }
+    let manifest: super::CsrShardManifest = serde_json::from_slice(bytes)
+        .map_err(|error| manifest_parse_error(error, path, bytes.len()))?;
+    if manifest.format != "graphforge.csr-shards" {
+        return Err(GfError::Storage(format!(
+            "unsupported sharded CSR manifest {}",
+            path.display()
+        )));
+    }
+    Ok(manifest)
+}
+
+fn manifest_parse_error(error: impl std::fmt::Display, path: &Path, bytes: usize) -> GfError {
+    corrupt_index(format!(
+        "CSR shard manifest {} ({} bytes) does not parse: {error}",
+        path.display(),
+        bytes
+    ))
+}
+
 fn invalid() -> GfError {
     GfError::Storage("invalid or oversized current CSR shard encoding".into())
 }
@@ -50,21 +163,49 @@ pub(super) fn admit_encoded_len(bytes_len: u64, nodes: u64, edges: u64) -> Resul
     Ok(())
 }
 
-pub(super) fn read(path: &Path, encoded_bytes: u64, limit: u64) -> Result<Vec<u8>, GfError> {
+/// Read one shard whose manifest declares `encoded_bytes`. Every disagreement
+/// between the file and its declaration is corruption ([`corrupt_index`]); only
+/// an I/O failure other than "not found" is a storage error.
+pub(super) fn read(
+    path: &Path,
+    file_name: &str,
+    encoded_bytes: u64,
+    limit: u64,
+) -> Result<Vec<u8>, GfError> {
     if encoded_bytes > limit {
-        return Err(invalid());
+        return Err(corrupt_index(format!(
+            "CSR shard {file_name} declares more bytes than its encoding admits"
+        )));
     }
-    let mut file = std::fs::File::open(path).map_err(|error| {
-        GfError::Storage(format!("missing CSR shard {}: {error}", path.display()))
-    })?;
-    if file.metadata().map_err(storage_err)?.len() != encoded_bytes {
-        return Err(invalid());
+    let mut file = std::fs::File::open(path).map_err(|error| shard_io_error(file_name, &error))?;
+    let length_mismatch = || {
+        corrupt_index(format!(
+            "CSR shard {file_name} length does not match its manifest"
+        ))
+    };
+    if file
+        .metadata()
+        .map_err(|error| shard_io_error(file_name, &error))?
+        .len()
+        != encoded_bytes
+    {
+        return Err(length_mismatch());
     }
     let mut bytes = vec![0; usize::try_from(encoded_bytes).map_err(storage_err)?];
-    file.read_exact(&mut bytes).map_err(storage_err)?;
+    file.read_exact(&mut bytes).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            length_mismatch()
+        } else {
+            shard_io_error(file_name, &error)
+        }
+    })?;
     let mut trailing = [0_u8; 1];
-    if file.read(&mut trailing).map_err(storage_err)? != 0 {
-        return Err(invalid());
+    if file
+        .read(&mut trailing)
+        .map_err(|error| shard_io_error(file_name, &error))?
+        != 0
+    {
+        return Err(length_mismatch());
     }
     Ok(bytes)
 }
@@ -242,6 +383,90 @@ pub(super) fn preflight(bytes: &[u8], nodes: u64, edges: u64) -> Result<(), GfEr
 mod tests {
     use super::*;
 
+    #[test]
+    fn shard_set_identity_accounts_descriptor_contract_and_preserves_digest_bytes() {
+        use graphforge_core::hash_observation::operation::{Capture, Snapshot};
+        use sha2::{Digest, Sha256};
+        let record = super::super::CsrShardRecord {
+            first_node: 2,
+            node_count: 3,
+            edge_count: 4,
+            file: "shard.csr".into(),
+            sha256: "ab".repeat(32),
+            xxh64: 0,
+            encoded_bytes: 128,
+            decoded_bytes: 64,
+        };
+        let mut preimage = b"graphforge/csr-shards/v2\0".to_vec();
+        for value in [5_u64, 4, 2, 3, 4] {
+            preimage.extend_from_slice(&value.to_le_bytes());
+        }
+        preimage.extend_from_slice(record.sha256.as_bytes());
+        let expected = Sha256::digest(Sha256::digest(&preimage))
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let capture = Capture::start();
+        let actual = shard_set_identity(5, 4, std::slice::from_ref(&record));
+        assert_eq!(actual, expected);
+        assert_eq!(
+            capture.snapshot(),
+            Snapshot {
+                contract_identity_sha256_bytes: preimage.len() as u64 + 32,
+                ..Snapshot::default()
+            }
+        );
+        drop(capture);
+        assert_ne!(actual, shard_set_identity(6, 4, &[record]));
+    }
+
+    #[test]
+    fn checksum_csr_manifest_refuses_legacy_missing_and_malformed_metadata() {
+        use super::super::{CsrIndex, ShardedCsrIndex, write_sharded_csr};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.csr");
+        let csr = CsrIndex {
+            offsets: vec![0, 1],
+            edge_ids: vec![0],
+            neighbor_ids: vec![0],
+        };
+        write_sharded_csr(&path, &csr, 1).unwrap();
+        let manifest_path = path.with_extension("csr.json");
+        let original: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        for mode in 0..4 {
+            let mut changed = original.clone();
+            match mode {
+                0 => {
+                    changed["version"] = serde_json::json!(2);
+                    for shard in changed["shards"].as_array_mut().unwrap() {
+                        shard.as_object_mut().unwrap().remove("xxh64");
+                    }
+                }
+                1 => changed["version"] = serde_json::json!(4),
+                2 => {
+                    changed["shards"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("xxh64");
+                }
+                _ => changed["shards"][0]["xxh64"] = serde_json::json!("not-a-checksum"),
+            }
+            std::fs::write(&manifest_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            let error = ShardedCsrIndex::open(&path).unwrap_err().to_string();
+            assert_eq!(
+                error.contains("unsupported sharded CSR format version"),
+                mode < 2,
+                "mode={mode}: {error}"
+            );
+            if mode < 2 {
+                assert!(error.contains("recreate the index"), "{error}");
+            }
+        }
+        std::fs::write(&manifest_path, serde_json::to_vec(&original).unwrap()).unwrap();
+        ShardedCsrIndex::open(&path).unwrap();
+    }
+
     fn fixture() -> (tempfile::TempDir, std::path::PathBuf, Vec<u8>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shard.csr");
@@ -269,7 +494,13 @@ mod tests {
         let (_dir, path, bytes) = fixture();
         preflight(&bytes, 1, 128).unwrap();
         assert_eq!(
-            read(&path, bytes.len() as u64, encoded_limit(1, 128).unwrap()).unwrap(),
+            read(
+                &path,
+                "shard.csr",
+                bytes.len() as u64,
+                encoded_limit(1, 128).unwrap()
+            )
+            .unwrap(),
             bytes
         );
         assert!(preflight(&bytes, 2, 128).is_err());
@@ -284,10 +515,11 @@ mod tests {
         let start = first_buffer_start(&bytes);
         bytes[start..start + 8].copy_from_slice(&i64::MAX.to_le_bytes());
         assert!(preflight(&bytes, 1, 128).is_err());
-        assert!(read(&path, u64::MAX, encoded_limit(1, 128).unwrap()).is_err());
+        assert!(read(&path, "shard.csr", u64::MAX, encoded_limit(1, 128).unwrap()).is_err());
         assert!(
             read(
                 &path,
+                "shard.csr",
                 bytes.len() as u64 + 1,
                 encoded_limit(1, 128).unwrap()
             )
@@ -365,6 +597,7 @@ mod tests {
         let start = first_buffer_start(&bytes);
         bytes[start..start + 8].copy_from_slice(&i64::MAX.to_le_bytes());
         record.sha256 = sha256_hex(&bytes);
+        record.xxh64 = crate::corruption_checksum::checksum(&bytes);
         std::fs::write(payload, bytes).unwrap();
         assert!(reader.row(0).is_err());
         assert!(reader.row_len(0).is_err());

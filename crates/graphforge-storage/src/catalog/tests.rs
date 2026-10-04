@@ -51,6 +51,43 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 #[test]
+fn absent_standalone_target_has_empty_authority_without_creating_directory() {
+    let parent = TempDir::new().unwrap();
+    let target = parent.path().join("new-graph");
+    let catalog = GraphCatalog::open(&target, None, &RuntimeCatalog::new()).unwrap();
+    assert!(!target.exists());
+    assert!(catalog.topology_authority().is_some());
+    let files = catalog.topology_files().unwrap();
+    assert!(files.node_fragments().is_empty());
+    assert!(files.edge_fragments().is_empty());
+    assert!(!target.exists());
+}
+
+#[test]
+fn authenticated_catalog_without_full_topology_authority_refuses_legacy_discovery() {
+    let parent = TempDir::new().unwrap();
+    let generation =
+        crate::open_or_initialize_ephemeral_project(parent.path().join("project")).unwrap();
+    let root = generation.graph_tree_root();
+    std::fs::create_dir_all(root.join("topology")).unwrap();
+    write_nodes_parquet(&root.join("topology/nodes.parquet"));
+    let inventory = crate::AuthenticatedPropertyInventory::from_resolved_generation_for_route(
+        &generation,
+        crate::PropertyRouteKind::Node,
+        "_untyped",
+    )
+    .unwrap();
+    assert!(inventory.node_fragments().is_none());
+    let error =
+        GraphCatalog::open_authenticated(&root, None, &RuntimeCatalog::new(), Arc::new(inventory))
+            .unwrap_err();
+    assert!(
+        error.to_string().contains("GF_TOPOLOGY_AUTHORITY_MISSING"),
+        "{error}"
+    );
+}
+
+#[test]
 fn admitted_topology_requires_payload_except_empty_selection() {
     let dir = TempDir::new().unwrap();
     let node = graphforge_core::uuid::new_v7();
@@ -301,8 +338,8 @@ fn raw_catalog_shares_one_authenticated_property_inventory() {
         .property_inventory
         .as_ref()
         .expect("raw catalog admits one complete property authority");
-    let node = catalog.property_table(dir.path(), "Person");
-    let edge = catalog.edge_property_table(dir.path(), "KNOWS");
+    let node = catalog.property_table(dir.path(), "Person").unwrap();
+    let edge = catalog.edge_property_table(dir.path(), "KNOWS").unwrap();
     assert!(Arc::ptr_eq(
         authority,
         node.inventory.as_ref().expect("node authority")
@@ -712,7 +749,7 @@ fn read_nodes_returns_rows_and_empty_when_absent() {
 
 #[test]
 fn catalog_and_schema_debug_identity_are_stable_and_content_free() {
-    let schema = GraphSchema::new();
+    let schema = GraphSchema::new(std::path::Path::new(""));
     assert_eq!(format!("{schema:?}"), "GraphSchema { table_names: [] }");
     let schema_provider: Arc<dyn SchemaProvider> = Arc::new(schema);
     assert!(schema_provider.downcast_ref::<GraphSchema>().is_some());
@@ -831,4 +868,24 @@ fn wave12_max_edge_id_ignores_non_parquet_but_rejects_corrupt_canonical_shards()
     std::fs::write(edges.join("note.txt"), b"not parquet").unwrap();
     std::fs::write(edges.join("broken.parquet"), b"not parquet").unwrap();
     assert!(max_edge_id(dir.path()).is_err());
+}
+#[test]
+fn logical_parquet_source_rejects_oversized_footer_before_decode() {
+    let metadata_length = u32::try_from(super::MAX_ADMITTED_PARQUET_METADATA_BYTES + 1).unwrap();
+    let mut encoded = b"PAR1".to_vec();
+    encoded.extend_from_slice(&metadata_length.to_le_bytes());
+    encoded.extend_from_slice(b"PAR1");
+    let error = match super::admitted_parquet_source(bytes::Bytes::from(encoded)) {
+        Ok(_) => panic!("logical reader accepted an oversized footer"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        super::DataFusionError::ResourcesExhausted(_)
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains("Parquet metadata exceeds admission limit")
+    );
 }

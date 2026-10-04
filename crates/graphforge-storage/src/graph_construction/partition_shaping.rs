@@ -29,7 +29,7 @@ use super::{
     IoCounter, ReadWork, SealDirectoryBatch, account_cache_release, account_fixed_write_operations,
     account_merge_read_bytes, account_merge_write_bytes, account_sequential_write, artifact_temp,
     cleanup_failed_shape_output, cleanup_shape_publication, combine_cache_cleanup,
-    combine_secondary_cleanup, construction_failpoint, hex, injected_input_release_failure,
+    combine_secondary_cleanup, construction_failpoint, injected_input_release_failure,
     merge_cache_release_evidence, open_fixed_reader, persist_shape_receipt,
     persist_shape_receipt_in_batch, read_run_record, record_shape_artifact_install,
     reject_cancelled, run_record_bytes, sha256, shape_publication_failure,
@@ -49,7 +49,6 @@ use graphforge_core::GfError;
 use graphforge_filesystem::{FileIdentity, file_identity};
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use sha2::Digest;
 use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::io::{BufWriter, Write};
@@ -268,10 +267,7 @@ impl SpillWriter {
         batch: &mut SealDirectoryBatch,
     ) -> Result<ArtifactReceipt, GfError> {
         self.writer.flush().map_err(super::storage)?;
-        self.writer
-            .get_mut()
-            .inner
-            .sync_all_and_release()
+        root.seal_cache_writer(&mut self.writer.get_mut().inner)
             .map_err(super::storage)?;
         let cache_release = self.writer.get_ref().inner.evidence();
         account_cache_release(cache_release, evidence)?;
@@ -284,7 +280,6 @@ impl SpillWriter {
             )
             .map_err(super::storage)?
             .allocated_bytes,
-            sha256: hex(&self.writer.get_ref().digest.clone().finalize()),
             xxh64: crate::corruption_checksum::hex(self.writer.get_ref().checksum.finish()),
             identity: self.identity.into(),
             write_operations: self.writer.get_ref().operations,
@@ -308,6 +303,7 @@ impl SpillWriter {
             .merge_fsync_operations
             .checked_add(receipt.fsync_operations)
             .ok_or_else(|| super::storage("merge fsync operations overflows"))?;
+        super::diagnostics::sealed_payload(receipt.bytes, 1);
         Ok(receipt)
     }
 }
@@ -407,7 +403,7 @@ impl FixedSpillWriter {
         } = self;
         drop(writer);
         let _ = root.unlink_child_if_identity(temporary.as_os_str(), identity);
-        let _ = root.sync();
+        let _ = root.acknowledge();
     }
 
     fn seal(
@@ -432,9 +428,7 @@ impl FixedSpillWriter {
     ) -> Result<SealedSpill, GfError> {
         self.flush_buffer()?;
         self.writer.flush().map_err(super::storage)?;
-        self.writer
-            .inner
-            .sync_all_and_release()
+        root.seal_cache_writer(&mut self.writer.inner)
             .map_err(super::storage)?;
         let cache_release = self.writer.inner.evidence();
         let receipt = ArtifactReceipt {
@@ -443,7 +437,6 @@ impl FixedSpillWriter {
             allocated_bytes: graphforge_filesystem::file_space_usage(self.writer.inner.file())
                 .map_err(super::storage)?
                 .allocated_bytes,
-            sha256: hex(&self.writer.digest.clone().finalize()),
             xxh64: crate::corruption_checksum::hex(self.writer.checksum.finish()),
             identity: self.identity.into(),
             write_operations: self.writer.operations,
@@ -489,6 +482,7 @@ impl SealedSpill {
             .merge_fsync_operations
             .checked_add(receipt.fsync_operations)
             .ok_or_else(|| super::storage("merge fsync operations overflows"))?;
+        super::diagnostics::sealed_payload(receipt.bytes, 1);
         Ok(receipt)
     }
 }
@@ -997,10 +991,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             }
         };
         let finalized = writer.flush().map_err(super::storage).and_then(|()| {
-            writer
-                .get_mut()
-                .inner
-                .sync_all_and_release()
+            root.seal_cache_writer(&mut writer.get_mut().inner)
                 .map_err(super::storage)
         });
         if let Err(primary) = finalized {
@@ -1030,7 +1021,6 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                 name: output.to_owned(),
                 bytes: writer.get_ref().bytes,
                 allocated_bytes,
-                sha256: hex(&writer.get_ref().digest.clone().finalize()),
                 xxh64: crate::corruption_checksum::hex(writer.get_ref().checksum.finish()),
                 identity: identity.into(),
                 write_operations: writer.get_ref().operations,
@@ -1079,15 +1069,13 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             } else {
                 None
             };
-            publication
-                .install_child(OsStr::new(output))
+            root.install_guarded(&mut publication, OsStr::new(output))
                 .map_err(super::storage)?;
             if let Some(file) = &allocation_file {
                 root.record_replacement(temporary.as_os_str(), OsStr::new(output), file)
                     .map_err(super::storage)?;
             }
             drop(allocation_file);
-            publication.sync_parent().map_err(super::storage)?;
             shape_publication_failure("directory_sync")?;
             shape_publication_failure("post_publication_metric_overflow")?;
             shape_publication_failure("manifest_update")?;
@@ -1111,6 +1099,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
         }
         publication.commit().map_err(super::storage)?;
         *evidence = committed;
+        super::diagnostics::sealed_payload(receipt.bytes, 1);
         #[cfg(any(test, feature = "test-support"))]
         if let Some(diagnostic) = diagnostic {
             diagnostic.finish(self.family.as_str(), 1, partitions, evidence, true);
@@ -1316,9 +1305,15 @@ fn seal_on_lanes<'r>(
     let reversed = super::lane_jobs_reversed();
     let sealed = std::sync::Mutex::new(Vec::with_capacity(jobs.len()));
     let lane_batches = std::sync::Mutex::new(Vec::new());
+    #[cfg(any(test, feature = "test-support"))]
+    let digest_context = graphforge_core::hash_observation::operation::Context::capture();
+    let lifecycle_context = crate::lifecycle_io::CaptureContext::current();
     std::thread::scope(|scope| {
         for _ in 0..lanes.get() {
             scope.spawn(|| {
+                #[cfg(any(test, feature = "test-support"))]
+                let _digest_guard = digest_context.attach();
+                let _lifecycle_capture = lifecycle_context.attach();
                 let mut lane_batch = SealDirectoryBatch::new(root);
                 loop {
                     let index = super::lane_job(
@@ -1558,7 +1553,7 @@ impl Drop for RowRangePartitioner<'_> {
                 let _ = self
                     .root
                     .unlink_child_if_identity(temporary.as_os_str(), identity);
-                let _ = self.root.sync();
+                let _ = self.root.acknowledge();
             }
         }
     }
@@ -1910,16 +1905,14 @@ impl<'a> RowRangePartitioner<'a> {
                 drop(writer);
                 // Leave no owned temporary behind on a failed or cancelled pass.
                 let _ = root.unlink_child_if_identity(temporary.as_os_str(), identity);
-                let _ = root.sync();
+                let _ = root.acknowledge();
                 return Err(primary);
             }
         };
         writer.finish().map_err(super::storage)?;
         writer.sync().map_err(super::storage)?;
         let hashing = writer.inner_mut().get_mut();
-        hashing
-            .inner
-            .sync_all_and_release()
+        root.seal_cache_writer(&mut hashing.inner)
             .map_err(super::storage)?;
         let cache_release = hashing.inner.evidence();
         account_cache_release(cache_release, evidence)?;
@@ -1930,7 +1923,6 @@ impl<'a> RowRangePartitioner<'a> {
             allocated_bytes: graphforge_filesystem::file_space_usage(hashing.inner.file())
                 .map_err(super::storage)?
                 .allocated_bytes,
-            sha256: hex(&hashing.digest.clone().finalize()),
             xxh64: crate::corruption_checksum::hex(hashing.checksum.finish()),
             identity: identity.into(),
             write_operations: hashing.operations,
@@ -1942,7 +1934,7 @@ impl<'a> RowRangePartitioner<'a> {
         drop(writer);
         root.install_child(temporary.as_os_str(), identity, OsStr::new(output))
             .map_err(super::storage)?;
-        root.sync().map_err(super::storage)?;
+        root.acknowledge().map_err(super::storage)?;
         construction_failpoint("shape.row_partition.after_install");
         persist_shape_receipt(root, &receipt)?;
         record_shape_artifact_install(evidence, &receipt)?;
@@ -1977,6 +1969,7 @@ impl<'a> RowRangePartitioner<'a> {
                 }
             }
         }
+        super::diagnostics::sealed_payload(receipt.bytes, 1);
         Ok(output.to_owned())
     }
 

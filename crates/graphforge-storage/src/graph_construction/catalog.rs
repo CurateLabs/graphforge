@@ -7,14 +7,14 @@
 use std::ffi::OsStr;
 use std::io::{Read, Seek};
 use std::path::Path;
-use std::sync::atomic::Ordering;
 
 use arrow::array::{Array, StringArray};
 use graphforge_core::GfError;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_filesystem::{file_identity, file_link_count};
 use graphforge_ir::RuntimeCatalog;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::construction_directory::ConstructionDirectory as StableDirectory;
 
@@ -468,11 +468,11 @@ pub(super) fn load_parent_runtime_catalog(
     merge_cache_release_evidence(&mut work.cache_release, cache_release.evidence())?;
     work.bytes = work
         .bytes
-        .checked_add(counter.bytes.load(Ordering::Relaxed))
+        .checked_add(counter.values().0)
         .ok_or_else(|| storage("parent catalog Parquet read bytes overflow"))?;
     work.operations = work
         .operations
-        .checked_add(counter.operations.load(Ordering::Relaxed))
+        .checked_add(counter.values().1)
         .ok_or_else(|| storage("parent catalog Parquet read operations overflow"))?;
     let named = topology
         .open_child_file(OsStr::new("runtime_catalog.parquet"))
@@ -558,8 +558,8 @@ where
         cache_release.check_error().map_err(storage),
         "compact parent runtime catalog",
     )?;
-    let bytes = counter.bytes.load(Ordering::Relaxed);
-    let operations = counter.operations.load(Ordering::Relaxed);
+    let bytes = counter.values().0;
+    let operations = counter.values().1;
     if !is_canonical_sha256(digest) {
         return Err(storage("parent runtime catalog CAS authority changed"));
     }

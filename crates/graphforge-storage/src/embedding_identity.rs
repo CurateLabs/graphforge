@@ -4,9 +4,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::SearchArtifactError;

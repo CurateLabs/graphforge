@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import StrEnum
 import math
 from typing import Any
@@ -80,20 +81,28 @@ def require_local_admission(evidence: Mapping[str, Any]) -> Mapping[str, Any]:
     return measurements
 
 
+def _seconds(value: object) -> object:
+    """RunExecutor reports PSI totals as ``decimal.Decimal``; normalize to float.
+
+    Any other value passes through unchanged for ``normalize_run`` to validate.
+    """
+    return float(value) if isinstance(value, Decimal) else value
+
+
 def adapt_run_result(raw: Mapping[str, Any], *, correctness: bool) -> dict[str, Any]:
     """Translate BenchExec RunExecutor keys without weakening mandatory evidence."""
     exitcode = raw.get("exitcode")
     value = getattr(exitcode, "value", None)
     signal = getattr(exitcode, "signal", None)
     return {
-        "wall_seconds": raw.get("walltime"),
-        "cpu_seconds": raw.get("cputime"),
+        "wall_seconds": _seconds(raw.get("walltime")),
+        "cpu_seconds": _seconds(raw.get("cputime")),
         "peak_rss_bytes": raw.get("memory"),
         "read_bytes": raw.get("blkio-read"),
         "write_bytes": raw.get("blkio-write"),
-        "pressure_cpu_seconds": raw.get("pressure-cpu-some"),
-        "pressure_io_seconds": raw.get("pressure-io-some"),
-        "pressure_memory_seconds": raw.get("pressure-memory-some"),
+        "pressure_cpu_seconds": _seconds(raw.get("pressure-cpu-some")),
+        "pressure_io_seconds": _seconds(raw.get("pressure-io-some")),
+        "pressure_memory_seconds": _seconds(raw.get("pressure-memory-some")),
         "termination_reason": raw.get("terminationreason"),
         "exit_code": value,
         "signal": signal,
@@ -117,7 +126,12 @@ def _integer(values: Mapping[str, Any], key: str) -> int:
 
 def _outcome(result: Mapping[str, Any]) -> tuple[Outcome, int | None, int | None]:
     termination = result.get("termination_reason")
-    if termination in {"cputime", "walltime"}:
+    if result.get("timed_out") is True or termination in {
+        "cputime",
+        "cputime-soft",
+        "cputime-hard",
+        "walltime",
+    }:
         return Outcome.TIMEOUT, None, None
     if termination == "memory":
         return Outcome.OOM, None, None

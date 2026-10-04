@@ -798,6 +798,24 @@ impl<'a> ExprLowerer<'a> {
         if let IrExpr::VarRef(var_id) = self.arena.get(base)
             && let Some(base_name) = self.var_map.get(*var_id)
         {
+            // A snapshot compiled without property schemas only serves plans
+            // that read node topology columns. Anything else reaching here is a
+            // misclassified plan: refuse it rather than lower an absent column
+            // to null.
+            if self
+                .read_target
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.property_schemas_omitted)
+                && (self.is_edge_var(base_name)
+                    || (self.is_node_var(base_name)
+                        && graphforge_ir::arrow_schema::TOPOLOGY_NODES_SCHEMA
+                            .field_with_name(key)
+                            .is_err()))
+            {
+                return Err(LoweringError::UnsupportedExpr(format!(
+                    "property `{key}` needs the property schemas this plan was compiled without"
+                )));
+            }
             if let Some(value) = self.lower_entity_static_property(*var_id, base_name, key) {
                 return Ok(Some(value));
             }

@@ -96,6 +96,8 @@ fn cli_freezes_queries_compacts_and_restores_new_research_identity() {
     let owner = Uuid::now_v7();
     let version = Uuid::now_v7();
     let request = PrepareResearchVersionRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         version_uuid: version,
         context_uuid: owner,

@@ -8,6 +8,7 @@ license-file.workspace = true
 repository.workspace = true
 
 [dependencies]
+graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
 graphforge-value = { version = "0.5.2", path = "../graphforge-value" }
 arrow = { workspace = true }
 graphforge-storage = { version = "0.5.2", path = "../graphforge-storage" }
@@ -18,7 +19,6 @@ ureq = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-graphforge-core = { path = "../graphforge-core" }
 graphforge-ir = { path = "../graphforge-ir" }
 parquet = { workspace = true }
 tempfile = "3"

@@ -5,16 +5,17 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::{
-    EmbeddingCompatibilityDescriptor, EmbeddingCompatibilityId, EmbeddingContentDigest,
-    EmbeddingGenerationId, EmbeddingGenerationManifest, EmbeddingGenerationManifestInput,
-    EmbeddingPublicationFingerprint, EmbeddingSourceState, EmbeddingSpaceCatalogLimits,
-    SearchArtifactError, SearchCoordinationLimits, StoredVector, VECTOR_DATA_FILE,
-    ValidatedEmbeddingBatch, VectorStoreLimits, read_vector_snapshot,
-    remove_embedding_space_catalog_identity, write_vector_snapshot,
+    EmbeddingCompatibilityDescriptor, EmbeddingCompatibilityId, EmbeddingGenerationId,
+    EmbeddingGenerationManifest, EmbeddingGenerationManifestInput, EmbeddingPublicationFingerprint,
+    EmbeddingSourceState, EmbeddingSpaceCatalogLimits, SearchArtifactError,
+    SearchCoordinationLimits, StoredVector, VECTOR_DATA_FILE, ValidatedEmbeddingBatch,
+    VectorStoreLimits, read_vector_snapshot, remove_embedding_space_catalog_identity,
+    write_vector_snapshot,
 };
 
 const SPACE_FILE: &str = "space.json";
@@ -137,6 +138,9 @@ where
         generated_at_micros: request.generated_at_micros,
         committed_at_micros: request.committed_at_micros,
         publication_fingerprint: EmbeddingPublicationFingerprint::from_hex(&"0".repeat(64))?,
+        publication_byte_length: 0,
+        publication_xxh64: 0,
+        content_xxh64: 0,
     })?;
     let generation_id = provisional.generation_id();
     let generations = root.join(GENERATIONS_DIR);
@@ -167,18 +171,23 @@ where
     )?;
 
     let private_path = private.keep();
-    if let Err(source) = std::fs::rename(&private_path, &generation_path) {
-        let _ = std::fs::remove_dir_all(&private_path);
+    if let Err(error) = crate::durable_commit::promote_no_replace(
+        &private_path,
+        &generation_path,
+        || Ok(()),
+        || Ok(()),
+    ) {
+        if error.visibility == crate::durable_commit::Visibility::NotPublished {
+            let _ = std::fs::remove_dir_all(&private_path);
+        }
         return Err(io(
             "publish immutable embedding generation",
             &generation_path,
-            source,
+            std::io::Error::other(error),
         ));
     }
-    sync_directory(&generations)?;
     checkpoint()?;
     persist_active_pointer(&root, compatibility_id, generation_id)?;
-    sync_directory(&root)?;
 
     Ok(EmbeddingPublicationOutcome::Published(
         EmbeddingGenerationPublication {
@@ -231,17 +240,35 @@ where
 
     let removed_root = if path_exists(&root)? {
         ensure_space_ancestors(project_dir, &root)?;
-        std::fs::remove_dir_all(&root)
+        let parent = graphforge_filesystem::StableDirectory::open(&spaces)
             .map_err(|source| io("delete embedding space lineage", &root, source))?;
-        sync_directory(&spaces)?;
+        let identity = graphforge_filesystem::path_identity(&root)
+            .map_err(|source| io("delete embedding space lineage", &root, source))?;
+        crate::durable_commit::retire_owned_tree(
+            &parent,
+            root.file_name()
+                .expect("embedding lineage has a child name"),
+            identity,
+        )
+        .map_err(|source| io("delete embedding space lineage", &root, source))?;
         true
     } else {
         false
     };
     checkpoint()?;
-    std::fs::remove_file(&marker)
+    let parent = graphforge_filesystem::StableDirectory::open(&embeddings)
         .map_err(|source| io("clear embedding deletion marker", &marker, source))?;
-    sync_directory(&embeddings)?;
+    let name = marker
+        .file_name()
+        .expect("deletion marker has a child name");
+    let file = parent
+        .open_child_file(name)
+        .map_err(|source| io("clear embedding deletion marker", &marker, source))?;
+    let identity = graphforge_filesystem::file_identity(&file)
+        .map_err(|source| io("clear embedding deletion marker", &marker, source))?;
+    drop(file);
+    crate::durable_commit::retire_files(&parent, [(name, identity)])
+        .map_err(|source| io("clear embedding deletion marker", &marker, source))?;
     checkpoint()?;
     let removed_aliases = remove_embedding_space_catalog_identity(
         project_dir,
@@ -300,6 +327,16 @@ where
         generated_at_micros: request.generated_at_micros,
         committed_at_micros: request.committed_at_micros,
         publication_fingerprint,
+        publication_byte_length: std::fs::metadata(&vector_path)
+            .map_err(|source| io("inspect embedding file", &vector_path, source))?
+            .len(),
+        publication_xxh64: checksum_file(
+            &vector_path,
+            vector_limits.parquet_bytes,
+            &mut *checkpoint,
+        )?
+        .1,
+        content_xxh64: content_checksum(&rows, &mut *checkpoint)?,
     })?;
     debug_assert_eq!(manifest.generation_id(), generation_id);
     checkpoint()?;
@@ -398,12 +435,14 @@ where
         ));
     }
     let vector_path = path.join(VECTOR_DATA_FILE);
-    let fingerprint = hash_file(&vector_path, vector_limits.parquet_bytes, checkpoint)
-        .map_err(|error| primary_from(&path, error))?;
-    if fingerprint != manifest.publication_fingerprint() {
+    let (byte_length, checksum) =
+        checksum_file(&vector_path, vector_limits.parquet_bytes, checkpoint)
+            .map_err(|error| primary_from(&path, error))?;
+    if byte_length != manifest.publication_byte_length() || checksum != manifest.publication_xxh64()
+    {
         return Err(corrupt_primary(
             &vector_path,
-            "vector file fingerprint does not match generation manifest",
+            "vector file checksum or length does not match generation manifest",
         ));
     }
     let dimension = usize::try_from(manifest.dimension())
@@ -416,10 +455,10 @@ where
             "vector row count does not match generation manifest",
         ));
     }
-    if content_digest(&rows, checkpoint)? != manifest.content_digest() {
+    if content_checksum(&rows, checkpoint)? != manifest.content_xxh64() {
         return Err(corrupt_primary(
             &vector_path,
-            "canonical UUID/vector content digest does not match generation manifest",
+            "canonical UUID/vector content checksum does not match generation manifest",
         ));
     }
     Ok(EmbeddingGenerationPublication {
@@ -509,8 +548,7 @@ fn persist_or_verify_descriptor(
         read_descriptor(root, descriptor, compatibility_id).map(|_| ())
     } else {
         let bytes = descriptor.to_canonical_json()?;
-        persist_synced_file(&path, ".space.json.", &bytes)?;
-        sync_directory(root)
+        persist_synced_file(&path, ".space.json.", &bytes)
     }
 }
 
@@ -610,22 +648,22 @@ fn active_checksum(
     hex_lower(hasher.finalize())
 }
 
-fn content_digest<C>(
+fn content_checksum<C>(
     rows: &[StoredVector],
     checkpoint: &mut C,
-) -> Result<EmbeddingContentDigest, SearchArtifactError>
+) -> Result<u64, SearchArtifactError>
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
-    let mut hasher = Sha256::new();
+    let mut hasher = crate::corruption_checksum::Checksum::new();
     for row in rows {
         checkpoint()?;
-        hasher.update(row.node_uuid);
+        hasher.update(&row.node_uuid);
         for value in &row.vector {
-            hasher.update(value.to_le_bytes());
+            hasher.update(&value.to_le_bytes());
         }
     }
-    EmbeddingContentDigest::from_hex(&hex_lower(hasher.finalize()))
+    Ok(hasher.finish())
 }
 
 fn hash_file<C>(
@@ -646,7 +684,7 @@ where
         });
     }
     let mut file = File::open(path).map_err(|source| io("open embedding file", path, source))?;
-    let mut hasher = Sha256::new();
+    let mut hasher = graphforge_core::hash_observation::ArtifactSha256::new();
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
     loop {
         checkpoint()?;
@@ -659,6 +697,47 @@ where
         hasher.update(&buffer[..read]);
     }
     EmbeddingPublicationFingerprint::from_hex(&hex_lower(hasher.finalize()))
+}
+
+fn checksum_file<C>(
+    path: &Path,
+    max_bytes: u64,
+    checkpoint: &mut C,
+) -> Result<(u64, u64), SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    ensure_regular_file(path)?;
+    let metadata =
+        std::fs::metadata(path).map_err(|source| io("inspect embedding file", path, source))?;
+    if metadata.len() > max_bytes {
+        return Err(SearchArtifactError::ResourceExhausted {
+            resource: "vector_parquet_bytes",
+            limit: max_bytes,
+        });
+    }
+    let mut file = File::open(path).map_err(|source| io("open embedding file", path, source))?;
+    let mut hasher = crate::corruption_checksum::Checksum::new();
+    let mut byte_length = 0_u64;
+    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
+    loop {
+        checkpoint()?;
+        let read = file
+            .read(&mut buffer)
+            .map_err(|source| io("read embedding file", path, source))?;
+        if read == 0 {
+            break;
+        }
+        byte_length += read as u64;
+        hasher.update(&buffer[..read]);
+    }
+    if byte_length != metadata.len() {
+        return Err(corrupt_primary(
+            path,
+            "embedding file changed while checksumming",
+        ));
+    }
+    Ok((byte_length, hasher.finish()))
 }
 
 struct EmbeddingWriterLock {
@@ -746,12 +825,43 @@ fn persist_synced_file(path: &Path, prefix: &str, bytes: &[u8]) -> Result<(), Se
         .map_err(|source| io("create embedding metadata temp", path, source))?;
     temp.write_all(bytes)
         .map_err(|source| io("write embedding metadata temp", path, source))?;
-    temp.as_file()
-        .sync_all()
+    let directory = graphforge_filesystem::StableDirectory::open(parent)
+        .map_err(|source| io("publish embedding metadata", path, source))?;
+    let temporary = temp
+        .path()
+        .file_name()
+        .expect("named temporary has a child name");
+    let identity = graphforge_filesystem::file_identity(temp.as_file())
         .map_err(|source| io("sync embedding metadata temp", path, source))?;
-    temp.persist(path)
-        .map_err(|error| io("publish embedding metadata", path, error.error))?;
-    sync_directory(parent)
+    let file = temp
+        .as_file()
+        .try_clone()
+        .map_err(|source| io("sync embedding metadata temp", path, source))?;
+    crate::durable_commit::SealedArtifact::seal_existing(
+        &directory, temporary, file, identity, None,
+    )
+    .map_err(|source| io("sync embedding metadata temp", path, source))?
+    .make_visible(
+        path.file_name().expect("publication has a child name"),
+        crate::durable_commit::PublishMode::Replace,
+        || Ok(()),
+    )
+    .map_err(|error| {
+        io(
+            "publish embedding metadata",
+            path,
+            std::io::Error::other(error),
+        )
+    })?
+    .acknowledge(None)
+    .map_err(|error| {
+        io(
+            "publish embedding metadata",
+            path,
+            std::io::Error::other(error),
+        )
+    })?;
+    Ok(())
 }
 
 fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), SearchArtifactError> {
@@ -762,7 +872,7 @@ fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), SearchArtifactErro
         .map_err(|source| io("create embedding generation file", path, source))?;
     file.write_all(bytes)
         .map_err(|source| io("write embedding generation file", path, source))?;
-    file.sync_all()
+    crate::durable_commit::seal_file(&file)
         .map_err(|source| io("sync embedding generation file", path, source))
 }
 
@@ -818,7 +928,7 @@ fn sync_tree(root: &Path) -> Result<(), SearchArtifactError> {
             .read(true)
             .write(true)
             .open(&file)
-            .and_then(|file| file.sync_all())
+            .and_then(|file| crate::durable_commit::seal_file(&file))
             .map_err(|source| io("sync embedding generation file", &file, source))?;
     }
     directories.sort_unstable_by_key(|path| std::cmp::Reverse(path.components().count()));
@@ -872,16 +982,9 @@ fn path_exists(path: &Path) -> Result<bool, SearchArtifactError> {
     }
 }
 
-#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), SearchArtifactError> {
-    File::open(path)
-        .and_then(|file| file.sync_all())
+    crate::durable_commit::sync_directory(path)
         .map_err(|source| io("sync embedding directory", path, source))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<(), SearchArtifactError> {
-    Ok(())
 }
 
 fn primary_from(path: &Path, error: SearchArtifactError) -> SearchArtifactError {
@@ -1149,6 +1252,9 @@ mod tests {
                 generated_at_micros: 10,
                 committed_at_micros: 20,
                 publication_fingerprint: original.publication_fingerprint(),
+                publication_byte_length: original.publication_byte_length(),
+                publication_xxh64: original.publication_xxh64(),
+                content_xxh64: original.content_xxh64(),
             })
             .unwrap();
             std::fs::write(
@@ -1212,6 +1318,15 @@ mod tests {
                 generated_at_micros: 10,
                 committed_at_micros: 20,
                 publication_fingerprint: fingerprint,
+                publication_byte_length: std::fs::metadata(&vector_path).unwrap().len(),
+                publication_xxh64: checksum_file(
+                    &vector_path,
+                    VectorStoreLimits::default().parquet_bytes,
+                    &mut || Ok(()),
+                )
+                .unwrap()
+                .1,
+                content_xxh64: published.publication().manifest.content_xxh64(),
             })
             .unwrap();
             std::fs::write(

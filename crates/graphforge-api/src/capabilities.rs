@@ -6,6 +6,7 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, FixedSizeBinaryBuilder, StringArray, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_exec::{ExecutionResult, ExecutionStats};
 #[cfg(feature = "knowledge")]
@@ -14,7 +15,7 @@ use graphforge_storage::{
     ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
     ProjectStageOutcome,
 };
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::GraphForge;
@@ -230,6 +231,7 @@ impl GraphForge {
             capabilities,
             participants,
         };
+        let graph_objects = self.begin_graph_object_publication()?;
         let generation_uuid = match self.stage_project_generation(&publication)? {
             ProjectStageOutcome::AlreadyPublished(receipt) => receipt.generation_uuid,
             ProjectStageOutcome::Staged(staged) => {
@@ -247,7 +249,7 @@ impl GraphForge {
                             Ok(())
                         },
                     )?
-                    .publish()?
+                    .publish_with_graph_objects(&graph_objects)?
                     .generation_uuid
             }
         };

@@ -5,16 +5,13 @@
 //! immutable base plus size-tiered delta runs. Each run contains a unified
 //! UUID-sorted identity file and a node-only surrogate-sorted reverse file.
 //! Readers verify version, topology generation, framing, canonical ordering,
-//! counts, and SHA-256 before serving bounded binary-search probes.
+//! counts, and corruption checksums before serving bounded binary-search probes.
 
 use self::probing::ProbeFileKind;
 use self::probing::authenticated_probe_block;
-use self::topology_delta::hex_sha256;
 use graphforge_core::GfError;
 use serde::Deserialize;
 use serde::Serialize;
-use sha2::Digest;
-use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -55,10 +52,12 @@ pub(crate) use probing::UuidConstructionSnapshot;
 pub(crate) use probing::open_uuid_construction_snapshot;
 #[cfg(test)]
 pub(crate) use probing::pin_uuid_construction_snapshot;
-pub(crate) use rebuild::ensure_uuid_membership_migrated;
-pub use rebuild::rebuild_uuid_membership_indexes;
 pub use rebuild::rebuild_v4_ordinal_identity;
 pub use rebuild::rebuild_v4_ordinal_identity_with_evidence;
+pub(crate) use rebuild::{
+    ensure_uuid_membership_migrated, ensure_uuid_membership_migrated_with_topology,
+};
+pub use rebuild::{rebuild_uuid_membership_indexes, rebuild_uuid_membership_indexes_with_topology};
 #[cfg(test)]
 pub(crate) use topology_delta::append_uuid_membership_delta;
 pub(crate) use topology_delta::commit_uuid_neutral_topology_rewrite;
@@ -68,7 +67,9 @@ pub(crate) use topology_delta::prepare_v4_ordinal_delta;
 
 mod identity_codec;
 
-const FORMAT_VERSION: u32 = 5;
+const FORMAT_VERSION: u32 = 7;
+// Private recovery intents evolve independently of the published UUID format.
+const CONSTRUCTION_INTENT_FORMAT_VERSION: u32 = 3;
 const NODE_LOOKUP_RECORD_BYTES: u64 = 24;
 const IDENTITY_RECORD_BYTES: u64 = 25;
 const NODE_LOOKUP_RECORD_WIDTH: usize = 24;
@@ -98,13 +99,6 @@ fn create_uuid_file(path: &Path) -> Result<File, GfError> {
     let file = File::create(path).map_err(storage_err)?;
     crate::io_stats::record_uuid_file_open();
     Ok(file)
-}
-
-fn sync_uuid_file(file: &File) -> Result<(), GfError> {
-    let _wait = crate::concurrency_attribution::RegionScope::named("fsync");
-    file.sync_all().map_err(storage_err)?;
-    crate::io_stats::record_uuid_file_sync();
-    Ok(())
 }
 
 fn open_uuid_child_file(
@@ -361,20 +355,25 @@ pub struct UuidProbeMetrics {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct FileRecord {
     name: String,
     count: u64,
     sha256: String,
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    xxh64: u64,
     blocks: Vec<BlockRecord>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct BlockRecord {
     offset: u64,
     len: u32,
     first_key: String,
     last_key: String,
-    sha256: String,
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    xxh64: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -681,7 +680,7 @@ pub struct AuthenticatedUuidIndexSnapshot {
     runs: Vec<AuthenticatedRun>,
     authenticated_bytes: u64,
     authenticated_blocks: u64,
-    cas_source_paths: Option<BTreeMap<String, (String, String, u64)>>,
+    cas_source_paths: Option<BTreeMap<String, (String, String, u64, u64)>>,
     _cas_leases: Vec<crate::graph_object_store::AuthenticatedGraphObject>,
 }
 
@@ -690,6 +689,7 @@ pub(crate) struct ConstructionIndexOutput {
     pub name: String,
     pub bytes: u64,
     pub sha256: String,
+    pub xxh64: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -703,6 +703,8 @@ pub(crate) struct ConstructionIndexReference {
     pub target_path: String,
     pub bytes: u64,
     pub sha256: String,
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    pub xxh64: u64,
     pub parent_manifest_sha256: String,
 }
 
@@ -723,6 +725,10 @@ pub(crate) struct ConstructionIndexEncoding {
     pub peak_buffer_bytes: u64,
     pub peak_temporary_bytes: u64,
     pub cache_release: graphforge_filesystem::FileCacheReleaseEvidence,
+    /// SHA-256 of the source identity file, computed during encoding using
+    /// `ArtifactSha256` (classified). Used as the `topology_delta_sha256`
+    /// binding in the published `TopologyIndexReceipt`.
+    pub source_sha256: String,
 }
 
 #[cfg(test)]
@@ -764,6 +770,7 @@ pub(crate) struct ConstructionReferenceAuthentication<'a> {
     pub(crate) target_path: &'a str,
     pub(crate) bytes: u64,
     pub(crate) sha256: &'a str,
+    pub(crate) xxh64: u64,
     pub(crate) parent_manifest_sha256: &'a str,
 }
 
@@ -827,13 +834,36 @@ pub fn uuid_membership_index_is_fresh(project_dir: &Path) -> Result<bool, GfErro
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(storage_err(error)),
     };
-    let manifest: Manifest = serde_json::from_slice(&body).map_err(storage_err)?;
-    Ok(manifest.format_version == FORMAT_VERSION
-        && manifest.current_generation == crate::read_topology_generation(project_dir)?)
+    let manifest = decode_manifest(&body)?;
+    Ok(manifest.current_generation == crate::read_topology_generation(project_dir)?)
 }
 
 const TOPOLOGY_RECEIPT: &str = "topology-receipt.json";
 const MAX_MANIFEST_BYTES: u64 = 1 << 20;
+
+fn validate_manifest_version(version: u32) -> Result<(), GfError> {
+    if version != FORMAT_VERSION {
+        return Err(storage_err(format!(
+            "unsupported UUID membership format version {version}; recreate the index"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse retired or future schemas before decoding current checksum fields.
+fn decode_manifest(bytes: &[u8]) -> Result<Manifest, GfError> {
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(storage_err("UUID membership manifest exceeds size limit"));
+    }
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(storage_err)?;
+    let version = value
+        .get("format_version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .unwrap_or(0);
+    validate_manifest_version(version)?;
+    serde_json::from_value(value).map_err(storage_err)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TopologyIndexReceipt {
@@ -934,7 +964,7 @@ fn block_layout(bytes: &[u8], width: usize) -> Result<(u64, &[u8], &[u8]), GfErr
 
 fn block_matches(bytes: &[u8], block: &BlockRecord, width: usize) -> bool {
     block_layout(bytes, width).is_ok_and(|(_, first, last)| {
-        hex_sha256(bytes) == block.sha256
+        crate::corruption_checksum::checksum(bytes) == block.xxh64
             && hex_sha256_key(first) == block.first_key
             && hex_sha256_key(last) == block.last_key
     })
@@ -965,13 +995,14 @@ fn authenticate_file_blocks(
     mut work: Option<&mut UuidIndexAppendMetrics>,
 ) -> Result<(), GfError> {
     validate_block_records(record, record_bytes)?;
-    let mut whole = Sha256::new();
     let mut count = 0_u64;
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     for block in &record.blocks {
         file.seek(SeekFrom::Start(block.offset))
             .map_err(storage_err)?;
         let mut bytes = vec![0_u8; block.len as usize];
         file.read_exact(&mut bytes).map_err(storage_err)?;
+        checksum.update(&bytes);
         let width = usize::try_from(record_bytes)
             .map_err(|_| storage_err("record width does not fit address space"))?;
         if !block_matches(&bytes, block, width) {
@@ -980,7 +1011,6 @@ fn authenticate_file_blocks(
         count = count
             .checked_add(block_layout(&bytes, width)?.0)
             .ok_or_else(|| storage_err("record count overflow"))?;
-        whole.update(&bytes);
         if let Some(metrics) = work.as_deref_mut() {
             metrics.validation_scan_bytes = metrics
                 .validation_scan_bytes
@@ -988,8 +1018,10 @@ fn authenticate_file_blocks(
             metrics.validation_scan_blocks = metrics.validation_scan_blocks.saturating_add(1);
         }
     }
-    let digest = hex_bytes(&whole.finalize());
-    if digest != record.sha256 || count != record.count {
+    if file.metadata().map_err(storage_err)?.len() != record_length(record, record_bytes)?
+        || count != record.count
+        || checksum.finish() != record.xxh64
+    {
         return Err(storage_err("UUID run authentication failed"));
     }
     Ok(())
@@ -1017,7 +1049,6 @@ fn validate_block_records(record: &FileRecord, record_bytes: u64) -> Result<(), 
             || block.first_key.len() != key_hex_len
             || block.last_key.len() != key_hex_len
             || block.first_key > block.last_key
-            || block.sha256.len() != 64
         {
             return Err(storage_err("UUID run block table is not canonical"));
         }
@@ -1047,11 +1078,12 @@ fn describe_run(
     if width != IDENTITY_RECORD_BYTES && length % width != 0 {
         return Err(storage_err("internal run has a partial index record"));
     }
-    let (sha256, blocks, count) = describe_blocks(&mut open_uuid_file(path)?, width)?;
+    let (sha256, xxh64, blocks, count) = describe_blocks(&mut open_uuid_file(path)?, width)?;
     Ok(FileRecord {
         name: format!("{kind}-{generation}-{}.uuidx", &sha256[..16]),
         count,
         sha256,
+        xxh64,
         blocks,
     })
 }
@@ -1059,7 +1091,7 @@ fn describe_run(
 fn describe_blocks(
     file: &mut File,
     width: u64,
-) -> Result<(String, Vec<BlockRecord>, u64), GfError> {
+) -> Result<(String, u64, Vec<BlockRecord>, u64), GfError> {
     describe_stream(
         file,
         usize::try_from(width).map_err(storage_err)?,
@@ -1073,7 +1105,7 @@ fn describe_stream(
     file: &mut impl Read,
     width: usize,
     reads: &mut (u64, u64),
-) -> Result<(String, Vec<BlockRecord>, u64), GfError> {
+) -> Result<(String, u64, Vec<BlockRecord>, u64), GfError> {
     if !matches!(width, IDENTITY_RECORD_WIDTH | NODE_LOOKUP_RECORD_WIDTH) {
         return Err(storage_err("unsupported UUID run record width"));
     }
@@ -1081,7 +1113,8 @@ fn describe_stream(
     let mut carried = 0;
     let mut offset = 0_u64;
     let mut count = 0_u64;
-    let mut whole = Sha256::new();
+    let mut whole = crate::payload_digest::PayloadSha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut blocks = Vec::new();
     loop {
         let mut filled = carried;
@@ -1122,12 +1155,13 @@ fn describe_stream(
         let bytes = &buffer[..valid];
         let (records, first, last) = block_layout(bytes, width)?;
         whole.update(bytes);
+        checksum.update(bytes);
         blocks.push(BlockRecord {
             offset,
             len: u32::try_from(valid).map_err(storage_err)?,
             first_key: hex_sha256_key(first),
             last_key: hex_sha256_key(last),
-            sha256: hex_sha256(bytes),
+            xxh64: crate::corruption_checksum::checksum(bytes),
         });
         offset = offset
             .checked_add(valid as u64)
@@ -1141,7 +1175,12 @@ fn describe_stream(
             break;
         }
     }
-    Ok((hex_bytes(&whole.finalize()), blocks, count))
+    Ok((
+        hex_bytes(&whole.finalize()),
+        checksum.finish(),
+        blocks,
+        count,
+    ))
 }
 
 fn hex_sha256_key(bytes: &[u8]) -> String {
@@ -1184,6 +1223,7 @@ impl PreparedUuidIndexDelta {
 }
 
 fn validate_run_descriptors(manifest: &Manifest) -> Result<(), GfError> {
+    validate_manifest_version(manifest.format_version)?;
     for record in manifest.runs.iter().flat_map(|run| {
         [
             (&run.identities, IDENTITY_RECORD_BYTES),
@@ -1422,48 +1462,6 @@ fn v4_compaction_post_write_failure(point: &str) -> Result<(), GfError> {
     Ok(())
 }
 
-pub(crate) fn canonical_v3_manifest_marker(bytes: &[u8], expected_generation: u64) -> bool {
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return false;
-    };
-    let Ok(manifest) = serde_json::from_value::<Manifest>(value.clone()) else {
-        return false;
-    };
-    // Serialize the typed v3 schema and require the supplied tree to be a
-    // recursive structural subset. This rejects unknown fields in Manifest,
-    // RunRecord, FileRecord, and BlockRecord without duplicating descriptor
-    // semantics here. Missing serde-default fields remain valid v3.
-    let Ok(canonical_shape) = serde_json::to_value(&manifest) else {
-        return false;
-    };
-    if !json_shape_is_subset(&value, &canonical_shape) {
-        return false;
-    }
-    manifest.format_version == FORMAT_VERSION
-        && manifest.current_generation == expected_generation
-        && validate_run_descriptors(&manifest).is_ok()
-}
-
-fn json_shape_is_subset(candidate: &serde_json::Value, canonical: &serde_json::Value) -> bool {
-    match (candidate, canonical) {
-        (serde_json::Value::Object(candidate), serde_json::Value::Object(canonical)) => {
-            candidate.iter().all(|(key, value)| {
-                canonical
-                    .get(key)
-                    .is_some_and(|known| json_shape_is_subset(value, known))
-            })
-        }
-        (serde_json::Value::Array(candidate), serde_json::Value::Array(canonical)) => {
-            candidate.len() == canonical.len()
-                && candidate
-                    .iter()
-                    .zip(canonical)
-                    .all(|(value, known)| json_shape_is_subset(value, known))
-        }
-        _ => true,
-    }
-}
-
 fn describe_staged_data(
     source: &Path,
     kind: &str,
@@ -1475,11 +1473,12 @@ fn describe_staged_data(
         return Err(storage_err("internal run has a partial index record"));
     }
     let mut input = File::open(source).map_err(storage_err)?;
-    let (sha256, blocks, count) = describe_blocks(&mut input, record_bytes)?;
+    let (sha256, xxh64, blocks, count) = describe_blocks(&mut input, record_bytes)?;
     Ok(FileRecord {
         name: format!("{kind}-{generation}-{}.uuidx", &sha256[..16]),
         count,
         sha256,
+        xxh64,
         blocks,
     })
 }

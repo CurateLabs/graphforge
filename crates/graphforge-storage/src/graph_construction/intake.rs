@@ -6,7 +6,7 @@ use super::{
     ConstructionChunkReceipt, CountingChunkReader, Deserialize, DetailCodec, Digest,
     EDGE_DETAIL_WIDTH, ENDPOINT_WIDTH, FixedSizeBinaryArray, GfError, GraphConstructionBudgets,
     GraphConstructionEvidence, GraphConstructionSession, GraphConstructionState, HashingWriter,
-    IDENTITY_WIDTH, INTENT, IdentityRecord, IoCounter, NODE_DETAIL_WIDTH, Ordering, OsStr,
+    IDENTITY_WIDTH, INTENT, IdentityRecord, IoCounter, NODE_DETAIL_WIDTH, OsStr,
     ParquetRecordBatchReaderBuilder, ReadWork, RecordBatch, Schema, Serialize, Sha256,
     StableDirectory, StringArray, UInt32Array, Uuid, Write, account_cache_release, artifact_temp,
     authenticate_artifact, combine_cache_cleanup, construction_failpoint, decode_bounded,
@@ -520,11 +520,8 @@ fn validate_schema(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<(
             return Err(storage("required construction columns are non-null"));
         }
     }
-    if batch.schema().fields()[expected.fields().len()..]
-        .iter()
-        .any(|field| !crate::schemas::property_data_type_supported(field.data_type()))
-    {
-        return Err(storage("unsupported construction property type"));
+    for field in &batch.schema().fields()[expected.fields().len()..] {
+        validate_persisted_property_type(field)?;
     }
     let identifiers = batch
         .column(1)
@@ -539,6 +536,33 @@ fn validate_schema(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<(
         return Err(storage("invalid canonical label or relation"));
     }
     Ok(())
+}
+
+/// Refuse any property column that is not in canonical persisted form.
+/// Construction persists staged columns as given, and readers decode only
+/// canonical types, so a narrower or large Arrow type must be normalized by
+/// the caller (`graphforge-api` does so for every bulk producer) rather than
+/// written here and found unreadable later.
+fn validate_persisted_property_type(field: &arrow::datatypes::Field) -> Result<(), GfError> {
+    let data_type = field.data_type();
+    if crate::schemas::property_data_type_canonical(data_type) {
+        return Ok(());
+    }
+    let message = match crate::schemas::canonical_property_data_type(data_type) {
+        Some(canonical) => format!(
+            "construction property column {} has non-canonical Arrow type {data_type}; \
+             it must be normalized to {canonical} before construction",
+            field.name()
+        ),
+        None => format!(
+            "construction property column {} has unsupported Arrow type {data_type}",
+            field.name()
+        ),
+    };
+    Err(GfError::Api {
+        code: graphforge_core::ApiErrorCode::SchemaMismatch,
+        message,
+    })
 }
 
 fn is_construction_identifier(value: &str) -> bool {
@@ -772,7 +796,8 @@ pub(super) fn write_parquet_with_properties(
     parquet.finish().map_err(storage)?;
     parquet.sync().map_err(storage)?;
     let hashing = parquet.inner_mut().get_mut();
-    hashing.inner.sync_all_and_release().map_err(storage)?;
+    root.seal_cache_writer(&mut hashing.inner)
+        .map_err(storage)?;
     let cache_release = hashing.inner.evidence();
     account_cache_release(cache_release, evidence)?;
     construction_failpoint(&format!("artifact.after_temp_fsync.{name}"));
@@ -782,7 +807,6 @@ pub(super) fn write_parquet_with_properties(
         allocated_bytes: graphforge_filesystem::file_space_usage(hashing.inner.file())
             .map_err(storage)?
             .allocated_bytes,
-        sha256: hex(&hashing.digest.clone().finalize()),
         xxh64: crate::corruption_checksum::hex(hashing.checksum.finish()),
         identity: identity.into(),
         write_operations: hashing.operations,
@@ -791,12 +815,13 @@ pub(super) fn write_parquet_with_properties(
             .checked_add(3)
             .ok_or_else(|| storage("artifact synchronization count overflows"))?,
     };
-    root.sync().map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(name))
         .map_err(storage)?;
-    root.sync().map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     construction_failpoint(&format!("artifact.after_install.{name}"));
     persist_shape_receipt(root, &receipt)?;
+    super::diagnostics::sealed_payload(receipt.bytes, 1);
     Ok(receipt)
 }
 
@@ -832,7 +857,7 @@ pub(super) fn write_run<const N: usize>(
         writer.write_all(&block).map_err(storage)?;
     }
     writer.flush().map_err(storage)?;
-    writer.inner.sync_all_and_release().map_err(storage)?;
+    root.seal_cache_writer(&mut writer.inner).map_err(storage)?;
     let cache_release = writer.inner.evidence();
     account_cache_release(cache_release, evidence)?;
     construction_failpoint(&format!("artifact.after_temp_fsync.{name}"));
@@ -842,7 +867,6 @@ pub(super) fn write_run<const N: usize>(
         allocated_bytes: graphforge_filesystem::file_space_usage(writer.inner.file())
             .map_err(storage)?
             .allocated_bytes,
-        sha256: hex(&writer.digest.finalize()),
         xxh64: crate::corruption_checksum::hex(writer.checksum.finish()),
         identity: identity.into(),
         write_operations: writer.operations,
@@ -851,12 +875,13 @@ pub(super) fn write_run<const N: usize>(
             .checked_add(2)
             .ok_or_else(|| storage("artifact synchronization count overflows"))?,
     };
-    root.sync().map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(name))
         .map_err(storage)?;
-    root.sync().map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     construction_failpoint(&format!("artifact.after_install.{name}"));
     persist_shape_receipt(root, &receipt)?;
+    super::diagnostics::sealed_payload(receipt.bytes, 1);
     Ok(receipt)
 }
 
@@ -870,8 +895,8 @@ pub(super) fn validate_artifact_name(receipt: &ArtifactReceipt) -> Result<(), Gf
         || receipt.name.starts_with('.')
         || receipt.name.contains('/')
         || receipt.name.contains('\\')
-        || !is_canonical_sha256(&receipt.sha256)
         || !is_canonical_lower_hex(&receipt.identity.file_id, 32)
+        || !is_canonical_lower_hex(&receipt.xxh64, 16)
         || receipt.bytes == 0
         || receipt.write_operations == 0
         || receipt.fsync_operations == 0
@@ -1091,8 +1116,8 @@ fn validate_parquet_shape(
     )?;
     Ok(ReadWork {
         detail_records: 0,
-        bytes: counter.bytes.load(Ordering::Relaxed),
-        operations: counter.operations.load(Ordering::Relaxed),
+        bytes: counter.values().0,
+        operations: counter.values().1,
         cache_release: cache_release.evidence(),
     })
 }
@@ -1139,8 +1164,8 @@ pub(super) fn validate_parquet_metadata(
     )?;
     Ok(ReadWork {
         detail_records: 0,
-        bytes: counter.bytes.load(Ordering::Relaxed),
-        operations: counter.operations.load(Ordering::Relaxed),
+        bytes: counter.values().0,
+        operations: counter.values().1,
         cache_release: cache_release.evidence(),
     })
 }

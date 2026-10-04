@@ -23,6 +23,8 @@ fn count(graph: &GraphForge) -> i64 {
 
 fn create(graph: &mut GraphForge, label: &str) -> CreateResearchBranchRequest {
     let request = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(graph),
         branch_uuid: Uuid::now_v7(),
@@ -122,6 +124,8 @@ fn branch_mutation_faults_preserve_parent_sibling_and_exact_retry_after_reopen()
             .execute("CREATE (:Person {name:'parent only'})")
             .unwrap();
         let request = ExecuteResearchBranchRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             expected_generation_uuid: current(&graph),
             branch_uuid: branch.branch_uuid,

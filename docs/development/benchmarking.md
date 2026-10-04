@@ -1,9 +1,7 @@
 # Benchmark measurement policy
 
 GraphForge values correctness over performance, but performance claims still
-require comparable evidence with explicit scope and provenance. The canonical
-inventory lives in `config/benchmark-measurement-inventory.json`; fast CI enforces
-it through `scripts/ci/benchmark-measurement-policy.py`.
+require comparable evidence with explicit scope and provenance.
 
 ## Execution boundaries
 
@@ -29,6 +27,67 @@ measurements.
 Ordinary deadlines, cancellation tests, and approved shared diagnostics remain
 allowed. `Instant` / `Duration` in product control paths are not banned globally.
 
+## Construction syscall comparison
+
+[`construction-syscall-comparison.py`](../../benchmarks/scripts/construction-syscall-comparison.py)
+compares a frozen baseline and candidate through the current Graph500 S18/S20
+profiles. Generate each input once with the frozen current generator, then share
+those regular files between fresh projects. Registration arguments use absolute
+input paths because the product refuses symlink sources. The five profile import
+commands run under BenchExec with CPUs 0–15 and a 4000 MB memory limit. The driver
+requests region diagnostics; optional allocation diagnostics remain disabled in
+both modes. It provides no lifecycle-storage certification claim.
+
+Build and archive both release executables before reserving the host. All input
+generation and digest reads happen outside the timed workflow. Before each run,
+input hashing verifies identical bytes and establishes the matched warm-input
+policy. Required checks and barriers remain inside the complete ingest.
+
+```bash
+task_driver="$PWD/benchmarks/scripts/construction-syscall-comparison.py"
+task_profile="$PWD/benchmarks/profiles/graph500/s18-local.json"
+python3 "$task_driver" generate --profile "$task_profile" \
+  --binary "$task_generator" --inputs "$task_inputs"
+systemd-run --user --scope --slice=benchexec -p Delegate=yes \
+  python3 "$task_driver" run --profile "$task_profile" \
+  --binary "$task_baseline_gf" --inputs "$task_inputs" --run "$task_evidence/s18-a1"
+```
+
+Use task-owned absolute paths on the admitted ext4/xfs/btrfs volume, and repeat
+with the candidate executable and `s20-provider.json`. Take three accepted pairs
+per scale in A/B, B/A, A/B order, each with a distinct run directory. The parent
+operator first records at least 60 seconds of CPU, I/O and process activity with
+`vmstat -w 5`, `mpstat -P ALL 5`, `pidstat -durh -p ALL 5` and process-name samples,
+reviews that quiet window, and keeps those observers plus a compiler-process
+watchdog running throughout measurement. Boundary process checks alone do not
+establish a quiet host. Preserve and exclude a contended or failed observation;
+do not silently retry it into the accepted set.
+
+After each workflow, the driver reopens the project and runs the profile's node
+and edge recount plus ordered one-hop and two-hop queries. Compare all four
+complete result digests and row counts across both modes; an absent digest is a
+failure, while an absent scalar observation remains unavailable. Read complete
+workflow wall/CPU/memory from `runexec.txt`. Run a separate S18 observation per
+mode with `--trace`; its `validate.strace` gives `strace -f -c` syscall counts.
+Keep traced runs out of the wall comparison.
+
+Method input SHA-256 identities:
+
+| Input | SHA-256 |
+| --- | --- |
+| Comparison driver | `a51cc92b75bf9dc99e567b025cfedee2a2a3ec4c9c726fd56fce45e2de81e05d` |
+| S18 profile | `762fdac3d4ad790eaf1aa75348ccca692c709dcf578f91e1363f720afebc368b` |
+| S20 profile | `b8af47526cad5641bfe85c8c68e507c46edf0de106f92bffd712e6ae90c9b59d` |
+| S18 nodes.parquet | `44c9dfd9325013d0f6ea2f03bd86b00d2bea01265254cb28f70f0881a6478075` |
+| S18 edges.parquet | `f112ccbec94875f36f113e9bdf3e6e7d88e3105bafbaeeb3a7cb42ac4883e9c4` |
+| S20 nodes.parquet | `5792da943d39a3ec0cfe48c375fef1b078ae31f2c086af5d9bcfd417c74f24aa` |
+| S20 edges.parquet | `3fb656aa9af568f12359c51fcb6a337460d0521ac07bd05def3a7e98f2e51086` |
+
+These inputs use the profiles' edge factor 16 and seed 13907095936298285200.
+The generator binary and generated Parquet hashes also appear in each input
+`identity.json`. Raw receipts, counts, logs, per-run tables and binary provenance
+attach to the producing issue/PR outside the repository.
+
 ## Inventory and enforcement
 
 The inventory records each measurement site, its boundary, disposition, migration
@@ -46,18 +105,59 @@ statistics in the scanned in-process benchmark surfaces (`crates/*/benches/`,
 when adding a reviewed legacy exception or completing a migration; stale entries
 fail closed.
 
-Validation:
+### CodSpeed walltime raw results are Divan evidence
+
+Maintainer decision on #1467 (2026-09-30): when a Divan target runs with
+`CODSPEED_ENV` set, the per-benchmark walltime `raw_results` JSON that the
+CodSpeed Divan integration writes
+(`$CODSPEED_CARGO_WORKSPACE_ROOT/target/codspeed/walltime/raw_results/divan/*.json`)
+is accepted as Divan evidence. Divan does the measuring; CodSpeed only
+serializes the samples Divan collected. This does not make CodSpeed a merge
+authority, and it does not admit any hand-written timer. Divan test mode
+(`--test`, or `cargo test` on a bench target) runs each benchmark once and
+writes no raw results, so it is never performance evidence.
+
+### openCypher TCK scenario benchmark
+
+`crates/graphforge-api/benches/tck_scenarios/` (#1653) is the in-process
+per-scenario measurement boundary for the TCK. It parses the same ephemeral
+normalized corpus as the Cucumber correctness run, and executes every step
+through the step functions registered on `GraphForgeWorld` with the same pooled
+fixture and clear-on-lease semantics. One timed iteration is a whole scenario,
+including `Given an empty graph`, so fixture reset cost stays visible. Each
+iteration's verdict is checked outside the timed region; a failing scenario
+aborts the run before Divan records its timing. Benchmarks are named
+`scenario[<feature>:<line>:<name>]`, the key `tests/tck/passing_baseline.txt`
+uses. The default is 10 samples of one scenario execution each.
 
 ```bash
-python3 scripts/ci/benchmark-measurement-policy.py
-python3 scripts/ci/test-benchmark-measurement-policy.py
+cargo bench -p graphforge-api --bench tck_scenarios -- --test      # run every scenario once, no timing
+CODSPEED_ENV=local CODSPEED_CARGO_WORKSPACE_ROOT="$PWD" \
+  cargo bench -p graphforge-api --bench tck_scenarios               # whole corpus, raw results
+TCK_ONLY=Delete5 cargo bench -p graphforge-api --bench tck_scenarios # feature-file subset
 ```
 
+`make bench-tck-scenarios` runs the whole corpus with the default sample count.
+
+The target has no thresholds, baseline or comparison of its own. Its raw
+results are the per-scenario input to `make tck-perf` (#1654), the single TCK
+threshold consumer: it also measures the whole-TCK Cucumber process under
+BenchExec for the aggregate, and compares only when every provenance key
+(host, build profile and toolchain, workload, sample counts) matches a
+host-local baseline. See `docs/reference/tck-compliance.md`. Divan orders
+scenarios by name, not Cucumber file order, and `cargo bench` builds with an
+optimizing profile while `cargo test` does not; both are provenance keys. The
+bench is not part of the PR CI Gate:
+`cargo test` and nextest do not run bench targets by default.
+`tests/tck_scenario_bench.rs` covers it there, running the benchmark in
+subprocesses: a passing scenario yields a keyed raw result, a failing step
+aborts without one, and test mode writes none.
+
 Functional benchmark checks (correctness, read counts, topology/I/O invariants)
-stay in ordinary product CI (`//:ci_rust_tests`, release-only scaling tests).
-Comparable performance measurements use Divan (`cargo bench`, CodSpeed) or
-BenchExec (native Linux cgroups-v2 hosts). Durable temp-root and admitted-host
-requirements are documented per workload in `benchmarks/README.md`.
+stay in ordinary product CI. Comparable performance measurements use Divan
+(`cargo bench`, CodSpeed) or BenchExec (native Linux cgroups-v2 hosts). Durable
+temp-root and admitted-host requirements are documented per workload in
+`benchmarks/README.md`.
 
 # Benchmarking with CodSpeed
 
@@ -128,8 +228,8 @@ still execute the targets as ordinary divan benchmarks:
 ```bash
 cargo bench -p graphforge-core --bench canonical
 cargo bench -p graphforge-cypher --bench compile
-cargo bench -p graphforge-storage --bench m6_storage
-cargo bench -p graphforge-storage --bench m6_storage_io -- --sample-count 1
+cargo bench -p graphforge-storage --bench storage_kernels
+cargo bench -p graphforge-storage --bench storage_io -- --sample-count 1
 cargo bench -p graphforge-exec --bench traversal_scaling -- --sample-count 5
 cargo bench -p graphforge-exec --bench merge_scaling -- --sample-count 5
 ```
@@ -137,21 +237,31 @@ cargo bench -p graphforge-exec --bench merge_scaling -- --sample-count 5
 ## The ingest floor gate is a ratchet
 
 `GF_INGEST_FLOOR_GATE=1 cargo bench -p graphforge-storage --bench
-m6_storage_io` runs the bulk-ingest gate instead of the divan benchmarks. Its
+storage_io` runs the bulk-ingest gate instead of the divan benchmarks. Its
 banked constants fail in **both** directions (#1476): a measurement past its
 constant the wrong way is a regression, and a measurement beating its constant
 by more than that metric's margin is an **unbanked gain** — the gate fails and
 prints the exact constant to write, so an improvement cannot land without the
 pull request that won it recording the new constant. Margins are per metric,
 from each metric's recorded reproducibility (bytes and the growth ratio
-reproduce to the byte: 10%; CPU moves ±15% under load: 25%); wall-clock
-throughput is excluded from the ratchet side until its baseline is banked from
-the isolated `codspeed-macro` runner. Each banked constant documents its host
-class, build profile and the change that set it, and every metric records its
-execution scope, denominator and units — do not transfer a number between
-scopes. The gate's judgment is unit-tested in `tests/ingest_gate_verdict.rs`:
-a deliberate regression and a deliberate improvement must each fail in the
-expected direction before a clean pass is trusted.
+reproduce to the byte: 10%; CPU: 25%; wall-clock throughput on its own runner:
+40%). Each banked constant documents its host class, build profile and the
+change that set it, and every metric records its execution scope, denominator
+and units — do not transfer a number between scopes. The gate's judgment is
+unit-tested in `tests/ingest_gate_verdict.rs`: a deliberate regression and a
+deliberate improvement must each fail in the expected direction before a clean
+pass is trusted.
+
+Two of the four limits are **host-bound**. The throughput floor and the CPU
+ceiling are banked from the isolated `codspeed-macro` runner the nightly runs
+on, which is an ARM64 machine bound by its device rather than its CPU; its
+numbers say nothing about an x86_64 development host, and the reverse. The
+nightly declares the host with `GF_INGEST_GATE_BANKED_HOST=codspeed-macro` and
+both limits are judged there. Run anywhere else, as in the command above, they
+are printed as `not judged` notes and only the two deterministic byte-counter
+limits can fail. Do not set that variable on another machine, and do not bank a
+throughput or CPU constant from a local run: re-bank from scheduled nightlies
+and put the table on the issue.
 
 Per-region wall, CPU, fsync, and byte attribution for one import comes from the
 stock receipt's `region_diagnostics` tree; see
@@ -161,9 +271,9 @@ Manual scaling studies also expose Makefile entry points (`make bench-traversal`
 `make bench-merge-scaling`). Divan test mode (`--sample-count 1`) exercises every
 case without treating the output as performance evidence.
 
-## M6 storage evidence
+## Storage benchmark evidence
 
-`m6_storage` uses synthetic, versioned fixtures and the `1 / 100 / 10,000`
+`storage_kernels` uses synthetic, versioned fixtures and the `1 / 100 / 10,000`
 operation ladder. GFDR framing, checksum verification, replay/merge fingerprints,
 reachability, and transaction classification belong to CPU simulation; fixture
 construction and correctness assertions stay outside timed closures.
@@ -187,13 +297,13 @@ their measured tradeoff; samples and thresholds must not be weakened.
 The frozen pre-M6 comparison commit is
 `aeb46d1b012d40e8a0af7873af9152b3aab752c6`, the first parent immediately
 before the #777 replay merge. The walltime host contract is CodSpeed's
-`codspeed-macro` ARM64 runner, Rust 1.96.0, `m6_storage_io` fixture v1, and
+`codspeed-macro` ARM64 runner, Rust 1.96.0, `storage_io` fixture v1, and
 CodSpeed walltime mode. The scheduled memory fallback remains a separately
 labelled Blacksmith diagnostic and uploads `/usr/bin/time -v` peak-resident
 output for replay and spill/compaction, named with the exact head SHA.
 Certification #756 records the
 base/head SHAs, result URLs or artifact IDs, benchmark mode and any accepted
-tradeoff. `scripts/ci/check-m6-benchmarks.py` freezes the v1 names and count.
+tradeoff. `scripts/ci/check-storage-benchmarks.py` freezes the v1 names and count.
 
 ## Adding a benchmark
 
@@ -209,6 +319,6 @@ tradeoff. `scripts/ci/check-m6-benchmarks.py` freezes the v1 names and count.
 ## Related manual benchmarks
 
 The scaling studies under `benchmarks/` (`make bench-traversal`,
-`make bench-merge-scaling`, `make bench-m4-entry`, and the fixed-hop LIMIT
+`make bench-merge-scaling`, `make bench-embedded-performance`, and the fixed-hop LIMIT
 matrices) remain hardware-specific manual evidence. They are unrelated to the
 continuous CodSpeed lane.

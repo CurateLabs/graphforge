@@ -1,4 +1,6 @@
 //! UUID and ordinal rebuild, migration, and bounded record sorting.
+//! Sorting runs are process-owned scratch, not restart checkpoints. Flush/close
+//! makes them available to readers; the final staged artifact owns durability.
 
 use super::BULK_IO_BYTES;
 use super::FORMAT_VERSION;
@@ -20,6 +22,7 @@ use super::V4_ORDINAL_RECEIPT;
 use super::V4OrdinalBuildMetrics;
 use super::V4OrdinalRebuildDisposition;
 use super::V4OrdinalRebuildEvidence;
+use super::decode_manifest;
 #[cfg(test)]
 use super::describe_blocks;
 use super::describe_staged_data;
@@ -33,6 +36,8 @@ use super::storage_err;
 use super::topology_delta::hex_sha256;
 use super::uuid_membership_index_is_fresh;
 use super::validate_run_descriptors;
+#[cfg(test)]
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use arrow::array::Array;
 use arrow::array::FixedSizeBinaryArray;
 use arrow::array::UInt64Array;
@@ -40,8 +45,6 @@ use graphforge_core::GfError;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 #[cfg(test)]
 use sha2::Digest;
-#[cfg(test)]
-use sha2::Sha256;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 #[cfg(test)]
@@ -156,7 +159,16 @@ pub fn rebuild_uuid_membership_indexes(
     project_dir: &Path,
     limits: UuidIndexBuildLimits,
 ) -> Result<UuidIndexBuildMetrics, GfError> {
-    migrate_uuid_membership_indexes(project_dir, limits, true)
+    migrate_uuid_membership_indexes(project_dir, limits, true, None)
+}
+
+/// Rebuild a private session index from explicit topology membership.
+pub fn rebuild_uuid_membership_indexes_with_topology(
+    project_dir: &Path,
+    limits: UuidIndexBuildLimits,
+    topology: std::sync::Arc<crate::TopologyFileAuthority>,
+) -> Result<UuidIndexBuildMetrics, GfError> {
+    migrate_uuid_membership_indexes(project_dir, limits, true, Some(topology))
 }
 
 /// Rebuild v4 ordinal identity from canonical topology, never v3 reverse state.
@@ -221,7 +233,7 @@ pub fn rebuild_v4_ordinal_identity_with_evidence(
             // generation record remains the durable transaction's last switch.
             batch.move_staged_destination_to_end(&manifest_path);
             Ok(Some(crate::AuxiliaryReceipt {
-                kind: "uuid-membership/v4".to_owned(),
+                kind: "uuid-membership/ordinal-v6".to_owned(),
                 schema_version: crate::ORDINAL_IDENTITY_V4,
                 path: format!("{INDEX_DIR}/{V4_ORDINAL_RECEIPT}"),
                 digest: hex_sha256(&receipt_bytes),
@@ -332,6 +344,7 @@ fn stage_v4_ordinal_rebuild_locked(
         manifest,
         metrics: v4_metrics,
         publications,
+        ..
     } = writer.finish()?;
     scratch_accounting.register_artifacts(v4_metrics.peak_temporary_bytes)?;
     metrics.node_count = v4_metrics.input_records;
@@ -406,13 +419,28 @@ fn v4_rebuild_evidence(
 /// Ensure the current topology generation has a v3 UUID index before a
 /// topology mutation enters its sealed rewrite callback.
 pub(crate) fn ensure_uuid_membership_migrated(project_dir: &Path) -> Result<(), GfError> {
-    migrate_uuid_membership_indexes(project_dir, UuidIndexBuildLimits::default(), false).map(|_| ())
+    migrate_uuid_membership_indexes(project_dir, UuidIndexBuildLimits::default(), false, None)
+        .map(|_| ())
+}
+
+pub(crate) fn ensure_uuid_membership_migrated_with_topology(
+    project_dir: &Path,
+    topology: Option<std::sync::Arc<crate::TopologyFileAuthority>>,
+) -> Result<(), GfError> {
+    migrate_uuid_membership_indexes(
+        project_dir,
+        UuidIndexBuildLimits::default(),
+        false,
+        topology,
+    )
+    .map(|_| ())
 }
 
 fn migrate_uuid_membership_indexes(
     project_dir: &Path,
     limits: UuidIndexBuildLimits,
     force: bool,
+    topology: Option<std::sync::Arc<crate::TopologyFileAuthority>>,
 ) -> Result<UuidIndexBuildMetrics, GfError> {
     if !force && uuid_membership_index_is_fresh(project_dir)? {
         return Ok(UuidIndexBuildMetrics::default());
@@ -450,7 +478,7 @@ fn migrate_uuid_membership_indexes(
                 &receipt_bytes,
             )?;
             Ok(Some(crate::AuxiliaryReceipt {
-                kind: "uuid-membership/v5".to_owned(),
+                kind: "uuid-membership/v7".to_owned(),
                 schema_version: FORMAT_VERSION,
                 path: format!("{INDEX_DIR}/{TOPOLOGY_RECEIPT}"),
                 digest: hex_sha256(&receipt_bytes),
@@ -458,11 +486,11 @@ fn migrate_uuid_membership_indexes(
                     .map_err(|_| storage_err("receipt length overflow"))?,
             }))
         });
-    crate::generation::commit_topology_aware_with_participant(
-        crate::staging::RewriteBatch::new(),
-        &root,
-        participant,
-    )?;
+    let mut batch = crate::staging::RewriteBatch::new();
+    if let Some(topology) = topology {
+        batch.bind_topology_authority(topology)?;
+    }
+    crate::generation::commit_topology_aware_with_participant(batch, &root, participant)?;
     let result = metrics.borrow_mut().take().unwrap_or_default();
     Ok(result)
 }
@@ -485,7 +513,11 @@ fn stage_uuid_membership_rebuild_locked(
         .tempdir_in(staging)
         .map_err(storage_err)?;
     let mut metrics = UuidIndexBuildMetrics::default();
-    let node_paths = crate::mutator::node_parquet_files(project_dir).map_err(storage_err)?;
+    let files = match batch.topology_authority() {
+        Some(topology) => crate::enumerate_topology_files(topology, None)?,
+        None => crate::TopologyFiles::discover_legacy(project_dir)?,
+    };
+    let node_paths: Vec<_> = files.nodes.iter().map(|(path, _)| path.clone()).collect();
     let node_runs = scan_to_runs(
         &node_paths,
         "node_uuid",
@@ -505,11 +537,11 @@ fn stage_uuid_membership_rebuild_locked(
     )?;
     let node_surrogate_validation_runs =
         scan_node_surrogate_validation_runs(&node_paths, scratch.path(), limits, &mut metrics)?;
-    let mut edge_paths = crate::mutator::edge_parquet_files(project_dir, None)
-        .map_err(storage_err)?
-        .into_iter()
-        .map(|(_, path)| path)
-        .collect::<Vec<_>>();
+    let mut edge_paths: Vec<_> = files
+        .edges
+        .iter()
+        .map(|(_, path, _)| path.clone())
+        .collect();
     edge_paths.sort();
     let edge_runs = scan_to_runs(
         &edge_paths,
@@ -602,9 +634,9 @@ pub(super) fn manifest_generation(project_dir: &Path) -> Result<Option<u64>, GfE
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(storage_err(error)),
     };
-    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(storage_err)?;
+    let manifest = decode_manifest(&bytes)?;
     validate_run_descriptors(&manifest)?;
-    Ok((manifest.format_version == FORMAT_VERSION).then_some(manifest.current_generation))
+    Ok(Some(manifest.current_generation))
 }
 
 fn scan_to_runs(
@@ -621,7 +653,7 @@ fn scan_to_runs(
         if !path.exists() {
             continue;
         }
-        let file = File::open(path).map_err(storage_err)?;
+        let file = crate::graph_admission::open_admitted(path)?;
         let reader = ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(storage_err)?
             .with_batch_size(limits.scan_batch_rows)
@@ -652,10 +684,7 @@ fn scan_to_runs(
     }
     if runs.is_empty() {
         let path = scratch.join(format!("{prefix}-empty.run"));
-        File::create(&path)
-            .map_err(storage_err)?
-            .sync_all()
-            .map_err(storage_err)?;
+        File::create(&path).map_err(storage_err)?;
         runs.push(path);
     }
     Ok(runs)
@@ -701,8 +730,7 @@ pub(super) fn build_identity_run(nodes: &Path, edges: &Path, output: &Path) -> R
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    out.flush().map_err(storage_err)?;
-    out.sync_all().map_err(storage_err)
+    out.flush().map_err(storage_err)
 }
 
 pub(super) fn build_surrogate_run(
@@ -726,9 +754,7 @@ pub(super) fn build_surrogate_run(
     }
     if runs.is_empty() {
         let path = scratch.join("surrogates-empty.run");
-        File::create(&path)
-            .and_then(|file| file.sync_all())
-            .map_err(storage_err)?;
+        File::create(&path).map_err(storage_err)?;
         runs.push(path);
     }
     let mut round = 0;
@@ -766,7 +792,7 @@ fn flush_surrogate_run(
     }
     let mut file = File::create(&path).map_err(storage_err)?;
     file.write_all(&bytes).map_err(storage_err)?;
-    file.sync_all().map_err(storage_err)?;
+    file.flush().map_err(storage_err)?;
     buffer.clear();
     runs.push(path);
     metrics.temporary_runs += 1;
@@ -811,8 +837,7 @@ pub(super) fn merge_surrogate_runs(inputs: &[PathBuf], output: &Path) -> Result<
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    out.flush().map_err(storage_err)?;
-    out.sync_all().map_err(storage_err)
+    out.flush().map_err(storage_err)
 }
 
 pub(super) fn read_surrogate_record(
@@ -864,7 +889,7 @@ fn flush_run(
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    out.sync_all().map_err(storage_err)?;
+    out.flush().map_err(storage_err)?;
     buffer.clear();
     runs.push(path);
     metrics.temporary_runs += 1;
@@ -927,7 +952,7 @@ fn merge_runs(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    out.sync_all().map_err(storage_err)?;
+    out.flush().map_err(storage_err)?;
     Ok(())
 }
 
@@ -944,7 +969,7 @@ fn scan_entity_surrogate_runs(
     let mut runs = Vec::new();
     for path in paths {
         let reader =
-            ParquetRecordBatchReaderBuilder::try_new(File::open(path).map_err(storage_err)?)
+            ParquetRecordBatchReaderBuilder::try_new(crate::graph_admission::open_admitted(path)?)
                 .map_err(storage_err)?
                 .with_batch_size(limits.scan_batch_rows)
                 .build()
@@ -986,10 +1011,7 @@ fn scan_entity_surrogate_runs(
     }
     if runs.is_empty() {
         let path = scratch.join(format!("{prefix}-surrogates-empty.run"));
-        File::create(&path)
-            .map_err(storage_err)?
-            .sync_all()
-            .map_err(storage_err)?;
+        File::create(&path).map_err(storage_err)?;
         runs.push(path);
     }
     Ok(runs)
@@ -1077,10 +1099,7 @@ fn scan_pinned_entity_surrogate_runs(
     }
     if runs.is_empty() {
         let path = scratch.join(format!("{prefix}-surrogates-empty.run"));
-        File::create(&path)
-            .map_err(storage_err)?
-            .sync_all()
-            .map_err(storage_err)?;
+        File::create(&path).map_err(storage_err)?;
         runs.push(path);
     }
     Ok(runs)
@@ -1096,7 +1115,7 @@ fn scan_node_surrogate_validation_runs(
     let mut runs = Vec::new();
     for path in paths {
         let reader =
-            ParquetRecordBatchReaderBuilder::try_new(File::open(path).map_err(storage_err)?)
+            ParquetRecordBatchReaderBuilder::try_new(crate::graph_admission::open_admitted(path)?)
                 .map_err(storage_err)?
                 .with_batch_size(limits.scan_batch_rows)
                 .build()
@@ -1124,10 +1143,7 @@ fn scan_node_surrogate_validation_runs(
     }
     if runs.is_empty() {
         let path = scratch.join("node-surrogate-validation-empty.run");
-        File::create(&path)
-            .map_err(storage_err)?
-            .sync_all()
-            .map_err(storage_err)?;
+        File::create(&path).map_err(storage_err)?;
         runs.push(path);
     }
     Ok(runs)
@@ -1154,7 +1170,7 @@ fn flush_node_surrogate_validation_run(
     if !bytes.is_empty() {
         file.write_all(&bytes).map_err(storage_err)?;
     }
-    file.sync_all().map_err(storage_err)?;
+    file.flush().map_err(storage_err)?;
     buffer.clear();
     runs.push(path);
     metrics.temporary_runs += 1;
@@ -1220,7 +1236,7 @@ fn merge_node_surrogate_validation_group(inputs: &[PathBuf], output: &Path) -> R
     if !bytes.is_empty() {
         out.write_all(&bytes).map_err(storage_err)?;
     }
-    out.sync_all().map_err(storage_err)
+    out.flush().map_err(storage_err)
 }
 
 fn read_validation_surrogate(reader: &mut impl Read) -> Result<Option<u64>, GfError> {
@@ -1248,7 +1264,7 @@ pub(super) fn flush_entity_surrogate_run(
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    out.sync_all().map_err(storage_err)?;
+    out.flush().map_err(storage_err)?;
     buffer.clear();
     runs.push(path);
     metrics.temporary_runs += 1;
@@ -1313,7 +1329,7 @@ fn merge_node_surrogate_group(inputs: &[PathBuf], output: &Path) -> Result<(), G
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    out.sync_all().map_err(storage_err)?;
+    out.flush().map_err(storage_err)?;
     Ok(())
 }
 
@@ -1366,7 +1382,7 @@ pub(super) fn publish_data(
         return Err(storage_err("internal run has a partial index record"));
     }
     let mut input = File::open(source).map_err(storage_err)?;
-    let (sha256, blocks, count) = describe_blocks(&mut input, record_bytes)?;
+    let (sha256, xxh64, blocks, count) = describe_blocks(&mut input, record_bytes)?;
     let name = format!("{kind}-{generation}-{}.uuidx", &sha256[..16]);
     let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
     let target = std::ffi::OsStr::new(&name);
@@ -1387,7 +1403,7 @@ pub(super) fn publish_data(
         let mut install = || -> Result<(), GfError> {
             let mut input = File::open(source).map_err(storage_err)?;
             std::io::copy(&mut input, &mut temp).map_err(storage_err)?;
-            temp.sync_all().map_err(storage_err)?;
+            crate::durable_commit::seal_file(&temp).map_err(storage_err)?;
             match directory.link_child_into(&temp_name, &temp, temp_identity, &directory, target) {
                 Ok(_) => Ok(()),
                 Err(_) => {
@@ -1404,12 +1420,13 @@ pub(super) fn publish_data(
         let result = install();
         let _ = directory.unlink_child_if_identity(&temp_name, temp_identity);
         result?;
-        directory.sync().map_err(storage_err)?;
+        crate::durable_commit::acknowledge_directory(&directory).map_err(storage_err)?;
     }
     Ok(FileRecord {
         name,
         count,
         sha256,
+        xxh64,
         blocks,
     })
 }

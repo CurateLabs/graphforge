@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::Array;
@@ -247,7 +246,8 @@ pub(super) fn run_delete_phase(
     let committed_nodes: HashSet<[u8; 16]> =
         node_targets.difference(&pending_nodes).copied().collect();
     let mut removed_labels = ctx.writer.pending_node_labels(&pending_nodes);
-    let mut committed_labels = persisted_node_labels(env.dir, &committed_nodes)?;
+    let mut committed_labels =
+        persisted_node_labels(&ctx.writer.topology_files()?, &committed_nodes)?;
     for uuid in &committed_nodes {
         let labels = committed_labels.entry(*uuid).or_default();
         if let Some(additions) = ctx.label_additions.get(uuid) {
@@ -259,14 +259,17 @@ pub(super) fn run_delete_phase(
     }
     removed_labels.extend(committed_labels.into_values().flatten());
     if !removed_labels.is_empty() {
-        let surviving_labels = surviving_node_labels(env.dir, &node_targets, ctx)?;
+        let surviving_labels =
+            surviving_node_labels(&ctx.writer.topology_files()?, &node_targets, ctx)?;
         removed_labels.retain(|label| !surviving_labels.contains(label));
     }
     ctx.record_removed_label_tokens(removed_labels);
-    let mut incident: HashSet<[u8; 16]> =
-        graphforge_storage::incident_edge_uuids(env.dir, &committed_nodes)?
-            .into_iter()
-            .collect();
+    let mut incident: HashSet<[u8; 16]> = graphforge_storage::incident_edge_uuids_from_files(
+        &ctx.writer.topology_files()?,
+        &committed_nodes,
+    )?
+    .into_iter()
+    .collect();
     incident.extend(ctx.writer.pending_incident_edge_uuids(&node_targets));
 
     let survivors: Vec<[u8; 16]> = incident
@@ -321,15 +324,15 @@ pub(super) fn run_delete_phase(
 }
 
 fn persisted_node_labels(
-    dir: &Path,
+    files: &graphforge_storage::TopologyFiles,
     targets: &HashSet<[u8; 16]>,
 ) -> Result<HashMap<[u8; 16], HashSet<EntityTypeId>>, GfError> {
     if targets.is_empty() {
         return Ok(HashMap::new());
     }
     let mut found = HashMap::new();
-    for batch in
-        graphforge_storage::read_nodes(dir).map_err(|error| GfError::Storage(error.to_string()))?
+    for batch in graphforge_storage::read_nodes_from_files(files)
+        .map_err(|error| GfError::Storage(error.to_string()))?
     {
         collect_node_label_batch(&batch, Some(targets), &mut found)?;
     }
@@ -337,13 +340,13 @@ fn persisted_node_labels(
 }
 
 fn surviving_node_labels(
-    dir: &Path,
+    files: &graphforge_storage::TopologyFiles,
     deleting: &HashSet<[u8; 16]>,
     ctx: &StatementWriteContext,
 ) -> Result<HashSet<EntityTypeId>, GfError> {
     let mut nodes = HashMap::new();
-    for batch in
-        graphforge_storage::read_nodes(dir).map_err(|error| GfError::Storage(error.to_string()))?
+    for batch in graphforge_storage::read_nodes_from_files(files)
+        .map_err(|error| GfError::Storage(error.to_string()))?
     {
         collect_node_label_batch(&batch, None, &mut nodes)?;
     }
@@ -489,10 +492,20 @@ fn resolve_property_write_batch(
         captured = AuthenticatedPropertyInventory::capture(env.dir)?;
         &captured
     };
+    let observe = graphforge_storage::lifecycle_io::is_active();
     if col.is_edge {
-        let work =
-            graphforge_storage::resolve_existing_edge_property_owners(inventory, &mut committed)?;
-        crate::demand::record_edge_owner_work(&work, committed.len());
+        if observe {
+            let work = graphforge_storage::resolve_existing_edge_property_owners(
+                inventory,
+                &mut committed,
+            )?;
+            crate::demand::record_edge_owner_work(&work, committed.len());
+        } else {
+            graphforge_storage::resolve_existing_edge_property_owner_data(
+                inventory,
+                &mut committed,
+            )?;
+        }
     }
     let mut routes: BTreeMap<String, BTreeSet<[u8; 16]>> = BTreeMap::new();
     for (uuid, stem) in committed {
@@ -508,10 +521,18 @@ fn resolve_property_write_batch(
         PropertyRouteKind::Node
     };
     for (route, targets) in routes {
-        let (rows, work) = graphforge_storage::read_authenticated_property_snapshots_for_inventory(
-            inventory, kind, &route, &targets,
-        )?;
-        crate::demand::record_replacement_key_work(&work, targets.len());
+        let rows = if observe {
+            let (rows, work) =
+                graphforge_storage::read_authenticated_property_snapshots_for_inventory(
+                    inventory, kind, &route, &targets,
+                )?;
+            crate::demand::record_replacement_key_work(&work, targets.len());
+            rows
+        } else {
+            graphforge_storage::read_authenticated_property_snapshot_data_for_inventory(
+                inventory, kind, &route, &targets,
+            )?
+        };
         for (uuid, row) in rows {
             keys.insert(uuid, row.values.into_keys().collect());
         }

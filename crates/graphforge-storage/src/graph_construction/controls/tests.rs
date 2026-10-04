@@ -6,7 +6,7 @@ use tempfile::TempDir;
 
 #[test]
 fn unsupported_or_incomplete_checkpoint_is_refused_before_recovery_mutation() {
-    for case in [0, 6, 7, 8, 9, 11, FORMAT_VERSION] {
+    for case in [0, 6, 7, 8, 9, 10, FORMAT_VERSION] {
         let root = TempDir::new().unwrap();
         let operation = Uuid::new_v4();
         let mut session = open(&root, operation.as_u128());

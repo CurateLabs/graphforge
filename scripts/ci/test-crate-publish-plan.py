@@ -95,15 +95,16 @@ assert names.index("graphforge-ast") < names.index("graphforge-ir")
 assert names.index("graphforge-filesystem") < names.index("graphforge-storage")
 assert names.index("graphforge-storage") < names.index("graphforge-api")
 assert names.index("graphforge-observability") < names.index("graphforge-api")
+assert names.index("graphforge-discovery") < names.index("graphforge-hub-publish")
 
 checked = run("check")
 assert checked.returncode == 0, checked.stderr
-assert "20 crates" in checked.stdout
+assert "21 crates" in checked.stdout
 
 dry = run("dry-run-commands")
 assert dry.returncode == 0, dry.stderr
 commands = [line for line in dry.stdout.splitlines() if line]
-assert len(commands) == 20, commands
+assert len(commands) == 21, commands
 assert any(command.startswith("cargo publish -p graphforge-value ") for command in commands)
 assert any(command.startswith("cargo publish -p graphforge-observability ") for command in commands)
 assert commands[0].startswith("cargo publish -p graphforge-core ")
@@ -112,11 +113,7 @@ assert commands[-1].startswith("cargo publish -p graphforge-cli ")
 # --- Release inventories must not diverge from the publish plan (#1373) -------
 # Every hand-maintained crates.io inventory is compared against the plan here so
 # that adding a crate cannot silently leave a release gate behind.
-INVENTORIES = (
-    (ROOT / "scripts" / "ci" / "release_candidate_manifest.py", "CRATES"),
-    (ROOT / "scripts" / "ci" / "clean-env-verify.py", "DEFAULT_CRATES"),
-    (ROOT / "scripts" / "verify_package_licenses.py", "CARGO_PUBLISH_CRATES"),
-)
+INVENTORIES = ((ROOT / "scripts" / "verify_package_licenses.py", "CARGO_PUBLISH_CRATES"),)
 
 for script, attribute in INVENTORIES:
     inventory_module = load_named_module(script)

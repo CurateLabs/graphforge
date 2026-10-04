@@ -31,7 +31,7 @@ package classes, older-reader behavior, typed negative results, and operational
 non-mutation invariants. It deliberately contains no runtime identity or TCK
 result in the composition identity.
 
-`m9-interchange-cases.json` is the versioned Rust conformance ledger for #841.
+`multi-ontology-interchange-cases.json` is the versioned Rust conformance ledger for #841.
 It freezes the four package classes, both representations, cross-form receipts,
 semantic tamper and future-feature ordering, and the durable non-authoritative
 staging replay/conflict/cancellation/failure matrix.
@@ -43,6 +43,19 @@ by the same-build `gf --json portable verify --mode full` and `--mode inspect`
 commands; `structure_only` is the binding/API spelling of inspect mode. The CLI
 integration test independently compares both actual facade and CLI results to
 this golden. Native Python and Node tests compare every field, using an explicit
-Node naming/BigInt adapter with safe-integer roundtrip checks. Nonempty composition
-and projected preview entries are separately exercised against actual exported
-multi-ontology packages in the native lifecycle suites.
+Node naming/BigInt adapter with safe-integer roundtrip checks. The bundle carries
+a one-module ontology composition; bridge sets and projected preview entries are
+separately exercised against actual exported multi-ontology packages in the
+native lifecycle suites.
+
+Regenerate the receipts whenever the Hub fixture bundle changes. After
+`generate_hub_fixture -- --update` (see `tests/fixtures/hub/README.md`), copy the
+bundle to a private directory, run both commands against the copy, and store the
+results under the keys `full` and `structure_only`. The Rust, Python, and Node
+tests compare receipt values, not bytes, so pretty-printing the compact
+`gf --json` output is not a hand edit:
+
+```bash
+gf --json portable verify --mode full --input <copy of openalex-openalex.gfpb>
+gf --json portable verify --mode inspect --input <copy of openalex-openalex.gfpb>
+```

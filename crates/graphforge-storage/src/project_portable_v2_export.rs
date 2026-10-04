@@ -1,5 +1,7 @@
 //! Bounded deterministic portable-project v2 complete-package export.
 
+#[cfg(test)]
+use graphforge_filesystem::ObservedSync as _;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(windows)]
 use std::fs::OpenOptions;
@@ -7,15 +9,13 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::{
-    PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2Mode, PortableV2PackageClass,
-    verify_portable_v2,
-};
+use crate::{PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2PackageClass};
 use uuid::Uuid;
 pub(crate) mod planning;
 mod transport;
 use planning::{inspect, package_class};
 pub use planning::{plan_complete_portable_v2, plan_selected_portable_v2};
+pub(crate) use transport::WrittenPackage;
 use transport::{bundle, entries, expanded};
 
 type ExportError = PortableV2Error;
@@ -35,6 +35,7 @@ struct PlannedFile {
     path: String,
     length: u64,
     digest: [u8; 32],
+    checksum: Option<u64>,
 }
 #[derive(Debug, Clone)]
 enum PlannedSource {
@@ -303,7 +304,7 @@ pub fn export_complete_portable_v2_with_allocation(
             &mut allocation,
         ),
     };
-    let digest = match result {
+    let written = match result {
         Ok(d) => d,
         Err(e) => {
             allocation.remove(&stage);
@@ -318,24 +319,29 @@ pub fn export_complete_portable_v2_with_allocation(
         return Err(err("GF_CANCELLED", "portable export cancelled")
             .with_allocation_identities(staged_allocation));
     }
-    let verified =
-        verify_written_export(plan, &stage, digest, limits, cancelled).map_err(|error| {
+    // Retain the same native artifact across physical checksum verification
+    // and namespace publication, rather than admitting a fresh stage inode.
+    let stage_authority = RetainedExportStage::open(&stage).map_err(|error| {
+        allocation.remove(&stage);
+        error.with_allocation_identities(staged_allocation.clone())
+    })?;
+    let verified = match verify_written_export(plan, &stage, &written, limits, cancelled) {
+        Ok(verified) => verified,
+        Err(error) => {
+            drop(stage_authority);
             allocation.remove(&stage);
-            error.with_allocation_identities(staged_allocation.clone())
-        })?;
-    publish_no_replace(&stage, dst).map_err(|error| {
+            return Err(error.with_allocation_identities(staged_allocation));
+        }
+    };
+    stage_authority.publish(&stage, dst).map_err(|error| {
         allocation.remove(&stage);
         storage(error).with_allocation_identities(staged_allocation.clone())
     })?;
     allocation.published(&stage, dst)?;
-    if let Err(error) = sync_dir(parent) {
-        allocation.remove(dst);
-        return Err(error.with_allocation_identities(staged_allocation));
-    }
     Ok(PortableV2ExportReceipt {
         generation_uuid: plan.generation_uuid,
         package_digest: plan.package_digest,
-        transport_digest: digest,
+        transport_digest: written.digest(),
         entry_count: usize::try_from(verified.entry_count)
             .map_err(|_| limit("verified entry count exceeds platform capacity"))?,
         payload_bytes: plan.payload_bytes,
@@ -347,15 +353,56 @@ pub fn export_complete_portable_v2_with_allocation(
     })
 }
 
+enum RetainedExportStage {
+    File(File),
+    Directory(graphforge_filesystem::StableDirectory),
+}
+impl RetainedExportStage {
+    fn open(path: &Path) -> Result<Self, ExportError> {
+        let metadata = fs::symlink_metadata(path).map_err(storage)?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            return graphforge_filesystem::StableDirectory::open(path)
+                .map(Self::Directory)
+                .map_err(storage);
+        }
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(err(
+                "GF_UNSUPPORTED_ENTRY_TYPE",
+                "export stage is not a regular artifact",
+            ));
+        }
+        open_source_no_follow(path).map(Self::File)
+    }
+    fn publish(self, source: &Path, destination: &Path) -> std::io::Result<()> {
+        let expected = match &self {
+            Self::File(file) => graphforge_filesystem::file_identity(file)?,
+            Self::Directory(directory) => directory.identity(),
+        };
+        // Windows directory authorities exclude deletion; carry the admitted
+        // native identity across that required close, never a fresh path ID.
+        #[cfg(windows)]
+        drop(self);
+        crate::durable_commit::promote_no_replace_authenticated(
+            source,
+            destination,
+            expected,
+            || Ok(()),
+            || Ok(()),
+        )
+        .map_err(|failure| failure.cause)
+    }
+}
+
 fn verify_written_export(
     plan: &PortableV2ExportPlan,
     stage: &Path,
-    digest: [u8; 32],
+    written: &WrittenPackage,
     limits: PortableV2ExportLimits,
     cancelled: &AtomicBool,
 ) -> Result<crate::PortableV2Report, ExportError> {
-    let verified = verify_portable_v2(stage, PortableV2Mode::Full, limits, Some(cancelled))?;
-    let expected_transport = format!("sha256:{}", hex(digest));
+    let verified =
+        crate::project_portable_v2::verify_written_package(stage, limits, cancelled, written)?;
+    let expected_transport = format!("sha256:{}", hex(written.digest()));
     if verified.package_class != plan.package_class
         || verified.package_digest != format!("sha256:{}", hex(plan.package_digest))
     {
@@ -647,25 +694,8 @@ fn reject_destination(p: &Path) -> Result<(), ExportError> {
     }
     Ok(())
 }
-pub(crate) fn publish_no_replace(stage: &Path, destination: &Path) -> std::io::Result<()> {
-    graphforge_filesystem::rename_no_replace(stage, destination)
-}
-fn sync_dir(p: &Path) -> Result<(), ExportError> {
-    sync_directory_handle(p).map_err(storage)
-}
-#[cfg(not(windows))]
-fn sync_directory_handle(p: &Path) -> std::io::Result<()> {
-    File::open(p)?.sync_all()
-}
-#[cfg(windows)]
-fn sync_directory_handle(p: &Path) -> std::io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt as _;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    OpenOptions::new()
-        .write(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(p)?
-        .sync_all()
+fn sync_dir(path: &Path) -> Result<(), ExportError> {
+    crate::durable_commit::sync_directory(path).map_err(storage)
 }
 fn remove(p: &Path) {
     if p.is_dir() {
@@ -707,18 +737,24 @@ fn storage(e: impl std::fmt::Display) -> ExportError {
 
 #[cfg(test)]
 mod tests {
+    mod historical_saved_queries;
+    mod participant_files;
+    mod saved_queries;
     mod semantic_refusals;
     use super::planning::exact_identity;
     use super::transport::open_planned_source;
     use super::*;
+    use crate::concurrency_attribution::ObservedSha256 as Sha256;
     use crate::project_portable_v2::{
         PortableV2ExactIdentity, PortableV2OntologyComposition, canonical_json,
     };
+    #[cfg(test)]
+    use crate::project_portable_v2::{PortableV2Mode, verify_portable_v2};
     use crate::{
         PortableV2SelectionProfile, PortableV2SelectionRequest, ResolvedProjectGeneration,
         preview_portable_v2_selection,
     };
-    use sha2::{Digest, Sha256};
+    use sha2::Digest;
     use std::io::{Read, Write};
 
     #[test]
@@ -801,15 +837,34 @@ mod tests {
     fn graph_generation_with_composition(
         include_composition: bool,
     ) -> (tempfile::TempDir, ResolvedProjectGeneration) {
+        graph_generation_with_metadata(include_composition, None)
+    }
+
+    fn graph_generation_with_metadata(
+        include_composition: bool,
+        extra: Option<crate::ProjectParticipant>,
+    ) -> (tempfile::TempDir, ResolvedProjectGeneration) {
         let project = tempfile::tempdir().unwrap();
         let parent = open_or_initialize_project(project.path()).unwrap();
         let tree = tempfile::tempdir().unwrap();
         fs::write(tree.path().join("a.parquet"), b"graph-a").unwrap();
         fs::create_dir(tree.path().join("properties")).unwrap();
-        let properties = RecordBatch::try_from_iter(vec![(
-            "name",
-            std::sync::Arc::new(StringArray::from(vec!["person"])) as arrow::array::ArrayRef,
-        )])
+        let property_schema = std::sync::Arc::new(arrow::datatypes::Schema::new(vec![
+            crate::schemas::uuid_field("node_uuid"),
+            arrow::datatypes::Field::new("name", arrow::datatypes::DataType::Utf8, true),
+        ]));
+        let properties = RecordBatch::try_new(
+            property_schema,
+            vec![
+                std::sync::Arc::new(
+                    arrow::array::FixedSizeBinaryArray::try_from_iter(std::iter::once(
+                        graphforge_core::uuid::new_v7().into_bytes(),
+                    ))
+                    .unwrap(),
+                ),
+                std::sync::Arc::new(StringArray::from(vec!["person"])),
+            ],
+        )
         .unwrap();
         let mut writer = ArrowWriter::try_new(
             fs::File::create(tree.path().join("properties/Person.parquet")).unwrap(),
@@ -843,6 +898,13 @@ mod tests {
                 .unwrap()
                 .unwrap();
             participants.push(composition.to_project_participant().unwrap());
+            participants.sort_by(|left, right| {
+                (&left.capability_id, &left.record_family_id)
+                    .cmp(&(&right.capability_id, &right.record_family_id))
+            });
+        }
+        if let Some(extra) = extra {
+            participants.push(extra);
             participants.sort_by(|left, right| {
                 (&left.capability_id, &left.record_family_id)
                     .cmp(&(&right.capability_id, &right.record_family_id))
@@ -1250,6 +1312,164 @@ mod tests {
     }
 
     #[test]
+    fn captured_export_has_one_transport_hash_and_refuses_written_corruption() {
+        use graphforge_core::hash_observation::operation::Capture;
+        let (_project, generation) = graph_generation_with_composition(true);
+        let limits = PortableV2ExportLimits::default();
+        let plan = plan_complete_portable_v2(&generation, limits).unwrap();
+        for output in [PortableV2Output::Expanded, PortableV2Output::Bundle] {
+            let root = tempfile::tempdir().unwrap();
+            let stage = root.path().join("written");
+            let mut allocation = ExportAllocationObserver::default();
+            let capture = Capture::start();
+            let written = match output {
+                PortableV2Output::Expanded => expanded(
+                    &plan,
+                    &stage,
+                    limits,
+                    &|| false,
+                    &mut |_| {},
+                    &mut allocation,
+                ),
+                PortableV2Output::Bundle => bundle(
+                    &plan,
+                    &stage,
+                    limits,
+                    &|| false,
+                    &mut |_| {},
+                    &mut allocation,
+                ),
+            }
+            .unwrap();
+            let report =
+                verify_written_export(&plan, &stage, &written, limits, &AtomicBool::new(false))
+                    .unwrap();
+            let observed = capture.snapshot();
+            drop(capture);
+            let transport_bytes = if output == PortableV2Output::Bundle {
+                fs::metadata(&stage).unwrap().len()
+            } else {
+                0
+            };
+            assert_eq!(
+                observed.portable_authentication_sha256_bytes,
+                transport_bytes
+            );
+            assert_eq!(observed.artifact_payload_sha256_bytes, 0);
+            assert_eq!(observed.unclassified_sha256_bytes, 0);
+            assert!(observed.checksum_bytes >= report.payload_bytes);
+            // The public verifier remains a full cryptographic trust boundary.
+            let capture = Capture::start();
+            let public = verify_portable_v2(&stage, PortableV2Mode::Full, limits, None).unwrap();
+            let authenticated = capture.snapshot();
+            drop(capture);
+            assert_eq!(
+                authenticated.portable_authentication_sha256_bytes,
+                public.payload_bytes + transport_bytes
+            );
+            assert_eq!(public.package_digest, report.package_digest);
+            assert_eq!(public.transport_digest, report.transport_digest);
+            let path = if output == PortableV2Output::Bundle {
+                stage.clone()
+            } else {
+                stage.join(&plan.files[0].path)
+            };
+            let before = fs::metadata(&path).unwrap();
+            let mut bytes = fs::read(&path).unwrap();
+            let last = bytes.len() - 1;
+            bytes[last] ^= 1;
+            fs::write(&path, bytes).unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(before.modified().unwrap())
+                .unwrap();
+            assert!(
+                verify_written_export(&plan, &stage, &written, limits, &AtomicBool::new(false))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn public_export_refuses_completed_stage_corruption_from_progress_callback() {
+        let (project, generation) = graph_generation_with_composition(true);
+        let current = fs::read(project.path().join("CURRENT")).unwrap();
+        let limits = PortableV2ExportLimits::default();
+        let plan = plan_complete_portable_v2(&generation, limits).unwrap();
+        let member = plan
+            .files
+            .iter()
+            .find(|file| file.path.ends_with("/a.parquet"))
+            .unwrap();
+        for output in [PortableV2Output::Expanded, PortableV2Output::Bundle] {
+            let root = tempfile::tempdir().unwrap();
+            let destination = root.path().join("exported");
+            let mut injected = false;
+            let result = export_complete_portable_v2(
+                &plan,
+                &destination,
+                output,
+                limits,
+                &AtomicBool::new(false),
+                |progress| {
+                    if injected || progress.entries_completed != progress.entries_total {
+                        return;
+                    }
+                    let mut stages = fs::read_dir(root.path())
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path())
+                        .filter(|path| {
+                            path.file_name()
+                                .unwrap()
+                                .to_string_lossy()
+                                .ends_with(".partial")
+                        });
+                    let stage = stages.next().unwrap();
+                    assert!(stages.next().is_none());
+                    let path = if output == PortableV2Output::Expanded {
+                        stage.join(&member.path)
+                    } else {
+                        stage
+                    };
+                    let before = fs::metadata(&path).unwrap();
+                    let identity = graphforge_filesystem::path_identity(&path).unwrap();
+                    let mut bytes = fs::read(&path).unwrap();
+                    let position = bytes
+                        .windows(b"graph-a".len())
+                        .position(|bytes| bytes == b"graph-a")
+                        .expect("the completed graph member was written");
+                    bytes[position] ^= 1;
+                    fs::write(&path, bytes).unwrap();
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open(&path)
+                        .unwrap()
+                        .set_modified(before.modified().unwrap())
+                        .unwrap();
+                    let after = fs::metadata(&path).unwrap();
+                    assert_eq!(after.len(), before.len());
+                    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+                    assert_eq!(
+                        graphforge_filesystem::path_identity(&path).unwrap(),
+                        identity
+                    );
+                    injected = true;
+                },
+            );
+            assert!(injected, "{output:?}");
+            assert_eq!(
+                result.unwrap_err().code,
+                PortableV2ErrorCode::DigestMismatch
+            );
+            assert!(!destination.exists());
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+            assert_eq!(fs::read(project.path().join("CURRENT")).unwrap(), current);
+        }
+    }
+
+    #[test]
     fn export_failed_partial_write_is_observed_before_cleanup() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("partial");
@@ -1261,7 +1481,7 @@ mod tests {
         };
         allocation.register(&path, &file).unwrap();
         file.write_all(&vec![1_u8; 32768]).unwrap();
-        file.sync_all().unwrap();
+        file.observed_sync_all().unwrap();
         let actual = graphforge_filesystem::file_space_usage(&file)
             .unwrap()
             .allocated_bytes;
@@ -1483,6 +1703,7 @@ mod tests {
             path: evidence_path.into(),
             length: evidence_bytes.len() as u64,
             digest: evidence_digest,
+            checksum: Some(crate::corruption_checksum::checksum(&evidence_bytes)),
         });
         with_evidence
             .files
@@ -1724,12 +1945,12 @@ mod tests {
     #[test]
     fn versioned_m9_interchange_ledger_covers_required_matrix() {
         let ledger: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/portable-v2/m9-interchange-cases.json"
+            "../../../tests/fixtures/portable-v2/multi-ontology-interchange-cases.json"
         ))
         .unwrap();
         assert_eq!(
             ledger["contract"],
-            "graphforge-portable-v2-m9-interchange-cases/1"
+            "graphforge-portable-v2-multi-ontology-interchange-cases/1"
         );
         assert_eq!(
             ledger["representations"],

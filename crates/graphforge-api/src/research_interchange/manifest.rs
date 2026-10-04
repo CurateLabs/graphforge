@@ -32,10 +32,7 @@ pub(super) fn build(
     let mut genealogy = BTreeMap::new();
     let mut identities = BTreeMap::new();
     for version in versions.values() {
-        cite(registry, &mut identities, version.version_uuid)?;
-        if let Some(source) = version.content.source_version {
-            cite(registry, &mut identities, source)?;
-        }
+        cite_version(registry, &mut identities, version)?;
         let mut branch = registry.historical_branch(version.context_uuid);
         while let Some(record) = branch {
             if genealogy
@@ -88,6 +85,7 @@ pub(super) fn build(
                 .and_then(|id| registry.historical_branch(id));
         }
     }
+    let ancestry = descent(registry, &versions, &mut identities, cancellation)?;
     let version_projects = project_citations(owner, registry, &versions)?;
     let source_project_uuid = version_projects[&selected.version_uuid];
     let manifest = ResearchInterchangeManifest {
@@ -107,12 +105,54 @@ pub(super) fn build(
         versions,
         version_projects,
         identities,
+        ancestry,
         genealogy,
         accepted: proofs.accepted.clone(),
         proof_exports: proofs.exports.clone(),
     };
     manifest.validate()?;
     Ok(manifest)
+}
+
+/// The closure's recorded ancestry, citing every ancestor's identity, so descent
+/// stays walkable after import.
+fn descent(
+    registry: &ResearchRegistry,
+    versions: &BTreeMap<Uuid, ResearchVersionRecord>,
+    identities: &mut BTreeMap<Uuid, [u8; 32]>,
+    cancellation: &CancellationToken,
+) -> Result<BTreeMap<Uuid, Vec<Uuid>>, GfError> {
+    let mut ancestry = BTreeMap::new();
+    let mut pending: Vec<_> = versions.keys().copied().collect();
+    while let Some(id) = pending.pop() {
+        cancellation.checkpoint()?;
+        if let Some(parents) = registry.ancestry.get(&id)
+            && !ancestry.contains_key(&id)
+        {
+            for parent in parents {
+                cite(registry, identities, *parent)?;
+            }
+            pending.extend(parents.iter().copied());
+            ancestry.insert(id, parents.clone());
+        }
+    }
+    Ok(ancestry)
+}
+
+/// Cite the Version and its content and operation provenance independently of ancestry.
+fn cite_version(
+    registry: &ResearchRegistry,
+    identities: &mut BTreeMap<Uuid, [u8; 32]>,
+    version: &ResearchVersionRecord,
+) -> Result<(), GfError> {
+    cite(registry, identities, version.version_uuid)?;
+    if let Some(source) = version.content.source_version {
+        cite(registry, identities, source)?;
+    }
+    if let Some(provenance) = &version.provenance {
+        cite(registry, identities, provenance.version_uuid())?;
+    }
+    Ok(())
 }
 
 fn cite(

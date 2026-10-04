@@ -1,12 +1,13 @@
 //! OCI Distribution protocol, bounded HTTP transport, and authenticity.
 #![allow(missing_docs)]
+use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use graphforge_core::portable::{
     PortableV2Error, PortableV2ErrorCode, PortableV2OciAuthenticityPolicy, PortableV2OciPhase,
     PortableV2OciProgress, PortableV2OciSignatureMaterial, PortableV2OciSignatureState,
     PortableV2PackageClass,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -778,7 +779,7 @@ pub fn authenticity_error(state: PortableV2OciSignatureState) -> PortableV2Error
 }
 
 fn signature_mac(secret: &[u8], signer: &str, subject: &str, package_digest: &str) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = graphforge_core::hash_observation::ControlSha256::new();
     hasher.update(b"graphforge-oci-sig/1\0");
     hasher.update(secret);
     hasher.update(b"\0");

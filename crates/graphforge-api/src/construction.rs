@@ -130,13 +130,18 @@ impl GraphForge {
         // allocation, flush, and publication (see #704).
         let _visibility = self.graph_visibility.lock()?;
         let prior = crate::graph_snapshot::capture(&self.dir())?;
+        let prior_topology = self.dir().topology_files()?;
         let expected_generation = *self
             .current_generation_uuid
             .lock()
             .expect("generation UUID lock poisoned");
         let now = (self.clock.lock().expect("clock lock poisoned"))()?;
-        let mut writer =
-            graphforge_storage::GraphWriter::open_at(&self.dir(), self.ontology_mode, now)?;
+        let mut writer = graphforge_storage::GraphWriter::open_at_with_topology(
+            &self.dir(),
+            self.ontology_mode,
+            now,
+            Some(std::sync::Arc::clone(&self.dir().topology)),
+        )?;
         writer
             .register_existing_endpoints(&[src_uuid, dst_uuid])
             .map_err(|error| match error {
@@ -180,6 +185,7 @@ impl GraphForge {
                 == expected_generation;
             if still_prior {
                 crate::graph_snapshot::restore(&prior.bytes, &self.dir())?;
+                self.dir().topology.restore(prior_topology);
                 self.adjacency_provider_for_session().invalidate();
             }
             return Err(error);
@@ -384,11 +390,13 @@ mod tests {
         let source = graph.add_node("Person", &HashMap::new()).unwrap();
         let target = graph.add_node("Person", &HashMap::new()).unwrap();
 
+        let _io_capture = graphforge_storage::io_stats::CaptureScope::install();
+
         graphforge_storage::io_stats::reset();
         graph
             .add_edge(&source, "KNOWS", &target, &HashMap::new())
             .unwrap();
-        let io = graphforge_storage::io_stats::snapshot();
+        let io = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
         assert_eq!(io.node_full_reads, 0, "endpoint resolution decoded nodes");
         assert_eq!(io.edge_full_reads, 0, "endpoint resolution decoded edges");
     }

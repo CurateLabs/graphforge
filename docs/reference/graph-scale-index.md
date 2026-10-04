@@ -8,13 +8,11 @@ operational boundaries. Use it to label fixtures, compare workload classes, and
 frame performance investigations without ambiguous “N million nodes” claims.
 
 GSI describes **dataset shape** (directedness + node band + density). It is
-complementary to GraphForge’s product [scale limits](scale-limits.md) and the
-release [load-matrix taxonomy](../development/release-load-matrix.md)
-(`tests/contracts/load-dataset-taxonomy.json`).
+complementary to GraphForge’s product [scale limits](scale-limits.md).
 
 **Nomenclature rule:** when docs discuss profiling, benchmarking, or performance
 classes for a graph, prefer a full GSI (`GU-03-XS-D01`, `GD-05-SM-D00`, or
-`Gx-00-XS-D00`). Do not reuse load-matrix size letters (`S`, `M`, `L`) as if they
+`Gx-00-XS-D00`). Do not reuse bare size letters (`S`, `M`, `L`) as if they
 were GSI Size Tags — only GSI Size Tags are `XS`, `SM`, `MD`, `LG`, `XL`,
 `2XL`–`5XL`, and `BIG`.
 
@@ -99,8 +97,7 @@ Choose `GU`, `GD`, or `Gx` first — that choice selects the formula below.
 When `V < 2` (including empty and singleton graphs), density is `D00` — there is
 no complete-graph denominator.
 
-Self-loops are excluded from the complete-graph denominator (same convention as
-the load-matrix density formula).
+Self-loops are excluded from the complete-graph denominator.
 
 ### Integer normalization
 
@@ -256,24 +253,6 @@ those bands. Measured LIMIT contracts and edge-bound full scans remain in
 [scale limits](scale-limits.md). Escalation past Levels 01–06 is a
 **spec + external harness** track — see [Scale Evaluation](scale-evaluation.md).
 
-### Load-matrix size-class crosswalk
-
-The release load matrix uses its own size letters for synthetic CI fixtures.
-Those IDs are **not** GSI Size Tags. Matrix density is directed, so profile
-fixtures with a `GD-…` GSI. Approximate node-band mapping:
-
-| Load-matrix size | Node band (taxonomy) | Typical GSI Scale Code / Size Tag |
-|---|---|---|
-| `XS` | 16–31 | `01` / `XS` |
-| `S` | 64–127 | `01`–`02` / `XS` |
-| `M` | 256–511 | `02` / `XS` |
-| `L` | 1,024–2,047 | `03` / `XS` |
-| `XL` | 4,096–8,191 | `03` / `XS` |
-
-Matrix `sparse` (density ≤ 0.08) maps to GSI **D00–D08**; matrix `dense`
-(density ≥ 0.10) maps to **D10+**. Always emit the full GSI when profiling a
-concrete fixture (for example `GD-03-XS-D12`), not the bare matrix letter.
-
 ### Example profiles
 
 | Dataset / fixture | V / E (approx.) | GSI |
@@ -296,8 +275,6 @@ concrete fixture (for example `GD-03-XS-D12`), not the bare matrix letter.
 - [Official-parameter SCALE-20 client](../development/perf-g500-scale20.md) — in-tree public-facade engineering green (not Official-track)
 - [Scale Limits](scale-limits.md) — GraphForge product envelopes and fixed-hop LIMIT contract
 - [LDBC full suite](../guide/datasets/ldbc.md) — SNB, Graphalytics, FinBench, SPB (spec-level)
-- [Standardized Release Load Matrix](../development/release-load-matrix.md) — CI size/density taxonomy (distinct from GSI)
-- [Load Matrix Results](load-matrix-results.md) — accepted matrix evidence
 - [Datasets overview](../guide/datasets/overview.md) — planned public dataset catalogs
 - [Graph500 benchmark specification](https://graph500.org/?page_id=12) — SCALE / edgefactor definition
 - [Graph Data Council / LDBC](https://ldbcouncil.org/) — official benchmark suite home

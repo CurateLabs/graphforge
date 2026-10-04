@@ -5,8 +5,8 @@ use super::{
 };
 use crate::{CancellationToken, GfError, GraphForge, slices::branch};
 use graphforge_storage::research_versions::{
-    RegisterResearchVersion, ResearchMutation, ResearchOperationReceipt, prepare_branch_content,
-    replace_prepared_branch_domains,
+    RegisterResearchVersion, ResearchMutation, ResearchOperationReceipt, ResearchVersionProvenance,
+    prepare_branch_content, replace_prepared_branch_domains,
 };
 use std::collections::BTreeSet;
 use uuid::Uuid;
@@ -36,6 +36,8 @@ impl GraphForge {
         let active = selected.active.clone();
         let source_version = selected.version.version_uuid;
         let mut spec = RegisterResearchVersion {
+            author: None,
+            committer: None,
             version_uuid: Uuid::now_v7(),
             context_uuid: Uuid::now_v7(),
             source_generation_uuid: selected.version.content.generation_uuid,
@@ -60,6 +62,16 @@ impl GraphForge {
         import_graph::incorporate(&destination, &source, cancellation)?;
         version.version_uuid = request.version_uuid;
         version.created_at = request.created_at;
+        let parents = std::mem::take(&mut version.parents);
+        publication::commit(
+            &mut version,
+            parents,
+            request.author.as_ref(),
+            request.committer.as_ref(),
+            Some(ResearchVersionProvenance::Brought {
+                version_uuid: source_version,
+            }),
+        )?;
         let generation = destination.generation_for_read()?;
         let mut prepared =
             prepare_branch_content(&command.root, &generation, version, cancellation.flag())?;

@@ -1172,9 +1172,9 @@ The M4 harness executes contract cells `threads-1` / `2` / `4` / `8` /
 
 ```bash
 export CARGO_TARGET_DIR=/tmp/gf-m4-337-target
-cargo test -p graphforge-api --test m4_entry_baseline \
+cargo test -p graphforge-api --test embedded_performance_baseline \
   thread_parity_matrix_executes_under_resource_policy -- --nocapture
-make m4-entry-matrix-check
+cargo test -p graphforge-api --test embedded_performance_baseline -- --nocapture
 ```
 
 Configurations that exceed the host concurrency budget are recorded
@@ -1187,4 +1187,4 @@ counts.
 - [M4 Entry Baseline](m4-entry-baseline.md)
 - [Dijkstra all-pairs source parallelism evidence](dijkstra-all-pairs-parallel-evidence.md)
 - [Scale Limits](../reference/scale-limits.md)
-- Contract: [`tests/contracts/m4-entry-matrix.json`](../../tests/contracts/m4-entry-matrix.json)
+- Contract: [`tests/contracts/embedded-performance-matrix.json`](../../tests/contracts/embedded-performance-matrix.json)

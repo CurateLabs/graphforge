@@ -12,19 +12,25 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use graphforge_core::GfError;
+#[cfg(test)]
+use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use graphforge_ontology::{
     ActivationMode, ActivationRecord, ActivationScope, AuthoredModule, BridgeSetId,
     CompositionLimits, InventoryCompileRequest, OntologyModuleId, compile_inventory,
 };
-use sha2::{Digest, Sha256};
+#[cfg(test)]
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::project_portable::{prepare_import_target, semantically_pristine_generation};
 use crate::project_portable_v2::{
-    PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2PackageClass,
-    PortableV2Report, RUNTIME_MAP_PATH, decode_runtime_map, materialize_verified_portable_v2,
+    CapturedCompositionControl, PortableV2Error, PortableV2ErrorCode, PortableV2Limits,
+    PortableV2PackageClass, PortableV2Report, RUNTIME_MAP_PATH, decode_runtime_map,
+    materialize_verified_portable_v2, persist_composition_authority, persist_staged_composition,
 };
-mod adjacency;
+pub(crate) mod adjacency;
+mod materialized_graph;
+use materialized_graph::prepare_compact_import_graph_with_allocation;
 mod allocation;
 use allocation::{capture_import_tree, record_import_file_identity};
 mod outcome;
@@ -124,7 +130,7 @@ pub fn consume_selective_portable_v2<T>(
     let (ontology, staged_composition) = if report.ontology_composition.is_some() {
         let (candidate, receipt) = build_staged_composition(&stage, &report, limits, None)?;
         let bytes = read_bounded_payload(
-            &candidate.source,
+            &candidate.participant.source,
             limits.max_manifest_bytes,
             "selective staged composition",
         )?;
@@ -316,6 +322,7 @@ fn import_complete_portable_v2_native(
         report,
         materialization_read_bytes,
         materialization_read_operations,
+        captures,
         stage_identity: materialized_stage_identity,
         entry_count,
     } = materialize_owned_import(
@@ -346,6 +353,7 @@ fn import_complete_portable_v2_native(
         limits,
         cancelled,
         &report,
+        &captures,
         owned_retry,
         allocation,
         &mut added_stage_entries,
@@ -446,6 +454,7 @@ struct OwnedMaterialization {
     report: PortableV2Report,
     materialization_read_bytes: u64,
     materialization_read_operations: u64,
+    captures: std::collections::BTreeMap<String, crate::project_portable_v2::MaterializedCapture>,
     stage_identity: graphforge_filesystem::FileIdentity,
     entry_count: usize,
 }
@@ -508,12 +517,9 @@ fn materialize_owned_import(
     ) {
         Ok(materialized) => materialized,
         Err(error) => {
-            if fs::remove_file(&owner).is_ok()
-                && let Some(allocation) = allocation
-            {
-                let _ = allocation.remove_file_at(&owner);
-            }
-            let _ = sync_parent(&owner);
+            drop(owner_file);
+            let mut removed = std::collections::BTreeMap::new();
+            let _ = cleanup_import_owner(&owner, &identities, &mut removed, allocation);
             return Err(error.with_allocation_identities(identities));
         }
     };
@@ -545,6 +551,7 @@ fn materialize_owned_import(
         report,
         materialization_read_bytes: materialized.application_read_bytes,
         materialization_read_operations: materialized.application_read_operations,
+        captures: materialized.captures,
         stage_identity: stage_directory.identity(),
         entry_count,
     })
@@ -641,17 +648,14 @@ fn cleanup_import_materialization(
         )?;
         let directory_identity = directory.identity();
         drop(directory);
-        parent
-            .remove_child_directory_if_identity(name, directory_identity)
-            .map_err(|_| {
+        crate::durable_commit::retire_directory(&parent, name, directory_identity).map_err(
+            |_| {
                 PortableV2Error::new(
                     PortableV2ErrorCode::Io,
-                    "cannot remove authenticated import staging",
+                    "cannot retire authenticated import staging",
                 )
-            })?;
-        parent.sync().map_err(|_| {
-            PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync import staging parent")
-        })?;
+            },
+        )?;
     }
     cleanup_import_owner(owner, identities, &mut removed_identities, allocation)?;
     Ok(PortableV2ImportCleanupReceipt {
@@ -700,22 +704,17 @@ fn cleanup_import_owner(
         // Authentication handles deny delete sharing on Windows. The removal
         // operation rechecks the saved identity after acquiring its own handle.
         drop(file);
-        parent
-            .unlink_child_if_identity(name, identity)
-            .map_err(|_| {
-                PortableV2Error::new(
-                    PortableV2ErrorCode::Io,
-                    "cannot remove authenticated import owner",
-                )
-            })?;
+        crate::durable_commit::retire_files(&parent, [(name, identity)]).map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "cannot retire authenticated import owner",
+            )
+        })?;
         if let Some(allocation) = allocation {
             allocation
                 .remove_file_at(owner)
                 .map_err(|error| storage(&error))?;
         }
-        parent.sync().map_err(|_| {
-            PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync import owner parent")
-        })?;
     }
     Ok(())
 }
@@ -734,8 +733,9 @@ fn remove_stable_tree(
         )
     })?;
     *remaining = (*remaining).saturating_sub(names.len());
-    for name in names {
-        if let Ok(child) = directory.open_child_directory(&name) {
+    let mut retired = Vec::with_capacity(names.len());
+    for name in &names {
+        if let Ok(child) = directory.open_child_directory(name) {
             remove_stable_tree(
                 &child,
                 identities,
@@ -745,16 +745,12 @@ fn remove_stable_tree(
             )?;
             let child_identity = child.identity();
             drop(child);
-            directory
-                .remove_child_directory_if_identity(&name, child_identity)
-                .map_err(|_| {
-                    PortableV2Error::new(
-                        PortableV2ErrorCode::Io,
-                        "cannot remove authenticated import directory",
-                    )
-                })?;
+            retired.push(crate::durable_commit::RetireEntry::Directory {
+                name,
+                identity: child_identity,
+            });
         } else {
-            let file = directory.open_child_file(&name).map_err(|_| {
+            let file = directory.open_child_file(name).map_err(|_| {
                 PortableV2Error::new(
                     PortableV2ErrorCode::Io,
                     "cannot authenticate import cleanup entry",
@@ -779,27 +775,23 @@ fn remove_stable_tree(
             }
             removed_identities.extend(observed);
             drop(file);
-            directory
-                .unlink_child_if_identity(&name, identity)
-                .map_err(|_| {
-                    PortableV2Error::new(
-                        PortableV2ErrorCode::Io,
-                        "cannot remove authenticated import entry",
-                    )
-                })?;
-            if let Some(allocation) = allocation {
-                allocation
-                    .remove_file_at(&directory.path().join(&name))
-                    .map_err(|error| storage(&error))?;
-            }
+            retired.push(crate::durable_commit::RetireEntry::File { name, identity });
         }
     }
-    directory.sync().map_err(|_| {
+    crate::durable_commit::retire_entries(directory, retired).map_err(|_| {
         PortableV2Error::new(
             PortableV2ErrorCode::Io,
-            "cannot sync authenticated import staging",
+            "cannot retire authenticated import staging",
         )
-    })
+    })?;
+    if let Some(allocation) = allocation {
+        for name in &names {
+            allocation
+                .remove_file_at(&directory.path().join(name))
+                .map_err(|error| storage(&error))?;
+        }
+    }
+    Ok(())
 }
 
 fn claim_stage(
@@ -864,13 +856,26 @@ fn claim_stage(
                 "cannot mark import staging ownership",
             )
         })?;
-        marker.sync_all().map_err(|_| {
+        let parent = graphforge_filesystem::StableDirectory::open(
+            owner.parent().unwrap_or_else(|| Path::new(".")),
+        )
+        .map_err(|_| {
             PortableV2Error::new(
                 PortableV2ErrorCode::Io,
-                "cannot sync import staging ownership",
+                "cannot retain import ownership parent",
             )
         })?;
-        sync_parent(&owner)?;
+        let name = owner.file_name().ok_or_else(|| {
+            PortableV2Error::new(PortableV2ErrorCode::InvalidPath, "import owner has no name")
+        })?;
+        crate::durable_commit::acknowledge_created(&parent, name, &marker, || Ok(())).map_err(
+            |_| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::Io,
+                    "cannot acknowledge import staging ownership",
+                )
+            },
+        )?;
     }
     crate::project_failpoint::hit(
         "portable_import.after_owner",
@@ -881,29 +886,6 @@ fn claim_stage(
     )
     .map_err(|error| storage(&error))?;
     Ok((owner, owned_retry))
-}
-
-fn sync_parent(path: &Path) -> Result<(), PortableV2Error> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    sync_directory_handle(parent).map_err(|_| {
-        PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync import staging parent")
-    })
-}
-
-#[cfg(not(windows))]
-fn sync_directory_handle(path: &Path) -> std::io::Result<()> {
-    fs::File::open(path)?.sync_all()
-}
-
-#[cfg(windows)]
-fn sync_directory_handle(path: &Path) -> std::io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt as _;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    OpenOptions::new()
-        .write(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?
-        .sync_all()
 }
 
 #[expect(clippy::too_many_arguments, reason = "import authority is explicit")]
@@ -920,6 +902,7 @@ fn import_materialized(
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
     report: &PortableV2Report,
+    captures: &std::collections::BTreeMap<String, crate::project_portable_v2::MaterializedCapture>,
     owned_retry: bool,
     allocation: Option<&crate::StorageAllocationOperation>,
     added_stage_entries: &mut usize,
@@ -963,7 +946,7 @@ fn import_materialized(
             ));
         }
     }
-    let capabilities = runtime
+    let mut capabilities: Vec<ProjectCapability> = runtime
         .capabilities
         .into_iter()
         .map(|capability| ProjectCapability {
@@ -981,7 +964,29 @@ fn import_materialized(
                 "participant vanished",
             )
         })?;
-        let content_sha256: [u8; 32] = hash_file(&source, limits.copy_buffer_bytes, cancelled)?;
+        let relative = source
+            .strip_prefix(stage)
+            .map_err(|_| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::InvalidPath,
+                    "participant escaped private staging",
+                )
+            })?
+            .to_str()
+            .ok_or_else(|| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::InvalidPath,
+                    "non UTF-8 participant path",
+                )
+            })?
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let capture = captures.get(&relative).ok_or_else(|| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::InvalidStructure,
+                "participant lacks exact-byte import capture",
+            )
+        })?;
+        let content_sha256 = capture.authenticate(&source, cancelled)?;
         if participant.capability_id == crate::GRAPH_CAPABILITY_ID
             && participant.record_family_id == crate::GRAPH_SEMANTIC_BINDINGS_FAMILY
         {
@@ -1022,8 +1027,11 @@ fn import_materialized(
             content_sha256,
         });
     }
+    let mut composition_captures = std::collections::BTreeMap::new();
     let staged_composition = if report.ontology_composition.is_some() {
-        let (candidate, receipt) = build_staged_composition(stage, report, limits, allocation)?;
+        let (written, receipt) = build_staged_composition(stage, report, limits, allocation)?;
+        let candidate = written.participant;
+        composition_captures.insert(candidate.source.clone(), written.capture);
         if let Some(expected) = semantic_composition_fingerprint.as_deref() {
             let staged_bytes = read_bounded_payload(
                 &candidate.source,
@@ -1039,11 +1047,14 @@ fn import_materialized(
                     "semantic bindings and portable composition fingerprints disagree",
                 ));
             }
-            participants.push(persist_composition_authority(
+            let written = persist_composition_authority(
                 stage,
                 &staged.composition,
+                limits.max_manifest_bytes,
                 allocation,
-            )?);
+            )?;
+            composition_captures.insert(written.participant.source.clone(), written.capture);
+            participants.push(written.participant);
         }
         participants.push(candidate);
         Some(receipt)
@@ -1056,6 +1067,12 @@ fn import_materialized(
         }
         None
     };
+    // A revision 6 research package (an older client's export) imports at the
+    // current revision; its participant bytes and Versions are unchanged.
+    crate::research_versions::upgrade_research_request(
+        &mut capabilities,
+        participants.iter_mut().map(|p| &mut p.participant),
+    );
     participants.sort_by(|left, right| {
         (
             &left.participant.capability_id,
@@ -1072,16 +1089,23 @@ fn import_materialized(
         .graph_tree
         .as_ref()
         .map(|_| stage.join("data/components/graph-data/graph-tree"));
+    let mut derived_captures = std::collections::BTreeMap::new();
     if let Some(graph_tree) = &package_graph_tree {
         validate_import_graph_identities(graph_tree, cancelled)?;
         validate_import_property_values(graph_tree, report.entry_count, cancelled)?;
-        *added_stage_entries = adjacency::persist_import_adjacency(
+        let (added, derived) = crate::project_portable_v2::capture_import_adjacency(
             stage,
             graph_tree,
             &participants,
             cancelled,
             allocation,
-        )?;
+            limits.max_entry_bytes,
+        )
+        .map_err(|error| {
+            outcome::with_io_context(error, "capture imported adjacency", graph_tree)
+        })?;
+        *added_stage_entries = added;
+        derived_captures = derived;
     }
     let stage_entry_count = usize::try_from(report.entry_count)
         .map_err(|_| {
@@ -1094,65 +1118,174 @@ fn import_materialized(
     let research =
         crate::project_portable_v2::research::validate_stage(stage, report, limits, cancelled)?;
     if let Some((registry, objects)) = &research {
-        native_validation::validate(stage, registry, objects, cancelled, validator)?;
+        native_validation::validate(stage, registry, objects, captures, cancelled, validator)?;
     }
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         target,
         crate::filesystem_admission::ProjectLifecycleMode::Durable,
         crate::filesystem_admission::ProjectRootRequirement::CreateIfMissing,
     )
-    .map_err(|error| storage(&error))?;
-    admission
-        .revalidate_identity()
-        .map_err(|error| storage(&error))?;
+    .map_err(|error| outcome::with_io_context(storage(&error), "admit import target", target))?;
+    admission.revalidate_identity().map_err(|error| {
+        outcome::with_io_context(storage(&error), "revalidate import target", target)
+    })?;
+    // An owned retry follows this transaction's own interrupted attempt. Its
+    // journal is classified against CURRENT first, exactly as a project open
+    // would, so the attempt either replays as published or retries cleanly.
+    if owned_retry
+        && !import_target_is_empty(admission.root()).map_err(|error| {
+            outcome::with_io_context(
+                storage(&error),
+                "inspect import retry target",
+                admission.root(),
+            )
+        })?
+    {
+        crate::project_recovery::recover_project_transactions_admitted(admission.root()).map_err(
+            |error| {
+                outcome::with_io_context(
+                    storage(&error),
+                    "recover interrupted import",
+                    admission.root(),
+                )
+            },
+        )?;
+    }
     let replay = crate::published_project_transaction(admission.root(), transaction_uuid)
-        .map_err(|error| storage(&error))?
+        .map_err(|error| {
+            outcome::with_io_context(storage(&error), "inspect import replay", admission.root())
+        })?
         .is_some();
     let existing = if replay {
-        Some(crate::resolve_project_generation(admission.root()).map_err(|error| storage(&error))?)
+        Some(
+            crate::resolve_project_generation(admission.root()).map_err(|error| {
+                outcome::with_io_context(storage(&error), "resolve import replay", admission.root())
+            })?,
+        )
     } else if owned_retry
-        || outcome::aborted_retry(admission.root(), transaction_uuid, generation_uuid)?
+        || outcome::aborted_retry(admission.root(), transaction_uuid, generation_uuid).map_err(
+            |error| outcome::with_io_context(error, "inspect aborted import", admission.root()),
+        )?
     {
-        let generation =
-            semantically_pristine_generation(admission.root()).map_err(|error| storage(&error))?;
-        if generation.is_none() {
+        let generation = semantically_pristine_generation(admission.root()).map_err(|error| {
+            outcome::with_io_context(
+                storage(&error),
+                "inspect import retry target",
+                admission.root(),
+            )
+        })?;
+        if generation.is_some() {
+            Some(
+                crate::resolve_project_generation(admission.root()).map_err(|error| {
+                    outcome::with_io_context(
+                        storage(&error),
+                        "resolve import retry",
+                        admission.root(),
+                    )
+                })?,
+            )
+        } else if import_target_is_empty(admission.root()).map_err(|error| {
+            outcome::with_io_context(
+                storage(&error),
+                "inspect import retry target",
+                admission.root(),
+            )
+        })? {
+            // The interrupted attempt stopped before the target held a
+            // project (for example right after claiming its staging), so the
+            // retry initializes it like a first attempt.
+            None
+        } else {
             return Err(PortableV2Error::new(
                 PortableV2ErrorCode::Io,
                 "owned retry target is not pristine",
             ));
         }
-        Some(crate::resolve_project_generation(admission.root()).map_err(|error| storage(&error))?)
     } else {
-        prepare_import_target(admission.root()).map_err(|error| storage(&error))?
+        prepare_import_target(admission.root()).map_err(|error| {
+            outcome::with_io_context(storage(&error), "prepare import target", admission.root())
+        })?
     };
     // Only admitted retained authorities join this operation; other attempts'
     // private preparation remains outside its resource ownership.
     if let Some(allocation) = allocation {
-        allocation::observe_destination(allocation, admission.root(), existing.as_ref())?;
+        allocation::observe_destination(allocation, admission.root(), existing.as_ref()).map_err(
+            |error| outcome::with_io_context(error, "observe import destination", admission.root()),
+        )?;
     }
     let parent = match existing {
         Some(parent) => parent,
-        None => crate::project_generation::open_or_initialize_project_admitted_with_allocation(
+        // The publication retains its bootstrap parent as usual. Bind that
+        // parent's identities to this import so repeated fresh-root imports
+        // also retain identical manifest bytes, without changing existing roots.
+        None => crate::project_generation::open_or_initialize_project_admitted_with_bootstrap(
             admission.root(),
+            Some((
+                graphforge_core::uuid::portable_v2_bootstrap_generation(&transaction_uuid),
+                graphforge_core::uuid::portable_v2_bootstrap_transaction(&transaction_uuid),
+            )),
             allocation,
         )
-        .map_err(|error| storage(&error))?,
+        .map_err(|error| {
+            outcome::with_io_context(
+                storage(&error),
+                "initialize import target",
+                admission.root(),
+            )
+        })?,
     };
-    let graph_object_lease = prepare_compact_import_graph_with_allocation(
+    let mut participant_captures = captures
+        .iter()
+        .map(|(relative, capture)| (stage.join(relative), capture))
+        .chain(
+            derived_captures
+                .iter()
+                .map(|(path, capture)| (path.clone(), capture)),
+        )
+        .chain(
+            composition_captures
+                .iter()
+                .map(|(path, capture)| (path.clone(), capture)),
+        )
+        .collect();
+    let prepared_graph = prepare_compact_import_graph_with_allocation(
         admission.root(),
         package_graph_tree.as_deref(),
         &mut participants,
         stage_entry_count,
         allocation,
-    )?;
+        Some(&participant_captures),
+    )
+    .map_err(|error| outcome::with_io_context(error, "prepare compact import graph", target))?;
+    let (graph_object_lease, compact_root_capture) =
+        prepared_graph.map_or((None, None), |prepared| {
+            (
+                Some(prepared.lease),
+                Some((prepared.root_path, prepared.root_capture)),
+            )
+        });
+    if let Some((path, capture)) = &compact_root_capture {
+        // Compact installation rewrote this source. Carry the new writer's
+        // exact-byte authority, replacing the archive's old inode capture.
+        participant_captures.insert(path.clone(), capture);
+    }
     let _research_lease = if let Some((_, objects)) = &research {
-        let mut lease = crate::begin_graph_object_publication(admission.root())
-            .map_err(|error| storage(&error))?;
-        lease
-            .set_import_allocation_operation(allocation.cloned())
-            .map_err(|error| storage(&error))?;
-        crate::project_portable_v2::research::install_with_lease(stage, &lease, objects)?;
-        Some(lease)
+        if let Some(lease) = &graph_object_lease {
+            crate::project_portable_v2::research::install_captured_with_lease(
+                stage, lease, objects, captures, cancelled,
+            )?;
+            None
+        } else {
+            let mut lease = crate::begin_graph_object_publication(admission.root())
+                .map_err(|error| storage(&error))?;
+            lease
+                .set_import_allocation_operation(allocation.cloned())
+                .map_err(|error| storage(&error))?;
+            crate::project_portable_v2::research::install_captured_with_lease(
+                stage, &lease, objects, captures, cancelled,
+            )?;
+            Some(lease)
+        }
     } else {
         None
     };
@@ -1178,25 +1311,42 @@ fn import_materialized(
         cancelled,
         limits.copy_buffer_bytes,
         allocation,
+        graph_object_lease.as_ref(),
+        Some(&participant_captures),
     )
-    .map_err(|error| storage_or_cancel(&error, cancelled))?
-    {
+    .map_err(|error| {
+        outcome::with_io_context(
+            storage_or_cancel(&error, cancelled),
+            "stage imported generation",
+            target,
+        )
+    })? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => {
             let validated = staged
                 .validate(|_| Ok(()), |_, _| Ok(()))
-                .map_err(|error| storage(&error))?;
+                .map_err(|error| {
+                    outcome::with_io_context(
+                        storage(&error),
+                        "validate imported generation",
+                        target,
+                    )
+                })?;
             let published = match graph_object_lease.as_ref() {
                 Some(lease) => validated.publish_with_graph_objects(lease),
                 None => validated.publish(),
             };
             published.map_err(|error| {
-                outcome::publication_error(
+                outcome::with_io_context(
+                    outcome::publication_error(
+                        target,
+                        transaction_uuid,
+                        generation_uuid,
+                        &report.package_digest,
+                        &error,
+                    ),
+                    "publish imported generation",
                     target,
-                    transaction_uuid,
-                    generation_uuid,
-                    &report.package_digest,
-                    &error,
                 )
             })?
         }
@@ -1233,6 +1383,13 @@ fn import_materialized(
         materialized_cleanup: PortableV2ImportCleanupReceipt::default(),
         transient_peak_allocated_bytes: 0,
     })
+}
+
+fn import_target_is_empty(target: &Path) -> Result<bool, GfError> {
+    Ok(fs::read_dir(target)
+        .map_err(|error| GfError::Storage(format!("failed to inspect import target: {error}")))?
+        .next()
+        .is_none())
 }
 
 const IMPORT_IDENTITY_BATCH_ROWS: usize = 8192;
@@ -1315,26 +1472,48 @@ fn validate_import_property_values(
         .saturating_mul(2)
         .saturating_add(1024);
     collect_portable_graph_paths(&directory, Path::new(""), &mut paths, &mut remaining)?;
-    for path in paths {
-        check_identity_validation_cancelled(cancelled)?;
-        if !(path.starts_with("properties") || path.starts_with("edge_properties"))
-            || path
-                .extension()
-                .is_none_or(|extension| extension != "parquet")
-        {
-            continue;
-        }
-        let reader = crate::catalog::admitted_parquet(&graph_tree.join(path))
-            .map_err(invalid_import_identity)?
-            .with_batch_size(IMPORT_IDENTITY_BATCH_ROWS)
-            .build()
-            .map_err(invalid_import_identity)?;
-        for batch in reader {
-            check_identity_validation_cancelled(cancelled)?;
-            crate::writer::validate_property_values(&batch.map_err(invalid_import_identity)?)
-                .map_err(|error| {
-                    PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, error.code())
-                })?;
+    if !paths
+        .iter()
+        .any(|path| path.starts_with("properties") || path.starts_with("edge_properties"))
+    {
+        return Ok(());
+    }
+    // Validate logical values, not the binary envelope used to keep an
+    // oversized property fragment in bounded physical objects. Every historical
+    // fragment still passes validation before this private candidate publishes.
+    let inventory = crate::AuthenticatedPropertyInventory::capture_for_import(
+        graph_tree, cancelled,
+    )
+    .map_err(|error| match error {
+        GfError::Api {
+            code: graphforge_core::ApiErrorCode::Cancelled,
+            ..
+        } => PortableV2Error::new(PortableV2ErrorCode::Cancelled, "verification cancelled"),
+        error => invalid_import_identity(error),
+    })?;
+    let scratch = inventory
+        .create_snapshot_scratch()
+        .map_err(invalid_import_identity)?;
+    for kind in [
+        crate::PropertyRouteKind::Node,
+        crate::PropertyRouteKind::Edge,
+    ] {
+        for route in inventory.routes(kind) {
+            for fragment in inventory.property_fragments(kind, route) {
+                check_identity_validation_cancelled(cancelled)?;
+                let (_, reader) = inventory
+                    .open_property_fragment_batches(kind, route, fragment.id, scratch.path(), true)
+                    .map_err(invalid_import_identity)?;
+                for batch in reader {
+                    check_identity_validation_cancelled(cancelled)?;
+                    crate::writer::validate_property_values(
+                        &batch.map_err(invalid_import_identity)?,
+                    )
+                    .map_err(|error| {
+                        PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, error.code())
+                    })?;
+                }
+            }
         }
     }
     Ok(())
@@ -1394,109 +1573,9 @@ fn prepare_compact_import_graph(
         participants,
         entry_count,
         None,
+        None,
     )
-}
-
-fn prepare_compact_import_graph_with_allocation(
-    target: &Path,
-    package_graph_tree: Option<&Path>,
-    participants: &mut [ProjectFileParticipant],
-    entry_count: usize,
-    allocation: Option<&crate::StorageAllocationOperation>,
-) -> Result<Option<crate::GraphObjectPublicationLease>, PortableV2Error> {
-    let Some(graph_tree) = package_graph_tree else {
-        return Ok(None);
-    };
-    let Some(participant) = participants.iter_mut().find(|participant| {
-        participant.participant.capability_id == crate::GRAPH_CAPABILITY_ID
-            && participant.participant.record_family_id == crate::GRAPH_FILES_FAMILY
-    }) else {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::InvalidStructure,
-            "graph tree requires a graph/files participant",
-        ));
-    };
-    if !matches!(
-        participant.participant.record_version,
-        crate::graph_files::GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION
-            | crate::graph_files::GRAPH_FILES_MAPPED_CHECKSUM_ROOT_RECORD_VERSION
-    ) {
-        return Ok(None);
-    }
-    let mut lease =
-        crate::begin_graph_object_publication(target).map_err(|error| storage(&error))?;
-    lease
-        .set_import_allocation_operation(allocation.cloned())
-        .map_err(|error| storage(&error))?;
-    let directory = graphforge_filesystem::StableDirectory::open(graph_tree).map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "cannot authenticate portable graph tree",
-        )
-    })?;
-    let mut paths = Vec::new();
-    let mut remaining = entry_count.saturating_mul(2).saturating_add(1024);
-    collect_portable_graph_paths(&directory, Path::new(""), &mut paths, &mut remaining)?;
-    paths.sort();
-    let (root, _) = if crate::graph_files::root_is_mapped(participant.participant.record_version) {
-        let routes = crate::route_component::owned::read_owned_layout_table(&directory)
-            .map_err(|error| storage(&error))?
-            .ok_or_else(|| {
-                PortableV2Error::new(
-                    PortableV2ErrorCode::InvalidStructure,
-                    "mapped compact import requires route authority",
-                )
-            })?;
-        crate::graph_object_store::append_mapped_import_graph_files(
-            &lease, graph_tree, &paths, &routes,
-        )
-    } else {
-        crate::graph_object_store::append_graph_files_v2(
-            &lease,
-            graph_tree,
-            &mut crate::graph_object_store::GraphManifestState::empty(),
-            &paths,
-            &[],
-        )
-    }
-    .map_err(|error| storage(&error))?;
-    let published =
-        crate::graph_files::graph_files_root_participant(&root).map_err(|error| storage(&error))?;
-    let bytes = &published.bytes;
-    crate::project_publication::publish_atomic_bytes_with_allocation(
-        &participant.source,
-        bytes,
-        || Ok(()),
-        || Ok(()),
-        || Ok(()),
-        allocation,
-    )
-    .map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "cannot publish imported compact graph root",
-        )
-    })?;
-    #[cfg(not(windows))]
-    let file = fs::File::open(&participant.source);
-    #[cfg(windows)]
-    let file = OpenOptions::new().write(true).open(&participant.source);
-    let file = file.map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "cannot reopen imported compact graph root",
-        )
-    })?;
-    participant.byte_length = bytes.len() as u64;
-    participant.content_sha256 = Sha256::digest(bytes).into();
-    participant.participant = published;
-    file.sync_all().map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "cannot sync imported compact graph root",
-        )
-    })?;
-    Ok(Some(lease))
+    .map(|prepared| prepared.map(|prepared| prepared.lease))
 }
 
 fn collect_portable_graph_paths(
@@ -1547,7 +1626,13 @@ fn build_staged_composition(
     report: &PortableV2Report,
     limits: PortableV2Limits,
     allocation: Option<&crate::StorageAllocationOperation>,
-) -> Result<(ProjectFileParticipant, PortableV2StagedCompositionReceipt), PortableV2Error> {
+) -> Result<
+    (
+        CapturedCompositionControl,
+        PortableV2StagedCompositionReceipt,
+    ),
+    PortableV2Error,
+> {
     let control = report.ontology_composition.as_ref().ok_or_else(|| {
         PortableV2Error::new(
             PortableV2ErrorCode::Incompatible,
@@ -1618,24 +1703,14 @@ fn build_staged_composition(
         portable_composition_digest: control.composition_digest.clone(),
         composition,
     };
-    let (participant, source, bytes) = persist_staged_composition(stage, &staged, allocation)?;
+    let written =
+        persist_staged_composition(stage, &staged, limits.max_manifest_bytes, allocation)?;
     let receipt = PortableV2StagedCompositionReceipt {
         package_digest: report.package_digest.clone(),
         portable_composition_digest: control.composition_digest.clone(),
         workspace_composition_fingerprint: staged.composition.composition_fingerprint.clone(),
     };
-    Ok((
-        ProjectFileParticipant {
-            participant: ProjectParticipant {
-                bytes: Vec::new(),
-                ..participant
-            },
-            source,
-            byte_length: bytes.len() as u64,
-            content_sha256: Sha256::digest(&bytes).into(),
-        },
-        receipt,
-    ))
+    Ok((written, receipt))
 }
 
 fn load_staged_composition_entries(
@@ -1762,88 +1837,6 @@ fn resolve_staged_bridge_ids(
         .collect()
 }
 
-fn persist_staged_composition(
-    stage: &Path,
-    staged: &crate::WorkspacePortableOntologyStaging,
-    allocation: Option<&crate::StorageAllocationOperation>,
-) -> Result<(ProjectParticipant, PathBuf, Vec<u8>), PortableV2Error> {
-    let participant = staged
-        .to_project_participant()
-        .map_err(|error| storage(&error))?;
-    let bytes = participant.bytes.clone();
-    let source = stage.join("portable-ontology-staging.json");
-    let mut output = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&source)
-        .map_err(|_| {
-            PortableV2Error::new(
-                PortableV2ErrorCode::Io,
-                "cannot stage composition candidate",
-            )
-        })?;
-    output.write_all(&bytes).map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "cannot write composition candidate",
-        )
-    })?;
-    output.sync_all().map_err(|_| {
-        PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync composition candidate")
-    })?;
-    if let Some(allocation) = allocation {
-        allocation
-            .replace_file_at(&source, &output)
-            .map_err(|error| storage(&error))?;
-    }
-    Ok((participant, source, bytes))
-}
-
-fn persist_composition_authority(
-    stage: &Path,
-    composition: &crate::WorkspaceOntologyComposition,
-    allocation: Option<&crate::StorageAllocationOperation>,
-) -> Result<ProjectFileParticipant, PortableV2Error> {
-    let participant = composition
-        .to_project_participant()
-        .map_err(|error| storage(&error))?;
-    let bytes = participant.bytes.clone();
-    let source = stage.join("ontology-composition-authority.json");
-    let mut output = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&source)
-        .map_err(|_| {
-            PortableV2Error::new(
-                PortableV2ErrorCode::Io,
-                "cannot stage composition authority",
-            )
-        })?;
-    output.write_all(&bytes).map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "cannot write composition authority",
-        )
-    })?;
-    output.sync_all().map_err(|_| {
-        PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync composition authority")
-    })?;
-    if let Some(allocation) = allocation {
-        allocation
-            .replace_file_at(&source, &output)
-            .map_err(|error| storage(&error))?;
-    }
-    Ok(ProjectFileParticipant {
-        participant: ProjectParticipant {
-            bytes: Vec::new(),
-            ..participant
-        },
-        source,
-        byte_length: bytes.len() as u64,
-        content_sha256: Sha256::digest(&bytes).into(),
-    })
-}
-
 fn read_bounded_payload(
     path: &Path,
     limit: u64,
@@ -1939,33 +1932,6 @@ fn find_participant_file(
     Ok(path)
 }
 
-fn hash_file(
-    path: &Path,
-    buffer_size: usize,
-    cancelled: Option<&AtomicBool>,
-) -> Result<[u8; 32], PortableV2Error> {
-    use std::io::Read;
-    let mut file = fs::File::open(path)
-        .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "participant unavailable"))?;
-    let mut buffer = vec![0; buffer_size];
-    let mut hash = Sha256::new();
-    loop {
-        if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::Cancelled,
-                "verification cancelled",
-            ));
-        }
-        let count = file
-            .read(&mut buffer)
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "participant unreadable"))?;
-        if count == 0 {
-            return Ok(hash.finalize().into());
-        }
-        hash.update(&buffer[..count]);
-    }
-}
-
 fn parse_digest(value: &str) -> Result<[u8; 32], PortableV2Error> {
     let mut digest = [0; 32];
     if value.len() != 64 {
@@ -1994,7 +1960,22 @@ fn parse_digest(value: &str) -> Result<[u8; 32], PortableV2Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod crash_into_fresh_target;
     mod returned_errors;
+
+    #[test]
+    fn property_validation_preserves_cancelled_before_inventory_capture() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("properties")).unwrap();
+        fs::write(
+            root.path().join("properties/Person.parquet"),
+            b"not parquet",
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(true);
+        let error = validate_import_property_values(root.path(), 1, Some(&cancelled)).unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::Cancelled);
+    }
 
     const HELPER: &str = "project_portable_v2_import::tests::subprocess_crash_import";
     const COOKIE: &str = "graphforge-internal-subprocess-v1";
@@ -2263,7 +2244,7 @@ mod tests {
     }
 
     fn write_identity_delta(tree: &Path, raw: u32) {
-        const RECORD_START: usize = 84;
+        const RECORD_START: usize = 60;
         const PAYLOAD_LENGTH: usize = RECORD_START + 25;
         let op = crate::GraphDeltaOp {
             operation_uuid: Uuid::now_v7(),
@@ -2295,9 +2276,9 @@ mod tests {
         framed[RECORD_START + 22] = crate::GraphDeltaOpKind::UpsertNode as u8;
         framed.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
         framed.extend_from_slice(&payload);
-        let checksum = Sha256::digest(&framed[RECORD_START..]);
+        let checksum = crate::corruption_checksum::checksum(&framed[RECORD_START..]).to_le_bytes();
         framed.extend_from_slice(&checksum);
-        let checksum = Sha256::digest(&framed);
+        let checksum = crate::corruption_checksum::checksum(&framed).to_le_bytes();
         framed.extend_from_slice(&checksum);
         let path = tree.join(crate::delta_run_relative_path(1));
         fs::create_dir_all(path.parent().unwrap()).unwrap();

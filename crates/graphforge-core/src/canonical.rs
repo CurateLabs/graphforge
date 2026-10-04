@@ -10,7 +10,8 @@
 //! and composition identities. The compatibility decision is documented in
 //! `docs/book/architecture/canonical-fingerprints-v1.md`.
 
-use sha2::{Digest, Sha256};
+use crate::hash_observation::ContractSha256 as Sha256;
+use sha2::Digest;
 
 /// Frozen canonical contract version.
 pub const CANONICAL_CONTRACT_VERSION: u32 = 1;

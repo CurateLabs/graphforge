@@ -16,7 +16,8 @@ use graphforge_knowledge::{
         ResearchSuppressionRecord,
     },
 };
-use sha2::{Digest, Sha256};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+use sha2::Digest;
 use uuid::Uuid;
 
 impl GraphForge {
@@ -54,6 +55,11 @@ impl GraphForge {
             .map_err(knowledge_error)?;
         version.version_uuid = request.version_uuid;
         version.created_at = request.created_at;
+        edit::sign(
+            &mut version,
+            request.author.as_ref(),
+            request.committer.as_ref(),
+        )?;
         edit::finish(
             self,
             command,
@@ -215,8 +221,12 @@ fn suppress(
         .map_err(knowledge_error)?;
     let replacements = ledger::encode_suppressions(&merged)?;
     let operation = step(request, b"suppression");
-    let generation =
-        k::knowledge_generation_uuid(b"claim_suppression", OperationId(operation), &replacements);
+    let generation = k::knowledge_generation_uuid(
+        b"claim_suppression",
+        OperationId(operation),
+        &replacements,
+        &k::participant_content_sha256(&replacements),
+    );
     publication::publish(
         graph,
         &parent,

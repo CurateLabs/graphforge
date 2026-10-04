@@ -2,7 +2,8 @@
 
 use std::collections::BTreeSet;
 
-use sha2::{Digest, Sha256};
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
+use sha2::Digest;
 
 use crate::{
     EmbeddingContentDigest, EmbeddingNormalization, SearchArtifactError, VectorStoreLimits,

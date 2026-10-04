@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+#[cfg(test)]
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::{GfError, OntologyMode, ProjectErrorCode};
 use graphforge_ontology::{
     ActivationMode, ActivationRecord, AuthoredModule, BridgeDocument, BridgeInventory,
@@ -11,7 +13,7 @@ use graphforge_ontology::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::{ProjectParticipant, ProjectParticipantEncoding};
@@ -626,7 +628,10 @@ fn participant(family: &str, bytes: Vec<u8>) -> ProjectParticipant {
         record_family_id: family.into(),
         record_version: 1,
         encoding: ProjectParticipantEncoding::Json,
-        schema_fingerprint: Sha256::digest(format!("workspace/{family}@1")).into(),
+        schema_fingerprint: graphforge_core::hash_observation::ContractSha256::digest(format!(
+            "workspace/{family}@1"
+        ))
+        .into(),
         row_count: 1,
         bytes,
     }
@@ -654,7 +659,9 @@ fn validate_ontology(record: &WorkspaceOntology) -> Result<(), GfError> {
             }
             let canonical = serde_json::to_vec(document)
                 .map_err(|_| corrupt("ontology document cannot be encoded"))?;
-            let digest = encode_hex(&Sha256::digest(canonical));
+            let digest = encode_hex(&graphforge_core::hash_observation::ContractSha256::digest(
+                canonical,
+            ));
             if record.canonical_ontology_sha256.as_deref() != Some(digest.as_str()) {
                 return Err(corrupt("canonical ontology digest does not match"));
             }

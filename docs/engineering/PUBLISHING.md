@@ -1,34 +1,15 @@
 # Publishing
 
 A change that passes [`TESTING.md`](TESTING.md) becomes versioned artifacts only through
-the documented release path. GraphForge publishes library artifacts and docs — not a hosted
-multi-tenant service. Operational detail:
-[`../development/publication-order.md`](../development/publication-order.md)
-(authoritative §5/§6 order + rollback),
-[`../development/release-process.md`](../development/release-process.md),
-[`../development/release-workflows.md`](../development/release-workflows.md), and
-`.github/workflows/publish.yaml`.
+one workflow, `.github/workflows/publish.yaml`. GraphForge publishes library artifacts and
+docs — not a hosted multi-tenant service. The steps for cutting a release are in
+`RELEASING.md` at the repository root.
 
-**Speed is a first-class value alongside registry honesty.** Prefer the
-**publish-track** for frequent publishes (scheduled or on-demand): Binding RC →
-tag / release identity → `publish.yaml` on retained bytes (no rebuild-on-write).
-Wall-clock targets: Binding RC ≤20m p50 warm / ≤35m cold; publish-track
-≤35m p50 / ≤50m cold; unchanged-SHA publish-only ≤15m. Dual-track table:
-[`TESTING.md`](TESTING.md).
-
-**Human release close** (milestone / coordinated GA) adds optional evidence gates
-(release-load, checkpoint, knowledge/epistemic surface aggregates) on top of publish-track honesty.
-Those gates must not block every publish-track run.
-
-`Publish Track` schedules exact-`main` Binding RC dispatch every six hours and
-reuses a complete, unexpired 30-day candidate for the same SHA. It does not
-create a tag or publish by schedule. A maintainer must dispatch it with both
-`create_release` and `confirm_registry_publish`, plus the exact
-`v<root-version>` tag; that published GitHub Release triggers the existing
-`publish.yaml`. Any missing/expired partition, manifest validation failure,
-mixed SHA, existing release identity, or registry conflict stops the path.
-See [`publication-order.md`](../development/publication-order.md) for the
-operational sequence and recovery boundary.
+Pushing a `v<version>` tag builds every artifact from that commit, smoke-tests it, and — after
+approval of the `release` environment — publishes to crates.io, PyPI, and npm, creates the
+GitHub Release, then installs from the public registries and runs a smoke test. A manual run
+or a pull request that touches the release path is a dry run that uploads nothing. Each registry
+step skips a version that is already published, so a failed tag run is re-run as-is.
 
 ## Artifacts and destinations
 
@@ -39,7 +20,7 @@ operational sequence and recovery boundary.
 | Node binding package | npm | Same release version | Maintainers |
 | Lifecycle CLI package | npm (`@curatelabs/graphforge-cli`) | Same release version | Maintainers |
 | Agent skills package | npm (`npx` skills) | Same release line | Maintainers |
-| Source archive / GitHub Release | GitHub | Annotated tag | Maintainers |
+| Source archive / GitHub Release | GitHub | Tag `v<version>` | Maintainers |
 | Documentation site | Astro Starlight (`docs-site/`; CI via `docs.yml`) | Commit / release | Maintainers |
 
 ## Versioning and release history
@@ -48,90 +29,72 @@ operational sequence and recovery boundary.
   GitHub Releases and their generated or explicitly supplied notes.
 - Pre-1.0 (`0.x`) may include breaking changes; v0.5 documents explicit lack of pre-v1
   project-format compatibility.
-- Patch vs minor conventions and checklists:
-  [`../development/release-process.md`](../development/release-process.md).
 - Commit messages follow Conventional Commit–style scopes used in the repo history; do not
   add new enforcement without maintainer agreement.
-- The coordinated **v0.5.1** publication (GitHub milestone **release-certification**, tracked on
-  [#192](https://github.com/CurateLabs/graphforge/issues/192)) is the current
-  release close-out target. Partial v0.5.0 registry records remain immutable
-  historical evidence and must not be overwritten.
+- The tag must be `v<workspace version>`. A prerelease (`X.Y.Z-rc.N`) is published to npm
+  under the `next` dist-tag; a release under `latest`.
 
 ## Build and continuous delivery
 
 ```bash
-# Local validation before release candidate freeze
+# Local validation before tagging
 cargo fmt --all -- --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
-make pre-push
+make check
 
 # Docs site (Starlight)
 pnpm docs:build
 
-# Publication tooling — authoritative order:
-# docs/development/publication-order.md
-python3 scripts/ci/crate-publish-plan.py check
-# Cargo: package the complete 16-crate graph in dependency order.
-make publish-dry-run-cargo
-# Python: maturin / TestPyPI clean-install checks
-# Node / CLI / skills: npm publish --dry-run
+# Publication tooling
+python3 scripts/set_release_version.py --check
+make publish-dry-run   # package every crate in publish order without uploading
 ```
 
-The release-event workflow runs `release-publish-preflight.py`, validates the
-complete partitioned candidate and offline rehearsal, and obtains fresh public
-registry truth before any registry write. The release tag must resolve to the
-reviewed `main` SHA, and Cargo, Python, Node, CLI, and skills versions must match
-the tag. npm write steps use trusted publishing (GitHub Actions OIDC) with
-provenance and do not project a long-lived `NPM_TOKEN`.
+The publish job runs only for a tag push and needs the wheels, sdist, npm tarballs, and crate
+packaging jobs from the same run. The tag must equal `v<workspace version>`, and Cargo, Python,
+Node, CLI, and skills versions must agree (`set_release_version.py --check`). npm and crates.io
+writes use trusted publishing (GitHub Actions OIDC; npm with provenance); PyPI uses
+`uv publish`. A crate name that has never been published is uploaded with the repository
+secret `CARGO_REGISTRY_TOKEN`, because crates.io Trusted Publishing cannot create a crate.
 
-Required TESTING.md gates (TCK, contract gates applicable to the release, binding RC evidence)
-must be green on the **same SHA** that is tagged for publication.
+Required TESTING.md gates (TCK, applicable contract gates) are enforced by `CI Gate` on the PR
+that lands the release commit on `main`; the tag run does not repeat them.
 
 ## Environments and promotion
 
 | From | To | Required evidence / approval |
 | --- | --- | --- |
-| PR branch | `main` | Focused PR, green CI Gate, clean review threads (not Binding RC / release-certification) |
-| `main` SHA | Binding RC candidate | Same-SHA multi-OS retained partitions + offline rehearsal |
-| Binding RC candidate | Registries (publish-track) | Tag / release identity + `publish.yaml` retained bytes; release-certification/checkpoint/knowledge/epistemic **not** required |
-| publish-track success | Human release close (optional) | Documented release-certification / surface gates when the milestone runbook requires them |
-| Published artifacts | Clean-install verification | Fresh pip/npm/Cargo consumers use only public registries |
+| PR branch | `main` | Focused PR, green CI Gate, clean review threads |
+| `main` commit | Dry run | Manual `publish.yaml` run: everything built, packed, and smoke-tested; nothing uploaded |
+| `v<version>` tag | Registries and GitHub Release | Approval of the `release` environment; `publish.yaml` publishes |
+| Published artifacts | Verified | The `verify-published` job installs from PyPI and npm and runs a smoke test |
 | `main` docs | Public docs site | Green `docs.yml` / Starlight build for the deployed commit |
 
 ## Deployment verification
 
 - **Docs:** `pnpm docs:build` / docs workflow green; published URLs resolve to current Guide +
   Book + allowlisted lifecycle pages.
-- **Packages:** clean-environment quickstart / smoke from public registries only
-  ([`../development/clean-environment-verification.md`](../development/clean-environment-verification.md),
-  tracker [#167](https://github.com/CurateLabs/graphforge/issues/167)).
-  Fail closed when the requested version is unpublished — never check off against missing
-  artifacts.
+- **Packages:** the `verify-published` job installs `graphforge` from PyPI and
+  `@curatelabs/graphforge` and `-cli` from npm and runs smoke tests; it does not install the
+  crates or the agent-skills package. Confirm those on the registries by hand.
 - **Skills:** packed artifact hashes and offline compatibility check
-  ([`../agent-skills.md`](../agent-skills.md)); post-publish NPX bootstrap is a clean-env lane.
-- Versions and checksums match the release record; do not rebuild different bytes under the
-  same version if a step fails — stop and recover per the release plan.
+  ([`../agent-skills.md`](../agent-skills.md)).
+- Do not rebuild different bytes under the same version if a step fails; the registry steps skip
+  a version already published.
 
 ## Rollback and recovery
 
-Authoritative stop/rollback table:
-[`../development/publication-order.md`](../development/publication-order.md).
-
+- **Partial failure:** re-run the failed tag run; versions already on a registry are skipped.
+  Build artifacts are kept for 7 days; after that, re-run all jobs.
 - **Registries:** yank or follow registry-specific yank/deprecate procedures; never overwrite
   an already-published version with different bits.
-- **GitHub Release / tag:** do not move an annotated release tag to a different commit; cut a
-  new patch version if needed.
+- **GitHub Release / tag:** do not move a release tag to a different commit; cut a new version
+  if needed.
 - **Docs site:** redeploy last known-good commit from `main` / hosting history.
-- Authority: maintainers explicitly authorize the immutable tag, GitHub
-  Release, registry writes, and final closure of the v0.5.1 publication
-  tracker ([#192](https://github.com/CurateLabs/graphforge/issues/192)).
 
 ## Official references
 
 - [Semantic Versioning 2.0.0](https://semver.org/)
 - [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/)
-- [`../development/publication-order.md`](../development/publication-order.md)
-- [`../development/release-process.md`](../development/release-process.md)
-- [`../development/release-workflows.md`](../development/release-workflows.md)
 - `.github/workflows/publish.yaml`

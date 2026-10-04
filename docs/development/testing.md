@@ -21,8 +21,8 @@ The testing principles are the same for both:
 3. **Hermetic tests** — no shared state between tests
 4. **Deterministic behavior** — tests pass or fail consistently
 
-Coverage floors are enforced locally by `make pre-push`, not uploaded from CI;
-see [codecov-integration.md](codecov-integration.md).
+Coverage floors are enforced by the Coverage workflow on pushes to `main`, not
+uploaded from CI; see [codecov-integration.md](codecov-integration.md).
 The rules for classifying behavior tests and binding smoke checks are in the
 [test coverage classification](test-coverage-classification.md).
 
@@ -84,14 +84,9 @@ cargo test -p graphforge-api \
   --test search_public_surface
 ```
 
-The `Rust Non-Cypher Surface Gate` workflow runs the inventory validator,
-`graphforge-api` unit contracts, and these persisted integration tests from one exact
-source SHA when assembling release-certification evidence. Its downloadable
-report records the inventory digest and test binary digests. Ordinary
-implementation and construction issues close on acceptance-criteria outcomes
-and the relevant PR/`main` checks for the changed surface; they do not require
-this manual SHA-bound dispatch (see `AGENTS.md` § Issue close). A green TCK run
-cannot substitute for the surface inventory itself.
+No workflow dispatches the inventory gate on its own; the Python binding test
+`crates/graphforge-bindings-py/tests/non_cypher_release.py` imports it. A green
+TCK run cannot substitute for the surface inventory itself.
 
 ### Rust test example
 
@@ -175,8 +170,8 @@ PYO3_PYTHON="$python_test_exe" \
 ```
 
 `scripts/ci/python-build-mode-check.py` inspects the actual default and packaging
-Cargo feature graphs. It runs in the fast local gate and the required Rust
-Quality job before Clippy. Test builds, a real native import, and inspection of
+Cargo feature graphs. It runs in `make check` (via `scripts/ci/repo-checks.sh`) and the CI Lint job
+before Clippy. Test builds, a real native import, and inspection of
 the distribution artifact's dynamic dependencies remain required evidence when
 changing linkage; a successful cdylib build alone does not prove the Rust-test
 executable links.
@@ -274,51 +269,6 @@ make coverage-diff       # changed Python wrapper files only
 pytest tests/ -n auto
 ```
 
-## Resumable full validation
-
-`make pre-push` is the full local gate. It begins with a prerequisite and disk
-preflight, then records content-addressed
-evidence for policy checks, Rust tests and coverage, the instrumented native
-Python and Node builds consumed by acceptance, wrapper coverage, Rust engine
-Rust API/TCK BDD and one native smoke suite per binding, and coverage thresholds.
-`make pre-push-fast` (also invoked from the
-policy-static stage) runs the Python lock, build-mode, and inventory policies
-before format/lint/security. The CI Gate Rust lane's nextest commands are in
-[agent-environment.md](agent-environment.md#rust-test-gate).
-It never skips a gate: a compatible passed stage is reused only when its exact
-inputs, command contract, toolchain, dependency evidence, and required native
-artifact identity still match.
-
-The human-readable stage lines and machine-readable summary report elapsed time,
-evidence hit or miss, identity digest, invalidation reason, and disk budget.
-They are stored locally at `.graphforge/validation/v1/summary.json`; standalone
-preflight writes `preflight-summary.json` so it cannot replace the full-run
-outcome. These paths are ignored by Git and the evidence contains no command
-output or secrets. The instrumented Rust coverage run executes the full Rust
-corpus once and builds each native artifact once; later acceptance stages reuse
-those exact artifact identities.
-Compatible Cargo dependency compilation is shared beneath the common Git
-metadata directory (`graphforge-validation-cache/cargo`, one target directory
-per manifest, toolchain, and heavy-profile identity), while evidence and native
-binding artifacts stay scoped to their individual worktree. Each heavy stage
-records its use and, while holding the shared heavy-build lock, evicts the
-least-recently-used target directories so at most six remain
-(`GF_PRE_PUSH_CACHE_KEEP_ENTRIES` overrides the six). The directories the
-current run needs are always kept. Preflight prunes the same way before it
-checks free disk, unless another worktree is compiling.
-
-Run `make pre-push-preflight` to check those prerequisites and disk budget
-without starting any heavy compilation.
-
-Use `make pre-push-clean` to discard only this local validation evidence and
-force every stage to rerun. If the preflight reports insufficient space, it does
-not start compilation. Review its reported safe options first: `make
-clean-builds` removes stale Rust artifacts under `target/` when possible,
-while `make clean-builds-all` removes all of them and forces future
-recompilation. Neither command is run automatically, and neither touches the
-shared pre-push cache; lower `GF_PRE_PUSH_CACHE_KEEP_ENTRIES` to bound it more
-tightly.
-
 ### Core Fixtures (`tests/conftest.py`)
 
 ```python
@@ -406,34 +356,75 @@ pass end-to-end before marking `"status": "supported"`.
 
 ## CI/CD
 
-GitHub Actions runs the full suite on every PR:
+GitHub Actions (`.github/workflows/test.yml`) runs the applicable jobs on every
+PR. Key jobs: `Lint` (Cargo fmt/Clippy + Python quality + policy checks),
+`Rust Tests` (nextest over the workspace), `Rust Harness, Doc, and Feature
+Tests`, `Python and Node Bindings` (full binding suites on Linux), `Windows
+Storage`, and the required `CI Gate`
+aggregate. See [`.github/workflows/README.md`](../../.github/workflows/README.md)
+for the full job list and local equivalents.
 
-```yaml
-jobs:
-  rust:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo clippy --workspace -- -D warnings
-      - run: cargo test --workspace
+### Build-lane measurement method (ADR 0048)
 
-  python:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      - run: pip install uv && uv sync --all-extras
-      - run: maturin develop --release
-      - run: make pre-push
-```
+[ADR 0048](../adr/0048-cargo-is-the-ci-build-authority.md) rests on a
+comparison of the Bazel CI lane with a Cargo lane on the same runner class. The
+dispatch-only harness that produced the Cargo samples,
+`.github/workflows/build-lane-measurement.yml`, was retired when the comparison
+finished (#1663). This section records how to reproduce it and the digests that
+identify its inputs. The results (per-run tables, run ids, logs and artifact
+hashes) are on
+[#1618](https://github.com/CurateLabs/graphforge/issues/1618#issuecomment-5902091518)
+and are not kept in the repository.
+
+**Method.**
+
+- **Runner and toolchain:** `blacksmith-4vcpu-ubuntu-2404`, Rust 1.96.0,
+  cargo-nextest 0.9.145, `CARGO_INCREMENTAL=0`, and the dev/test profile with
+  debug information off. Debug assertions and overflow checks stay on.
+- **Concurrent variant:** the three Rust gate commands in
+  [agent-environment.md](agent-environment.md#rust-test-gate), timed as one
+  interval that includes compilation. `cargo fetch` is timed separately.
+- **Serial variant:** `cargo test --workspace --locked`.
+- **Keep the aggregate exit status.** Run every constituent step even when an
+  earlier one fails.
+- **Record the cache state before each sample,** from the actual contents of
+  `target/`. A cache key or label does not prove the cache is populated.
+  Compilation caching and test-result caching are different inputs.
+- **Compare only compatible boundaries.** Compare successful runs over the
+  same timing boundary. The test interval and the full job wall time are
+  different quantities. Label cancelled runs and failed collectors explicitly,
+  even if a test step passed.
+- **Check cohort ancestry.** Verify each main-history SHA with
+  `git merge-base --is-ancestor <measured-sha> <frozen-main-sha>`. An event
+  label does not establish ancestry.
+
+**Harness identity.** A harness commit identifies the workflow, not the
+measured tree. Check out the measured SHA separately. To reproduce, run
+`git show <harness-commit>:.github/workflows/build-lane-measurement.yml` and
+check its SHA-256:
+
+| Harness commit | Workflow SHA-256 |
+| --- | --- |
+| `d05a1fcee10ca2a07cb75423a35954ba66d2cdc0` | `3d660ea31df1e5461cba0c22397cb22d878b8895044dab4fe3170af65d88ed82` |
+| `6363d0c5b682347d7a53feab44975264c43bf2fe` | `816352ea82fc76914dcc228052253237781875c396c09c6094e2b762fd8b2ed8` |
+| `3ba0ccf40c03140d8dbf0d3c96e03f9b1c7afaea` | `816352ea82fc76914dcc228052253237781875c396c09c6094e2b762fd8b2ed8` |
+| `5bbf944e7204c54504f67236ba936e544945c345` | `a08ac97aeae44d5eb682db9576901fcdac934338090bfeb133193bf95ecc7978` |
+| `59e9165970d08aeb20e94b6fd63dfa5bd3e9497b` | `d5d1d3ee5079d5018be1c74e3d47bccb2e6d9f7046d9bb347ef871fe08aa4763` |
+| `1cf4548608a6d441808146b4268660f55f89d4d1` | `ee91e8d7bbfb14a9946bf2be494882ea49e3dbcb160b8e20525ea6244315a1ac` |
+| `4ce5649c51bc9684eb9a83cc945a191d7a3d56ca` | `ee91e8d7bbfb14a9946bf2be494882ea49e3dbcb160b8e20525ea6244315a1ac` |
+| `29a7b34ebe441a85ffb9274164d58aaeeb68dc8a` | `38d95bbe61096b904e5c16221d8f3e6a28235929109dacd1a564b18e843783d0` |
+
+Samples from `5bbf944e` failed before running tests: nextest could not list a
+custom-harness target. Samples from `59e91659` recompiled the custom-harness
+targets under per-package features. #1618 qualifies both groups.
+
+**Cohort identity.** The twenty measured SHAs (ten main-history, ten pull
+request) and their `Cargo.lock` inputs have canonical digest
+`1661bfc7d281b6abcbc5edff33041f97502996d0492f80c888beb1cd174ab1d1`. It is the
+SHA-256 of UTF-8 JSON for the ordered records
+`{"cargo_lock_sha256", "lane", "measured_sha"}`, with sorted keys and compact
+separators (`,` and `:`). It identifies inputs only and contains no timing or
+pass/fail results.
 
 ---
 
@@ -441,7 +432,7 @@ jobs:
 
 ### pytest-xdist + pytest-cov deadlock on macOS / Python 3.13
 
-**Symptom:** `make pre-push` hangs at the end of the test run — progress reaches
+**Symptom:** `make coverage` hangs at the end of the test run — progress reaches
 ~100% then freezes. CPU drops to 0%. Only `kill` escapes it.
 
 **Root cause:** `pytest-cov` collects coverage data from xdist workers via IPC

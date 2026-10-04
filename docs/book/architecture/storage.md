@@ -122,9 +122,12 @@ The v4 reverse authority makes `node_id → node_uuid` a generation-pinned,
 disk-bound read rather than a graph-sized process cache. Its manifest names
 typed immutable artifacts: packed UUID payloads for contiguous ordinal ranges,
 UUID-sorted `(UUID, surrogate)` forward records, plus sorted surrogate
-tombstones. Admission authenticates each retained file
-in one streaming pass that jointly derives its whole-file digest, block fences,
-structural checks, and mapping commitment. Aggregate admission counters report
+tombstones. Current ordinal descriptors use wire version 5 while retaining the v4 logical
+authority and API names. Admission checks each retained file
+in one streaming pass that jointly derives its required seed-zero XXH64 checksum,
+block fences, structural checks, and mapping commitment. Payload SHA-256
+identities are computed at publication; the domain-separated mapping commitment
+remains a required contract identity. Aggregate admission counters report
 the exact artifact bytes, sequential read calls, and peak bounded buffer. A
 lookup accepts only
 a bounded request batch, sorts and deduplicates it, applies newest tombstones,
@@ -158,13 +161,13 @@ it after pinning the immutable files; every v4 publisher holds that same stable
 file exclusively across artifact installation and manifest replacement. Each
 admitted file's stable identity, length, and
 high-resolution modification time are retained as a fast change detector.
-That cooperative ownership is not the cryptographic boundary: every selected
-ordinal or tombstone block is verified against its manifest digest before its
+That cooperative ownership does not replace corruption refusal: every selected
+ordinal or tombstone block is checked against its required manifest XXH64 checksum before its
 bytes can produce a result. A non-cooperating mutation therefore fails closed
 even if it preserves the inode and restores the original modification time.
 Adjacent selected ordinal blocks may share one bounded read only when their
 intervening gap and combined span fit the configured cap; every constituent
-slice is still verified against its own digest. Version-3 rebuild recognition
+slice is still checked against its own checksum. Version-3 rebuild recognition
 uses the existing canonical v3 manifest and run-descriptor validator, so a
 minimal version tag or a v3 document mixed with v4 fields fails closed.
 
@@ -254,7 +257,7 @@ project/
 │       ├── graph/              # file-backed graph workspace (optional; with graph/files)
 │       │   └── deltas/         # authoritative mutation runs (ADR 0019; not adjacency)
 │       └── participants/
-│           ├── graph/...       # snapshot.arrow (legacy) or files.json (inventory)
+│           ├── graph/...       # files.json (inventory) and semantic bindings
 │           ├── workspace/
 │           │   ├── configuration.json
 │           │   └── ontology.json
@@ -264,13 +267,20 @@ project/
 └── trash/
 ```
 
+The `graphforge-generation` manifest requires wire version 2. Every participant
+descriptor binds exact length, SHA-256 publication identity, and mandatory
+fixed-width seed-zero XXH64. Data-bearing Arrow/Parquet participant reads check
+length and checksum; JSON control participants retain SHA-256 authentication.
+Old generation manifests and missing or malformed checksum metadata are refused.
+The unchanged project `FORMAT` and `CURRENT` envelopes keep their version 1.
+
 A minimal committed generation declares `graph@1` and `workspace@1`.
 `workspace@1` contains canonical JSON records for explicit ontology absence (or
 an adopted advisory/strict ontology) and authoritative registered project
 configuration. Project open validates these records before opening graph
 data. New publications store graph workspace files under the generation-owned
-`graph/` tree with a `graph`/`files` inventory participant; legacy
-`graph`/`snapshot` Arrow envelopes remain readable. Root YAML/JSON and
+`graph/` tree with a `graph`/`files` inventory participant. Persisted legacy
+`graph`/`snapshot` Arrow envelopes are refused. Root YAML/JSON and
 environment settings are inputs only and cannot override the selected
 generation. Version 2 of `graph`/`files` replaces the expanded per-generation
 inventory with a compact authenticated Patricia/radix root. Immutable payload and
@@ -291,23 +301,83 @@ unchanged while a writable facade materializes a private workspace.
 
 The graph-files role is inferred from the relative path. It does not select a
 different integrity policy: current-format admission checks XXH64 and exact
-length of **every** selected payload without a payload SHA-256 pass. SHA-256
+length of **every** payload it admits, without a payload SHA-256 pass: bulk
+payloads on first touch, the rest at open (see below). SHA-256
 still names CAS objects and authenticates control metadata and existing
 trust boundaries. The standalone `graphforge verify` command and whole-store
 forensic scanner are retired. Portable package verification remains required.
 See [ADR 0049](../../adr/0049-published-payload-checksums.md) for the pre-v1
-format policy and trust assumptions. The same-inode, same-length corruption test in
-`graphforge-api/src/workspace_hydration/tests.rs` covers every role, including
+format policy and trust assumptions.
+
+Opening a compact generation is O(files), not O(payload bytes). The open
+authenticates the manifest and route table and checks each payload's presence
+and exact length, then hard-links the payloads into the private workspace. A
+payload's content is checked (exact length and XXH64) in one of three ways,
+chosen by path in `graphforge_storage::graph_admission`:
+
+- **First touch.** Nodes, edges, property fragments, search segments and the
+  v4 forward and ordinal identity runs are checked when the first reader opens each object, memoized for that hydration,
+  and a refusal is memoized too. Readers reach the check through
+  `ReadPathFile::admitted`, `open_admitted`, and `current_search_artifact`.
+  Anything that would bless a payload's current bytes (inventory capture for
+  publication, rewrite baselines, appends) admits it first, so corruption is
+  refused rather than republished under a fresh digest. (The identity handle
+  authenticates the blocks it reads itself, so for the identity runs only that
+  capture check applies.)
+  The property inventory of a compact generation holds each fragment's
+  manifest entry and reads nothing at open: the exact length is checked, the
+  footer (schema and row count, which the manifest does not carry) is read the
+  first time a route is used, after checking the content directly on the
+  read-only content-store inode. Schema and row-count failures propagate
+  through planning; only an absent route receives a base-schema default.
+  Footer admission is memoized for the inventory's life. A route is "used" only
+  by a plan that reads property values: the catalog names property tables
+  without opening them, and a read plan that references no property value
+  (`graphforge_ir::property_demand` returns `None`) compiles against key-only
+  route schemas. Its scans still join each route by `node_uuid`/`edge_uuid`, so
+  a route such a plan actually reads is admitted and authenticated at execution.
+  Each property payload
+  read copies and authenticates its bytes into a private snapshot before decoding,
+  so an in-place change after a successful read is refused and a concurrent change
+  cannot alter the bytes already authenticated for the decoder. A checksum refusal under `indexes/search/`
+  is a hard validation error, never a reason to rebuild the index. Text `find`
+  takes its freshness identity from the same manifest (node and node-property
+  objects by name, length and XXH64), so it reads no edge object and re-reads no
+  source to recheck freshness.
+- **Self-authenticating.** UUID-membership runs (block checksums in their
+  manifest), CSR shards (per-shard XXH64) and delta runs (verified at replay)
+  carry their own authority; hydration neither reads nor registers them.
+- **Eager.** Every other payload is small metadata or a sidecar with many
+  by-name readers (generation counters, label encoding, catalogs, adjacency
+  build records, CSR shard manifests, unclassified files). Hydration
+  hard-links it from the object store and checks its length and XXH64 as it
+  links, so an unforeseen reader fails closed. Only the route table and the
+  small mutable UUID-membership controls (manifests, receipts, lock,
+  tombstones) are copied into single-link private files. The forward and
+  ordinal identity runs are hard-linked read-only; the identity handle admits a
+  shared inode only when it is read-only and authenticates each block it reads.
+
+`GraphFilesOpenEvidence.bytes_validated` is declared length validated, and
+`bytes_checksummed` is content actually read and checksummed while hydrating.
+`ResolvedProjectGeneration::graph_files_inventory` still checks every payload
+(memoized); `unadmitted_graph_files_inventory` is the length-only form an open
+uses. Every mutating commit publishes a compact root, so a mutated project opens
+as cheaply as a constructed one. Expanded (V1) and delta-bearing generations
+that already exist are still readable: they verify and copy the whole tree at
+open, and convert to a compact root on their next commit.
+
+The same-inode, same-length corruption tests in
+`graphforge-api/src/workspace_hydration/tests.rs` cover every role, including
 real adjacency and search index publications:
 
 | Role | Inventory source | Corruption coverage |
 | --- | --- | --- |
-| Topology | `topology/`, including the current `topology/runtime_catalog.parquet` | Real payload; also covered by the ordinary API reopen/query regression |
-| Properties | `properties/` and `edge_properties/` | Real property payload; the property overlay also re-hashes its routes |
-| Index | Published `indexes/adjacency/` CSR and `indexes/search/` artifacts | Both real build paths reach the compact inventory and refuse changed bytes |
-| Delta | `deltas/` journal runs | Role-level CAS admission test uses an opaque fixture; journal replay has separate validation |
-| Catalog | Top-level `semantic-routes.json` | Real control payload |
-| Other | Any admitted graph workspace file outside the named prefixes | Opaque fixture proves the default role receives the same CAS check |
+| Topology | `topology/`, including the current `topology/runtime_catalog.parquet` | Nodes and edges are refused on first touch (open or the first query/recount); sidecars (generation counters, label encoding, surrogate tails, runtime catalog) are refused at open; a mutating commit refuses a corrupted edge payload instead of republishing it |
+| Properties | `properties/` and `edge_properties/` | Real property payload; open checks each fragment's exact length only, and every read (projection, filter, `find`, portable export, `SET`) refuses a corrupted fragment on first touch |
+| Index | Published `indexes/adjacency/` CSR and `indexes/search/` artifacts | Both real build paths reach the compact inventory; adjacency build records and shard manifests are refused at open, CSR shards by their own checksum on read, search artifacts on first touch |
+| Delta | `deltas/` journal runs | Role-level full-admission test uses an opaque fixture; journal replay has separate validation |
+| Catalog | Top-level `semantic-routes.json` | Real control payload, authenticated by SHA-256 with the manifest |
+| Other | Any admitted graph workspace file outside the named prefixes | Opaque fixture is copied and checked while hydrating, so it is refused at open |
 
 `runtime_catalog.parquet` at the graph root would be Catalog-role, but the
 current compact writer places it under `topology/`. The role classifier permits
@@ -387,6 +457,40 @@ authenticated targeted batch lookup for the window's UUID set, with the same
 zero-per-record-seek scanner; sealing consumes those complete staged rows and
 does not read historical fragments again.
 
+Writers cut logical fragments in UUID order at `MAX_PROPERTY_FRAGMENT_ROWS`
+(65,536) and `MAX_PROPERTY_FRAGMENT_BYTES` (4 MiB of Arrow value, offset and
+presence bytes). These boundaries give dense ordinals and disjoint UUID ranges
+within a generation. A row larger than the logical target stays intact: the
+target does not impose a new limit on valid property values.
+
+The separate physical bound is `MAX_PROPERTY_OBJECT_BYTES` (4 MiB), including
+all Parquet headers, pages, schema metadata and footer. Writers check the final
+encoded size; compression is not assumed to shrink its input. An oversized
+logical Parquet stream is split into fixed-size byte segments, each stored in
+a valid Parquet envelope with the `graphforge.property_object=1` marker,
+logical length, part count and part index. The first object uses the canonical
+fragment filename; later objects append `.part-<20-digit-index>.parquet`.
+The envelope has a fixed schema and is uncompressed, so it adds no second
+compression pass. Every completed envelope is checked against the physical
+bound before publication.
+
+Parts share one logical fragment identity. The authenticated inventory owns
+the complete ordered part set, and the shared property byte reader exposes the
+original Parquet stream to existing Arrow decoders. It loads only requested
+ranges, retains at most one decoded part, and verifies every physical object
+through existing manifest checksums. Missing, duplicate or inconsistent parts
+are corruption. Logical fingerprints and query results use decoded values,
+never envelope rows. Reading a large requested value necessarily reads all of
+its parts; storage chunking does not remove existing query resource budgets.
+
+Construction, SET/REMOVE windows, delta replay and graph projection use this
+publication boundary. Oversized projected flat snapshots become canonical
+generation-zero fragments. Existing plain Parquet files remain readable,
+including oversized files written before the cap; portable copies preserve
+their representation. Newly encoded objects use the bounded representation.
+Projects containing envelopes require an envelope-aware reader; older readers
+do not interpret the envelope's binary payload as property values.
+
 Each fragment also carries the authenticated `graphforge-property-live-schema/1`
 route summary: an exact live-UUID count for every currently present property
 key. Mutation preparation updates those counts from the targeted UUIDs' old
@@ -414,11 +518,11 @@ resource failure therefore discards the runs and returns a typed error with zero
 rows observed by direct callbacks or DataFusion—even for a projected `LIMIT 1`
 plan.
 Admission retains the stable root capability plus each fragment's authenticated
-path, native file identity, length, digest, and schema—not one OS handle per
+path, native file identity, length, XXH64 checksum, and schema—not one OS handle per
 historical fragment. A scan opens fragments on demand without following links,
-requires the admitted device/file identity, and rehashes the complete file
+requires the admitted device/file identity, and checksums the complete file
 while streaming those exact bytes into an exclusively created, unnamed scratch
-file. Identity, length, and digest must match before Parquet sees the scratch
+file. Identity, length, and checksum must match before Parquet sees the scratch
 handle; full, targeted, and SQL readers never decode the mutable source handle.
 The source handle then closes. Consequently live
 fragment handles are bounded by `max_open_runs` rather than total history, and
@@ -500,7 +604,15 @@ entry regression ladder bounds representative successful and absent lookups and
 replacements to four reads, and checks deletion work separately. These are
 application I/O counters, not OS I/O or native memory measurements.
 
-Authoritative small-write delta runs, when present, live under
+GFDR run envelopes and records require version 2 with seed-zero XXH64
+checksums; version-1 framing is refused. Control-chain identities and publication
+SHA-256 names remain required, while default replay performs corruption checks
+without cryptographic payload rehashing.
+
+No commit publishes delta runs any longer (#1388): a delta-bearing open verifies,
+copies and re-streams the whole graph, which a bounded open cannot afford. Runs
+that generations already carry stay readable and compactable. Authoritative
+small-write delta runs, when present, live under
 `graph/deltas/` inside the same generation and are inventory-verified
 ([ADR 0019](../../adr/0019-authoritative-graph-delta-journal.md)). GFDR's
 binary framing and JSON payload schema are a permanent, versioned exception to
@@ -631,6 +743,12 @@ private trees are ignored and recoverably removed on open. Alias replacement is
 separate from generation publication, so an incompatible producer cannot take
 over a name accidentally.
 
+Generation manifests require wire version 2, exact Parquet byte length, a
+seed-zero XXH64 file checksum, and a checksum of canonical UUID/vector rows.
+Default open checks both physical bytes and canonical rows without recomputing
+their publication/content SHA-256 identities. Missing, malformed, or older
+manifest metadata fails closed; no legacy hashing fallback is provided.
+
 Every open recomputes `fresh`, `stale`, `substantially_stale`, `incompatible`,
 or `corrupt` from the persisted descriptor/source fingerprint and current graph
 metadata. The exact identity fields, mutation thresholds, forced-stale boundary,
@@ -711,15 +829,15 @@ Conventions:
   array is never empty.
 - **Node with no neighbors**: an empty list (`offsets[i] == offsets[i+1]`).
 - The shard manifest records format/version, total node/edge counts, ordered boundaries,
-  per-shard counts, encoded/decoded byte lengths, and SHA-256 checksums. A row may span consecutive shards when a
+  per-shard counts, encoded/decoded byte lengths, SHA-256 publication identities, and required seed-zero XXH64 corruption checksums. A row may span consecutive shards when a
   high-degree vertex exceeds the configured hard edge cap; readers concatenate those
   fragments in deterministic `(key, edge_id)` order.
 - Logical CSR rows cover exactly `node_id ∈ 0..node_count`; surrogates beyond `node_count`
   have no entries. Empty interior rows need no physical shard bytes.
 - In-memory consumers (`graphforge_exec::AdjacencyProvider`) keep a
   `ShardedCsrIndex` on a persisted hit and materialize only the requested logical row
-  from its bounded shard fragments. Only current version 2 manifests and Zstd IPC shards
-  are admitted. Version 1 manifests and standalone legacy files have no compatibility reader
+  from its bounded shard fragments. Only current version 3 manifests and Zstd IPC shards
+  are admitted. Earlier manifests and standalone legacy files have no compatibility reader
   or migration path.
   Scan-build fallback still materializes a hash map for oracle parity.
 
@@ -737,7 +855,7 @@ For admitted shard counts `N` and `E`, the seven decoded buffers total
 `D = 8*(N+1) + 16*E + ceil(N/8) + 3*ceil(E/8)` bytes, including validity bitmaps.
 The encoded file is capped at `D + 16,384` bytes. The manifest carries both exact
 encoded length and `D`; lookup and stable-shard reuse validate these counts, bound
-reads, authenticate SHA-256, then check the IPC footer/message and every buffer
+reads, check seed-zero XXH64, then check the IPC footer/message and every buffer
 before Arrow allocates decoded arrays. Preflight requires the exact fixed schema,
 one batch, no dictionaries, zero null counts, matching field lengths, Zstd buffer
 compression, and one exact current Zstd frame with matching content size. Invalid
@@ -782,6 +900,22 @@ shards; only `row_chunk` bounds the returned row portion by its limit.
 - **Fallback.** On mismatch (or absent index), the provider scans the typed edge tables and
   builds the adjacency in memory — yielding identical results, only slower. A stale or missing
   index can therefore never cause incorrect output.
+- **Corruption is refused, not rebuilt (#1388).** An index object that fails its
+  checksum or length (a CSR shard against its shard manifest; `index_manifest.parquet`
+  and each `*.csr.json` against the project manifest on first touch), or whose
+  checksummed bytes do not decode, is refused by the query that touches it with
+  `GF_VALIDATION`. Nothing is rebuilt or written: a rebuild would answer by scanning
+  the edge table, so a bounded query would silently cost O(E) and the damage would
+  never be reported. An index in a format this release does not read, or an I/O
+  failure, is a storage error. The explicit `index_adjacency` rebuilds from the
+  authenticated edges and replaces a corrupted index.
+- **Explain and query evidence.** Traversal plans retain `adjacency=hit`,
+  `miss`, or `building`. A stale index adds `adjacency_rebuild=stale`, including
+  the ordered one-hop and two-hop plans. Explain observes the pending rebuild
+  without performing it. Public query execution evidence records
+  `adjacency_rebuilds`: a construction-published generation reads its current
+  index with zero rebuilds; the first traversal after a stale-making mutation
+  records the rebuild it performs. Corruption refuses rather than rebuilding.
 - **Rebuild triggers.** Lazy on first traversal when the `indexes/adjacency/` capability is
   present, or explicit via `forge.index("adjacency", ...)`. Append-only commits
   publish bounded delta segments; a full rebuild compacts them into sharded bases.
@@ -808,10 +942,12 @@ shards; only `row_chunk` bounds the returned row portion by its limit.
   (`adjacency=hit`); stale or torn ⇒ lazy rebuild, then serve; fresh but **no
   row** for the requested relation ⇒ scan-build *without* rebuild (rebuilding
   cannot add an unknown relation — prevents a rebuild-per-query loop); a
-  corrupt accelerator ⇒ always-stale scan-build; capability absent ⇒ scan-build
+  missing shard manifest for a manifest row, or one that disagrees with the index
+  manifest's counts ⇒ lazy rebuild; a corrupt accelerator ⇒ `GF_VALIDATION`, never a
+  rebuild; an unreadable generation counter ⇒ scan-build; capability absent ⇒ scan-build
   (`adjacency=building`). Typed-mode `"*"` bypasses the index entirely
-  (reported as `building`, never a false miss). A build or load failure never
-  fails the query — only its speed.
+  (reported as `building`, never a false miss). A failure to *write* a missing or
+  stale index never fails the query — only its speed.
 - **Direction.** `out` and `in` CSRs are stored separately; undirected traversal unions them.
   In exploratory mode, `_exploratory.parquet` rows are routed by their `rel_type_name` column.
 
@@ -900,8 +1036,10 @@ legacy projects without it use the bounded tail migration path once.
 
 Bulk endpoint resolution uses the persistent authenticated
 `topology/uuid-membership/` snapshot published with each immutable graph
-generation. The existing `manifest.json` facet authenticates the
-topology generation, record counts, lengths, and SHA-256 digests. Nodes have a
+generation. The current wire-version-6 `manifest.json` facet binds the
+topology generation, record counts, exact lengths, publication SHA-256 identities,
+and mandatory file/block XXH64 checksums. Default probes validate checksums
+without recomputing cryptographic payload identities. Nodes have a
 sorted fixed-width `UUID -> node_id` file; edges have a sorted UUID membership
 file. Builds use bounded external sort runs and bounded-fan-in merges. Probes
 sort and deduplicate the caller batch, use authenticated block fences to select
@@ -918,7 +1056,8 @@ Node ordinal resolution is a distinct, additive authority facet in the same
 directory. Its `ordinal-v4-manifest.json`, `ordinal-v4-receipt.json`, and
 `ordinal-v4.lock` never replace or reinterpret the v3 node-and-edge manifest.
 Both facets name the same topology generation but have independent receipt-bound
-manifest digests. If the ordinal facet is absent while current v3 is canonical,
+manifest digests. The v4 logical ordinal facet now requires wire version 5
+with file/block XXH64 checksums; earlier wire-version-4 descriptors are refused. If the ordinal facet is absent while current v3 is canonical,
 discovery returns a typed rebuild requirement. A present ordinal path must pass
 authenticated open and never falls back to v3 when malformed or substituted.
 
@@ -1169,7 +1308,7 @@ Every applicable graph publisher preserves these authorities together:
 | --- | --- |
 | Public construction → canonical graph generation → facade/reopen | Typed/exploratory topology and properties, sharded nodes, routes, all graph identity authorities and continuation tails. Construction, CAS ownership and publishing-budget facade regressions cover exact reopening and portable interchange. |
 | Ordinary Cypher/analyst mutation → MutationTransaction/GraphWriter → generation readers | Canonical topology and property mutation; complete participant publication. Public CREATE/DELETE/SET, active streams, fault recovery and next-ID tests apply. |
-| Composite property mutation → GFDR preparation → verified replay/compaction | Only the four property operations are admitted. Qualified/constructed ownership fixtures cover sparse latest values, removals, nulls, route identity and shared immutable base payloads. Canonical property publication remains available when eligibility requires it. |
+| Composite property mutation → compact root publication (GFDR preparation retained for existing generations) | Composite property mutation publishes a compact root and no delta run (#1388). The GFDR storage APIs and their verified replay/compaction remain for generations that already carry runs: only the four property operations are admitted, and ownership fixtures cover sparse latest values, removals, nulls, route identity and shared immutable base payloads. |
 | Composite topology mutation → canonical GraphWriter publication → facade | Never GFDR. Qualified create and owner-routing regressions cover identities and subsequent property mutation. |
 | Storage GFDR APIs → framed runs → direct replay, open, checkpoint, compaction/import | All topology operations are unsupported, including checksum-valid records, duplicate operation IDs and matching transaction retries. Refusal precedes authority changes; direct replay leaves the entire supplied state unchanged. |
 | Public compaction → complete new generation → refreshed facade | Full verified property chain, same-facade subsequent mutation, exact retry, retained streams and imported continuation. Private hydration and selected permanent ownership are measured separately. |
@@ -1232,7 +1371,7 @@ superseded fixture attempts. No incomparable baseline improvement is claimed.
 | Portable current-format identity correctness | `valid_identity_package_keeps_absent_primary_and_runtime_catalog_bytes`, `invalid_delta_identity_package_preserves_pristine_target_authority`, and `absent_primary_round_trip_and_topology_replay_refusal_preserve_state` distinguish valid full-width identities from unsupported topology replay. |
 
 This ledger maps ordinary implementation criteria to their existing tests. It
-adds no release-certification requirement and does not claim final capacity
+adds no release-gate requirement and does not claim final capacity
 completion. The [integrated #1194 report](../../development/integrated-storage-1194.md)
 reconciles the merged repairs, admitted S20/S22 measurements, physical owners,
 resource tradeoffs and the separate final-capacity outcome.
@@ -1309,6 +1448,23 @@ temporary-disk bounds. The separate point census includes retained generations.
 See [`bounded-csr-1205.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/bounded-csr-1205.json)
 for frozen source/executable hashes, exact observations, commands, decoded bounds,
 CPU/I/O costs and limitations, including the superseded incomplete baseline trace.
+
+### Topology file membership
+
+A compact session retains an explicit topology authority from its generation's
+manifest. `enumerate_topology_files` returns those node and edge files together
+with the session's own staged replacements and appends. Payload readers receive
+that file list; directory discovery is confined to the explicit standalone
+legacy boundary. A route-scoped property inventory cannot authorize a complete
+topology scan. A newly created generation without graph participants has an
+explicit empty authority.
+
+The same authority governs mutation preparation, UUID rebuilding, publication,
+and reopen. Publication captures only selected topology files, so an unrelated
+well-formed file placed in a node or edge directory cannot become authenticated
+through a refresh. A staged commit prepares its candidate membership before
+installing files and swaps the authority after successful installation; rollback
+restores the session's prior membership along with its files.
 
 ### Ordinary Cypher property ownership
 
@@ -1594,3 +1750,28 @@ reachability before deletion. Recovery/read-side reachability acquires shared
 CAS access before the writer lock. No callback reacquires a shared CAS lock
 while cleanup holds it exclusively. Historical materialization writes only to
 an empty private target and preserves the Project's read-only state.
+
+
+## Physical durability owner
+
+`graphforge-storage::durable_commit` owns physical staging, descriptor seals,
+atomic visibility, retained-parent acknowledgment and exact owned retirement.
+Callers retain content checksums/authentication, logical predicates and recovery
+formats. `SealedArtifact` consumes the actual producer descriptor or an opaque
+seal witness; `PendingCommit` retains uncertain visibility and acknowledgment.
+A directory batch validates all visible identities before one fence. Construction
+batches share their parent and close unlocked producer handles after visibility;
+recovery-owned inputs survive failed publication. No failed acknowledgment may
+remove visible authority. Append journals bind their accepted offset to the same
+retained descriptor and namespace. Cache release retains its final dirty window.
+
+The [durability inventory method](../../development/ingest-region-diagnostics.md#durability-source-inventory) records the reproducible counting unit and input digests.
+
+Only uncheckpointed sorting/merge scratch barriers are retired: rebuilt outputs
+still receive their durable seal before publication. Durable rewrite inputs,
+UUID intents and checkpoint recovery inputs remain sealed. Two duplicate delta
+and compaction tests that ran only the generic crash model are replaced by five
+actual primitive fault tests. Real family reopen, native replacement and modeled
+power-loss omission witnesses remain. The standard Cargo CI discovers the new
+owner tests automatically. No additional product workflow/job is retired here;
+the gate registry and platform lanes retain their existing coverage.

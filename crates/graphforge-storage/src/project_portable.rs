@@ -9,10 +9,10 @@ use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use atomicwrites::{AtomicFile, DisallowOverwrite};
+use graphforge_core::hash_observation::PortableSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -218,11 +218,28 @@ pub fn export_portable_project(
     let destination = destination.as_ref();
     reject_export_destination(destination)?;
     let (bytes, receipt) = encode_portable_project(generation, limits)?;
-    AtomicFile::new(destination, DisallowOverwrite)
-        .write(|file| {
-            file.write_all(&bytes)?;
-            file.sync_all()
-        })
+    let parent = destination
+        .parent()
+        .ok_or_else(|| GfError::Storage("portable export has no parent".to_owned()))?;
+    let directory = graphforge_filesystem::StableDirectory::open(parent)
+        .map_err(|error| GfError::Storage(error.to_string()))?;
+    let temporary = format!("portable-{}.tmp", Uuid::new_v4());
+    let sealed = crate::durable_commit::stage_writer(
+        &directory,
+        std::ffi::OsStr::new(&temporary),
+        |file| file.write_all(&bytes),
+        None,
+    )
+    .map_err(|error| GfError::Storage(format!("failed to write portable export: {error}")))?;
+    sealed
+        .make_visible(
+            destination
+                .file_name()
+                .ok_or_else(|| GfError::Storage("portable export has no name".to_owned()))?,
+            crate::durable_commit::PublishMode::CreateOnly,
+            || Ok(()),
+        )
+        .and_then(|pending| pending.acknowledge(None))
         .map_err(|error| GfError::Storage(format!("failed to write portable export: {error}")))?;
     Ok(receipt)
 }
@@ -972,6 +989,63 @@ mod tests {
                 .generation_uuid(),
             parent
         );
+    }
+
+    #[test]
+    fn portable_envelope_crypto_is_separate_and_corruption_refuses_before_admission() {
+        use graphforge_core::hash_observation::operation::Capture;
+
+        let source = tempfile::tempdir().unwrap();
+        let generation = open_or_initialize_project(source.path()).unwrap();
+        let members = generation.participant_snapshots().unwrap();
+        let member_bytes = members
+            .iter()
+            .map(|member| member.bytes.len() as u64)
+            .sum::<u64>();
+        assert!(member_bytes > 0);
+        let capabilities = supported(&generation);
+        let limits = PortableProjectLimits::default();
+        let capture = Capture::start();
+        let (envelope, receipt) = encode_portable_project(&generation, limits).unwrap();
+        let verified = validate_envelope(&envelope, &capabilities, limits).unwrap();
+        let work = capture.snapshot();
+        drop(capture);
+        assert_eq!(
+            work.portable_authentication_sha256_bytes,
+            2 * (receipt.byte_length + member_bytes)
+        );
+        assert_eq!(work.artifact_payload_sha256_bytes, 0);
+        assert_eq!(work.unclassified_sha256_bytes, 0);
+        let expected: [u8; 32] = sha2::Sha256::digest(&envelope).into();
+        assert_eq!(receipt.envelope_sha256, expected);
+        assert_eq!(verified.envelope_sha256, expected);
+
+        let mut corrupt_envelope = envelope;
+        *corrupt_envelope.last_mut().unwrap() ^= 1;
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("refused-portable-import");
+        let capture = Capture::start();
+        let error = import_portable_project(
+            &corrupt_envelope,
+            &target,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &capabilities,
+            limits,
+        )
+        .unwrap_err();
+        let refused = capture.snapshot();
+        drop(capture);
+        assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
+        assert!(
+            error
+                .to_string()
+                .contains("portable participant content digest does not match")
+        );
+        assert!(refused.portable_authentication_sha256_bytes > 0);
+        assert_eq!(refused.artifact_payload_sha256_bytes, 0);
+        assert_eq!(refused.unclassified_sha256_bytes, 0);
+        assert!(!target.exists());
     }
 
     #[test]

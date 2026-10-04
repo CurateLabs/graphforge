@@ -97,7 +97,7 @@ fn generation_without_family(
         .map(snapshot_to_participant)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    let request = ProjectGenerationRequest {
+    let request = graphforge_storage::ProjectGenerationRequest {
         transaction_uuid,
         generation_uuid,
         capabilities: parent

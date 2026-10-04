@@ -17,14 +17,6 @@ use arrow::array::{ArrayRef, Int64Array};
 use arrow::datatypes::SchemaRef;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
-use datafusion::physical_expr::ScalarFunctionExpr;
-use datafusion::physical_expr::expressions::{Column, Literal};
-use datafusion::physical_plan::Partitioning;
-use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode};
-use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion::physical_plan::limit::GlobalLimitExec;
-use datafusion::physical_plan::projection::ProjectionExec;
-use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
@@ -32,39 +24,8 @@ use datafusion::physical_plan::{
 use futures::Stream;
 use graphforge_ir::Direction;
 
-use crate::ExpandExec;
 use crate::adjacency::AdjacencyProvider;
 use crate::demand;
-
-/// Rewrite a global edge `count` over one Expand into an adjacency edge count.
-pub(crate) fn try_rewrite_edge_count(
-    plan: Arc<dyn ExecutionPlan>,
-) -> Result<Arc<dyn ExecutionPlan>> {
-    let Some(spec) = detect_edge_count(&plan) else {
-        return Ok(plan);
-    };
-    let replacement = Arc::new(EdgeCountExec::new(spec)) as Arc<dyn ExecutionPlan>;
-    replace_peeled(&plan, replacement)
-}
-
-fn replace_peeled(
-    plan: &Arc<dyn ExecutionPlan>,
-    replacement: Arc<dyn ExecutionPlan>,
-) -> Result<Arc<dyn ExecutionPlan>> {
-    if let Some(limit) = plan.downcast_ref::<GlobalLimitExec>() {
-        return Arc::clone(plan)
-            .with_new_children(vec![replace_peeled(limit.input(), replacement)?]);
-    }
-    if let Some(coalesce) = plan.downcast_ref::<CoalescePartitionsExec>() {
-        return Arc::clone(plan)
-            .with_new_children(vec![replace_peeled(coalesce.input(), replacement)?]);
-    }
-    if let Some(repartition) = plan.downcast_ref::<RepartitionExec>() {
-        return Arc::clone(plan)
-            .with_new_children(vec![replace_peeled(repartition.input(), replacement)?]);
-    }
-    Ok(replacement)
-}
 
 struct EdgeCountSpec {
     schema: SchemaRef,
@@ -72,166 +33,6 @@ struct EdgeCountSpec {
     rel_type_name: String,
     direction: Direction,
     provider: Arc<dyn AdjacencyProvider>,
-}
-
-fn peel_transport(plan: &Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-    if let Some(limit) = plan.downcast_ref::<GlobalLimitExec>() {
-        return peel_transport(limit.input());
-    }
-    if let Some(coalesce) = plan.downcast_ref::<CoalescePartitionsExec>() {
-        return peel_transport(coalesce.input());
-    }
-    if let Some(repartition) = plan.downcast_ref::<RepartitionExec>() {
-        return peel_transport(repartition.input());
-    }
-    Arc::clone(plan)
-}
-
-fn peel_expand_input(plan: &Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-    if let Some(coalesce) = plan.downcast_ref::<CoalescePartitionsExec>() {
-        return peel_expand_input(coalesce.input());
-    }
-    if let Some(repartition) = plan.downcast_ref::<RepartitionExec>() {
-        return peel_expand_input(repartition.input());
-    }
-    if let Some(projection) = plan.downcast_ref::<ProjectionExec>() {
-        return peel_expand_input(projection.input());
-    }
-    Arc::clone(plan)
-}
-
-/// Trace only row-preserving column projections/transports to an actual complete
-/// topology scan. A node name or absence of Filter alone is not sufficient.
-pub(crate) fn has_complete_frontier(expand: &ExpandExec) -> bool {
-    fn trace(plan: &Arc<dyn ExecutionPlan>, column: usize) -> bool {
-        if let Some(projection) = plan.downcast_ref::<ProjectionExec>() {
-            return projection
-                .expr()
-                .get(column)
-                .and_then(|expr| expr.expr.downcast_ref::<Column>())
-                .is_some_and(|column| trace(projection.input(), column.index()));
-        }
-        if let Some(coalesce) = plan.downcast_ref::<CoalescePartitionsExec>() {
-            return trace(coalesce.input(), column);
-        }
-        if let Some(repartition) = plan.downcast_ref::<RepartitionExec>() {
-            return trace(repartition.input(), column);
-        }
-        graphforge_storage::parquet_scan::is_complete_node_id_scan(plan.as_ref(), column)
-    }
-    expand.fetch.is_none() && trace(&expand.input, expand.src_col_idx)
-}
-
-/// An emitted fixed-hop edge has an identity even when its properties are null.
-/// Follow exact column lineage; names and schema nullability alone are not proof.
-fn is_matched_edge_identity(plan: &Arc<dyn ExecutionPlan>, index: usize) -> bool {
-    if let Some(projection) = plan.downcast_ref::<ProjectionExec>() {
-        return projection
-            .expr()
-            .get(index)
-            .and_then(|expr| expr.expr.downcast_ref::<Column>())
-            .is_some_and(|column| is_matched_edge_identity(projection.input(), column.index()));
-    }
-    if let Some(coalesce) = plan.downcast_ref::<CoalescePartitionsExec>() {
-        return is_matched_edge_identity(coalesce.input(), index);
-    }
-    if let Some(repartition) = plan.downcast_ref::<RepartitionExec>() {
-        return is_matched_edge_identity(repartition.input(), index);
-    }
-    let Some(expand) = plan.downcast_ref::<ExpandExec>() else {
-        return false;
-    };
-    index == expand.input_width
-        && expand.schema.fields().get(index).is_some_and(|field| {
-            field.name() == "edge_uuid"
-                && field.data_type() == &arrow::datatypes::DataType::FixedSizeBinary(16)
-                && !field.is_nullable()
-        })
-}
-
-fn is_row_count(aggregate: &AggregateExec) -> bool {
-    aggregate.group_expr().is_empty()
-        && !aggregate.aggr_expr().is_empty()
-        && aggregate.filter_expr().iter().all(Option::is_none)
-        && aggregate.aggr_expr().iter().all(|expr| {
-            if expr
-                .fun()
-                .inner()
-                .downcast_ref::<datafusion::functions_aggregate::count::Count>()
-                .is_none()
-                || expr.is_distinct()
-                || !expr.order_bys().is_empty()
-            {
-                return false;
-            }
-            expr.expressions().iter().all(|arg| {
-                if let Some(literal) = arg.downcast_ref::<Literal>() {
-                    return !literal.value().is_null();
-                }
-                if let Some(column) = arg.downcast_ref::<Column>() {
-                    return is_matched_edge_identity(aggregate.input(), column.index());
-                }
-                arg.downcast_ref::<ScalarFunctionExpr>()
-                    .is_some_and(|function| {
-                        graphforge_rel::expr::is_cypher_row_marker(function.fun())
-                            && function.args().len() == 1
-                            && function.args()[0].downcast_ref::<Column>().is_some()
-                    })
-            })
-        })
-}
-
-fn detect_edge_count(plan: &Arc<dyn ExecutionPlan>) -> Option<EdgeCountSpec> {
-    let plan = peel_transport(plan);
-    let aggregate = plan.downcast_ref::<AggregateExec>()?;
-    let input = match aggregate.mode() {
-        AggregateMode::Single if is_row_count(aggregate) => Arc::clone(aggregate.input()),
-        AggregateMode::Final => {
-            let input = peel_expand_input_without_projection(aggregate.input());
-            let partial = input.downcast_ref::<AggregateExec>()?;
-            if *partial.mode() != AggregateMode::Partial
-                || !aggregate.group_expr().is_empty()
-                || aggregate.filter_expr().iter().any(Option::is_some)
-                // DataFusion aggregate equality does not compare these flags.
-                || aggregate.aggr_expr().iter().any(|expr| {
-                    expr.is_distinct() || !expr.order_bys().is_empty()
-                })
-                || !is_row_count(partial)
-                || aggregate.aggr_expr() != partial.aggr_expr()
-            {
-                return None;
-            }
-            Arc::clone(partial.input())
-        }
-        _ => return None,
-    };
-    let expand_plan = peel_expand_input(&input);
-    let expand = expand_plan.downcast_ref::<ExpandExec>()?;
-    if expand.direction() != Direction::Out || !has_complete_frontier(expand) {
-        return None;
-    }
-    Some(EdgeCountSpec {
-        schema: plan.schema(),
-        props: Arc::new(
-            plan.properties()
-                .as_ref()
-                .clone()
-                .with_partitioning(Partitioning::UnknownPartitioning(1)),
-        ),
-        rel_type_name: expand.rel_type_name().to_owned(),
-        direction: expand.direction(),
-        provider: Arc::clone(expand.provider()),
-    })
-}
-
-fn peel_expand_input_without_projection(plan: &Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-    if let Some(coalesce) = plan.downcast_ref::<CoalescePartitionsExec>() {
-        return peel_expand_input_without_projection(coalesce.input());
-    }
-    if let Some(repartition) = plan.downcast_ref::<RepartitionExec>() {
-        return peel_expand_input_without_projection(repartition.input());
-    }
-    Arc::clone(plan)
 }
 
 pub(crate) struct EdgeCountExec {
@@ -244,6 +45,23 @@ pub(crate) struct EdgeCountExec {
 }
 
 impl EdgeCountExec {
+    /// Build from parts chosen from the Graph IR (ADR 0050).
+    pub(crate) fn from_parts(
+        schema: SchemaRef,
+        props: Arc<PlanProperties>,
+        rel_type_name: String,
+        direction: Direction,
+        provider: Arc<dyn AdjacencyProvider>,
+    ) -> Self {
+        Self::new(EdgeCountSpec {
+            schema,
+            props,
+            rel_type_name,
+            direction,
+            provider,
+        })
+    }
+
     fn new(spec: EdgeCountSpec) -> Self {
         Self {
             schema: spec.schema,

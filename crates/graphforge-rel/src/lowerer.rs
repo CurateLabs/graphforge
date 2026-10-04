@@ -25,6 +25,7 @@
 //! Graph-native operators (#578) lower to `graphforge-plan` logical stub nodes wrapped
 //! as [`LogicalPlan::Extension`]; their physical execution is deferred to physical execution.
 
+mod fast_path;
 mod nested_queries;
 mod primary_property_value;
 mod scans;
@@ -224,6 +225,18 @@ impl GraphPlanLowerer {
         self
     }
 
+    /// Whether fixed hops use the relational oracle lowering, which no fast path wraps.
+    #[cfg(feature = "differential-testing")]
+    fn relational_reference(&self) -> bool {
+        self.relational_fixed_hop_reference
+    }
+
+    #[cfg(not(feature = "differential-testing"))]
+    #[allow(clippy::unused_self, reason = "the differential build reads a field")]
+    fn relational_reference(&self) -> bool {
+        false
+    }
+
     /// The dataset facts available to read operators. Execution binds providers. `None` for pure logical/explain
     /// lowering, where scans use a schema-only source.
     fn read_snapshot(&self) -> Option<&LoweringSnapshot> {
@@ -285,7 +298,11 @@ impl GraphPlanLowerer {
             // under `read_snapshot`. With no dir (schema-only/explain lowering) an empty
             // `prop_names` means "unknown", not "absent", so the missing-property→
             // null rewrite (#598) must NOT fire — gate it on having the dataset.
-            self.read_snapshot().is_some(),
+            // A snapshot that omits property schemas lists no property columns
+            // either, so an access it cannot resolve must stay a dangling column
+            // DataFusion refuses, never a silent null.
+            self.read_snapshot()
+                .is_some_and(|snapshot| !snapshot.property_schemas_omitted),
         );
         // With a dataset attached, `nodes(p)` hydrates its elements (#1024).
         if let Some(dir) = self.read_snapshot() {
@@ -344,12 +361,25 @@ impl GraphPlanLowerer {
     ///
     /// Returns [`GfError`] if any operator in the pipeline cannot be lowered.
     pub fn lower_plan(&self, plan: &GraphPlan) -> Result<LogicalPlan, GfError> {
+        // A snapshot without property schemas cannot describe a plan that
+        // reads property values: refuse rather than plan absent values as NULL.
+        if let Some(snapshot) = self.catalog.as_ref()
+            && snapshot.property_schemas_omitted
+            && graphforge_ir::property_demand(plan, snapshot.prop_names())
+                != graphforge_ir::PropertyDemand::None
+        {
+            return Err(GfError::Plan(
+                "lowering snapshot omits the property schemas this plan reads".into(),
+            ));
+        }
         // Seed node shapes for bare-node-value materialization (#785) from the
         // plan's NodeScans before lowering its expressions.
         *self.node_shapes.write().expect("node shapes lock poisoned") =
             self.build_node_shapes(&plan.ops);
         let mut var_map = VarMap::new();
-        self.lower_pipeline(&plan.ops, &plan.exprs, &mut var_map)
+        let lowered = self.lower_pipeline(&plan.ops, &plan.exprs, &mut var_map);
+        let lowered = lowered.map(|lowered| self.wrap_structural_fast_path(plan, lowered));
+        lowered
             .and_then(|plan| self.attach_graph_contract(plan))
             .map_err(GfError::from)
     }

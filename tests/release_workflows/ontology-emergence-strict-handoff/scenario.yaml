@@ -42,7 +42,7 @@
     "node_incremental": "supported-addNode-addEdge",
     "query_create": "supported-query-surface-not-classified-as-import",
     "legacy_add_nodes_add_edges": "placeholder-not-used-by-this-scenario",
-    "dataset_registry": "out-of-scope-issue-880"
+    "dataset_registry": "out-of-scope-for-this-scenario"
   },
   "algorithms": ["find.text", "rank.degree", "cluster.components", "analyze.is_dag"],
   "correction": {

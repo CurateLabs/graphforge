@@ -126,9 +126,47 @@ pub(super) fn encode_adjacency(
         return Err(storage("adjacency build published no manifest rows"));
     }
 
+    register_adjacency_artifacts(
+        output,
+        &graph_root,
+        &adjacency,
+        metrics.captured_artifacts,
+        cancelled,
+        artifacts,
+        evidence,
+    )?;
+    evidence.adjacency.source_rows = metrics.source_rows;
+    evidence.adjacency.spill_runs = metrics.spill_runs;
+    evidence.adjacency.spill_peak_bytes = metrics.spill_bytes;
+    evidence.adjacency.csr_shards = metrics.csr_shards;
+    Ok(())
+}
+
+fn register_adjacency_artifacts(
+    output: &StableDirectory,
+    graph_root: &Path,
+    adjacency: &Path,
+    shard_outputs: Vec<crate::adjacency::CapturedAdjacencyArtifact>,
+    cancelled: &mut impl FnMut() -> bool,
+    artifacts: &mut Vec<ConstructionEncodedArtifact>,
+    evidence: &mut GraphConstructionEncodingEvidence,
+) -> Result<(), GfError> {
     let mut relative_paths = Vec::new();
-    collect_relative_files(&graph_root, &adjacency, &mut relative_paths)?;
+    collect_relative_files(graph_root, adjacency, &mut relative_paths)?;
     relative_paths.sort();
+    let mut captured = shard_outputs
+        .into_iter()
+        .map(|artifact| {
+            let path = artifact
+                .path
+                .strip_prefix(graph_root)
+                .map_err(storage)?
+                .to_str()
+                .ok_or_else(|| storage("captured adjacency path is not UTF-8"))?
+                .replace('\\', "/");
+            Ok((path, artifact))
+        })
+        .collect::<Result<std::collections::BTreeMap<_, _>, GfError>>()?;
     for relative in relative_paths {
         let (directory, name) = directory_for(output, &relative)?;
         let file = directory
@@ -142,7 +180,24 @@ pub(super) fn encode_adjacency(
         if let Some(allocation) = output.allocation() {
             allocation.replace_file_at(&graph_root.join(&relative), &file)?;
         }
-        let (artifact, released, _) = authenticate_file_cancellable(&relative, file, cancelled)?;
+        let artifact = if let Some(captured) = captured.remove(&relative) {
+            if file.metadata().map_err(storage)?.len() != captured.bytes
+                || graphforge_filesystem::file_link_count(&file).map_err(storage)? != 1
+            {
+                return Err(storage("captured adjacency artifact identity changed"));
+            }
+            ConstructionEncodedArtifact {
+                path: relative,
+                bytes: captured.bytes,
+                sha256: captured.sha256,
+                xxh64: captured.xxh64,
+            }
+        } else {
+            let (artifact, released, _) =
+                authenticate_file_cancellable(&relative, file, cancelled)?;
+            account_cache_release(released, evidence)?;
+            artifact
+        };
         add_evidence_counter(
             &mut evidence.adjacency.write_bytes,
             artifact.bytes,
@@ -153,13 +208,13 @@ pub(super) fn encode_adjacency(
             artifact.bytes,
             "output write bytes",
         )?;
-        account_cache_release(released, evidence)?;
         artifacts.push(artifact);
     }
-    evidence.adjacency.source_rows = metrics.source_rows;
-    evidence.adjacency.spill_runs = metrics.spill_runs;
-    evidence.adjacency.spill_peak_bytes = metrics.spill_bytes;
-    evidence.adjacency.csr_shards = metrics.csr_shards;
+    if !captured.is_empty() {
+        return Err(storage(
+            "captured adjacency inventory includes absent files",
+        ));
+    }
     Ok(())
 }
 

@@ -26,6 +26,7 @@ import tempfile
 from typing import Any
 import xml.etree.ElementTree as ET
 
+from benchexec.util import parse_timespan_value
 from jsonschema import Draft202012Validator
 
 from graphforge_bench.benchexec_authority import Limits, normalize_run
@@ -592,10 +593,8 @@ def _benchexec_tool_directory(stage: Path, *, prefer_stage: bool = False) -> Pat
     return stage / "bin"
 
 
-# The checked-in definition carries the 4 h envelope. A rung may stage a
-# tighter per-rung wall (a margin above the last accepted measurement) so a
-# regressed rung stops within minutes instead of holding the ladder for hours.
-BENCHEXEC_HARD_TIMELIMIT_GRACE_SECONDS = 30
+# A rung tightens only elapsed wall time. BenchExec's timelimit and
+# hardtimelimit constrain process-tree CPU time and retain their own envelope.
 
 
 def _stage_benchmark_xml(root: Path, stage: Path, *, wall_seconds: int | None = None) -> None:
@@ -615,13 +614,12 @@ def _rewrite_benchmark_wall(text: str, wall_seconds: int) -> str:
         raise ControllerError("BenchExec wall limit must be within 1..14400 seconds")
     soft = re.search(r'\btimelimit="14400 s"', text)
     hard = re.search(r'\bhardtimelimit="14430 s"', text)
-    if soft is None or hard is None:
-        raise ControllerError("BenchExec definition wall limits are not the expected 4 h envelope")
-    text = text[: soft.start()] + f'timelimit="{wall_seconds} s"' + text[soft.end() :]
-    hard = re.search(r'\bhardtimelimit="14430 s"', text)
-    assert hard is not None
-    grace = wall_seconds + BENCHEXEC_HARD_TIMELIMIT_GRACE_SECONDS
-    return text[: hard.start()] + f'hardtimelimit="{grace} s"' + text[hard.end() :]
+    wall = re.search(r'\bwalltimelimit="14400 s"', text)
+    if soft is None or hard is None or wall is None:
+        raise ControllerError(
+            "BenchExec definition limits are not the expected CPU and wall envelopes"
+        )
+    return text[: wall.start()] + f'walltimelimit="{wall_seconds} s"' + text[wall.end() :]
 
 
 # Host durable writes charge page cache into cgroup memory.peak. Keep the product
@@ -789,9 +787,7 @@ def _parse_benchexec_xml(raw_output: Path, *, correctness: bool) -> Mapping[str,
     status = required("status")
     exit_code = 0 if status == "DONE" else None
     termination = columns.get("terminationreason")
-    if status == "TIMEOUT":
-        termination = "walltime"
-    elif status in {"OUT OF MEMORY", "MEMORY"}:
+    if status in {"OUT OF MEMORY", "MEMORY"}:
         termination = "memory"
     return {
         "wall_seconds": _scaled_number(required("walltime")),
@@ -803,6 +799,7 @@ def _parse_benchexec_xml(raw_output: Path, *, correctness: bool) -> Mapping[str,
         "pressure_io_seconds": _scaled_number(required("pressure-io-some")),
         "pressure_memory_seconds": _scaled_number(required("pressure-memory-some")),
         "termination_reason": termination,
+        "timed_out": status == "TIMEOUT",
         "exit_code": exit_code,
         "signal": None,
         "correctness": correctness,
@@ -870,6 +867,29 @@ def _closed_receipt_inventory(
     return inventory
 
 
+def _valid_query_evidence(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    numeric_fields = {
+        "max_in_flight_reads",
+        "memory_reserved_before",
+        "memory_reserved_after",
+        "returned_batch_bytes",
+        "execution_batch_rows",
+        "peak_rss_bytes",
+        "rss_after_release_bytes",
+    }
+    if value.get("contract") == "graphforge-query-evidence/2":
+        numeric_fields.add("adjacency_rebuilds")
+    elif value.get("contract") != "graphforge-query-evidence/1":
+        return False
+    return (
+        set(value) == numeric_fields | {"contract", "hops", "sorts", "operator_rss"}
+        and all(_is_int(value[key]) and 0 <= value[key] <= (1 << 64) - 1 for key in numeric_fields)
+        and all(isinstance(value[key], list) for key in ("hops", "sorts", "operator_rss"))
+    )
+
+
 def _query_receipts(
     graphforge: Mapping[str, Any], phase: str, expected: int
 ) -> list[Mapping[str, Any]]:
@@ -885,8 +905,7 @@ def _query_receipts(
             receipt.get("complete") is not True
             or not isinstance(digest, str)
             or re.fullmatch(r"[0-9a-f]{64}", digest) is None
-            or not isinstance(receipt.get("query_evidence"), Mapping)
-            or receipt["query_evidence"].get("contract") != "graphforge-query-evidence/1"
+            or not _valid_query_evidence(receipt.get("query_evidence"))
         ):
             raise ControllerError("ordinary query receipt is incomplete")
     return receipts
@@ -1279,12 +1298,17 @@ def ingest_benchexec_result(
         raise ControllerError("requested profile identity contradicts the run plan")
     raw = _parse_benchexec_xml(raw_output, correctness=graphforge.get("status") == "passed")
     limits = plan["limits"]
+    try:
+        definition = ET.parse(stage / "benchmark.xml").getroot()
+        cpu_seconds = float(parse_timespan_value(definition.attrib["timelimit"]))
+    except (OSError, ET.ParseError, KeyError, ValueError) as error:
+        raise ControllerError("staged BenchExec CPU policy is missing or invalid") from error
     benchexec = normalize_run(
         benchexec=raw,
         graphforge=graphforge,
         limits=Limits(
             float(limits["wall_seconds"]),
-            float(limits["wall_seconds"]),
+            cpu_seconds,
             int(limits["memory_bytes"]),
             tuple(range(int(limits["cores"]))),
         ),

@@ -78,6 +78,8 @@ fn selected_claim_preserves_native_fields_and_excludes_private_claim_after_reope
         graph
             .change_research_branch_claim(
                 &ChangeResearchBranchClaimRequest {
+                    author: None,
+                    committer: None,
                     operation_uuid: Uuid::now_v7(),
                     expected_generation_uuid: current(&graph),
                     branch_uuid,

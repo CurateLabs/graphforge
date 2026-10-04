@@ -1,11 +1,11 @@
 //! Controls for graph construction.
 
 use super::{
-    CHECKPOINT, Checkpoint, ConstructionPublicationState, Deserialize, DetailCodec, File,
-    FileIdentity, GfError, GraphConstructionBudgets, GraphConstructionState, MAX_CONTROL_BYTES,
-    MAX_SHAPE_CONTROL_BYTES, OsStr, OsString, Read, SHAPE_INTENT, Serialize, ShapeIntent,
-    StableDirectory, Uuid, Write, checked_evidence_sum, construction_failpoint, file_identity,
-    file_link_count, is_control_temp, sha256, storage,
+    CHECKPOINT, Checkpoint, ConstructionPublicationState, Deserialize, DetailCodec, FORMAT_VERSION,
+    File, FileIdentity, GfError, GraphConstructionBudgets, GraphConstructionState,
+    MAX_CONTROL_BYTES, MAX_SHAPE_CONTROL_BYTES, OsStr, OsString, Read, SHAPE_INTENT, Serialize,
+    ShapeIntent, StableDirectory, Uuid, Write, checked_evidence_sum, construction_failpoint,
+    file_identity, file_link_count, is_control_temp, sha256, storage,
 };
 
 /// Current-format phase totals must be exact; omitted old-version fields are refused.
@@ -80,6 +80,11 @@ pub(super) fn validate_checkpoint(
         .len()
         .checked_add(checkpoint.edge_schema_sha256.len())
         .ok_or_else(|| storage("checkpoint schema-group count overflow"))?;
+    if checkpoint.format_version < FORMAT_VERSION {
+        return Err(storage(
+            "construction checkpoint format is outdated: discard the in-progress import and restart",
+        ));
+    }
     if DetailCodec::from_version(checkpoint.format_version).is_err()
         || checkpoint.operation_uuid != operation
         || !checkpoint.project_identity.matches(project)
@@ -236,13 +241,14 @@ pub(super) fn install_control<T: Serialize>(
         .map_err(storage)?;
     let identity = file_identity(&file).map_err(storage)?;
     write_control_body(&mut file, &body, target, "install")?;
-    file.sync_all().map_err(storage)?;
-    root.sync().map_err(storage)?;
+    root.seal_file(&file).map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     construction_failpoint(&format!("control.install.after_temp_fsync.{target}"));
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(target))
         .map_err(storage)?;
-    root.sync().map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     construction_failpoint(&format!("control.install.after_install.{target}"));
+    super::diagnostics::written_bytes(body.len() as u64);
     Ok(())
 }
 
@@ -268,6 +274,7 @@ pub(super) fn install_control<T: Serialize>(
 pub(super) struct SealDirectoryBatch<'a> {
     root: &'a StableDirectory,
     pending: bool,
+    sealed_control_bytes: u64,
 }
 
 impl<'a> SealDirectoryBatch<'a> {
@@ -275,6 +282,7 @@ impl<'a> SealDirectoryBatch<'a> {
         Self {
             root,
             pending: false,
+            sealed_control_bytes: 0,
         }
     }
 
@@ -294,6 +302,9 @@ impl<'a> SealDirectoryBatch<'a> {
     /// its own batch, which the boundary's batch absorbs).
     pub(super) fn absorb(&mut self, other: &mut SealDirectoryBatch<'_>) {
         self.pending |= std::mem::take(&mut other.pending);
+        // Worker captures are not inherited. Adopt their completed control
+        // writes on the caller, exactly once, with the seal region active.
+        super::diagnostics::written_bytes(std::mem::take(&mut other.sealed_control_bytes));
     }
 
     /// Make every name linked since the last flush durable. Idempotent; the
@@ -305,7 +316,10 @@ impl<'a> SealDirectoryBatch<'a> {
         if !self.pending {
             return Ok(());
         }
-        self.root.sync().map_err(storage)?;
+        // These bodies already passed their file barriers and install calls.
+        // Credit data work independently of this separate namespace barrier.
+        super::diagnostics::written_bytes(std::mem::take(&mut self.sealed_control_bytes));
+        self.root.acknowledge().map_err(storage)?;
         self.pending = false;
         evidence.merge_directory_fsync_operations = evidence
             .merge_directory_fsync_operations
@@ -324,7 +338,7 @@ impl Drop for SealDirectoryBatch<'_> {
         // caller, and every real consumer re-establishes durability itself
         // (the same best-effort pattern as spill abandonment).
         if self.pending {
-            let _ = self.root.sync();
+            let _ = self.root.acknowledge();
         }
     }
 }
@@ -349,12 +363,13 @@ pub(super) fn install_control_batched<T: Serialize>(
         .map_err(storage)?;
     let identity = file_identity(&file).map_err(storage)?;
     write_control_body(&mut file, &body, target, "install")?;
-    file.sync_all().map_err(storage)?;
+    root.seal_file(&file).map_err(storage)?;
     construction_failpoint(&format!("control.install.after_temp_fsync.{target}"));
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(target))
         .map_err(storage)?;
     batch.mark();
     construction_failpoint(&format!("control.install.after_install.{target}"));
+    batch.sealed_control_bytes = batch.sealed_control_bytes.saturating_add(body.len() as u64);
     Ok(())
 }
 
@@ -370,13 +385,14 @@ pub(super) fn replace_control<T: Serialize>(
         .map_err(storage)?;
     let identity = file_identity(&file).map_err(storage)?;
     write_control_body(&mut file, &body, target, "replace")?;
-    file.sync_all().map_err(storage)?;
-    root.sync().map_err(storage)?;
+    root.seal_file(&file).map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     construction_failpoint(&format!("control.replace.after_temp_fsync.{target}"));
     root.replace_child(OsStr::new(&temporary), identity, OsStr::new(target))
         .map_err(storage)?;
-    root.sync().map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     construction_failpoint(&format!("control.replace.after_replace.{target}"));
+    super::diagnostics::written_bytes(body.len() as u64);
     Ok(())
 }
 
@@ -521,7 +537,7 @@ fn write_control_body(
     {
         let middle = body.len() / 2;
         file.write_all(&body[..middle]).map_err(storage)?;
-        file.sync_all().map_err(storage)?;
+        crate::durable_commit::seal_file(file).map_err(storage)?;
         construction_failpoint(&format!("control.{operation}.after_partial.{target}"));
         file.write_all(&body[middle..]).map_err(storage)?;
     }

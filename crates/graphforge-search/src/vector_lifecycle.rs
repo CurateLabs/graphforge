@@ -39,6 +39,12 @@ impl Default for VectorLifecycleLimits {
 /// Caller-resolved vector artifact identity and local label membership ID.
 #[derive(Clone, Copy, Debug)]
 pub struct VectorIndexRequest<'a> {
+    /// Explicit topology membership; absent only for standalone legacy callers.
+    pub topology: Option<&'a graphforge_storage::TopologyFiles>,
+    /// The facade's generation-pinned ordinal identity authority. Membership
+    /// projection checks node rows against it, reading only the identity blocks
+    /// it needs; without one it opens the whole UUID-membership index.
+    pub ordinal: Option<&'a crate::SessionOrdinalIdentity>,
     /// Normalized graph label persisted in the artifact key.
     pub label: &'a str,
     /// Local catalog identity used only for topology membership projection.
@@ -82,8 +88,10 @@ where
         limits.coordination,
         || {
             if projection.borrow().is_none() {
-                *projection.borrow_mut() = Some(project_label_members_snapshot(
+                *projection.borrow_mut() = Some(project_label_members_snapshot_with_topology(
                     project_dir,
+                    request.topology,
+                    request.ordinal,
                     request.label_id,
                     limits,
                     || checkpoint.borrow_mut()(),
@@ -121,6 +129,35 @@ pub fn search_graph_vectors<C>(
     query: &[f32],
     limit: usize,
     limits: VectorLifecycleLimits,
+    checkpoint: C,
+) -> Result<Vec<VectorSearchHit>, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    search_graph_vectors_with_projection(
+        project_dir,
+        request,
+        query,
+        limit,
+        limits,
+        None,
+        checkpoint,
+    )
+}
+
+/// Search with an optional admitted label projection shared with facade result shaping.
+/// A changed generation always fails; callers may capture a fresh projection and retry.
+///
+/// # Errors
+/// Returns the same selector, resource, corruption and mutation errors as ordinary search.
+#[allow(clippy::too_many_arguments)]
+pub fn search_graph_vectors_with_projection<C>(
+    project_dir: &Path,
+    request: VectorIndexRequest<'_>,
+    query: &[f32],
+    limit: usize,
+    limits: VectorLifecycleLimits,
+    admitted: Option<&LabelMemberProjection>,
     mut checkpoint: C,
 ) -> Result<Vec<VectorSearchHit>, SearchArtifactError>
 where
@@ -131,8 +168,21 @@ where
     validate_result_limit(limit, limits.vector)?;
 
     for attempt in 1_u8..=2 {
-        let projection =
-            project_label_members_snapshot(project_dir, request.label_id, limits, &mut checkpoint)?;
+        let captured;
+        let projection = if let Some(projection) = admitted {
+            projection.validate_binding(project_dir, request.label_id)?;
+            projection
+        } else {
+            captured = project_label_members_snapshot_with_topology(
+                project_dir,
+                request.topology,
+                request.ordinal,
+                request.label_id,
+                limits,
+                &mut checkpoint,
+            )?;
+            &captured
+        };
         let expected_generation = projection.snapshot.generation;
 
         let hits = match current_search_artifact(project_dir, &key)? {
@@ -180,14 +230,69 @@ where
         .map(|projection| projection.members)
 }
 
-pub(crate) struct LabelMemberProjection {
+/// Admitted label membership and the generation that supplied it.
+pub struct LabelMemberProjection {
+    project_dir: std::path::PathBuf,
+    label_id: graphforge_value::EntityTypeSelection,
     pub(crate) members: BTreeSet<[u8; 16]>,
     pub(crate) snapshot: SearchSourceSnapshot,
 }
 
-#[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
-pub(crate) fn project_label_members_snapshot<C>(
+impl LabelMemberProjection {
+    /// UUID membership from the exact admitted topology handles.
+    #[must_use]
+    pub fn members(&self) -> &BTreeSet<[u8; 16]> {
+        &self.members
+    }
+    pub(crate) fn validate_binding(
+        &self,
+        project: &Path,
+        label: graphforge_value::EntityTypeSelection,
+    ) -> Result<(), SearchArtifactError> {
+        if self.project_dir != project
+            || self.label_id != label
+            || SearchSourceSnapshot::generation(project)? != self.snapshot.generation
+        {
+            return Err(SearchArtifactError::ConcurrentMutation);
+        }
+        Ok(())
+    }
+}
+
+/// Read the canonical topology membership once for a label at one generation.
+///
+/// # Errors
+/// Refuses invalid topology, concurrent mutation, cancellation, and resource limits.
+pub fn project_label_members_snapshot<C>(
     project_dir: &Path,
+    label_id: graphforge_value::EntityTypeSelection,
+    limits: VectorLifecycleLimits,
+    checkpoint: C,
+) -> Result<LabelMemberProjection, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    project_label_members_snapshot_with_topology(
+        project_dir,
+        None,
+        None,
+        label_id,
+        limits,
+        checkpoint,
+    )
+}
+
+/// Project membership from an explicit file authority, or standalone legacy source.
+///
+/// `ordinal` is the facade's generation-pinned identity authority. With it,
+/// each node row is checked against the ordinal blocks it touches; without it,
+/// against the whole UUID-membership index when one exists
+/// (see [`crate::node_identity`]).
+#[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
+pub fn project_label_members_snapshot_with_topology<C>(
+    project_dir: &Path,
+    topology: Option<&graphforge_storage::TopologyFiles>,
+    ordinal: Option<&crate::SessionOrdinalIdentity>,
     label_id: graphforge_value::EntityTypeSelection,
     limits: VectorLifecycleLimits,
     mut checkpoint: C,
@@ -195,20 +300,25 @@ pub(crate) fn project_label_members_snapshot<C>(
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
+    let legacy;
+    let topology = if let Some(topology) = topology {
+        topology
+    } else {
+        legacy = graphforge_storage::TopologyFiles::discover_legacy(project_dir)
+            .map_err(|error| source(error.to_string()))?;
+        &legacy
+    };
+    graphforge_core::hash_observation::record_topology_projection();
     checkpoint()?;
     let source_generation = SearchSourceSnapshot::generation(project_dir)?;
     let mut source_evidence = Vec::new();
     let mut eligible = BTreeSet::new();
     let mut rows = 0_usize;
     let mut last_surrogate = None;
-    let mut index = graphforge_storage::uuid_membership_index_present(project_dir)
-        .then(|| graphforge_storage::UuidMembershipIndex::open(project_dir))
-        .transpose()
-        .map_err(|error| source(error.to_string()))?;
-    let mut legacy_seen = index.is_none().then(BTreeSet::new);
+    let mut identity = crate::node_identity::NodeIdentityCheck::open(project_dir, ordinal)?;
     let mut failure = None;
-    graphforge_storage::visit_node_fragments_admitted(
-        project_dir,
+    graphforge_storage::visit_node_fragments_admitted_from_files(
+        topology,
         8192,
         limits.source_bytes,
         &mut source_evidence,
@@ -227,21 +337,8 @@ where
                     .column_by_name("node_id")
                     .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
                     .ok_or_else(|| source("topology node_id is not UInt64"))?;
-                let mut batch_uuids = Vec::with_capacity(batch.num_rows());
-                for row in 0..batch.num_rows() {
-                    let bytes: [u8; 16] = uuids
-                        .value(row)
-                        .try_into()
-                        .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
-                    batch_uuids.push(uuid::Uuid::from_bytes(bytes));
-                }
-                let indexed = index
-                    .as_mut()
-                    .map(|index| index.lookup_node_surrogates(&batch_uuids))
-                    .transpose()
-                    .map_err(|error| source(error.to_string()))?
-                    .map(|(values, _)| values);
-                for row in 0..batch.num_rows() {
+                let agrees = identity.resolve_batch(uuids, surrogates, &mut checkpoint)?;
+                for (row, agrees) in agrees.into_iter().enumerate() {
                     checkpoint()?;
                     rows = rows.saturating_add(1);
                     if rows > limits.topology_rows {
@@ -256,15 +353,11 @@ where
                         .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
                     let surrogate = surrogates.value(row);
                     if last_surrogate.is_some_and(|prior| surrogate <= prior)
-                        || indexed
-                            .as_ref()
-                            .is_some_and(|values| values[row] != Some(surrogate))
-                        || legacy_seen
-                            .as_mut()
-                            .is_some_and(|seen| !seen.insert(node_uuid))
+                        || !agrees
+                        || !identity.distinct(node_uuid)
                     {
                         return Err(source(
-                            "topology identity disagrees with authenticated UUID index",
+                            "topology identity disagrees with authenticated node identity",
                         ));
                     }
                     last_surrogate = Some(surrogate);
@@ -303,20 +396,15 @@ where
     if let Some(error) = failure {
         return Err(error);
     }
-    if index
-        .as_ref()
-        .is_some_and(|index| rows as u64 != index.count(graphforge_storage::UuidIndexKind::Node))
-    {
-        return Err(source(
-            "topology row count disagrees with authenticated UUID index",
-        ));
-    }
+    identity.finish(rows, &mut checkpoint)?;
     let snapshot = SearchSourceSnapshot::from_admitted_files(
         project_dir,
         source_generation,
         &source_evidence,
     )?;
     Ok(LabelMemberProjection {
+        project_dir: project_dir.to_path_buf(),
+        label_id,
         members: eligible,
         snapshot,
     })
@@ -433,6 +521,8 @@ mod tests {
 
     fn request() -> VectorIndexRequest<'static> {
         VectorIndexRequest {
+            topology: None,
+            ordinal: None,
             label: "Person",
             label_id: graphforge_value::EntityTypeSelection::Known(
                 graphforge_value::EntityTypeId::decode(9).unwrap(),

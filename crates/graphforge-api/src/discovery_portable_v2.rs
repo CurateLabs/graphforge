@@ -25,6 +25,13 @@ pub enum DiscoveryPortableV2Mismatch {
     ImmutableVersion,
     /// The verified portable package digest differs from the discovery reference.
     PackageDigest,
+    /// The verified package does not carry the requested exact ontology module.
+    ModuleIdentity,
+    /// The module document's recomputed canonical digest differs from its identity.
+    ModuleContentDigest,
+    /// The verified package's research registry does not carry the selected
+    /// research Version with the lineage identity digest and kind.
+    ResearchVersionIdentity,
 }
 
 /// Failure at one of the explicit discovery-to-package trust boundaries.
@@ -36,6 +43,13 @@ pub enum DiscoveryPortableV2Error {
     ReferenceMismatch(DiscoveryPortableV2Mismatch),
     /// The storage-owned portable-v2 verifier rejected the package.
     Portable(PortableV2Error),
+    /// A verified package participant is not a valid canonical record.
+    Participant {
+        /// Stable participant name such as `workspace/research_metadata`.
+        participant: &'static str,
+        /// Owner-supplied validation message.
+        message: String,
+    },
 }
 
 impl fmt::Display for DiscoveryPortableV2Error {
@@ -49,6 +63,10 @@ impl fmt::Display for DiscoveryPortableV2Error {
                 )
             }
             Self::Portable(error) => write!(formatter, "{error}"),
+            Self::Participant {
+                participant,
+                message,
+            } => write!(formatter, "invalid {participant} participant: {message}"),
         }
     }
 }
@@ -88,20 +106,20 @@ pub struct DiscoveryPortableV2Request<'a> {
     pub cancelled: Option<&'a AtomicBool>,
 }
 
-/// Validate discovery documents, bind their immutable selection, and verify the package.
+/// Parse discovery documents and bind repository and immutable-version selection.
 ///
-/// No partially accepted value is returned: package verification and the final
-/// package-digest comparison complete before [`DiscoveredPortableV2`] exists.
-pub fn verify_discovered_portable_v2(
-    request: &DiscoveryPortableV2Request<'_>,
-) -> Result<DiscoveredPortableV2, DiscoveryPortableV2Error> {
-    let manifest = DiscoveryManifest::from_json(request.manifest_json, request.discovery_limits)
+/// Performs no package I/O. Shared by every verification-first entry point so
+/// each rejects discovery and binding failures before touching a package path.
+pub(crate) fn bind_discovery(
+    manifest_json: &[u8],
+    refs_json: &[u8],
+    expected_repository: &RepositoryIdentity,
+    limits: DiscoveryLimits,
+) -> Result<DiscoveryManifest, DiscoveryPortableV2Error> {
+    let manifest = DiscoveryManifest::from_json(manifest_json, limits)
         .map_err(DiscoveryPortableV2Error::Discovery)?;
-    let refs = RefSet::from_json(request.refs_json, request.discovery_limits)
-        .map_err(DiscoveryPortableV2Error::Discovery)?;
-    if &manifest.repository != request.expected_repository
-        || &refs.repository != request.expected_repository
-    {
+    let refs = RefSet::from_json(refs_json, limits).map_err(DiscoveryPortableV2Error::Discovery)?;
+    if &manifest.repository != expected_repository || &refs.repository != expected_repository {
         return Err(DiscoveryPortableV2Error::ReferenceMismatch(
             DiscoveryPortableV2Mismatch::Repository,
         ));
@@ -115,6 +133,22 @@ pub fn verify_discovered_portable_v2(
             DiscoveryPortableV2Error::Discovery(error)
         }
     })?;
+    Ok(manifest)
+}
+
+/// Validate discovery documents, bind their immutable selection, and verify the package.
+///
+/// No partially accepted value is returned: package verification and the final
+/// package-digest comparison complete before [`DiscoveredPortableV2`] exists.
+pub fn verify_discovered_portable_v2(
+    request: &DiscoveryPortableV2Request<'_>,
+) -> Result<DiscoveredPortableV2, DiscoveryPortableV2Error> {
+    let manifest = bind_discovery(
+        request.manifest_json,
+        request.refs_json,
+        request.expected_repository,
+        request.discovery_limits,
+    )?;
     let report = verify_portable_v2(
         &PortableVerifyRequest {
             input: request.package.to_path_buf(),

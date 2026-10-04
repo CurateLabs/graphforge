@@ -12,8 +12,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::graph_delta_journal::{
@@ -25,7 +26,7 @@ use crate::project_generation::resolve_project_generation;
 use crate::project_publication::{ProjectCapability, ProjectGenerationRequest};
 use crate::project_publication::{
     ProjectPublicationReceipt, ProjectStageOutcome, published_project_transaction,
-    stage_project_generation_from_admitted_parent,
+    stage_project_generation_from_installed_objects,
 };
 use crate::project_retention::{
     ProjectCleanupReport, ProjectRetentionLimits, ProjectRetentionPolicy,
@@ -379,15 +380,15 @@ fn compact_graph_delta_after_prepare(
 
     check_cancel(cancel)?;
     before_stage(root)?;
-    if let Some(lease) = &publication_lease {
-        lease.revalidate_for_publish()?;
-    }
-    let publication = match stage_project_generation_from_admitted_parent(
+    publication_lease.revalidate_for_publish()?;
+    let publication = match stage_project_generation_from_installed_objects(
         admission,
         parent,
         &generation_request,
-        publication_lease.is_none().then(|| staging.path()),
         None,
+        None,
+        None,
+        Some(&publication_lease),
     )? {
         ProjectStageOutcome::Staged(staged) => {
             // Pre-publication verification authenticates the exact bounded
@@ -399,13 +400,9 @@ fn compact_graph_delta_after_prepare(
                 ));
             }
             let validated = staged.validate(|_| Ok(()), |_, _| Ok(()))?;
-            match &publication_lease {
-                Some(lease) => validated
-                    .publish_with_graph_objects_cancellable(lease, &mut || {
-                        cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
-                    })?,
-                None => validated.publish()?,
-            }
+            validated.publish_with_graph_objects_cancellable(&publication_lease, &mut || {
+                cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
+            })?
         }
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
     };
@@ -822,10 +819,6 @@ fn storage(action: &str, path: &Path, error: impl std::fmt::Display) -> GfError 
 mod crash_oracle_tests {
     use super::*;
     use crate::GraphDeltaOp;
-    use crate::project_fault_oracle::{
-        AuthorityClass, PublicationIds, PublicationPhase, default_durable_ids, expected_authority,
-        publication_ops, simulate_crash,
-    };
 
     #[test]
     fn canonical_topology_rows_counts_nested_edge_shards() {
@@ -1008,32 +1001,6 @@ mod crash_oracle_tests {
             panic!("clone publication unexpectedly replayed");
         };
         (generation_uuid, staged)
-    }
-
-    #[test]
-    fn crash_oracle_before_and_after_ack_matches_frozen_contract() {
-        let seed = 753u64;
-        let ids = PublicationIds::from_seed(seed);
-        for phase in [
-            PublicationPhase::BeforeCurrentReplace,
-            PublicationPhase::AfterCurrentReplace,
-            PublicationPhase::AfterRootFsync,
-        ] {
-            let ops = publication_ops(ids, phase);
-            let durable = default_durable_ids(&ops, phase);
-            let report = simulate_crash(seed, phase, &durable).unwrap();
-            assert_eq!(report.expected, expected_authority(phase));
-            assert_eq!(report.actual, report.expected);
-            match phase {
-                PublicationPhase::BeforeCurrentReplace => {
-                    assert_eq!(report.expected, AuthorityClass::PriorGeneration);
-                }
-                PublicationPhase::AfterCurrentReplace | PublicationPhase::AfterRootFsync => {
-                    assert_eq!(report.expected, AuthorityClass::NewGeneration);
-                }
-                _ => unreachable!(),
-            }
-        }
     }
 
     #[test]

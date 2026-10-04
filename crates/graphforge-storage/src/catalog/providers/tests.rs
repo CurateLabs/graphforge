@@ -147,8 +147,8 @@ async fn every_table_provider_exposes_base_contract_and_empty_scan() {
         )),
         Arc::new(TypedEdgeTable::open(dir.path(), "KNOWS")),
         Arc::new(UnionEdgeTable::open(dir.path())),
-        Arc::new(PropertyTable::open_discovered(dir.path(), "Person")),
-        Arc::new(EdgePropertyTable::open_discovered(dir.path(), "KNOWS")),
+        Arc::new(PropertyTable::open_discovered(dir.path(), "Person").unwrap()),
+        Arc::new(EdgePropertyTable::open_discovered(dir.path(), "KNOWS").unwrap()),
     ];
     let ctx = SessionContext::new();
     for (index, provider) in providers.into_iter().enumerate() {
@@ -187,11 +187,11 @@ async fn query_providers_build_streaming_parquet_plan_not_memtable() {
         ("union", Arc::new(UnionEdgeTable::open(dir.path()))),
         (
             "props",
-            Arc::new(PropertyTable::open_discovered(dir.path(), "Person")),
+            Arc::new(PropertyTable::open_discovered(dir.path(), "Person").unwrap()),
         ),
         (
             "edge_props",
-            Arc::new(EdgePropertyTable::open_discovered(dir.path(), "KNOWS")),
+            Arc::new(EdgePropertyTable::open_discovered(dir.path(), "KNOWS").unwrap()),
         ),
     ];
     for (label, provider) in cases {
@@ -305,4 +305,129 @@ async fn provider_scan_honors_session_batch_size_policy() {
     );
     assert!(batches.iter().all(|b| b.num_rows() <= 5));
     assert_eq!(row_count(&batches), 20);
+}
+
+/// A topology entry for a file beneath `root`, admitted by length and XXH64.
+fn topology_entry(root: &Path, relative: &str) -> crate::GraphFileEntry {
+    let bytes = std::fs::read(root.join(relative)).unwrap();
+    crate::GraphFileEntry {
+        relative_path: relative.to_owned(),
+        byte_length: bytes.len() as u64,
+        content_sha256: "0".repeat(64),
+        content_xxh64: crate::corruption_checksum::checksum(&bytes),
+        role: crate::GraphFileRole::Topology,
+    }
+}
+
+async fn node_ids(table: TopologyNodeTable) -> Vec<u64> {
+    let ctx = SessionContext::new();
+    ctx.register_table("nodes", Arc::new(table)).unwrap();
+    let batches = ctx
+        .sql("SELECT node_id FROM nodes ORDER BY node_id")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    batches
+        .iter()
+        .flat_map(|batch| {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            (0..batch.num_rows()).map(move |row| ids.value(row))
+        })
+        .collect()
+}
+
+/// #1388: the node table lists what the inventory declares, never the
+/// directory; an undeclared file in `topology/nodes/` is not read. Without an
+/// inventory the directory listing remains (expanded generations verify it
+/// at open).
+#[tokio::test]
+async fn open_with_inventory_reads_only_declared_node_files() {
+    let dir = TempDir::new().unwrap();
+    let declared = "topology/nodes/00000000000000000001-00000000000000000001.parquet";
+    let planted = "topology/nodes/00000000000000000002-00000000000000000002.parquet";
+    write_nodes_parquet_value(&dir.path().join(declared), 1, 1);
+    write_nodes_parquet_value(&dir.path().join(planted), 2, 2);
+    let inventory = crate::AuthenticatedPropertyInventory::from_entries_at_root(
+        dir.path(),
+        vec![topology_entry(dir.path(), declared)],
+    )
+    .unwrap();
+    assert_eq!(
+        inventory.node_fragments().unwrap(),
+        vec![(dir.path().join(declared), declared.to_owned())]
+    );
+    let table = TopologyNodeTable::open_with_inventory(dir.path(), Some(&inventory)).unwrap();
+    assert_eq!(node_ids(table).await, vec![1]);
+    let listed = TopologyNodeTable::open_with_inventory(dir.path(), None).unwrap();
+    assert_eq!(node_ids(listed).await, vec![1, 2]);
+}
+
+/// The declared set keeps the legacy flat file first, then shards by range,
+/// and refuses what `node_parquet_files` would refuse of a listing.
+#[test]
+fn declared_node_files_are_ordered_and_validated_like_a_listing() {
+    let dir = TempDir::new().unwrap();
+    let legacy = "topology/nodes.parquet";
+    let shard = "topology/nodes/00000000000000000002-00000000000000000003.parquet";
+    write_nodes_parquet_value(&dir.path().join(legacy), 1, 1);
+    write_nodes_parquet_value(&dir.path().join(shard), 2, 2);
+    let inventory = crate::AuthenticatedPropertyInventory::from_entries_at_root(
+        dir.path(),
+        vec![
+            topology_entry(dir.path(), shard),
+            topology_entry(dir.path(), legacy),
+        ],
+    )
+    .unwrap();
+    let fragments = inventory.node_fragments().unwrap();
+    assert_eq!(
+        fragments
+            .iter()
+            .map(|(_, relative)| relative.as_str())
+            .collect::<Vec<_>>(),
+        vec![legacy, shard]
+    );
+
+    // A staged temporary or any non-Parquet name beside the shards is
+    // ignored, as the listing ignores it; a Parquet file with a non-canonical
+    // name or an overlapping range is refused.
+    for ignored in [
+        "topology/nodes/00000000000000000002-00000000000000000003.parquet.a1b2c3.tmp",
+        "topology/nodes/00000000000000000005-00000000000000000006.arrow",
+    ] {
+        write_nodes_parquet_value(&dir.path().join(ignored), 2, 2);
+        let inventory = crate::AuthenticatedPropertyInventory::from_entries_at_root(
+            dir.path(),
+            vec![
+                topology_entry(dir.path(), shard),
+                topology_entry(dir.path(), ignored),
+            ],
+        )
+        .unwrap();
+        assert_eq!(inventory.node_fragments().unwrap().len(), 1, "{ignored}");
+    }
+    for (name, message) in [
+        ("topology/nodes/nodes-extra.parquet", "canonical"),
+        (
+            "topology/nodes/00000000000000000003-00000000000000000004.parquet",
+            "overlap",
+        ),
+    ] {
+        write_nodes_parquet_value(&dir.path().join(name), 3, 3);
+        let error = crate::AuthenticatedPropertyInventory::from_entries_at_root(
+            dir.path(),
+            vec![
+                topology_entry(dir.path(), shard),
+                topology_entry(dir.path(), name),
+            ],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(message), "{name}: {error}");
+    }
 }

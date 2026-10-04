@@ -14,6 +14,8 @@ fn complete_research_roundtrip_preserves_version_and_historical_genealogy() {
     source
         .create_research_branch(
             &CreateResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: source.generation_for_read().unwrap().generation_uuid(),
                 branch_uuid,
@@ -143,6 +145,8 @@ fn fork_has_independent_governance_metadata_and_exact_retry() {
     source
         .create_research_branch(
             &CreateResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: source.generation_for_read().unwrap().generation_uuid(),
                 branch_uuid: Uuid::now_v7(),
@@ -232,6 +236,8 @@ fn disjoint_and_redacted_exports_have_distinct_content_and_stable_transport_iden
     source
         .create_research_branch(
             &CreateResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: source.generation_for_read().unwrap().generation_uuid(),
                 branch_uuid: branch,

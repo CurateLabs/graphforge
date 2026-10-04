@@ -6,17 +6,13 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use arrow::array::{
-    Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Int64Array, StringArray,
-    UInt64Array,
-};
+use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ExecutionResourcePolicy,
-    GraphConstructionBudgets, GraphForge, GraphForgeOptions, OperationId, PortableSelection,
+    ExecutionResourcePolicy, GraphForge, GraphForgeOptions, OperationId, PortableSelection,
     PortableV2ExportRequest, PortableV2ImportRequest, PortableVerifyRequest, ResourcePolicyMode,
     ResultSinkFormat, ResultSinkOptions, verify_portable_v2,
 };
@@ -31,8 +27,14 @@ use graphforge_storage::{
 };
 use tempfile::TempDir;
 
+#[path = "support/bulk_fixture.rs"]
+mod bulk_fixture;
 #[path = "support/project_fixture.rs"]
 mod project_fixture;
+
+use bulk_fixture::{
+    BulkFixtureEvidence, WRITE_WINDOW, encoded_node_files, fixture_node_uuid, generate_bulk_graph,
+};
 
 const TS: i64 = 1_700_000_000_000_000;
 const NODE_TYPE: graphforge_value::EntityTypeId = match graphforge_value::EntityTypeId::decode(0) {
@@ -41,7 +43,6 @@ const NODE_TYPE: graphforge_value::EntityTypeId = match graphforge_value::Entity
 };
 const FAN_OUT: usize = 8;
 const LIMIT: usize = 1_000;
-const WRITE_WINDOW: usize = 32 * 1024;
 
 /// Serializes the process-global storage counters used by the assertions.
 ///
@@ -65,10 +66,11 @@ const ORDERED_TWO_HOP: &str =
     "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000";
 
 fn measured_identity_query(forge: &GraphForge, query: &str) -> (Vec<Vec<u8>>, DemandSnapshot) {
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     let (result, snapshot) = demand::capture(|| forge.execute(query));
     let result = result.unwrap();
-    let io = io_stats::snapshot();
+    let io = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:#?}");
     assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:#?}");
     let optimized_ordered = query == ORDERED_ONE_HOP || query == ORDERED_TWO_HOP;
@@ -176,118 +178,6 @@ fn generate_graph(dir: &Path, nodes: usize, fan_out: usize, compact_v4: bool) {
     }
     build_adjacency_index(workspace.path(), TS).unwrap();
     project_fixture::publish_graph_workspace(dir, workspace.path());
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct BulkFixtureEvidence {
-    node_rows: usize,
-    edge_rows: usize,
-    node_batches: usize,
-    edge_batches: usize,
-    accepted_chunks: u64,
-    input_rows: u64,
-    peak_batch_rows: u64,
-}
-
-/// Construct scale fixtures through the same bounded Arrow publication path
-/// used by ordinary high-volume ingestion. Scalar `GraphWriter::create_edge`
-/// deliberately checks its in-flight topology window for duplicate UUIDs and
-/// is therefore not a realistic bulk-ingestion primitive.
-fn generate_bulk_graph(dir: &Path, nodes: usize, fan_out: usize) -> BulkFixtureEvidence {
-    assert!(nodes > fan_out);
-    let forge = GraphForge::new(Some(dir.to_str().expect("temp path is UTF-8"))).unwrap();
-    let mut session = forge
-        .begin_graph_construction(GraphConstructionBudgets {
-            max_batch_rows: WRITE_WINDOW,
-            max_run_records: 4 * WRITE_WINDOW,
-            ..GraphConstructionBudgets::default()
-        })
-        .unwrap();
-
-    let mut node_batches = 0;
-    for start in (0..nodes).step_by(WRITE_WINDOW) {
-        let end = start.saturating_add(WRITE_WINDOW).min(nodes);
-        let rows = end - start;
-        let mut identities = FixedSizeBinaryBuilder::with_capacity(rows, 16);
-        for node in start..end {
-            identities
-                .append_value(fixture_node_uuid(node).as_bytes())
-                .unwrap();
-        }
-        let batch = RecordBatch::try_new(
-            Arc::clone(&CONSTRUCTION_NODE_SCHEMA),
-            vec![
-                Arc::new(identities.finish()) as ArrayRef,
-                Arc::new(StringArray::from(vec!["Entity"; rows])),
-            ],
-        )
-        .unwrap();
-        session
-            .append_nodes(&format!("nodes-{start}"), &batch)
-            .unwrap();
-        node_batches += 1;
-    }
-
-    let edge_rows = nodes.saturating_mul(fan_out);
-    let mut edge_batches = 0;
-    for start in (0..edge_rows).step_by(WRITE_WINDOW) {
-        let end = start.saturating_add(WRITE_WINDOW).min(edge_rows);
-        let rows = end - start;
-        let mut identities = FixedSizeBinaryBuilder::with_capacity(rows, 16);
-        let mut sources = FixedSizeBinaryBuilder::with_capacity(rows, 16);
-        let mut targets = FixedSizeBinaryBuilder::with_capacity(rows, 16);
-        for edge in start..end {
-            let source = edge / fan_out;
-            let offset = edge % fan_out + 1;
-            identities
-                .append_value(fixture_edge_uuid(edge).as_bytes())
-                .unwrap();
-            sources
-                .append_value(fixture_node_uuid(source).as_bytes())
-                .unwrap();
-            targets
-                .append_value(fixture_node_uuid((source + offset) % nodes).as_bytes())
-                .unwrap();
-        }
-        let batch = RecordBatch::try_new(
-            Arc::clone(&CONSTRUCTION_EDGE_SCHEMA),
-            vec![
-                Arc::new(identities.finish()) as ArrayRef,
-                Arc::new(StringArray::from(vec!["LINK"; rows])),
-                Arc::new(sources.finish()),
-                Arc::new(targets.finish()),
-            ],
-        )
-        .unwrap();
-        session
-            .append_edges(&format!("edges-{start}"), &batch)
-            .unwrap();
-        edge_batches += 1;
-    }
-
-    session.seal_and_publish().unwrap();
-    let progress = session.progress();
-    drop(session);
-    forge.index_adjacency().unwrap();
-    drop(forge);
-
-    BulkFixtureEvidence {
-        node_rows: nodes,
-        edge_rows,
-        node_batches,
-        edge_batches,
-        accepted_chunks: progress.accepted_chunks,
-        input_rows: progress.evidence.input_rows,
-        peak_batch_rows: progress.evidence.peak_batch_rows,
-    }
-}
-
-fn fixture_node_uuid(index: usize) -> Uuid {
-    Uuid::from_u128(0x1000_0000_0000_0000_0000_0000_0000_0000 | index as u128 + 1)
-}
-
-fn fixture_edge_uuid(index: usize) -> Uuid {
-    Uuid::from_u128(0x2000_0000_0000_0000_0000_0000_0000_0000 | index as u128 + 1)
 }
 
 fn open_forge(dir: &Path) -> GraphForge {
@@ -409,37 +299,6 @@ fn generate_semantic_v4_graph_with_nodes(dir: &Path, nodes: Vec<Uuid>) -> Vec<Uu
     nodes
 }
 
-/// Encoded node files under `dir` (construction staging included): the
-/// published topology spans one file per 65,536-row window.
-fn encoded_node_files(dir: &Path) -> usize {
-    fn walk(path: &Path, found: &mut usize) {
-        let Ok(entries) = std::fs::read_dir(path) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let child = entry.path();
-            if child.is_dir() {
-                walk(&child, found);
-            } else if child.extension().is_some_and(|ext| ext == "parquet")
-                && child
-                    .parent()
-                    .and_then(Path::file_name)
-                    .is_some_and(|name| name == "nodes")
-                && child
-                    .parent()
-                    .and_then(Path::parent)
-                    .and_then(Path::file_name)
-                    .is_some_and(|name| name == "topology")
-            {
-                *found += 1;
-            }
-        }
-    }
-    let mut found = 0;
-    walk(dir, &mut found);
-    found
-}
-
 /// #1513: the certification fast paths must survive a node table that spans
 /// more than one encoded file when the session plans with more target
 /// partitions than files. The ladder host derives eight target partitions
@@ -447,7 +306,7 @@ fn encoded_node_files(dir: &Path) -> usize {
 /// that combination the S18 recount fell back to a per-batch edge scan and the
 /// two-hop query ran for hours.
 #[test]
-fn regression1513_fast_paths_survive_multi_file_node_tables() {
+fn fast_paths_survive_multi_file_node_tables() {
     let _guard = io_guard();
     // Two 32 Ki-row publication windows: the fixture spans two node files.
     const NODES: usize = 40_000;
@@ -517,6 +376,44 @@ fn regression1513_fast_paths_survive_multi_file_node_tables() {
     }
 }
 
+/// ADR 0050: `ExpandExec` charges the batches it holds to the session memory
+/// pool. With every node in one input batch and the smallest admitted pool, a
+/// generic hop that returns whole rows is refused by the pool, naming the
+/// `ExpandExec` reservation.
+#[test]
+fn expand_charges_held_batches_to_the_memory_pool() {
+    let _guard = io_guard();
+    const NODES: usize = 40_000;
+    const MULTI_FILE_FAN_OUT: usize = 4;
+    let dir = TempDir::new().unwrap();
+    generate_bulk_graph(dir.path(), NODES, MULTI_FILE_FAN_OUT);
+    let options = GraphForgeOptions {
+        resource: ExecutionResourcePolicy {
+            mode: ResourcePolicyMode::Explicit,
+            tokio_worker_threads: Some(1),
+            target_partitions: Some(1),
+            io_concurrency: Some(1),
+            compute_threads: Some(1),
+            batch_size: Some(1_048_576),
+            memory_budget_bytes: Some(16 * 1024 * 1024),
+            ..ExecutionResourcePolicy::default()
+        },
+        ..GraphForgeOptions::default()
+    };
+    let forge = GraphForge::new_with_options(
+        Some(dir.path().to_str().expect("temp path is UTF-8")),
+        options,
+    )
+    .unwrap();
+    let refused = forge
+        .execute("MATCH (a)-[r]->(b) RETURN a, r, b")
+        .expect_err("the pool must refuse an ExpandExec holding every row");
+    assert!(
+        format!("{refused:?}").contains("ExpandExec"),
+        "the refusal must name the ExpandExec reservation: {refused:?}"
+    );
+}
+
 #[test]
 fn poisoned_io_guard_recovers_for_subsequent_tests() {
     let seeded = std::thread::spawn(|| {
@@ -529,7 +426,7 @@ fn poisoned_io_guard_recovers_for_subsequent_tests() {
 }
 
 #[test]
-fn regression1094_property_free_shortcuts() {
+fn property_free_shortcuts() {
     let _guard = io_guard();
     for ordinals in [[3, 1, 2], [1, 2, 3]] {
         let dir = TempDir::new().unwrap();
@@ -687,7 +584,7 @@ fn regression1094_property_free_shortcuts() {
 }
 
 #[test]
-fn regression1094_recount_and_ordered_frontier_semantics() {
+fn recount_and_ordered_frontier_semantics() {
     let _guard = io_guard();
     let dir = TempDir::new().unwrap();
     let nodes = generate_semantic_v4_graph_with_nodes(
@@ -781,7 +678,7 @@ fn regression1094_recount_and_ordered_frontier_semantics() {
 }
 
 #[test]
-fn regression1094_identity_lookup_limit_is_chunked() {
+fn identity_lookup_limit_is_chunked() {
     let _guard = io_guard();
     let dir = TempDir::new().unwrap();
     let limit = graphforge_storage::V4OrdinalIdentityLimits::default().max_requested + 1;
@@ -802,7 +699,7 @@ fn regression1094_identity_lookup_limit_is_chunked() {
 }
 
 #[test]
-fn regression1094_sharded_hubs_keep_one_and_two_hop_work_bounded() {
+fn sharded_hubs_keep_one_and_two_hop_work_bounded() {
     let _guard = io_guard();
     for degree in [16_384, 32_768] {
         let dir = TempDir::new().unwrap();
@@ -951,6 +848,7 @@ fn run_measured(
     forge: &GraphForge,
     query: &str,
 ) -> (Duration, io_stats::IoSnapshot, DemandSnapshot) {
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     demand::reset();
     let started = Instant::now();
@@ -958,7 +856,11 @@ fn run_measured(
     let elapsed = started.elapsed();
     demand::disable();
     assert_eq!(result.stats.rows_produced, LIMIT as u64, "{query}");
-    (elapsed, io_stats::snapshot(), demand::snapshot())
+    (
+        elapsed,
+        io_stats::snapshot().expect("requested I/O statistics"),
+        demand::snapshot(),
+    )
 }
 
 #[derive(Debug)]
@@ -1110,12 +1012,13 @@ fn scale_fixture_uses_bounded_bulk_publications() {
     let forge = open_forge(dir.path());
     let plan = forge.explain(ORDERED_ONE_HOP).unwrap();
     assert!(plan.contains("OrderedOneHopExec"), "{plan}");
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     let (result, demand) = demand::capture(|| forge.execute(ORDERED_ONE_HOP));
     let result = result.unwrap();
     assert_eq!(result.stats.rows_produced, LIMIT as u64);
     assert!(demand.hops.values().all(|hop| hop.identity_read_calls > 0));
-    assert_projected_identity_io(&io_stats::snapshot());
+    assert_projected_identity_io(&io_stats::snapshot().expect("requested I/O statistics"));
 }
 
 fn run_scattered_destination_scale(
@@ -1130,6 +1033,7 @@ fn run_scattered_destination_scale(
     let dir = TempDir::new().unwrap();
     let edges = generate_scattered_destinations(dir.path(), nodes, 4, 1_500);
     let forge = open_forge(dir.path());
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     demand::reset();
     let result = forge.execute(ONE_HOP).unwrap();
@@ -1139,7 +1043,7 @@ fn run_scattered_destination_scale(
     values.sort_unstable();
     (
         values,
-        io_stats::snapshot(),
+        io_stats::snapshot().expect("requested I/O statistics"),
         demand::snapshot(),
         edges,
         u64::try_from(nodes.div_ceil(WRITE_WINDOW)).unwrap(),
@@ -1200,11 +1104,13 @@ fn run_ordered_projection_scale(nodes: usize) -> (Vec<Vec<u8>>, DemandSnapshot) 
         "{plan}"
     );
 
+    let _io_capture = io_stats::CaptureScope::install();
+
     io_stats::reset();
     demand::reset();
     let first = forge.execute(ORDERED_ONE_HOP).unwrap();
     demand::disable();
-    let io = io_stats::snapshot();
+    let io = io_stats::snapshot().expect("requested I/O statistics");
     let snapshot = demand::snapshot();
     let first_values = fixed_binary_values(&first, "id");
     assert_eq!(first_values.len(), LIMIT);
@@ -1250,13 +1156,14 @@ fn run_ordered_projection_scale(nodes: usize) -> (Vec<Vec<u8>>, DemandSnapshot) 
             .unwrap()
             .contains("EdgeCountExec")
     );
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     let (recount, recount_demand) = demand::capture(|| forge.execute(recount_query));
     assert_eq!(
         int64_values(&recount.unwrap(), "total"),
         vec![(nodes * FAN_OUT) as i64]
     );
-    let recount_io = io_stats::snapshot();
+    let recount_io = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(
         recount_io.edge_full_reads
             + recount_io.edge_filtered_reads
@@ -1356,7 +1263,7 @@ fn ordinary_streaming_sink_exposes_deterministic_query_evidence() {
                 None,
             )
             .unwrap();
-        assert_eq!(receipt.evidence.contract, "graphforge-query-evidence/1");
+        assert_eq!(receipt.evidence.contract, "graphforge-query-evidence/2");
         assert_eq!(receipt.evidence.hops.len(), 1);
         assert!(receipt.evidence.sorts.is_empty());
         assert_eq!(receipt.evidence.operator_rss.len(), 1);
@@ -1388,16 +1295,31 @@ fn ordinary_streaming_sink_exposes_deterministic_query_evidence() {
             "{:?}",
             receipt.evidence.hops
         );
+        // The reader is exercised when a lookup selects an ordinal range. Disk
+        // reads are a separate fact: the handle holds the blocks it already
+        // authenticated, so only the query that first touches them reads.
         assert!(
             receipt
                 .evidence
                 .hops
                 .iter()
-                .map(|hop| hop.identity_reader_calls)
+                .map(|hop| hop.identity_ranges_selected)
                 .sum::<u64>()
                 > 0,
             "the query must exercise the bounded reusable identity reader"
         );
+        if ordinal == 0 {
+            assert!(
+                receipt
+                    .evidence
+                    .hops
+                    .iter()
+                    .map(|hop| hop.identity_reader_calls)
+                    .sum::<u64>()
+                    > 0,
+                "the first query on a fresh handle reads its identity blocks"
+            );
+        }
         assert_eq!(receipt.scalar_u64, None);
         fingerprints.push(receipt.result_sha256);
     }
@@ -1509,6 +1431,7 @@ fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
         "{canonical_plan}"
     );
     assert!(!canonical_plan.contains("ExpandExec"), "{canonical_plan}");
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     let (canonical, canonical_demand) = demand::capture(|| forge.execute(ORDERED_TWO_HOP));
     let canonical = canonical.unwrap();
@@ -1518,7 +1441,7 @@ fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
         .take(LIMIT)
         .collect::<Vec<_>>();
     assert_eq!(fixed_binary_values(&canonical, "id"), expected);
-    assert_projected_identity_io(&io_stats::snapshot());
+    assert_projected_identity_io(&io_stats::snapshot().expect("requested I/O statistics"));
     assert_eq!(canonical_demand.hops.len(), 1, "{canonical_demand:#?}");
     assert!(canonical_demand.sorts.is_empty(), "{canonical_demand:#?}");
     let hop = canonical_demand.hops.values().next().unwrap();
@@ -1553,6 +1476,7 @@ fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
         ),
     ];
     for (query, multiplicity, identity_only, expects_v4_lookup) in cases {
+        let _io_capture = io_stats::CaptureScope::install();
         io_stats::reset();
         demand::reset();
         let result = forge.execute(query).unwrap();
@@ -1563,7 +1487,7 @@ fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
             .take(LIMIT)
             .collect::<Vec<_>>();
         assert_eq!(fixed_binary_values(&result, "id"), expected, "{query}");
-        let io = io_stats::snapshot();
+        let io = io_stats::snapshot().expect("requested I/O statistics");
         if identity_only {
             assert_eq!(
                 io.edge_full_reads + io.edge_filtered_reads,
@@ -1633,6 +1557,7 @@ fn optimized_v4_preserves_parallel_self_loop_and_demanded_property_semantics() {
         destination_plan.contains("projection=1"),
         "{destination_plan}"
     );
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     let destinations = forge.execute(destination_query).unwrap();
     let expected = [nodes[0], nodes[1], nodes[1], nodes[2]]
@@ -1640,7 +1565,7 @@ fn optimized_v4_preserves_parallel_self_loop_and_demanded_property_semantics() {
         .map(|uuid| uuid.as_bytes().to_vec())
         .collect::<Vec<_>>();
     assert_eq!(fixed_binary_values(&destinations, "id"), expected);
-    let io = io_stats::snapshot();
+    let io = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:#?}");
     assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:#?}");
 
@@ -1712,12 +1637,14 @@ fn limits_sweep_bounded_multi_hop_work_and_repartition() {
         );
         assert!(!plan.contains("RoundRobinBatch"), "{plan}");
 
+        let _io_capture = io_stats::CaptureScope::install();
+
         io_stats::reset();
         demand::reset();
         let result = forge.execute(&query).unwrap();
         demand::disable();
         assert_eq!(result.stats.rows_produced, limit);
-        let io = io_stats::snapshot();
+        let io = io_stats::snapshot().expect("requested I/O statistics");
         assert_indexed_limit_io(&io);
         assert_bounded_demand(&demand::snapshot(), 2, limit);
     }
@@ -1811,6 +1738,8 @@ fn fixed_hop_limit_preserves_skip_parameters_filters_and_blockers() {
     generate_graph(dir.path(), 64, 4, false);
     let forge = open_forge(dir.path());
 
+    let _io_capture = io_stats::CaptureScope::install();
+
     io_stats::reset();
     assert_eq!(
         forge
@@ -1820,7 +1749,7 @@ fn fixed_hop_limit_preserves_skip_parameters_filters_and_blockers() {
             .rows_produced,
         0
     );
-    let zero = io_stats::snapshot();
+    let zero = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(
         zero.edge_full_reads + zero.edge_filtered_reads,
         0,
@@ -1923,6 +1852,7 @@ fn physical_plan_only(explain: &str) -> &str {
 }
 
 fn livejournal_sample(forge: &GraphForge, query: &str, limit: usize) -> LiveJournalSample {
+    let _io_capture = io_stats::CaptureScope::install();
     io_stats::reset();
     demand::reset();
     let started = Instant::now();
@@ -1934,7 +1864,7 @@ fn livejournal_sample(forge: &GraphForge, query: &str, limit: usize) -> LiveJour
     assert_eq!(result.stats.rows_produced, limit as u64);
     LiveJournalSample {
         elapsed,
-        io: io_stats::snapshot(),
+        io: io_stats::snapshot().expect("requested I/O statistics"),
         demand: demand::snapshot(),
     }
 }

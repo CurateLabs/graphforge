@@ -30,6 +30,93 @@ use crate::graph_object_store::verify_file;
 use crate::graph_object_store::verify_graph_object;
 
 #[test]
+fn successful_install_byte_work_counts_actual_streams_and_refuses_failed_writes() {
+    let payload = b"payload byte work";
+    for failure in [None, Some("install:temp-sealed")] {
+        let root = tempfile::tempdir().unwrap();
+        let lease = begin_graph_object_publication(root.path()).unwrap();
+        let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+        inject_returned_error(failure);
+        let result = install_graph_object_bytes_with_lease(&lease, payload);
+        inject_returned_error(None);
+        let snapshot = capture.finish();
+        let work = &snapshot.regions["import_command"].work;
+        if failure.is_some() {
+            assert!(result.is_err());
+            assert!(
+                work.is_empty(),
+                "failed installation must not credit successful byte work"
+            );
+            assert!(
+                snapshot.regions["import_command"]
+                    .inclusive
+                    .hashed_bytes
+                    .unwrap()
+                    >= payload.len() as u64,
+                "attempted SHA work must remain visible independently"
+            );
+        } else {
+            let (_, evidence) = result.unwrap();
+            let bytes = payload.len() as u64;
+            assert_eq!(work["written_bytes"], bytes);
+            // Resident SHA + XXH64 naming. Windows additionally authenticates
+            // the reopened sealed temporary through both streams.
+            #[cfg(unix)]
+            assert_eq!(work["hashed_bytes"], 2 * bytes);
+            #[cfg(windows)]
+            assert_eq!(work["hashed_bytes"], 4 * bytes);
+            assert!(evidence.attempted_install);
+            let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+            let (_, reused) = install_graph_object_bytes_with_lease(&lease, payload).unwrap();
+            assert!(reused.reused_existing);
+            let work = &capture.finish().regions["import_command"].work;
+            // Resident naming and one existing-object SHA/XXH64 admission.
+            assert_eq!(work["hashed_bytes"], 4 * bytes);
+            assert!(!work.contains_key("written_bytes"));
+        }
+    }
+}
+
+#[test]
+fn failed_streamed_payload_authentication_does_not_credit_hash_or_write_work() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let payload = b"failed streamed payload";
+    fs::write(&source, payload).unwrap();
+    let lease = begin_graph_object_publication(root.path()).unwrap();
+    let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+    let error = install_graph_object_file_with_lease(
+        &lease,
+        &source,
+        &"ab".repeat(32),
+        payload.len() as u64,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("source digest or length changed")
+    );
+    let snapshot = capture.finish();
+    assert!(snapshot.regions["import_command"].work.is_empty());
+    assert!(
+        snapshot.regions["import_command"]
+            .inclusive
+            .hashed_bytes
+            .unwrap()
+            >= payload.len() as u64
+    );
+    #[cfg(target_os = "linux")]
+    assert!(
+        snapshot.regions["import_command"]
+            .inclusive
+            .written_bytes
+            .unwrap()
+            >= payload.len() as u64
+    );
+}
+
+#[test]
 fn allocation_observed_concurrent_cas_winner_keeps_real_temporary_peak() {
     let root = tempfile::tempdir().unwrap();
     let operation = crate::StorageAllocationOperation::default();
@@ -416,9 +503,11 @@ fn concurrent_winner_reuse_retains_the_losing_install_work() {
         assert_eq!(loser.file_fsync_calls, 1);
         assert_eq!(loser.directory_fsync_calls, 2);
         assert_eq!(loser.fsync_calls, 3);
-        // Windows authenticates the protected sealed handle after closing
-        // the writable handle, in addition to a file source-copy pass.
-        let read_passes = 2 + u64::from(cfg!(windows) && file_backed);
+        // Reuse verifies the concurrent winner once. A file source adds its
+        // copy pass. Windows authenticates the protected sealed handle after
+        // closing the writable handle. Resident bytes named in memory are not
+        // read back before sealing (#1691).
+        let read_passes = 1 + u64::from(file_backed) + u64::from(cfg!(windows));
         assert_eq!(loser.read_calls, read_passes);
         assert_eq!(loser.bytes_hashed, read_passes * payload.len() as u64);
         assert_eq!(
@@ -497,10 +586,13 @@ fn file_install_receipts_count_actual_cache_window_synchronizations() {
 fn installs_once_reuses_exact_object_and_rejects_tampering() {
     let root = tempfile::tempdir().unwrap();
     let (digest, first) = install_graph_object_bytes(root.path(), b"payload").unwrap();
-    assert_eq!(first.bytes_hashed, 7);
+    // Resident bytes are named in memory and not read back before sealing
+    // (#1691); Windows still authenticates its protected sealed handle.
+    let sealed_reads = u64::from(cfg!(windows));
+    assert_eq!(first.bytes_hashed, 7 * sealed_reads);
     assert_eq!(first.bytes_installed, 7);
     assert!(!first.reused_existing);
-    assert_eq!(first.read_calls, 1);
+    assert_eq!(first.read_calls, sealed_reads);
     assert_eq!(first.write_bytes, 7);
     assert_eq!(first.write_calls, 1);
     assert_eq!(first.fsync_calls, 3);
@@ -598,4 +690,79 @@ fn cas_copy_isolated_from_preexisting_writable_source_descriptor() {
         payload.len() as u64,
     )
     .unwrap();
+}
+
+#[test]
+fn installation_capture_uses_the_final_inode_without_rehashing_or_accepting_new_checksums() {
+    use graphforge_core::hash_observation::operation::Capture as HashCapture;
+
+    for mode in ["new", "existing", "concurrent"] {
+        let root = tempfile::tempdir().unwrap();
+        let payload = b"captured immutable payload";
+        if mode == "existing" {
+            install_graph_object_bytes(root.path(), payload).unwrap();
+        } else if mode == "concurrent" {
+            let winner_root = root.path().to_path_buf();
+            BEFORE_OBJECT_LINK.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    install_graph_object_bytes(&winner_root, payload).unwrap();
+                }));
+            });
+        }
+        let lease = begin_graph_object_publication(root.path()).unwrap();
+        let (digest, installed) = install_graph_object_bytes_with_lease(&lease, payload).unwrap();
+        assert_eq!(installed.reused_existing, mode != "new");
+        assert_eq!(installed.attempted_install, mode != "existing");
+        let mut entry = crate::GraphFileEntry {
+            relative_path: "topology/nodes/Person.parquet".into(),
+            byte_length: payload.len() as u64,
+            content_sha256: digest.clone(),
+            content_xxh64: crate::corruption_checksum::checksum(payload),
+            role: crate::GraphFileRole::Topology,
+        };
+        let path = graph_object_path(root.path(), &digest).unwrap();
+        let original_identity =
+            graphforge_filesystem::file_identity(&File::open(&path).unwrap()).unwrap();
+        let capture = HashCapture::start();
+        assert!(lease.admit_captured_object(&entry).unwrap(), "{mode}");
+        let observed = capture.snapshot();
+        drop(capture);
+        assert_eq!(observed.artifact_payload_sha256_bytes, 0, "{mode}");
+        assert_eq!(observed.unclassified_sha256_bytes, 0, "{mode}");
+        assert_eq!(observed.checksum_bytes, payload.len() as u64, "{mode}");
+
+        let mut changed = payload.to_vec();
+        changed[0] ^= 1;
+        let permissions = fs::metadata(&path).unwrap().permissions();
+        corrupt_sealed_graph_object_for_test(&path, &changed);
+        fs::set_permissions(&path, permissions).unwrap();
+        assert_eq!(
+            graphforge_filesystem::file_identity(&File::open(&path).unwrap()).unwrap(),
+            original_identity,
+            "{mode}"
+        );
+        assert!(lease.admit_captured_object(&entry).is_err(), "{mode}");
+        entry.content_xxh64 = crate::corruption_checksum::checksum(&changed);
+        assert!(!lease.admit_captured_object(&entry).unwrap(), "{mode}");
+    }
+}
+
+#[test]
+fn unsuccessful_installation_does_not_mint_capture_authority() {
+    for boundary in [
+        "install:final-linked",
+        "install:bucket-synced",
+        "install:temp-unlinked",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let lease = begin_graph_object_publication(root.path()).unwrap();
+        inject_returned_error(Some(boundary));
+        let result = install_graph_object_bytes_with_lease(&lease, b"immutable payload");
+        inject_returned_error(None);
+        assert!(result.is_err(), "{boundary}");
+        assert!(
+            lease.installed_objects.lock().unwrap().is_empty(),
+            "{boundary}"
+        );
+    }
 }

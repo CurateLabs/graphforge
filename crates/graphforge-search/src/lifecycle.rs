@@ -13,7 +13,7 @@ use graphforge_storage::{
 
 use crate::TextSearchLimits;
 use crate::analyzer::{TEXT_CONTRACT_VERSION, analyze_query};
-use crate::source::{TextSourceProjection, project_text_source};
+use crate::source::{TextSourceProjection, project_text_source_with, text_source_snapshot};
 use crate::text_index::{
     TEXT_BACKEND_VERSION, TextIndexBuildOutcome, TextSearchHit, build_text_index,
     search_text_index, validate_text_index,
@@ -35,21 +35,39 @@ pub struct TextLifecycleLimits {
 /// Caller-resolved identity and explicit property set for one text artifact.
 #[derive(Clone, Copy, Debug)]
 pub struct TextIndexRequest<'a> {
+    /// Explicit topology membership; absent only for standalone legacy callers.
+    pub topology: Option<&'a graphforge_storage::TopologyFiles>,
+    /// The facade's generation-pinned ordinal identity authority. Membership
+    /// projection checks node rows against it, reading only the identity blocks
+    /// it needs; without one it opens the whole UUID-membership index.
+    pub ordinal: Option<&'a crate::SessionOrdinalIdentity>,
     /// Normalized graph label persisted in the artifact key.
     pub label: &'a str,
     /// Local catalog identity used only for Parquet membership projection.
     pub label_id: graphforge_value::EntityTypeSelection,
     /// Explicit non-empty property selectors persisted in canonical order.
     pub properties: &'a [String],
+    /// The caller's admitted property inventory. Passing it lets projection read
+    /// node properties through it and take the freshness identity from its
+    /// manifest instead of re-capturing the whole project.
+    pub inventory: Option<&'a graphforge_storage::AuthenticatedPropertyInventory>,
 }
 
 /// Caller-resolved identity for lazy search over the stable default projection.
 #[derive(Clone, Copy, Debug)]
 pub struct LazyTextRequest<'a> {
+    /// Explicit topology membership; absent only for standalone legacy callers.
+    pub topology: Option<&'a graphforge_storage::TopologyFiles>,
+    /// The facade's generation-pinned ordinal identity authority. Membership
+    /// projection checks node rows against it, reading only the identity blocks
+    /// it needs; without one it opens the whole UUID-membership index.
+    pub ordinal: Option<&'a crate::SessionOrdinalIdentity>,
     /// Normalized graph label persisted in the discovered artifact key.
     pub label: &'a str,
     /// Local catalog identity used only for Parquet membership projection.
     pub label_id: graphforge_value::EntityTypeSelection,
+    /// The caller's admitted property inventory; see [`TextIndexRequest::inventory`].
+    pub inventory: Option<&'a graphforge_storage::AuthenticatedPropertyInventory>,
 }
 
 /// One verified, immutable text publication.
@@ -171,8 +189,11 @@ pub fn inspect_text_index_freshness<C>(
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
-    let projection = project_text_source(
+    let projection = project_text_source_with(
+        request.inventory,
         project_dir,
+        request.topology,
+        request.ordinal,
         request.label_id,
         explicit_properties,
         limits.text,
@@ -385,8 +406,11 @@ where
     match prepare_stable_text_index(
         project_dir,
         LazyTextRequest {
+            topology: request.topology,
+            ordinal: request.ordinal,
             label: key.label(),
             label_id: request.label_id,
+            inventory: request.inventory,
         },
         Some(properties),
         mode,
@@ -417,8 +441,11 @@ where
     let retry_budget = Cell::new(true);
 
     loop {
-        let projection = project_text_source(
+        let projection = project_text_source_with(
+            request.inventory,
             project_dir,
+            request.topology,
+            request.ordinal,
             request.label_id,
             explicit_properties.as_deref(),
             limits.text,
@@ -436,9 +463,12 @@ where
         match prepare_text_index_with_budget(
             project_dir,
             TextIndexRequest {
+                topology: request.topology,
+                ordinal: request.ordinal,
                 label: key.label(),
                 label_id: request.label_id,
                 properties: &properties,
+                inventory: request.inventory,
             },
             mode,
             limits,
@@ -452,10 +482,13 @@ where
             Ok(index) => {
                 let after = generation_checked_snapshot(
                     project_dir,
+                    request.topology,
+                    request.ordinal,
                     &discovered,
                     request.label_id,
                     &properties,
                     limits.text,
+                    request.inventory,
                 )?;
                 match index.artifact().manifest.verify_fresh(
                     &key,
@@ -516,10 +549,13 @@ where
     let revalidate = |expected: &SearchSourceSnapshot| {
         generation_checked_snapshot(
             project_dir,
+            request.topology,
+            request.ordinal,
             expected,
             request.label_id,
             &properties,
             limits.text,
+            request.inventory,
         )
     };
     let outcome = coordinate_search_publication(
@@ -537,8 +573,11 @@ where
                 return revalidate(expected).map_err(stale_after_property_discovery);
             }
             if projection.borrow().is_none() {
-                *projection.borrow_mut() = Some(project_text_source(
+                *projection.borrow_mut() = Some(project_text_source_with(
+                    request.inventory,
                     project_dir,
+                    request.topology,
+                    request.ordinal,
                     request.label_id,
                     Some(&properties),
                     limits.text,
@@ -604,8 +643,11 @@ where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
     if projection.borrow().is_none() {
-        *projection.borrow_mut() = Some(project_text_source(
+        *projection.borrow_mut() = Some(project_text_source_with(
+            request.inventory,
             project_dir,
+            request.topology,
+            request.ordinal,
             request.label_id,
             Some(properties),
             limits.text,
@@ -698,9 +740,12 @@ where
             project_dir,
             TextSearchAttemptRequest {
                 index: TextIndexRequest {
+                    topology: request.topology,
+                    ordinal: request.ordinal,
                     label: key.label(),
                     label_id: request.label_id,
                     properties: &properties,
+                    inventory: request.inventory,
                 },
                 key: &key,
                 query,
@@ -749,8 +794,11 @@ where
     let retry_budget = Cell::new(true);
 
     loop {
-        let projection = project_text_source(
+        let projection = project_text_source_with(
+            request.inventory,
             project_dir,
+            request.topology,
+            request.ordinal,
             request.label_id,
             None,
             limits.text,
@@ -766,9 +814,12 @@ where
             project_dir,
             TextSearchAttemptRequest {
                 index: TextIndexRequest {
+                    topology: request.topology,
+                    ordinal: request.ordinal,
                     label: key.label(),
                     label_id: request.label_id,
                     properties: &projection.properties,
+                    inventory: request.inventory,
                 },
                 key: &key,
                 query,
@@ -844,10 +895,13 @@ where
     };
     let after = match generation_checked_snapshot(
         project_dir,
+        request.index.topology,
+        request.index.ordinal,
         &manifest_snapshot,
         request.index.label_id,
         properties,
         limits.text,
+        request.index.inventory,
     ) {
         Ok(snapshot) => snapshot,
         Err(SearchArtifactError::ConcurrentMutation) => return Ok(TextSearchAttempt::Retry),
@@ -1031,15 +1085,39 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generation_checked_snapshot(
     project_dir: &Path,
+    topology: Option<&graphforge_storage::TopologyFiles>,
+    ordinal: Option<&crate::SessionOrdinalIdentity>,
     expected: &SearchSourceSnapshot,
     label_id: graphforge_value::EntityTypeSelection,
     properties: &[String],
     limits: TextSearchLimits,
+    inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
 ) -> Result<SearchSourceSnapshot, SearchArtifactError> {
-    let fresh = project_text_source(project_dir, label_id, Some(properties), limits, || Ok(()))?
-        .source_snapshot;
+    // With the caller's admitted inventory the source identity is the manifest's
+    // own list of node and node-property objects (name, length, XXH64) plus the
+    // live search generation: no source byte is read to recheck freshness.
+    let fresh = if let Some(snapshot) = inventory
+        .map(|inventory| text_source_snapshot(project_dir, inventory))
+        .transpose()?
+        .flatten()
+    {
+        snapshot
+    } else {
+        project_text_source_with(
+            inventory,
+            project_dir,
+            topology,
+            ordinal,
+            label_id,
+            Some(properties),
+            limits,
+            || Ok(()),
+        )?
+        .source_snapshot
+    };
     if fresh != *expected {
         return Err(SearchArtifactError::ConcurrentMutation);
     }
@@ -1149,20 +1227,26 @@ mod tests {
 
     fn request(properties: &[String]) -> TextIndexRequest<'_> {
         TextIndexRequest {
+            topology: None,
+            ordinal: None,
             label: LABEL,
             label_id: graphforge_value::EntityTypeSelection::Known(
                 graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
             ),
             properties,
+            inventory: None,
         }
     }
 
     fn lazy_request() -> LazyTextRequest<'static> {
         LazyTextRequest {
+            topology: None,
+            ordinal: None,
             label: LABEL,
             label_id: graphforge_value::EntityTypeSelection::Known(
                 graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
             ),
+            inventory: None,
         }
     }
 
@@ -1519,7 +1603,7 @@ mod tests {
         assert_eq!(paths.len(), 2);
         let before =
             capture_text_snapshot(dir.path(), TextSearchLimits::default(), || Ok(())).unwrap();
-        let selected_before = project_text_source(
+        let selected_before = crate::source::project_text_source(
             dir.path(),
             graphforge_value::EntityTypeSelection::Known(
                 graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
@@ -1544,12 +1628,15 @@ mod tests {
         assert!(
             generation_checked_snapshot(
                 dir.path(),
+                None,
+                None,
                 &selected_before,
                 graphforge_value::EntityTypeSelection::Known(
                     graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap()
                 ),
                 &properties(),
                 TextSearchLimits::default(),
+                None,
             )
             .is_err()
         );

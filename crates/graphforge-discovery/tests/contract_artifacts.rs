@@ -7,7 +7,10 @@
     clippy::type_complexity
 )]
 
-use graphforge_discovery::{DiscoveryLimits, DiscoveryManifest, RefSet};
+use graphforge_discovery::{
+    DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, ExactIdentity, ProjectSummary, RefSet,
+    ResearchLineage,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs;
@@ -16,6 +19,10 @@ use std::path::{Path, PathBuf};
 const MANIFEST_SCHEMA: &str =
     include_str!("../../../docs/reference/discovery/v1/manifest.schema.json");
 const REFS_SCHEMA: &str = include_str!("../../../docs/reference/discovery/v1/refs.schema.json");
+const SUMMARY_SCHEMA: &str =
+    include_str!("../../../docs/reference/discovery/v1/summary.schema.json");
+const LINEAGE_SCHEMA: &str =
+    include_str!("../../../docs/reference/discovery/v1/lineage.schema.json");
 const FIXTURES: &str = include_str!("../../../docs/reference/discovery/v1/conformance.json");
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -39,6 +46,8 @@ struct Case {
 enum Document {
     Manifest,
     Refs,
+    Summary,
+    Lineage,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
@@ -53,6 +62,16 @@ struct Limits {
     max_locations_per_object: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_cumulative_object_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_summary_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_module_package_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_ontology_entries: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_lineage_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_lineage_entries: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -117,6 +136,8 @@ fn manifest_schema() -> Value {
             "requirements":{"type":"array","maxItems":256,"items":{"$ref":"#/$defs/semantic"}},
             "capabilities":{"type":"array","maxItems":256,"items":{"$ref":"#/$defs/semantic"}},
             "objects":{"type":"array","minItems":1,"maxItems":1_000_000,"items":{"$ref":"#/$defs/object"}},
+            "summary":{"$ref":"#/$defs/summary_reference"}, "ontology":{"$ref":"#/$defs/ontology_inventory"},
+            "lineage":{"$ref":"#/$defs/lineage_reference"},
             "extensions":{"$ref":"#/$defs/extensions"}
         }),
         {
@@ -124,6 +145,151 @@ fn manifest_schema() -> Value {
             let map = defs.as_object_mut().unwrap();
             map.insert("semantic".into(), json!({"type":"object","additionalProperties":false,"required":["capability","major"],"properties":{"capability":{"type":"string","minLength":1,"maxLength":128},"major":{"type":"integer","minimum":0,"maximum":65535}}}));
             map.insert("object".into(), json!({"type":"object","additionalProperties":false,"required":["digest","length","media_type","locations"],"properties":{"digest":{"$ref":"#/$defs/digest"},"length":{"type":"integer","minimum":0},"media_type":{"type":"string","minLength":1,"maxLength":4096},"locations":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"string","format":"uri","pattern":"^https://"}}}}));
+            map.insert("package_reference".into(), json!({"type":"object","additionalProperties":false,"required":["format","package_digest","object_digest"],"properties":{"format":{"const":"graphforge-project/2"},"package_digest":{"$ref":"#/$defs/digest"},"object_digest":{"$ref":"#/$defs/digest"}}}));
+            map.insert(
+                "identity_text".into(),
+                json!({"type":"string","minLength":1,"maxLength":4096}),
+            );
+            map.insert("summary_reference".into(), json!({"type":"object","additionalProperties":false,"required":["format","summary_digest","object_digest"],"properties":{"format":{"const":"graphforge-project-summary/1"},"summary_digest":{"$ref":"#/$defs/digest"},"object_digest":{"$ref":"#/$defs/digest"}}}));
+            map.insert("module_descriptor".into(), json!({"type":"object","additionalProperties":false,"required":["id","version","content_digest"],"properties":{"id":{"$ref":"#/$defs/identity_text"},"version":{"$ref":"#/$defs/identity_text"},"content_digest":{"$ref":"#/$defs/digest"},"package":{"$ref":"#/$defs/package_reference"}}}));
+            map.insert("bridge_descriptor".into(), bridge_descriptor_schema());
+            map.insert("ontology_inventory".into(), json!({"type":"object","additionalProperties":false,"required":["composition_digest","modules","bridge_sets"],"properties":{"composition_digest":{"$ref":"#/$defs/digest"},"modules":{"type":"array","maxItems":4096,"items":{"$ref":"#/$defs/module_descriptor"}},"bridge_sets":{"type":"array","maxItems":4096,"items":{"$ref":"#/$defs/bridge_descriptor"}}}}));
+            map.insert("lineage_reference".into(), json!({"type":"object","additionalProperties":false,"required":["format","lineage_digest","object_digest"],"properties":{"format":{"const":"graphforge-research-lineage/1"},"lineage_digest":{"$ref":"#/$defs/digest"},"object_digest":{"$ref":"#/$defs/digest"}}}));
+            defs
+        },
+    )
+}
+
+fn lineage_schema() -> Value {
+    schema(
+        "lineage",
+        &[
+            "format",
+            "version",
+            "repository",
+            "immutable_version",
+            "project_uuid",
+            "requirements",
+            "capabilities",
+            "branches",
+            "versions",
+            "proposals",
+        ],
+        json!({
+            "format":{"const":"graphforge-research-lineage/1"},
+            "version":{"$ref":"#/$defs/version"},
+            "repository":{"$ref":"#/$defs/identity"},
+            "immutable_version":{"$ref":"#/$defs/digest"},
+            "project_uuid":{"$ref":"#/$defs/uuid"},
+            "requirements":{"type":"array","maxItems":1,"items":{"type":"object","additionalProperties":false,"required":["capability","major"],"properties":{"capability":{"const":"research-lineage"},"major":{"const":1}}}},
+            "capabilities":{"type":"array","maxItems":256,"items":{"$ref":"#/$defs/semantic"}},
+            "fork":{"anyOf":[{"$ref":"#/$defs/fork_origin"},{"type":"null"}]},
+            "branches":{"type":"array","maxItems":10000,"items":{"$ref":"#/$defs/branch"}},
+            "versions":{"type":"array","maxItems":10000,"items":{"$ref":"#/$defs/research_version"}},
+            "proposals":{"type":"array","maxItems":10000,"items":{"$ref":"#/$defs/proposal"}},
+            "extensions":{"$ref":"#/$defs/extensions"}
+        }),
+        {
+            let mut defs = common_defs();
+            let map = defs.as_object_mut().unwrap();
+            map.insert("semantic".into(), json!({"type":"object","additionalProperties":false,"required":["capability","major"],"properties":{"capability":{"type":"string","minLength":1,"maxLength":128},"major":{"type":"integer","minimum":0,"maximum":65535}}}));
+            map.insert("uuid".into(), json!({"type":"string","minLength":36,"maxLength":36,"pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"}));
+            map.insert("package_reference".into(), json!({"type":"object","additionalProperties":false,"required":["format","package_digest","object_digest"],"properties":{"format":{"const":"graphforge-project/2"},"package_digest":{"$ref":"#/$defs/digest"},"object_digest":{"$ref":"#/$defs/digest"}}}));
+            map.insert("fork_origin".into(), json!({"type":"object","additionalProperties":false,"required":["origin_repository","origin_project_uuid","origin_version_uuid","origin_version_identity"],"properties":{"origin_repository":{"$ref":"#/$defs/identity"},"origin_project_uuid":{"$ref":"#/$defs/uuid"},"origin_version_uuid":{"$ref":"#/$defs/uuid"},"origin_version_identity":{"$ref":"#/$defs/digest"}}}));
+            map.insert("branch".into(), json!({"type":"object","additionalProperties":false,"required":["branch_uuid","ref_name","project_uuid","head_version_uuid","origin_version_uuid","base_version_uuid","selection_sha256","label"],"properties":{"branch_uuid":{"$ref":"#/$defs/uuid"},"ref_name":{"type":"string","minLength":1,"maxLength":4096},"project_uuid":{"$ref":"#/$defs/uuid"},"head_version_uuid":{"$ref":"#/$defs/uuid"},"parent_branch_uuid":{"anyOf":[{"$ref":"#/$defs/uuid"},{"type":"null"}]},"origin_version_uuid":{"$ref":"#/$defs/uuid"},"base_version_uuid":{"$ref":"#/$defs/uuid"},"selection_sha256":{"$ref":"#/$defs/digest"},"label":{"type":"string","minLength":1,"maxLength":4096}}}));
+            map.insert("research_version".into(), json!({"type":"object","additionalProperties":false,"required":["version_uuid","identity_digest","kind","branch_uuid"],"properties":{"version_uuid":{"$ref":"#/$defs/uuid"},"identity_digest":{"$ref":"#/$defs/digest"},"kind":{"enum":["complete","projection"]},"branch_uuid":{"$ref":"#/$defs/uuid"},"source_version_uuid":{"anyOf":[{"$ref":"#/$defs/uuid"},{"type":"null"}]},"package":{"anyOf":[{"$ref":"#/$defs/package_reference"},{"type":"null"}]}}}));
+            map.insert("proposal".into(), json!({"type":"object","additionalProperties":false,"required":["proposal_uuid","source_branch_uuid","source_version_uuid","payload_version_uuid","package"],"properties":{"proposal_uuid":{"$ref":"#/$defs/uuid"},"source_branch_uuid":{"$ref":"#/$defs/uuid"},"source_version_uuid":{"$ref":"#/$defs/uuid"},"payload_version_uuid":{"$ref":"#/$defs/uuid"},"package":{"$ref":"#/$defs/package_reference"}}}));
+            defs
+        },
+    )
+}
+
+fn bridge_descriptor_schema() -> Value {
+    json!({"type":"object","additionalProperties":false,"required":["id","version","content_digest"],"properties":{"id":{"$ref":"#/$defs/identity_text"},"version":{"$ref":"#/$defs/identity_text"},"content_digest":{"$ref":"#/$defs/digest"}}})
+}
+
+const COMPONENT_KINDS: [&str; 10] = [
+    "ontology",
+    "schema",
+    "migration",
+    "settings",
+    "graph-data",
+    "derived-artifact",
+    "evidence",
+    "provenance",
+    "compatibility",
+    "research",
+];
+
+fn summary_schema() -> Value {
+    schema(
+        "summary",
+        &[
+            "format",
+            "version",
+            "repository",
+            "immutable_version",
+            "package",
+            "requirements",
+            "capabilities",
+            "metadata",
+            "facts",
+        ],
+        json!({
+            "format":{"const":"graphforge-project-summary/1"}, "version":{"$ref":"#/$defs/version"},
+            "repository":{"$ref":"#/$defs/identity"}, "immutable_version":{"$ref":"#/$defs/digest"},
+            "package":{"type":"object","additionalProperties":false,"required":["format","package_digest","package_class"],"properties":{"format":{"const":"graphforge-project/2"},"package_digest":{"$ref":"#/$defs/digest"},"package_class":{"enum":["complete","ontology-only","component-selective","graph-data-subset"]}}},
+            "requirements":{"type":"array","maxItems":1,"items":{"type":"object","additionalProperties":false,"required":["capability","major"],"properties":{"capability":{"const":"project-summary"},"major":{"const":1}}}},
+            "capabilities":{"type":"array","maxItems":256,"items":{"$ref":"#/$defs/semantic"}},
+            "metadata":{"$ref":"#/$defs/metadata"}, "facts":{"$ref":"#/$defs/facts"},
+            "extensions":{"$ref":"#/$defs/extensions"}
+        }),
+        {
+            let mut defs = common_defs();
+            let map = defs.as_object_mut().unwrap();
+            map.insert("semantic".into(), json!({"type":"object","additionalProperties":false,"required":["capability","major"],"properties":{"capability":{"type":"string","minLength":1,"maxLength":128},"major":{"type":"integer","minimum":0,"maximum":65535}}}));
+            map.insert("text".into(), json!({"type":"string","minLength":1,"maxLength":4096,"pattern":"^[^\\u0000-\\u001f\\u007f]+$"}));
+            map.insert(
+                "optional_text".into(),
+                json!({"anyOf":[{"$ref":"#/$defs/text"},{"type":"null"}]}),
+            );
+            map.insert(
+                "optional_count".into(),
+                json!({"anyOf":[{"type":"integer","minimum":0},{"type":"null"}]}),
+            );
+            map.insert("text_list".into(), json!({"type":"array","maxItems":256,"uniqueItems":true,"items":{"$ref":"#/$defs/text"}}));
+            map.insert(
+                "identity_text".into(),
+                json!({"type":"string","minLength":1,"maxLength":4096}),
+            );
+            map.insert("bridge_descriptor".into(), bridge_descriptor_schema());
+            map.insert("metadata".into(), json!({"type":"object","additionalProperties":false,
+                "required":["title","description","authors","subjects","languages","geographic_coverage","temporal_coverage","source_types","corpus_size","ontologies","license","access","tags","originating_projects","related_projects","canonical_identifiers","external_identifiers","created_at","updated_at"],
+                "properties":{
+                    "title":{"$ref":"#/$defs/optional_text"},"description":{"$ref":"#/$defs/optional_text"},
+                    "authors":{"$ref":"#/$defs/text_list"},"subjects":{"$ref":"#/$defs/text_list"},"languages":{"$ref":"#/$defs/text_list"},
+                    "geographic_coverage":{"anyOf":[{"type":"object","additionalProperties":false,"required":["label","regions"],"properties":{"label":{"$ref":"#/$defs/optional_text"},"regions":{"$ref":"#/$defs/text_list"}}},{"type":"null"}]},
+                    "temporal_coverage":{"anyOf":[{"type":"object","additionalProperties":false,"required":["start","end","label"],"properties":{"start":{"$ref":"#/$defs/optional_text"},"end":{"$ref":"#/$defs/optional_text"},"label":{"$ref":"#/$defs/optional_text"}}},{"type":"null"}]},
+                    "source_types":{"$ref":"#/$defs/text_list"},
+                    "corpus_size":{"anyOf":[{"type":"object","additionalProperties":false,"required":["node_count","relationship_count","source_count","artifact_count"],"properties":{"node_count":{"$ref":"#/$defs/optional_count"},"relationship_count":{"$ref":"#/$defs/optional_count"},"source_count":{"$ref":"#/$defs/optional_count"},"artifact_count":{"$ref":"#/$defs/optional_count"}}},{"type":"null"}]},
+                    "ontologies":{"$ref":"#/$defs/text_list"},"license":{"$ref":"#/$defs/optional_text"},
+                    "access":{"type":"object","additionalProperties":false,"required":["visibility","access_policy"],"properties":{"visibility":{"$ref":"#/$defs/optional_text"},"access_policy":{"$ref":"#/$defs/optional_text"}}},
+                    "tags":{"$ref":"#/$defs/text_list"},"originating_projects":{"$ref":"#/$defs/text_list"},"related_projects":{"$ref":"#/$defs/text_list"},
+                    "canonical_identifiers":{"$ref":"#/$defs/text_list"},"external_identifiers":{"$ref":"#/$defs/text_list"},
+                    "created_at":{"$ref":"#/$defs/optional_text"},"updated_at":{"$ref":"#/$defs/optional_text"}
+                }}));
+            map.insert("facts".into(), json!({"type":"object","additionalProperties":false,
+                "required":["ontology_mode","components","research_present","evidence_present","payload_bytes","ontology_composition"],
+                "properties":{
+                    "ontology_mode":{"enum":["none","advisory","strict"]},
+                    "components":{"type":"object","propertyNames":{"enum":COMPONENT_KINDS},"additionalProperties":{"type":"integer","minimum":1}},
+                    "research_present":{"type":"boolean"},"evidence_present":{"type":"boolean"},
+                    "payload_bytes":{"type":"integer","minimum":0},
+                    "ontology_composition":{"anyOf":[{"type":"object","additionalProperties":false,"required":["composition_digest","modules","bridge_sets"],"properties":{
+                        "composition_digest":{"$ref":"#/$defs/digest"},
+                        "modules":{"type":"array","maxItems":4096,"items":{"type":"object","additionalProperties":false,"required":["id","version","content_digest","dialect","profile"],"properties":{"id":{"$ref":"#/$defs/identity_text"},"version":{"$ref":"#/$defs/identity_text"},"content_digest":{"$ref":"#/$defs/digest"},"dialect":{"$ref":"#/$defs/identity_text"},"profile":{"$ref":"#/$defs/identity_text"}}}},
+                        "bridge_sets":{"type":"array","maxItems":4096,"items":{"$ref":"#/$defs/bridge_descriptor"}}}},{"type":"null"}]}
+                }}));
             defs
         },
     )
@@ -168,6 +334,144 @@ fn base_refs() -> Value {
     })
 }
 
+const MODULE_ID: &str = "https://openalex.org/ontology/works";
+const BRIDGE_ID: &str = "https://openalex.org/bridge/works-authors";
+
+fn base_summary() -> Value {
+    json!({
+        "format":"graphforge-project-summary/1","version":{"major":1,"minor":1},
+        "repository":{"owner":"openalex","repository":"openalex"},
+        "immutable_version":digest('a'),
+        "package":{"format":"graphforge-project/2","package_digest":digest('b'),"package_class":"complete"},
+        "requirements":[{"capability":"project-summary","major":1}],"capabilities":[],
+        "metadata":{
+            "title":"OpenAlex","description":null,
+            "authors":["OurResearch"],"subjects":["scholarly-communication"],"languages":["en"],
+            "geographic_coverage":{"label":"Global","regions":["africa","asia"]},
+            "temporal_coverage":{"start":"1900","end":null,"label":null},
+            "source_types":["bibliographic-database"],
+            "corpus_size":{"node_count":1000,"relationship_count":2500,"source_count":1,"artifact_count":null},
+            "ontologies":[MODULE_ID],"license":"CC0-1.0",
+            "access":{"visibility":"public","access_policy":"open"},
+            "tags":[],"originating_projects":[],"related_projects":[],
+            "canonical_identifiers":[],"external_identifiers":[],
+            "created_at":"2026-01-01T00:00:00.000000Z","updated_at":"2026-01-01T00:00:00.000000Z"
+        },
+        "facts":{
+            "ontology_mode":"advisory",
+            "components":{"ontology":1,"research":1,"settings":2},
+            "research_present":true,"evidence_present":false,"payload_bytes":4096,
+            "ontology_composition":{
+                "composition_digest":digest('e'),
+                "modules":[{"id":MODULE_ID,"version":"2026.01","content_digest":digest('f'),"dialect":"graphforge-ontology","profile":"advisory"}],
+                "bridge_sets":[{"id":BRIDGE_ID,"version":"1","content_digest":digest('9')}]
+            }
+        },
+        "extensions":{"x-example":true}
+    })
+}
+
+fn summary_digest(summary: &Value) -> String {
+    ProjectSummary::from_json(compact(summary).as_bytes(), DiscoveryLimits::default())
+        .unwrap()
+        .canonical_digest()
+        .unwrap()
+        .0
+}
+
+const LINEAGE_PROJECT: &str = "01900000-0000-7000-8000-000000000001";
+const LINEAGE_BRANCH_MAIN: &str = "01900000-0000-7000-8000-000000000010";
+const LINEAGE_BRANCH_FEATURE: &str = "01900000-0000-7000-8000-000000000011";
+const LINEAGE_VERSION_ORIGIN: &str = "01900000-0000-7000-8000-000000000020";
+const LINEAGE_VERSION_MAIN: &str = "01900000-0000-7000-8000-000000000021";
+const LINEAGE_VERSION_FEATURE: &str = "01900000-0000-7000-8000-000000000022";
+const LINEAGE_VERSION_PROJECTION: &str = "01900000-0000-7000-8000-000000000023";
+const LINEAGE_PROPOSAL: &str = "01900000-0000-7000-8000-000000000030";
+
+fn base_lineage() -> Value {
+    json!({
+        "format":"graphforge-research-lineage/1","version":{"major":1,"minor":1},
+        "repository":{"owner":"openalex","repository":"openalex-fork"},
+        "immutable_version":digest('a'),
+        "project_uuid":LINEAGE_PROJECT,
+        "requirements":[{"capability":"research-lineage","major":1}],"capabilities":[],
+        "fork":{"origin_repository":{"owner":"curate","repository":"source"},"origin_project_uuid":"01900000-0000-7000-8000-000000000099","origin_version_uuid":"01900000-0000-7000-8000-000000000098","origin_version_identity":digest('8')},
+        "branches":[
+            {"branch_uuid":LINEAGE_BRANCH_MAIN,"ref_name":"main","project_uuid":LINEAGE_PROJECT,"head_version_uuid":LINEAGE_VERSION_MAIN,"parent_branch_uuid":null,"origin_version_uuid":LINEAGE_VERSION_ORIGIN,"base_version_uuid":LINEAGE_VERSION_ORIGIN,"selection_sha256":digest('1'),"label":"main"},
+            {"branch_uuid":LINEAGE_BRANCH_FEATURE,"ref_name":"feature/claims","project_uuid":LINEAGE_PROJECT,"head_version_uuid":LINEAGE_VERSION_FEATURE,"parent_branch_uuid":LINEAGE_BRANCH_MAIN,"origin_version_uuid":LINEAGE_VERSION_MAIN,"base_version_uuid":LINEAGE_VERSION_FEATURE,"selection_sha256":digest('2'),"label":"claims"}
+        ],
+        "versions":[
+            {"version_uuid":LINEAGE_VERSION_ORIGIN,"identity_digest":digest('3'),"kind":"complete","branch_uuid":LINEAGE_BRANCH_MAIN,"source_version_uuid":null,"package":{"format":"graphforge-project/2","package_digest":digest('4'),"object_digest":digest('5')}},
+            {"version_uuid":LINEAGE_VERSION_MAIN,"identity_digest":digest('6'),"kind":"complete","branch_uuid":LINEAGE_BRANCH_MAIN,"source_version_uuid":null,"package":{"format":"graphforge-project/2","package_digest":digest('7'),"object_digest":digest('8')}},
+            {"version_uuid":LINEAGE_VERSION_FEATURE,"identity_digest":digest('9'),"kind":"complete","branch_uuid":LINEAGE_BRANCH_FEATURE,"source_version_uuid":null,"package":{"format":"graphforge-project/2","package_digest":digest('a'),"object_digest":digest('b')}},
+            {"version_uuid":LINEAGE_VERSION_PROJECTION,"identity_digest":digest('c'),"kind":"projection","branch_uuid":LINEAGE_BRANCH_FEATURE,"source_version_uuid":LINEAGE_VERSION_FEATURE,"package":{"format":"graphforge-project/2","package_digest":digest('d'),"object_digest":digest('e')}}
+        ],
+        "proposals":[
+            {"proposal_uuid":LINEAGE_PROPOSAL,"source_branch_uuid":LINEAGE_BRANCH_FEATURE,"source_version_uuid":LINEAGE_VERSION_FEATURE,"payload_version_uuid":LINEAGE_VERSION_PROJECTION,"package":{"format":"graphforge-project/2","package_digest":digest('d'),"object_digest":digest('e')}}
+        ],
+        "extensions":{"x-example":true}
+    })
+}
+
+fn lineage_digest(lineage: &Value) -> String {
+    ResearchLineage::from_json(compact(lineage).as_bytes(), DiscoveryLimits::default())
+        .unwrap()
+        .canonical_digest()
+        .unwrap()
+        .0
+}
+
+fn refs_with_research_branches() -> Value {
+    json!({
+        "format":"graphforge-discovery/1","version":{"major":1,"minor":0},
+        "repository":{"owner":"openalex","repository":"openalex-fork"},
+        "default_ref":"main",
+        "refs":[
+            {"name":"feature/claims","target":digest('a'),"validator":digest('b')},
+            {"name":"main","target":digest('a'),"validator":digest('d')}
+        ]
+    })
+}
+
+fn manifest_with_research_lineage() -> Value {
+    let lineage = base_lineage();
+    let mut v = base_manifest();
+    v["repository"] = json!({"owner":"openalex","repository":"openalex-fork"});
+    v["objects"] = json!([
+        {"digest":digest('0'),"length":42,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/0"]},
+        {"digest":digest('5'),"length":2048,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/5"]},
+        {"digest":digest('8'),"length":2048,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/8"]},
+        {"digest":digest('b'),"length":2048,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/b"]},
+        {"digest":digest('e'),"length":1024,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/e"]},
+        {"digest":digest('f'),"length":1800,"media_type":"application/vnd.graphforge.research-lineage+json","locations":["https://data.graphforge.sh/objects/f"]}
+    ]);
+    v["package"]["object_digest"] = json!(digest('0'));
+    v["lineage"] = json!({"format":"graphforge-research-lineage/1","lineage_digest":lineage_digest(&lineage),"object_digest":digest('f')});
+    v
+}
+
+/// Manifest advertising `summary` and an ontology inventory that matches it.
+fn manifest_with_summary_and_ontology_for(summary: &Value) -> Value {
+    let mut v = base_manifest();
+    v["summary"] = json!({"format":"graphforge-project-summary/1","summary_digest":summary_digest(summary),"object_digest":digest('d')});
+    v["ontology"] = json!({
+        "composition_digest":digest('e'),
+        "modules":[{"id":MODULE_ID,"version":"2026.01","content_digest":digest('f'),
+            "package":{"format":"graphforge-project/2","package_digest":digest('1'),"object_digest":digest('2')}}],
+        "bridge_sets":[{"id":BRIDGE_ID,"version":"1","content_digest":digest('9')}]
+    });
+    v["objects"] = json!([
+        {"digest":digest('2'),"length":2048,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/2"]},
+        {"digest":digest('c'),"length":42,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/c"]},
+        {"digest":digest('d'),"length":900,"media_type":"application/vnd.graphforge.project-summary+json","locations":["https://data.graphforge.sh/objects/d"]}
+    ]);
+    v
+}
+
+fn manifest_with_summary_and_ontology() -> Value {
+    manifest_with_summary_and_ontology_for(&base_summary())
+}
+
 fn compact(value: &Value) -> String {
     serde_json::to_string(value).unwrap()
 }
@@ -183,6 +487,20 @@ fn valid(name: &str, document: Document, value: Value) -> Case {
         .unwrap(),
         Document::Refs => String::from_utf8(
             RefSet::from_json(compact(&value).as_bytes(), DiscoveryLimits::default())
+                .unwrap()
+                .to_canonical_json()
+                .unwrap(),
+        )
+        .unwrap(),
+        Document::Summary => String::from_utf8(
+            ProjectSummary::from_json(compact(&value).as_bytes(), DiscoveryLimits::default())
+                .unwrap()
+                .to_canonical_json()
+                .unwrap(),
+        )
+        .unwrap(),
+        Document::Lineage => String::from_utf8(
+            ResearchLineage::from_json(compact(&value).as_bytes(), DiscoveryLimits::default())
                 .unwrap()
                 .to_canonical_json()
                 .unwrap(),
@@ -214,6 +532,7 @@ fn invalid(name: &str, document: Document, value: Value, code: &str, field: Opti
 
 fn invalid_version(
     name: &str,
+    document: Document,
     value: Value,
     field: &str,
     subject: &str,
@@ -222,7 +541,7 @@ fn invalid_version(
 ) -> Case {
     Case {
         name: name.into(),
-        document: Document::Manifest,
+        document,
         json: compact(&value),
         limits: None,
         expected: Expected::Invalid {
@@ -250,6 +569,7 @@ fn corpus() -> Corpus {
     ];
     cases.push(invalid_version(
         "future-protocol",
+        Document::Manifest,
         {
             let mut v = base_manifest();
             v["version"]["major"] = json!(2);
@@ -262,6 +582,7 @@ fn corpus() -> Corpus {
     ));
     cases.push(invalid_version(
         "future-package",
+        Document::Manifest,
         {
             let mut v = base_manifest();
             v["package"]["format"] = json!("graphforge-project/3");
@@ -274,6 +595,7 @@ fn corpus() -> Corpus {
     ));
     cases.push(invalid_version(
         "unknown-required-capability",
+        Document::Manifest,
         {
             let mut v = base_manifest();
             v["requirements"][0]["capability"] = json!("future-fetch");
@@ -425,6 +747,8 @@ fn corpus() -> Corpus {
         let mut value = match doc {
             Document::Manifest => base_manifest(),
             Document::Refs => base_refs(),
+            Document::Summary => base_summary(),
+            Document::Lineage => base_lineage(),
         };
         mutate(&mut value);
         cases.push(invalid(name, *doc, value, code, *field));
@@ -493,10 +817,490 @@ fn corpus() -> Corpus {
             version: None,
         },
     });
+    cases.extend(summary_cases());
+    cases.extend(lineage_cases());
     Corpus {
         format: "graphforge-discovery-conformance/1".into(),
         cases,
     }
+}
+
+fn lineage_cases() -> Vec<Case> {
+    let mut cases = vec![
+        valid(
+            "manifest-with-research-lineage",
+            Document::Manifest,
+            manifest_with_research_lineage(),
+        ),
+        valid(
+            "lineage-fork-two-branches-proposal",
+            Document::Lineage,
+            base_lineage(),
+        ),
+        valid(
+            "refs-with-research-branches",
+            Document::Refs,
+            refs_with_research_branches(),
+        ),
+        invalid(
+            "lineage-projection-without-source",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["versions"][3]["source_version_uuid"] = Value::Null;
+                v
+            },
+            "malformed_response",
+            Some("versions.source_version_uuid"),
+        ),
+        invalid(
+            "lineage-projection-cites-itself",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["versions"][3]["source_version_uuid"] = json!(LINEAGE_VERSION_PROJECTION);
+                v
+            },
+            "malformed_response",
+            Some("versions.source_version_uuid"),
+        ),
+        invalid(
+            "lineage-proposal-source-disagrees-with-projection",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["proposals"][0]["source_version_uuid"] = json!(LINEAGE_VERSION_MAIN);
+                v
+            },
+            "malformed_response",
+            Some("proposals.source_version_uuid"),
+        ),
+        invalid(
+            "lineage-proposal-source-branch-unlisted",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["proposals"][0]["source_branch_uuid"] =
+                    json!("01900000-0000-7000-8000-000000000012");
+                v
+            },
+            "malformed_response",
+            Some("proposals.source_branch_uuid"),
+        ),
+        invalid(
+            "lineage-proposal-payload-is-complete",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["proposals"][0]["payload_version_uuid"] = json!(LINEAGE_VERSION_FEATURE);
+                v
+            },
+            "malformed_response",
+            Some("proposals.payload_version_uuid"),
+        ),
+        invalid(
+            "lineage-proposal-package-disagrees-with-payload",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["proposals"][0]["package"]["package_digest"] = json!(digest('7'));
+                v
+            },
+            "malformed_response",
+            Some("proposals.package"),
+        ),
+    ];
+    cases.push(invalid_version(
+        "lineage-unknown-required-capability",
+        Document::Lineage,
+        {
+            let mut v = base_lineage();
+            v["requirements"] = json!([{"capability":"future-lineage","major":2}]);
+            v
+        },
+        "requirements",
+        "capability",
+        None,
+        2,
+    ));
+    cases
+}
+
+/// Cases for the Project summary document and the optional manifest fields.
+/// Appended after the clone-oriented cases, which stay unchanged.
+fn summary_cases() -> Vec<Case> {
+    let mut cases = vec![
+        valid(
+            "manifest-with-summary-and-ontology",
+            Document::Manifest,
+            manifest_with_summary_and_ontology(),
+        ),
+        valid("summary-canonical", Document::Summary, base_summary()),
+        // The unchanged clone manifest: `summary` and `ontology` are optional.
+        valid(
+            "manifest-without-summary-still-valid",
+            Document::Manifest,
+            base_manifest(),
+        ),
+        valid("summary-unknown-optional-capability", Document::Summary, {
+            let mut v = base_summary();
+            v["capabilities"] = json!([{"capability":"future-facts","major":3}]);
+            v
+        }),
+        valid(
+            "manifest-ontology-module-without-package",
+            Document::Manifest,
+            {
+                let mut v = manifest_with_summary_and_ontology();
+                v["ontology"]["modules"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("package");
+                v["objects"].as_array_mut().unwrap().remove(0);
+                v
+            },
+        ),
+    ];
+    cases.push(invalid_version(
+        "summary-unknown-required-capability",
+        Document::Summary,
+        {
+            let mut v = base_summary();
+            v["requirements"] = json!([{"capability":"future-summary","major":1}]);
+            v
+        },
+        "requirements",
+        "capability",
+        None,
+        1,
+    ));
+    cases.push(invalid_version(
+        "summary-future-required-capability-major",
+        Document::Summary,
+        {
+            let mut v = base_summary();
+            v["requirements"] = json!([{"capability":"project-summary","major":2}]);
+            v
+        },
+        "requirements",
+        "capability",
+        Some(1),
+        2,
+    ));
+    cases.push(invalid_version(
+        "summary-future-format",
+        Document::Summary,
+        {
+            let mut v = base_summary();
+            v["format"] = json!("graphforge-project-summary/2");
+            v
+        },
+        "format",
+        "project_summary",
+        Some(1),
+        2,
+    ));
+    cases.push(invalid_version(
+        "summary-future-package",
+        Document::Summary,
+        {
+            let mut v = base_summary();
+            v["package"]["format"] = json!("graphforge-project/3");
+            v
+        },
+        "package.format",
+        "portable_package",
+        Some(2),
+        3,
+    ));
+    cases.push(invalid_version(
+        "manifest-future-summary-format",
+        Document::Manifest,
+        {
+            let mut v = manifest_with_summary_and_ontology();
+            v["summary"]["format"] = json!("graphforge-project-summary/2");
+            v
+        },
+        "summary.format",
+        "project_summary",
+        Some(1),
+        2,
+    ));
+    cases.push(invalid_version(
+        "manifest-module-package-future-format",
+        Document::Manifest,
+        {
+            let mut v = manifest_with_summary_and_ontology();
+            v["ontology"]["modules"][0]["package"]["format"] = json!("graphforge-project/3");
+            v
+        },
+        "ontology.modules.package.format",
+        "portable_package",
+        Some(2),
+        3,
+    ));
+    let mutations: &[(&str, Document, &str, Option<&str>, fn(&mut Value))] = &[
+        (
+            "manifest-missing-summary-object",
+            Document::Manifest,
+            "missing_object",
+            Some("summary.object_digest"),
+            |v| v["summary"]["object_digest"] = json!(digest('7')),
+        ),
+        (
+            "manifest-summary-object-media-type",
+            Document::Manifest,
+            "malformed_response",
+            Some("summary.object_digest"),
+            |v| v["objects"][2]["media_type"] = json!("application/octet-stream"),
+        ),
+        (
+            "manifest-summary-is-project-package",
+            Document::Manifest,
+            "malformed_response",
+            Some("summary.object_digest"),
+            |v| v["summary"]["object_digest"] = json!(digest('c')),
+        ),
+        (
+            "manifest-summary-unknown-field",
+            Document::Manifest,
+            "malformed_response",
+            None,
+            |v| v["summary"]["url"] = json!("https://data.graphforge.sh/summary"),
+        ),
+        (
+            "manifest-module-package-missing-object",
+            Document::Manifest,
+            "missing_object",
+            Some("ontology.modules.package.object_digest"),
+            |v| v["ontology"]["modules"][0]["package"]["object_digest"] = json!(digest('7')),
+        ),
+        (
+            "manifest-module-package-is-project-package",
+            Document::Manifest,
+            "malformed_response",
+            Some("ontology.modules.package.object_digest"),
+            |v| v["ontology"]["modules"][0]["package"]["object_digest"] = json!(digest('c')),
+        ),
+        (
+            "manifest-module-package-media-type",
+            Document::Manifest,
+            "malformed_response",
+            Some("ontology.modules.package.object_digest"),
+            |v| v["objects"][0]["media_type"] = json!("application/octet-stream"),
+        ),
+        (
+            "manifest-noncanonical-ontology-modules",
+            Document::Manifest,
+            "duplicate",
+            Some("ontology.modules"),
+            |v| {
+                let module = v["ontology"]["modules"][0].clone();
+                v["ontology"]["modules"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(module);
+            },
+        ),
+        (
+            "manifest-noncanonical-ontology-bridge-sets",
+            Document::Manifest,
+            "duplicate",
+            Some("ontology.bridge_sets"),
+            |v| {
+                let bridge = v["ontology"]["bridge_sets"][0].clone();
+                v["ontology"]["bridge_sets"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(bridge);
+            },
+        ),
+        (
+            "manifest-ontology-invalid-digest",
+            Document::Manifest,
+            "integrity_failure",
+            Some("digest"),
+            |v| v["ontology"]["composition_digest"] = json!("sha256:ABC"),
+        ),
+        (
+            "summary-unknown-field",
+            Document::Summary,
+            "malformed_response",
+            None,
+            |v| v["surprise"] = json!(true),
+        ),
+        (
+            "summary-rejects-collaborators",
+            Document::Summary,
+            "malformed_response",
+            None,
+            |v| v["metadata"]["access"]["collaborators"] = json!(["private-person"]),
+        ),
+        (
+            "summary-rejects-metadata-extensions",
+            Document::Summary,
+            "malformed_response",
+            None,
+            |v| v["metadata"]["extensions"] = json!({"internal": "value"}),
+        ),
+        (
+            "summary-inconsistent-research-presence",
+            Document::Summary,
+            "malformed_response",
+            Some("facts"),
+            |v| v["facts"]["research_present"] = json!(false),
+        ),
+        (
+            "summary-unknown-component-kind",
+            Document::Summary,
+            "malformed_response",
+            Some("facts.components"),
+            |v| v["facts"]["components"]["mystery"] = json!(1),
+        ),
+        (
+            "summary-zero-component-count",
+            Document::Summary,
+            "malformed_response",
+            Some("facts.components"),
+            |v| v["facts"]["components"]["schema"] = json!(0),
+        ),
+        (
+            "summary-unknown-ontology-mode",
+            Document::Summary,
+            "malformed_response",
+            Some("facts.ontology_mode"),
+            |v| v["facts"]["ontology_mode"] = json!("lenient"),
+        ),
+        (
+            "summary-unknown-package-class",
+            Document::Summary,
+            "malformed_response",
+            Some("package.package_class"),
+            |v| v["package"]["package_class"] = json!("everything"),
+        ),
+        (
+            "summary-noncanonical-modules",
+            Document::Summary,
+            "duplicate",
+            Some("facts.ontology_composition.modules"),
+            |v| {
+                let module = v["facts"]["ontology_composition"]["modules"][0].clone();
+                v["facts"]["ontology_composition"]["modules"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(module);
+            },
+        ),
+        (
+            "summary-metadata-unsorted-list",
+            Document::Summary,
+            "duplicate",
+            Some("metadata.authors"),
+            |v| v["metadata"]["authors"] = json!(["b", "a"]),
+        ),
+        (
+            "summary-metadata-control-character",
+            Document::Summary,
+            "malformed_response",
+            Some("metadata.title"),
+            |v| v["metadata"]["title"] = json!("bad\u{7}title"),
+        ),
+        (
+            "summary-metadata-empty-string",
+            Document::Summary,
+            "limit_exceeded",
+            Some("metadata.license"),
+            |v| v["metadata"]["license"] = json!(""),
+        ),
+        (
+            "summary-noncanonical-requirements",
+            Document::Summary,
+            "duplicate",
+            Some("requirements"),
+            |v| {
+                v["requirements"] = json!([
+                    {"capability":"project-summary","major":1},
+                    {"capability":"project-summary","major":1}
+                ])
+            },
+        ),
+    ];
+    for (name, doc, code, field, mutate) in mutations {
+        let mut value = match doc {
+            Document::Manifest => manifest_with_summary_and_ontology(),
+            Document::Refs => base_refs(),
+            Document::Summary => base_summary(),
+            Document::Lineage => base_lineage(),
+        };
+        mutate(&mut value);
+        cases.push(invalid(name, *doc, value, code, *field));
+    }
+    let bounded = |name: &str, document: Document, value: Value, field: &str, limits: Limits| {
+        let mut case = invalid(name, document, value, "limit_exceeded", Some(field));
+        case.limits = Some(limits);
+        case
+    };
+    cases.push(bounded(
+        "summary-byte-bound",
+        Document::Summary,
+        base_summary(),
+        "response",
+        Limits {
+            max_response_bytes: Some(1),
+            ..Limits::default()
+        },
+    ));
+    cases.push(bounded(
+        "summary-document-length-bound",
+        Document::Summary,
+        base_summary(),
+        "summary",
+        Limits {
+            max_summary_bytes: Some(1),
+            ..Limits::default()
+        },
+    ));
+    cases.push(bounded(
+        "manifest-summary-length-bound",
+        Document::Manifest,
+        manifest_with_summary_and_ontology(),
+        "summary.object_digest",
+        Limits {
+            max_summary_bytes: Some(899),
+            ..Limits::default()
+        },
+    ));
+    cases.push(bounded(
+        "manifest-module-package-length-bound",
+        Document::Manifest,
+        manifest_with_summary_and_ontology(),
+        "ontology.modules.package.object_digest",
+        Limits {
+            max_module_package_bytes: Some(2047),
+            ..Limits::default()
+        },
+    ));
+    cases.push(bounded(
+        "manifest-ontology-module-count-bound",
+        Document::Manifest,
+        manifest_with_summary_and_ontology(),
+        "ontology.modules",
+        Limits {
+            max_ontology_entries: Some(0),
+            ..Limits::default()
+        },
+    ));
+    cases.push(bounded(
+        "summary-ontology-module-count-bound",
+        Document::Summary,
+        base_summary(),
+        "facts.ontology_composition.modules",
+        Limits {
+            max_ontology_entries: Some(0),
+            ..Limits::default()
+        },
+    ));
+    cases
 }
 
 fn limits(overrides: Option<Limits>) -> DiscoveryLimits {
@@ -516,6 +1320,21 @@ fn limits(overrides: Option<Limits>) -> DiscoveryLimits {
         }
         if let Some(x) = v.max_cumulative_object_bytes {
             limits.max_cumulative_object_bytes = x
+        }
+        if let Some(x) = v.max_summary_bytes {
+            limits.max_summary_bytes = x
+        }
+        if let Some(x) = v.max_module_package_bytes {
+            limits.max_module_package_bytes = x
+        }
+        if let Some(x) = v.max_ontology_entries {
+            limits.max_ontology_entries = x
+        }
+        if let Some(x) = v.max_lineage_bytes {
+            limits.max_lineage_bytes = x
+        }
+        if let Some(x) = v.max_lineage_entries {
+            limits.max_lineage_entries = x
         }
     }
     limits
@@ -537,6 +1356,8 @@ fn checked_in_contract_artifacts_match_rust_authority() {
     let expected = [
         ("manifest.schema.json", pretty(&manifest_schema())),
         ("refs.schema.json", pretty(&refs_schema())),
+        ("summary.schema.json", pretty(&summary_schema())),
+        ("lineage.schema.json", pretty(&lineage_schema())),
         ("conformance.json", pretty(&corpus())),
     ];
     if std::env::var_os("GRAPHFORGE_UPDATE_DISCOVERY_ARTIFACTS").is_some() {
@@ -547,10 +1368,13 @@ fn checked_in_contract_artifacts_match_rust_authority() {
         }
         return;
     }
-    for ((name, expected), actual) in expected
-        .iter()
-        .zip([MANIFEST_SCHEMA, REFS_SCHEMA, FIXTURES])
-    {
+    for ((name, expected), actual) in expected.iter().zip([
+        MANIFEST_SCHEMA,
+        REFS_SCHEMA,
+        SUMMARY_SCHEMA,
+        LINEAGE_SCHEMA,
+        FIXTURES,
+    ]) {
         assert_eq!(
             actual.as_bytes(),
             expected,
@@ -566,6 +1390,14 @@ fn checked_in_contract_artifacts_match_rust_authority() {
             }
             Document::Refs => RefSet::from_json(case.json.as_bytes(), limits(case.limits))
                 .map(|v| String::from_utf8(v.to_canonical_json().unwrap()).unwrap()),
+            Document::Summary => {
+                ProjectSummary::from_json(case.json.as_bytes(), limits(case.limits))
+                    .map(|v| String::from_utf8(v.to_canonical_json().unwrap()).unwrap())
+            }
+            Document::Lineage => {
+                ResearchLineage::from_json(case.json.as_bytes(), limits(case.limits))
+                    .map(|v| String::from_utf8(v.to_canonical_json().unwrap()).unwrap())
+            }
         };
         match (case.expected, result) {
             (Expected::Valid { canonical_json }, Ok(actual)) => {
@@ -596,4 +1428,341 @@ fn checked_in_contract_artifacts_match_rust_authority() {
             (_, result) => panic!("{}: unexpected {result:?}", case.name),
         }
     }
+}
+
+fn parse_summary(value: &Value) -> ProjectSummary {
+    ProjectSummary::from_json(compact(value).as_bytes(), DiscoveryLimits::default()).unwrap()
+}
+
+fn parse_manifest(value: &Value) -> DiscoveryManifest {
+    DiscoveryManifest::from_json(compact(value).as_bytes(), DiscoveryLimits::default()).unwrap()
+}
+
+fn parse_lineage(value: &Value) -> ResearchLineage {
+    ResearchLineage::from_json(compact(value).as_bytes(), DiscoveryLimits::default()).unwrap()
+}
+
+fn parse_refs(value: &Value) -> RefSet {
+    RefSet::from_json(compact(value).as_bytes(), DiscoveryLimits::default()).unwrap()
+}
+
+fn bind_lineage_error(
+    manifest: &Value,
+    refs: &Value,
+    lineage: &ResearchLineage,
+) -> (DiscoveryErrorCode, Option<&'static str>) {
+    let error = parse_manifest(manifest)
+        .bind_lineage(&parse_refs(refs), lineage)
+        .unwrap_err();
+    (error.code, error.field)
+}
+
+fn bind_error(
+    manifest: &Value,
+    summary: &ProjectSummary,
+) -> (DiscoveryErrorCode, Option<&'static str>) {
+    let error = parse_manifest(manifest).bind_summary(summary).unwrap_err();
+    (error.code, error.field)
+}
+
+#[test]
+fn bind_summary_accepts_the_advertised_summary() {
+    let summary = parse_summary(&base_summary());
+    parse_manifest(&manifest_with_summary_and_ontology())
+        .bind_summary(&summary)
+        .unwrap();
+    // A Project without ontology composition binds with no `ontology` field.
+    let mut plain = base_summary();
+    plain["facts"]["ontology_composition"] = Value::Null;
+    let mut manifest = manifest_with_summary_and_ontology_for(&plain);
+    manifest.as_object_mut().unwrap().remove("ontology");
+    manifest["objects"].as_array_mut().unwrap().remove(0);
+    parse_manifest(&manifest)
+        .bind_summary(&parse_summary(&plain))
+        .unwrap();
+}
+
+#[test]
+fn bind_summary_requires_an_advertised_summary() {
+    let summary = parse_summary(&base_summary());
+    let error = parse_manifest(&base_manifest())
+        .bind_summary(&summary)
+        .unwrap_err();
+    assert_eq!(error.code, DiscoveryErrorCode::MissingObject);
+    assert_eq!(error.field, Some("summary"));
+    assert!(parse_manifest(&base_manifest()).summary_object().is_err());
+}
+
+#[test]
+fn bind_summary_rejects_each_identity_mismatch() {
+    let manifest = manifest_with_summary_and_ontology();
+    let integrity = DiscoveryErrorCode::IntegrityFailure;
+
+    let mut other = base_summary();
+    other["repository"]["repository"] = json!("elsewhere");
+    let manifest_for_other = manifest_with_summary_and_ontology_for(&other);
+    assert_eq!(
+        bind_error(&manifest_for_other, &parse_summary(&other)),
+        (integrity, Some("summary.repository"))
+    );
+
+    let mut other = base_summary();
+    other["immutable_version"] = json!(digest('7'));
+    assert_eq!(
+        bind_error(
+            &manifest_with_summary_and_ontology_for(&other),
+            &parse_summary(&other)
+        ),
+        (integrity, Some("summary.immutable_version"))
+    );
+
+    let mut other = base_summary();
+    other["package"]["package_digest"] = json!(digest('7'));
+    assert_eq!(
+        bind_error(
+            &manifest_with_summary_and_ontology_for(&other),
+            &parse_summary(&other)
+        ),
+        (integrity, Some("summary.package.package_digest"))
+    );
+
+    // Same identity fields, different bytes: the manifest's summary_digest no
+    // longer matches.
+    let mut other = base_summary();
+    other["metadata"]["title"] = json!("Different title");
+    assert_eq!(
+        bind_error(&manifest, &parse_summary(&other)),
+        (integrity, Some("summary.summary_digest"))
+    );
+}
+
+#[test]
+fn bind_summary_rejects_ontology_inventory_disagreement() {
+    let integrity = DiscoveryErrorCode::IntegrityFailure;
+    let mutations: &[fn(&mut Value)] = &[
+        |v| v["facts"]["ontology_composition"]["composition_digest"] = json!(digest('7')),
+        |v| v["facts"]["ontology_composition"]["modules"][0]["content_digest"] = json!(digest('7')),
+        |v| v["facts"]["ontology_composition"]["modules"][0]["version"] = json!("2026.02"),
+        |v| v["facts"]["ontology_composition"]["bridge_sets"] = json!([]),
+        |v| v["facts"]["ontology_composition"] = Value::Null,
+    ];
+    for mutate in mutations {
+        let mut other = base_summary();
+        mutate(&mut other);
+        // The manifest references the mutated summary, so only the inventory
+        // comparison can fail.
+        assert_eq!(
+            bind_error(
+                &manifest_with_summary_and_ontology_for(&other),
+                &parse_summary(&other)
+            ),
+            (integrity, Some("summary"))
+        );
+    }
+    // A manifest that omits its inventory disagrees with a summary that has one.
+    let mut manifest = manifest_with_summary_and_ontology();
+    manifest.as_object_mut().unwrap().remove("ontology");
+    manifest["objects"].as_array_mut().unwrap().remove(0);
+    assert_eq!(
+        bind_error(&manifest, &parse_summary(&base_summary())),
+        (integrity, Some("summary"))
+    );
+}
+
+#[test]
+fn summary_and_ontology_descriptors_do_not_depend_on_object_locations() {
+    let summary = parse_summary(&base_summary());
+    let first = manifest_with_summary_and_ontology();
+    let mut second = manifest_with_summary_and_ontology();
+    for object in second["objects"].as_array_mut().unwrap() {
+        let digest = object["digest"].as_str().unwrap().replace("sha256:", "");
+        object["locations"] = json!([
+            format!("https://cdn.example.org/mirror/{digest}"),
+            format!("https://data.graphforge.sh/other/{digest}"),
+        ]);
+    }
+    let (first, second) = (parse_manifest(&first), parse_manifest(&second));
+    first.bind_summary(&summary).unwrap();
+    second.bind_summary(&summary).unwrap();
+
+    // Only transport changed: the manifest identity differs, nothing else does.
+    assert_ne!(
+        first.canonical_digest().unwrap(),
+        second.canonical_digest().unwrap()
+    );
+    assert_eq!(first.summary, second.summary);
+    assert_eq!(first.ontology, second.ontology);
+    assert_eq!(
+        first.summary.as_ref().unwrap().summary_digest,
+        summary.canonical_digest().unwrap()
+    );
+    let text = String::from_utf8(summary.to_canonical_json().unwrap()).unwrap();
+    for object in first.objects.iter().chain(&second.objects) {
+        for location in &object.locations {
+            assert!(
+                !text.contains(location.as_str()),
+                "a summary carries no object location"
+            );
+        }
+    }
+}
+
+#[test]
+fn exact_module_objects_are_selected_by_identity_and_never_by_position() {
+    let manifest = parse_manifest(&manifest_with_summary_and_ontology());
+    let identity = ExactIdentity {
+        id: MODULE_ID.into(),
+        version: "2026.01".into(),
+        content_digest: graphforge_discovery::Sha256Digest(digest('f')),
+    };
+    let (descriptor, object) = manifest.ontology_module_object(&identity).unwrap();
+    assert_eq!(descriptor.identity(), identity);
+    assert_eq!(object.digest.0, digest('2'));
+    assert_ne!(object.digest, manifest.package.object_digest);
+    assert_eq!(manifest.summary_object().unwrap().digest.0, digest('d'));
+
+    let mut unknown = identity.clone();
+    unknown.content_digest = graphforge_discovery::Sha256Digest(digest('7'));
+    let error = manifest.ontology_module_object(&unknown).unwrap_err();
+    assert_eq!(error.code, DiscoveryErrorCode::MissingObject);
+    assert_eq!(error.field, Some("ontology.modules"));
+
+    let mut without_package = manifest_with_summary_and_ontology();
+    without_package["ontology"]["modules"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("package");
+    without_package["objects"].as_array_mut().unwrap().remove(0);
+    let error = parse_manifest(&without_package)
+        .ontology_module_object(&identity)
+        .unwrap_err();
+    assert_eq!(error.code, DiscoveryErrorCode::MissingObject);
+    assert_eq!(error.field, Some("ontology.modules"));
+}
+
+#[test]
+fn summary_string_bounds_follow_project_metadata_bounds() {
+    let mut value = base_summary();
+    value["metadata"]["title"] = json!("a".repeat(4097));
+    let error = ProjectSummary::from_json(compact(&value).as_bytes(), DiscoveryLimits::default())
+        .unwrap_err();
+    assert_eq!(error.code, DiscoveryErrorCode::LimitExceeded);
+    assert_eq!(error.field, Some("metadata.title"));
+    value["metadata"]["title"] = json!("a".repeat(4096));
+    parse_summary(&value);
+
+    let mut value = base_summary();
+    value["metadata"]["tags"] = json!((0..257).map(|i| format!("tag-{i:04}")).collect::<Vec<_>>());
+    let error = ProjectSummary::from_json(compact(&value).as_bytes(), DiscoveryLimits::default())
+        .unwrap_err();
+    assert_eq!(error.code, DiscoveryErrorCode::LimitExceeded);
+    assert_eq!(error.field, Some("metadata.tags"));
+}
+
+#[test]
+fn bind_lineage_accepts_the_advertised_lineage() {
+    let manifest = manifest_with_research_lineage();
+    let refs = refs_with_research_branches();
+    let lineage = parse_lineage(&base_lineage());
+    parse_manifest(&manifest)
+        .bind_lineage(&parse_refs(&refs), &lineage)
+        .unwrap();
+}
+
+#[test]
+fn bind_lineage_requires_an_advertised_lineage() {
+    let lineage = parse_lineage(&base_lineage());
+    let refs = refs_with_research_branches();
+    let error = parse_manifest(&base_manifest())
+        .bind_lineage(&parse_refs(&refs), &lineage)
+        .unwrap_err();
+    assert_eq!(error.code, DiscoveryErrorCode::MissingObject);
+    assert_eq!(error.field, Some("lineage"));
+    assert!(parse_manifest(&base_manifest()).lineage_object().is_err());
+}
+
+#[test]
+fn bind_lineage_rejects_identity_and_ref_mismatches() {
+    let manifest = manifest_with_research_lineage();
+    let refs = refs_with_research_branches();
+    let integrity = DiscoveryErrorCode::IntegrityFailure;
+
+    let mut other = base_lineage();
+    other["repository"]["repository"] = json!("elsewhere");
+    assert_eq!(
+        bind_lineage_error(&manifest, &refs, &parse_lineage(&other)),
+        (integrity, Some("lineage.repository"))
+    );
+
+    let mut other = base_lineage();
+    other["immutable_version"] = json!(digest('7'));
+    assert_eq!(
+        bind_lineage_error(&manifest, &refs, &parse_lineage(&other)),
+        (integrity, Some("lineage.immutable_version"))
+    );
+
+    let mut other = base_lineage();
+    other["branches"][0]["label"] = json!("renamed");
+    assert_eq!(
+        bind_lineage_error(&manifest, &refs, &parse_lineage(&other)),
+        (integrity, Some("lineage.lineage_digest"))
+    );
+
+    // A Branch ref pointing at another repository snapshot names a head this
+    // lineage does not describe; it must not resolve to this snapshot's head.
+    let mut moved = refs_with_research_branches();
+    moved["refs"][0]["target"] = json!(digest('9'));
+    assert_eq!(moved["refs"][0]["name"], "feature/claims");
+    assert_eq!(
+        bind_lineage_error(&manifest, &moved, &parse_lineage(&base_lineage())),
+        (integrity, Some("lineage.branches.ref_name"))
+    );
+
+    let mut refs = refs_with_research_branches();
+    refs["refs"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|item| item["name"] != "feature/claims");
+    assert_eq!(
+        bind_lineage_error(&manifest, &refs, &parse_lineage(&base_lineage())),
+        (
+            DiscoveryErrorCode::MissingRef,
+            Some("lineage.branches.ref_name")
+        )
+    );
+}
+
+#[test]
+fn research_version_object_selects_per_version_packages() {
+    let manifest = parse_manifest(&manifest_with_research_lineage());
+    let lineage = parse_lineage(&base_lineage());
+    let (version, object) = manifest
+        .research_version_object(&lineage, LINEAGE_VERSION_FEATURE)
+        .unwrap();
+    assert_eq!(version.kind, "complete");
+    assert_eq!(object.digest.0, digest('b'));
+    assert_ne!(object.digest, manifest.package.object_digest);
+
+    let (projection, object) = manifest
+        .research_version_object(&lineage, LINEAGE_VERSION_PROJECTION)
+        .unwrap();
+    assert_eq!(projection.kind, "projection");
+    assert_eq!(
+        projection.source_version_uuid.as_deref(),
+        Some(LINEAGE_VERSION_FEATURE)
+    );
+    assert_eq!(object.digest.0, digest('e'));
+}
+
+#[test]
+fn unknown_required_summary_capability_fails_before_metadata_is_considered() {
+    // The metadata below is invalid, but the unsupported requirement is
+    // reported first, so a reader never interprets content it cannot honor.
+    let mut value = base_summary();
+    value["requirements"] = json!([{"capability":"future-summary","major":1}]);
+    value["metadata"]["authors"] = json!(["b", "a"]);
+    let error = ProjectSummary::from_json(compact(&value).as_bytes(), DiscoveryLimits::default())
+        .unwrap_err();
+    assert_eq!(error.code, DiscoveryErrorCode::UnsupportedFuture);
+    assert_eq!(error.field, Some("requirements"));
 }

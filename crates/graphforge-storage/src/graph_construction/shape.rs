@@ -22,7 +22,7 @@ use super::{
     GraphConstructionEvidence, GraphConstructionSession, GraphConstructionState, HashingWriter,
     IDENTITY_SURROGATE_OFFSET, IDENTITY_WIDTH, IoCounter, NODE_DETAIL_WIDTH, OsStr,
     RESOLVED_ENDPOINT_WIDTH, RESOLVED_SURROGATE_OFFSET, Read, ReadWork, SHAPE_INTENT,
-    SealDirectoryBatch, Sha256, ShapeIntent, StableDirectory, Uuid, UuidIndexKind, Write,
+    SealDirectoryBatch, ShapeIntent, StableDirectory, Uuid, UuidIndexKind, Write,
     account_cache_release, account_fixed_read_operations, account_fixed_write_operations,
     account_merge_read, account_merge_write, account_probe_work, account_sequential_read,
     account_sequential_write, artifact_temp, authenticate_artifact, build_runtime_catalog,
@@ -40,6 +40,33 @@ use super::{
     unlink_shape_artifact, validate_parquet_metadata,
 };
 use std::io::Seek;
+
+// Sorted sample positions visit each extent once. Reusing its descriptor
+// removes opens, while revalidating the named child at every read boundary.
+fn read_identity_sample(
+    root: &StableDirectory,
+    name: &str,
+    retained: &mut Option<(String, File)>,
+    offset: u64,
+) -> Result<[u8; IDENTITY_WIDTH], GfError> {
+    if let Some((current, file)) = retained.as_ref()
+        && current == name
+    {
+        root.revalidate_child_file(OsStr::new(name), file)
+            .map_err(storage)?;
+    } else {
+        *retained = Some((
+            name.to_owned(),
+            root.open_child_file(OsStr::new(name)).map_err(storage)?,
+        ));
+    }
+    let (_, file) = retained.as_mut().expect("sample extent opened above");
+    file.seek(std::io::SeekFrom::Start(offset))
+        .map_err(storage)?;
+    let mut key = [0_u8; IDENTITY_WIDTH];
+    file.read_exact(&mut key).map_err(storage)?;
+    Ok(key)
+}
 
 /// Pre-surrogate identity domain, produced by concatenating sorted partitions.
 pub(super) const STAGED_IDENTITIES: &str = "staged-identities.run";
@@ -160,6 +187,7 @@ impl GraphConstructionSession {
         )?;
         let positions = sampler.positions().collect::<Vec<_>>();
         let mut cursor = 0_usize;
+        let mut retained = None;
         for position in positions {
             while cursor < extents.len() && position >= extents[cursor].1 + extents[cursor].2 {
                 cursor += 1;
@@ -167,18 +195,10 @@ impl GraphConstructionSession {
             let (name, base, _) = extents
                 .get(cursor)
                 .ok_or_else(|| storage("identity sample position is out of range"))?;
-            let mut file = self
-                .root
-                .open_child_file(OsStr::new(name))
-                .map_err(storage)?;
-            file.seek(std::io::SeekFrom::Start(
-                (position - base)
-                    .checked_mul(IDENTITY_WIDTH as u64)
-                    .ok_or_else(|| storage("identity sample offset overflows"))?,
-            ))
-            .map_err(storage)?;
-            let mut key = [0_u8; IDENTITY_WIDTH];
-            file.read_exact(&mut key).map_err(storage)?;
+            let offset = (position - base)
+                .checked_mul(IDENTITY_WIDTH as u64)
+                .ok_or_else(|| storage("identity sample offset overflows"))?;
+            let key = read_identity_sample(&self.root, name, &mut retained, offset)?;
             account_sequential_read(IDENTITY_WIDTH as u64, &mut self.checkpoint.evidence)?;
             sampler.admit(key)?;
         }
@@ -447,7 +467,7 @@ impl GraphConstructionSession {
                 }
             }
         }
-        let mut catalog_authority = Sha256::new();
+        let mut catalog_authority = graphforge_core::hash_observation::ControlSha256::default();
         let mut shape_intent = ShapeIntent {
             format_version: self.checkpoint.format_version,
             operation_uuid: self.checkpoint.operation_uuid,
@@ -526,7 +546,7 @@ impl GraphConstructionSession {
             let kind = u8::from(receipt.kind == ConstructionChunkKind::Edge);
             catalog_authority.update([kind]);
             catalog_authority.update(receipt.schema_sha256.as_bytes());
-            catalog_authority.update(receipt.parquet.sha256.as_bytes());
+            catalog_authority.update(receipt.parquet.xxh64.as_bytes());
             let group = (kind, receipt.schema_sha256.clone());
             // Row groups are keyed by their own kind's UUID (#1439): a
             // node-kind schema group's rows are keyed by node UUID and must
@@ -1363,14 +1383,14 @@ pub(super) fn read_completed_shape_outputs(
     Ok(manifest.outputs)
 }
 
-pub(crate) fn shaped_output_sha256<'a>(
+pub(crate) fn shaped_output_xxh64<'a>(
     outputs: &'a [ArtifactReceipt],
     name: &str,
 ) -> Result<&'a str, GfError> {
     outputs
         .iter()
         .find(|output| output.name == name)
-        .map(|output| output.sha256.as_str())
+        .map(|output| output.xxh64.as_str())
         .ok_or_else(|| storage("shaped output receipt is absent"))
 }
 
@@ -1395,7 +1415,7 @@ pub(crate) fn open_authenticated_shape_source(
         file,
         identity,
         bytes: expected.bytes,
-        sha256: expected.sha256.clone(),
+        xxh64: expected.xxh64.clone(),
     })
 }
 
@@ -1470,7 +1490,7 @@ pub(super) fn authenticate_shaped_output_identity(
     }
     let actual = receipt_for_existing(root, &expected.name)?;
     if actual.bytes != expected.bytes
-        || actual.sha256 != expected.sha256
+        || actual.xxh64 != expected.xxh64
         || actual.identity != expected.identity
     {
         return Err(storage("shape manifest output authentication changed"));
@@ -1647,13 +1667,13 @@ pub(super) fn route_fixed_run<const N: usize>(
             counter: counter.clone(),
         },
     );
-    let mut digest = Sha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut bytes = 0_u64;
     let routed = (|| -> Result<(), GfError> {
         let mut run = PartitionRun::new();
         while let Some(record) = read_run_record::<N>(&mut reader, codec)? {
             let wire = run_record_bytes(&record, codec)?;
-            digest.update(wire);
+            checksum.update(wire);
             bytes = bytes
                 .checked_add(wire.len() as u64)
                 .ok_or_else(|| storage("partition source byte count overflows"))?;
@@ -1663,7 +1683,9 @@ pub(super) fn route_fixed_run<const N: usize>(
             reject_cancelled(cancelled)?;
         }
         run.flush(target, evidence)?;
-        if bytes != source.bytes || hex(&digest.clone().finalize()) != source.sha256 {
+        if bytes != source.bytes
+            || crate::corruption_checksum::hex(checksum.finish()) != source.xxh64
+        {
             return Err(storage("construction partition source content changed"));
         }
         account_fixed_read_operations(&counter, evidence)
@@ -1787,12 +1809,12 @@ fn route_identity_run(
         },
     );
     let kind = u8::from(receipt.kind == ConstructionChunkKind::Edge);
-    let mut digest = Sha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut bytes = 0_u64;
     let routed = (|| -> Result<(), GfError> {
         let mut run = PartitionRun::new();
         while let Some(uuid) = read_fixed::<IDENTITY_WIDTH>(&mut reader)? {
-            digest.update(uuid);
+            checksum.update(&uuid);
             bytes = bytes
                 .checked_add(IDENTITY_WIDTH as u64)
                 .ok_or_else(|| storage("identity source byte count overflows"))?;
@@ -1805,7 +1827,9 @@ fn route_identity_run(
             reject_cancelled(cancelled)?;
         }
         run.flush(target, evidence)?;
-        if bytes != source.bytes || hex(&digest.clone().finalize()) != source.sha256 {
+        if bytes != source.bytes
+            || crate::corruption_checksum::hex(checksum.finish()) != source.xxh64
+        {
             return Err(storage(
                 "identity source content changed before partitioning",
             ));
@@ -2099,10 +2123,7 @@ fn assign_surrogates(
     }
     account_fixed_read_operations(&reader_counter, evidence)?;
     writer.flush().map_err(storage)?;
-    writer
-        .get_mut()
-        .inner
-        .sync_all_and_release()
+    root.seal_cache_writer(&mut writer.get_mut().inner)
         .map_err(storage)?;
     let cache_release = writer.get_ref().inner.evidence();
     account_cache_release(cache_release, evidence)?;
@@ -2113,7 +2134,6 @@ fn assign_surrogates(
         allocated_bytes: graphforge_filesystem::file_space_usage(writer.get_ref().inner.file())
             .map_err(storage)?
             .allocated_bytes,
-        sha256: hex(&writer.get_ref().digest.clone().finalize()),
         xxh64: crate::corruption_checksum::hex(writer.get_ref().checksum.finish()),
         identity: identity.into(),
         write_operations: writer.get_ref().operations,
@@ -2125,7 +2145,7 @@ fn assign_surrogates(
     drop(writer);
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
         .map_err(storage)?;
-    root.sync().map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     persist_shape_receipt(root, &output_receipt)?;
     record_shape_artifact_install(evidence, &output_receipt)?;
     account_fixed_write_operations(&output_receipt, evidence)?;
@@ -2410,10 +2430,16 @@ fn retire_segments(
             .take(segments.len())
             .collect::<Vec<Option<Result<ArtifactReceipt, GfError>>>>(),
     );
+    #[cfg(any(test, feature = "test-support"))]
+    let digest_context = graphforge_core::hash_observation::operation::Context::capture();
+    let lifecycle_context = crate::lifecycle_io::CaptureContext::current();
     std::thread::scope(|scope| {
         for _ in 0..lanes {
             scope.spawn(|| {
                 use std::sync::atomic::Ordering;
+                #[cfg(any(test, feature = "test-support"))]
+                let _digest_guard = digest_context.attach();
+                let _lifecycle_capture = lifecycle_context.attach();
                 loop {
                     let index = super::lane_job(
                         next.fetch_add(1, Ordering::AcqRel),

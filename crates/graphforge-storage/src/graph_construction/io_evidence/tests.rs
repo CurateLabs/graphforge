@@ -48,7 +48,10 @@ fn fixed_run_receipts_count_cache_rollovers_and_preserve_reopened_bytes() {
         file.read_to_end(&mut actual).unwrap();
         assert_eq!(u64::try_from(actual.len()).unwrap(), bytes);
         assert!(actual.iter().all(|byte| *byte == 0x5a));
-        assert_eq!(hex(&Sha256::digest(&actual)), receipt.sha256);
+        assert_eq!(
+            crate::corruption_checksum::hex(crate::corruption_checksum::checksum(&actual)),
+            receipt.xxh64
+        );
         assert!(tree_has_no_temps(temporary.path()));
     }
 }
@@ -124,4 +127,26 @@ fn counting_reader_uses_authenticated_cas_length() {
     .unwrap();
     let reader = CountingChunkReader::new(file, IoCounter::default());
     assert_eq!(Length::len(&reader), payload.len() as u64);
+}
+
+#[test]
+fn required_receipt_io_counts_real_reads_without_optional_capture() {
+    use parquet::file::reader::ChunkReader;
+    assert!(crate::lifecycle_io::snapshot().is_none());
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(b"required receipt bytes").unwrap();
+    let counter = IoCounter::default();
+    let reader = CountingChunkReader::new(file.try_clone().unwrap(), counter.clone());
+    assert_eq!(reader.get_bytes(0, 8).unwrap().as_ref(), b"required");
+    assert_eq!(counter.values(), (8, 1));
+    let mut evidence = GraphConstructionEvidence::default();
+    counter.add_to(&mut evidence).unwrap();
+    assert_eq!(evidence.parquet_read_bytes, 8);
+    assert_eq!(evidence.parquet_read_operations, 1);
+    let disabled = IoCounter::disabled();
+    assert!(disabled.state.is_none());
+    let reader = CountingChunkReader::new(file, disabled.clone());
+    assert_eq!(reader.get_bytes(9, 7).unwrap().as_ref(), b"receipt");
+    assert_eq!(disabled.values(), (0, 0));
+    assert!(crate::lifecycle_io::snapshot().is_none());
 }

@@ -156,6 +156,7 @@ fn authenticated_reader_reports_actual_io_and_decodes_snapshot() {
     assert!(
         inventory
             .route_schema(PropertyRouteKind::Node, "Person")
+            .unwrap()
             .is_some()
     );
     let targets = BTreeSet::from([[4; 16]]);
@@ -383,6 +384,7 @@ fn authenticated_reader_reports_actual_io_and_decodes_snapshot() {
         evolved
             .route_schema(PropertyRouteKind::Node, "Person")
             .unwrap()
+            .unwrap()
             .field_with_name("name")
             .unwrap()
             .data_type(),
@@ -409,7 +411,9 @@ fn authenticated_reader_reports_actual_io_and_decodes_snapshot() {
     assert_eq!(evolved_metrics.physical_rows, 3);
     assert_eq!(evolved_metrics.tombstones, 1);
     assert_eq!(
-        evolved.route_row_upper_bound(PropertyRouteKind::Node, "Person"),
+        evolved
+            .route_row_upper_bound(PropertyRouteKind::Node, "Person")
+            .unwrap(),
         3
     );
     let (targeted, targeted_metrics) = read_authenticated_property_snapshots_for_inventory(
@@ -429,11 +433,14 @@ fn authenticated_reader_reports_actual_io_and_decodes_snapshot() {
     context
         .register_table(
             "evolved",
-            Arc::new(crate::catalog::PropertyTable::open_authenticated(
-                dir.path(),
-                "Person",
-                Arc::new(evolved),
-            )),
+            Arc::new(
+                crate::catalog::PropertyTable::open_authenticated(
+                    dir.path(),
+                    "Person",
+                    Arc::new(evolved),
+                )
+                .unwrap(),
+            ),
         )
         .unwrap();
     let projected = tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -698,11 +705,14 @@ async fn late_authenticated_decoder_failure_emits_nothing_direct_or_through_limi
     context
         .register_table(
             "props",
-            Arc::new(crate::catalog::PropertyTable::open_authenticated(
-                dir.path(),
-                "Person",
-                Arc::clone(&inventory),
-            )),
+            Arc::new(
+                crate::catalog::PropertyTable::open_authenticated(
+                    dir.path(),
+                    "Person",
+                    Arc::clone(&inventory),
+                )
+                .unwrap(),
+            ),
         )
         .unwrap();
     let error = context
@@ -916,10 +926,65 @@ fn projected_overlay_decodes_only_selected_values_and_mandatory_keys() {
     let inventory = Arc::new(inventory);
     let schema = inventory
         .route_schema(PropertyRouteKind::Edge, "KNOWS")
+        .unwrap()
         .unwrap();
     let keep = schema.index_of("keep").unwrap();
     let uuid = schema.index_of("edge_uuid").unwrap();
+    let targets = BTreeSet::from([[1_u8; 16], [2_u8; 16]]);
+    let before = crate::lifecycle_io::observer_work();
+    let data_only = read_authenticated_property_target_data_for_inventory(
+        &inventory,
+        PropertyRouteKind::Edge,
+        "KNOWS",
+        &targets,
+    )
+    .unwrap();
+    assert_eq!(data_only.rows.len(), 2);
+    assert_eq!(data_only.present, targets);
+    assert_eq!(crate::lifecycle_io::observer_work(), before);
+    let exact_work = read_authenticated_property_targets_for_inventory(
+        &inventory,
+        PropertyRouteKind::Edge,
+        "KNOWS",
+        &targets,
+    )
+    .unwrap();
+    assert_eq!(exact_work.rows, data_only.rows);
+    assert_eq!(exact_work.present, data_only.present);
+    assert!(exact_work.metrics.validation_bytes > 0);
+    assert!(exact_work.metrics.read_calls > 0);
+
     let runtime = tokio::runtime::Runtime::new().unwrap();
+    // Real DataFusion execution returns the same rows with no optional metric set.
+    let ordinary: Arc<dyn datafusion::physical_plan::ExecutionPlan> = Arc::new(
+        crate::property_scan::PropertyOverlayExec::try_new(
+            root.path().to_path_buf(),
+            Some(Arc::clone(&inventory)),
+            "KNOWS".into(),
+            true,
+            Arc::clone(&schema),
+            crate::property_scan::PropertyScanOptions {
+                projection: None,
+                limit: None,
+                batch_size: 17,
+                footer_statistics: true,
+            },
+        )
+        .unwrap(),
+    );
+    assert!(ordinary.metrics().is_none());
+    let output = runtime
+        .block_on(datafusion::physical_plan::collect(
+            ordinary,
+            Arc::new(datafusion::execution::TaskContext::default()),
+        ))
+        .unwrap();
+    assert_eq!(
+        output.iter().map(RecordBatch::num_rows).sum::<usize>(),
+        rows
+    );
+
+    let _capture = crate::lifecycle_io::CaptureScope::install();
     let mut full_spill = None;
     for projection in [None, Some(vec![keep, uuid, keep]), Some(vec![])] {
         let expected_schema = projection.as_ref().map_or_else(
@@ -937,6 +1002,7 @@ fn projected_overlay_decodes_only_selected_values_and_mandatory_keys() {
                     projection: projection.as_ref(),
                     limit: None,
                     batch_size: 17,
+                    footer_statistics: true,
                 },
             )
             .unwrap(),
@@ -1158,7 +1224,7 @@ fn hostile_authenticated_property_matrix_fails_closed_before_projection_or_limit
             .unwrap_err();
     assert_corrupt(&error, "Parquet is corrupt");
     let mut conflicting_digest = entry;
-    conflicting_digest.content_sha256 = "00".repeat(32);
+    conflicting_digest.content_xxh64 ^= 1;
     let error = AuthenticatedPropertyInventory::from_entries_at_root(
         hostile.path(),
         vec![conflicting_digest],

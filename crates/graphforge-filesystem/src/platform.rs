@@ -129,6 +129,23 @@ pub(super) fn stable_open_child_file(
 }
 
 #[cfg(unix)]
+pub(super) fn stable_open_publishing_child_file(
+    parent: &File,
+    _path: &Path,
+    name: &OsStr,
+) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags};
+    rustix::fs::openat(
+        parent,
+        name,
+        OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
 pub(super) fn stable_open_replaceable_child_file(
     parent: &File,
     path: &Path,
@@ -360,6 +377,25 @@ pub(super) fn stable_open_child_file(
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     options.open(path)
+}
+
+#[cfg(windows)]
+pub(super) fn stable_open_publishing_child_file(
+    _parent: &File,
+    path: &Path,
+    _name: &OsStr,
+) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
 }
 
 #[cfg(windows)]
@@ -595,6 +631,18 @@ pub(super) fn stable_open_child_file(
     stable_open_directory(Path::new(""))
 }
 
+#[cfg(all(not(unix), not(windows)))]
+pub(super) fn stable_open_publishing_child_file(
+    _parent: &File,
+    _path: &Path,
+    _name: &OsStr,
+) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "publication descriptors unsupported",
+    ))
+}
+
 #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "redox"))]
 pub(super) fn rename_no_replace_platform(source: &Path, destination: &Path) -> io::Result<()> {
     rustix::fs::renameat_with(
@@ -729,6 +777,70 @@ pub(super) fn replace_file_platform(
     {
         return Err(ReplaceFileError::StateUnknown(io::Error::other(
             "replacement success state did not reconcile",
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(super) fn replace_file_from_platform(
+    source_directory: &File,
+    target_directory: &File,
+    source_name: &OsStr,
+    target_name: &OsStr,
+    expected_source: Option<FileIdentity>,
+    expected_target: Option<FileIdentity>,
+) -> Result<(), ReplaceFileError> {
+    use rustix::fs::{AtFlags, Mode, OFlags, openat, renameat, statat};
+
+    let source = openat(
+        source_directory,
+        source_name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)
+    .map_err(ReplaceFileError::NotReplaced)?;
+    let target = openat(
+        target_directory,
+        target_name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)
+    .map_err(ReplaceFileError::NotReplaced)?;
+    verify_regular_metadata(&source.metadata().map_err(ReplaceFileError::NotReplaced)?)
+        .map_err(ReplaceFileError::NotReplaced)?;
+    let target_metadata = target.metadata().map_err(ReplaceFileError::NotReplaced)?;
+    verify_space_usage_metadata(&target_metadata).map_err(ReplaceFileError::NotReplaced)?;
+    let source_identity = unix_identity(&source).map_err(ReplaceFileError::NotReplaced)?;
+    let target_identity = unix_identity(&target).map_err(ReplaceFileError::NotReplaced)?;
+    if expected_source.is_some_and(|expected| expected != source_identity)
+        || expected_target.is_some_and(|expected| expected != target_identity)
+    {
+        return Err(ReplaceFileError::NotReplaced(io::Error::other(
+            "cross-directory replacement identity changed",
+        )));
+    }
+    renameat(source_directory, source_name, target_directory, target_name)
+        .map_err(io::Error::from)
+        .map_err(ReplaceFileError::NotReplaced)?;
+    let replaced = openat(
+        target_directory,
+        target_name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)
+    .map_err(ReplaceFileError::StateUnknown)?;
+    if unix_identity(&replaced).map_err(ReplaceFileError::StateUnknown)? != source_identity
+        || statat(source_directory, source_name, AtFlags::SYMLINK_NOFOLLOW).is_ok()
+    {
+        return Err(ReplaceFileError::StateUnknown(io::Error::other(
+            "cross-directory replacement success state did not reconcile",
         )));
     }
     Ok(())
@@ -885,6 +997,25 @@ pub(super) fn replace_file_platform(
 }
 
 #[cfg(windows)]
+pub(super) fn replace_file_from_platform(
+    source_directory: &File,
+    target_directory: &File,
+    source_name: &OsStr,
+    target_name: &OsStr,
+    expected_source: Option<FileIdentity>,
+    expected_target: Option<FileIdentity>,
+) -> Result<(), ReplaceFileError> {
+    windows::replace_file_from(
+        source_directory,
+        target_directory,
+        source_name,
+        target_name,
+        expected_source,
+        expected_target,
+    )
+}
+
+#[cfg(windows)]
 pub(super) fn install_new_file_platform(
     directory: &File,
     source_name: &OsStr,
@@ -912,6 +1043,21 @@ pub(super) fn replace_file_platform(
     Err(ReplaceFileError::NotReplaced(io::Error::new(
         io::ErrorKind::Unsupported,
         "atomic replacement is unsupported on this platform",
+    )))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+pub(super) fn replace_file_from_platform(
+    _source_directory: &File,
+    _target_directory: &File,
+    _source_name: &OsStr,
+    _target_name: &OsStr,
+    _expected_source: Option<FileIdentity>,
+    _expected_target: Option<FileIdentity>,
+) -> Result<(), ReplaceFileError> {
+    Err(ReplaceFileError::NotReplaced(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "cross-directory atomic replacement is unsupported on this platform",
     )))
 }
 
@@ -974,4 +1120,14 @@ pub(super) fn path_link_count_platform(_path: &Path) -> io::Result<u64> {
         io::ErrorKind::Unsupported,
         "link count unsupported",
     ))
+}
+
+// Unix metadata already contains the native identity from this observation.
+#[cfg(unix)]
+pub(super) fn metadata_identity(metadata: &std::fs::Metadata) -> FileIdentity {
+    use std::os::unix::fs::MetadataExt as _;
+    FileIdentity {
+        volume_serial: metadata.dev(),
+        file_id: u128::from(metadata.ino()).to_le_bytes(),
+    }
 }

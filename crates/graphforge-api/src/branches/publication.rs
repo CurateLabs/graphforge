@@ -1,14 +1,34 @@
 //! Intent replay, optimistic CURRENT preconditions and post-publication reconciliation.
 use crate::{CancellationToken, GfError, GraphForge};
 use graphforge_core::ProjectErrorCode;
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::research_versions::{
     ResearchMutation, ResearchOperation, ResearchOperationReceipt, ResearchRegistry,
-    read_research_registry,
+    ResearchSignature, ResearchVersionProvenance, ResearchVersionRecord, read_research_registry,
 };
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::path::PathBuf;
 use uuid::Uuid;
+
+/// Set every commit field of a new Version explicitly; nothing is inherited
+/// from the record it was prepared from. Signatures are validated here.
+pub(crate) fn commit(
+    version: &mut ResearchVersionRecord,
+    parents: Vec<Uuid>,
+    author: Option<&ResearchSignature>,
+    committer: Option<&ResearchSignature>,
+    provenance: Option<ResearchVersionProvenance>,
+) -> Result<(), GfError> {
+    for signature in author.iter().chain(&committer) {
+        signature.validate()?;
+    }
+    version.parents = parents;
+    version.author = author.cloned();
+    version.committer = committer.cloned();
+    version.provenance = provenance;
+    Ok(())
+}
 
 pub(crate) struct Command {
     pub root: PathBuf,

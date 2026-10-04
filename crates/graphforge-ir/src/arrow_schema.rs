@@ -76,7 +76,9 @@ pub fn duration_struct_fields() -> Fields {
 }
 
 /// Whether an Arrow value can be normalized into GraphForge's ordinary
-/// persisted property representation.
+/// persisted property representation. This is the input acceptance rule;
+/// [`canonical_property_data_type`] maps an accepted type to the form that is
+/// persisted, and [`property_data_type_canonical`] recognizes that form.
 #[must_use]
 pub fn property_data_type_supported(data_type: &DataType) -> bool {
     match data_type {
@@ -99,15 +101,64 @@ pub fn property_data_type_supported(data_type: &DataType) -> bool {
         DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, zone) => {
             zone.as_deref() == Some("UTC")
         }
-        DataType::Struct(fields) => {
-            fields == &duration_struct_fields()
-                || fields == &date_struct_fields()
-                || fields == &localdatetime_struct_fields()
-                || fields == &time_struct_fields()
-                || fields == &datetime_struct_fields()
-        }
+        DataType::Struct(fields) => temporal_struct(fields),
         _ => false,
     }
+}
+
+/// Whether an Arrow property type is GraphForge's canonical persisted
+/// representation: the only property types storage persists and its readers
+/// decode. Integers are `Int64`, floats `Float64`, strings `Utf8`, and lists
+/// `List` of a canonical element; booleans and temporal values are already
+/// canonical on input.
+#[must_use]
+pub fn property_data_type_canonical(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::List(field) => property_data_type_canonical(field.data_type()),
+        DataType::Boolean
+        | DataType::Int64
+        | DataType::Float64
+        | DataType::Utf8
+        | DataType::Time64(TimeUnit::Nanosecond) => true,
+        DataType::Timestamp(TimeUnit::Microsecond, zone) => zone.as_deref() == Some("UTC"),
+        DataType::Struct(fields) => temporal_struct(fields),
+        _ => false,
+    }
+}
+
+/// The canonical persisted type of an accepted property type, or `None` when
+/// [`property_data_type_supported`] rejects it. Every accepted integer width
+/// widens losslessly to `Int64`, `Float32` to `Float64`, `LargeUtf8` to
+/// `Utf8`, and `LargeList` to `List`, recursively for list elements; a list
+/// element keeps its name, nullability and metadata.
+#[must_use]
+pub fn canonical_property_data_type(data_type: &DataType) -> Option<DataType> {
+    match data_type {
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32 => Some(DataType::Int64),
+        DataType::Float32 | DataType::Float64 => Some(DataType::Float64),
+        DataType::Utf8 | DataType::LargeUtf8 => Some(DataType::Utf8),
+        DataType::List(field) | DataType::LargeList(field) => {
+            let element = canonical_property_data_type(field.data_type())?;
+            Some(DataType::List(Arc::new(
+                field.as_ref().clone().with_data_type(element),
+            )))
+        }
+        other => property_data_type_supported(other).then(|| other.clone()),
+    }
+}
+
+fn temporal_struct(fields: &Fields) -> bool {
+    fields == &duration_struct_fields()
+        || fields == &date_struct_fields()
+        || fields == &localdatetime_struct_fields()
+        || fields == &time_struct_fields()
+        || fields == &datetime_struct_fields()
 }
 
 /// `Struct{epoch_day: Int64}` — a Cypher `date` typed value (ADR 0012): i64 days
@@ -253,4 +304,104 @@ pub fn ts_field(name: &str) -> Field {
         DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
         false,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn list(element: DataType) -> DataType {
+        DataType::List(Arc::new(Field::new("item", element, true)))
+    }
+
+    fn large_list(element: DataType) -> DataType {
+        DataType::LargeList(Arc::new(Field::new("item", element, true)))
+    }
+
+    #[test]
+    fn every_accepted_property_type_maps_to_a_canonical_type() {
+        let scalars = [
+            (DataType::Boolean, DataType::Boolean),
+            (DataType::Int8, DataType::Int64),
+            (DataType::Int16, DataType::Int64),
+            (DataType::Int32, DataType::Int64),
+            (DataType::Int64, DataType::Int64),
+            (DataType::UInt8, DataType::Int64),
+            (DataType::UInt16, DataType::Int64),
+            (DataType::UInt32, DataType::Int64),
+            (DataType::Float32, DataType::Float64),
+            (DataType::Float64, DataType::Float64),
+            (DataType::Utf8, DataType::Utf8),
+            (DataType::LargeUtf8, DataType::Utf8),
+            (
+                DataType::Time64(TimeUnit::Nanosecond),
+                DataType::Time64(TimeUnit::Nanosecond),
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            ),
+            (
+                DataType::Struct(duration_struct_fields()),
+                DataType::Struct(duration_struct_fields()),
+            ),
+            (
+                DataType::Struct(datetime_struct_fields()),
+                DataType::Struct(datetime_struct_fields()),
+            ),
+        ];
+        let mut cases = Vec::new();
+        for (input, canonical) in scalars {
+            cases.push((list(input.clone()), list(canonical.clone())));
+            cases.push((large_list(input.clone()), list(canonical.clone())));
+            cases.push((
+                large_list(large_list(input.clone())),
+                list(list(canonical.clone())),
+            ));
+            cases.push((input, canonical));
+        }
+        for (input, canonical) in cases {
+            assert!(property_data_type_supported(&input), "{input}");
+            assert_eq!(
+                canonical_property_data_type(&input).as_ref(),
+                Some(&canonical),
+                "{input}"
+            );
+            assert!(property_data_type_canonical(&canonical), "{canonical}");
+            assert_eq!(property_data_type_canonical(&input), input == canonical);
+        }
+    }
+
+    #[test]
+    fn unaccepted_property_types_have_no_canonical_form() {
+        for input in [
+            DataType::Binary,
+            DataType::UInt64,
+            DataType::Float16,
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            list(DataType::UInt64),
+            large_list(DataType::Binary),
+        ] {
+            assert!(!property_data_type_supported(&input), "{input}");
+            assert_eq!(canonical_property_data_type(&input), None, "{input}");
+            assert!(!property_data_type_canonical(&input), "{input}");
+        }
+    }
+
+    #[test]
+    fn canonical_list_element_keeps_name_nullability_and_metadata() {
+        let element = Field::new("element", DataType::Int16, false).with_metadata(
+            [("origin".to_owned(), "caller".to_owned())]
+                .into_iter()
+                .collect(),
+        );
+        let canonical =
+            canonical_property_data_type(&DataType::LargeList(Arc::new(element.clone())));
+        assert_eq!(
+            canonical,
+            Some(DataType::List(Arc::new(
+                element.with_data_type(DataType::Int64)
+            )))
+        );
+    }
 }

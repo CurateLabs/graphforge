@@ -4,7 +4,8 @@
 //! never an event history. Writers report actual file facts at their existing
 //! installation/removal boundaries. No process-global observer is installed.
 
-use sha2::{Digest, Sha256};
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
+use sha2::Digest;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::Path;
@@ -184,7 +185,12 @@ impl StorageAllocationOperation {
     /// Validate every participating continuation before changing any of them.
     fn change(
         &self,
-        mut update: impl FnMut(&mut StorageAllocationLifecycle) -> Result<(), GfError>,
+        mut prepare: impl FnMut(
+            &StorageAllocationLifecycle,
+        ) -> Result<
+            Option<crate::storage_attribution::PreparedOwnerAllocationChange>,
+            GfError,
+        >,
     ) -> Result<(), GfError> {
         let mut states: Vec<_> = std::iter::once(&self.state).chain(&self.mirrors).collect();
         states.sort_unstable_by_key(|state| Arc::as_ptr(state) as usize);
@@ -192,15 +198,17 @@ impl StorageAllocationOperation {
             .iter()
             .map(|state| state.lock().map_err(poisoned))
             .collect::<Result<Vec<_>, _>>()?;
-        if guards.len() == 1 {
-            return update(&mut guards[0]);
-        }
-        let mut next: Vec<_> = guards.iter().map(|state| (**state).clone()).collect();
-        for state in &mut next {
-            update(state)?;
-        }
-        for (state, next) in guards.iter_mut().zip(next) {
-            **state = next;
+        // Keep every guard until all contexts have validated the changed
+        // identities. Infallible application then preserves mirror atomicity
+        // without copying unrelated retained owner inventories.
+        let prepared = guards
+            .iter()
+            .map(|state| prepare(state))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (state, prepared) in guards.iter_mut().zip(prepared) {
+            if let Some(prepared) = prepared {
+                state.apply_prepared_owner_change(prepared);
+            }
         }
         Ok(())
     }
@@ -214,7 +222,11 @@ impl StorageAllocationOperation {
         owner: &str,
         transition: &StorageAllocationTransition,
     ) -> Result<(), GfError> {
-        self.change(|state| state.apply_owner_transition(owner, transition))
+        self.change(|state| {
+            state
+                .prepare_owner_transition(TransientComponent::Unclassified, owner, transition)
+                .map(Some)
+        })
     }
 
     /// Resolve the project using the ordinary admission path authority.
@@ -328,7 +340,11 @@ impl StorageAllocationOperation {
             &identity.file_id,
         );
         let identities = BTreeMap::from([(identity, usage.allocated_bytes)]);
-        self.change(|state| state.replace_owner_in(component, owner, &identities))
+        self.change(|state| {
+            state
+                .prepare_owner_replacement(component, owner, &identities)
+                .map(Some)
+        })
     }
 
     /// Remove a writer's reference after successful unlink/replacement.
@@ -336,7 +352,7 @@ impl StorageAllocationOperation {
     /// # Errors
     /// Returns accounting errors without discarding other owners' aliases.
     pub fn remove_owner(&self, owner: &str) -> Result<(), GfError> {
-        self.change(|state| state.remove_owner(owner))
+        self.change(|state| state.prepare_owner_removal(owner))
     }
 
     /// Return the composition of the high-water mark, which sums to the peak
@@ -471,6 +487,93 @@ mod tests {
                 .allocated_bytes,
             operation.totals().unwrap().0
         );
+    }
+
+    #[test]
+    fn mirrored_single_owner_changes_retain_unrelated_inventory_storage() {
+        use std::io::Write as _;
+
+        for count in [16, 1024] {
+            let owners: BTreeMap<_, _> = (0..count)
+                .map(|n| {
+                    (
+                        format!("retained-owner-{n}"),
+                        BTreeMap::from([(format!("retained-identity-{n}"), 1)]),
+                    )
+                })
+                .collect();
+            let outer = StorageAllocationOperation::from_owners(&owners).unwrap();
+            let local = StorageAllocationOperation::from_owners(&owners)
+                .unwrap()
+                .with_mirror(Some(&outer));
+            let tokens = |operation: &StorageAllocationOperation| {
+                let state = operation.state.lock().unwrap();
+                owners
+                    .keys()
+                    .map(|owner| state.owner_storage_tokens(owner))
+                    .collect::<Vec<_>>()
+            };
+            let before_local = tokens(&local);
+            let before_outer = tokens(&outer);
+            local
+                .transition(
+                    "changed-owner",
+                    &StorageAllocationTransition {
+                        installed: BTreeMap::from([("changed-identity".into(), 7)]),
+                        removed: Default::default(),
+                    },
+                )
+                .unwrap();
+            assert_eq!(tokens(&local), before_local, "local inventory was copied");
+            assert_eq!(tokens(&outer), before_outer, "mirror inventory was copied");
+            for operation in [&local, &outer] {
+                assert_eq!(operation.totals().unwrap(), (count + 7, count + 7));
+                let identities = owners
+                    .values()
+                    .flat_map(|identities| {
+                        identities.iter().map(|(id, bytes)| (id.clone(), *bytes))
+                    })
+                    .chain([("changed-identity".into(), 7)])
+                    .collect();
+                assert!(
+                    operation
+                        .snapshot()
+                        .unwrap()
+                        .matches_file_inventory(&identities, count + 1)
+                );
+            }
+
+            let mut file = tempfile::tempfile().unwrap();
+            file.write_all(&[0; 4096]).unwrap();
+            let allocated = graphforge_filesystem::file_space_usage(&file)
+                .unwrap()
+                .allocated_bytes;
+            let peak = count + allocated.max(7);
+            local.replace_file("changed-owner", &file).unwrap();
+            assert_eq!(tokens(&local), before_local);
+            assert_eq!(tokens(&outer), before_outer);
+            for operation in [&local, &outer] {
+                assert_eq!(operation.totals().unwrap(), (count + allocated, peak));
+            }
+
+            local.remove_owner("changed-owner").unwrap();
+            assert_eq!(tokens(&local), before_local);
+            assert_eq!(tokens(&outer), before_outer);
+            for operation in [&local, &outer] {
+                assert_eq!(operation.totals().unwrap(), (count, peak));
+            }
+            let before_local = serde_json::to_vec(&local.snapshot().unwrap()).unwrap();
+            let before_outer = serde_json::to_vec(&outer.snapshot().unwrap()).unwrap();
+            local.remove_owner("absent-owner").unwrap();
+            assert_eq!(
+                serde_json::to_vec(&local.snapshot().unwrap()).unwrap(),
+                before_local
+            );
+            assert_eq!(
+                serde_json::to_vec(&outer.snapshot().unwrap()).unwrap(),
+                before_outer
+            );
+        }
     }
 
     #[test]

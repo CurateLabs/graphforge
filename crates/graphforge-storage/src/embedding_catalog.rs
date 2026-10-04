@@ -649,24 +649,48 @@ fn persist_synced_file(path: &Path, bytes: &[u8]) -> Result<(), SearchArtifactEr
         .map_err(|source| io("create embedding catalog temp", path, source))?;
     temp.write_all(bytes)
         .map_err(|source| io("write embedding catalog temp", path, source))?;
-    temp.as_file()
-        .sync_all()
+    let directory = graphforge_filesystem::StableDirectory::open(parent)
+        .map_err(|source| io("publish embedding space catalog", path, source))?;
+    let temporary = temp
+        .path()
+        .file_name()
+        .expect("named temporary has a child name");
+    let identity = graphforge_filesystem::file_identity(temp.as_file())
         .map_err(|source| io("sync embedding catalog temp", path, source))?;
-    temp.persist(path)
-        .map_err(|error| io("publish embedding space catalog", path, error.error))?;
-    sync_directory(parent)
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), SearchArtifactError> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|source| io("sync embedding catalog directory", path, source))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<(), SearchArtifactError> {
+    let file = temp
+        .as_file()
+        .try_clone()
+        .map_err(|source| io("sync embedding catalog temp", path, source))?;
+    crate::durable_commit::SealedArtifact::seal_existing(
+        &directory, temporary, file, identity, None,
+    )
+    .map_err(|source| io("sync embedding catalog temp", path, source))?
+    .make_visible(
+        path.file_name().expect("publication has a child name"),
+        crate::durable_commit::PublishMode::Replace,
+        || Ok(()),
+    )
+    .map_err(|error| {
+        io(
+            "publish embedding space catalog",
+            path,
+            std::io::Error::other(error),
+        )
+    })?
+    .acknowledge(None)
+    .map_err(|error| {
+        io(
+            "publish embedding space catalog",
+            path,
+            std::io::Error::other(error),
+        )
+    })?;
     Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<(), SearchArtifactError> {
+    crate::durable_commit::sync_directory(path)
+        .map_err(|source| io("sync embedding catalog directory", path, source))
 }
 
 fn path_exists(path: &Path) -> Result<bool, SearchArtifactError> {

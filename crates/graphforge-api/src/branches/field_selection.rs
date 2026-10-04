@@ -71,8 +71,7 @@ pub(crate) fn freeze(
         }
     }
     let prepared = crate::branches::selection::prepare(root, selected, spec, cancellation)?;
-    let mut view = crate::branches::private_view::open(owner, &prepared)?;
-    view.read_only = false;
+    let view = crate::branches::private_view::open_writable(owner, &prepared)?;
     super::field_application::redact_properties(&view, &keys, cancellation)?;
     let mut frozen = graphforge_storage::research_versions::prepare_branch_content(
         root,

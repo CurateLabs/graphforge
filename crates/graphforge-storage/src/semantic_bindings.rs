@@ -1,21 +1,24 @@
 //! Generation-bound bindings between physical graph storage and qualified ontology authority.
 
 mod migration;
-pub use migration::materialize_semantic_migration;
+pub use migration::{materialize_semantic_migration, materialize_semantic_migration_from_files};
 mod legacy_routes;
-pub use legacy_routes::{LegacyRouteMigration, apply_legacy_route_moves};
+pub use legacy_routes::{
+    LegacyRouteMigration, apply_legacy_route_moves, apply_legacy_route_moves_with_topology,
+};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_ontology::{
     CompiledComposition, MigrationEngine, OntologyModuleId, QualifiedSymbol, SymbolKind,
     TransformKind,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::{GRAPH_CAPABILITY_ID, ProjectParticipant, ProjectParticipantEncoding};
 
@@ -237,7 +240,7 @@ impl SemanticStorageBindings {
         symbol: &QualifiedSymbol,
         owner: Option<&QualifiedSymbol>,
     ) -> String {
-        let mut digest = Sha256::new();
+        let mut digest = graphforge_core::hash_observation::ContractSha256::new();
         digest.update(b"graphforge-semantic-route/1\0");
         let route_symbol = owner.unwrap_or(symbol);
         // Properties are columns in their owner's physical table.  The owner
@@ -408,10 +411,25 @@ impl SemanticStorageBindings {
         graph_root: &Path,
         inventory: Option<&crate::GraphFilesInventory>,
     ) -> Result<(), GfError> {
-        let captured = crate::capture_graph_files(graph_root)?.0;
+        let projected = inventory
+            .map(crate::GraphReadInventory::from_published)
+            .transpose()?;
+        self.validate_physical_routes_with_read_inventory(graph_root, projected.as_ref())
+    }
+
+    /// Validate published or private replay read authority without deriving CAS identities.
+    ///
+    /// # Errors
+    /// Refuses changed payloads, unlisted routes, and invalid schema or topology authority.
+    pub fn validate_physical_routes_with_read_inventory(
+        &self,
+        graph_root: &Path,
+        inventory: Option<&crate::GraphReadInventory>,
+    ) -> Result<(), GfError> {
+        let captured = crate::capture_graph_read_inventory(graph_root)?;
         let inventory = match inventory {
             Some(inventory) => {
-                if inventory != &captured {
+                if !inventory.agrees_with(&captured) {
                     return Err(corrupt(
                         "semantic route inventory disagrees with the graph tree",
                     ));
@@ -420,7 +438,7 @@ impl SemanticStorageBindings {
             }
             None => &captured,
         };
-        let routes = semantic_fragment_inventory(graph_root, inventory)?;
+        let routes = semantic_read_fragment_inventory(graph_root, inventory)?;
         let expected = self
             .bindings
             .iter()
@@ -490,7 +508,10 @@ impl SemanticStorageBindings {
             record_family_id: GRAPH_SEMANTIC_BINDINGS_FAMILY.into(),
             record_version: GRAPH_SEMANTIC_BINDINGS_VERSION,
             encoding: ProjectParticipantEncoding::Json,
-            schema_fingerprint: Sha256::digest(b"graphforge-semantic-storage-bindings/1").into(),
+            schema_fingerprint: graphforge_core::hash_observation::ContractSha256::digest(
+                b"graphforge-semantic-storage-bindings/1",
+            )
+            .into(),
             row_count: self.bindings.len() as u64,
             bytes,
         })
@@ -568,15 +589,17 @@ impl SemanticStorageBindings {
 
 type SemanticFragments = BTreeMap<(String, String), Vec<PathBuf>>;
 
-fn semantic_fragment_inventory(
+fn semantic_read_fragment_inventory(
     root: &Path,
-    inventory: &crate::GraphFilesInventory,
+    inventory: &crate::GraphReadInventory,
 ) -> Result<SemanticFragments, GfError> {
-    let authority =
-        crate::graph_projection::TransformRoutes::from_inventory(root, inventory.clone())?;
+    let table = inventory.authenticate_routes(root)?;
     let mut routes = BTreeMap::<(String, String), Vec<PathBuf>>::new();
     for entry in &inventory.files {
-        let logical = authority.semantic_path(&entry.relative_path)?;
+        let logical = match &table {
+            Some(table) => table.semantic_relative_path(&entry.relative_path)?,
+            None => entry.relative_path.clone(),
+        };
         if let Some(route) = semantic_route_from_wire(&logical) {
             let domain = if logical.starts_with("topology/edges/") {
                 "topology/edges"
@@ -585,7 +608,7 @@ fn semantic_fragment_inventory(
             } else {
                 "properties"
             };
-            let physical = crate::graph_files::resolve_v1_inventory_entry(root, entry)?;
+            let physical = crate::graph_read_inventory::resolve_entry_retained(root, entry)?.path;
             routes
                 .entry((domain.to_owned(), route.to_owned()))
                 .or_default()
@@ -612,10 +635,10 @@ fn semantic_route_fragments(
     binding: &SemanticStorageBinding,
     root: &Path,
 ) -> Result<Vec<PathBuf>, GfError> {
-    let (inventory, _) = crate::capture_graph_files(root)?;
+    let inventory = crate::capture_graph_read_inventory(root)?;
     Ok(binding_fragments(
         binding,
-        &semantic_fragment_inventory(root, &inventory)?,
+        &semantic_read_fragment_inventory(root, &inventory)?,
     ))
 }
 
@@ -760,7 +783,10 @@ pub fn semantic_storage_bindings(
         .participant_snapshot(GRAPH_CAPABILITY_ID, GRAPH_SEMANTIC_BINDINGS_FAMILY)?
         .map(|snapshot| {
             let expected_schema: [u8; 32] =
-                Sha256::digest(b"graphforge-semantic-storage-bindings/1").into();
+                graphforge_core::hash_observation::ContractSha256::digest(
+                    b"graphforge-semantic-storage-bindings/1",
+                )
+                .into();
             if snapshot.capability_version != crate::GRAPH_CAPABILITY_VERSION
                 || snapshot.record_version != GRAPH_SEMANTIC_BINDINGS_VERSION
                 || snapshot.encoding != "json"
@@ -1577,7 +1603,8 @@ mod tests {
         second.flush().unwrap();
 
         let inventory = crate::capture_graph_files(dir.path()).unwrap().0;
-        let fragments = semantic_fragment_inventory(dir.path(), &inventory)
+        let read_inventory = crate::GraphReadInventory::from_published(&inventory).unwrap();
+        let fragments = semantic_read_fragment_inventory(dir.path(), &read_inventory)
             .unwrap()
             .remove(&("properties".to_owned(), entity.route.clone()))
             .unwrap();

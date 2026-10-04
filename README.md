@@ -324,8 +324,8 @@ pnpm docs:preview      # serve docs-site/dist/
 # Install with dev dependencies
 uv sync --dev
 
-# Run all checks (mirrors CI)
-make pre-push
+# Run all checks (mirrors CI Lint)
+make check
 
 # Targeted Rust gates while iterating
 cargo fmt --all -- --check
@@ -333,9 +333,7 @@ cargo clippy --workspace -- -D warnings
 cargo test --workspace
 ```
 
-`Binding Release Candidate` is post-merge, `main`-only evidence. Dispatch it
-with the current 40-character `main` commit SHA; the workflow rejects branch
-heads and stale commits before any platform matrix build starts.
+Releases are cut by pushing a `v<version>` tag; see [`RELEASING.md`](RELEASING.md).
 
 ---
 

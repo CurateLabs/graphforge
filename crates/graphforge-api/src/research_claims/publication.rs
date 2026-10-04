@@ -50,6 +50,16 @@ pub(super) fn publish(
             }
         }
         participants.extend(replacements);
+        // Writing research history upgrades a revision 6 Project atomically.
+        if participants.iter().any(|p| {
+            p.capability_id == graphforge_storage::research_versions::RESEARCH_CAPABILITY
+                && p.record_family_id != graphforge_storage::research_versions::RESEARCH_REGISTRY
+        }) {
+            graphforge_storage::research_versions::upgrade_research_request(
+                &mut capabilities,
+                &mut participants,
+            );
+        }
         participants.sort_by(|a, b| {
             (&a.capability_id, &a.record_family_id).cmp(&(&b.capability_id, &b.record_family_id))
         });
@@ -107,7 +117,8 @@ impl Attempt {
         domain: &[u8],
         request: &impl serde::Serialize,
     ) -> Result<Self, GfError> {
-        use sha2::{Digest, Sha256};
+        use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
+        use sha2::Digest;
         let registry = graphforge_storage::research_versions::read_research_registry(parent)?;
         let bytes = serde_json::to_vec(request)
             .map_err(|_| GfError::Validation("invalid research request".into()))?;

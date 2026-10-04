@@ -269,6 +269,7 @@ pub fn verify_portable_v2(
         #[cfg(feature = "research")]
         return graphforge_storage::validate_research_package(
             &request.input,
+            None,
             request.limits,
             cancelled,
             &mut crate::research_interchange::validation::validate,
@@ -677,6 +678,11 @@ pub(crate) fn supported_capabilities() -> Vec<ProjectCapability> {
             1
         },
     })
+    // Revision 6 research packages (older clients' exports) still import.
+    .chain(std::iter::once(ProjectCapability {
+        capability_id: "research".into(),
+        capability_version: graphforge_storage::research_versions::RESEARCH_LEGACY_VERSION,
+    }))
     .collect()
 }
 
@@ -1076,6 +1082,7 @@ mod tests {
             .find(|route| {
                 inventory
                     .route_schema(graphforge_storage::PropertyRouteKind::Edge, route)
+                    .unwrap()
                     .is_some_and(|schema| schema.field_with_name("weight").is_ok())
             })
             .unwrap()
@@ -1196,7 +1203,7 @@ mod tests {
                 .map(|route| {
                     (
                         route.to_owned(),
-                        inventory.route_schema(kind, route).unwrap(),
+                        inventory.route_schema(kind, route).unwrap().unwrap(),
                     )
                 })
                 .collect::<std::collections::BTreeMap<_, _>>()

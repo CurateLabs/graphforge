@@ -751,7 +751,7 @@ fn ensure_mutation_lock_files(root: &Path) {
 }
 
 #[test]
-fn shared_checkpoint_reader_blocks_mutation_with_issue_275_message() {
+fn shared_checkpoint_reader_blocks_mutation_with_checkpoint_busy_message() {
     let directory = tempdir().unwrap();
     crate::open_or_initialize_project(directory.path()).unwrap();
     ensure_mutation_lock_files(directory.path());
@@ -762,7 +762,7 @@ fn shared_checkpoint_reader_blocks_mutation_with_issue_275_message() {
 }
 
 #[test]
-fn exclusive_checkpoint_holder_without_writer_blocks_mutation_with_issue_275_message() {
+fn exclusive_checkpoint_holder_without_writer_blocks_mutation_with_checkpoint_busy_message() {
     // Models revert post-handoff / recovery-style windows: writer free,
     // checkpoints.lock still exclusive.
     let directory = tempdir().unwrap();
@@ -776,7 +776,7 @@ fn exclusive_checkpoint_holder_without_writer_blocks_mutation_with_issue_275_mes
 }
 
 #[test]
-fn early_writer_release_while_checkpoint_held_produces_issue_275_message() {
+fn early_writer_release_while_checkpoint_held_produces_checkpoint_busy_message() {
     let directory = tempdir().unwrap();
     crate::open_or_initialize_project(directory.path()).unwrap();
     ensure_mutation_lock_files(directory.path());

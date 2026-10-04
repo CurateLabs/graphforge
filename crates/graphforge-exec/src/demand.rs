@@ -233,6 +233,13 @@ pub struct DemandSnapshot {
     /// Statement-wide owner-resolution and replacement-key work. Decoder peaks
     /// and identity counts are logical accounting, not process-memory bounds.
     pub property_writes: BTreeMap<String, u64>,
+    /// Adjacency index rebuild attempts because the index was missing or stale,
+    /// including attempts that fail after starting rebuild work. A published
+    /// generation ships a current index, so this is zero there; a nonzero count
+    /// is an O(E) rebuild inside the query that
+    /// would otherwise go unreported (#1388). Rebuilds are never a response to
+    /// corruption, which the query refuses instead.
+    pub adjacency_rebuilds: u64,
     /// Query memory-pool reservation before physical execution.
     pub memory_reserved_before: u64,
     /// Query memory-pool reservation after every operator stream was dropped.
@@ -295,6 +302,19 @@ pub fn set_bound_capture_session(epoch: u64) {
     BOUND_CAPTURE_SESSION.set(epoch);
 }
 
+/// Bind a plan's capture only for one synchronous request on its worker.
+pub(crate) fn with_capture_session<T>(epoch: u64, request: impl FnOnce() -> T) -> T {
+    struct RestoreBinding(u64);
+    impl Drop for RestoreBinding {
+        fn drop(&mut self) {
+            BOUND_CAPTURE_SESSION.set(self.0);
+        }
+    }
+
+    let _restore = RestoreBinding(BOUND_CAPTURE_SESSION.replace(epoch));
+    request()
+}
+
 /// Epoch to stamp on physical plans for the active capture bound to this thread.
 pub(crate) fn stamp_capture_epoch() -> Option<u64> {
     let bound = BOUND_CAPTURE_SESSION.get();
@@ -330,6 +350,10 @@ pub fn capture<T>(operation: impl FnOnce() -> T) -> (T, DemandSnapshot) {
     let disable_on_exit = CaptureDisable;
     // `reset` binds this thread to the live epoch (inherited across block_on
     // workers). Concurrent unbound executes stamp epoch 0 and cannot record.
+    // Property-overlay work counters belong to the requested diagnostics;
+    // keep their storage collector alive across physical-plan construction.
+    let _storage_capture = (!graphforge_storage::lifecycle_io::is_active())
+        .then(graphforge_storage::lifecycle_io::CaptureScope::install);
     let result = operation();
     // Snapshot while this session is still the active epoch, then retire it so
     // any still-alive operator streams cannot append to the next capture.
@@ -522,6 +546,21 @@ pub(crate) fn record_plan_completion(
     state.snapshot.memory_reserved_after = memory_reserved_after as u64;
     state.snapshot.returned_batch_bytes = returned_batch_bytes as u64;
     state.snapshot.execution_batch_rows = execution_batch_rows as u64;
+}
+
+/// Record one adjacency rebuild in the calling thread's bound capture.
+/// Unbound peers and work retained from an older capture own no work here.
+pub(crate) fn record_adjacency_rebuild() {
+    let epoch = bound_capture_session();
+    if epoch == 0 || !capture_enabled() {
+        return;
+    }
+    let mut state = CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if session_active_locked(&state, epoch) {
+        state.snapshot.adjacency_rebuilds += 1;
+    }
 }
 
 pub(crate) fn record_property_write_work(sums: &[(&str, u64)], peaks: &[(&str, u64)]) {
@@ -852,7 +891,8 @@ impl graphforge_storage::io_stats::FilteredReadObserver for HopReadObserver {
     }
 }
 
-/// Final physical optimizer rule for bounded fixed-hop pipelines.
+/// Final physical optimizer rule for bounded fixed-hop pipelines. The fast
+/// operators are chosen by the lowerer (ADR 0050), not by this rule.
 #[derive(Debug, Default)]
 pub(crate) struct FixedHopDemandRule;
 
@@ -874,9 +914,6 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
         } else {
             plan
         };
-        let plan = crate::ordered_two_hop::try_rewrite_ordered_two_hop(plan)?;
-        let plan = crate::ordered_one_hop::try_rewrite_ordered_one_hop(plan)?;
-        let plan = crate::edge_count::try_rewrite_edge_count(plan)?;
         let Some(terminal) = find_terminal_demand(&plan) else {
             // RSS probes are diagnostics only; skip when this thread is not the
             // capturing session so concurrent executes cannot append operator_rss.
@@ -1334,6 +1371,7 @@ fn is_fetch_transparent(plan: &dyn ExecutionPlan) -> bool {
         || plan.is::<ProjectionExec>()
         || plan.is::<RepartitionExec>()
         || plan.is::<ExpandExec>()
+        || plan.is::<crate::fast_path::FastPathFallbackExec>()
 }
 
 /// Whether a fixed hop is reachable without crossing a semantic boundary.
@@ -2040,6 +2078,33 @@ mod tests {
         assert_eq!(hop.input_rows, 0);
         assert_eq!(hop.candidates_generated, 0);
         assert!(second.operator_rss.is_empty());
+    }
+
+    #[test]
+    fn adjacency_rebuilds_belong_only_to_the_bound_capture() {
+        let _guard = CAPTURE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (stale, _) = capture(bound_capture_session);
+        let ((), captured) = capture(|| {
+            let active = bound_capture_session();
+            record_adjacency_rebuild();
+            // A deferred older plan must not borrow the current poller's epoch.
+            with_capture_session(stale, record_adjacency_rebuild);
+            with_capture_session(0, record_adjacency_rebuild);
+            assert_eq!(bound_capture_session(), active);
+            std::thread::spawn(move || {
+                record_adjacency_rebuild();
+                BOUND_CAPTURE_SESSION.set(stale);
+                record_adjacency_rebuild();
+                // A query-owned worker carries the plan's epoch explicitly.
+                with_capture_session(active, record_adjacency_rebuild);
+                assert_eq!(bound_capture_session(), stale);
+            })
+            .join()
+            .expect("peer rebuilds");
+        });
+        assert_eq!(captured.adjacency_rebuilds, 2);
     }
 
     #[test]

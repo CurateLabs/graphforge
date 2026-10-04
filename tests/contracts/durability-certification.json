@@ -17,8 +17,8 @@
     "durability_certification": "graphforge-durability-certification/1",
     "delta_journal": "adr-0019",
     "fault_oracle": "project_fault_oracle",
-    "m6_benchmark_inventory": "m6-storage-v1",
-    "m6_storage_io_fixture": "v1"
+    "storage_benchmark_inventory": "storage-benchmarks-v1",
+    "storage_io_fixture": "v1"
   },
   "production_observation": {
     "driver": "graphforge_api::GraphForge",
@@ -69,8 +69,8 @@
   "benchmark_evidence": {
     "baseline_commit": "aeb46d1b012d40e8a0af7873af9152b3aab752c6",
     "walltime_host": "codspeed-macro-arm64",
-    "simulation_bench": "m6_storage",
-    "walltime_bench": "m6_storage_io",
+    "simulation_bench": "storage_kernels",
+    "walltime_bench": "storage_io",
     "memory_fallback": "/usr/bin/time -v"
   },
   "forbidden_positive_claims": [

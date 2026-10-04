@@ -8,6 +8,7 @@ use super::{
     encode_hex, fs, reject_symlink_components, remove_file_durable, rename_durable, sync_directory,
     validation, write_durable,
 };
+use graphforge_filesystem::ObservedSync as _;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -518,7 +519,7 @@ impl RepositoryContext {
             .write_all(b"graphforge-skills/1\n")
             .map_err(|error| GfError::Storage(error.to_string()))?;
         marker
-            .sync_all()
+            .observed_sync_all()
             .map_err(|error| GfError::Storage(error.to_string()))?;
         sync_directory(
             path.parent()

@@ -1,8 +1,9 @@
 //! A subset gets a distinct immutable identity with explicit source provenance.
 use crate::{CancellationToken, GfError, GraphForge, ResearchFieldIdentity};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::research_versions::{PreparedResearchContent, RegisterResearchVersion};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
@@ -62,6 +63,8 @@ pub(super) fn prepare(
     let fingerprint: [u8; 32] = digest.finalize().into();
     let original = selection.version.clone();
     let mut spec = RegisterResearchVersion {
+        author: None,
+        committer: None,
         version_uuid: request.version_uuid,
         context_uuid: original.context_uuid,
         source_generation_uuid: original.content.generation_uuid,

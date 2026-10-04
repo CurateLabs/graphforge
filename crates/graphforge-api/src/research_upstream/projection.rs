@@ -58,6 +58,8 @@ pub(super) fn prepare(
         .or(snapshot.upstream.version)
         .ok_or_else(|| invalid("exact upstream Version is unavailable"))?;
     let spec = RegisterResearchVersion {
+        author: None,
+        committer: None,
         version_uuid: preview::identity(request.operation_uuid, "selected_upstream"),
         context_uuid: preview::identity(request.operation_uuid, "selected_upstream_context"),
         source_generation_uuid: snapshot.upstream.generation,
@@ -97,8 +99,7 @@ pub(super) fn prepare(
         &replacements,
         cancel.flag(),
     )?;
-    let mut view = crate::branches::private_view::open(owner, &prepared)?;
-    view.read_only = false;
+    let view = crate::branches::private_view::open_writable(owner, &prepared)?;
     let keys = selected
         .iter()
         .filter(|(_, resolution)| {

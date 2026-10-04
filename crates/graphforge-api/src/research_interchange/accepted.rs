@@ -1,10 +1,11 @@
 //! Preserve exact selected acceptance mappings with independently narrowed proof roots.
 use crate::branches::{baseline, fields};
 use crate::{CancellationToken, GfError, GraphForge, ResearchFieldIdentity};
+use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::research_versions::{
     PreparedResearchContent, ResearchAcceptedMapping, ResearchRegistry,
 };
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 

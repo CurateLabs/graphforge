@@ -1,6 +1,6 @@
 //! Two-sided verdict engine for the bulk-ingest gate (#1476).
 //!
-//! Measurement lives in the `m6_storage_io` bench; this module owns only the
+//! Measurement lives in the `storage_io` bench; this module owns only the
 //! judgment:
 //! given [`IngestObservation`] rows and the banked [`GateLimits`], decide which
 //! limits were breached in *either* direction and, on the ratchet side, print
@@ -20,9 +20,14 @@
 //!   remembered.
 //!
 //! This is a ratchet, not a wall: the remedy is one constant in the PR that
-//! won the gain. Throughput is the one metric excluded from the ratchet side,
-//! because wall clock is the one measurement host contention can move without
-//! any code change.
+//! won the gain.
+//!
+//! Two of the four limits are **host-bound** (#1672): wall-clock throughput
+//! and CPU per edge mean something only on the machine their constants were
+//! banked on. They are judged where the run declares that host and reported
+//! as notes everywhere else, so a developer machine neither fails on the
+//! runner's numbers nor is told to bank its own. The two byte-counter limits
+//! are deterministic and are judged everywhere.
 
 use std::collections::HashMap;
 
@@ -158,18 +163,38 @@ pub enum RatchetPolicy {
     /// metric's recorded reproducibility, not one global tolerance (#1476).
     Margin(f64),
     /// Never fail the ratchet side; report an unbanked gain as a note instead.
-    /// Used for wall-clock throughput, whose ±48% under-load swing is host
-    /// contention, not code (#1476).
+    #[allow(
+        dead_code,
+        reason = "no banked limit is excluded since throughput was banked from its own runner \
+                  (#1672); the verdict tests disarm single ratchets with it to judge one metric \
+                  at a time"
+    )]
     Excluded {
         /// Why the ratchet side is off and what lifts the exclusion.
         reason: &'static str,
     },
 }
 
-/// Why wall-clock throughput is not auto-ratcheted (#1476).
-pub const THROUGHPUT_RATCHET_EXCLUSION: &str = "wall-clock edges/second moved ±48% under load on a shared host with no \
-     code change; the ratchet side stays off until this floor's baseline is \
-     banked from the isolated codspeed-macro runner the nightly already runs on";
+/// Whether the host-bound limits — wall-clock throughput and CPU per edge —
+/// are judged on this run (#1672).
+#[derive(Debug, Clone, Copy)]
+pub enum HostBoundJudgment {
+    /// The run is on the host the constants were banked on: both sides fail
+    /// the gate.
+    Judged,
+    /// Any other host: what would have been a breach is reported as a note.
+    ReportOnly {
+        /// Which host the constants belong to and how a run declares it.
+        reason: &'static str,
+    },
+}
+
+/// Ratchet margin for wall-clock throughput **on the banked host**. Twelve
+/// consecutive isolated nightlies of unchanged-cost code spanned 9,959 to
+/// 11,954 edges/sec at the binding (smallest) rung, ±9% about their midpoint;
+/// 40% puts the ratchet trigger above the best of them, so runner noise cannot
+/// demand a re-bank while a gain of about a fifth over the typical night still must be banked.
+pub const INGEST_RATCHET_MARGIN_EDGES_PER_SECOND: f64 = 0.40;
 
 /// Ratchet margin for bytes read per edge: reproduced to the byte across
 /// loaded-host runs, so 10% covers genuine cross-run drift several times over.
@@ -186,8 +211,8 @@ pub const INGEST_RATCHET_MARGIN_READ_DEGRADATION_RATIO: f64 = 0.10;
 
 /// The banked constants and per-metric ratchet policies the gate enforces.
 ///
-/// Filled in from the `INGEST_*` constants in `m6_storage_io.rs`, which stay
-/// there so `scripts/ci/check-m6-benchmarks.py` can freeze them.
+/// Filled in from the `INGEST_*` constants in `storage_io.rs`, which stay
+/// there so `scripts/ci/check-storage-benchmarks.py` can freeze them.
 #[derive(Debug, Clone, Copy)]
 pub struct GateLimits {
     /// Throughput floor in edges per second, enforced at every swept size.
@@ -206,6 +231,27 @@ pub struct GateLimits {
     pub ratchet_cpu_micros_per_edge: RatchetPolicy,
     /// Ratchet policy for the read-degradation ratio.
     pub ratchet_read_degradation_ratio: RatchetPolicy,
+    /// Whether throughput and CPU per edge are judged or only reported.
+    pub host_bound: HostBoundJudgment,
+}
+
+/// Which side of a limit a host-bound finding is on.
+#[derive(Clone, Copy)]
+enum Side {
+    Regression,
+    Ratchet,
+}
+
+/// File a host-bound finding as a failure on the banked host and as a note
+/// anywhere else.
+fn record_host_bound(verdict: &mut GateVerdict, limits: &GateLimits, side: Side, message: String) {
+    match (limits.host_bound, side) {
+        (HostBoundJudgment::Judged, Side::Regression) => verdict.breaches.push(message),
+        (HostBoundJudgment::Judged, Side::Ratchet) => verdict.ratchet_breaches.push(message),
+        (HostBoundJudgment::ReportOnly { reason }, _) => verdict
+            .notes
+            .push(format!("not judged ({reason}): {message}")),
+    }
 }
 
 /// Outcome of judging one gate run.
@@ -272,12 +318,13 @@ fn regression_breaches(
 ) {
     for row in rows {
         if row.edges_per_second() < limits.floor_edges_per_second {
-            verdict.breaches.push(format!(
+            let message = format!(
                 "{} edges: {:.0} edges/sec is below the {:.0} edges/sec floor",
                 row.edges,
                 row.edges_per_second(),
                 limits.floor_edges_per_second,
-            ));
+            );
+            record_host_bound(verdict, limits, Side::Regression, message);
         }
         if row.bytes_read_per_edge() > limits.ceiling_bytes_read_per_edge {
             verdict.breaches.push(format!(
@@ -290,10 +337,11 @@ fn regression_breaches(
         if let Some(cpu) = row.cpu_micros_per_edge()
             && cpu > limits.ceiling_cpu_micros_per_edge
         {
-            verdict.breaches.push(format!(
+            let message = format!(
                 "{} edges: {cpu:.2} us CPU per edge exceeds the {:.2} us ceiling",
                 row.edges, limits.ceiling_cpu_micros_per_edge,
-            ));
+            );
+            record_host_bound(verdict, limits, Side::Regression, message);
         }
     }
     if read_ratio > limits.max_read_degradation_ratio {
@@ -343,13 +391,14 @@ fn ratchet_breaches(
         let trigger = limits.ceiling_cpu_micros_per_edge * (1.0 - margin);
         if cpu_worst < trigger {
             let suggested = snap_ceil(cpu_worst * (1.0 + margin / 2.0), 2);
-            verdict.ratchet_breaches.push(format!(
+            let message = format!(
                 "unbanked gain: worst {cpu_worst:.2} us CPU per edge is more than \
                  {percent:.0}% under the {:.2} us ceiling; write const \
                  INGEST_CEILING_CPU_MICROS_PER_EDGE: f64 = {suggested:.2};",
                 limits.ceiling_cpu_micros_per_edge,
                 percent = margin * 100.0,
-            ));
+            );
+            record_host_bound(verdict, limits, Side::Ratchet, message);
         }
     }
     if let Some(margin) = GateVerdict::ratchet_margin(limits.ratchet_read_degradation_ratio) {
@@ -378,13 +427,14 @@ fn throughput_ratchet(rows: &[IngestObservation], limits: &GateLimits, verdict: 
             let trigger = limits.floor_edges_per_second * (1.0 + margin);
             if best > trigger {
                 let suggested = snap_floor(best * (1.0 - margin / 2.0), 0);
-                verdict.ratchet_breaches.push(format!(
+                let message = format!(
                     "unbanked gain: best {best:.0} edges/sec across the sweep is more \
                      than {percent:.0}% over the {:.0} edges/sec floor; write const \
                      INGEST_FLOOR_EDGES_PER_SECOND: f64 = {suggested:.1};",
                     limits.floor_edges_per_second,
                     percent = margin * 100.0,
-                ));
+                );
+                record_host_bound(verdict, limits, Side::Ratchet, message);
             }
         }
         RatchetPolicy::Excluded { reason } => {
@@ -456,6 +506,15 @@ pub fn limits_report(limits: &GateLimits) -> HashMap<&'static str, serde_json::V
         (
             "ratchet_read_degradation_ratio",
             policy_value(limits.ratchet_read_degradation_ratio),
+        ),
+        (
+            "host_bound",
+            match limits.host_bound {
+                HostBoundJudgment::Judged => serde_json::json!("judged"),
+                HostBoundJudgment::ReportOnly { reason } => {
+                    serde_json::json!({ "report_only": reason })
+                }
+            },
         ),
     ])
 }

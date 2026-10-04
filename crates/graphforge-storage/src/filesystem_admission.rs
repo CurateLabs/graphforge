@@ -13,6 +13,7 @@
 //! retained directory identity plus post-operation reconciliation ensure a
 //! concurrent namespace change cannot produce a successful admission.
 
+use graphforge_filesystem::ObservedSync as _;
 use std::fs::File;
 #[cfg(any(test, windows))]
 use std::fs::OpenOptions;
@@ -23,7 +24,8 @@ use std::time::Instant;
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_filesystem::is_link_or_reparse;
 
-use sha2::{Digest as _, Sha256};
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
+use sha2::Digest as _;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use sysinfo::Disks;
 
@@ -200,10 +202,13 @@ impl ProjectLifecycleAdmission {
         {
             return Err(unsupported("REMOVE", "project_identity_changed"));
         }
-        std::fs::remove_dir_all(&root)
-            .map_err(|_| unsupported("REMOVE", "project_remove_failed"))?;
-        complete_namespace_barrier(parent.path())
-            .map_err(|_| unsupported("REMOVE", "parent_namespace_barrier_failed"))?;
+        crate::durable_commit::retire_owned_tree(
+            &parent.directory,
+            root.file_name()
+                .ok_or_else(|| unsupported("REMOVE", "project_identity_unavailable"))?,
+            project_identity,
+        )
+        .map_err(|_| unsupported("REMOVE", "project_remove_failed"))?;
         parent.revalidate("REMOVE", "parent_identity_changed")?;
         if let Some(lock) = &lifecycle_lock {
             lock.revalidate()?;
@@ -343,7 +348,7 @@ fn admit_project_lifecycle_inner(
                 &parent,
                 &target_name,
                 || create_private_child_directory(&parent, &target_name, &root),
-                || complete_namespace_barrier_handle(&parent),
+                || crate::durable_commit::acknowledge_directory(&parent.directory),
             )?;
         }
         Err(_) => return Err(unsupported("IDENTITY", "target_metadata_unavailable")),
@@ -553,10 +558,13 @@ impl LifecycleLock {
         let path = parent.path().join(&name);
         let file = open_lifecycle_lock_file(parent, &name)
             .map_err(|_| unsupported("LOCK", "lifecycle_lock_open_failed"))?;
-        file.sync_all()
-            .map_err(|_| unsupported("LOCK", "lifecycle_lock_flush_failed"))?;
-        complete_namespace_barrier(parent.path())
-            .map_err(|_| unsupported("LOCK", "parent_namespace_barrier_failed"))?;
+        crate::durable_commit::acknowledge_created(
+            &parent.directory,
+            std::ffi::OsStr::new(&name),
+            &file,
+            || Ok(()),
+        )
+        .map_err(|_| unsupported("LOCK", "lifecycle_lock_flush_failed"))?;
         crate::file_lock::lock_exclusive(&file)
             .map_err(|_| unsupported("LOCK", "lifecycle_lock_failed"))?;
         let identity = graphforge_filesystem::file_identity(&file)
@@ -1240,7 +1248,7 @@ fn run_probe(
     lock.write_all(PROBE_BYTES_A)
         .map_err(|_| unsupported("WRITE", "lock_file_write_failed"))?;
     hit(fault, ProbeFault::Write, "WRITE")?;
-    lock.sync_all()
+    lock.observed_sync_all()
         .map_err(|_| unsupported("FILE_FLUSH", "lock_file_flush_failed"))?;
     hit(fault, ProbeFault::FileFlush, "FILE_FLUSH")?;
     verify_stable_identity(&lock, &lock_path, parent.path())?;
@@ -1315,7 +1323,7 @@ fn replace_probe_file(
     let mut initial = create_new_file(probe, "initial")?;
     initial
         .write_all(PROBE_BYTES_A)
-        .and_then(|()| initial.sync_all())
+        .and_then(|()| initial.observed_sync_all())
         .map_err(|_| unsupported("REPLACE", "initial_file_flush_failed"))?;
     drop(initial);
     graphforge_filesystem::install_new_file(
@@ -1332,7 +1340,7 @@ fn replace_probe_file(
     let mut replacement = create_new_file(probe, "replacement")?;
     replacement
         .write_all(PROBE_BYTES_B)
-        .and_then(|()| replacement.sync_all())
+        .and_then(|()| replacement.observed_sync_all())
         .map_err(|_| unsupported("REPLACE", "replacement_file_flush_failed"))?;
     drop(replacement);
     hit(fault, ProbeFault::Replace, "REPLACE")?;
@@ -1528,7 +1536,7 @@ fn cleanup_probe(
 fn complete_namespace_barrier_handle(parent: &LifecycleDirectory) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        parent.handle().sync_all()
+        parent.handle().observed_sync_all()
     }
     #[cfg(not(unix))]
     {
@@ -1538,7 +1546,7 @@ fn complete_namespace_barrier_handle(parent: &LifecycleDirectory) -> std::io::Re
 
 #[cfg(unix)]
 fn complete_namespace_barrier(path: &Path) -> std::io::Result<()> {
-    File::open(path)?.sync_all()
+    File::open(path)?.observed_sync_all()
 }
 
 #[cfg(windows)]
@@ -1786,14 +1794,14 @@ mod tests {
         assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 1);
     }
 
-    const LIFECYCLE_TEST_COOKIE: &str = "graphforge-780-lifecycle-test";
+    const LIFECYCLE_TEST_COOKIE: &str = "graphforge-lifecycle-test";
 
     #[test]
     fn subprocess_lifecycle_admission() {
-        if std::env::var("GF_780_LIFECYCLE_COOKIE").as_deref() != Ok(LIFECYCLE_TEST_COOKIE) {
+        if std::env::var("GF_LIFECYCLE_LIFECYCLE_COOKIE").as_deref() != Ok(LIFECYCLE_TEST_COOKIE) {
             return;
         }
-        let root = PathBuf::from(std::env::var_os("GF_780_PROJECT_ROOT").unwrap());
+        let root = PathBuf::from(std::env::var_os("GF_LIFECYCLE_PROJECT_ROOT").unwrap());
         let admission = admit_project_lifecycle(
             root,
             ProjectLifecycleMode::Durable,
@@ -1822,8 +1830,8 @@ mod tests {
                     "filesystem_admission::tests::subprocess_lifecycle_admission",
                     "--nocapture",
                 ])
-                .env("GF_780_LIFECYCLE_COOKIE", LIFECYCLE_TEST_COOKIE)
-                .env("GF_780_PROJECT_ROOT", &root)
+                .env("GF_LIFECYCLE_LIFECYCLE_COOKIE", LIFECYCLE_TEST_COOKIE)
+                .env("GF_LIFECYCLE_PROJECT_ROOT", &root)
                 .env(
                     "GRAPHFORGE_PROJECT_FAILPOINTS",
                     "graphforge-internal-subprocess-v1",
@@ -1848,8 +1856,8 @@ mod tests {
                     "filesystem_admission::tests::subprocess_lifecycle_admission",
                     "--nocapture",
                 ])
-                .env("GF_780_LIFECYCLE_COOKIE", LIFECYCLE_TEST_COOKIE)
-                .env("GF_780_PROJECT_ROOT", &root)
+                .env("GF_LIFECYCLE_LIFECYCLE_COOKIE", LIFECYCLE_TEST_COOKIE)
+                .env("GF_LIFECYCLE_PROJECT_ROOT", &root)
                 .status()
                 .unwrap();
             assert!(retry.success(), "retry after {phase} failed: {retry}");
@@ -2028,14 +2036,14 @@ mod tests {
         }
     }
 
-    const LOCK_TEST_COOKIE: &str = "graphforge-779-native-lock-test";
+    const LOCK_TEST_COOKIE: &str = "graphforge-native-lock-test";
 
     #[test]
     fn subprocess_lock_contender() {
-        if std::env::var("GF_779_LOCK_COOKIE").as_deref() != Ok(LOCK_TEST_COOKIE) {
+        if std::env::var("GF_NATIVE_LOCK_LOCK_COOKIE").as_deref() != Ok(LOCK_TEST_COOKIE) {
             return;
         }
-        let path = PathBuf::from(std::env::var_os("GF_779_LOCK_PATH").unwrap());
+        let path = PathBuf::from(std::env::var_os("GF_NATIVE_LOCK_LOCK_PATH").unwrap());
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -2046,11 +2054,11 @@ mod tests {
 
     #[test]
     fn subprocess_crash_lock_holder() {
-        if std::env::var("GF_779_CRASH_COOKIE").as_deref() != Ok(LOCK_TEST_COOKIE) {
+        if std::env::var("GF_NATIVE_LOCK_CRASH_COOKIE").as_deref() != Ok(LOCK_TEST_COOKIE) {
             return;
         }
-        let path = PathBuf::from(std::env::var_os("GF_779_LOCK_PATH").unwrap());
-        let ready = PathBuf::from(std::env::var_os("GF_779_READY_PATH").unwrap());
+        let path = PathBuf::from(std::env::var_os("GF_NATIVE_LOCK_LOCK_PATH").unwrap());
+        let ready = PathBuf::from(std::env::var_os("GF_NATIVE_LOCK_READY_PATH").unwrap());
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -2059,7 +2067,7 @@ mod tests {
         crate::file_lock::lock_exclusive(&file).unwrap();
         let mut signal = File::create(ready).unwrap();
         signal.write_all(b"locked").unwrap();
-        signal.sync_all().unwrap();
+        signal.observed_sync_all().unwrap();
         std::process::abort();
     }
 
@@ -2075,8 +2083,8 @@ mod tests {
                 "filesystem_admission::tests::subprocess_lock_contender",
                 "--nocapture",
             ])
-            .env("GF_779_LOCK_COOKIE", LOCK_TEST_COOKIE)
-            .env("GF_779_LOCK_PATH", &path)
+            .env("GF_NATIVE_LOCK_LOCK_COOKIE", LOCK_TEST_COOKIE)
+            .env("GF_NATIVE_LOCK_LOCK_PATH", &path)
             .status()
             .unwrap();
         assert!(status.success());
@@ -2097,9 +2105,9 @@ mod tests {
                 "filesystem_admission::tests::subprocess_crash_lock_holder",
                 "--nocapture",
             ])
-            .env("GF_779_CRASH_COOKIE", LOCK_TEST_COOKIE)
-            .env("GF_779_LOCK_PATH", &path)
-            .env("GF_779_READY_PATH", &ready)
+            .env("GF_NATIVE_LOCK_CRASH_COOKIE", LOCK_TEST_COOKIE)
+            .env("GF_NATIVE_LOCK_LOCK_PATH", &path)
+            .env("GF_NATIVE_LOCK_READY_PATH", &ready)
             .spawn()
             .unwrap();
         let status = child

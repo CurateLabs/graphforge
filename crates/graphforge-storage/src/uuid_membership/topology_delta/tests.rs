@@ -11,6 +11,7 @@ use super::super::V4_ORDINAL_MANIFEST;
 use super::super::maintenance::manifest_file_names;
 use super::super::maintenance::standalone_v4_pinned_update;
 use super::super::ordinal_artifacts::stage_v4_ordinal_artifacts;
+use super::super::ordinal_artifacts::stage_v4_ordinal_artifacts_unordered;
 use super::super::rebuild::rebuild_uuid_membership_indexes;
 use super::super::rebuild::rebuild_v4_ordinal_identity;
 use super::super::tests::fixture;
@@ -126,6 +127,146 @@ fn v4_delta_append_delete_binary_carry_reopens_without_resurrection() {
             Some(Uuid::from_u128(5)),
         ]
     );
+}
+
+/// Publish one append and return the manifest it planned.
+fn append_v4_generation(
+    root: &std::path::Path,
+    prior: crate::V4OrdinalIdentityManifest,
+    nodes: &[(Uuid, u64)],
+    tombstones: &[u64],
+) -> crate::V4OrdinalIdentityManifest {
+    let generation = prior.topology_generation + 1;
+    let pinned = pinned_v4_update(root, prior);
+    let mut batch = crate::staging::RewriteBatch::new();
+    let planned = prepare_v4_ordinal_delta(
+        root,
+        generation - 1,
+        generation,
+        &pinned,
+        &mut batch,
+        nodes,
+        tombstones,
+        &"44".repeat(32),
+    )
+    .unwrap();
+    install_v4_plan(&batch);
+    planned.manifest
+}
+
+/// Like [`append_v4_generation`], but the pinned inputs come from an opened,
+/// completely admitted handle, as a real writer obtains them.
+fn append_v4_generation_through_handle(
+    root: &std::path::Path,
+    prior: crate::V4OrdinalIdentityManifest,
+    nodes: &[(Uuid, u64)],
+    tombstones: &[u64],
+) -> crate::V4OrdinalIdentityManifest {
+    let index = root.join(INDEX_DIR);
+    let body = serde_json::to_vec(&prior).unwrap();
+    fs::write(index.join(V4_ORDINAL_MANIFEST), &body).unwrap();
+    fs::write(index.join("ordinal-v4.lock"), []).unwrap();
+    let authority = crate::ordinal_identity_v4::V4OrdinalIdentityAuthority {
+        topology_generation: prior.topology_generation,
+        manifest_sha256: hex_sha256(&body),
+    };
+    let crate::V4OrdinalIdentityOpen::Ready(mut handle) =
+        crate::ordinal_identity_v4::V4OrdinalIdentityHandle::open(
+            root,
+            &authority,
+            crate::V4OrdinalIdentityLimits::default(),
+        )
+        .unwrap()
+    else {
+        panic!("v4 expected");
+    };
+    let pinned = handle.pinned_update_inputs().unwrap();
+    let generation = prior.topology_generation + 1;
+    let mut batch = crate::staging::RewriteBatch::new();
+    let planned = prepare_v4_ordinal_delta(
+        root,
+        generation - 1,
+        generation,
+        &pinned,
+        &mut batch,
+        nodes,
+        tombstones,
+        &"44".repeat(32),
+    )
+    .unwrap();
+    install_v4_plan(&batch);
+    planned.manifest
+}
+
+#[test]
+fn v4_delta_publishes_the_uuid_order_it_derived_never_one_it_assumed() {
+    let new_project = |records: &[(u128, u64)]| {
+        let root = tempfile::tempdir().unwrap();
+        let index_path = root.path().join(INDEX_DIR);
+        fs::create_dir_all(&index_path).unwrap();
+        let index = graphforge_filesystem::StableDirectory::open(&index_path).unwrap();
+        let base = stage_v4_ordinal_artifacts_unordered(
+            records
+                .iter()
+                .map(|(uuid, id)| (Uuid::from_u128(*uuid), *id))
+                .collect(),
+            1,
+            &index,
+        )
+        .unwrap();
+        (root, base)
+    };
+    let u = Uuid::from_u128;
+
+    // Construction records what it streamed: ascending, then not.
+    let (ordered_root, ordered) = new_project(&[(10, 1), (20, 2), (30, 3)]);
+    assert_eq!(ordered.uuid_order_matches_ordinals, Some(true));
+    let (_, shuffled) = new_project(&[(30, 1), (10, 2), (20, 3)]);
+    assert_eq!(shuffled.uuid_order_matches_ordinals, Some(false));
+
+    // An append whose UUIDs ascend past the parent's last keeps the order...
+    let next = append_v4_generation(ordered_root.path(), ordered.clone(), &[(u(40), 4)], &[]);
+    assert_eq!(next.uuid_order_matches_ordinals, Some(true));
+    // ...and one that sorts below it, only at the boundary, breaks it. The
+    // tombstone changes nothing: a deleted identity still holds its place.
+    let (root, base) = new_project(&[(10, 1), (20, 2), (30, 3)]);
+    let broken = append_v4_generation(root.path(), base.clone(), &[(u(25), 4)], &[3]);
+    assert_eq!(broken.uuid_order_matches_ordinals, Some(false));
+    // A recorded inversion is permanent: later ascending appends cannot undo it.
+    let after = append_v4_generation(root.path(), broken, &[(u(99), 5)], &[]);
+    assert_eq!(after.uuid_order_matches_ordinals, Some(false));
+
+    // A delta that is itself unordered breaks an ordered parent.
+    let (root, base) = new_project(&[(10, 1), (20, 2)]);
+    let unordered_delta = append_v4_generation(root.path(), base, &[(u(50), 3), (u(40), 4)], &[]);
+    assert_eq!(unordered_delta.uuid_order_matches_ordinals, Some(false));
+
+    // An unknown parent is promoted by the first generation built on it,
+    // because the writer derives the fact from the authenticated parent when it
+    // opens it: true for ordered data, false for unordered data.
+    for (records, expected) in [
+        (&[(10_u128, 1_u64), (20, 2)][..], Some(true)),
+        (&[(20, 1), (10, 2)][..], Some(false)),
+    ] {
+        let (root, mut unknown) = new_project(records);
+        unknown.uuid_order_matches_ordinals = None;
+        let promoted =
+            append_v4_generation_through_handle(root.path(), unknown, &[(u(30), 3)], &[]);
+        assert_eq!(
+            promoted.uuid_order_matches_ordinals, expected,
+            "{records:?}"
+        );
+    }
+    // Inputs that bypassed admission are never promoted: unknown stays unknown.
+    let (root, mut unknown) = new_project(&[(10, 1), (20, 2)]);
+    unknown.uuid_order_matches_ordinals = None;
+    let bypassed = append_v4_generation(root.path(), unknown, &[(u(30), 3)], &[]);
+    assert_eq!(bypassed.uuid_order_matches_ordinals, None);
+
+    // A tombstone-only generation adds no ordinals and keeps the claim.
+    let (root, base) = new_project(&[(10, 1), (20, 2)]);
+    let deleted = append_v4_generation(root.path(), base, &[], &[2]);
+    assert_eq!(deleted.uuid_order_matches_ordinals, Some(true));
 }
 
 #[test]
@@ -487,4 +628,68 @@ fn retained_planner_stages_only_new_and_binary_carry_outputs() {
     assert_eq!(subsequent.snapshot_admission_authentication_blocks, 0);
     assert_eq!(subsequent.validation_scan_bytes, 0);
     assert_eq!(subsequent.validation_scan_blocks, 0);
+}
+
+#[test]
+fn topology_delta_digest_accounts_canonical_logical_contract_bytes() {
+    use graphforge_core::hash_observation::operation::{Capture, Snapshot};
+    use sha2::{Digest, Sha256};
+    let nodes = [(Uuid::from_u128(2), 20_u64), (Uuid::from_u128(1), 10)];
+    let edges = [Uuid::from_u128(4), Uuid::from_u128(3)];
+    let deleted_nodes = [(Uuid::from_u128(6), 60_u64), (Uuid::from_u128(5), 50)];
+    let deleted_edges = [Uuid::from_u128(8), Uuid::from_u128(7)];
+    let mut preimage = b"graphforge/uuid-index-topology-delta/v1".to_vec();
+    for (tag, tuples) in [
+        (0, [nodes[1], nodes[0]]),
+        (2, [deleted_nodes[1], deleted_nodes[0]]),
+    ] {
+        if tag == 2 {
+            for uuid in [edges[1], edges[0]] {
+                preimage.push(1);
+                preimage.extend_from_slice(uuid.as_bytes());
+            }
+        }
+        for (uuid, surrogate) in tuples {
+            preimage.push(tag);
+            preimage.extend_from_slice(uuid.as_bytes());
+            preimage.extend_from_slice(&surrogate.to_be_bytes());
+        }
+    }
+    for uuid in [deleted_edges[1], deleted_edges[0]] {
+        preimage.push(3);
+        preimage.extend_from_slice(uuid.as_bytes());
+    }
+    let expected = Sha256::digest(&preimage)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let capture = Capture::start();
+    let actual = super::topology_delta_sha256(&nodes, &edges, &deleted_nodes, &deleted_edges);
+    assert_eq!(actual, expected);
+    assert_eq!(
+        capture.snapshot(),
+        Snapshot {
+            contract_identity_sha256_bytes: preimage.len() as u64,
+            ..Snapshot::default()
+        }
+    );
+    drop(capture);
+    assert_eq!(
+        super::topology_delta_sha256(
+            &[nodes[1], nodes[0]],
+            &[edges[1], edges[0]],
+            &[deleted_nodes[1], deleted_nodes[0]],
+            &[deleted_edges[1], deleted_edges[0]]
+        ),
+        actual
+    );
+    assert_ne!(
+        super::topology_delta_sha256(
+            &[(nodes[0].0, 21), nodes[1]],
+            &edges,
+            &deleted_nodes,
+            &deleted_edges
+        ),
+        actual
+    );
 }

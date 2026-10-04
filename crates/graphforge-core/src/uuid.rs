@@ -47,6 +47,19 @@ pub fn portable_v2_import_generation(operation: &Uuid) -> Uuid {
     new_v5(operation, b"graphforge-portable-v2-import-generation/1")
 }
 
+/// Derive the empty parent generation used by a fresh portable-v2 import.
+/// The versioned name is a persisted compatibility contract.
+#[must_use]
+pub fn portable_v2_bootstrap_generation(operation: &Uuid) -> Uuid {
+    new_v5(operation, b"graphforge-portable-v2-bootstrap-generation/1")
+}
+
+/// Derive the empty parent's transaction in a separate versioned domain.
+#[must_use]
+pub fn portable_v2_bootstrap_transaction(operation: &Uuid) -> Uuid {
+    new_v5(operation, b"graphforge-portable-v2-bootstrap-transaction/1")
+}
+
 /// Derive one composite delta operation using its original mutation index.
 /// The slash separates the versioned domain from the unambiguous decimal index.
 #[must_use]
@@ -74,6 +87,54 @@ pub fn hub_clone_operation(repository: &str, immutable_version: &str) -> Uuid {
     new_v5(
         &Uuid::NAMESPACE_URL,
         format!("{repository}:{immutable_version}").as_bytes(),
+    )
+}
+
+/// Derive a hub clone operation for one exact research Version of a snapshot.
+///
+/// A Project-package clone keeps [`hub_clone_operation`]. A research clone also
+/// binds the selected research `version_uuid` and its native identity digest, so
+/// clones of different Versions (a Branch head versus an immutable base) of one
+/// repository snapshot never share an operation, and therefore never share the
+/// generation and transaction identities derived from it.
+#[must_use]
+pub fn hub_research_clone_operation(
+    repository: &str,
+    immutable_version: &str,
+    version_uuid: &str,
+    identity_digest: &str,
+) -> Uuid {
+    new_v5(
+        &hub_clone_operation(repository, immutable_version),
+        format!("graphforge-hub-research-clone/1/{version_uuid}/{identity_digest}").as_bytes(),
+    )
+}
+
+/// Derive the default `gf publish` operation for one exact research Version
+/// of one exact Project state.
+///
+/// `repository` is the canonical `owner/repository`, `git_ref` the published
+/// Branch ref (absent when an exact Version is published without a Branch),
+/// `version_uuid` the published Version, and `project_content` the identity of
+/// the exported Project state (the committed generation's manifest digest).
+/// NUL cannot occur in any component, so the encoding is unambiguous.
+/// Publishing the same Version of an unchanged Project to the same ref again
+/// reuses the operation and replays its receipt; a changed Project gets a new
+/// operation.
+#[must_use]
+pub fn hub_publish_operation(
+    repository: &str,
+    git_ref: Option<&str>,
+    version_uuid: &str,
+    project_content: &str,
+) -> Uuid {
+    new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!(
+            "graphforge-hub-publish/1\0{repository}\0{}\0{version_uuid}\0{project_content}",
+            git_ref.unwrap_or("")
+        )
+        .as_bytes(),
     )
 }
 
@@ -158,6 +219,14 @@ mod tests {
                 "167a58d3-52f2-533e-b3c4-01d743d7537d",
             ),
             (
+                portable_v2_bootstrap_generation(&operation),
+                "d633da3b-0a2e-543e-bcdd-d383b3c52794",
+            ),
+            (
+                portable_v2_bootstrap_transaction(&operation),
+                "7f6e6309-9103-5c77-837a-0efffec19b70",
+            ),
+            (
                 composite_delta_operation(&operation, 0),
                 "bf613aba-38a4-5ae7-8982-1675caa13e7c",
             ),
@@ -186,6 +255,60 @@ mod tests {
                 "29ea96be-d350-5026-a85b-32cbf5b835cc",
             ),
             (
+                hub_research_clone_operation(
+                    "curatelabs/demo",
+                    &version_a,
+                    "01900000-0000-7000-8000-000000000021",
+                    &format!("sha256:{}", "c".repeat(64)),
+                ),
+                "a53b2fd9-7de0-5826-9fc3-cbd8f7b07c4c",
+            ),
+            (
+                hub_research_clone_operation(
+                    "curatelabs/demo",
+                    &version_a,
+                    "01900000-0000-7000-8000-000000000022",
+                    &format!("sha256:{}", "c".repeat(64)),
+                ),
+                "c4bb0970-3473-5822-a82a-516833d8fde8",
+            ),
+            (
+                hub_publish_operation(
+                    "curatelabs/demo",
+                    Some("main"),
+                    "01900000-0000-7000-8000-000000000021",
+                    &format!("sha256:{}", "e".repeat(64)),
+                ),
+                "d93f3756-aea3-568b-b2b6-984835743c81",
+            ),
+            (
+                hub_publish_operation(
+                    "curatelabs/demo",
+                    None,
+                    "01900000-0000-7000-8000-000000000021",
+                    &format!("sha256:{}", "e".repeat(64)),
+                ),
+                "b8c6df3d-28dc-589b-bf90-2378b9a388fc",
+            ),
+            (
+                hub_publish_operation(
+                    "curatelabs/demo",
+                    Some("main"),
+                    "01900000-0000-7000-8000-000000000022",
+                    &format!("sha256:{}", "e".repeat(64)),
+                ),
+                "7f331a69-7ea4-5ceb-9280-9f44b8db5a2d",
+            ),
+            (
+                hub_publish_operation(
+                    "curatelabs/demo",
+                    Some("main"),
+                    "01900000-0000-7000-8000-000000000021",
+                    &format!("sha256:{}", "f".repeat(64)),
+                ),
+                "e0a6d8fd-b812-5603-ba77-b694e25648c9",
+            ),
+            (
                 new_v5(&PROVENANCE_NAMESPACE, b"graphforge"),
                 "59a64d29-3fe8-5c2c-ad21-1f285e53d758",
             ),
@@ -206,6 +329,14 @@ mod tests {
         assert_ne!(
             portable_v2_import_generation(&operation),
             portable_v2_import_generation(&other_operation)
+        );
+        assert_ne!(
+            portable_v2_bootstrap_generation(&operation),
+            portable_v2_bootstrap_generation(&other_operation)
+        );
+        assert_ne!(
+            portable_v2_bootstrap_transaction(&operation),
+            portable_v2_bootstrap_transaction(&other_operation)
         );
         assert_ne!(
             composite_delta_operation(&operation, 0),

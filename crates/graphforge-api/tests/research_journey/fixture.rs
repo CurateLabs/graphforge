@@ -199,6 +199,8 @@ impl Journey {
         self.graph
             .execute_research_branch(
                 &ExecuteResearchBranchRequest {
+                    author: None,
+                    committer: None,
                     operation_uuid: Uuid::now_v7(),
                     expected_generation_uuid: self.generation(),
                     branch_uuid: branch,
@@ -362,6 +364,8 @@ impl Journey {
         let prepared = self
             .graph
             .prepare_research_version(PrepareResearchVersionRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 version_uuid: self.origin,
                 context_uuid: Uuid::now_v7(),
@@ -465,6 +469,8 @@ impl Journey {
             self.graph
                 .create_research_branch(
                     &CreateResearchBranchRequest {
+                        author: None,
+                        committer: None,
                         operation_uuid: Uuid::now_v7(),
                         expected_generation_uuid: self.generation(),
                         branch_uuid: branch,

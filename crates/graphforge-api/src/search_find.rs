@@ -3,15 +3,20 @@
 use graphforge_search::{
     EmbeddingGenerationQuery, EmbeddingVectorQuery, FindSearchLimits, FindSearchRequest,
     FusedSearchHit, MatchedOn, SearchChannelHit, VectorIndexRequest, VectorLifecycleLimits,
-    reciprocal_rank_fusion, search_embedding_generation, search_graph_native, search_graph_vectors,
+    reciprocal_rank_fusion, search_graph_native,
 };
 use graphforge_storage::{
     SearchArtifactError, SearchArtifactKey, VectorSearchHit, current_search_artifact,
     generation::read_search_generation,
 };
 
-use super::search_output::shape_search_output;
+use super::search_output::shape_search_output_with_members;
 use super::{FindOptions, GfError, GraphForge};
+use graphforge_search::embedding_query::search_embedding_generation_with_projection;
+use graphforge_search::vector_lifecycle::{
+    LabelMemberProjection, project_label_members_snapshot_with_topology,
+    search_graph_vectors_with_projection,
+};
 
 enum VectorQuery {
     Raw(Vec<f32>),
@@ -71,8 +76,23 @@ impl GraphForge {
         if query.is_none() && vector_query.is_none() {
             return Err(validation("find requires text or vector retrieval"));
         }
+        let topology = self.dir().topology_files()?;
+        let ordinal = self.ordinal_identities.revalidated_handle()?;
         for attempt in 1_u8..=2 {
             let before = read_search_generation(dir)?;
+            let projection = vector_query
+                .as_ref()
+                .map(|_| {
+                    project_label_members_snapshot_with_topology(
+                        dir,
+                        Some(&topology),
+                        ordinal.as_deref(),
+                        label_id,
+                        VectorLifecycleLimits::default(),
+                        || Ok(()),
+                    )
+                })
+                .transpose()?;
             let hits = self.retrieve_find_hits(
                 dir,
                 &label,
@@ -82,9 +102,24 @@ impl GraphForge {
                 space.as_deref(),
                 force_stale,
                 limit,
+                projection.as_ref(),
+            );
+            let hits = match hits {
+                Err(GfError::Lifecycle(_))
+                    if attempt == 1 && before != read_search_generation(dir)? =>
+                {
+                    continue;
+                }
+                result => result?,
+            };
+            let batch = shape_search_output_with_members(
+                dir,
+                &self.property_inventory_for_session(),
+                ordinal.as_deref(),
+                label_id,
+                &hits,
+                projection.as_ref().map(LabelMemberProjection::members),
             )?;
-            let batch =
-                shape_search_output(dir, &self.property_inventory_for_session(), label_id, &hits)?;
             if before == read_search_generation(dir)? {
                 return Ok(batch);
             }
@@ -106,18 +141,25 @@ impl GraphForge {
         space: Option<&str>,
         force_stale: bool,
         limit: usize,
+        projection: Option<&LabelMemberProjection>,
     ) -> Result<Vec<FusedSearchHit>, GfError> {
+        let inventory = self.property_inventory_for_session();
+        let topology = self.dir().topology_files()?;
+        let ordinal = self.ordinal_identities.revalidated_handle()?;
         let text = query
             .map(|query| {
                 search_graph_native(
                     dir,
                     FindSearchRequest {
+                        topology: Some(&topology),
+                        ordinal: ordinal.as_deref(),
                         label,
                         label_id,
                         query: Some(query),
                         vector: None,
                         space: None,
                         limit,
+                        inventory: Some(&inventory),
                     },
                     FindSearchLimits::default(),
                     || Ok(()),
@@ -126,7 +168,15 @@ impl GraphForge {
             .transpose()?;
         let vector = vector_query
             .map(|vector_query| {
-                self.retrieve_vector_hits(label, label_id, vector_query, space, force_stale, limit)
+                self.retrieve_vector_hits(
+                    label,
+                    label_id,
+                    vector_query,
+                    space,
+                    force_stale,
+                    limit,
+                    projection,
+                )
             })
             .transpose()?;
 
@@ -162,6 +212,7 @@ impl GraphForge {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn retrieve_vector_hits(
         &self,
         label: &str,
@@ -170,6 +221,7 @@ impl GraphForge {
         space: Option<&str>,
         force_stale: bool,
         limit: usize,
+        projection: Option<&LabelMemberProjection>,
     ) -> Result<Vec<VectorSearchHit>, GfError> {
         // The caller retains graph read visibility for the entire find attempt.
         let workspace = self.workspace_for_session();
@@ -179,9 +231,11 @@ impl GraphForge {
             VectorQuery::Raw(vector) => {
                 let key = SearchArtifactKey::vector(label, space)?;
                 if current_search_artifact(dir, &key)?.is_some() {
-                    return soft_dimension_miss(search_graph_vectors(
+                    return soft_dimension_miss(search_graph_vectors_with_projection(
                         dir,
                         VectorIndexRequest {
+                            topology: Some(&self.dir().topology_files()?),
+                            ordinal: self.ordinal_identities.revalidated_handle()?.as_deref(),
                             label,
                             label_id,
                             space,
@@ -189,11 +243,12 @@ impl GraphForge {
                         vector,
                         limit,
                         VectorLifecycleLimits::default(),
+                        projection,
                         || Ok(()),
                     ));
                 }
                 let prepared = self.prepare_embedding_space_read(Some(space), force_stale)?;
-                soft_dimension_miss(search_embedding_generation(
+                soft_dimension_miss(search_embedding_generation_with_projection(
                     dir,
                     EmbeddingGenerationQuery {
                         prepared: &prepared,
@@ -202,12 +257,13 @@ impl GraphForge {
                         limit,
                     },
                     VectorLifecycleLimits::default(),
+                    projection,
                     || Ok(()),
                 ))
             }
             VectorQuery::Node(node_uuid) => {
                 let prepared = self.prepare_embedding_space_read(Some(space), force_stale)?;
-                soft_dimension_miss(search_embedding_generation(
+                soft_dimension_miss(search_embedding_generation_with_projection(
                     dir,
                     EmbeddingGenerationQuery {
                         prepared: &prepared,
@@ -216,6 +272,7 @@ impl GraphForge {
                         limit,
                     },
                     VectorLifecycleLimits::default(),
+                    projection,
                     || Ok(()),
                 ))
             }

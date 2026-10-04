@@ -7,7 +7,8 @@
   "pinned_identity": "profiles/gdc/graphalytics-live-identity.json",
   "identity_profiles": {
     "static": "profiles/gdc/graphalytics-static-identity.json",
-    "live": "profiles/gdc/graphalytics-live-identity.json"
+    "live": "profiles/gdc/graphalytics-live-identity.json",
+    "scorecard": "profiles/gdc/graphalytics-scorecard-identity.json"
   },
   "runner": "gdc-graphalytics",
   "datasets": ["ga-tiny"]

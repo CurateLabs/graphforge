@@ -10,6 +10,8 @@ fn archived_native_baseline_rejects_unknown_origin_without_mutating_source() {
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: graph.generation_for_read().unwrap().generation_uuid(),
                 branch_uuid: Uuid::now_v7(),
@@ -129,10 +131,12 @@ fn malformed_owner_is_rejected(
             .collect(),
         participants,
     };
+    let graph_objects =
+        graphforge_storage::begin_graph_object_publication(historical.container_root()).unwrap();
     let stage = graphforge_storage::stage_project_generation_with_graph_tree_mode(
         historical.container_root(),
         &request,
-        Some(&historical.graph_tree_root()),
+        None,
         graphforge_storage::filesystem_admission::ProjectLifecycleMode::Ephemeral,
     )
     .unwrap();
@@ -142,7 +146,7 @@ fn malformed_owner_is_rejected(
     stage
         .validate(|_| Ok(()), |_, _| Ok(()))
         .unwrap()
-        .publish()
+        .publish_with_graph_objects(&graph_objects)
         .unwrap();
     let malformed =
         graphforge_storage::resolve_project_generation(historical.container_root()).unwrap();

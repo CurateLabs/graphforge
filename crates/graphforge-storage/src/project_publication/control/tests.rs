@@ -1,6 +1,8 @@
 use super::super::tests::project;
 use super::super::*;
 use super::*;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
+use sha2::Digest;
 
 #[test]
 fn allocation_observed_atomic_replacement_preserves_coexistence_and_cleanup() {

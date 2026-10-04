@@ -16,11 +16,12 @@ use arrow::array::{
     Array, FixedSizeBinaryArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
     Int64Array, ListArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use graphforge_core::{GfError, OntologyMode};
 use graphforge_ir::{Direction, IrLiteral};
 #[cfg(test)]
 use graphforge_value::EntityTypeId;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::adjacency::AdjacencyProvider;
 use crate::algorithm_partition::{PartitionValue, ResolvedPartitionMap};
@@ -707,7 +708,17 @@ pub(crate) fn export_node_selection(
     dir: &Path,
     label: EntityTypeSelection,
 ) -> Result<AdjacencyGraph, GfError> {
-    let (node_ids, node_uuid_by_id) = selected_nodes(dir, label)?;
+    export_node_selection_from_files(
+        &graphforge_storage::TopologyFiles::discover_legacy(dir)?,
+        label,
+    )
+}
+
+pub(crate) fn export_node_selection_from_files(
+    files: &graphforge_storage::TopologyFiles,
+    label: EntityTypeSelection,
+) -> Result<AdjacencyGraph, GfError> {
+    let (node_ids, node_uuid_by_id) = selected_nodes(files, label)?;
     let node_id_by_uuid = node_uuid_by_id
         .iter()
         .map(|(&node_id, &uuid)| (uuid, node_id))
@@ -743,7 +754,11 @@ pub(crate) fn export_adjacency(
 ) -> Result<AdjacencyGraph, GfError> {
     let mut adjacency =
         crate::adjacency::AdjacencyReader::new(provider, selection.via, selection.direction)?;
-    let (node_ids, node_uuid_by_id) = selected_nodes(dir, selection.label)?;
+    let topology = match provider.admitted_inventory() {
+        Some(inventory) => graphforge_storage::TopologyFiles::from_inventory(&inventory)?,
+        None => graphforge_storage::TopologyFiles::discover_legacy(dir)?,
+    };
+    let (node_ids, node_uuid_by_id) = selected_nodes(&topology, selection.label)?;
     let selected: HashSet<u64> = node_ids.iter().copied().collect();
 
     // Bound projection work by the selected node set (#340): look up each
@@ -1141,14 +1156,14 @@ fn validate_vector_shape(nodes: usize, dimension: usize) -> Result<(), GfError> 
 }
 
 fn selected_nodes(
-    dir: &Path,
+    files: &graphforge_storage::TopologyFiles,
     label: EntityTypeSelection,
 ) -> Result<(Vec<u64>, NodeUuidMap), GfError> {
     if label == EntityTypeSelection::Missing {
         return Ok((Vec::new(), HashMap::new()));
     }
     let mut rows = Vec::new();
-    for batch in graphforge_storage::read_nodes(dir).map_err(storage_error)? {
+    for batch in graphforge_storage::read_nodes_from_files(files).map_err(storage_error)? {
         let uuids = fixed_binary(&batch, "node_uuid")?;
         let ids = uint64(&batch, "node_id")?;
         let labels = batch

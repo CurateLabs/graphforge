@@ -15,6 +15,7 @@ mod tests;
 /// Aggregate bounded-resource evidence for one adjacency build.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AdjacencyBuildMetrics {
+    pub(crate) captured_artifacts: Vec<super::CapturedAdjacencyArtifact>,
     /// Projected source rows consumed from Parquet.
     pub source_rows: u64,
     /// Sorted spill runs written across relation and union accumulators.
@@ -663,8 +664,10 @@ impl EntryGroup {
         }
         let node_count = max_key.map_or(0, |key| key.saturating_add(1));
         let edge_count = writer.edge_count;
-        let (shards, peak_shard_edges, peak_shard_nodes) = writer.finish(node_count)?;
+        let (shards, peak_shard_edges, peak_shard_nodes, captured_artifacts) =
+            writer.finish(node_count)?;
         Ok(ShardedWriteOutcome {
+            captured_artifacts,
             node_count,
             edge_count,
             shards,
@@ -675,6 +678,7 @@ impl EntryGroup {
 }
 
 struct ShardedWriteOutcome {
+    captured_artifacts: Vec<super::CapturedAdjacencyArtifact>,
     node_count: u64,
     edge_count: u64,
     shards: u64,
@@ -713,8 +717,13 @@ fn write_keyed_run(
     Ok(())
 }
 
+/// Spill-run file whose reads are attributed as they reach the file, beneath
+/// any buffering: calls count refills, not the 24-byte records decoded from
+/// them (#1449).
+type SpillRunFile = crate::lifecycle_io::ReadPathRead<std::fs::File>;
+
 struct RunCursor {
-    file: std::io::BufReader<std::fs::File>,
+    file: std::io::BufReader<SpillRunFile>,
     remaining: u64,
     current: Option<(u64, u64, u64)>,
 }
@@ -722,7 +731,7 @@ struct RunCursor {
 impl RunCursor {
     fn open(path: &Path, buffer_bytes: usize) -> Result<Self, GfError> {
         use std::io::Read;
-        let file = std::fs::File::open(path).map_err(storage_err)?;
+        let file = SpillRunFile::new(std::fs::File::open(path).map_err(storage_err)?);
         let mut file = std::io::BufReader::with_capacity(buffer_bytes, file);
         let mut magic = [0u8; 8];
         file.read_exact(&mut magic).map_err(storage_err)?;
@@ -742,7 +751,6 @@ impl RunCursor {
         }
         let mut count = [0u8; 8];
         file.read_exact(&mut count).map_err(storage_err)?;
-        crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, 20, 3);
         let mut cursor = Self {
             file,
             remaining: u64::from_le_bytes(count),
@@ -760,7 +768,6 @@ impl RunCursor {
         }
         let mut buf = [0u8; 24];
         self.file.read_exact(&mut buf).map_err(storage_err)?;
-        crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, 24, 1);
         let key = u64::from_le_bytes(buf[0..8].try_into().unwrap());
         let edge = u64::from_le_bytes(buf[8..16].try_into().unwrap());
         let neighbor = u64::from_le_bytes(buf[16..24].try_into().unwrap());
@@ -810,10 +817,11 @@ fn compact_keyed_runs(
 
 fn keyed_run_count(path: &Path) -> Result<u64, GfError> {
     use std::io::Read;
-    let mut file = std::io::BufReader::new(std::fs::File::open(path).map_err(storage_err)?);
+    // Unbuffered: only the header is needed, so read exactly its 20 bytes and
+    // attribute the calls that returned them.
+    let mut file = SpillRunFile::new(std::fs::File::open(path).map_err(storage_err)?);
     let mut header = [0_u8; 20];
     file.read_exact(&mut header).map_err(storage_err)?;
-    crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, 20, 1);
     if &header[..8] != SPILL_RUN_MAGIC
         || u32::from_le_bytes(header[8..12].try_into().expect("four bytes")) != SPILL_RUN_VERSION
     {
@@ -1012,6 +1020,9 @@ fn finish_groups(
     }
     let mut manifest = Vec::with_capacity(outcomes.len());
     for (index, outcome) in outcomes.into_iter().enumerate() {
+        metrics
+            .captured_artifacts
+            .extend(outcome.captured_artifacts);
         metrics.csr_shards = metrics.csr_shards.saturating_add(outcome.shards);
         metrics.peak_shard_edges = metrics.peak_shard_edges.max(outcome.peak_shard_edges);
         metrics.peak_shard_nodes = metrics.peak_shard_nodes.max(outcome.peak_shard_nodes);
@@ -1056,7 +1067,13 @@ fn finish_groups_on_lanes(
             let next = &next;
             let stop = &stop;
             let results = &results;
+            #[cfg(any(test, feature = "test-support"))]
+            let digest_context = graphforge_core::hash_observation::operation::Context::capture();
+            let lifecycle_context = crate::lifecycle_io::CaptureContext::current();
             scope.spawn(move || {
+                #[cfg(any(test, feature = "test-support"))]
+                let _digest_guard = digest_context.attach();
+                let _lifecycle_capture = lifecycle_context.attach();
                 let _phase = crate::lifecycle_io::PhaseScope::enter(phase);
                 loop {
                     let index = crate::graph_construction::lane_job(
@@ -1155,7 +1172,15 @@ fn sorted_directions(
     };
     let incoming = if lease.is_some() {
         std::thread::scope(|scope| {
-            let worker = scope.spawn(incoming);
+            #[cfg(any(test, feature = "test-support"))]
+            let digest_context = graphforge_core::hash_observation::operation::Context::capture();
+            let lifecycle_context = crate::lifecycle_io::CaptureContext::current();
+            let worker = scope.spawn(move || {
+                #[cfg(any(test, feature = "test-support"))]
+                let _digest_guard = digest_context.attach();
+                let _lifecycle_capture = lifecycle_context.attach();
+                incoming()
+            });
             out.sort_unstable_by_key(|&(key, edge, _)| (key, edge));
             worker
                 .join()
@@ -1210,7 +1235,13 @@ fn for_each_admitted_edge_batch(
     let phase = crate::lifecycle_io::effective_phase(crate::StorageIoPhase::ReadPathScan);
     std::thread::scope(|scope| {
         let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        #[cfg(any(test, feature = "test-support"))]
+        let digest_context = graphforge_core::hash_observation::operation::Context::capture();
+        let lifecycle_context = crate::lifecycle_io::CaptureContext::current();
         let worker = scope.spawn(move || {
+            #[cfg(any(test, feature = "test-support"))]
+            let _digest_guard = digest_context.attach();
+            let _lifecycle_capture = lifecycle_context.attach();
             let _phase = crate::lifecycle_io::PhaseScope::enter(phase);
             for_each_adjacency_edge_path(edge_files, batch_size, &mut |stem, exploratory, batch| {
                 sender

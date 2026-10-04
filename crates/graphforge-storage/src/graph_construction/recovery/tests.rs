@@ -43,7 +43,7 @@ fn shaped_writer_capability_resume_adopts_only_the_exact_receipt() {
     persist_shape_receipt(&root, &receipt).unwrap();
 
     let mut mismatched = receipt;
-    mismatched.sha256 = "0".repeat(64);
+    mismatched.xxh64 = "0".repeat(16);
     let error = persist_shape_receipt(&root, &mismatched)
         .unwrap_err()
         .to_string();
@@ -257,4 +257,387 @@ fn symlink_substitution_is_rejected_on_independent_seal() {
     std::fs::rename(&artifact, &displaced).unwrap();
     symlink(&displaced, &artifact).unwrap();
     assert!(session.seal().is_err());
+}
+
+#[test]
+fn successful_artifact_hash_work_is_exact_and_failed_authentication_adds_none() {
+    let root = TempDir::new().unwrap();
+    let mut session = open(&root, 9_102);
+    let chunk = session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 4))
+        .unwrap();
+    let receipt = &chunk.parquet;
+    let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+    {
+        let _seal = diagnostics::Scope::start("seal_authentication");
+        let work = authenticate_artifact(&session.root, receipt, DetailCodec::Compact).unwrap();
+        assert_eq!(work.bytes, receipt.bytes);
+    }
+    let snapshot = capture.finish();
+    let leaf = &snapshot.regions["import_command/seal_authentication/artifact_authentication"];
+    assert_eq!(leaf.work["hashed_bytes"], receipt.bytes);
+    assert!(
+        snapshot.regions["import_command/seal_authentication"]
+            .work
+            .is_empty()
+    );
+    assert!(snapshot.regions["import_command"].work.is_empty());
+    let total: u64 = snapshot
+        .regions
+        .values()
+        .map(|row| row.work.get("hashed_bytes").copied().unwrap_or(0))
+        .sum();
+    assert_eq!(
+        total, receipt.bytes,
+        "successful work must not roll up twice"
+    );
+
+    let path = session.root.path().join(&receipt.name);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[0] ^= 0xff;
+    std::fs::write(&path, bytes).unwrap();
+    let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+    assert!(authenticate_artifact(&session.root, receipt, DetailCodec::Compact).is_err());
+    let failed = capture.finish();
+    assert!(
+        failed
+            .regions
+            .values()
+            .all(|row| !row.work.contains_key("hashed_bytes"))
+    );
+}
+
+#[test]
+fn truncated_staged_artifact_is_refused_by_checksum() {
+    let root = TempDir::new().unwrap();
+    let mut session = open(&root, 9_100);
+    let chunk = session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 4))
+        .unwrap();
+    let receipt = &chunk.identities;
+    let path = session.root.path().join(&receipt.name);
+    let mut bytes = std::fs::read(&path).unwrap();
+    assert!(!bytes.is_empty(), "staged artifact must be non-empty");
+    bytes.pop();
+    std::fs::write(&path, &bytes).unwrap();
+    let error = authenticate_artifact(&session.root, receipt, DetailCodec::Compact)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("truncated") || error.contains("artifact digest or size changed"),
+        "{error}"
+    );
+}
+
+#[test]
+fn same_length_flipped_staged_artifact_is_refused_by_checksum() {
+    let root = TempDir::new().unwrap();
+    let mut session = open(&root, 9_101);
+    let chunk = session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 4))
+        .unwrap();
+    let receipt = &chunk.identities;
+    let path = session.root.path().join(&receipt.name);
+    let mut bytes = std::fs::read(&path).unwrap();
+    assert!(
+        bytes.len() >= 2,
+        "staged artifact must have at least two bytes"
+    );
+    bytes[0] ^= 0xff;
+    std::fs::write(&path, &bytes).unwrap();
+    let error = authenticate_artifact(&session.root, receipt, DetailCodec::Compact)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("not strictly sorted") || error.contains("artifact digest or size changed"),
+        "{error}"
+    );
+}
+
+#[test]
+fn checkpoint_with_previous_format_version_fails_closed_with_restart_error() {
+    let root = TempDir::new().unwrap();
+    let operation = Uuid::from_u128(9_200);
+    let mut session = open(&root, 9_200);
+    session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+        .unwrap();
+    session.checkpoint.format_version = FORMAT_VERSION - 1;
+    replace_checkpoint_control(&session.root, &session.checkpoint).unwrap();
+    drop(session);
+    let result = GraphConstructionSession::open(
+        root.path(),
+        operation,
+        0,
+        GraphConstructionBudgets::default(),
+    );
+    let error = match result {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("expected a checkpoint format error"),
+    };
+    assert!(error.contains("restart"), "{error}");
+}
+
+fn assert_resumed_seal_refuses_without_changing_authority(
+    root: &TempDir,
+    session: GraphConstructionSession,
+    expected_error: &str,
+) {
+    let operation = session.checkpoint.operation_uuid;
+    let session_path = session.root.path().to_path_buf();
+    let controls = session
+        .root
+        .child_names()
+        .unwrap()
+        .into_iter()
+        .filter(|name| name.to_string_lossy().ends_with(".json"))
+        .map(|name| {
+            let bytes = std::fs::read(session_path.join(&name)).unwrap();
+            (name, bytes)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let current = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
+    drop(session);
+    let mut resumed = GraphConstructionSession::open(
+        root.path(),
+        operation,
+        0,
+        GraphConstructionBudgets::default(),
+    )
+    .unwrap();
+    let error = resumed.seal().unwrap_err().to_string();
+    assert!(error.contains(expected_error), "{error}");
+    assert_eq!(resumed.checkpoint.state, GraphConstructionState::Staging);
+    for (name, bytes) in controls {
+        assert_eq!(std::fs::read(session_path.join(name)).unwrap(), bytes);
+    }
+    assert_eq!(
+        std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
+        current
+    );
+}
+
+#[test]
+fn resumed_seal_refuses_whole_record_truncation_by_exact_length() {
+    let root = TempDir::new().unwrap();
+    let mut session = open(&root, 9_300);
+    let chunk = session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 4))
+        .unwrap();
+    let path = session.root.path().join(&chunk.identities.name);
+    let before = file_identity(&File::open(&path).unwrap()).unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    assert_eq!(bytes.len(), 4 * IDENTITY_WIDTH);
+    // Removing one complete UUID leaves a well-formed, strictly sorted run.
+    bytes.truncate(bytes.len() - IDENTITY_WIDTH);
+    std::fs::write(&path, &bytes).unwrap();
+    assert_eq!(file_identity(&File::open(&path).unwrap()).unwrap(), before);
+    assert_resumed_seal_refuses_without_changing_authority(
+        &root,
+        session,
+        "artifact digest or size changed",
+    );
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+}
+
+#[test]
+fn resumed_seal_refuses_same_inode_sorted_uuid_change_by_checksum() {
+    let root = TempDir::new().unwrap();
+    let mut session = open(&root, 9_301);
+    let chunk = session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 4))
+        .unwrap();
+    let path = session.root.path().join(&chunk.identities.name);
+    let before = file_identity(&File::open(&path).unwrap()).unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    let original_len = bytes.len();
+    assert_eq!(
+        bytes,
+        (1_u128..=4).flat_map(u128::to_be_bytes).collect::<Vec<_>>()
+    );
+    // UUID 4 -> 5 preserves width, UUID validity, and strict ordering.
+    *bytes.last_mut().unwrap() ^= 1;
+    assert_eq!(
+        bytes,
+        [1_u128, 2, 3, 5]
+            .into_iter()
+            .flat_map(u128::to_be_bytes)
+            .collect::<Vec<_>>()
+    );
+    std::fs::write(&path, &bytes).unwrap();
+    let after = File::open(&path).unwrap();
+    assert_eq!(file_identity(&after).unwrap(), before);
+    assert_eq!(after.metadata().unwrap().len(), original_len as u64);
+    drop(after);
+    assert_resumed_seal_refuses_without_changing_authority(
+        &root,
+        session,
+        "artifact digest or size changed",
+    );
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+}
+
+#[test]
+fn resumed_seal_refuses_missing_checksum_metadata() {
+    let root = TempDir::new().unwrap();
+    let mut session = open(&root, 9_302);
+    let chunk = session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 4))
+        .unwrap();
+    let path = session.root.path().join(receipt_name(chunk.sequence));
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    receipt["identities"]
+        .as_object_mut()
+        .unwrap()
+        .remove("xxh64");
+    std::fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    assert_resumed_seal_refuses_without_changing_authority(&root, session, "missing field `xxh64`");
+}
+
+#[test]
+fn resumed_seal_refuses_malformed_checksum_metadata() {
+    for checksum in [
+        "",
+        "0123456789abcde",
+        "0123456789abcdef0",
+        "0123456789abcdeG",
+    ] {
+        let root = TempDir::new().unwrap();
+        let mut session = open(&root, 9_303);
+        let mut chunk = session
+            .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 4))
+            .unwrap();
+        chunk.identities.xxh64 = checksum.to_owned();
+        let path = session.root.path().join(receipt_name(chunk.sequence));
+        std::fs::write(&path, serde_json::to_vec(&chunk).unwrap()).unwrap();
+        assert_resumed_seal_refuses_without_changing_authority(
+            &root,
+            session,
+            "invalid construction artifact receipt",
+        );
+    }
+}
+
+fn retained_retirement_fixture() -> (
+    TempDir,
+    StableDirectory,
+    ArtifactReceipt,
+    RetainedShapeArtifact,
+) {
+    let temporary = TempDir::new().unwrap();
+    let root = StableDirectory::open(temporary.path()).unwrap();
+    let name = "shaped-identities.run";
+    std::fs::write(temporary.path().join(name), b"identity").unwrap();
+    let receipt = receipt_for_existing(&root, name).unwrap();
+    persist_shape_receipt(&root, &receipt).unwrap();
+    let (actual, _, retained) = receipt_for_existing_retained(&root, name).unwrap();
+    assert_eq!(receipt, actual);
+    (temporary, root, receipt, retained.unwrap())
+}
+
+#[test]
+fn retained_retirement_removes_exact_artifact_and_capability() {
+    let (temporary, root, receipt, retained) = retained_retirement_fixture();
+    retained.unlink(&root, &receipt).unwrap();
+    assert!(!temporary.path().join(&receipt.name).exists());
+    assert!(
+        !temporary
+            .path()
+            .join(shape_receipt_name(&receipt.name))
+            .exists()
+    );
+}
+
+#[test]
+fn retained_retirement_rereads_capability_contents() {
+    let (temporary, root, receipt, mut retained) = retained_retirement_fixture();
+    assert_eq!(retained.fresh_receipt().unwrap(), receipt);
+    let mut changed = receipt.clone();
+    changed.xxh64 = "0".repeat(16);
+    std::fs::write(
+        temporary.path().join(shape_receipt_name(&receipt.name)),
+        serde_json::to_vec(&changed).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(retained.fresh_receipt().unwrap(), changed);
+    assert!(retained.unlink(&root, &receipt).is_err());
+    assert!(temporary.path().join(&receipt.name).exists());
+    assert!(
+        temporary
+            .path()
+            .join(shape_receipt_name(&receipt.name))
+            .exists()
+    );
+}
+
+#[test]
+fn retained_retirement_preserves_equivalent_fresh_receipt_encoding() {
+    let (temporary, root, receipt, retained) = retained_retirement_fixture();
+    std::fs::write(
+        temporary.path().join(shape_receipt_name(&receipt.name)),
+        serde_json::to_vec_pretty(&receipt).unwrap(),
+    )
+    .unwrap();
+    retained.unlink(&root, &receipt).unwrap();
+}
+
+#[test]
+fn retained_retirement_refuses_changed_artifact_length() {
+    let (temporary, root, receipt, retained) = retained_retirement_fixture();
+    std::fs::write(temporary.path().join(&receipt.name), b"longer identity").unwrap();
+    assert!(retained.unlink(&root, &receipt).is_err());
+    assert!(temporary.path().join(&receipt.name).exists());
+    assert!(
+        temporary
+            .path()
+            .join(shape_receipt_name(&receipt.name))
+            .exists()
+    );
+}
+
+#[test]
+fn retained_retirement_refuses_fresh_extra_links() {
+    for capability in [false, true] {
+        let (temporary, root, receipt, retained) = retained_retirement_fixture();
+        let name = if capability {
+            shape_receipt_name(&receipt.name)
+        } else {
+            receipt.name.clone()
+        };
+        std::fs::hard_link(
+            temporary.path().join(name),
+            temporary.path().join("extra.link"),
+        )
+        .unwrap();
+        assert!(retained.unlink(&root, &receipt).is_err());
+        assert!(temporary.path().join(&receipt.name).exists());
+        assert!(
+            temporary
+                .path()
+                .join(shape_receipt_name(&receipt.name))
+                .exists()
+        );
+    }
+}
+
+#[test]
+fn retirement_without_writer_capability_keeps_payload_authentication() {
+    let temporary = TempDir::new().unwrap();
+    let root = StableDirectory::open(temporary.path()).unwrap();
+    let name = "shaped-identities.run";
+    std::fs::write(temporary.path().join(name), b"identity").unwrap();
+    let expected = receipt_for_existing(&root, name).unwrap();
+    let actual = unlink_shape_artifact_files(&root, name).unwrap();
+    assert_eq!(actual, expected);
+    assert!(!temporary.path().join(name).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn retained_retirement_refuses_disappeared_capability_before_unlink() {
+    let (temporary, root, receipt, retained) = retained_retirement_fixture();
+    std::fs::remove_file(temporary.path().join(shape_receipt_name(&receipt.name))).unwrap();
+    assert!(retained.unlink(&root, &receipt).is_err());
+    assert!(temporary.path().join(&receipt.name).exists());
 }

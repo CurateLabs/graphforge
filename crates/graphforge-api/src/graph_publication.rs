@@ -1,7 +1,7 @@
 //! Graph mutation publication, reconciliation, and in-memory reset.
 
 use super::{CompositionBindingContext, GfError, GraphForge, RuntimeCatalog};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,10 +11,48 @@ pub(super) type BoundGenerationStorage = (
     Vec<(std::path::PathBuf, std::path::PathBuf)>,
 );
 
+/// Prepare the compact root for the private workspace over `parent`.
+///
+/// Every mutating commit publishes a compact graph root: only files that changed
+/// since the parent install, and the generation owns no graph tree. Topology
+/// payloads are exactly `topology`, never discovered from the directory. Keep
+/// the returned lease through `CURRENT` and publish with it.
+pub(crate) fn compact_graph_participant(
+    workspace: &std::path::Path,
+    parent: &graphforge_storage::ResolvedProjectGeneration,
+    repair_corrupt_adjacency: bool,
+    topology: &graphforge_storage::TopologyFiles,
+) -> Result<
+    (
+        graphforge_storage::ProjectParticipant,
+        graphforge_storage::GraphObjectPublicationLease,
+    ),
+    GfError,
+> {
+    if repair_corrupt_adjacency {
+        graphforge_storage::prepare_compact_graph_publication_repairing_adjacency(
+            parent, workspace, topology,
+        )
+    } else {
+        graphforge_storage::prepare_compact_graph_publication(parent, workspace, topology)
+    }
+}
+
 impl GraphForge {
-    pub(crate) fn stage_project_generation(
+    /// Take the graph object lease a publication holds from before staging
+    /// through `CURRENT`, so a generation that carries a compact graph root
+    /// forward publishes whether or not the parent is compact.
+    pub(crate) fn begin_graph_object_publication(
         &self,
-        request: &graphforge_storage::ProjectGenerationRequest,
+    ) -> Result<graphforge_storage::GraphObjectPublicationLease, GfError> {
+        graphforge_storage::begin_graph_object_publication(
+            self.resolved_generation.container_root(),
+        )
+    }
+
+    pub(crate) fn stage_project_generation<'r>(
+        &self,
+        request: impl Into<graphforge_storage::StageRequest<'r>>,
     ) -> Result<graphforge_storage::ProjectStageOutcome, GfError> {
         graphforge_storage::stage_project_generation_with_graph_tree_mode(
             self.resolved_generation.container_root(),
@@ -35,10 +73,11 @@ impl GraphForge {
         let (projected, route_moves) =
             if current.is_none() && context.composition().modules.len() == 1 {
                 let projection =
-                    graphforge_storage::SemanticStorageBindings::project_legacy_unambiguous(
-                        context.composition(),
-                        &self.dir(),
-                    )?;
+                graphforge_storage::SemanticStorageBindings::project_legacy_unambiguous_from_files(
+                    context.composition(),
+                    &self.dir(),
+                    &self.dir().topology_files()?,
+                )?;
                 (projection.bindings, projection.route_moves)
             } else {
                 if current.is_none() {
@@ -83,6 +122,21 @@ impl GraphForge {
             None,
             recorded_at_micros,
             candidate_bindings,
+            false,
+        )
+    }
+
+    pub(super) fn publish_graph_mutation_repairing_adjacency(&self) -> Result<(), GfError> {
+        let receipt = graphforge_exec::MutationReceipt::default();
+        let operation_uuid = uuid::Uuid::now_v7();
+        let recorded_at_micros = (self.clock.lock().expect("clock lock poisoned"))()?;
+        self.publish_graph_mutation_with_context_and_bindings(
+            &receipt,
+            operation_uuid,
+            None,
+            recorded_at_micros,
+            None,
+            true,
         )
     }
 
@@ -99,6 +153,7 @@ impl GraphForge {
             actor_uuid,
             recorded_at_micros,
             None,
+            false,
         )
     }
 
@@ -109,11 +164,13 @@ impl GraphForge {
         actor_uuid: Option<uuid::Uuid>,
         recorded_at_micros: i64,
         candidate_bindings: Option<&graphforge_storage::SemanticStorageBindings>,
+        repair_corrupt_adjacency: bool,
     ) -> Result<(), GfError> {
-        use graphforge_storage::{
-            ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
-        };
+        use graphforge_storage::{ProjectCapability, ProjectStageOutcome};
 
+        // Publication rebuilds indexes and stages from `self.dir()` in place; a
+        // pinned alias of a published tree must never reach that point.
+        self.require_private_workspace()?;
         let root = self.resolved_generation.container_root();
         let parent = graphforge_storage::resolve_project_generation(root)?;
         parent.validate_complete_participant_inventory()?;
@@ -128,12 +185,18 @@ impl GraphForge {
         }
 
         if !graphforge_storage::uuid_membership_index_is_fresh(&self.dir())? {
-            graphforge_storage::rebuild_uuid_membership_indexes(
+            graphforge_storage::rebuild_uuid_membership_indexes_with_topology(
                 &self.dir(),
                 graphforge_storage::UuidIndexBuildLimits::default(),
+                std::sync::Arc::clone(&self.dir().topology),
             )?;
         }
-        let graph = graphforge_storage::capture_graph_files(&self.dir())?.1;
+        let (graph, graph_objects) = compact_graph_participant(
+            &self.dir(),
+            &parent,
+            repair_corrupt_adjacency,
+            &self.dir().topology_files()?,
+        )?;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let installed_bindings = self
             .semantic_storage_bindings
@@ -158,17 +221,19 @@ impl GraphForge {
                 capability_version: capability.capability_version,
             })
             .collect::<Vec<_>>();
-        let generation_uuid = mutation_generation_uuid(operation_uuid, &participants);
-        let request = ProjectGenerationRequest {
-            transaction_uuid: operation_uuid,
-            generation_uuid,
+        let request = graphforge_storage::PreparedGenerationRequest::new(
+            operation_uuid,
             capabilities,
             participants,
-        };
+            |participants, content_sha256| {
+                mutation_generation_uuid(operation_uuid, participants, content_sha256)
+            },
+        )?;
+        let generation_uuid = request.generation_uuid;
         let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
             root,
             &request,
-            Some(self.dir().path()),
+            None,
             self.lifecycle_mode,
         )? {
             ProjectStageOutcome::AlreadyPublished(receipt) => Ok(receipt),
@@ -184,7 +249,7 @@ impl GraphForge {
                         Ok(())
                     },
                 )?
-                .publish(),
+                .publish_with_graph_objects(&graph_objects),
         };
         let published = match publication {
             Ok(receipt) => receipt,
@@ -219,6 +284,7 @@ impl GraphForge {
             ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
         };
 
+        self.require_private_workspace()?;
         let root = self.resolved_generation.container_root();
         let parent = graphforge_storage::resolve_project_generation(root)?;
         parent.validate_complete_participant_inventory()?;
@@ -228,12 +294,14 @@ impl GraphForge {
             ));
         }
         if !graphforge_storage::uuid_membership_index_is_fresh(&self.dir())? {
-            graphforge_storage::rebuild_uuid_membership_indexes(
+            graphforge_storage::rebuild_uuid_membership_indexes_with_topology(
                 &self.dir(),
                 graphforge_storage::UuidIndexBuildLimits::default(),
+                std::sync::Arc::clone(&self.dir().topology),
             )?;
         }
-        let graph = graphforge_storage::capture_graph_files(&self.dir())?.1;
+        let (graph, graph_objects) =
+            compact_graph_participant(&self.dir(), &parent, false, &self.dir().topology_files()?)?;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let participants = graph_publication_participants(
             &parent,
@@ -265,7 +333,7 @@ impl GraphForge {
         let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
             root,
             &request,
-            Some(self.dir().path()),
+            None,
             self.lifecycle_mode,
         )? {
             ProjectStageOutcome::AlreadyPublished(receipt) => Ok(receipt),
@@ -281,7 +349,7 @@ impl GraphForge {
                         Ok(())
                     },
                 )?
-                .publish(),
+                .publish_with_graph_objects(&graph_objects),
         };
         let published = match publication {
             Ok(receipt) => receipt,
@@ -306,6 +374,10 @@ impl GraphForge {
 
     pub(super) fn publish_workspace_update(&self) -> Result<(), GfError> {
         self.publish_graph_mutation(&graphforge_exec::MutationReceipt::default())
+    }
+
+    pub(super) fn publish_workspace_update_repairing_adjacency(&self) -> Result<(), GfError> {
+        self.publish_graph_mutation_repairing_adjacency()
     }
 
     /// Remove all nodes and edges (in-memory instances only).
@@ -381,7 +453,46 @@ impl GraphForge {
             .expect("procedure registry lock")
             .clear();
         self.adjacency_provider_for_session().invalidate();
-        cleanup_result
+        // The session's read authority still declares the generation's node and
+        // edge files, content-store objects the workspace wipe does not touch,
+        // and every later catalog lists node files from it (#1388). Re-establish
+        // it from the emptied workspace, as a same-session commit does.
+        let authority_result = self.reset_read_authority_from_workspace();
+        cleanup_result.and(authority_result)
+    }
+
+    /// Replace the session's read authority with what the workspace holds now.
+    fn reset_read_authority_from_workspace(&self) -> Result<(), GfError> {
+        let generation = self.generation_for_read()?;
+        self.dir().topology.clear();
+        let (captured, _) = graphforge_storage::capture_graph_files_with_topology(
+            &self.dir(),
+            &self.dir().topology_files()?,
+        )?;
+        let inventory = std::sync::Arc::new(
+            graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
+                &generation,
+                &self.dir(),
+                captured,
+            )?,
+        );
+        let adjacency = std::sync::Arc::new(crate::adjacency_provider_for_graph(
+            &self.dir(),
+            self.ontology_mode,
+            std::sync::Arc::clone(&inventory),
+        )?);
+        *self
+            .property_authority
+            .lock()
+            .expect("property authority lock poisoned") = crate::GenerationPropertyAuthority {
+            generation_uuid: generation.generation_uuid(),
+            inventory,
+        };
+        *self
+            .adjacency_provider
+            .write()
+            .expect("adjacency provider lock poisoned") = adjacency;
+        Ok(())
     }
 }
 
@@ -478,19 +589,22 @@ fn graph_publication_participants(
     Ok(participants)
 }
 
+/// Generation identity over the operation and each participant's exact-byte
+/// SHA-256, computed once by [`graphforge_storage::PreparedGenerationRequest`].
 fn mutation_generation_uuid(
     operation_uuid: uuid::Uuid,
     participants: &[graphforge_storage::ProjectParticipant],
+    content_sha256: &[[u8; 32]],
 ) -> uuid::Uuid {
-    let mut hasher = Sha256::new();
+    let mut hasher = graphforge_core::hash_observation::ContractSha256::default();
     hasher.update(b"graphforge-graph-mutation-generation/1");
     hasher.update(operation_uuid.as_bytes());
-    for participant in participants {
+    for (participant, digest) in participants.iter().zip(content_sha256) {
         hasher.update(participant.capability_id.as_bytes());
         hasher.update([0]);
         hasher.update(participant.record_family_id.as_bytes());
         hasher.update([0]);
-        hasher.update(Sha256::digest(&participant.bytes));
+        hasher.update(digest);
     }
     let digest: [u8; 32] = hasher.finalize().into();
     graphforge_core::canonical::uuid_v8(digest)

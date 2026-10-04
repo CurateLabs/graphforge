@@ -91,6 +91,9 @@ fn discovery(package_digest: String) -> (DiscoveryManifest, RefSet, RepositoryId
             package_digest: Sha256Digest(package_digest),
             object_digest: digest('c'),
         },
+        summary: None,
+        ontology: None,
+        lineage: None,
         requirements: vec![ProtocolRequirement {
             capability: "portable-v2".into(),
             major: 1,

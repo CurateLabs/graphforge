@@ -1,3 +1,4 @@
+use graphforge_filesystem::ObservedSync as _;
 // Real multi-level construction measurements, sharing the writer test fixtures.
 mod lifecycle_budget {
     use super::*;
@@ -259,7 +260,7 @@ mod lifecycle_budget {
                 // the reclaim sweep's to refuse: it checks identity, link
                 // count and length only (the #1392 pattern applied to the
                 // encoded branch). Preparation succeeds; the CAS install at
-                // publication hashes the artifact and refuses it there.
+                // publication checksums the actual copied bytes and refuses it there.
                 let prepared = session.prepare_canonical_encoding(1).unwrap();
                 session
                     .publish_canonical(
@@ -276,7 +277,7 @@ mod lifecycle_budget {
                     // #1392: the completed-shape trust boundary refuses this
                     // deliberately now, instead of incidentally at retirement.
                     "shape" => "shape manifest output payload changed",
-                    "encoding" => "graph object source digest or length changed during install",
+                    "encoding" => "captured encoded source checksum or length changed during copy",
                     "replacement" => "predecessor identity changed",
                     "receipt_chain" => "receipt tail changed",
                     _ => unreachable!(),
@@ -335,7 +336,7 @@ mod lifecycle_budget {
                 std::fs::remove_file(&path).unwrap();
             } else {
                 let mut receipt = outputs[0].clone();
-                receipt.sha256 = "0".repeat(64);
+                receipt.xxh64 = "0".repeat(16);
                 std::fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
             }
             let current = session.evidence().storage_current.clone();
@@ -391,11 +392,10 @@ mod lifecycle_budget {
                 .publish_canonical(&encoding, target, transaction)
                 .map(|_| ()),
         ] {
+            let error = result.unwrap_err().to_string();
             assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("digest does not match its address")
+                error.contains("construction object checksum does not match its inventory"),
+                "{error}"
             );
         }
         drop(session);
@@ -407,11 +407,11 @@ mod lifecycle_budget {
             GraphConstructionBudgets::default(),
         )
         .err()
-        .unwrap();
+        .unwrap()
+        .to_string();
         assert!(
-            error
-                .to_string()
-                .contains("digest does not match its address")
+            error.contains("construction object checksum does not match its inventory"),
+            "{error}"
         );
         assert_eq!(
             std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
@@ -2100,7 +2100,7 @@ mod group_boundary {
         read_completed_shape_outputs(&session.root, &session.checkpoint)
             .unwrap()
             .into_iter()
-            .map(|receipt| (receipt.name, (receipt.bytes, receipt.sha256)))
+            .map(|receipt| (receipt.name, (receipt.bytes, receipt.xxh64)))
             .collect()
     }
 
@@ -2375,7 +2375,7 @@ mod group_boundary {
             std::io::Read::read_exact(&mut file, &mut byte).unwrap();
             file.seek(SeekFrom::Start(length - 1)).unwrap();
             file.write_all(&[byte[0] ^ 0x5a]).unwrap();
-            file.sync_all().unwrap();
+            file.observed_sync_all().unwrap();
         }
         /// Change the first digit of `key`'s numeric value, in place.
         fn bump_number(path: &Path, key: &str) {
@@ -2396,7 +2396,7 @@ mod group_boundary {
             // Same inode, same length: an in-place rewrite.
             assert_eq!(from.len(), to.len());
             file.write_all(body.replacen(from, to, 1).as_bytes()).unwrap();
-            file.sync_all().unwrap();
+            file.observed_sync_all().unwrap();
         }
         type Mutation<'a> = (&'a str, &'a str, &'a dyn Fn(&Path));
         let cases: [Mutation; 4] = [
@@ -2430,13 +2430,13 @@ mod group_boundary {
                 &|session: &Path| {
                 let path = session.join("shape-stage-02.json");
                 let body = std::fs::read_to_string(&path).unwrap();
-                let at = body.find("\"sha256\":\"").unwrap() + "\"sha256\":\"".len();
+                let at = body.find("\"xxh64\":\"").unwrap() + "\"xxh64\":\"".len();
                 let digit = &body[at..=at];
                 let replacement = if digit == "0" { "1" } else { "0" };
                 rewrite(
                     &path,
-                    &format!("\"sha256\":\"{digit}"),
-                    &format!("\"sha256\":\"{replacement}"),
+                    &format!("\"xxh64\":\"{digit}"),
+                    &format!("\"xxh64\":\"{replacement}"),
                 );
             }),
         ];

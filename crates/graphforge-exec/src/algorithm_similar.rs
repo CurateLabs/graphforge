@@ -16,7 +16,8 @@ use crate::algorithm_dispatch::{
     AlgorithmValue, DependencyReview, RustAlgorithm,
 };
 use crate::algorithm_graph::{
-    AdjacencyGraph, AdjacencySelection, export_adjacency, export_node_selection, load_node_vectors,
+    AdjacencyGraph, AdjacencySelection, export_adjacency, export_node_selection_from_files,
+    load_node_vectors,
 };
 use crate::algorithm_output::shape_algorithm_output;
 use crate::algorithm_similar_jaccard::exact_jaccard;
@@ -478,7 +479,11 @@ fn similar_projection(
         SimilarAlgorithm::Knn | SimilarAlgorithm::FilteredKnn | SimilarAlgorithm::Cosine
     );
     let mut graph = if matches!(by, SimilarAlgorithm::Knn | SimilarAlgorithm::Cosine) {
-        let mut selected = export_node_selection(dir, label)?;
+        let topology = match provider.admitted_inventory() {
+            Some(inventory) => graphforge_storage::TopologyFiles::from_inventory(&inventory)?,
+            None => graphforge_storage::TopologyFiles::discover_legacy(dir)?,
+        };
+        let mut selected = export_node_selection_from_files(&topology, label)?;
         selected.retain_inventory(provider.admitted_inventory());
         selected
     } else {

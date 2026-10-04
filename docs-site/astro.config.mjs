@@ -177,10 +177,6 @@ export default defineConfig({
               label: 'Scale Evaluation',
               slug: 'reference/scale-evaluation',
             },
-            {
-              label: 'Load Matrix Results',
-              slug: 'reference/load-matrix-results',
-            },
             { label: 'Column Naming', slug: 'reference/column-naming-behavior' },
             {
               // Catalog loaders are backlog — not a v0.5.0 core/product surface.
@@ -203,19 +199,10 @@ export default defineConfig({
           items: [
             { label: 'Documentation map', slug: 'documentation' },
             { label: 'Contributing', slug: 'development/contributing' },
-            { label: 'Workflow', slug: 'development/workflow' },
             { label: 'Testing Strategy', slug: 'development/testing' },
             { label: 'Billion-edge certification', slug: 'development/g500-certification' },
             { label: 'Product roadmap', slug: 'releases/roadmap' },
             { label: 'Publishing', slug: 'engineering/publishing' },
-            { label: 'Release Process', slug: 'development/release-process' },
-            { label: 'Publication Order', slug: 'development/publication-order' },
-            { label: 'Release Workflows', slug: 'development/release-workflows' },
-            { label: 'Release Load Matrix', slug: 'development/release-load-matrix' },
-            {
-              label: 'Clean-environment verification',
-              slug: 'development/clean-environment-verification',
-            },
           ],
         },
         {
@@ -416,6 +403,30 @@ export default defineConfig({
                 {
                   label: '0049 — Versioned checksums for published graph payload admission',
                   slug: 'adr/0049-published-payload-checksums',
+                },
+                {
+                  label: '0050 — The read path keeps its adjacency operators and chooses fast paths in the lowerer',
+                  slug: 'adr/0050-read-path-fast-path-selection',
+                },
+                {
+                  label: '0051 — Discovery carries a digest-addressed Project summary and exact ontology descriptors',
+                  slug: 'adr/0051-discovery-project-summary-and-ontology-descriptors',
+                },
+                {
+                  label: '0052 — Discovery carries a digest-addressed research lineage document',
+                  slug: 'adr/0052-discovery-research-lineage-document',
+                },
+                {
+                  label: '0053 — Hub publish wire contract',
+                  slug: 'adr/0053-hub-publish-wire-contract',
+                },
+                {
+                  label: '0054 — GraphForge component boundaries: Core, XYG, editor, and Hub',
+                  slug: 'adr/0054-product-component-boundaries',
+                },
+                {
+                  label: '0055 — Research Versions are commits',
+                  slug: 'adr/0055-versions-are-commits',
                 },
                 // END generated ADR records
               ],

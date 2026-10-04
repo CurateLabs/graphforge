@@ -9,7 +9,7 @@
 //! 3. Close → `GraphForge::new` → one-hop LIMIT query.
 //!
 //! ```bash
-//! CARGO_TARGET_DIR=/tmp/cargo-338-fb \
+//! CARGO_TARGET_DIR=/tmp/cargo-file-backed-evidence \
 //! GF_FILE_BACKED_SCALE_EVIDENCE_OUT=docs/development/file-backed-128m-evidence.json \
 //! GF_FILE_BACKED_SCALE_WORK=build/file-backed-128m-work \
 //!   make bench-file-backed-128m

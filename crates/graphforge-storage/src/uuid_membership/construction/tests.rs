@@ -3,8 +3,10 @@ use super::super::IDENTITY_RECORD_BYTES;
 use super::super::IDENTITY_RECORD_WIDTH;
 use super::super::INDEX_DIR;
 use super::super::NODE_LOOKUP_RECORD_BYTES;
+use super::super::NODE_LOOKUP_RECORD_WIDTH;
 use super::super::UuidMembershipIndex;
 use super::super::append_uuid_membership_delta;
+use super::super::hex_bytes;
 use super::super::identity_codec;
 use super::super::ordinal_artifacts::publish_v4_construction_artifacts;
 use super::super::ordinal_artifacts::stage_v4_ordinal_bundle;
@@ -80,7 +82,7 @@ fn packed_construction_index_preserves_full_width_surrogates_and_refuses_invalid
         let result = encode_construction_index(
             &source,
             "identities.run",
-            &hex_sha256(&bytes),
+            &crate::corruption_checksum::hex(crate::corruption_checksum::checksum(&bytes)),
             &encoded,
             1,
             0,
@@ -147,12 +149,13 @@ fn construction_encoder_io_geometry_is_block_bounded() {
         drop(input);
         let source = graphforge_filesystem::StableDirectory::open(source_dir.path()).unwrap();
         let encoded = graphforge_filesystem::StableDirectory::open(encoded_dir.path()).unwrap();
-        let source_sha256 =
-            hex_sha256(&fs::read(source_dir.path().join("identities.run")).unwrap());
+        let source_bytes = fs::read(source_dir.path().join("identities.run")).unwrap();
+        let source_xxh64 =
+            crate::corruption_checksum::hex(crate::corruption_checksum::checksum(&source_bytes));
         let result = encode_construction_index(
             &source,
             "identities.run",
-            &source_sha256,
+            &source_xxh64,
             &encoded,
             1,
             0,
@@ -229,4 +232,70 @@ fn unified_identity_merge_rejects_cross_kind_uuid() {
         file.write_all(&1_u64.to_le_bytes()).unwrap();
     }
     assert!(build_identity_run(&node, &edge, &scratch.path().join("out.run")).is_err());
+}
+
+#[test]
+fn construction_intent_rejects_published_format_as_private_version() {
+    let mut intent = super::ConstructionRecoveryIntent {
+        format_version: super::CONSTRUCTION_INTENT_FORMAT_VERSION,
+        generation: 1,
+        parent_generation: 0,
+        identities_name: "identities.bin".to_owned(),
+        source_volume: 1,
+        source_file_id: "00".repeat(16),
+        source_bytes: 25,
+        source_xxh64: "0123456789abcdef".to_owned(),
+        authority_sha256: String::new(),
+    };
+    for version in [
+        super::CONSTRUCTION_INTENT_FORMAT_VERSION,
+        super::FORMAT_VERSION,
+    ] {
+        intent.format_version = version;
+        intent.authority_sha256 = super::construction_intent_digest(
+            intent.format_version,
+            intent.generation,
+            intent.parent_generation,
+            &intent.identities_name,
+            intent.source_volume,
+            &intent.source_file_id,
+            intent.source_bytes,
+            &intent.source_xxh64,
+        );
+        assert_eq!(
+            intent.authenticate().is_ok(),
+            version == super::CONSTRUCTION_INTENT_FORMAT_VERSION
+        );
+    }
+}
+
+#[test]
+fn uuid_final_capture_hashes_whole_payload_once_and_retires_block_sha() {
+    let mut bytes = Vec::new();
+    for node_id in 1_u64..=4096 {
+        bytes.extend_from_slice(&node_id.to_be_bytes());
+        bytes.extend_from_slice(Uuid::from_u128(u128::from(node_id)).as_bytes());
+    }
+    let expected = hex_bytes(&crate::payload_digest::PayloadSha256::digest(&bytes));
+    let expected_checksum = crate::corruption_checksum::checksum(&bytes);
+    let capture = graphforge_core::hash_observation::operation::Capture::start();
+    let (sha, checksum, blocks, count) = super::super::describe_stream(
+        &mut std::io::Cursor::new(&bytes),
+        NODE_LOOKUP_RECORD_WIDTH,
+        &mut (0, 0),
+    )
+    .unwrap();
+    let observed = capture.snapshot();
+    assert_eq!(observed.artifact_payload_sha256_bytes, bytes.len() as u64);
+    assert_eq!(observed.checksum_bytes, 2 * bytes.len() as u64);
+    assert_eq!(observed.unclassified_sha256_bytes, 0);
+    assert_eq!((sha, checksum, count), (expected, expected_checksum, 4096));
+    assert!(
+        serde_json::to_value(&blocks)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|block| block.get("sha256").is_none() && block.get("xxh64").is_some())
+    );
 }

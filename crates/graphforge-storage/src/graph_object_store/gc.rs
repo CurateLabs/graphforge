@@ -273,22 +273,15 @@ pub(crate) fn gc_graph_objects_with_evidence_guarded(
                     error,
                 )
             })?;
-        bucket
-            .unlink_child_if_identity(&object, identity)
-            .map_err(|error| {
+        crate::durable_commit::retire_files(&bucket, [(object.as_os_str(), identity)]).map_err(
+            |error| {
                 storage(
-                    "remove unreachable stable graph object",
+                    "retire unreachable stable graph object",
                     &guard.cas.diagnostic_root,
                     error,
                 )
-            })?;
-        bucket.sync().map_err(|error| {
-            storage(
-                "sync graph object bucket after GC removal",
-                &guard.cas.diagnostic_root,
-                error,
-            )
-        })?;
+            },
+        )?;
         evidence.objects_removed = evidence
             .objects_removed
             .checked_add(1)

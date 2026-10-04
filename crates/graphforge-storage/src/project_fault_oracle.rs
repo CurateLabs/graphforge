@@ -15,9 +15,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::project_generation::{
@@ -25,6 +26,12 @@ use crate::project_generation::{
     resolve_project_generation,
 };
 use crate::project_publication::GENERATIONS_DIR;
+
+// Actual physical fault witnesses share the storage commit owner with all
+// durable writers; modeled power-loss omission witnesses remain below.
+#[cfg(test)]
+#[path = "durable_commit/tests.rs"]
+mod primitive;
 
 const MANIFEST_FILE: &str = "manifest.json";
 const PARTICIPANTS_DIR: &str = "participants";
@@ -379,6 +386,8 @@ struct ParticipantRecord {
     row_count: u64,
     schema_fingerprint: String,
     content_sha256: String,
+    #[serde(with = "crate::corruption_checksum::wire_hex")]
+    content_xxh64: u64,
 }
 
 fn canonical_json_line<T: Serialize>(value: &T) -> Vec<u8> {
@@ -673,7 +682,7 @@ fn hex_digest(bytes: [u8; 32]) -> String {
 fn parent_manifest_bytes(ids: PublicationIds) -> Vec<u8> {
     canonical_json_line(&ManifestRecord {
         format: "graphforge-generation".into(),
-        format_version: 1,
+        format_version: crate::project_generation::GENERATION_MANIFEST_VERSION,
         generation_uuid: ids.parent_generation.hyphenated().to_string(),
         parent_generation_uuid: None,
         transaction_uuid: uuid_from_seed(0, 9).hyphenated().to_string(),
@@ -690,7 +699,7 @@ fn child_manifest_bytes(ids: PublicationIds, participant_bytes: &[u8]) -> Vec<u8
     let schema = hex_digest(Sha256::digest(b"graph/nodes").into());
     canonical_json_line(&ManifestRecord {
         format: "graphforge-generation".into(),
-        format_version: 1,
+        format_version: crate::project_generation::GENERATION_MANIFEST_VERSION,
         generation_uuid: ids.new_generation.hyphenated().to_string(),
         parent_generation_uuid: Some(ids.parent_generation.hyphenated().to_string()),
         transaction_uuid: ids.transaction.hyphenated().to_string(),
@@ -709,6 +718,7 @@ fn child_manifest_bytes(ids: PublicationIds, participant_bytes: &[u8]) -> Vec<u8
             row_count: 1,
             schema_fingerprint: schema,
             content_sha256: digest,
+            content_xxh64: crate::corruption_checksum::checksum(participant_bytes),
         }],
     })
 }
@@ -1677,7 +1687,7 @@ pub fn simulate_all_phases_for_profile(
     Ok(outcomes)
 }
 
-/// Project-relative generation manifest path for later M6 harness reuse.
+/// Project-relative generation manifest path for later harness reuse.
 #[must_use]
 pub fn generation_manifest_path(generation: Uuid) -> PathBuf {
     PathBuf::from(GENERATIONS_DIR)

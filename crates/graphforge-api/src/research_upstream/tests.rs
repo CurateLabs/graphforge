@@ -2,6 +2,7 @@
 mod assertions;
 mod history;
 mod ontology;
+mod pinned_workspace;
 mod recovery;
 mod repeated;
 use super::*;
@@ -15,6 +16,8 @@ fn preview_is_pinned_read_only_and_requires_explicit_conflict_selection() {
     let current = |g: &GraphForge| g.generation_for_read().unwrap().generation_uuid();
     let cancel = CancellationToken::new();
     let branch = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: Uuid::now_v7(),
@@ -53,6 +56,8 @@ fn preview_is_pinned_read_only_and_requires_explicit_conflict_selection() {
         digest
     );
     let mut update = UpdateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: before,
         version_uuid: Uuid::now_v7(),
@@ -69,6 +74,8 @@ fn preview_is_pinned_read_only_and_requires_explicit_conflict_selection() {
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: before,
                 branch_uuid: branch.branch_uuid,
@@ -233,6 +240,8 @@ fn preference_only_source_update_is_visible_without_changing_immutable_source() 
     let current = |g: &GraphForge| g.generation_for_read().unwrap().generation_uuid();
     let cancel = CancellationToken::new();
     let branch = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: Uuid::now_v7(),
@@ -247,6 +256,8 @@ fn preference_only_source_update_is_visible_without_changing_immutable_source() 
     };
     graph.create_research_branch(&branch, &cancel).unwrap();
     let child = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: Uuid::now_v7(),
@@ -325,6 +336,8 @@ fn preference_only_source_update_is_visible_without_changing_immutable_source() 
     assert_eq!(preferences.events[0].artifact_uuid, first);
     drop(old);
     let mut update = UpdateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         version_uuid: Uuid::now_v7(),
@@ -366,10 +379,19 @@ fn preference_only_source_update_is_visible_without_changing_immutable_source() 
             resolution: ResearchUpstreamResolution::AdoptUpstream,
         });
     }
+    let prior = graph
+        .open_research_branch(branch.branch_uuid)
+        .unwrap()
+        .version_uuid();
     let receipt = graph.update_research_branch(&update, &cancel).unwrap();
     let updated = graph.open_research_branch(branch.branch_uuid).unwrap();
     let registry = graph.research_version_retention().unwrap();
     let upstream_version = registry.upstream.reviews[&update.operation_uuid].upstream_version_uuid;
+    // Incorporating the Project upstream merges its captured Version.
+    assert_eq!(
+        registry.versions[&update.version_uuid].parents,
+        vec![prior, upstream_version]
+    );
     assert!(
         !serde_json::to_string(&registry.upstream.reviews[&update.operation_uuid])
             .unwrap()
@@ -436,6 +458,8 @@ fn preference_only_source_update_is_visible_without_changing_immutable_source() 
         })
         .collect();
     let child_update = UpdateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         version_uuid: Uuid::now_v7(),
@@ -449,9 +473,21 @@ fn preference_only_source_update_is_visible_without_changing_immutable_source() 
         created_at: 5,
         explanation: "Adopt immediate parent".into(),
     };
+    let child_prior = graph
+        .open_research_branch(child.branch_uuid)
+        .unwrap()
+        .version_uuid();
     graph
         .update_research_branch(&child_update, &cancel)
         .unwrap();
+    // Incorporating a parent Branch merges that Branch's head.
+    assert_eq!(
+        graph
+            .research_version(child_update.version_uuid)
+            .unwrap()
+            .parents,
+        vec![child_prior, update.version_uuid]
+    );
     let child_branch = graph.open_research_branch(child.branch_uuid).unwrap();
     let child_baseline = crate::branches::baseline::read(child_branch.graph()).unwrap();
     assert_eq!(

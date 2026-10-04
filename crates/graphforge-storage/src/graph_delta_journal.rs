@@ -6,18 +6,19 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use arrow::array::{
     Array, FixedSizeBinaryArray, ListArray, StringArray, TimestampMicrosecondArray, UInt32Array,
     UInt64Array,
 };
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_ir::IrLiteral;
 use graphforge_value::{EntityTypeId, PrimaryEntityTypeId};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::graph_files::{
@@ -26,15 +27,15 @@ use crate::graph_files::{
 use crate::project_generation::resolve_project_generation;
 use crate::project_publication::{
     ProjectCapability, ProjectGenerationRequest, ProjectPublicationReceipt, ProjectStageOutcome,
-    published_project_transaction, stage_project_generation_from_admitted_parent,
+    published_project_transaction, stage_project_generation_from_installed_objects,
 };
 #[cfg(test)]
 use crate::{GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, empty_workspace_participants};
 
 /// Run file format identity implemented by this release.
-pub const GRAPH_DELTA_RUN_FORMAT_VERSION: u32 = 1;
+pub const GRAPH_DELTA_RUN_FORMAT_VERSION: u32 = 2;
 /// Record frame version implemented by this release.
-pub const GRAPH_DELTA_RECORD_VERSION: u16 = 1;
+pub const GRAPH_DELTA_RECORD_VERSION: u16 = 2;
 /// File extension for authoritative delta runs.
 pub const GRAPH_DELTA_RUN_EXTENSION: &str = "gfdr";
 /// Directory holding authoritative runs beneath a generation graph tree.
@@ -751,7 +752,7 @@ pub fn encode_delta_run(
     let record_count = u32::try_from(operations.len())
         .map_err(|_| validation("graph delta record count overflow"))?;
     body.extend_from_slice(&record_count.to_le_bytes());
-    let header_checksum = Sha256::digest(&body);
+    let header_checksum = crate::corruption_checksum::checksum(&body).to_le_bytes();
     body.extend_from_slice(&header_checksum);
 
     for (index, op) in operations.iter().enumerate() {
@@ -780,15 +781,15 @@ pub fn encode_delta_run(
             .map_err(|_| validation("graph delta payload length overflow"))?;
         record.extend_from_slice(&payload_len.to_le_bytes());
         record.extend_from_slice(&payload);
-        let record_checksum = Sha256::digest(&record);
+        let record_checksum = crate::corruption_checksum::checksum(&record).to_le_bytes();
         body.extend_from_slice(&record);
         body.extend_from_slice(&record_checksum);
-        if body.len() > limits.max_run_bytes.saturating_sub(32) {
+        if body.len() > limits.max_run_bytes.saturating_sub(8) {
             return Err(resource_limit("graph delta run bytes"));
         }
     }
 
-    let file_checksum = Sha256::digest(&body);
+    let file_checksum = crate::corruption_checksum::checksum(&body).to_le_bytes();
     body.extend_from_slice(&file_checksum);
     if body.len() > limits.max_run_bytes {
         return Err(resource_limit("graph delta run bytes"));
@@ -810,7 +811,7 @@ pub fn decode_delta_run(
     if bytes.len() > limits.max_run_bytes {
         return Err(resource_limit("graph delta run bytes"));
     }
-    if bytes.len() < 4 + 4 + 8 + 16 + 16 + 4 + 32 + 32 {
+    if bytes.len() < 4 + 4 + 8 + 16 + 16 + 4 + 8 + 8 {
         return Err(corrupt("graph delta run truncated before header"));
     }
     if &bytes[..4] != MAGIC {
@@ -834,27 +835,29 @@ pub fn decode_delta_run(
         return Err(corrupt("graph delta record count invalid"));
     }
     let header_end = 52;
-    let stored_header_checksum = &bytes[header_end..header_end + 32];
-    let actual_header_checksum = Sha256::digest(&bytes[..header_end]);
+    let stored_header_checksum = &bytes[header_end..header_end + 8];
+    let actual_header_checksum =
+        crate::corruption_checksum::checksum(&bytes[..header_end]).to_le_bytes();
     if stored_header_checksum != actual_header_checksum.as_slice() {
         return Err(corrupt("graph delta run header checksum mismatch"));
     }
 
-    let file_checksum_offset = bytes.len().saturating_sub(32);
-    if file_checksum_offset <= header_end + 32 {
+    let file_checksum_offset = bytes.len().saturating_sub(8);
+    if file_checksum_offset <= header_end + 8 {
         return Err(corrupt("graph delta run truncated"));
     }
     let stored_file_checksum = &bytes[file_checksum_offset..];
-    let actual_file_checksum = Sha256::digest(&bytes[..file_checksum_offset]);
+    let actual_file_checksum =
+        crate::corruption_checksum::checksum(&bytes[..file_checksum_offset]).to_le_bytes();
     if stored_file_checksum != actual_file_checksum.as_slice() {
         return Err(corrupt("graph delta run file checksum mismatch"));
     }
 
-    let mut cursor = header_end + 32;
+    let mut cursor = header_end + 8;
     let mut records = Vec::with_capacity(record_count);
     let mut seen_ops = BTreeSet::new();
     for expected_op_sequence in 0..record_count {
-        if cursor + 2 + 16 + 4 + 1 + 2 + 4 + 32 > file_checksum_offset {
+        if cursor + 2 + 16 + 4 + 1 + 2 + 4 + 8 > file_checksum_offset {
             return Err(corrupt("graph delta run truncated mid-record"));
         }
         let record_start = cursor;
@@ -885,17 +888,18 @@ pub fn decode_delta_run(
         if payload_len > limits.max_payload_bytes {
             return Err(resource_limit("graph delta payload bytes"));
         }
-        if cursor + payload_len + 32 > file_checksum_offset {
+        if cursor + payload_len + 8 > file_checksum_offset {
             return Err(corrupt("graph delta record payload truncated"));
         }
         let payload_bytes = &bytes[cursor..cursor + payload_len];
         cursor += payload_len;
-        let stored_record_checksum = &bytes[cursor..cursor + 32];
-        let actual_record_checksum = Sha256::digest(&bytes[record_start..cursor]);
+        let stored_record_checksum = &bytes[cursor..cursor + 8];
+        let actual_record_checksum =
+            crate::corruption_checksum::checksum(&bytes[record_start..cursor]).to_le_bytes();
         if stored_record_checksum != actual_record_checksum.as_slice() {
             return Err(corrupt("graph delta record checksum mismatch"));
         }
-        cursor += 32;
+        cursor += 8;
         let payload = GraphDeltaPayload::decode(payload_bytes)?;
         if payload.expected_kind() != kind {
             return Err(corrupt("graph delta record kind/payload mismatch"));
@@ -985,8 +989,8 @@ pub fn load_verified_delta_runs(
         if bytes.len() as u64 != entry.byte_length {
             return Err(corrupt("graph delta run length mismatch"));
         }
-        let digest = hex_digest(Sha256::digest(&bytes).into());
-        if digest != entry.content_sha256 {
+        let checksum = crate::corruption_checksum::checksum(&bytes);
+        if checksum != entry.content_xxh64 {
             return Err(corrupt("graph delta run digest mismatch"));
         }
         let run = decode_delta_run(&bytes, Some(expected), limits)?;
@@ -1385,11 +1389,16 @@ fn bounded_materialized_fingerprint(
         }
         known_unchanged.insert(
             entry.relative_path.clone(),
-            (entry.byte_length, entry.content_sha256.clone()),
+            crate::graph_files::KnownGraphFile::from(entry),
         );
     }
-    let (materialized, _) =
-        crate::graph_files::capture_graph_files_reusing_digests(target.path(), &known_unchanged)?;
+    // The materialized view is temporary and never published. Its per-file
+    // identities feed only the delta's contract state fingerprint.
+    let (materialized, _) = crate::graph_files::capture_graph_files_reusing_digests(
+        target.path(),
+        &known_unchanged,
+        graphforge_core::hash_observation::HashDomain::ContractIdentity,
+    )?;
     let mut hasher = Sha256::new();
     hasher.update(b"graphforge-materialized-graph-tree/1\n");
     for entry in materialized.files {
@@ -1462,13 +1471,13 @@ pub(crate) fn generation_with_replaced_graph(
 }
 
 impl DeltaReplaySource {
-    /// Open a replay source for `parent`, authenticating against an inventory
-    /// the caller already fetched.
-    ///
-    /// Callers that have not already verified `parent`'s inventory should use
-    /// [`DeltaReplaySource::open`] instead. Passing an already-authenticated
-    /// inventory here avoids a second full content-addressed verification
-    /// sweep of the same base graph (#1401).
+    /// Open a replay source for `parent`, using an inventory the caller already
+    /// fetched with [`crate::ResolvedProjectGeneration::graph_files_inventory`],
+    /// which checks every payload's length and XXH64. Callers that have not
+    /// done so should use [`DeltaReplaySource::open`] instead. Passing the
+    /// checked inventory here avoids a second full verification of the same
+    /// base graph (#1401). An inventory from `unadmitted_graph_files_inventory`
+    /// is length-only and must not be passed here.
     pub(crate) fn open_with_inventory(
         parent: &crate::ResolvedProjectGeneration,
         parent_inventory: &GraphFilesInventory,
@@ -1488,10 +1497,11 @@ impl DeltaReplaySource {
                     parent_inventory,
                     workspace.path(),
                 )?;
-                // `materialize_graph_objects` already authenticated every byte
-                // it linked/copied against `parent_inventory`'s digests (#1384:
-                // digests name content-addressed objects, verified once at
-                // that boundary). For the mapped route layout, the file's
+                // The caller admitted every payload against `parent_inventory`
+                // (`graph_files_inventory`), and `materialize_graph_objects`
+                // linked or copied exactly those objects (#1384: digests name
+                // content-addressed objects, verified once at that boundary).
+                // For the mapped route layout, the file's
                 // relative path is carried through unchanged (only the raw
                 // legacy layout translates destinations), so the resulting
                 // workspace is byte-for-byte and path-for-path identical to
@@ -1578,10 +1588,9 @@ fn prepare_graph_delta_inner(
             ));
         }
     }
-    // Fetched once (#1401): the parent's content-addressed inventory names
-    // every base object by its verified SHA-256 digest, and that single
-    // authentication sweep is threaded into `DeltaReplaySource` below instead
-    // of being repeated.
+    // Fetched once (#1401): `graph_files_inventory` checks every base payload
+    // against its required XXH64 and exact length, and that single admission
+    // is threaded into `DeltaReplaySource` below instead of being repeated.
     let parent_inventory = parent
         .graph_files_inventory()?
         .ok_or_else(|| validation("parent generation lacks graph/files inventory"))?;
@@ -1622,10 +1631,9 @@ fn prepare_graph_delta_inner(
     // without replaying and re-hashing every prior run a second time (#1401).
     let new_run = decode_delta_run(&run_bytes, Some(next_sequence), request.limits)?;
     // Captured before `source` is consumed below. Every entry here was
-    // already authenticated exactly once (parent's `graph_files_inventory()`,
-    // or `materialize_graph_objects`'s own per-object digest check) — it does
-    // not need a second full-tree rehash just because we are about to write
-    // one more file next to it (#1401).
+    // already admitted exactly once (the parent's `graph_files_inventory()`)
+    // — it does not need a second full-tree rehash just because we are about
+    // to write one more file next to it (#1401).
     let base_format = source.inventory.format.clone();
     let base_format_version = source.inventory.format_version;
     let base_files = source.inventory.files.clone();
@@ -1646,7 +1654,9 @@ fn prepare_graph_delta_inner(
             byte_length: run_byte_length,
             // Hashed once, in memory, from the exact bytes just written
             // (ADR 0019 record); no re-read of the file we just created.
-            content_sha256: hex_digest(Sha256::digest(&run_bytes).into()),
+            content_sha256: hex_digest(
+                crate::payload_digest::PayloadSha256::digest(&run_bytes).into(),
+            ),
             role: GraphFileRole::Delta,
         },
     );
@@ -1717,6 +1727,7 @@ fn prepare_graph_delta_inner(
                 &inventory,
                 &sealed,
                 &[],
+                None,
             )?;
             files_participant = crate::graph_files::graph_files_root_participant(&root)?;
             Some(lease)
@@ -1744,12 +1755,17 @@ fn write_prepared_run(
         fs::create_dir_all(parent_dir)
             .map_err(|error| storage("create deltas directory", parent_dir, error))?;
     }
-    let mut file =
-        File::create(&new_path).map_err(|error| storage("create delta run", &new_path, error))?;
-    file.write_all(run_bytes)
-        .map_err(|error| storage("write delta run", &new_path, error))?;
-    file.sync_all()
-        .map_err(|error| storage("flush delta run", &new_path, error))?;
+    crate::durable_commit::publish_atomic(
+        &new_path,
+        run_bytes,
+        crate::durable_commit::AtomicHooks {
+            after_write: || Ok(()),
+            after_seal: || Ok(()),
+            before_visible: || Ok(()),
+        },
+        None,
+    )
+    .map_err(|error| storage("publish delta run", &new_path, error))?;
     Ok(())
 }
 
@@ -1853,12 +1869,14 @@ fn publish_graph_delta_after_prepare(
     )?;
     before_stage(container_root)?;
     prepared.revalidate_for_publish()?;
-    let publication = match stage_project_generation_from_admitted_parent(
+    let publication = match stage_project_generation_from_installed_objects(
         admission,
         parent,
         &generation_request,
         prepared.graph_tree_source(),
         None,
+        None,
+        prepared.publication_lease.as_ref(),
     )? {
         ProjectStageOutcome::Staged(staged) => {
             prepared.publish(staged.validate(|_| Ok(()), |_, _| Ok(()))?)?
@@ -2339,10 +2357,6 @@ fn storage(action: &str, path: &Path, error: impl std::fmt::Display) -> GfError 
 #[cfg(test)]
 mod crash_oracle_tests {
     use super::*;
-    use crate::project_fault_oracle::{
-        AuthorityClass, PublicationIds, PublicationPhase, default_durable_ids, expected_authority,
-        publication_ops, simulate_crash,
-    };
 
     #[test]
     fn raw_parent_path_spelling_preserves_exact_parquet_digest_evidence() {
@@ -2484,32 +2498,6 @@ mod crash_oracle_tests {
             panic!("clone publication unexpectedly replayed");
         };
         (generation_uuid, staged)
-    }
-
-    #[test]
-    fn crash_oracle_before_and_after_ack_matches_frozen_contract() {
-        let seed = 752u64;
-        let ids = PublicationIds::from_seed(seed);
-        for phase in [
-            PublicationPhase::BeforeCurrentReplace,
-            PublicationPhase::AfterCurrentReplace,
-            PublicationPhase::AfterRootFsync,
-        ] {
-            let ops = publication_ops(ids, phase);
-            let durable = default_durable_ids(&ops, phase);
-            let report = simulate_crash(seed, phase, &durable).unwrap();
-            assert_eq!(report.expected, expected_authority(phase));
-            assert_eq!(report.actual, report.expected);
-            match phase {
-                PublicationPhase::BeforeCurrentReplace => {
-                    assert_eq!(report.expected, AuthorityClass::PriorGeneration);
-                }
-                PublicationPhase::AfterCurrentReplace | PublicationPhase::AfterRootFsync => {
-                    assert_eq!(report.expected, AuthorityClass::NewGeneration);
-                }
-                _ => unreachable!(),
-            }
-        }
     }
 
     #[test]

@@ -40,7 +40,7 @@ impl GraphForge {
                 cancellation,
             )?)
         };
-        let destination = proof
+        let mut destination = proof
             .as_ref()
             .map(|proof| {
                 super::destination::prepare(
@@ -54,6 +54,9 @@ impl GraphForge {
                 )
             })
             .transpose()?;
+        if let Some(prepared) = destination.as_mut() {
+            commit_destination(&command, &preview, request, prepared)?;
+        }
         let mappings = accepted_mappings(
             &preview,
             request,
@@ -109,6 +112,34 @@ impl GraphForge {
         drop(proof);
         outcome
     }
+}
+
+/// Whole-Proposal acceptance merges the Proposal's source Version; a partial
+/// acceptance only advances the prior head and the review records the items.
+fn commit_destination(
+    command: &publication::Command,
+    preview: &preview::Preview,
+    request: &ReviewResearchProposalRequest,
+    prepared: &mut graphforge_storage::research_versions::PreparedResearchContent,
+) -> Result<(), GfError> {
+    let whole = preview.proposal.items.iter().all(|item| {
+        request.decisions.get(&item.item_uuid) == Some(&ResearchProposalDecision::Accept)
+    });
+    let parents = command
+        .registry
+        .heads
+        .get(&prepared.version.context_uuid)
+        .copied()
+        .into_iter()
+        .chain(whole.then_some(preview.proposal.source_version_uuid))
+        .collect();
+    publication::commit(
+        &mut prepared.version,
+        parents,
+        request.author.as_ref(),
+        request.committer.as_ref(),
+        None,
+    )
 }
 
 fn validate(

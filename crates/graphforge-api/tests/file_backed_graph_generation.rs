@@ -104,6 +104,20 @@ fn property_digests(root: &Path) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// The UUID-membership index of a project's current compact generation, read
+/// from a private materialization that outlives it.
+fn membership_index(project: &Path) -> (tempfile::TempDir, UuidMembershipIndex) {
+    let inventory = resolve_project_generation(project)
+        .unwrap()
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap();
+    let workspace = tempfile::tempdir_in(project).unwrap();
+    graphforge_storage::materialize_graph_objects(project, &inventory, workspace.path()).unwrap();
+    let index = UuidMembershipIndex::open(workspace.path()).unwrap();
+    (workspace, index)
+}
+
 #[test]
 fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
     let root = tempfile::tempdir().unwrap();
@@ -194,7 +208,10 @@ fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
         .unwrap();
     assert_eq!(open.strategy, GraphFilesOpenStrategy::PrivateMaterialize);
     assert_eq!(open.files_validated, reopened_inventory.file_count);
-    assert_eq!(open.files_copied, open.files_validated);
+    // A compact generation hard-links its immutable payloads and copies only
+    // its small mutable controls.
+    assert!(open.files_copied > 0 && open.files_copied < open.files_validated);
+    assert_eq!(open.files_copied + open.files_reused, open.files_validated);
 
     let limits = PortableV2Limits::default();
     let subset_package = root.path().join("later-edge-subset.gfpb");
@@ -288,7 +305,7 @@ fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
 
 #[test]
 fn sharded_append_io_evidence_is_process_isolated() {
-    const CHILD: &str = "GRAPHFORGE_931_SHARDED_APPEND_IO_CHILD";
+    const CHILD: &str = "GRAPHFORGE_SHARDED_APPEND_IO_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let status = Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
@@ -321,6 +338,7 @@ fn sharded_append_io_evidence_is_process_isolated() {
         max_buffered_topology_bytes: 16 * 1024,
         max_flush_scratch_bytes: 16 * 1024,
     };
+    let _io_capture = graphforge_storage::io_stats::CaptureScope::install();
     graphforge_storage::io_stats::reset();
     let mut second = GraphWriter::open_at(&direct, OntologyMode::Strict, 2)
         .unwrap()
@@ -333,7 +351,7 @@ fn sharded_append_io_evidence_is_process_isolated() {
         .unwrap();
     second.flush().unwrap();
     let work = second.topology_write_work();
-    let io = graphforge_storage::io_stats::snapshot();
+    let io = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(work.input_rows, 1);
     assert_eq!(work.prior_rows_decoded, 0);
     assert_eq!(work.rows_encoded, 1);
@@ -396,8 +414,7 @@ fn public_delete_keeps_multishard_index_readers_and_portability_consistent() {
             .execute("MATCH (p:Person {name:'Cy'}) RETURN p.node_uuid")
             .unwrap(),
     );
-    let generation = resolve_project_generation(&source).unwrap();
-    let mut index = UuidMembershipIndex::open(&generation.graph_tree_root()).unwrap();
+    let (_workspace, mut index) = membership_index(&source);
     let deleted_surrogate = index.lookup_node_surrogates(&[deleted_uuid]).unwrap().0[0]
         .expect("Cy is indexed before deletion");
 
@@ -412,8 +429,7 @@ fn public_delete_keeps_multishard_index_readers_and_portability_consistent() {
             "deleting a later-shard entity must not rewrite earlier shard {path}"
         );
     }
-    let generation = resolve_project_generation(&source).unwrap();
-    let mut index = UuidMembershipIndex::open(&generation.graph_tree_root()).unwrap();
+    let (_workspace, mut index) = membership_index(&source);
     assert_eq!(
         index.lookup_node_surrogates(&[deleted_uuid]).unwrap().0,
         [None]
@@ -431,8 +447,7 @@ fn public_delete_keeps_multishard_index_readers_and_portability_consistent() {
         replacement_uuid, deleted_uuid,
         "deleted identity is not reused"
     );
-    let generation = resolve_project_generation(&source).unwrap();
-    let mut index = UuidMembershipIndex::open(&generation.graph_tree_root()).unwrap();
+    let (_workspace, mut index) = membership_index(&source);
     let replacement_surrogate = index.lookup_node_surrogates(&[replacement_uuid]).unwrap().0[0]
         .expect("replacement node is indexed");
     assert_ne!(
@@ -541,7 +556,15 @@ fn file_backed_multi_file_fixture_reopens_without_snapshot_envelope() {
     let inventory = generation.graph_files_inventory().unwrap().unwrap();
     assert!(inventory.file_count >= 2);
     assert!(inventory.total_byte_length > 0);
-    assert!(generation.graph_tree_root().is_dir());
+    // A mutating commit publishes a compact root over the content store: the
+    // generation owns no graph tree.
+    assert!(
+        generation
+            .declared_graph_files_inventory()
+            .unwrap()
+            .is_none()
+    );
+    assert!(!generation.graph_tree_root().exists());
 
     let reopened = GraphForge::new(Some(path)).unwrap();
     let evidence = reopened.graph_open_evidence();
@@ -550,10 +573,13 @@ fn file_backed_multi_file_fixture_reopens_without_snapshot_envelope() {
         GraphFilesOpenStrategy::PrivateMaterialize
     );
     assert!(evidence.files_validated >= 2);
-    assert_eq!(evidence.files_copied, evidence.files_validated);
     assert_eq!(evidence.files_opened_in_place, 0);
     assert!(evidence.bytes_copied > 0);
-    assert_eq!(evidence.bytes_copied, evidence.bytes_validated);
+    assert!(evidence.bytes_copied < evidence.bytes_validated);
+    assert_eq!(
+        evidence.files_copied + evidence.files_reused,
+        evidence.files_validated
+    );
 
     let result = reopened
         .execute("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS from, b.name AS to")
@@ -562,7 +588,7 @@ fn file_backed_multi_file_fixture_reopens_without_snapshot_envelope() {
 }
 
 #[test]
-fn checkpoint_read_only_open_pins_graph_tree_in_place() {
+fn checkpoint_read_only_open_hydrates_a_compact_generation_privately() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().to_str().unwrap();
     let graph = GraphForge::new(Some(path)).unwrap();
@@ -580,11 +606,18 @@ fn checkpoint_read_only_open_pins_graph_tree_in_place() {
 
     let view = graph.open_checkpoint("pinned").unwrap();
     let evidence = view.graph_open_evidence();
-    assert_eq!(evidence.strategy, GraphFilesOpenStrategy::PinnedInPlace);
+    // The checkpointed generation is compact, which always hydrates into a
+    // private workspace: payloads are hard-linked from the content store and
+    // only the small mutable controls are copied. Pinning a generation tree in
+    // place applies to expanded generations only (see `pinned_workspace_tests`).
+    assert_eq!(
+        evidence.strategy,
+        GraphFilesOpenStrategy::PrivateMaterialize
+    );
     assert!(evidence.files_validated >= 2);
-    assert_eq!(evidence.files_copied, 0);
-    assert_eq!(evidence.bytes_copied, 0);
-    assert_eq!(evidence.files_opened_in_place, evidence.files_validated);
+    assert_eq!(evidence.files_opened_in_place, 0);
+    assert!(evidence.files_reused > 0);
+    assert!(evidence.bytes_copied < evidence.bytes_validated);
     assert_eq!(
         view.project_open_recovery().kind,
         graphforge_storage::ProjectOpenRecoveryKind::CheckpointView

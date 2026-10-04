@@ -1,18 +1,191 @@
-//! Verified portable component materialization and cleanup.
-
+//! Single-pass authentication and private component materialization.
 use super::{
-    PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2Mode, PortableV2Report,
-    VerifiedMaterialization, check_cancel, header_path, parse_octal, parse_pax,
-    read_unhashed_payload, skip_padding, validate_path, verify_portable_v2, walk,
+    AtomicBool, BTreeMap, BTreeSet, File, Path, PortableV2Error, PortableV2ErrorCode,
+    PortableV2Limits, PortableV2Mode, PortableV2Report, Read, VerifiedMaterialization,
+    check_cancel, fs, hex, preflight, scan,
 };
-use std::fs::{self, File};
-use std::io::{Read, Write};
-use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::io::Write;
+mod derived;
+pub(crate) use derived::capture_import_adjacency;
+mod compact_root;
+pub(crate) use compact_root::publish_compact_import_root;
+mod composition_control;
+pub(crate) use composition_control::{
+    CapturedCompositionControl, persist_composition_authority, persist_staged_composition,
+};
 
-/// Fully verify a package, then stream its authenticated component entries
-/// into a new private directory for an importer. The destination is removed on
-/// every error and is never a project publication boundary.
+/// A private exact-byte capture from the authenticated import copy.
+/// Only the authenticated copier or actual derived writer can mint it.
+pub(crate) struct MaterializedCapture {
+    identity: graphforge_filesystem::FileIdentity,
+    length: u64,
+    digest: [u8; 32],
+    checksum: u64,
+    allocated_bytes: u64,
+}
+impl MaterializedCapture {
+    pub(crate) fn open_source(
+        &self,
+        path: &Path,
+    ) -> Result<CapturedPortableSource<'_>, PortableV2Error> {
+        let parent =
+            graphforge_filesystem::StableDirectory::open(path.parent().ok_or_else(|| {
+                PortableV2Error::new(PortableV2ErrorCode::InvalidPath, "captured source parent")
+            })?)
+            .map_err(|_| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::ConcurrentMutation,
+                    "captured source directory changed",
+                )
+            })?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| {
+                PortableV2Error::new(PortableV2ErrorCode::InvalidPath, "captured source name")
+            })?
+            .to_os_string();
+        let file = parent.open_child_file(&name).map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::ConcurrentMutation,
+                "captured source changed",
+            )
+        })?;
+        let source = CapturedPortableSource {
+            parent,
+            name,
+            file,
+            capture: self,
+            digest: hex(&self.digest),
+        };
+        source.revalidate().map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::ConcurrentMutation,
+                "captured source identity changed",
+            )
+        })?;
+        Ok(source)
+    }
+    pub(crate) fn matches_file(
+        &self,
+        file: &File,
+        length: u64,
+        digest: [u8; 32],
+        checksum: u64,
+    ) -> bool {
+        self.length == length
+            && self.digest == digest
+            && self.checksum == checksum
+            && graphforge_filesystem::file_identity(file)
+                .is_ok_and(|identity| identity == self.identity)
+    }
+    pub(crate) fn authenticate(
+        &self,
+        path: &Path,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<[u8; 32], PortableV2Error> {
+        let mut file = crate::project_portable_v2_export::open_source_no_follow(path)?;
+        if graphforge_filesystem::file_identity(&file).map_err(|_| {
+            PortableV2Error::new(PortableV2ErrorCode::Io, "materialized file identity")
+        })? != self.identity
+            || file
+                .metadata()
+                .map_err(|_| {
+                    PortableV2Error::new(PortableV2ErrorCode::Io, "materialized file metadata")
+                })?
+                .len()
+                != self.length
+        {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::ConcurrentMutation,
+                "materialized file changed",
+            ));
+        }
+        let mut checksum = crate::corruption_checksum::Checksum::new();
+        let mut bytes = 0_u64;
+        let mut buffer = vec![0; 64 * 1024];
+        let bound = self.length.checked_add(1).ok_or_else(|| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::LimitExceeded,
+                "materialized length overflow",
+            )
+        })?;
+        let mut reader = (&mut file).take(bound);
+        loop {
+            check_cancel(cancelled)?;
+            let count = reader.read(&mut buffer).map_err(|_| {
+                PortableV2Error::new(PortableV2ErrorCode::Io, "cannot read materialized file")
+            })?;
+            if count == 0 {
+                break;
+            }
+            bytes += count as u64;
+            checksum.update(&buffer[..count]);
+        }
+        if bytes != self.length
+            || checksum.finish() != self.checksum
+            || graphforge_filesystem::path_identity(path).map_err(|_| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::ConcurrentMutation,
+                    "materialized path changed",
+                )
+            })? != self.identity
+        {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::ConcurrentMutation,
+                "materialized checksum changed",
+            ));
+        }
+        Ok(self.digest)
+    }
+}
+
+/// Retained authority from a successful authenticated copy or private derived writer.
+/// Metadata tuples and public installers cannot construct this capability.
+pub(crate) struct CapturedPortableSource<'a> {
+    parent: graphforge_filesystem::StableDirectory,
+    name: std::ffi::OsString,
+    file: File,
+    capture: &'a MaterializedCapture,
+    digest: String,
+}
+impl CapturedPortableSource<'_> {
+    pub(crate) fn content_sha256(&self) -> &str {
+        &self.digest
+    }
+    pub(crate) fn bytes(&self) -> u64 {
+        self.capture.length
+    }
+    pub(crate) fn checksum(&self) -> u64 {
+        self.capture.checksum
+    }
+    pub(crate) fn source(&self) -> &File {
+        &self.file
+    }
+    pub(crate) fn revalidate(&self) -> Result<(), graphforge_core::GfError> {
+        let check = || -> std::io::Result<bool> {
+            self.parent.revalidate_named()?;
+            let named = self.parent.open_child_file(&self.name)?;
+            let metadata = self.file.metadata()?;
+            Ok(metadata.is_file()
+                && metadata.len() == self.bytes()
+                && graphforge_filesystem::file_identity(&self.file)? == self.capture.identity
+                && graphforge_filesystem::file_identity(&named)? == self.capture.identity
+                && graphforge_filesystem::file_link_count(&self.file)? == 1
+                && graphforge_filesystem::file_space_usage(&self.file)?.allocated_bytes
+                    == self.capture.allocated_bytes)
+        };
+        if check().unwrap_or(false) {
+            Ok(())
+        } else {
+            Err(graphforge_core::GfError::Validation(
+                "captured portable source identity, length, links or allocation changed".into(),
+            ))
+        }
+    }
+}
+
+/// Authenticate the exact bytes copied into a new private directory.
+/// No project authority is published until the complete package is admitted.
 pub fn materialize_verified_portable_v2(
     source: impl AsRef<Path>,
     destination: impl AsRef<Path>,
@@ -38,7 +211,6 @@ pub(crate) fn materialize_verified_portable_v2_observed(
     mut observed: impl FnMut(&Path, Option<&File>) -> Result<(), PortableV2Error>,
     track_removals: bool,
 ) -> Result<VerifiedMaterialization, PortableV2Error> {
-    let source = source.as_ref();
     let destination = destination.as_ref();
     if destination.exists() {
         return Err(PortableV2Error::new(
@@ -46,278 +218,194 @@ pub(crate) fn materialize_verified_portable_v2_observed(
             "materialization destination exists",
         ));
     }
-    let before = fs::metadata(source)
-        .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "source unavailable"))?;
-    let report = verify_portable_v2(source, PortableV2Mode::Full, limits, cancelled)?;
+    // Admission happens before creation; no malformed/future package can allocate payload staging.
+    preflight(source.as_ref(), limits, cancelled)?;
     fs::create_dir(destination).map_err(|_| {
         PortableV2Error::new(PortableV2ErrorCode::Io, "cannot create materialization")
     })?;
-    let mut routes = std::collections::BTreeSet::new();
+    let mut sink = CopySink {
+        destination,
+        observed: &mut observed,
+        routes: BTreeSet::new(),
+        track_removals,
+        bytes: 0,
+        operations: 0,
+        captures: BTreeMap::new(),
+    };
     let result = (|| {
-        let mut tracking = |path: &Path, file: Option<&File>| {
-            if track_removals {
-                routes.insert(path.to_path_buf());
-            }
-            observed(path, file)
-        };
-        let result = if before.is_dir() {
-            materialize_expanded(source, destination, limits, cancelled, &mut tracking)
-        } else {
-            materialize_bundle(source, destination, limits, cancelled, &mut tracking)
-        };
-        let (application_read_bytes, application_read_operations) = result?;
-        let after = fs::metadata(source).map_err(|_| {
-            PortableV2Error::new(
-                PortableV2ErrorCode::ConcurrentMutation,
-                "source disappeared",
-            )
-        })?;
-        if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::ConcurrentMutation,
-                "source changed after verification",
-            ));
+        let report = scan(
+            source.as_ref(),
+            PortableV2Mode::Full,
+            limits,
+            cancelled,
+            Some(&mut sink),
+            None,
+        )?;
+        // Refuse a successful write whose physical bytes changed before the
+        // private directory becomes available. This is a checksum readback of
+        // writer-owned output, not another authentication of the source.
+        for (relative, capture) in &sink.captures {
+            capture.authenticate(&destination.join(relative), cancelled)?;
         }
-        let after_report = verify_portable_v2(source, PortableV2Mode::Full, limits, cancelled)
-            .map_err(|_| {
-                PortableV2Error::new(
-                    PortableV2ErrorCode::ConcurrentMutation,
-                    "source changed during materialization",
-                )
-            });
-        let after_report = after_report?;
-        if report.package_digest != after_report.package_digest
-            || report.transport_digest != after_report.transport_digest
-        {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::ConcurrentMutation,
-                "source changed during materialization",
-            ));
-        }
+        sync_materialized_tree(destination)?;
         Ok(VerifiedMaterialization {
             report,
-            application_read_bytes,
-            application_read_operations,
+            application_read_bytes: sink.bytes,
+            application_read_operations: sink.operations,
+            captures: std::mem::take(&mut sink.captures),
         })
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(destination);
-        for path in routes {
-            if matches!(fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        for path in &sink.routes {
+            if matches!(fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
             {
-                let _ = observed(&path, None);
+                let _ = (sink.observed)(path, None);
             }
         }
     }
     result
 }
 
-pub(super) fn materialize_expanded(
-    source: &Path,
-    destination: &Path,
-    limits: PortableV2Limits,
-    cancelled: Option<&AtomicBool>,
-    observed: &mut impl FnMut(&Path, Option<&File>) -> Result<(), PortableV2Error>,
-) -> Result<(u64, u64), PortableV2Error> {
-    let mut read_bytes = 0_u64;
-    let mut read_operations = 0_u64;
-    let mut paths = Vec::new();
-    walk(source, source, &mut paths, limits, cancelled)?;
-    for relative in paths
-        .into_iter()
-        .filter(|path| path.starts_with("data/components/"))
-    {
-        check_cancel(cancelled)?;
-        let input_path = source.join(&relative);
-        let before = fs::metadata(&input_path).map_err(|_| {
-            PortableV2Error::at(PortableV2ErrorCode::Io, &relative, "cannot stat entry")
-        })?;
-        let output_path = destination.join(&relative);
-        create_materialized_parent(&output_path, &relative)?;
-        let mut input = File::open(&input_path).map_err(|_| {
-            PortableV2Error::at(PortableV2ErrorCode::Io, &relative, "cannot open entry")
-        })?;
-        let mut output = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&output_path)
-            .map_err(|_| {
-                PortableV2Error::at(PortableV2ErrorCode::Io, &relative, "cannot stage entry")
-            })?;
-        observed(&output_path, Some(&output))?;
-        let copied =
-            copy_materialized(&mut input, &mut output, limits.copy_buffer_bytes, cancelled);
-        let refreshed = observed(&output_path, Some(&output));
-        let (bytes, operations) = copied?;
-        refreshed?;
-        read_bytes = read_bytes.saturating_add(bytes);
-        read_operations = read_operations.saturating_add(operations);
-        let synced = output.sync_all().map_err(|_| {
-            PortableV2Error::at(PortableV2ErrorCode::Io, &relative, "cannot sync entry")
-        });
-        let refreshed = observed(&output_path, Some(&output));
-        synced?;
-        refreshed?;
-        let after = fs::metadata(&input_path).map_err(|_| {
+type EntryObserver<'a> = dyn FnMut(&Path, Option<&File>) -> Result<(), PortableV2Error> + 'a;
+
+pub(super) struct CopySink<'a> {
+    destination: &'a Path,
+    observed: &'a mut EntryObserver<'a>,
+    routes: BTreeSet<std::path::PathBuf>,
+    track_removals: bool,
+    bytes: u64,
+    operations: u64,
+    captures: BTreeMap<String, MaterializedCapture>,
+}
+impl CopySink<'_> {
+    pub(super) fn open(&mut self, relative: &str) -> Result<Option<File>, PortableV2Error> {
+        if !relative.starts_with("data/components/") {
+            return Ok(None);
+        }
+        let path = self.destination.join(relative);
+        fs::create_dir_all(path.parent().expect("component parent")).map_err(|_| {
             PortableV2Error::at(
-                PortableV2ErrorCode::ConcurrentMutation,
-                &relative,
-                "entry disappeared",
+                PortableV2ErrorCode::Io,
+                relative,
+                "cannot create component parent",
             )
         })?;
-        if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
-            return Err(PortableV2Error::at(
-                PortableV2ErrorCode::ConcurrentMutation,
-                &relative,
-                "entry changed during materialization",
-            ));
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|_| {
+                PortableV2Error::at(PortableV2ErrorCode::Io, relative, "cannot stage entry")
+            })?;
+        if self.track_removals {
+            self.routes.insert(path.clone());
         }
+        (self.observed)(&path, Some(&file))?;
+        Ok(Some(file))
     }
-    sync_materialized_tree(destination)?;
-    Ok((read_bytes, read_operations))
-}
-
-pub(super) fn materialize_bundle(
-    source: &Path,
-    destination: &Path,
-    limits: PortableV2Limits,
-    cancelled: Option<&AtomicBool>,
-    observed: &mut impl FnMut(&Path, Option<&File>) -> Result<(), PortableV2Error>,
-) -> Result<(u64, u64), PortableV2Error> {
-    let mut read_bytes = 0_u64;
-    let mut read_operations = 0_u64;
-    let mut input = File::open(source)
-        .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot reopen bundle"))?;
-    let mut pending_pax = None;
-    loop {
-        check_cancel(cancelled)?;
-        let mut header = [0u8; 512];
-        input.read_exact(&mut header).map_err(|_| {
-            PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "truncated bundle")
+    pub(super) fn write(
+        &mut self,
+        relative: &str,
+        file: &mut File,
+        bytes: &[u8],
+    ) -> Result<(), PortableV2Error> {
+        let result = file.write_all(bytes).map_err(|_| {
+            PortableV2Error::at(PortableV2ErrorCode::Io, relative, "cannot copy entry")
+        });
+        let refreshed = (self.observed)(&self.destination.join(relative), Some(file));
+        result?;
+        refreshed?;
+        self.bytes = self.bytes.saturating_add(bytes.len() as u64);
+        self.operations = self.operations.saturating_add(1);
+        Ok(())
+    }
+    pub(super) fn finish(
+        &mut self,
+        relative: &str,
+        file: File,
+        length: u64,
+        digest: [u8; 32],
+        checksum: u64,
+    ) -> Result<(), PortableV2Error> {
+        let result = crate::durable_commit::seal_file(&file).map_err(|_| {
+            PortableV2Error::at(PortableV2ErrorCode::Io, relative, "cannot sync entry")
+        });
+        let refreshed = (self.observed)(&self.destination.join(relative), Some(&file));
+        result?;
+        refreshed?;
+        let identity = graphforge_filesystem::file_identity(&file).map_err(|_| {
+            PortableV2Error::at(
+                PortableV2ErrorCode::Io,
+                relative,
+                "cannot capture materialized identity",
+            )
         })?;
-        if header.iter().all(|byte| *byte == 0) {
-            let mut second = [0u8; 512];
-            input.read_exact(&mut second).map_err(|_| {
-                PortableV2Error::new(
-                    PortableV2ErrorCode::InvalidStructure,
-                    "truncated end marker",
+        // Closing the last writer can release speculative filesystem allocation.
+        // Bind the reopened reader to the actual written inode before recording it.
+        drop(file);
+        let path = self.destination.join(relative);
+        let directory =
+            graphforge_filesystem::StableDirectory::open(path.parent().expect("component parent"))
+                .map_err(|_| {
+                    PortableV2Error::at(
+                        PortableV2ErrorCode::ConcurrentMutation,
+                        relative,
+                        "materialized directory changed",
+                    )
+                })?;
+        let file = directory
+            .open_child_file(path.file_name().expect("component name"))
+            .map_err(|_| {
+                PortableV2Error::at(
+                    PortableV2ErrorCode::ConcurrentMutation,
+                    relative,
+                    "materialized file changed after writer close",
                 )
             })?;
-            break;
-        }
-        let size = parse_octal(&header[124..136])?;
-        let raw_path = header_path(&header)?;
-        if header[156] == b'x' {
-            let bytes = read_unhashed_payload(&mut input, size, limits.max_path_bytes + 32)?;
-            pending_pax = Some(parse_pax(std::str::from_utf8(&bytes).map_err(|_| {
-                PortableV2Error::new(PortableV2ErrorCode::InvalidPath, "PAX path is not UTF-8")
-            })?)?);
-            continue;
-        }
-        let path = pending_pax.take().unwrap_or(raw_path);
-        validate_path(&path, limits.max_path_bytes)?;
-        if path.starts_with("data/components/") {
-            let output_path = destination.join(&path);
-            create_materialized_parent(&output_path, &path)?;
-            let mut output = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&output_path)
-                .map_err(|_| {
-                    PortableV2Error::at(PortableV2ErrorCode::Io, &path, "cannot stage entry")
-                })?;
-            observed(&output_path, Some(&output))?;
-            let copied = copy_exact_materialized(
-                &mut input,
-                &mut output,
-                size,
-                limits.copy_buffer_bytes,
-                cancelled,
-            );
-            let refreshed = observed(&output_path, Some(&output));
-            let (bytes, operations) = copied?;
-            refreshed?;
-            read_bytes = read_bytes.saturating_add(bytes);
-            read_operations = read_operations.saturating_add(operations);
-            let synced = output.sync_all().map_err(|_| {
-                PortableV2Error::at(PortableV2ErrorCode::Io, &path, "cannot sync entry")
-            });
-            let refreshed = observed(&output_path, Some(&output));
-            synced?;
-            refreshed?;
-        } else {
-            skip_exact(&mut input, size, limits.copy_buffer_bytes, cancelled)?;
-        }
-        skip_padding(&mut input, size)?;
-    }
-    sync_materialized_tree(destination)?;
-    Ok((read_bytes, read_operations))
-}
-
-fn create_materialized_parent(path: &Path, entry: &str) -> Result<(), PortableV2Error> {
-    fs::create_dir_all(path.parent().expect("component entry has a parent")).map_err(|_| {
-        PortableV2Error::at(
-            PortableV2ErrorCode::Io,
-            entry,
-            "cannot create staged parent",
-        )
-    })
-}
-fn copy_materialized(
-    input: &mut File,
-    output: &mut impl Write,
-    buffer_size: usize,
-    cancelled: Option<&AtomicBool>,
-) -> Result<(u64, u64), PortableV2Error> {
-    let mut buffer = vec![0; buffer_size];
-    let mut bytes = 0_u64;
-    let mut operations = 0_u64;
-    loop {
-        check_cancel(cancelled)?;
-        let count = input
-            .read(&mut buffer)
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot read entry"))?;
-        if count == 0 {
-            return Ok((bytes, operations));
-        }
-        bytes = bytes.saturating_add(count as u64);
-        operations = operations.saturating_add(1);
-        output
-            .write_all(&buffer[..count])
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot stage entry"))?;
-    }
-}
-fn copy_exact_materialized(
-    input: &mut File,
-    output: &mut impl Write,
-    length: u64,
-    buffer_size: usize,
-    cancelled: Option<&AtomicBool>,
-) -> Result<(u64, u64), PortableV2Error> {
-    let mut remaining = length;
-    let mut buffer = vec![0; buffer_size];
-    while remaining > 0 {
-        check_cancel(cancelled)?;
-        let count = usize::try_from(remaining.min(buffer_size as u64)).unwrap();
-        input.read_exact(&mut buffer[..count]).map_err(|_| {
-            PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "truncated payload")
+        directory.revalidate_named().map_err(|_| {
+            PortableV2Error::at(
+                PortableV2ErrorCode::ConcurrentMutation,
+                relative,
+                "materialized directory changed",
+            )
         })?;
-        output
-            .write_all(&buffer[..count])
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot stage entry"))?;
-        remaining -= count as u64;
+        let metadata = file.metadata().map_err(|_| {
+            PortableV2Error::at(PortableV2ErrorCode::Io, relative, "materialized metadata")
+        })?;
+        if !metadata.is_file()
+            || metadata.len() != length
+            || graphforge_filesystem::file_identity(&file).ok() != Some(identity)
+            || graphforge_filesystem::file_link_count(&file).ok() != Some(1)
+        {
+            return Err(PortableV2Error::at(
+                PortableV2ErrorCode::ConcurrentMutation,
+                relative,
+                "materialized file changed after writer close",
+            ));
+        }
+        (self.observed)(&path, Some(&file))?;
+        let allocated_bytes = graphforge_filesystem::file_space_usage(&file)
+            .map_err(|_| {
+                PortableV2Error::at(
+                    PortableV2ErrorCode::Io,
+                    relative,
+                    "cannot capture materialized allocation",
+                )
+            })?
+            .allocated_bytes;
+        self.captures.insert(
+            relative.into(),
+            MaterializedCapture {
+                identity,
+                length,
+                digest,
+                checksum,
+                allocated_bytes,
+            },
+        );
+        Ok(())
     }
-    let operations = length.div_ceil(buffer_size as u64);
-    Ok((length, operations))
-}
-fn skip_exact(
-    input: &mut File,
-    length: u64,
-    buffer_size: usize,
-    cancelled: Option<&AtomicBool>,
-) -> Result<(), PortableV2Error> {
-    let mut sink = std::io::sink();
-    copy_exact_materialized(input, &mut sink, length, buffer_size, cancelled).map(|_| ())
 }
 
 fn sync_materialized_tree(root: &Path) -> Result<(), PortableV2Error> {

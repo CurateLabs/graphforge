@@ -175,13 +175,9 @@ def validate_registry(value: dict[str, Any], root: Path = ROOT) -> None:
     ):
         raise RegistryError("durability/concurrency variants must share matrix-gate")
 
-    release_owners = {
-        item["owner"]
-        for item in workflows
-        if item["id"] in {"clean-environment", "publish-track", "publish"}
-    }
+    release_owners = {item["owner"] for item in workflows if item["id"] == "publish"}
     if release_owners != {"release"}:
-        raise RegistryError("publication verification must have one release owner")
+        raise RegistryError("publication must have one release owner")
     referenced_commands = {item["command"] for item in records}
     if referenced_commands != set(commands):
         raise RegistryError("command definitions must be referenced exactly by gate records")
@@ -197,6 +193,16 @@ def command_argv(value: dict[str, Any], gate_id: str) -> list[str]:
     if rendered[:3] == ["python3", "-m", "graphforge_bench.qualification_operator"]:
         rendered[0] = sys.executable
     return rendered
+
+
+def executable_argv(rendered: list[str]) -> list[str]:
+    """Execute registry Python commands under the interpreter that invoked the registry.
+
+    Registry commands name `python3` so the rendered operator command is portable.
+    Executing that literal drops the caller's virtualenv, and with it any wheel the
+    lane installed there (#1671).
+    """
+    return [sys.executable, *rendered[1:]] if rendered[:1] == ["python3"] else rendered
 
 
 def command_environment(argv: list[str]) -> dict[str, str] | None:
@@ -264,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         reject_owned_options(passthrough, record["args"])
         return subprocess.run(
-            [*rendered, *passthrough],
+            [*executable_argv(rendered), *passthrough],
             cwd=ROOT,
             check=False,
             env=command_environment(rendered),

@@ -45,18 +45,18 @@ fn detail_partition_load<const N: usize>(family: PartitionFamily) {
     .unwrap();
     assert_eq!(counters.records, count);
     assert_eq!(records.len() as u64, count);
-    let mut digest = sha2::Sha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     for (index, actual) in records.iter().enumerate() {
         let expected = detail_record::<N>(index as u64 + 1);
         let wire = codec.bytes(&expected).unwrap();
         // Works for both the old padded Vec and compact wire storage, letting
         // this exact fixture run unchanged against the comparison baseline.
         assert_eq!(&actual[..wire.len()], wire);
-        digest.update(wire);
+        checksum.update(wire);
     }
     println!(
-        "detail_width={N} records={count} sha256={}",
-        hex(&digest.finalize())
+        "detail_width={N} records={count} xxh64={:016x}",
+        checksum.finish()
     );
 }
 
@@ -277,6 +277,8 @@ fn boundary_seal_on_lanes_matches_the_calling_thread() {
         )
         .unwrap()
         .with_cpu_admission(Some(admission.clone()));
+        let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+        let region = crate::concurrency_attribution::RegionScope::named("shape_family_finish");
         let mut receipts = Vec::new();
         for boundary in 1..=3_u64 {
             for partition in 0..16_usize {
@@ -294,12 +296,34 @@ fn boundary_seal_on_lanes_matches_the_calling_thread() {
             batch.flush(&mut checkpoint.evidence).unwrap();
         }
         for receipt in partitioner.sealed_segments() {
-            receipts.push((receipt.name, receipt.bytes, receipt.sha256));
+            receipts.push((receipt.name, receipt.bytes, receipt.xxh64));
         }
+        drop(region);
+        let snapshot = capture.finish();
+        let work = snapshot.regions["import_command/shape_family_finish"]
+            .work
+            .clone();
+        assert!(snapshot.regions["import_command"].work.is_empty());
+        let payload_bytes: u64 = receipts.iter().map(|(_, bytes, _)| *bytes).sum();
+        let receipt_bytes: u64 = receipts
+            .iter()
+            .map(|(name, _, _)| {
+                std::fs::metadata(
+                    session_root
+                        .path()
+                        .join(super::super::shape_receipt_name(name)),
+                )
+                .unwrap()
+                .len()
+            })
+            .sum();
+        assert_eq!(work["hashed_bytes"], payload_bytes);
+        assert_eq!(work["written_bytes"], payload_bytes + receipt_bytes);
         (
             admission.peak(),
             receipts,
             super::super::tests::evidence_without_file_identities(&checkpoint.evidence),
+            work,
         )
     };
     let serial = seal(1);
@@ -307,7 +331,10 @@ fn boundary_seal_on_lanes_matches_the_calling_thread() {
     assert_eq!(serial.0, 1);
     assert_eq!(parallel.0, 8, "sealing never ran on parallel lanes");
     assert_eq!(serial.1.len(), 48);
-    assert_eq!((serial.1, serial.2), (parallel.1, parallel.2));
+    assert_eq!(
+        (serial.1, serial.2, serial.3),
+        (parallel.1, parallel.2, parallel.3)
+    );
 }
 
 /// #1448: a spill taken for a boundary seal and never sealed is abandoned when

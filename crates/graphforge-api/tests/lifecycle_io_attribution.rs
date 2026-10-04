@@ -5,15 +5,184 @@
 //! cost from execution cost. The ignored report prints the per-phase table this
 //! issue was opened to produce, plus the instrumentation's own overhead.
 
-use std::sync::Mutex;
 use std::time::Instant;
 
 use arrow::array::Int64Array;
-use graphforge_api::{GraphForge, LifecyclePhaseAttribution, lifecycle_io_snapshot};
+use graphforge_api::{
+    GraphForge, LifecycleIoCapture, LifecyclePhaseAttribution, lifecycle_io_snapshot,
+};
 use graphforge_storage::StorageIoPhase;
 
-/// Serializes the process-global lifecycle counters used by the assertions.
-static LIFECYCLE_IO_LOCK: Mutex<()> = Mutex::new(());
+#[path = "support/bulk_fixture.rs"]
+mod bulk_fixture;
+
+#[test]
+fn default_reopen_and_query_do_no_optional_observation_work() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("state");
+    seed_project(&path, 16);
+    let before = graphforge_storage::lifecycle_io::observer_work();
+    let clocks = graphforge_storage::concurrency_attribution::observer_samples();
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    assert!(forge.open_io_attribution().is_none());
+    assert_eq!(scalar_count(&forge, EDGE_RECOUNT), 16);
+    let result = forge.execute(ORDERED_ONE_HOP).unwrap();
+    assert_eq!(
+        result.batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+        10
+    );
+    assert!(lifecycle_io_snapshot().is_none());
+    assert!(graphforge_storage::io_stats::snapshot().is_none());
+    assert!(graphforge_storage::concurrency_attribution::snapshot().is_none());
+    assert_eq!(graphforge_storage::lifecycle_io::observer_work(), before);
+    assert_eq!(
+        graphforge_storage::concurrency_attribution::observer_samples(),
+        clocks
+    );
+    drop(forge);
+
+    let _requested = LifecycleIoCapture::install();
+    let measured = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    assert!(measured.open_io_attribution().unwrap().totals.read_bytes > 0);
+    let before_query = lifecycle_io_snapshot().unwrap();
+    assert_eq!(scalar_count(&measured, EDGE_RECOUNT), 16);
+    let query = lifecycle_io_snapshot()
+        .unwrap()
+        .since(&before_query)
+        .unwrap();
+    assert!(query.totals.read_bytes > 0);
+    assert!(query.totals.read_calls > 0);
+    let work = graphforge_storage::lifecycle_io::observer_work();
+    assert!(work.0 > before.0 && work.1 > before.1 && work.2 > before.2);
+}
+
+#[test]
+fn explicit_demand_capture_collects_property_work_and_preserves_query_rows() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("state");
+    seed_project(&path, 16);
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let ordinary = forge.execute(ORDERED_ONE_HOP).unwrap();
+    assert!(lifecycle_io_snapshot().is_none());
+    let (requested, work) = graphforge_exec::demand::capture(|| forge.execute(ORDERED_ONE_HOP));
+    let requested = requested.unwrap();
+    assert_eq!(requested.batches.len(), ordinary.batches.len());
+    for (requested, ordinary) in requested.batches.iter().zip(&ordinary.batches) {
+        assert_eq!(requested.num_rows(), ordinary.num_rows());
+        assert_eq!(requested.columns(), ordinary.columns());
+        assert_eq!(requested.schema().fields(), ordinary.schema().fields());
+        let mut requested_metadata = requested.schema().metadata().clone();
+        let mut ordinary_metadata = ordinary.schema().metadata().clone();
+        assert!(requested_metadata.remove("graphforge.query_id").is_some());
+        assert!(ordinary_metadata.remove("graphforge.query_id").is_some());
+        assert_eq!(requested_metadata, ordinary_metadata);
+    }
+    assert!(!work.property_overlays.is_empty());
+    assert!(
+        work.property_overlays
+            .iter()
+            .any(|overlay| overlay.physical_rows > 0)
+    );
+    assert!(
+        lifecycle_io_snapshot().is_none(),
+        "demand guard retires its collector"
+    );
+}
+
+#[test]
+fn requested_query_capture_survives_an_ambient_tokio_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("state");
+    seed_project(&path, 16);
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let _capture = LifecycleIoCapture::install();
+        let before = lifecycle_io_snapshot().unwrap();
+        let result = forge.execute(ORDERED_ONE_HOP).unwrap();
+        assert_eq!(
+            result.batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+            10
+        );
+        let query = lifecycle_io_snapshot().unwrap().since(&before).unwrap();
+        assert!(query.totals.read_bytes > 0);
+        assert!(query.totals.read_calls > 0);
+    });
+    assert!(lifecycle_io_snapshot().is_none());
+}
+
+#[test]
+fn default_filtered_and_targeted_property_queries_allocate_no_optional_counters() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("state");
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    forge
+        .execute("CREATE (:Leaf {value: 1})-[:LINK {weight: 7}]->(:Leaf {value: 2})")
+        .unwrap();
+    drop(forge);
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let before = graphforge_storage::lifecycle_io::observer_work();
+    let query = "MATCH (a)-[r:LINK]->(b) WHERE b.value = 2 RETURN r";
+    let ordinary = forge.execute(query).unwrap();
+    assert_eq!(
+        ordinary.batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+        1
+    );
+    assert_eq!(graphforge_storage::lifecycle_io::observer_work(), before);
+    assert!(lifecycle_io_snapshot().is_none());
+    {
+        let _capture = LifecycleIoCapture::install();
+        let measured = forge.execute(query).unwrap();
+        assert_eq!(
+            measured.batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+            1
+        );
+        assert_eq!(measured.batches[0].columns(), ordinary.batches[0].columns());
+        assert!(lifecycle_io_snapshot().unwrap().totals.read_bytes > 0);
+    }
+    assert!(lifecycle_io_snapshot().is_none());
+}
+
+#[test]
+fn default_edge_replacement_preserves_ownership_and_keys_without_optional_counters() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("state");
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    forge
+        .execute("CREATE (:Leaf {value: 1})-[:LINK {weight: 7, old: 42}]->(:Leaf {value: 2})")
+        .unwrap();
+    drop(forge);
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let before = graphforge_storage::lifecycle_io::observer_work();
+    forge
+        .execute("MATCH ()-[r:LINK]->() SET r = {weight: 9}")
+        .unwrap();
+    let query = "MATCH ()-[r:LINK]->() RETURN r.weight AS weight, r.old AS old";
+    let changed = forge.execute(query).unwrap();
+    let batch = &changed.batches[0];
+    assert_eq!(batch.num_rows(), 1);
+    assert_eq!(
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        9
+    );
+    assert!(
+        batch
+            .column(1)
+            .logical_nulls()
+            .is_some_and(|nulls| nulls.is_null(0))
+    );
+    assert_eq!(graphforge_storage::lifecycle_io::observer_work(), before);
+    assert!(lifecycle_io_snapshot().is_none());
+    drop(forge);
+    let reopened = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let persisted = reopened.execute(query).unwrap();
+    assert_eq!(persisted.batches[0].columns(), batch.columns());
+}
 
 const ORDERED_ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.value AS id ORDER BY id LIMIT 10";
 const EDGE_RECOUNT: &str = "MATCH ()-[r]->() RETURN count(*)";
@@ -52,11 +221,13 @@ struct Region {
 }
 
 fn measure<T>(work: impl FnOnce() -> T) -> (T, Region) {
-    let before = lifecycle_io_snapshot();
+    let _capture = LifecycleIoCapture::install();
+    let before = lifecycle_io_snapshot().expect("requested observation");
     let started = Instant::now();
     let value = work();
     let elapsed_micros = started.elapsed().as_micros();
     let attribution = lifecycle_io_snapshot()
+        .expect("requested observation")
         .since(&before)
         .expect("region attribution");
     attribution
@@ -93,7 +264,7 @@ fn measure_lifecycle(edges: usize) -> Lifecycle {
         GraphForge::new(Some(path.to_str().expect("utf-8 project path"))).expect("project reopens")
     });
     // The facade reports the same region for itself, without a caller snapshot.
-    assert_eq!(forge.open_io_attribution(), &open.attribution);
+    assert_eq!(forge.open_io_attribution(), Some(&open.attribution));
 
     let (counted, recount) = measure(|| scalar_count(&forge, EDGE_RECOUNT));
     assert_eq!(counted, i64::try_from(edges).expect("edge count fits i64"));
@@ -120,7 +291,6 @@ fn measure_lifecycle(edges: usize) -> Lifecycle {
 
 #[test]
 fn every_lifecycle_phase_reports_reconciled_per_phase_application_io() {
-    let _guard = LIFECYCLE_IO_LOCK.lock().expect("lifecycle I/O lock");
     let lifecycle = measure_lifecycle(64);
 
     // 1. Opening a project reads and authenticates committed data, and the
@@ -197,7 +367,9 @@ fn the_lifecycle_inventory_extends_the_construction_inventory_without_changing_i
     assert!(!StorageIoPhase::ALL.contains(&StorageIoPhase::ReadPathScan));
     assert_eq!(StorageIoPhase::LIFECYCLE.len(), 10);
 
-    let encoded = serde_json::to_value(lifecycle_io_snapshot()).expect("attribution serializes");
+    let _capture = LifecycleIoCapture::install();
+    let encoded =
+        serde_json::to_value(lifecycle_io_snapshot().unwrap()).expect("attribution serializes");
     let phases = encoded["phases"].as_object().expect("phase map");
     assert_eq!(phases.len(), 10);
     assert!(phases.contains_key("read_path_scan"));
@@ -213,7 +385,6 @@ fn the_lifecycle_inventory_extends_the_construction_inventory_without_changing_i
 #[test]
 #[ignore = "reporting run; prints the per-phase table rather than asserting"]
 fn report_lifecycle_io_attribution() {
-    let _guard = LIFECYCLE_IO_LOCK.lock().expect("lifecycle I/O lock");
     for edges in [1_024_usize, 4_096, 16_384] {
         let lifecycle = measure_lifecycle(edges);
         print_lifecycle(&lifecycle);
@@ -274,6 +445,7 @@ fn print_lifecycle(lifecycle: &Lifecycle) {
 /// Cost of the recording itself, measured against the number of record calls a
 /// lifecycle actually makes.
 fn report_instrumentation_overhead() {
+    let _capture = LifecycleIoCapture::install();
     const SAMPLES: u64 = 10_000_000;
     let started = Instant::now();
     for _ in 0..SAMPLES {
@@ -286,4 +458,169 @@ fn report_instrumentation_overhead() {
         elapsed,
         elapsed.as_nanos() as f64 / SAMPLES as f64
     );
+}
+
+/// One compact (V2) project measured through open and two identical queries.
+struct OpenCost {
+    payload_bytes: u64,
+    open: Region,
+    open_evidence: graphforge_storage::GraphFilesOpenEvidence,
+    first_query: Region,
+    second_query: Region,
+}
+
+fn total_read_bytes(region: &Region) -> u64 {
+    region.attribution.totals.read_bytes
+}
+
+fn measure_open_cost(nodes: usize, fan_out: usize) -> OpenCost {
+    let project = tempfile::tempdir().expect("project directory");
+    let path = project.path().join("state");
+    // Skip the trailing `index_adjacency`: it republishes the project as an
+    // expanded (V1) generation tree. The construction session's own compact
+    // publication, with its shipped adjacency CSR, is what this measures.
+    bulk_fixture::generate_bulk_graph_with_index(&path, nodes, fan_out, false);
+    let (forge, open) = measure(|| {
+        GraphForge::new(Some(path.to_str().expect("utf-8 project path"))).expect("project reopens")
+    });
+    let open_evidence = forge.graph_open_evidence().clone();
+    let query = "MATCH (a)-[r]->(b) RETURN count(*) AS edges";
+    let (_, first_query) = measure(|| forge.execute(query).expect("first query"));
+    let (_, second_query) = measure(|| forge.execute(query).expect("second query"));
+    OpenCost {
+        payload_bytes: open_evidence.bytes_validated,
+        open,
+        open_evidence,
+        first_query,
+        second_query,
+    }
+}
+
+/// Opening a compact project is O(files) in graph payload bytes (#1388): the
+/// manifest, route table and every payload's presence and exact length, plus
+/// the small sidecars and identity controls that are copied and checksummed
+/// while hydrating. A payload's content is checksummed on its first touch, once.
+///
+/// Node count is fixed and the edge payload grows 16x, so any open-time work
+/// proportional to payload bytes shows up as growth. The forward and ordinal
+/// identity runs are hard-linked, not copied, and authenticated block by block
+/// when a lookup reads them, so only small controls are copied. The node axis
+/// (nodes and edges scaling together, whole-process `rchar`) is
+/// `open_identity_cost.rs`.
+#[test]
+fn open_reads_control_bytes_not_payload_bytes() {
+    const NODES: usize = 1 << 12;
+    let small = measure_open_cost(NODES, 4);
+    let large = measure_open_cost(NODES, 64);
+
+    for (label, cost) in [("small", &small), ("large", &large)] {
+        for phase in StorageIoPhase::LIFECYCLE {
+            let totals = &cost.open.attribution.phases[&phase];
+            eprintln!(
+                "  open phase {label} {phase:?}: read {} bytes / {} calls",
+                totals.read_bytes, totals.read_calls
+            );
+        }
+        eprintln!(
+            "open cost {label}: payload={} open_read={} checksummed={} copied={} \
+             first_query_read={} second_query_read={}",
+            cost.payload_bytes,
+            total_read_bytes(&cost.open),
+            cost.open_evidence.bytes_checksummed,
+            cost.open_evidence.bytes_copied,
+            total_read_bytes(&cost.first_query),
+            total_read_bytes(&cost.second_query)
+        );
+    }
+    // The comparison is meaningful only if the payload really grew.
+    assert!(
+        large.payload_bytes > 6 * small.payload_bytes,
+        "edge payload did not grow: {} -> {}",
+        small.payload_bytes,
+        large.payload_bytes
+    );
+
+    // 1. Open reads controls, not payload: each copied identity control is read
+    //    twice (to copy it, then to verify the private copy; both are
+    //    attributed since #1388), plus the manifest, route table and sidecars.
+    //    The bound comes from the declared copied bytes, so it holds whatever
+    //    the node/edge mix of the fixture; it is far below the payload only
+    //    where the payload is edge-heavy.
+    for (label, cost) in [("small", &small), ("large", &large)] {
+        let bound = 2 * cost.open_evidence.bytes_copied + 64 * 1024;
+        assert!(
+            total_read_bytes(&cost.open) <= bound,
+            "{label}: open read {} bytes against {} copied control bytes (bound {bound}) \
+             and {} declared payload bytes",
+            total_read_bytes(&cost.open),
+            cost.open_evidence.bytes_copied,
+            cost.payload_bytes
+        );
+    }
+    assert!(
+        total_read_bytes(&large.open) * 8 < large.payload_bytes,
+        "large: open read {} bytes against {} declared payload bytes",
+        total_read_bytes(&large.open),
+        large.payload_bytes
+    );
+    // 2. Open does not grow with the edge payload. What does grow is O(files):
+    //    more edge files mean more manifest and route-table entries.
+    assert!(
+        total_read_bytes(&large.open) < 2 * total_read_bytes(&small.open),
+        "open reads grew with edge payload: {} -> {} bytes",
+        total_read_bytes(&small.open),
+        total_read_bytes(&large.open)
+    );
+    // 3. Hydration checksums only what it copies (small controls, read once to
+    //    copy and once to verify) plus small sidecars.
+    for (label, cost) in [("small", &small), ("large", &large)] {
+        let evidence = &cost.open_evidence;
+        assert!(
+            evidence.bytes_copied <= 64 * NODES as u64,
+            "{label}: {} control bytes copied for {NODES} nodes",
+            evidence.bytes_copied
+        );
+        assert!(
+            evidence.bytes_checksummed <= 2 * evidence.bytes_copied + 64 * 1024,
+            "{label}: hydration checksummed {} bytes but copied only {}: {evidence:#?}",
+            evidence.bytes_checksummed,
+            evidence.bytes_copied
+        );
+    }
+    let growth = large
+        .open_evidence
+        .bytes_checksummed
+        .abs_diff(small.open_evidence.bytes_checksummed);
+    // What moves is descriptors (one manifest entry per edge file), a sliver of
+    // the payload growth; it is no longer a fraction of copied identity bytes.
+    let payload_growth = large.payload_bytes - small.payload_bytes;
+    assert!(
+        growth * 1024 < payload_growth,
+        "checksummed bytes moved {growth} with a {payload_growth}-byte payload growth: {} -> {}",
+        small.open_evidence.bytes_checksummed,
+        large.open_evidence.bytes_checksummed
+    );
+
+    // 4. The first query pays its payloads' checksums (a read-path scan), and
+    //    the second query on the same session pays none of it again.
+    for (label, cost) in [("small", &small), ("large", &large)] {
+        assert!(
+            total_read_bytes(&cost.first_query) > 0,
+            "{label}: the first query read nothing"
+        );
+        assert_eq!(
+            read_bytes(
+                &cost.second_query.attribution,
+                StorageIoPhase::HydrationVerification
+            ),
+            0,
+            "{label}: a repeated query re-paid hydration verification"
+        );
+        assert!(
+            total_read_bytes(&cost.second_query) * 4 < total_read_bytes(&cost.first_query),
+            "{label}: the repeated query re-paid first-touch admission: {} vs {} bytes",
+            total_read_bytes(&cost.second_query),
+            total_read_bytes(&cost.first_query)
+        );
+    }
 }

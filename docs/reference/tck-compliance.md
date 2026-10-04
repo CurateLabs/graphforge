@@ -38,7 +38,7 @@ cucumber-expanded corpus — the count the BDD harness runs and gates on every C
 - **The gate is per-scenario (set-based, not a count).** `tests/tck/passing_baseline.txt` lists the
   scenarios that pass, one per line, keyed `<feature-name>:<line>:<scenario-name>`. A custom cucumber
   writer records the set that actually passes this run, then the harness:
-  - **fails** the `BDD — Rust` job if **any** baseline scenario stops passing — a regression — even
+  - **fails** the CI Gate `Rust Tests` job if **any** baseline scenario stops passing — a regression — even
     if a *different* scenario newly passes (a count would let an XPASS mask a regression; a set does
     not);
   - emits a **`TCK XPASS`** warning listing scenarios that newly pass and aren't yet in the baseline.
@@ -57,60 +57,92 @@ unrelated improvement. Removing a scenario from the baseline is an explicit, rev
 
 ## Performance monitoring
 
-The same Rust runner measures every GraphForge API BDD and openCypher TCK scenario once during its
-normal execution. A concurrency-safe writer observes raw cucumber `Scenario::Started` and
-`Scenario::Finished` events with `std::time::Instant`; timing after cucumber's normalization buffer
-would measure event replay rather than execution for queued scenarios.
+Performance thresholds come from framework evidence only, and only under matched provenance
+(#1654). The Cucumber run's scenario timer is a **diagnostic**: it never produces a warning.
 
-TCK timing uses the versioned `pooled-isolated-serial-v1` fixture profile. One in-memory
+### Diagnostic Cucumber timings
+
+The Rust runner still times every GraphForge API BDD and openCypher TCK scenario once. A
+concurrency-safe writer observes raw cucumber `Scenario::Started` and `Scenario::Finished` events;
+timing after cucumber's normalization buffer would measure event replay rather than execution for
+queued scenarios. Each run writes `report.json` (schema 3, `report_kind: "diagnostic"`) and
+`summary.md` under `BDD_TIMING_DIR` (default `target/bdd-timings`): count, sum, minimum, maximum,
+mean, median, p90, p95, p99, feature aggregates and the slowest scenarios per suite. Reports contain
+only the suite, public `<feature>:<line>:<scenario>` identity, outcome and elapsed time — never
+query/fixture payloads, graph values, UUIDs, parameters, temporary directories or local paths. The
+PR CI Gate runs this binary but uploads no timing artifact.
+
+TCK scenarios use the versioned `pooled-isolated-serial-v1` fixture profile. One in-memory
 `GraphForge` is reused across scenarios, but `clear()` removes graph storage and resets the runtime
-catalog, procedure registry, and adjacency cache before every lease. The serial measurement
-boundary prevents a genuine outlier from inflating other concurrently active scenarios. It is also
-faster for this corpus than cucumber's default 64-way execution, which creates 128 Tokio worker
-threads and causes severe temporary-storage contention. API BDD timing remains informational and
-keeps its normal runner behavior.
+catalog, procedure registry and adjacency cache before every lease. The serial boundary keeps a
+genuine outlier from inflating other active scenarios. It is also faster for this corpus than
+cucumber's default 64-way execution, which creates 128 Tokio worker threads and severe
+temporary-storage contention.
 
-Each run writes `report.json`, `summary.md`, and `tck-baseline-candidate.json` under
-`BDD_TIMING_DIR` (default `target/bdd-timings`). CI uploads the directory for 14 days and appends the
-Markdown summary to the job summary. Reports contain only the suite, public
-`<feature>:<line>:<scenario>` identity, outcome, and elapsed time — never query/fixture payloads,
-graph values, UUIDs, parameters, temporary directories, or local paths.
+`tests/tck/performance_policy.json` and `tests/tck/performance_baseline.json` are legacy schema-2
+files from when the Cucumber timer was a threshold authority. They still load, with one
+`TCK PERF NOTICE: legacy diagnostic baseline …` line and no comparison. The #1654 consumer rejects
+them, and the Cucumber report, as diagnostic-substituted input. Threshold consumers in `crates/graphforge-api/tests/bdd/` are forbidden by
+convention; any new Cucumber timer must be classified as diagnostic only.
 
-Both API BDD and TCK suites report count, summed scenario time, minimum, maximum, mean, median, p90,
-p95, p99, feature aggregates, and their slowest scenarios. API timing is informational. Only
-passing, baseline-matched TCK scenarios can emit performance warnings:
+### `make tck-perf`: the provenance-gated consumer
+
+`make tck-perf` is manual and host-local; it is not part of the PR CI Gate. It needs native Linux
+cgroups-v2 BenchExec admission (see `benchmarks/README.md`) and an ext4/xfs/btrfs work root. It
+builds both targets in the `release` profile and writes a run directory under `target/tck-perf/`:
+
+1. **Admission.** Native local admission must pass (`require_local_admission`).
+2. **Whole TCK under BenchExec.** The `bdd` test binary runs in a BenchExec container with a clean
+   environment (no `TCK_ONLY`, no blessing). `adapt_run_result` and `normalize_run` produce the
+   `graphforge-benchexec-run/1` record. The correctness verdict is exit 0 on the whole corpus with
+   zero TCK regressions. Its wall time is the aggregate.
+3. **Per scenario under Divan.** `benches/tck_scenarios` runs with `--bench` and CodSpeed
+   `raw_results`; each scenario's median is its time.
+4. **Run record.** `run.json` records the provenance, both binaries' sha256, the BenchExec record's
+   sha256, the correctness counts and a digest of the passing scenario keys.
+5. **Check.** `graphforge_bench.tck_perf check` compares the run with a baseline, writes
+   `report.json` and prints `TCK PERF WARNING:` lines (GitHub annotations under Actions).
+
+Thresholds keep the previous formulas and messages. They are warning-only:
 
 ```text
-scenario: current > max(2 × baseline, baseline + 250 ms)
-aggregate: current total > max(1.25 × baseline total, baseline total + 15 seconds)
+scenario: current > min(1.3 s, max(2 × baseline, baseline + 250 ms))
+aggregate: current > max(1.25 × baseline, baseline + 15 s)
 ```
 
-The scenario comparison also uses the committed absolute slow threshold, warning at the earlier of
-the relative or absolute boundary. New or renamed scenarios are reported as unbaselined without a
-warning on their first observation. At most 25 GitHub annotations are emitted; every finding remains
-available in the artifacts. Performance findings are warning-only for v0.5.0. Correctness
-regressions—including API BDD failures—malformed required configuration, and artifact failures
-remain blocking. Artifacts are written before those assertions so failures retain timing evidence.
-The policy and baseline also record the fixture-profile name and TCK concurrency. A profile mismatch
-is a blocking configuration error rather than an invitation to compare incompatible measurements.
+**Provenance.** Every key must match or the comparison does not run: CPU model, logical CPUs,
+memory, runner label (`GF_TCK_PERF_RUNNER_LABEL`, default `local`); the full `rustc -vV`, build
+profile, target and features; fixture profile, concurrency, corpus digest, suite selection,
+scenario order (Cucumber file order for the whole run, name order under Divan), temp-root
+filesystem, tool versions and sample counts. A mismatch reports `baseline_status: incompatible`
+with a `skip_reason` naming each field, emits no findings and exits 0. `--require-compatible` makes
+a mismatch, or a missing baseline, exit 3 for a designated runner-class lane.
 
-### Updating the performance baseline
+**Fail closed (exit 2)** on missing, malformed or schema-invalid input; a partial run; Divan test
+mode or absent raw results; a scenario-set mismatch; and a Cucumber report or schema-2 baseline
+offered as evidence.
 
-Refresh `tests/tck/performance_baseline.json` only from a complete, passing `BDD — Rust` run on the
-standard `ubuntu-latest` CI runner:
+**Baselines** are host-local. `--capture-baseline` stores a complete, passing, fault-free run at
+`$GF_TCK_PERF_HOME/baseline.json` (default `$XDG_DATA_HOME/graphforge/tck-perf/`), or at a given
+path outside the repository. Resolution order is `--baseline PATH`, then the host-local store, then
+a committed `tests/tck/tck-perf-baseline.json`. All three go through the same provenance check.
+None is committed, and no baseline may be captured for reference use until the #1467 outliers are
+resolved.
 
-1. Download and inspect `bdd-rust-timings/tck-baseline-candidate.json`.
-2. Confirm `partial` is false, `scenario_count` is 3,897, the fixture profile is
-   `pooled-isolated-serial-v1` with concurrency 1, and the correctness gate has zero regressions or
-   XPASS.
-3. Review p95, p99, maximum, the slowest 25 scenarios, and changes to every baseline duration.
-4. Copy the candidate to `tests/tck/performance_baseline.json`.
-5. Set `baseline_required` to `true` and set `absolute_slow_ms` to the candidate's suggested value,
-   calculated as `ceil_100ms(max(2 × p99, max + 250 ms))`.
-6. Re-run CI and require a clean comparison before merging.
+```bash
+make tck-perf                                             # measure, then check
+make tck-perf TCK_PERF_ARGS=--capture-baseline            # also store the host-local baseline
+PYTHONPATH=benchmarks/harness python3 -m graphforge_bench.tck_perf check target/tck-perf/<run>
+```
 
-Never baseline a local, partial, failing, or pre-fix run. Wall-clock CI job duration remains useful
-context but is not a threshold; the aggregate policy uses summed scenario durations.
+**Known positive.** The test-only fault injection (`--fault-delay-ms N --fault-scenario KEY`, or
+`*` for every scenario) sets `GF_TCK_PERF_FAULT_*`, which delays the scenario inside the timed
+region of both measurements. The binaries announce it, the driver requires the announcement, and
+the injection is recorded in the provenance. It is not a compatibility key, so an injected run is
+still compared against a clean baseline. A fault-injected run is never accepted as a baseline.
+
+The subsections below are the historical pre-#1654 measurements made with the Cucumber timer.
+They are records, not current thresholds.
 
 ### Initial fixture validation and pre-fix baseline
 
@@ -319,7 +351,8 @@ TCK_ONLY=Match3 cargo test -p graphforge-api --test bdd -- --no-fail-fast
 
 ### Post-TCK-conformance v0.5.0 performance baseline
 
-The committed baseline comes from the final complete `BDD — Rust` artifact for the independently
+Historical: this is the legacy schema-2 `tests/tck/performance_baseline.json`, now diagnostic
+only (#1654). The committed baseline comes from the final complete `BDD — Rust` artifact for the independently
 merged multi-label correction. It reports `partial: false`, runner `ubuntu-latest`, fixture profile
 `pooled-isolated-serial-v1`, concurrency 1, and exactly **3,897 / 3,897** passing TCK identities with
 no regressions, missing or unbaselined scenarios, XPASS, or performance findings.
@@ -370,7 +403,7 @@ TCK_ONLY=Comparison1 cargo test -p graphforge-api --test bdd # one feature → s
 ```
 
 When `TCK_ONLY` is set the whole-corpus **baseline gate is skipped** (a subset can't satisfy it) —
-it reports `N passing of M` and writes a `partial_not_compared` timing artifact. Always do a final
+it reports `N passing of M` and writes a diagnostic timing report marked `partial`. Always do a final
 unfiltered run before pushing. CI never sets `TCK_ONLY`, so it always runs and gates the whole corpus.
 
 ## Documented xfails

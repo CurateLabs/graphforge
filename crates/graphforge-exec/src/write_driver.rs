@@ -135,6 +135,45 @@ pub(crate) fn split_write_plan(ops: &[GraphOp]) -> Result<SplitWritePlan, GfErro
     })
 }
 
+/// Columns consumed by a terminal sequence of direct-variable DELETE clauses.
+///
+/// Deletion resolves properties, labels and incident edges from its storage
+/// authority, so its frontier needs only target identities. Projecting these
+/// columns before optimization leaves predicate dependencies in the read
+/// prefix while avoiding unused property reads for every expansion chunk.
+/// Expression targets, other writes and later reads retain the full frontier.
+pub(crate) fn delete_identity_projection(
+    ops: &[GraphOp],
+    split: &SplitWritePlan,
+    schema: &DFSchema,
+) -> Option<Vec<DfExpr>> {
+    let tail = &ops[split.prefix_len..];
+    if !tail.iter().all(|op| {
+        matches!(op, GraphOp::Delete { vars, exprs, .. } if !vars.is_empty() && exprs.is_empty())
+    }) {
+        return None;
+    }
+    let mut seen = HashSet::new();
+    let mut columns = Vec::new();
+    for op in tail {
+        let GraphOp::Delete { vars, .. } = op else {
+            unreachable!("direct DELETE-only suffix checked above");
+        };
+        for var in vars {
+            if seen.insert(*var) {
+                let qualifier = datafusion::common::TableReference::bare(format!("var_{}", var.0));
+                let name = ["node_uuid", "edge_uuid"].into_iter().find(|name| {
+                    schema
+                        .index_of_column_by_name(Some(&qualifier), name)
+                        .is_some()
+                })?;
+                columns.push(DfExpr::Column(Column::new(Some(qualifier), name)));
+            }
+        }
+    }
+    Some(columns)
+}
+
 /// For a contiguous, terminal CREATE-only suffix, return the created bindings
 /// each clause must retain for later clauses. Variables that are never read
 /// again do not need columns in the statement frontier: their graph effects
@@ -290,9 +329,22 @@ impl StatementWriteContext {
     ///
     /// # Errors
     /// Returns [`GfError::Storage`] if the writer cannot open the directory.
+    #[cfg(test)]
     pub(crate) fn new(dir: &Path, mode: OntologyMode) -> Result<Self, GfError> {
+        Self::new_with_topology(dir, mode, None)
+    }
+
+    pub(crate) fn new_with_topology(
+        dir: &Path,
+        mode: OntologyMode,
+        topology: Option<std::sync::Arc<graphforge_storage::TopologyFileAuthority>>,
+    ) -> Result<Self, GfError> {
+        let files = match &topology {
+            Some(authority) => graphforge_storage::enumerate_topology_files(authority, None)?,
+            None => graphforge_storage::TopologyFiles::discover_legacy(dir)?,
+        };
         let mut known_labels = HashSet::new();
-        for batch in graphforge_storage::read_nodes(dir)
+        for batch in graphforge_storage::read_nodes_from_files(&files)
             .map_err(|error| GfError::Storage(error.to_string()))?
         {
             let Some(labels) = batch
@@ -309,7 +361,12 @@ impl StatementWriteContext {
             }
         }
         Ok(Self {
-            writer: graphforge_storage::GraphWriter::open(dir, mode)?,
+            writer: match topology {
+                Some(authority) => {
+                    graphforge_storage::GraphWriter::open_with_topology(dir, mode, authority)?
+                }
+                None => graphforge_storage::GraphWriter::open(dir, mode)?,
+            },
             pending_node_deletes: HashSet::new(),
             pending_edge_deletes: HashSet::new(),
             deleted: HashSet::new(),
@@ -1626,10 +1683,19 @@ pub(crate) fn stage_statement(
     let workspace_inventory = if ctx.set_acc.is_empty() && ctx.remove_acc.is_empty() {
         None
     } else {
-        Some(graphforge_storage::AuthenticatedPropertyInventory::capture_workspace(dir, inventory)?)
+        Some(
+            graphforge_storage::AuthenticatedPropertyInventory::capture_workspace_with_topology(
+                dir,
+                inventory,
+                &ctx.writer.topology_files()?,
+            )?,
+        )
     };
     let inventory = workspace_inventory.as_ref();
     let mut staged = graphforge_storage::RewriteBatch::new();
+    if let Some(authority) = ctx.writer.topology_authority() {
+        staged.bind_topology_authority(authority)?;
+    }
     ctx.set_acc.stage_into(&mut staged, dir, inventory)?;
     ctx.remove_acc.stage_into(&mut staged, dir, inventory)?;
     graphforge_storage::stage_mutate_node_labels(

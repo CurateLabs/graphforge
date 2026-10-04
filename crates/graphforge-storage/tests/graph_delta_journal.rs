@@ -1048,12 +1048,22 @@ fn run_with_raw_membership(raw: u32) -> Vec<u8> {
     })
 }
 
+fn checksum_bytes(bytes: &[u8]) -> u64 {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("topology")).unwrap();
+    std::fs::write(root.path().join("topology/nodes.parquet"), bytes).unwrap();
+    graphforge_storage::capture_graph_files(root.path())
+        .unwrap()
+        .0
+        .files[0]
+        .content_xxh64
+}
+
 fn run_with_mutated_payload(
     operation: &GraphDeltaOp,
     mutate: impl FnOnce(&mut serde_json::Value),
 ) -> Vec<u8> {
-    use sha2::{Digest, Sha256};
-    const RECORD_START: usize = 84;
+    const RECORD_START: usize = 60;
     const PAYLOAD_LENGTH: usize = RECORD_START + 25;
     const PAYLOAD_START: usize = PAYLOAD_LENGTH + 4;
     let limits = GraphDeltaJournalLimits::default();
@@ -1082,9 +1092,9 @@ fn run_with_mutated_payload(
         "delete_edge" => GraphDeltaOpKind::DeleteEdge as u8,
         _ => operation.kind as u8,
     };
-    let checksum = Sha256::digest(&framed[RECORD_START..]);
+    let checksum = checksum_bytes(&framed[RECORD_START..]).to_le_bytes();
     framed.extend_from_slice(&checksum);
-    let checksum = Sha256::digest(&framed);
+    let checksum = checksum_bytes(&framed).to_le_bytes();
     framed.extend_from_slice(&checksum);
     framed
 }

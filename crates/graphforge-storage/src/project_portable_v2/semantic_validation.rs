@@ -7,13 +7,11 @@ use super::{
     RUNTIME_MAP_PATH, RuntimeGenerationMap, UniqueValue, canonical_json, check_cancel,
     constant_time_eq, hex, read_entry_bytes_from_map, sha, validate_path,
 };
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io::Read;
-use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use unicode_normalization::UnicodeNormalization;
 
@@ -40,11 +38,11 @@ pub(super) fn admit_composition_features(bytes: &[u8]) -> Result<(), PortableV2E
     Ok(())
 }
 
-pub(crate) fn validate_materialized_ontology_composition(
-    root: &Path,
+pub(super) fn validate_with_reader(
     report: &PortableV2Report,
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
+    mut read: impl FnMut(&PortableV2CompositionEntry) -> Result<Value, PortableV2Error>,
 ) -> Result<(), PortableV2Error> {
     let Some(control) = &report.ontology_composition else {
         return Ok(());
@@ -52,7 +50,7 @@ pub(crate) fn validate_materialized_ontology_composition(
     validate_semantic_payload_budget(report, limits)?;
     for entry in &report.ontology_composition_entries {
         check_cancel(cancelled)?;
-        let value = read_canonical_semantic_payload(root, entry)?;
+        let value = read(entry)?;
         if entry.kind == "ontology" {
             validate_materialized_ontology(entry, value)?;
         } else {
@@ -82,71 +80,6 @@ fn validate_semantic_payload_budget(
         }
     }
     Ok(())
-}
-
-fn read_canonical_semantic_payload(
-    root: &Path,
-    entry: &PortableV2CompositionEntry,
-) -> Result<Value, PortableV2Error> {
-    let path = root.join(&entry.path);
-    let metadata = fs::symlink_metadata(&path).map_err(|_| {
-        PortableV2Error::at(
-            PortableV2ErrorCode::InvalidStructure,
-            &entry.path,
-            "semantic payload unavailable",
-        )
-    })?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != entry.length {
-        return Err(PortableV2Error::at(
-            PortableV2ErrorCode::InvalidStructure,
-            &entry.path,
-            "semantic payload is not the authenticated regular file",
-        ));
-    }
-    let length = usize::try_from(entry.length).map_err(|_| {
-        PortableV2Error::new(PortableV2ErrorCode::LimitExceeded, "semantic payload size")
-    })?;
-    let mut file =
-        crate::project_portable_v2_export::open_source_no_follow(&path).map_err(|_| {
-            PortableV2Error::at(
-                PortableV2ErrorCode::InvalidStructure,
-                &entry.path,
-                "cannot open semantic payload",
-            )
-        })?;
-    let mut bytes = Vec::with_capacity(length);
-    std::io::Read::by_ref(&mut file)
-        .take(entry.length.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|_| {
-            PortableV2Error::at(
-                PortableV2ErrorCode::Io,
-                &entry.path,
-                "cannot read semantic payload",
-            )
-        })?;
-    if bytes.len() != length {
-        return Err(PortableV2Error::at(
-            PortableV2ErrorCode::ConcurrentMutation,
-            &entry.path,
-            "semantic payload changed",
-        ));
-    }
-    let value = serde_json::from_slice(&bytes).map_err(|_| {
-        PortableV2Error::at(
-            PortableV2ErrorCode::InvalidStructure,
-            &entry.path,
-            "semantic payload JSON",
-        )
-    })?;
-    if canonical_json(&value)? != bytes {
-        return Err(PortableV2Error::at(
-            PortableV2ErrorCode::Incompatible,
-            &entry.path,
-            "semantic payload is noncanonical",
-        ));
-    }
-    Ok(value)
 }
 
 fn validate_materialized_ontology(
@@ -1002,9 +935,10 @@ fn validate_research_runtime(
         }
         let part = research_parts[0];
         if part.record_family_id != "registry"
-            || part.record_version != crate::research_versions::RESEARCH_VERSION
-            || part.capability_version != crate::research_versions::RESEARCH_VERSION
-            || research_caps[0].capability_version != crate::research_versions::RESEARCH_VERSION
+            // Revision 6 packages (older clients' exports) are admitted as-is.
+            || !crate::research_versions::research_revision_readable(part.capability_version)
+            || part.record_version != part.capability_version
+            || research_caps[0].capability_version != part.capability_version
             || !research_components
                 .iter()
                 .any(|c| c.participant_id == part.participant_id)

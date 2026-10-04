@@ -18,6 +18,8 @@ fn fork_historical_project_suppression_uses_original_authority_after_reopen() {
     let version = Uuid::now_v7();
     let capture = source
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid: version,
             context_uuid: Uuid::now_v7(),
@@ -204,6 +206,7 @@ fn publish_suppression(graph: &GraphForge, record: ResearchSuppressionRecord) {
             })
             .collect(),
     };
+    let graph_objects = graph.begin_graph_object_publication().unwrap();
     let ProjectStageOutcome::Staged(stage) = graph.stage_project_generation(&request).unwrap()
     else {
         panic!("fresh fixture transaction")
@@ -211,6 +214,6 @@ fn publish_suppression(graph: &GraphForge, record: ResearchSuppressionRecord) {
     stage
         .validate(|_| Ok(()), |_, _| Ok(()))
         .unwrap()
-        .publish()
+        .publish_with_graph_objects(&graph_objects)
         .unwrap();
 }

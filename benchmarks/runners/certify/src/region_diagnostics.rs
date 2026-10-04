@@ -67,7 +67,7 @@ fn cpu_sample() -> Option<(u64, u64)> {
     None
 }
 
-const MEASUREMENTS: [&str; 9] = [
+const MEASUREMENTS: [&str; 14] = [
     "wall_ns",
     "sampling_uncertainty_ns",
     "process_cpu_ns",
@@ -77,14 +77,29 @@ const MEASUREMENTS: [&str; 9] = [
     "thread_uninterruptible_ns",
     "thread_iowait_ns",
     "thread_unknown_ns",
+    "written_bytes",
+    "hashed_bytes",
+    "hash_elapsed_ns",
+    "fsync_calls",
+    "fsync_elapsed_ns",
 ];
-const REGIONS: [&str; 44] = [
+const REGIONS: [&str; 54] = [
     "import_command",
     "begin_import",
     "resume_import",
     "register_arrow",
     "register_parquet",
     "checkpoint",
+    "stage+seal",
+    "append_nodes",
+    "append_edges",
+    "source_read",
+    "manifest_persistence",
+    "journal_append",
+    "journal_sync",
+    "journal_namespace_publication",
+    "source_publication",
+    "source_cleanup",
     "validate",
     "commit",
     "open_construction",
@@ -129,9 +144,18 @@ pub(crate) fn valid_snapshot(value: &Value) -> bool {
     let Some(object) = value.as_object() else {
         return false;
     };
-    if object.len() != 5
+    let legacy = value["contract"] == "graphforge-region-diagnostics/1";
+    let measurements = if legacy {
+        &MEASUREMENTS[..9]
+    } else {
+        &MEASUREMENTS[..]
+    };
+    if object.len() != if legacy { 5 } else { 6 }
         || value["complete"] != true
-        || value["contract"] != "graphforge-region-diagnostics/1"
+        || (!legacy
+            && (value["contract"] != "graphforge-region-diagnostics/2"
+                || value["io_scope"]
+                    != "shared_process_inclusive_write_syscalls_instrumented_sha256_and_barriers"))
         || value["cpu_scope"] != "shared_process_inclusive_do_not_sum"
         || value["scheduler_scope"] != "calling_thread_only_unknown_is_not_blocked_or_psi"
     {
@@ -145,19 +169,38 @@ pub(crate) fn valid_snapshot(value: &Value) -> bool {
         && regions.iter().all(|(path, row)| {
             path.starts_with("import_command")
                 && path.split('/').count() <= 16
-                && path.split('/').all(|part| REGIONS.contains(&part))
+                && path.split('/').all(|part| {
+                    REGIONS.contains(&part)
+                        && if legacy {
+                            !matches!(
+                                part,
+                                "stage+seal"
+                                    | "append_nodes"
+                                    | "append_edges"
+                                    | "source_read"
+                                    | "manifest_persistence"
+                                    | "journal_append"
+                                    | "journal_sync"
+                                    | "journal_namespace_publication"
+                                    | "source_publication"
+                                    | "source_cleanup"
+                            )
+                        } else {
+                            part != "validate"
+                        }
+                })
                 && row.as_object().is_some_and(|r| r.len() == 4)
                 && row["work"].as_object().is_some_and(|work| {
                     work.iter().all(|(k, v)| {
-                        matches!(k.as_str(), "rows" | "bytes" | "nodes" | "edges")
+                        matches!(k.as_str(), "rows" | "bytes" | "nodes" | "edges" | "hashed_bytes" | "written_bytes")
                             && v.as_u64().is_some()
                     })
                 })
                 && row["calls"].as_u64().is_some_and(|n| n > 0)
                 && ["inclusive", "residual"].iter().all(|key| {
                     row[*key].as_object().is_some_and(|m| {
-                        m.len() == MEASUREMENTS.len()
-                            && MEASUREMENTS.iter().all(|field| {
+                        m.len() == measurements.len()
+                            && measurements.iter().all(|field| {
                                 m.get(*field).is_some_and(|n| {
                                     n.as_u64().is_some()
                                         || (!matches!(
@@ -196,12 +239,92 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_contract_accepts_successful_byte_work_and_refuses_unknown_units() {
+        let capture =
+            graphforge_storage::concurrency_attribution::RegionCapture::start("import_command");
+        graphforge_storage::concurrency_attribution::RegionScope::record_work("hashed_bytes", 17);
+        graphforge_storage::concurrency_attribution::RegionScope::record_work("written_bytes", 11);
+        let mut value = serde_json::to_value(capture.finish()).unwrap();
+        assert!(valid_snapshot(&value));
+        value["regions"]["import_command"]["work"]["attempted_bytes"] = json!(17);
+        assert!(!valid_snapshot(&value));
+        value["regions"]["import_command"]["work"].as_object_mut().unwrap().remove("attempted_bytes");
+        value["regions"]["import_command"]["work"]["hashed_bytes"] = Value::Null;
+        assert!(!valid_snapshot(&value));
+    }
+
+    #[test]
+    fn journal_region_contract_accepts_only_production_leaves() {
+        let journal_regions = [
+            "journal_append",
+            "journal_sync",
+            "journal_namespace_publication",
+            "source_publication",
+            "source_cleanup",
+        ];
+        let capture =
+            graphforge_storage::concurrency_attribution::RegionCapture::start("import_command");
+        {
+            let _begin =
+                graphforge_storage::concurrency_attribution::RegionScope::named("begin_import");
+            // Names emitted by the journal writer, independent of the validator
+            // allowlist. The real begin receipt includes the namespace and sync
+            // leaves; subsequent mutation receipts include the remaining leaves.
+            for name in journal_regions {
+                let _scope = graphforge_storage::concurrency_attribution::RegionScope::named(name);
+            }
+        }
+        let value = serde_json::to_value(capture.finish()).unwrap();
+        assert!(valid_snapshot(&value));
+
+        let mut unknown = value.clone();
+        unknown["regions"]["import_command/begin_import/private_source_path"] =
+            unknown["regions"]["import_command/begin_import/journal_sync"].clone();
+        assert!(!valid_snapshot(&unknown));
+
+        let mut malformed = value.clone();
+        malformed["regions"]["import_command/begin_import/journal_sync"]["inclusive"]["fsync_calls"] =
+            json!("one");
+        assert!(!valid_snapshot(&malformed));
+
+        let mut legacy = value;
+        legacy["contract"] = json!("graphforge-region-diagnostics/1");
+        legacy.as_object_mut().unwrap().remove("io_scope");
+        for row in legacy["regions"].as_object_mut().unwrap().values_mut() {
+            for scope in ["inclusive", "residual"] {
+                row[scope]
+                    .as_object_mut()
+                    .unwrap()
+                    .retain(|key, _| MEASUREMENTS[..9].contains(&key.as_str()));
+            }
+        }
+        assert!(!valid_snapshot(&legacy));
+        legacy["regions"]
+            .as_object_mut()
+            .unwrap()
+            .retain(|path, _| {
+                matches!(
+                    path.as_str(),
+                    "import_command" | "import_command/begin_import"
+                )
+            });
+        assert!(valid_snapshot(&legacy));
+        for name in journal_regions {
+            let mut invalid_legacy = legacy.clone();
+            invalid_legacy["regions"][format!("import_command/begin_import/{name}")] =
+                legacy["regions"]["import_command/begin_import"].clone();
+            assert!(!valid_snapshot(&invalid_legacy), "{name} accepted as v1");
+        }
+    }
+
+    #[test]
     fn snapshot_contract_accepts_captured_encoding_lane_receipt() {
         // A `receipt-3-validate.json` captured by the #1600 encoding-lane
         // candidate run `curve-s18-c8-r1`; retained here as a contract fixture.
-        let receipt: Value =
-            serde_json::from_str(include_str!("../fixtures/region-diagnostics-receipt-1600.json"))
-                .unwrap();
+        let receipt: Value = serde_json::from_str(include_str!(
+            "../fixtures/region-diagnostics-receipt.json"
+        ))
+        .unwrap();
         assert!(valid_snapshot(&receipt["region_diagnostics"]));
     }
 
@@ -209,16 +332,32 @@ mod tests {
     fn snapshot_contract_accepts_every_allowlisted_region_name() {
         let capture =
             graphforge_storage::concurrency_attribution::RegionCapture::start("import_command");
-        for name in REGIONS.iter().skip(1) {
+        for name in REGIONS.iter().skip(1).filter(|name| **name != "validate") {
             let _scope = graphforge_storage::concurrency_attribution::RegionScope::named(name);
         }
         let value = serde_json::to_value(capture.finish()).unwrap();
         assert!(valid_snapshot(&value));
-        for name in REGIONS.iter().skip(1) {
+        for name in REGIONS.iter().skip(1).filter(|name| **name != "validate") {
             assert!(
                 value["regions"][format!("import_command/{name}")].is_object(),
                 "{name} missing from the capture"
             );
+        }
+    }
+
+    #[test]
+    fn successful_work_units_match_each_closed_certification_schema() {
+        let schema: Value = serde_json::from_str(include_str!("../../../schemas/certification-evidence.json")).unwrap();
+        for contract in ["regionDiagnosticsV2", "regionDiagnosticsV1"] {
+            let work = &schema["$defs"][contract]["properties"]["regions"]["additionalProperties"]["properties"]["work"];
+            assert_eq!(work["additionalProperties"], false);
+            let mut names: Vec<_> = work["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+            names.sort_unstable();
+            assert_eq!(names, ["bytes", "edges", "hashed_bytes", "nodes", "rows", "written_bytes"]);
+            for unit in ["hashed_bytes", "written_bytes"] {
+                assert_eq!(work["properties"][unit]["type"], "integer");
+                assert_eq!(work["properties"][unit]["minimum"], 0);
+            }
         }
     }
 
@@ -229,11 +368,19 @@ mod tests {
             "/../../schemas/certification-evidence.json"
         ))
         .unwrap();
-        let start = schema.find("^import_command(/(").unwrap() + "^import_command(/(".len();
-        let end = start + schema[start..].find("))").unwrap();
-        let mut schema_names: Vec<&str> = schema[start..end].split('|').collect();
+        let schema: Value = serde_json::from_str(&schema).unwrap();
+        let pattern = schema["$defs"]["regionDiagnosticsV2"]["properties"]["regions"]["propertyNames"]["pattern"]
+            .as_str().unwrap().replace("\\+", "+");
+        let start = "^import_command(/(".len();
+        let end = start + pattern[start..].find("))").unwrap();
+        let mut schema_names: Vec<&str> = pattern[start..end].split('|').collect();
         schema_names.sort_unstable();
-        let mut rust_names: Vec<&str> = REGIONS.iter().copied().skip(1).collect();
+        let mut rust_names: Vec<&str> = REGIONS
+            .iter()
+            .copied()
+            .skip(1)
+            .filter(|name| *name != "validate")
+            .collect();
         rust_names.sort_unstable();
         assert_eq!(schema_names, rust_names);
     }

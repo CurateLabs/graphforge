@@ -13,6 +13,8 @@ fn context() -> WriteContext {
 fn capture(graph: &mut GraphForge, owner: Uuid) -> ResearchOperation {
     let operation = graph
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid: Uuid::now_v7(),
             context_uuid: owner,
@@ -189,6 +191,8 @@ fn historical_graph_ontology_and_artifact_survive_cleanup_restore_and_replay() {
             .identity
             .generation_uuid,
         mutation: ResearchMutation::RestoreProject {
+            author: None,
+            committer: None,
             context_uuid: owner,
             source_version: version,
             version_uuid: Uuid::now_v7(),
@@ -251,6 +255,8 @@ fn in_memory_capture_empty_graph_and_cancelled_commit_are_real_native_operations
     let mut graph = GraphForge::new(None).unwrap();
     let operation = graph
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid: Uuid::now_v7(),
             context_uuid: Uuid::now_v7(),
@@ -301,6 +307,8 @@ fn restore_initial_snapshot_removes_later_file_backed_graph() {
     mutation(
         &mut graph,
         ResearchMutation::RestoreProject {
+            author: None,
+            committer: None,
             context_uuid: owner,
             source_version: version_id(&capture),
             version_uuid: Uuid::now_v7(),
@@ -374,6 +382,8 @@ fn restoration_errors_before_and_after_current_preserve_same_facade_and_retry() 
                 .identity
                 .generation_uuid,
             mutation: ResearchMutation::RestoreProject {
+                author: None,
+                committer: None,
                 context_uuid: owner,
                 source_version: version_id(&capture),
                 version_uuid: Uuid::now_v7(),
@@ -432,6 +442,8 @@ fn exact_restore_retry_on_stale_facade_refreshes_graph_authority() {
             .identity
             .generation_uuid,
         mutation: ResearchMutation::RestoreProject {
+            author: None,
+            committer: None,
             context_uuid: owner,
             source_version: version_id(&capture),
             version_uuid: Uuid::now_v7(),
@@ -654,6 +666,8 @@ fn selected_object_root_version_executes_after_ancestor_release_and_cleanup() {
             .generation_uuid,
         mutation: ResearchMutation::RegisterGraphProjection {
             spec: RegisterResearchVersion {
+                author: None,
+                committer: None,
                 version_uuid: projection,
                 context_uuid: owner,
                 source_generation_uuid: version.content.generation_uuid,

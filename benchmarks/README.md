@@ -1,8 +1,7 @@
 # External benchmark workspace
 
 Repository-wide measurement policy (BenchExec vs Divan vs diagnostic-only
-timings) lives in [`docs/development/benchmarking.md`](../docs/development/benchmarking.md)
-with the checked-in inventory at `config/benchmark-measurement-inventory.json`.
+timings) lives in [`docs/development/benchmarking.md`](../docs/development/benchmarking.md).
 
 This directory contains two deliberately independent benchmark toolchains:
 
@@ -123,6 +122,94 @@ CARGO_TARGET_DIR=target cargo test --locked -p graphforge-benchmark-gdc-finbench
 PYTHONPATH=harness GRAPHFORGE_GDC_FINBENCH_TRANSACTION_BIN=target/debug/graphforge-benchmark-gdc-finbench-transaction \
   uv run --locked python -m unittest tests.test_gdc_finbench_transaction
 ```
+
+### GDC dataset acquisition and conversion
+
+`graphforge_bench.gdc_dataset_cache` downloads a pinned archive from
+`datasets.ldbcouncil.org` to `<name>.partial`, checks its SHA-256 against the
+suite's identity profile, and renames it into place atomically. A mismatch is a
+typed `checksum_mismatch`, is never retried, and leaves no partial file; a
+cached archive that no longer matches its pin is reported the same way and left
+for inspection. Archives are extracted with system `tar --zstd`. The cache
+root must be on the same device as `/`, outside the repository, and disjoint
+from the ladder work root. The emitted `graphforge-gdc-acquisition/1` document
+is validated by `gdc_contracts.validate_acquisition` against the requested
+datasets of the selected profile.
+
+```bash
+make -C benchmarks gdc-acquire DATASET_CACHE=<cache> WORK_ROOT=<work root> DATASETS="wiki-Talk"
+```
+
+LDBC publishes no checksum sidecars, so the `scorecard` identity profile
+(`profiles/gdc/graphalytics-scorecard-identity.json`) records each archive's
+SHA-256 from its first download. Reproduce a pin with `sha256sum` on the
+downloaded archive. `profiles/gdc/graphalytics-scorecard-ladder.json` carries
+the LDBC-published vertex and edge counts (source:
+<https://ldbcouncil.org/benchmarks/graphalytics/datasets/>), each equal to the
+`graph.<name>.meta.vertices/edges` keys in the archive's `.properties` file. The
+`.v` line counts match all four, and the `.e` line counts (`listed_edges`) match
+all but `cit-Patents`, whose `.e` file lists 16,518,947 edges against the
+published 16,518,948; the ladder records that difference. Undirected datasets store one
+edge per listed pair, in the listed direction, so the stored edge count equals
+the published count; queries over `directed: false` datasets must match
+relationships without direction.
+
+`runners/gdc-scorecard` (`graphforge-benchmark-gdc-scorecard convert`) turns
+LDBC pipe-delimited CSV and Graphalytics `.v`/`.e` files into the Parquet layout
+`gf import-session register-parquet` accepts, driven by a declarative
+`graphforge-gdc-load-mapping/1` document (see `fixtures/gdc/load-fixture/` and
+`profiles/gdc/graphalytics-*-load-mapping.json`):
+
+- one node file per node table (`node_uuid`, `label`, properties) and one edge
+  file per edge table (`edge_uuid`, `rel_type`, `source_uuid`, `target_uuid`,
+  properties), registered nodes first;
+- property columns are written in lexicographic name order, which import
+  requires, and are limited to `string`, `int64`, `float64` and `boolean`
+  because storage cannot read narrower integers back; empty fields are null;
+- node UUIDs derive from SHA-256 of (label, id), shaped as UUIDv7, so the same
+  input always yields the same identities; edge UUIDs derive from (table,
+  row ordinal);
+- a duplicate (label, id), an edge endpoint no node table defines, a malformed
+  value or a missing column fails with a typed `cause` on stderr and exit code
+  2, and no manifest is written;
+- `conversion-manifest.json` records every input and output with row counts and
+  SHA-256, the mapping digest, the converter version and the spill statistics.
+  Tables are written to `*.partial` and renamed only after the identity checks
+  pass, and the output directory must start empty.
+
+Conversion runs out of core. Endpoint UUIDs are computed from (label, id), so
+no identity map is kept. The two identity checks run over 24-byte
+`(label, id, file, row)` keys buffered up to `--memory-budget-bytes` (default
+256 MiB, minimum 72 bytes), sorted, and spilled as runs under
+`<output-dir>/.spill/`: a k-way merge of node keys finds duplicates and a merge
+join of edge-endpoint keys against node keys finds dangling endpoints. Runs
+beyond the merge fan-in are merged in groups first, so the key buffer or the
+open run buffers fit the budget at every phase. The spill directory is removed
+on success and on failure. Reserve up to 48 bytes per node plus 48 bytes per
+edge endpoint (96 bytes per edge), in addition to the Parquet output: merges
+retain their input runs until the output run is complete. Deduplication can
+reduce actual usage. On Unix, the fan-in also respects the process's open-file
+limit, reserving eight descriptors for other files and process bookkeeping.
+The input batch and the Parquet
+writer's row group are fixed-size and outside the budget.
+
+Row-level errors are reported as rows are read. A duplicate is reported after
+every node table is read and a dangling endpoint after every edge table is
+read, so a row-level error anywhere in a phase's tables is reported ahead of
+a duplicate or dangling endpoint in the same phase. Each reports its earliest occurrence in input order
+(mapping table order, file order, row, then source before target), so the
+duplicate and dangling endpoint named are independent of the budget. The
+manifest's `spill` object records the budget, merge fan-in, and per key kind
+the records, records spilled, runs, peak buffered records and intermediate
+merges.
+
+```bash
+PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_dataset_cache tests.test_gdc_scorecard_load
+CARGO_TARGET_DIR=target cargo test --locked -p graphforge-benchmark-gdc-scorecard
+```
+
+`tests.test_gdc_scorecard_load` builds `gf` and the converter when
+`GRAPHFORGE_GF_BIN` and `GRAPHFORGE_GDC_SCORECARD_BIN` are unset.
 
 Per-suite adapters own workload semantics through their own Rust runner and
 harness module. The SNB BI suite (`gdc_snb_bi`) maps the 20 `BI*` analytical
@@ -286,7 +373,7 @@ PYTHONPATH=benchmarks/harness uv run --project benchmarks python -m \
   --expected-sha "$(git rev-parse HEAD)" \
   --org personal --app gf-q958-UNIQUE --region dfw \
   --volume-name gf_q958_unique --machine-name gf-q958-machine \
-  --prerequisite-955 merged --prerequisite-956 merged --prerequisite-957 merged \
+  --prerequisite-certification-runner merged --prerequisite-qualification-ladder merged --prerequisite-benchexec-limits merged \
   --ledger /tmp/gf-q958-ledger.json \
   --evidence-out /tmp/fly-qualification-evidence.json \
   --result-out /tmp/fly-qualification-result.json
@@ -319,8 +406,8 @@ continued material memory growth is an architectural failure. Persistent graph
 size remains expected to be disk/I/O-bound, with Fly's 500 GiB/425 GiB usable
 storage envelope evaluated only by the real ladder.
 
-If Fly's provider builder is unavailable, the protected manual
-`fly-tiny-qualification.yml` workflow may select `hosted-docker`. That mode
+If Fly's provider builder is unavailable, the `fly-tiny-qualification`
+operator gate may select `hosted-docker`. That mode
 executes the same owner/controller on a Linux GitHub Actions runner, uses the
 runner's Docker daemon with `flyctl deploy --local-only --build-only --push`,
 and resolves the same immutable `registry.fly.io/<app>@sha256:...` identity
@@ -329,8 +416,8 @@ outside Linux GitHub Actions so the disk-constrained Mac cannot accidentally
 become the image builder. A separate recovery job uses a durable pre-creation
 app/commit ownership receipt with a fresh 128-bit app-name nonce and an
 independent timeout; cleanup refuses to delete a present app without that exact
-binding. The protected
-`fly-tiny-recovery.yml` janitor can replay the same receipt manually after
+binding. The `fly-tiny-recovery` operator gate can replay the same receipt
+manually after
 runner loss or cancellation. Uploaded artifacts are one-day, closed results,
 the credential-free ownership receipt, and qualified evidence when present.
 
@@ -419,6 +506,15 @@ characters). The same text appears in the retained certify stream under
 `graphforge-public-certification/1` document, as the phase outcome's
 `error_tail`. `staging_failed` now means only that the rung never started;
 `benchexec_failed` means BenchExec itself failed before any phase reported.
+
+Host-wide swap activity during a rung invalidates its performance measurements,
+even when BenchExec exits successfully. The controller stops as `host_swapped`
+and retains the before/after `/proc/vmstat` counters in
+`s<scale>-failure-raw/host-swap.json`. A known phase or timeout failure remains
+the primary cause when swapping also occurred. `host_swap_unavailable` means
+the counters could not be read after execution; raw output is retained and the
+rung is rejected. Occupied swap without activity does not fail a rung, and a
+host-wide warning does not identify which process swapped.
 
 The reserve is 75 GiB by default. Before each launch, admission measures free
 space available to the current user on the actual work-root filesystem.

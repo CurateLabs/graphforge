@@ -1,13 +1,13 @@
 //! Version-nine predecessor removal under existing durable successor authority.
 //! Receipts remain installed so interruption needs no second cleanup journal.
 use super::{
-    ArtifactReceipt, BLOCK_BYTES, Digest, GfError, GraphConstructionEncoding,
-    GraphConstructionEvidence, GraphConstructionSession, OsStr, Read, ReadWork, Sha256,
-    StableDirectory, account_cache_release, canonical_artifact_target, checked_category_remove,
-    compact_parent_inventory, construction_failpoint, control_sha256, decode_bounded,
-    file_identity, file_link_count, hex, is_shape_artifact_name, read_completed_shape,
-    read_completed_shape_outputs, record_active_identity_remove, replace_checkpoint_control,
-    shape_receipt_name, storage, unlink_shape_progress,
+    ArtifactReceipt, BLOCK_BYTES, GfError, GraphConstructionEncoding, GraphConstructionEvidence,
+    GraphConstructionSession, OsStr, Read, ReadWork, StableDirectory, account_cache_release,
+    canonical_artifact_target, checked_category_remove, compact_parent_inventory,
+    construction_failpoint, control_sha256, decode_bounded, file_identity, file_link_count, hex,
+    is_shape_artifact_name, read_completed_shape, read_completed_shape_outputs,
+    record_active_identity_remove, replace_checkpoint_control, shape_receipt_name, storage,
+    unlink_shape_progress,
 };
 
 impl GraphConstructionSession {
@@ -233,6 +233,7 @@ impl GraphConstructionSession {
         let (_manifest, work, released) = lease.open_for_construction(
             &manifest.content_sha256,
             manifest.byte_length,
+            manifest.content_xxh64,
             cancelled,
         )?;
         self.record_supersession_reads(work.read_bytes, work.read_calls)?;
@@ -258,6 +259,7 @@ impl GraphConstructionSession {
                 .ok_or_else(|| storage("supersession retained parent artifact is absent"))?;
             let source = crate::graph_object_path(&self.project_path, &entry.content_sha256)?;
             if entry.content_sha256 != retained.sha256
+                || entry.content_xxh64 != retained.xxh64
                 || entry.byte_length != retained.bytes
                 || source
                     .strip_prefix(&self.project_path)
@@ -267,8 +269,12 @@ impl GraphConstructionSession {
             {
                 return Err(storage("supersession retained parent artifact changed"));
             }
-            let (file, work, released) =
-                lease.open_for_construction(&entry.content_sha256, entry.byte_length, cancelled)?;
+            let (file, work, released) = lease.open_for_construction(
+                &entry.content_sha256,
+                entry.byte_length,
+                entry.content_xxh64,
+                cancelled,
+            )?;
             let identity = file_identity(file.as_ref()).map_err(storage)?;
             if identity.volume_serial != retained.source_volume
                 || hex(&identity.file_id) != retained.source_file_id
@@ -410,7 +416,7 @@ pub(super) fn retire_staged_payload(
     // Even a previously missing name must cross the directory durability
     // barrier before a retry releases its still-persisted allocation.
     supersession_boundary("supersession.before_sync")?;
-    root.sync().map_err(storage)?;
+    root.acknowledge().map_err(storage)?;
     evidence.recovery_checkpoint_fsync_operations = evidence
         .recovery_checkpoint_fsync_operations
         .checked_add(1)
@@ -479,8 +485,12 @@ pub(super) fn authenticate_public_successor(
         inventory.ok_or_else(|| storage("published supersession successor is not compact"))?;
     let lease = crate::graph_object_store::begin_graph_object_read(target.container_root())?;
     for entry in &inventory.files {
-        let (_file, io, released) =
-            lease.open_for_construction(&entry.content_sha256, entry.byte_length, cancelled)?;
+        let (_file, io, released) = lease.open_for_construction(
+            &entry.content_sha256,
+            entry.byte_length,
+            entry.content_xxh64,
+            cancelled,
+        )?;
         work.bytes = work
             .bytes
             .checked_add(io.read_bytes)
@@ -604,7 +614,7 @@ pub(super) fn authenticate_payload(
     }
     let mut reader = graphforge_filesystem::FileCacheReleasingReader::new(file).map_err(storage)?;
     let mut work = ReadWork::default();
-    let mut digest = Sha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut block = vec![0; BLOCK_BYTES];
     let result = (|| {
         loop {
@@ -613,14 +623,16 @@ pub(super) fn authenticate_payload(
             if count == 0 {
                 break;
             }
-            digest.update(&block[..count]);
+            checksum.update(&block[..count]);
             work.bytes = work
                 .bytes
                 .checked_add(count as u64)
                 .ok_or_else(|| storage("supersession payload size overflow"))?;
             work.operations += 1;
         }
-        if work.bytes != receipt.bytes || hex(&digest.finalize()) != receipt.sha256 {
+        if work.bytes != receipt.bytes
+            || crate::corruption_checksum::hex(checksum.finish()) != receipt.xxh64
+        {
             return Err(storage("supersession payload digest changed"));
         }
         Ok(())

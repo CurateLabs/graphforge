@@ -3,6 +3,7 @@ use super::{Seek, fs};
 
 use super::BUFFER_BYTES;
 use super::CasRoot;
+#[cfg(test)]
 use super::Digest;
 use super::File;
 use super::GRAPH_OBJECTS_DIR;
@@ -12,7 +13,6 @@ use super::GraphObjectPublicationLease;
 use super::Path;
 use super::Read;
 use super::ReadIoEvidence;
-use super::Sha256;
 use super::StableDirectory;
 use super::TEMP_DIR;
 use super::Uuid;
@@ -25,8 +25,33 @@ use super::returned_error_boundary;
 use super::storage;
 use super::validate_digest;
 use super::validation;
-use super::verify_file_counted;
-use super::verify_stream_counted;
+use super::verify_file_counted_in_domain;
+use super::verify_stream_counted_in_domain;
+use graphforge_core::hash_observation::HashDomain;
+
+#[cfg(test)]
+type CapturedCopyHook = Box<dyn FnMut(&str)>;
+#[cfg(test)]
+thread_local! {
+    static CAPTURED_COPY_HOOK: std::cell::RefCell<Option<CapturedCopyHook>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(crate) fn set_captured_copy_hook(hook: Option<CapturedCopyHook>) {
+    CAPTURED_COPY_HOOK.with(|slot| *slot.borrow_mut() = hook);
+}
+fn captured_copy_boundary(_phase: &str) {
+    #[cfg(test)]
+    CAPTURED_COPY_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook(_phase);
+        }
+    });
+}
+
+struct InstalledObject {
+    evidence: GraphObjectInstallEvidence,
+    identity: graphforge_filesystem::FileIdentity,
+}
 
 struct TemporaryObject {
     name: std::ffi::OsString,
@@ -35,12 +60,14 @@ struct TemporaryObject {
     #[cfg(windows)]
     file: graphforge_filesystem::WindowsCasWriter,
     identity: graphforge_filesystem::FileIdentity,
+    seal: crate::durable_commit::FileSeal,
 }
 
 struct SealedTemporaryObject {
     name: std::ffi::OsString,
     file: File,
     identity: graphforge_filesystem::FileIdentity,
+    seal: crate::durable_commit::FileSeal,
 }
 
 #[cfg(unix)]
@@ -60,10 +87,32 @@ pub(super) fn install_graph_object_bytes_with_lease(
     lease: &GraphObjectPublicationLease,
     bytes: &[u8],
 ) -> Result<(String, GraphObjectInstallEvidence), GfError> {
-    let digest = hex_digest(Sha256::digest(bytes).into());
+    install_graph_object_bytes_in_domain(lease, bytes, HashDomain::ArtifactPayload)
+}
+
+/// Only a validated, bounded radix manifest node selects the control domain.
+pub(super) fn install_graph_manifest_node_with_lease(
+    lease: &GraphObjectPublicationLease,
+    node: &crate::GraphManifestNode,
+) -> Result<(String, GraphObjectInstallEvidence), GfError> {
+    let bytes = crate::encode_graph_manifest_node(node)?;
+    install_graph_object_bytes_in_domain(lease, &bytes, HashDomain::ControlAuthentication)
+}
+
+fn install_graph_object_bytes_in_domain(
+    lease: &GraphObjectPublicationLease,
+    bytes: &[u8],
+    domain: HashDomain,
+) -> Result<(String, GraphObjectInstallEvidence), GfError> {
+    let mut hasher = crate::payload_digest::PayloadSha256::for_domain(domain);
+    hasher.update(bytes);
+    let digest = hex_digest(hasher.finalize().into());
     let expected_length =
         u64::try_from(bytes.len()).map_err(|_| validation("graph object bytes exceed u64"))?;
-    install_object(&lease.cas, &digest, expected_length, false, |file| {
+    // The name was computed from these exact resident bytes, which are then
+    // written and synchronized, so the writer authenticates the temporary as
+    // the streamed file install does. Readers admit it by length and XXH64.
+    install_object(&lease.cas, &digest, expected_length, domain, true, |file| {
         file.write_all(bytes).map_err(|error| {
             storage(
                 "write temporary graph object",
@@ -71,7 +120,11 @@ pub(super) fn install_graph_object_bytes_with_lease(
                 error,
             )
         })?;
-        file.sync_all().map_err(|error| {
+        #[cfg(unix)]
+        let descriptor = &*file;
+        #[cfg(windows)]
+        let descriptor = file.as_file();
+        let seal = crate::durable_commit::seal_file_witness(descriptor).map_err(|error| {
             storage(
                 "fsync temporary graph object",
                 &lease.cas.diagnostic_root,
@@ -80,21 +133,37 @@ pub(super) fn install_graph_object_bytes_with_lease(
         })?;
         // The source is already resident memory; only the mandatory temporary
         // file verification below is an application-observed payload read.
-        Ok(0)
+        Ok((0, seal))
     })
-    .and_then(|mut evidence| {
-        evidence.content_xxh64 = Some(crate::corruption_checksum::checksum(bytes));
-        if evidence.attempted_install {
-            evidence.write_bytes = expected_length;
-            evidence.write_calls = u64::from(!bytes.is_empty());
-            evidence.file_fsync_calls = 1;
-            evidence.fsync_calls = evidence
-                .fsync_calls
-                .checked_add(1)
-                .ok_or_else(|| validation("CAS fsync count overflows"))?;
-        }
-        Ok((digest, evidence))
-    })
+    .and_then(
+        |InstalledObject {
+             mut evidence,
+             identity,
+         }| {
+            evidence.content_xxh64 = Some(crate::corruption_checksum::checksum(bytes));
+            if evidence.attempted_install {
+                evidence.write_bytes = expected_length;
+                evidence.write_calls = u64::from(!bytes.is_empty());
+                evidence.file_fsync_calls = 1;
+                evidence.fsync_calls = evidence
+                    .fsync_calls
+                    .checked_add(1)
+                    .ok_or_else(|| validation("CAS fsync count overflows"))?;
+            }
+            capture_installed_object(
+                lease,
+                &digest,
+                expected_length,
+                identity,
+                evidence.content_xxh64,
+            )?;
+            // Resident naming computed SHA and XXH64 even when CAS reuse
+            // avoided writing. Native read work below describes separate passes.
+            crate::graph_construction::diagnostics::hashed_bytes(expected_length, 2);
+            record_completed_install(&evidence, 0);
+            Ok((digest, evidence))
+        },
+    )
 }
 
 /// Stream, hash, and install a new payload object from a regular source file.
@@ -108,12 +177,37 @@ pub fn install_graph_object_file(
     install_graph_object_file_with_lease(&lease, source, expected_digest, expected_length)
 }
 
-#[allow(clippy::too_many_lines)] // The streamed copy keeps source authentication and destination durability atomic.
 pub(crate) fn install_graph_object_file_with_lease(
     lease: &GraphObjectPublicationLease,
     source: &Path,
     expected_digest: &str,
     expected_length: u64,
+) -> Result<GraphObjectInstallEvidence, GfError> {
+    install_graph_object_file_admitted(lease, source, expected_digest, expected_length, false)
+}
+
+/// Install a regular source file that may replace a corrupt object at its
+/// digest. Only the explicit adjacency repair action grants this, for the
+/// rebuilt files a capture did not retain. The copy is SHA-256 authenticated
+/// as it streams, the full-digest authority repair requires; an existing
+/// object that authenticates is reused, and any other existing-object failure
+/// is refused exactly as an ordinary install refuses it.
+pub(crate) fn install_graph_object_file_repairing_with_lease(
+    lease: &GraphObjectPublicationLease,
+    source: &Path,
+    expected_digest: &str,
+    expected_length: u64,
+) -> Result<GraphObjectInstallEvidence, GfError> {
+    install_graph_object_file_admitted(lease, source, expected_digest, expected_length, true)
+}
+
+#[allow(clippy::too_many_lines)] // The streamed copy keeps source authentication and destination durability atomic.
+fn install_graph_object_file_admitted(
+    lease: &GraphObjectPublicationLease,
+    source: &Path,
+    expected_digest: &str,
+    expected_length: u64,
+    repair_corrupt_existing: bool,
 ) -> Result<GraphObjectInstallEvidence, GfError> {
     validate_digest(expected_digest)?;
     let metadata = fs::symlink_metadata(source)
@@ -129,10 +223,12 @@ pub(crate) fn install_graph_object_file_with_lease(
     let file_sync_calls = std::cell::Cell::new(0_u64);
     let payload_checksum = std::cell::Cell::new(None);
     let result =
-        install_object(
+        install_object_admitted(
             &lease.cas,
             expected_digest,
             expected_length,
+            ObjectAuthentication::Sha(HashDomain::ArtifactPayload),
+            repair_corrupt_existing,
             true,
             |output| {
                 let cache_window = graphforge_filesystem::cache_release_window_for_streams(2)
@@ -241,70 +337,586 @@ pub(crate) fn install_graph_object_file_with_lease(
                     }
                 };
                 #[cfg(unix)]
-                {
-                    bounded_output.sync_all_and_release().map_err(|error| {
-                        storage(
-                            "fsync temporary graph object",
-                            &lease.cas.diagnostic_root,
-                            error,
-                        )
-                    })?;
+                let seal = {
+                    let seal =
+                        crate::durable_commit::seal_cache_writer_witness(&mut bounded_output)
+                            .map_err(|error| {
+                                storage(
+                                    "fsync temporary graph object",
+                                    &lease.cas.diagnostic_root,
+                                    error,
+                                )
+                            })?;
                     file_sync_calls.set(bounded_output.evidence().sync_operations);
-                }
+                    seal
+                };
                 #[cfg(windows)]
-                {
-                    output.sync_all().map_err(|error| {
-                        storage(
-                            "fsync temporary graph object",
-                            &lease.cas.diagnostic_root,
-                            error,
-                        )
-                    })?;
+                let seal = {
+                    let seal = crate::durable_commit::seal_file_witness(output.as_file()).map_err(
+                        |error| {
+                            storage(
+                                "fsync temporary graph object",
+                                &lease.cas.diagnostic_root,
+                                error,
+                            )
+                        },
+                    )?;
                     file_sync_calls.set(1);
-                }
-                Ok(total)
+                    seal
+                };
+                Ok((total, seal))
             },
         );
-    result.and_then(|mut evidence| {
-        if evidence.attempted_install {
-            evidence.content_xxh64 = payload_checksum.get();
-            evidence.read_calls = evidence
-                .read_calls
-                .checked_add(read_calls.get())
-                .ok_or_else(|| validation("object install read calls overflow"))?;
-            evidence.write_calls = evidence
-                .write_calls
-                .checked_add(write_calls.get())
-                .ok_or_else(|| validation("object install write calls overflow"))?;
-            evidence.write_bytes = evidence
-                .write_bytes
-                .checked_add(expected_length)
-                .ok_or_else(|| validation("object install write bytes overflow"))?;
-            evidence.file_fsync_calls = file_sync_calls.get();
-            evidence.fsync_calls = evidence
-                .fsync_calls
-                .checked_add(file_sync_calls.get())
-                .ok_or_else(|| validation("CAS file synchronization count overflows"))?;
-        }
-        Ok(evidence)
-    })
+    result.and_then(
+        |InstalledObject {
+             mut evidence,
+             identity,
+         }| {
+            if evidence.attempted_install {
+                evidence.content_xxh64 = payload_checksum.get();
+                evidence.read_calls = evidence
+                    .read_calls
+                    .checked_add(read_calls.get())
+                    .ok_or_else(|| validation("object install read calls overflow"))?;
+                evidence.write_calls = evidence
+                    .write_calls
+                    .checked_add(write_calls.get())
+                    .ok_or_else(|| validation("object install write calls overflow"))?;
+                evidence.write_bytes = evidence
+                    .write_bytes
+                    .checked_add(expected_length)
+                    .ok_or_else(|| validation("object install write bytes overflow"))?;
+                evidence.file_fsync_calls = file_sync_calls.get();
+                evidence.fsync_calls = evidence
+                    .fsync_calls
+                    .checked_add(file_sync_calls.get())
+                    .ok_or_else(|| validation("CAS file synchronization count overflows"))?;
+            }
+            capture_installed_object(
+                lease,
+                expected_digest,
+                expected_length,
+                identity,
+                evidence.content_xxh64,
+            )?;
+            record_completed_install(&evidence, 0);
+            Ok(evidence)
+        },
+    )
 }
+
+/// Only a checkpoint-admitted encoded source can choose checksum authentication.
+/// Public file and byte installers remain full SHA trust boundaries.
+pub(crate) fn install_captured_encoded_artifact_with_lease(
+    lease: &GraphObjectPublicationLease,
+    source: &crate::graph_construction::CapturedEncodedArtifact<'_>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<GraphObjectInstallEvidence, GfError> {
+    install_captured_source_with_lease(lease, &CapturedSource::Encoded(source), false, cancelled)
+}
+
+/// Install a workspace file that a capture hashed and kept open, checking the
+/// copied bytes against the checksum taken while hashing rather than hashing
+/// them with SHA-256 again. Only [`crate::graph_files::capture_workspace_over_parent`]
+/// mints the capability; public file and byte installers stay SHA boundaries.
+pub(crate) fn install_captured_workspace_file_with_lease(
+    lease: &GraphObjectPublicationLease,
+    source: &crate::graph_files::CapturedWorkspaceFile,
+    repair_corrupt_existing: bool,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<GraphObjectInstallEvidence, GfError> {
+    install_captured_source_with_lease(
+        lease,
+        &CapturedSource::Workspace(source),
+        repair_corrupt_existing,
+        cancelled,
+    )
+}
+
+pub(crate) fn install_captured_portable_source_with_lease(
+    lease: &GraphObjectPublicationLease,
+    source: &crate::project_portable_v2::CapturedPortableSource<'_>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<GraphObjectInstallEvidence, GfError> {
+    install_captured_source_with_lease(lease, &CapturedSource::Portable(source), false, cancelled)
+}
+
+/// A closed set of concrete, privately minted source capabilities.
+enum CapturedSource<'a, 'b> {
+    Encoded(&'a crate::graph_construction::CapturedEncodedArtifact<'b>),
+    Portable(&'a crate::project_portable_v2::CapturedPortableSource<'b>),
+    Workspace(&'a crate::graph_files::CapturedWorkspaceFile),
+}
+impl CapturedSource<'_, '_> {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Encoded(_) => "encoded",
+            Self::Portable(_) => "portable",
+            Self::Workspace(_) => "workspace",
+        }
+    }
+    fn content_sha256(&self) -> &str {
+        match self {
+            Self::Encoded(s) => s.content_sha256(),
+            Self::Portable(s) => s.content_sha256(),
+            Self::Workspace(s) => s.content_sha256(),
+        }
+    }
+    fn bytes(&self) -> u64 {
+        match self {
+            Self::Encoded(s) => s.bytes(),
+            Self::Portable(s) => s.bytes(),
+            Self::Workspace(s) => s.bytes(),
+        }
+    }
+    fn checksum(&self) -> u64 {
+        match self {
+            Self::Encoded(s) => s.checksum(),
+            Self::Portable(s) => s.checksum(),
+            Self::Workspace(s) => s.checksum(),
+        }
+    }
+    fn source(&self) -> &File {
+        match self {
+            Self::Encoded(s) => s.source(),
+            Self::Portable(s) => s.source(),
+            Self::Workspace(s) => s.source(),
+        }
+    }
+    fn revalidate(&self) -> Result<(), GfError> {
+        match self {
+            Self::Encoded(s) => s.revalidate(),
+            Self::Portable(s) => s.revalidate(),
+            Self::Workspace(s) => s.revalidate(),
+        }
+    }
+}
+
+fn install_captured_source_with_lease(
+    lease: &GraphObjectPublicationLease,
+    source: &CapturedSource<'_, '_>,
+    repair_corrupt_existing: bool,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<GraphObjectInstallEvidence, GfError> {
+    source.revalidate()?;
+    crate::graph_construction::reject_cancelled(cancelled)?;
+    let reads = std::cell::Cell::new(0_u64);
+    let writes = std::cell::Cell::new(0_u64);
+    let syncs = std::cell::Cell::new(0_u64);
+    let captured_identity = lease
+        .installed_objects
+        .lock()
+        .map_err(|_| validation("graph object installation authority poisoned"))?
+        .get(source.content_sha256())
+        .filter(|capture| {
+            capture.byte_length == source.bytes() && capture.content_xxh64 == source.checksum()
+        })
+        .map(|capture| capture.identity);
+    let authentication = if repair_corrupt_existing {
+        // Repair requires a full digest check of the copied source; the
+        // ordinary checksum capture is not sufficient replacement authority.
+        ObjectAuthentication::Sha(HashDomain::ArtifactPayload)
+    } else {
+        ObjectAuthentication::CapturedChecksum {
+            checksum: source.checksum(),
+            identity: captured_identity,
+        }
+    };
+    let installed = install_object_admitted(
+        &lease.cas,
+        source.content_sha256(),
+        source.bytes(),
+        authentication,
+        repair_corrupt_existing,
+        !repair_corrupt_existing,
+        |output| copy_captured_source(source, output, cancelled, &reads, &writes, &syncs),
+    )?;
+    source.revalidate()?;
+    let InstalledObject {
+        mut evidence,
+        identity,
+    } = installed;
+    if evidence.attempted_install {
+        evidence.content_xxh64 = Some(source.checksum());
+        evidence.read_calls = evidence
+            .read_calls
+            .checked_add(reads.get())
+            .ok_or_else(|| validation("captured read calls overflow"))?;
+        evidence.write_calls = writes.get();
+        evidence.write_bytes = source.bytes();
+        evidence.file_fsync_calls = syncs.get();
+        evidence.fsync_calls = evidence
+            .fsync_calls
+            .checked_add(syncs.get())
+            .ok_or_else(|| validation("captured synchronization calls overflow"))?;
+    }
+    capture_installed_object(
+        lease,
+        source.content_sha256(),
+        source.bytes(),
+        identity,
+        evidence.content_xxh64,
+    )?;
+    // A captured repair copy feeds XXH64 only, even though its temporary
+    // must subsequently pass full SHA authentication. The compatibility
+    // evidence classifies that source read by requested authority; successful
+    // hash work must instead follow the actual copy producer.
+    let checksum_only_source = if repair_corrupt_existing && evidence.attempted_install {
+        source.bytes()
+    } else {
+        0
+    };
+    record_completed_install(&evidence, checksum_only_source);
+    Ok(evidence)
+}
+
+/// Completed native operation evidence, never sampled process measurements.
+/// Actual read passes feed XXH64; those which also ran SHA contribute one
+/// additional stream. A captured repair source is checksum-only regardless of
+/// its temporary's later SHA authority. Reused identities perform no digest work.
+fn record_completed_install(evidence: &GraphObjectInstallEvidence, checksum_only_source: u64) {
+    crate::graph_construction::diagnostics::hashed_bytes(evidence.bytes_hashed, 1);
+    crate::graph_construction::diagnostics::hashed_bytes(
+        evidence.bytes_hashed.saturating_sub(checksum_only_source),
+        1,
+    );
+    crate::graph_construction::diagnostics::hashed_bytes(evidence.checksum_read_bytes, 1);
+    crate::graph_construction::diagnostics::written_bytes(evidence.write_bytes);
+}
+
+fn copy_captured_source(
+    source: &CapturedSource<'_, '_>,
+    output: &mut CasTemporaryWriter,
+    cancelled: &mut impl FnMut() -> bool,
+    reads: &std::cell::Cell<u64>,
+    writes: &std::cell::Cell<u64>,
+    syncs: &std::cell::Cell<u64>,
+) -> Result<(u64, crate::durable_commit::FileSeal), GfError> {
+    let window = graphforge_filesystem::cache_release_window_for_streams(2)
+        .map_err(|error| validation(error.to_string()))?;
+    let mut input = graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
+        source
+            .source()
+            .try_clone()
+            .map_err(|error| validation(error.to_string()))?,
+        window,
+        graphforge_filesystem::FileCacheReleaseTracker::default(),
+    )
+    .map_err(|error| validation(error.to_string()))?;
+    input
+        .rewind()
+        .map_err(|error| validation(error.to_string()))?;
+    #[cfg(unix)]
+    let mut output_stream = graphforge_filesystem::DurableFileCacheWriter::with_window_bytes(
+        output
+            .try_clone()
+            .map_err(|error| validation(error.to_string()))?,
+        window,
+    )
+    .map_err(|error| validation(error.to_string()))?;
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut total = 0_u64;
+    let mut buffer = vec![0; BUFFER_BYTES];
+    let copied = (|| {
+        loop {
+            crate::graph_construction::reject_cancelled(cancelled)?;
+            captured_copy_boundary("before_read");
+            let count = input
+                .read(&mut buffer)
+                .map_err(|error| validation(error.to_string()))?;
+            captured_copy_boundary("after_read");
+            if count == 0 {
+                break;
+            }
+            total = total
+                .checked_add(count as u64)
+                .ok_or_else(|| validation("captured source length overflow"))?;
+            if total > source.bytes() {
+                return Err(validation(format!(
+                    "captured {} source grew during copy",
+                    source.kind()
+                )));
+            }
+            reads.set(
+                reads
+                    .get()
+                    .checked_add(1)
+                    .ok_or_else(|| validation("captured read calls overflow"))?,
+            );
+            #[cfg(unix)]
+            output_stream
+                .write_all(&buffer[..count])
+                .map_err(|error| validation(error.to_string()))?;
+            #[cfg(windows)]
+            output
+                .write_all(&buffer[..count])
+                .map_err(|error| validation(error.to_string()))?;
+            writes.set(
+                writes
+                    .get()
+                    .checked_add(1)
+                    .ok_or_else(|| validation("captured write calls overflow"))?,
+            );
+            checksum.update(&buffer[..count]);
+        }
+        source.revalidate()?;
+        if total != source.bytes() || checksum.finish() != source.checksum() {
+            return Err(validation(format!(
+                "captured {} source checksum or length changed during copy",
+                source.kind()
+            )));
+        }
+        Ok(total)
+    })();
+    let cleanup = input
+        .finish()
+        .map_err(|error| validation(error.to_string()));
+    let total = finish_captured_source_copy(copied, cleanup)?;
+    #[cfg(unix)]
+    let seal = {
+        let seal = crate::durable_commit::seal_cache_writer_witness(&mut output_stream)
+            .map_err(|error| validation(error.to_string()))?;
+        syncs.set(output_stream.evidence().sync_operations);
+        seal
+    };
+    #[cfg(windows)]
+    let seal = {
+        let seal = crate::durable_commit::seal_file_witness(output.as_file())
+            .map_err(|error| validation(error.to_string()))?;
+        syncs.set(1);
+        seal
+    };
+    Ok((total, seal))
+}
+
+fn finish_captured_source_copy(
+    copied: Result<u64, GfError>,
+    cleanup: Result<graphforge_filesystem::FileCacheReleaseEvidence, GfError>,
+) -> Result<u64, GfError> {
+    match (copied, cleanup) {
+        (Ok(total), Ok(_)) => Ok(total),
+        (Err(primary), Ok(_)) | (Ok(_), Err(primary)) => Err(primary),
+        (Err(primary), Err(cleanup)) => Err(validation(format!(
+            "{primary}; captured source cache cleanup also failed: {cleanup}"
+        ))),
+    }
+}
+
+fn capture_installed_object(
+    lease: &GraphObjectPublicationLease,
+    digest: &str,
+    byte_length: u64,
+    identity: graphforge_filesystem::FileIdentity,
+    content_xxh64: Option<u64>,
+) -> Result<(), GfError> {
+    let content_xxh64 = content_xxh64
+        .ok_or_else(|| validation("authenticated installation lacks its captured checksum"))?;
+    let mut captures = lease
+        .installed_objects
+        .lock()
+        .map_err(|_| validation("graph object installation authority poisoned"))?;
+    let limits = crate::GraphManifestLimits::default();
+    let maximum = limits.max_entries.saturating_add(limits.max_segments);
+    if captures.len() < maximum || captures.contains_key(digest) {
+        captures.insert(
+            digest.to_owned(),
+            super::CapturedGraphObject {
+                identity,
+                byte_length,
+                content_xxh64,
+            },
+        );
+    }
+    // A full optional capture budget grants no authority: staging falls back to
+    // first SHA authentication for uncaptured objects.
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ObjectAuthentication {
+    Sha(HashDomain),
+    CapturedChecksum {
+        checksum: u64,
+        identity: Option<graphforge_filesystem::FileIdentity>,
+    },
+}
+
+impl ObjectAuthentication {
+    #[cfg(windows)]
+    fn without_existing_identity(self) -> Self {
+        match self {
+            Self::Sha(_) => self,
+            Self::CapturedChecksum { .. } => Self::Sha(HashDomain::ArtifactPayload),
+        }
+    }
+
+    fn sha_bytes(self, bytes: u64) -> u64 {
+        match self {
+            Self::Sha(_) => bytes,
+            Self::CapturedChecksum { .. } => 0,
+        }
+    }
+}
+
 fn install_object<F>(
     cas: &CasRoot,
     digest: &str,
     expected_length: u64,
+    domain: HashDomain,
     writer_authenticated: bool,
     write_temporary: F,
-) -> Result<GraphObjectInstallEvidence, GfError>
+) -> Result<InstalledObject, GfError>
 where
-    F: FnOnce(&mut CasTemporaryWriter) -> Result<u64, GfError>,
+    F: FnOnce(&mut CasTemporaryWriter) -> Result<(u64, crate::durable_commit::FileSeal), GfError>,
+{
+    install_object_admitted(
+        cas,
+        digest,
+        expected_length,
+        ObjectAuthentication::Sha(domain),
+        false,
+        writer_authenticated,
+        write_temporary,
+    )
+}
+
+fn verify_stream_admitted(
+    file: &mut impl Read,
+    digest: &str,
+    expected_length: u64,
+    diagnostic: &Path,
+    authentication: ObjectAuthentication,
+) -> Result<ReadIoEvidence, GfError> {
+    let ObjectAuthentication::CapturedChecksum {
+        checksum: expected, ..
+    } = authentication
+    else {
+        let ObjectAuthentication::Sha(domain) = authentication else {
+            unreachable!()
+        };
+        return verify_stream_counted_in_domain(file, digest, expected_length, diagnostic, domain);
+    };
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut io = ReadIoEvidence::default();
+    let mut buffer = vec![0; BUFFER_BYTES];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| storage("read captured CAS object", diagnostic, error))?;
+        if count == 0 {
+            break;
+        }
+        io.bytes = io
+            .bytes
+            .checked_add(count as u64)
+            .ok_or_else(|| validation("captured CAS read bytes overflow"))?;
+        io.calls = io
+            .calls
+            .checked_add(1)
+            .ok_or_else(|| validation("captured CAS read calls overflow"))?;
+        if io.bytes > expected_length {
+            return Err(validation("captured CAS object grew"));
+        }
+        checksum.update(&buffer[..count]);
+    }
+    if io.bytes != expected_length || checksum.finish() != expected {
+        return Err(validation("captured CAS object checksum or length changed"));
+    }
+    io.content_xxh64 = Some(expected);
+    crate::lifecycle_io::record_read(
+        crate::StorageIoPhase::HydrationVerification,
+        io.bytes,
+        io.calls,
+    );
+    crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
+    Ok(io)
+}
+
+fn verify_file_admitted(
+    file: File,
+    digest: &str,
+    expected_length: u64,
+    diagnostic: &Path,
+    authentication: ObjectAuthentication,
+) -> Result<ReadIoEvidence, GfError> {
+    if let ObjectAuthentication::Sha(domain) = authentication {
+        return verify_file_counted_in_domain(file, digest, expected_length, diagnostic, domain);
+    }
+    let identity = graphforge_filesystem::file_identity(&file)
+        .map_err(|error| storage("identify captured CAS object", diagnostic, error))?;
+    if file
+        .metadata()
+        .map_err(|error| storage("inspect captured CAS object", diagnostic, error))?
+        .len()
+        != expected_length
+    {
+        return Err(validation("captured CAS object length changed"));
+    }
+    let mut reader = graphforge_filesystem::FileCacheReleasingReader::new(file)
+        .map_err(|error| storage("bound captured CAS object", diagnostic, error))?;
+    reader
+        .rewind()
+        .map_err(|error| storage("rewind captured CAS object", diagnostic, error))?;
+    let checked = verify_stream_admitted(
+        &mut reader,
+        digest,
+        expected_length,
+        diagnostic,
+        authentication,
+    )
+    .and_then(|io| {
+        if graphforge_filesystem::file_identity(reader.file())
+            .map_err(|error| storage("reidentify captured CAS object", diagnostic, error))?
+            != identity
+            || reader
+                .file()
+                .metadata()
+                .map_err(|error| storage("reinspect captured CAS object", diagnostic, error))?
+                .len()
+                != expected_length
+        {
+            return Err(validation("captured CAS object identity changed"));
+        }
+        Ok(io)
+    });
+    let cleanup = reader
+        .finish()
+        .map_err(|error| storage("release captured CAS cache", diagnostic, error));
+    match (checked, cleanup) {
+        (Ok(io), Ok(_)) => Ok(io),
+        (Err(primary), Ok(_)) | (Ok(_), Err(primary)) => Err(primary),
+        (Err(primary), Err(cleanup)) => Err(validation(format!("{primary}; {cleanup}"))),
+    }
+}
+
+fn install_object_admitted<F>(
+    cas: &CasRoot,
+    digest: &str,
+    expected_length: u64,
+    authentication: ObjectAuthentication,
+    repair_corrupt_existing: bool,
+    writer_authenticated: bool,
+    write_temporary: F,
+) -> Result<InstalledObject, GfError>
+where
+    F: FnOnce(&mut CasTemporaryWriter) -> Result<(u64, crate::durable_commit::FileSeal), GfError>,
 {
     validate_digest(digest)?;
     let bucket = cas.digest_bucket(digest, true)?;
     let destination_name = std::ffi::OsStr::new(&digest[2..]);
-    if let Some(evidence) =
-        try_reuse_existing_object(cas, &bucket, destination_name, digest, expected_length)?
-    {
+    let mut replace_prior = None;
+    if let Some(evidence) = try_reuse_existing_object(
+        cas,
+        &bucket,
+        destination_name,
+        digest,
+        expected_length,
+        &mut ExistingObjectReuse {
+            authentication,
+            repair_corrupt_existing,
+            replace_prior: &mut replace_prior,
+        },
+    )? {
         return Ok(evidence);
     }
     let temporary_name = std::ffi::OsString::from(Uuid::new_v4().hyphenated().to_string());
@@ -330,11 +942,7 @@ where
     #[cfg(windows)]
     let temporary_identity = temporary.identity();
     let written = write_temporary(&mut temporary);
-    let temporary_path = cas
-        .diagnostic_root
-        .join(GRAPH_OBJECTS_DIR)
-        .join(TEMP_DIR)
-        .join(&temporary_name);
+    let temporary_path = temporary_object_path(cas, &temporary_name);
     #[cfg(unix)]
     let observed_file = &temporary;
     #[cfg(windows)]
@@ -342,7 +950,7 @@ where
     let observed = cas.allocation.as_ref().map_or(Ok(()), |allocation| {
         allocation.replace_file_at(&temporary_path, observed_file)
     });
-    let bytes_hashed = written?;
+    let (bytes_hashed, seal) = written?;
     observed?;
     let preseal_io = if writer_authenticated || cfg!(windows) {
         ReadIoEvidence::default()
@@ -350,35 +958,60 @@ where
         temporary.rewind().map_err(|error| {
             storage("rewind temporary graph object", &cas.diagnostic_root, error)
         })?;
-        verify_stream_counted(
+        verify_stream_admitted(
             &mut temporary,
             digest,
             expected_length,
             &cas.diagnostic_root,
+            authentication,
         )?
     };
     // Windows must close the writable handle and reopen an exact-identity,
     // protected read handle before publication. That transition authenticates
     // the complete payload below, so a second pre-seal read would be redundant.
-    let (installed, sealed_bytes_hashed, concurrent_io) = finalize_temporary_object(
+    let (installed, identity, _sealed_bytes_hashed, concurrent_io) = finalize_temporary_object(
         cas,
         &bucket,
         TemporaryObject {
             name: temporary_name,
             file: temporary,
             identity: temporary_identity,
+            seal,
         },
         digest,
         expected_length,
+        authentication,
+        replace_prior,
     )?;
-    let bytes_hashed = [
-        preseal_io.bytes,
-        sealed_bytes_hashed,
-        if installed { 0 } else { expected_length },
-    ]
-    .into_iter()
-    .try_fold(bytes_hashed, u64::checked_add)
-    .ok_or_else(|| validation("graph object hashed byte count overflows"))?;
+    Ok(InstalledObject {
+        evidence: installation_evidence(
+            expected_length,
+            installed,
+            bytes_hashed,
+            authentication,
+            preseal_io,
+            concurrent_io,
+        )?,
+        identity,
+    })
+}
+
+fn installation_evidence(
+    expected_length: u64,
+    installed: bool,
+    bytes_hashed: u64,
+    authentication: ObjectAuthentication,
+    preseal_io: ReadIoEvidence,
+    concurrent_io: ReadIoEvidence,
+) -> Result<GraphObjectInstallEvidence, GfError> {
+    let read_bytes = [preseal_io.bytes, concurrent_io.bytes]
+        .into_iter()
+        .try_fold(bytes_hashed, u64::checked_add)
+        .ok_or_else(|| validation("graph object read byte count overflows"))?;
+    let bytes_hashed = [preseal_io.sha_bytes, concurrent_io.sha_bytes]
+        .into_iter()
+        .try_fold(authentication.sha_bytes(bytes_hashed), u64::checked_add)
+        .ok_or_else(|| validation("graph object hashed byte count overflows"))?;
     let read_calls = preseal_io
         .calls
         .checked_add(concurrent_io.calls)
@@ -386,6 +1019,9 @@ where
     Ok(GraphObjectInstallEvidence {
         content_xxh64: preseal_io.content_xxh64.or(concurrent_io.content_xxh64),
         bytes_hashed,
+        checksum_read_bytes: read_bytes
+            .checked_sub(bytes_hashed)
+            .ok_or_else(|| validation("CAS SHA read count exceeds native reads"))?,
         bytes_installed: if installed { expected_length } else { 0 },
         reused_existing: !installed,
         attempted_install: true,
@@ -403,11 +1039,19 @@ fn reused_object_evidence(expected_length: u64, io: ReadIoEvidence) -> GraphObje
     debug_assert_eq!(io.bytes, expected_length);
     GraphObjectInstallEvidence {
         content_xxh64: io.content_xxh64,
-        bytes_hashed: io.bytes,
+        bytes_hashed: io.sha_bytes,
+        checksum_read_bytes: io.bytes - io.sha_bytes,
         reused_existing: true,
         read_calls: io.calls,
         ..GraphObjectInstallEvidence::default()
     }
+}
+
+#[cfg(any(unix, windows))]
+struct ExistingObjectReuse<'a> {
+    authentication: ObjectAuthentication,
+    repair_corrupt_existing: bool,
+    replace_prior: &'a mut Option<graphforge_filesystem::FileIdentity>,
 }
 
 #[cfg(unix)]
@@ -417,7 +1061,8 @@ fn try_reuse_existing_object(
     destination_name: &std::ffi::OsStr,
     digest: &str,
     expected_length: u64,
-) -> Result<Option<GraphObjectInstallEvidence>, GfError> {
+    reuse: &mut ExistingObjectReuse<'_>,
+) -> Result<Option<InstalledObject>, GfError> {
     let file = match bucket.open_child_file(destination_name) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -429,17 +1074,45 @@ fn try_reuse_existing_object(
             ));
         }
     };
-    let io = verify_and_seal_graph_object_counted(
+    let prior_identity = graphforge_filesystem::file_identity(&file).map_err(|error| {
+        storage(
+            "identify existing graph object",
+            &cas.diagnostic_root,
+            error,
+        )
+    })?;
+    let io = match verify_and_seal_graph_object_counted(
         &file,
         digest,
         expected_length,
         &graph_object_path(&cas.diagnostic_root, digest)?,
         &cas.diagnostic_root,
-    )?;
+        reuse.authentication,
+    ) {
+        Ok(io) => io,
+        Err(GfError::Validation(message))
+            if reuse.repair_corrupt_existing
+                && message == "graph object digest does not match its address" =>
+        {
+            *reuse.replace_prior = Some(prior_identity);
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
     if let Some(allocation) = &cas.allocation {
         allocation.replace_file_at(&graph_object_path(&cas.diagnostic_root, digest)?, &file)?;
     }
-    Ok(Some(reused_object_evidence(expected_length, io)))
+    let identity = graphforge_filesystem::file_identity(&file).map_err(|error| {
+        storage(
+            "identify authenticated graph object",
+            &cas.diagnostic_root,
+            error,
+        )
+    })?;
+    Ok(Some(InstalledObject {
+        evidence: reused_object_evidence(expected_length, io),
+        identity,
+    }))
 }
 
 #[cfg(windows)]
@@ -449,7 +1122,8 @@ fn try_reuse_existing_object(
     destination_name: &std::ffi::OsStr,
     digest: &str,
     expected_length: u64,
-) -> Result<Option<GraphObjectInstallEvidence>, GfError> {
+    reuse: &mut ExistingObjectReuse<'_>,
+) -> Result<Option<InstalledObject>, GfError> {
     let mut adoption_io = ReadIoEvidence::default();
     let file = match bucket.open_cas_child_file(destination_name) {
         Ok(file) => file.into_file(),
@@ -468,8 +1142,13 @@ fn try_reuse_existing_object(
                         },
                     )
                 })?;
-            adoption_io =
-                verify_stream_counted(&mut legacy, digest, expected_length, &cas.diagnostic_root)?;
+            adoption_io = verify_stream_admitted(
+                &mut legacy,
+                digest,
+                expected_length,
+                &cas.diagnostic_root,
+                reuse.authentication.without_existing_identity(),
+            )?;
             bucket
                 .adopt_legacy_cas_child(destination_name, legacy)
                 .map(graphforge_filesystem::WindowsSealedCasFile::into_file)
@@ -482,18 +1161,35 @@ fn try_reuse_existing_object(
                 })?
         }
     };
-    let io = verify_and_seal_graph_object_counted(
+    let prior_identity = graphforge_filesystem::file_identity(&file).map_err(|error| {
+        storage(
+            "identify existing graph object",
+            &cas.diagnostic_root,
+            error,
+        )
+    })?;
+    let io = match verify_and_seal_graph_object_counted(
         &file,
         digest,
         expected_length,
         &graph_object_path(&cas.diagnostic_root, digest)?,
         &cas.diagnostic_root,
-    )?;
+        reuse.authentication,
+    ) {
+        Ok(io) => io,
+        Err(GfError::Validation(message))
+            if reuse.repair_corrupt_existing
+                && message == "graph object digest does not match its address" =>
+        {
+            *reuse.replace_prior = Some(prior_identity);
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
     let mut evidence = reused_object_evidence(expected_length, io);
-    evidence.bytes_hashed = adoption_io
-        .bytes
-        .checked_add(io.bytes)
-        .ok_or_else(|| validation("reused object hashed byte count overflows"))?;
+    let combined = checked_read_io_sum(adoption_io, io)?;
+    evidence.bytes_hashed = combined.sha_bytes;
+    evidence.checksum_read_bytes = combined.bytes - combined.sha_bytes;
     evidence.read_calls = adoption_io
         .calls
         .checked_add(io.calls)
@@ -501,7 +1197,14 @@ fn try_reuse_existing_object(
     if let Some(allocation) = &cas.allocation {
         allocation.replace_file_at(&graph_object_path(&cas.diagnostic_root, digest)?, &file)?;
     }
-    Ok(Some(evidence))
+    let identity = graphforge_filesystem::file_identity(&file).map_err(|error| {
+        storage(
+            "identify authenticated graph object",
+            &cas.diagnostic_root,
+            error,
+        )
+    })?;
+    Ok(Some(InstalledObject { evidence, identity }))
 }
 
 fn finalize_temporary_object(
@@ -510,13 +1213,19 @@ fn finalize_temporary_object(
     temporary: TemporaryObject,
     digest: &str,
     expected_length: u64,
-) -> Result<(bool, u64, ReadIoEvidence), GfError> {
+    authentication: ObjectAuthentication,
+    replace_prior: Option<graphforge_filesystem::FileIdentity>,
+) -> Result<
+    (
+        bool,
+        graphforge_filesystem::FileIdentity,
+        u64,
+        ReadIoEvidence,
+    ),
+    GfError,
+> {
     let destination_name = std::ffi::OsStr::new(&digest[2..]);
-    let temporary_path = cas
-        .diagnostic_root
-        .join(GRAPH_OBJECTS_DIR)
-        .join(TEMP_DIR)
-        .join(&temporary.name);
+    let temporary_path = temporary_object_path(cas, &temporary.name);
     #[cfg(unix)]
     let (temporary, sealed_io) = {
         seal_graph_object(&temporary.file, &temporary_path, &cas.diagnostic_root)?;
@@ -525,6 +1234,7 @@ fn finalize_temporary_object(
                 name: temporary.name,
                 file: temporary.file,
                 identity: temporary.identity,
+                seal: temporary.seal,
             },
             ReadIoEvidence::default(),
         )
@@ -536,6 +1246,7 @@ fn finalize_temporary_object(
         digest,
         expected_length,
         &cas.diagnostic_root,
+        authentication,
     )?;
     if let Some(allocation) = &cas.allocation {
         allocation.replace_file_at(&temporary_path, &temporary.file)?;
@@ -543,101 +1254,169 @@ fn finalize_temporary_object(
     let sealed_bytes_hashed = sealed_io.bytes;
     validate_sealed_temporary(&temporary, expected_length, &cas.diagnostic_root)?;
     returned_error_boundary("install:temp-sealed")?;
-    let mut concurrent_io = ReadIoEvidence::default();
-    let installed = if let Ok((installed, _identity)) = cas.tmp.link_child_into(
+    let sealed = crate::durable_commit::SealedArtifact::adopt_sealed(
+        &cas.tmp,
         &temporary.name,
-        &temporary.file,
-        temporary.identity,
-        bucket,
-        destination_name,
-    ) {
-        if let Some(allocation) = &cas.allocation {
-            allocation.replace_file_at(
-                &graph_object_path(&cas.diagnostic_root, digest)?,
-                &installed,
-            )?;
-        }
-        true
+        temporary.file,
+        temporary.seal,
+        cas.allocation.as_ref(),
+    )
+    .map_err(|error| storage("adopt sealed graph object", &cas.diagnostic_root, error))?;
+    let mut concurrent_io = ReadIoEvidence::default();
+    let (identity, installed) = if let Some(prior) = replace_prior {
+        let pending = sealed
+            .make_visible_into(bucket, destination_name, prior, || {
+                returned_error_boundary("install:before-repair-visible")
+                    .map_err(std::io::Error::other)
+            })
+            .map_err(|failure| {
+                reconcile_uncertain_repair(failure, bucket, destination_name, &temporary_path, cas)
+            })?;
+        acknowledge_repair(pending, &temporary_path, cas)
+            .map_err(|failure| commit_failure_error(failure, cas))?;
+        (temporary.identity, true)
     } else {
-        #[cfg(unix)]
-        let existing = bucket.open_child_file(destination_name);
-        #[cfg(windows)]
-        let existing = bucket
-            .open_cas_child_file(destination_name)
-            .map(graphforge_filesystem::WindowsSealedCasFile::into_file);
-        let existing = existing.map_err(|error| {
-            storage(
-                "open concurrently installed graph object",
-                &cas.diagnostic_root,
-                error,
-            )
-        })?;
-        concurrent_io = verify_and_seal_graph_object_counted(
-            &existing,
-            digest,
-            expected_length,
-            &graph_object_path(&cas.diagnostic_root, digest)?,
-            &cas.diagnostic_root,
-        )?;
-        if let Some(allocation) = &cas.allocation {
-            allocation
-                .replace_file_at(&graph_object_path(&cas.diagnostic_root, digest)?, &existing)?;
-        }
-        false
+        let installed = crate::durable_commit::install_immutable(
+            sealed,
+            bucket,
+            destination_name,
+            |existing, _identity| {
+                concurrent_io = verify_and_seal_graph_object_counted(
+                    existing,
+                    digest,
+                    expected_length,
+                    &graph_object_path(&cas.diagnostic_root, digest)
+                        .map_err(std::io::Error::other)?,
+                    &cas.diagnostic_root,
+                    authentication,
+                )
+                .map_err(std::io::Error::other)?;
+                Ok(())
+            },
+            |_reused, file| {
+                if let Some(allocation) = &cas.allocation {
+                    allocation
+                        .replace_file_at(
+                            &graph_object_path(&cas.diagnostic_root, digest)
+                                .map_err(std::io::Error::other)?,
+                            file,
+                        )
+                        .map_err(std::io::Error::other)?;
+                }
+                returned_error_boundary("install:final-linked").map_err(std::io::Error::other)
+            },
+            |_reused, _file| {
+                returned_error_boundary("install:bucket-synced").map_err(std::io::Error::other)
+            },
+            || returned_error_boundary("install:temp-unlinked").map_err(std::io::Error::other),
+        )
+        .map_err(|error| immutable_commit_error(error, cas))?;
+        let (_file, identity, reused) = installed;
+        (identity, !reused)
     };
-    returned_error_boundary("install:final-linked")?;
-    // The destination namespace must be durable before its temporary alias is
-    // removed; after a crash, retry can therefore authenticate the final CAS
-    // name without depending on the temporary namespace.
-    bucket.sync().map_err(|error| {
-        storage(
-            "sync stable graph object bucket",
-            &cas.diagnostic_root,
-            error,
-        )
-    })?;
-    returned_error_boundary("install:bucket-synced")?;
-    // Windows cannot open a deletion handle while the original temporary
-    // handle remains open without delete sharing. Publication and concurrent
-    // winner authentication are complete, so release it before exact-identity
-    // cleanup; the fresh CAS-owned inode remains sealed at its final name.
-    drop(temporary.file);
-    remove_finalized_temporary(cas, &temporary.name, temporary.identity, &temporary_path)?;
-    returned_error_boundary("install:temp-unlinked")?;
-    cas.tmp.sync().map_err(|error| {
-        storage(
-            "sync stable graph object temporary directory",
-            &cas.diagnostic_root,
-            error,
-        )
-    })?;
     Ok((
         installed,
+        identity,
         sealed_bytes_hashed,
         checked_read_io_sum(sealed_io, concurrent_io)?,
     ))
 }
 
-fn remove_finalized_temporary(
+/// Acknowledge a visible repair: record the exact replacement at the CAS
+/// address and fence both namespaces. The replacement moved the private name,
+/// so its owner is retired before the identity is recorded at the address.
+/// Acknowledgement would retire it anyway, but only after recording the
+/// address; NTFS can report a different allocation for the same identity once
+/// its name changes, which the accounting refuses while the stale private
+/// owner still holds that identity.
+fn acknowledge_repair(
+    pending: crate::durable_commit::PendingCommit,
+    temporary_path: &Path,
     cas: &CasRoot,
-    name: &std::ffi::OsStr,
-    identity: graphforge_filesystem::FileIdentity,
-    path: &Path,
-) -> Result<(), GfError> {
-    cas.tmp
-        .unlink_child_if_identity(name, identity)
-        .map_err(|error| {
-            storage(
-                "remove stable temporary graph object",
-                &cas.diagnostic_root,
-                error,
-            )
-        })?;
-    if let Some(allocation) = &cas.allocation {
-        allocation.remove_file_at(path)?;
+) -> Result<(), crate::durable_commit::CommitFailure> {
+    if let Some(allocation) = &cas.allocation
+        && let Err(error) = allocation.remove_file_at(temporary_path)
+    {
+        return Err(crate::durable_commit::CommitFailure {
+            visibility: crate::durable_commit::Visibility::VisibleUnacknowledged,
+            cause: crate::durable_commit::CommitCause::Io(std::io::Error::other(error)),
+            pending: Some(Box::new(pending)),
+        });
     }
-    Ok(())
+    pending.acknowledge(cas.allocation.as_ref())
 }
+
+/// A native replacement can report an unknown outcome after it took effect.
+/// Keep the original failure, and if the exact staged replacement is the one
+/// now at the address, acknowledge it so its allocation and namespace fences
+/// are not lost. A different visible object is left untouched; the staged
+/// temporary is then retired by its own owner.
+fn reconcile_uncertain_repair(
+    mut failure: crate::durable_commit::CommitFailure,
+    bucket: &StableDirectory,
+    destination_name: &std::ffi::OsStr,
+    temporary_path: &Path,
+    cas: &CasRoot,
+) -> GfError {
+    let Some(pending) = failure.pending.take() else {
+        return commit_failure_error(failure, cas);
+    };
+    let reconciled = (|| -> Result<(), String> {
+        let visible = bucket
+            .open_child_file(destination_name)
+            .map_err(|error| format!("inspect uncertain graph object repair: {error}"))?;
+        let identity = graphforge_filesystem::file_identity(&visible)
+            .map_err(|error| format!("identify uncertain graph object repair: {error}"))?;
+        drop(visible);
+        if pending.matches_target(destination_name, identity) {
+            acknowledge_repair(*pending, temporary_path, cas).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })();
+    match reconciled {
+        Ok(()) => commit_failure_error(failure, cas),
+        Err(reconciliation) => storage(
+            "commit immutable graph object",
+            &cas.diagnostic_root,
+            format!("{failure}; reconciliation failed: {reconciliation}"),
+        ),
+    }
+}
+
+/// Report a durable commit failure as its own cause, keeping a nested
+/// storage error intact.
+fn commit_failure_error(failure: crate::durable_commit::CommitFailure, cas: &CasRoot) -> GfError {
+    match failure.cause {
+        crate::durable_commit::CommitCause::Io(error) => immutable_commit_error(error, cas),
+        crate::durable_commit::CommitCause::Replacement(error) => storage(
+            "commit immutable graph object",
+            &cas.diagnostic_root,
+            error.to_string(),
+        ),
+    }
+}
+
+fn immutable_commit_error(error: std::io::Error, cas: &CasRoot) -> GfError {
+    let message = error.to_string();
+    if let Some(cause) = error.into_inner()
+        && let Ok(cause) = cause.downcast::<GfError>()
+    {
+        return *cause;
+    }
+    storage(
+        "commit immutable graph object",
+        &cas.diagnostic_root,
+        message,
+    )
+}
+
+fn temporary_object_path(cas: &CasRoot, name: &std::ffi::OsStr) -> std::path::PathBuf {
+    cas.diagnostic_root
+        .join(GRAPH_OBJECTS_DIR)
+        .join(TEMP_DIR)
+        .join(name)
+}
+
 fn validate_sealed_temporary(
     temporary: &SealedTemporaryObject,
     expected_length: u64,
@@ -666,14 +1445,8 @@ fn transition_temporary_to_sealed_reader(
     digest: &str,
     expected_length: u64,
     diagnostic: &Path,
+    authentication: ObjectAuthentication,
 ) -> Result<(SealedTemporaryObject, ReadIoEvidence), GfError> {
-    temporary.file.sync_all().map_err(|error| {
-        storage(
-            "sync temporary graph object before sealing",
-            diagnostic,
-            error,
-        )
-    })?;
     let identity = temporary.identity;
     let name = temporary.name;
     let file = temporary_directory
@@ -692,7 +1465,7 @@ fn transition_temporary_to_sealed_reader(
             "temporary graph object identity changed while sealing",
         ));
     }
-    let io = verify_file_counted(
+    let io = verify_file_admitted(
         file.try_clone().map_err(|error| {
             storage(
                 "clone sealed temporary graph object for authentication",
@@ -703,12 +1476,14 @@ fn transition_temporary_to_sealed_reader(
         digest,
         expected_length,
         diagnostic,
+        authentication,
     )?;
     Ok((
         SealedTemporaryObject {
             name,
             file,
             identity,
+            seal: temporary.seal,
         },
         io,
     ))
@@ -721,8 +1496,15 @@ fn verify_and_seal_graph_object(
     object_path: &Path,
     diagnostic: &Path,
 ) -> Result<(), GfError> {
-    verify_and_seal_graph_object_counted(file, digest, expected_length, object_path, diagnostic)
-        .map(|_| ())
+    verify_and_seal_graph_object_counted(
+        file,
+        digest,
+        expected_length,
+        object_path,
+        diagnostic,
+        ObjectAuthentication::Sha(HashDomain::ArtifactPayload),
+    )
+    .map(|_| ())
 }
 
 fn verify_and_seal_graph_object_counted(
@@ -731,6 +1513,7 @@ fn verify_and_seal_graph_object_counted(
     expected_length: u64,
     object_path: &Path,
     diagnostic: &Path,
+    authentication: ObjectAuthentication,
 ) -> Result<ReadIoEvidence, GfError> {
     // Reuse is safe only after the exact opened inode is no longer writable.
     // Hashing first would leave a window in which the already-authenticated
@@ -749,12 +1532,24 @@ fn verify_and_seal_graph_object_counted(
             return Err(validation("graph object is not canonically sealed"));
         }
     }
-    let io = verify_file_counted(
+    let authentication = match authentication {
+        ObjectAuthentication::CapturedChecksum { identity, .. }
+            if identity
+                != Some(graphforge_filesystem::file_identity(file).map_err(|error| {
+                    storage("identify existing CAS authority", diagnostic, error)
+                })?) =>
+        {
+            ObjectAuthentication::Sha(HashDomain::ArtifactPayload)
+        }
+        value => value,
+    };
+    let io = verify_file_admitted(
         file.try_clone()
             .map_err(|error| storage("clone graph object for authentication", diagnostic, error))?,
         digest,
         expected_length,
         diagnostic,
+        authentication,
     )?;
     if !file
         .metadata()
@@ -782,5 +1577,7 @@ fn seal_graph_object(file: &File, object_path: &Path, diagnostic: &Path) -> Resu
     Ok(())
 }
 
+#[cfg(test)]
+mod repair_tests;
 #[cfg(test)]
 mod tests;

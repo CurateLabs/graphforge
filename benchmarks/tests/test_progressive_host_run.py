@@ -15,8 +15,9 @@ from graphforge_bench.progressive_host_run import (
     HostRunError,
     PhaseFailure,
     RungWall,
-    _benchexec_hit_wall,
+    _benchexec_timeout_failure,
     _certify_phase_failure,
+    _host_swap_counters,
     _result,
     _validate,
     build_plan,
@@ -32,17 +33,19 @@ from graphforge_bench.progressive_host_run import (
 from graphforge_bench.progressive_host_run import (
     run as host_run,
 )
-from graphforge_bench.progressive_run import Executables
+from graphforge_bench.progressive_run import ControllerError, Executables
+
 from tests.host_run_fixture import executables as fixture_executables
 from tests.host_run_fixture import write_host_bundle
 from tests.test_progressive_run import passed_rung as local_passed_rung
 
 ROOT = Path(__file__).resolve().parents[1]
-# Native filesystem admission requires ext4, xfs, or btrfs. /tmp on this host
-# is tmpfs, so host-run tests take a scratch root from GF_LADDER_TEST_ROOT.
-# The default directory is documented next to that ext4 requirement in
+# Native filesystem admission requires ext4, xfs, or btrfs. The scratch root is
+# GF_LADDER_TEST_ROOT, else a directory under the temporary root, which
+# scripts/test_environment.py checks is native storage and CI exports as TMPDIR.
+# Never a host-specific path: CI runners have no /home/ubuntu (#1679). See
 # docs/development/perf-g500-ladder.md.
-_DEFAULT_SCRATCH_ROOT = Path("/home/ubuntu") / "graphforge-ladder-test"
+_DEFAULT_SCRATCH_ROOT = Path(tempfile.gettempdir()) / "graphforge-ladder-test"
 WORK_PARENT = Path(os.environ.get("GF_LADDER_TEST_ROOT") or _DEFAULT_SCRATCH_ROOT)
 COMMIT = "f013587f0123456789abcdef0123456789abcdef"
 _SCRATCH_TOP_LEVEL: list[set[str]] = []
@@ -380,23 +383,35 @@ class RungWallTests(unittest.TestCase):
             self.assertEqual(envelope["limits"]["wall_seconds"], MAXIMUM_WALL_SECONDS)
             self.assertIsNone(envelope["wall_policy"]["reference_wall_seconds"])
 
-    def test_benchexec_hit_wall_reads_the_staged_result(self) -> None:
+    def test_benchexec_timeout_failure_reads_the_actual_limit(self) -> None:
         with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
             stage = Path(temporary)
-            self.assertFalse(_benchexec_hit_wall(stage))
+            self.assertIsNone(_benchexec_timeout_failure(stage))
             raw = stage / "raw"
             raw.mkdir()
             document = raw / "results.xml"
             document.write_text(
                 '<result><run name="profile"><column title="status" value="TIMEOUT"/>'
-                '<column title="walltime" value="102.4s"/></run></result>'
+                '<column title="walltime" value="102.4s"/>'
+                '<column title="terminationreason" value="walltime"/></run></result>'
             )
-            self.assertTrue(_benchexec_hit_wall(stage))
+            self.assertEqual(_benchexec_timeout_failure(stage), "rung_wall_exceeded")
+            for reason in ("cputime-soft", "cputime", "cputime-hard", ""):
+                with self.subTest(reason=reason):
+                    document.write_text(
+                        '<result><run name="profile"><column title="status" value="TIMEOUT"/>'
+                        '<column title="cputime" value="799.281815s"/>'
+                        '<column title="walltime" value="742.165077934s"/>'
+                        f'<column title="terminationreason" value="{reason}"/></run></result>'
+                    )
+                    self.assertEqual(
+                        _benchexec_timeout_failure(stage), "benchexec_failed" if reason else None
+                    )
             document.write_text(
                 '<result><run name="profile"><column title="status" value="DONE"/>'
                 '<column title="walltime" value="91.0s"/></run></result>'
             )
-            self.assertFalse(_benchexec_hit_wall(stage))
+            self.assertIsNone(_benchexec_timeout_failure(stage))
 
 
 class RungPhaseFailureTests(unittest.TestCase):
@@ -424,6 +439,203 @@ class RungPhaseFailureTests(unittest.TestCase):
             ],
             "claim": "engineering_evidence_only",
         }
+
+    def test_resource_timeout_keeps_its_cause_without_a_certify_receipt(self) -> None:
+        for reason, expected in (
+            ("walltime", "rung_wall_exceeded"),
+            ("cputime-soft", "benchexec_failed"),
+            ("cputime", "benchexec_failed"),
+        ):
+            for boundary in ("receipt", "exit", "swap"):
+                with (
+                    self.subTest(reason=reason, boundary=boundary),
+                    tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary,
+                ):
+                    parent = Path(temporary)
+                    work_root = parent / "work"
+                    work_root.mkdir()
+                    output = parent / "evidence"
+                    output.mkdir()
+                    plan = self.plan(22)
+                    (output / "s22-plan.json").write_text(json.dumps(plan))
+                    stage = parent / "stage"
+                    (stage / "raw").mkdir(parents=True)
+                    raw = (
+                        '<result><run name="profile"><column title="status" value="TIMEOUT"/>'
+                        '<column title="cputime" value="799.281815s"/>'
+                        '<column title="walltime" value="742.165077934s"/>'
+                        f'<column title="terminationreason" value="{reason}"/></run></result>'
+                    )
+                    (stage / "raw/results.xml").write_text(raw)
+                    bin_dir = parent / "bin"
+                    bin_dir.mkdir()
+                    before = {"pswpin": 100, "pswpout": 200}
+                    after = before | {"pswpin": 101} if boundary == "swap" else before
+                    with (
+                        patch("graphforge_bench.progressive_host_run._native_authority"),
+                        patch(
+                            "graphforge_bench.progressive_host_run._safe_stage_host",
+                            return_value=stage,
+                        ),
+                        patch(
+                            "graphforge_bench.progressive_host_run._run_benchexec",
+                            return_value=1 if boundary == "exit" else 0,
+                        ),
+                        patch(
+                            "graphforge_bench.progressive_host_run._host_swap_counters",
+                            side_effect=[before, after],
+                        ),
+                        patch(
+                            "graphforge_bench.progressive_host_run.ingest_benchexec_result",
+                            side_effect=ControllerError("certify receipt missing"),
+                        ),
+                        self.assertRaisesRegex(HostRunError, expected),
+                    ):
+                        host_run(
+                            root=ROOT,
+                            output_dir=output,
+                            work_root=work_root,
+                            scale=22,
+                            plan=plan,
+                            executables=fixture_executables(bin_dir),
+                        )
+                    result = json.loads((output / "s22-result.json").read_text())
+                    self.assertEqual(result["failure"], expected)
+                    self.assertEqual(result["status"], "failed")
+                    self.assertEqual((output / "s22-failure-raw/results.xml").read_text(), raw)
+                    self.assertFalse((output / "s22-rung.json").exists())
+
+    def test_swapping_rejects_completed_measurements_before_ingestion(self) -> None:
+        for counter in ("pswpin", "pswpout"):
+            with (
+                self.subTest(counter=counter),
+                tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary,
+            ):
+                parent = Path(temporary)
+                work_root = parent / "work"
+                work_root.mkdir()
+                output = parent / "evidence"
+                output.mkdir()
+                plan = self.plan(22)
+                (output / "s22-plan.json").write_text(json.dumps(plan))
+                stage = parent / "stage"
+                (stage / "raw").mkdir(parents=True)
+                bin_dir = parent / "bin"
+                bin_dir.mkdir()
+                before = {"pswpin": 100, "pswpout": 200}
+                after = before | {counter: before[counter] + 1}
+                with (
+                    patch("graphforge_bench.progressive_host_run._native_authority"),
+                    patch(
+                        "graphforge_bench.progressive_host_run._safe_stage_host", return_value=stage
+                    ),
+                    patch("graphforge_bench.progressive_host_run._run_benchexec", return_value=0),
+                    patch(
+                        "graphforge_bench.progressive_host_run._host_swap_counters",
+                        side_effect=[before, after],
+                    ),
+                    patch(
+                        "graphforge_bench.progressive_host_run.ingest_benchexec_result",
+                        return_value=({}, {}, {}),
+                    ) as ingest,
+                    self.assertRaisesRegex(HostRunError, "host_swapped"),
+                ):
+                    host_run(
+                        root=ROOT,
+                        output_dir=output,
+                        work_root=work_root,
+                        scale=22,
+                        plan=plan,
+                        executables=fixture_executables(bin_dir),
+                    )
+                ingest.assert_not_called()
+                result = json.loads((output / "s22-result.json").read_text())
+                self.assertEqual(result["failure"], "host_swapped")
+                self.assertEqual(result["status"], "failed")
+                self.assertIsNone(result["artifacts"])
+                counters = json.loads((output / "s22-failure-raw/host-swap.json").read_text())
+                self.assertEqual(counters, {"before": before, "after": after})
+                self.assertFalse((output / "s22-rung.json").exists())
+
+    def test_unchanged_swap_counters_allow_measurements(self) -> None:
+        with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
+            parent = Path(temporary)
+            work_root = parent / "work"
+            work_root.mkdir()
+            output = parent / "evidence"
+            output.mkdir()
+            plan = self.plan(22)
+            (output / "s22-plan.json").write_text(json.dumps(plan))
+            stage = self.stage(parent)
+            bin_dir = parent / "bin"
+            bin_dir.mkdir()
+            with (
+                patch("graphforge_bench.progressive_host_run._native_authority"),
+                patch("graphforge_bench.progressive_host_run._safe_stage_host", return_value=stage),
+                patch("graphforge_bench.progressive_host_run._run_benchexec", return_value=0),
+                patch(
+                    "graphforge_bench.progressive_host_run._host_swap_counters",
+                    return_value={"pswpin": 1_000_000, "pswpout": 2_000_000},
+                ),
+                patch(
+                    "graphforge_bench.progressive_host_run.ingest_benchexec_result",
+                    return_value=({}, {}, {}),
+                ) as ingest,
+            ):
+                host_run(
+                    root=ROOT,
+                    output_dir=output,
+                    work_root=work_root,
+                    scale=22,
+                    plan=plan,
+                    executables=fixture_executables(bin_dir),
+                )
+            ingest.assert_called_once()
+            self.assertEqual(
+                json.loads((output / "s22-result.json").read_text())["status"], "passed"
+            )
+
+    def test_host_swap_counters_require_both_kernel_fields(self) -> None:
+        with patch.object(Path, "read_text", return_value="pswpin 12\npswpout 34\npgfault 99\n"):
+            self.assertEqual(_host_swap_counters(), {"pswpin": 12, "pswpout": 34})
+        for malformed in ("pswpin 12\n", "pswpin bad\npswpout 34\n"):
+            with (
+                self.subTest(malformed=malformed),
+                patch.object(Path, "read_text", return_value=malformed),
+                self.assertRaises(ControllerError),
+            ):
+                _host_swap_counters()
+
+    def test_post_run_counter_read_failure_retains_raw_evidence(self) -> None:
+        with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
+            parent = Path(temporary)
+            work_root = parent / "work"
+            work_root.mkdir()
+            output = parent / "evidence"
+            stage = self.stage(parent)
+            bin_dir = parent / "bin"
+            bin_dir.mkdir()
+            with (
+                patch("graphforge_bench.progressive_host_run._native_authority"),
+                patch("graphforge_bench.progressive_host_run._safe_stage_host", return_value=stage),
+                patch("graphforge_bench.progressive_host_run._run_benchexec", return_value=0),
+                patch(
+                    "graphforge_bench.progressive_host_run._host_swap_counters",
+                    side_effect=[{"pswpin": 100, "pswpout": 200}, OSError("unreadable")],
+                ),
+                self.assertRaisesRegex(HostRunError, "host_swap_unavailable"),
+            ):
+                host_run(
+                    root=ROOT,
+                    output_dir=output,
+                    work_root=work_root,
+                    scale=22,
+                    plan=self.plan(22),
+                    executables=fixture_executables(bin_dir),
+                )
+            result = json.loads((output / "s22-result.json").read_text())
+            self.assertEqual(result["failure"], "host_swap_unavailable")
+            self.assertTrue(list((output / "s22-failure-raw").rglob("*.log")))
 
     def test_certify_phase_failure_reads_the_staged_stream(self) -> None:
         with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
@@ -494,6 +706,12 @@ class RungPhaseFailureTests(unittest.TestCase):
             )
 
     def test_run_reports_the_failed_phase_instead_of_staging_failed(self) -> None:
+        self.check_failed_phase(swapped=False)
+
+    def test_swap_does_not_hide_a_failed_phase(self) -> None:
+        self.check_failed_phase(swapped=True)
+
+    def check_failed_phase(self, *, swapped: bool) -> None:
         plan = self.plan(22)
         with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
             parent = Path(temporary)
@@ -507,6 +725,13 @@ class RungPhaseFailureTests(unittest.TestCase):
                 patch("graphforge_bench.progressive_host_run._native_authority"),
                 patch("graphforge_bench.progressive_host_run._safe_stage_host", return_value=stage),
                 patch("graphforge_bench.progressive_host_run._run_benchexec", return_value=0),
+                patch(
+                    "graphforge_bench.progressive_host_run._host_swap_counters",
+                    side_effect=[
+                        {"pswpin": 100, "pswpout": 200},
+                        {"pswpin": 101 if swapped else 100, "pswpout": 200},
+                    ],
+                ),
                 self.assertRaisesRegex(HostRunError, "rung_phase_failed"),
             ):
                 host_run(

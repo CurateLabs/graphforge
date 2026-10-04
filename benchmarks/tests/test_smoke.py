@@ -8,6 +8,7 @@ import unittest
 
 from graphforge_bench.smoke import FIXTURE_DIRECTORIES, discover_fixtures, workspace_root
 from jsonschema import Draft202012Validator
+
 from tests.lifecycle_storage_fixture import retained_owners
 
 
@@ -39,7 +40,7 @@ class WorkspaceSmokeTests(unittest.TestCase):
                     "receipts": [
                         {
                             "contract": "graphforge-import-session/1",
-                            "outcome": "validated",
+                            "outcome": "stage+seal",
                             "operation_timings": timings,
                         }
                     ],
@@ -47,6 +48,10 @@ class WorkspaceSmokeTests(unittest.TestCase):
             ],
         }
         validator.validate(document)
+        for outcome in ("validated", "committed"):
+            candidate = deepcopy(document)
+            candidate["phases"][0]["receipts"][0]["outcome"] = outcome
+            validator.validate(candidate)
         for key, value in [
             ("elapsed_ns", -1),
             ("elapsed_ns", 2**64),

@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Array, FixedSizeBinaryArray, ListArray, StringArray, UInt32Array};
+use arrow::array::{Array, ArrayRef, FixedSizeBinaryArray, ListArray, StringArray, UInt32Array};
 use arrow::compute::{concat_batches, take};
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
@@ -106,7 +106,7 @@ pub(crate) fn install_transform_table(
         .open(root.join(crate::route_component::TABLE_FILE))
         .map_err(storage)?;
     file.write_all(&bytes).map_err(storage)?;
-    file.sync_all().map_err(storage)
+    crate::durable_commit::seal_file(&file).map_err(storage)
 }
 
 type GraphUuid = [u8; 16];
@@ -164,7 +164,21 @@ pub fn materialize_graph_projection(
     target: &Path,
     selection: &GraphProjectionSelection,
 ) -> Result<GraphProjectionSummary, GfError> {
-    materialize_graph_projection_with_options(source, target, selection, true)
+    materialize_graph_projection_with_options(source, target, selection, true, None)
+        .map(|(summary, _)| summary)
+}
+
+/// Materialize using the source session's explicit topology membership.
+///
+/// # Errors
+/// Same as [`materialize_graph_projection`].
+pub fn materialize_graph_projection_from_files(
+    source: &Path,
+    target: &Path,
+    selection: &GraphProjectionSelection,
+    topology: &crate::TopologyFiles,
+) -> Result<(GraphProjectionSummary, crate::TopologyFiles), GfError> {
+    materialize_graph_projection_with_options(source, target, selection, true, Some(topology))
 }
 
 /// Materialize a portable graph-tree projection without copying ontology files.
@@ -176,7 +190,8 @@ pub fn materialize_portable_graph_tree_projection(
     target: &Path,
     selection: &GraphProjectionSelection,
 ) -> Result<GraphProjectionSummary, GfError> {
-    materialize_graph_projection_with_options(source, target, selection, false)
+    materialize_graph_projection_with_options(source, target, selection, false, None)
+        .map(|(summary, _)| summary)
 }
 
 /// Compact effective rows without retaining deleted property bases or indexes.
@@ -218,17 +233,31 @@ fn materialize_graph_projection_with_options(
     target: &Path,
     selection: &GraphProjectionSelection,
     copy_ontology_files: bool,
-) -> Result<GraphProjectionSummary, GfError> {
+    topology: Option<&crate::TopologyFiles>,
+) -> Result<(GraphProjectionSummary, crate::TopologyFiles), GfError> {
     validate_distinct_paths(source, target)?;
     validate_graph_empty_target(target)?;
 
-    let routes = TransformRoutes::capture(source)?;
+    let topology = projection_topology(source, topology)?;
+    let routes = TransformRoutes::from_inventory(
+        source,
+        crate::capture_graph_files_with_topology(source, &topology)?.0,
+    )?;
     let mut output_table = crate::route_component::RouteTable::default();
-    let node_paths = crate::mutator::node_parquet_files(source).map_err(storage)?;
+    let mut written = crate::TopologyFiles::default();
+    let node_paths = topology
+        .nodes
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
     let node_ids = uuid_rows_files(&node_paths, "node_uuid")?;
     require_present(&selection.node_uuids, &node_ids, "node")?;
 
-    let edge_files = sorted_parquet_files(&source.join("topology/edges"))?;
+    let edge_files = topology
+        .edges
+        .iter()
+        .map(|(_, path, _)| path.clone())
+        .collect::<Vec<_>>();
     let edges = edge_endpoints(&edge_files)?;
     let edge_ids = edges.keys().copied().collect::<BTreeSet<_>>();
     require_present(&selection.edge_uuids, &edge_ids, "edge")?;
@@ -242,16 +271,14 @@ fn materialize_graph_projection_with_options(
 
     clear_graph_empty_target(target)?;
     fs::create_dir_all(target).map_err(storage)?;
-    for path in node_paths {
-        let relative = path.strip_prefix(source).map_err(storage)?;
-        project_parquet_file(
-            &path,
-            &target.join(relative),
-            "node_uuid",
-            &selected_nodes,
-            &selection.exclude_properties,
-        )?;
-    }
+    project_node_fragments(
+        source,
+        target,
+        node_paths,
+        &selected_nodes,
+        &selection.exclude_properties,
+        &mut written,
+    )?;
     for path in edge_files {
         let relative = path
             .strip_prefix(source)
@@ -263,11 +290,17 @@ fn materialize_graph_projection_with_options(
         let destination = encode_transform_path(&semantic, &mut output_table)?;
         project_parquet_file(
             &path,
-            &target.join(destination),
+            &target.join(&destination),
             "edge_uuid",
             &selected_edges,
             &BTreeSet::new(),
         )?;
+        let route = crate::route_component::route_position(&semantic)?
+            .ok_or_else(|| validation("projected edge lacks route"))?
+            .to_owned();
+        written
+            .edges
+            .push((route, target.join(&destination), destination));
     }
     project_property_directory(
         source,
@@ -290,6 +323,66 @@ fn materialize_graph_projection_with_options(
         &selection.exclude_properties,
     )?;
     install_transform_table(target, &output_table)?;
+    copy_projection_metadata(source, target, copy_ontology_files)?;
+    let graph_content_fingerprint = projected_graph_fingerprint(target)?;
+
+    Ok((
+        GraphProjectionSummary {
+            node_uuids: selected_nodes.into_iter().collect(),
+            edge_uuids: selected_edges.into_iter().collect(),
+            endpoint_node_uuids,
+            graph_content_fingerprint,
+        },
+        written,
+    ))
+}
+
+fn projection_topology<'a>(
+    source: &Path,
+    topology: Option<&'a crate::TopologyFiles>,
+) -> Result<std::borrow::Cow<'a, crate::TopologyFiles>, GfError> {
+    match topology {
+        Some(files) => Ok(std::borrow::Cow::Borrowed(files)),
+        // Only the public standalone wrappers supply no selected membership.
+        None => Ok(std::borrow::Cow::Owned(
+            crate::TopologyFiles::discover_legacy(source)?,
+        )),
+    }
+}
+
+fn project_node_fragments(
+    source: &Path,
+    target: &Path,
+    node_paths: Vec<PathBuf>,
+    selected_nodes: &BTreeSet<GraphUuid>,
+    exclude_properties: &BTreeSet<String>,
+    written: &mut crate::TopologyFiles,
+) -> Result<(), GfError> {
+    for path in node_paths {
+        let relative = path.strip_prefix(source).map_err(storage)?;
+        project_parquet_file(
+            &path,
+            &target.join(relative),
+            "node_uuid",
+            selected_nodes,
+            exclude_properties,
+        )?;
+        written.nodes.push((
+            target.join(relative),
+            relative
+                .to_str()
+                .ok_or_else(|| validation("graph path is not UTF-8"))?
+                .replace('\\', "/"),
+        ));
+    }
+    Ok(())
+}
+
+fn copy_projection_metadata(
+    source: &Path,
+    target: &Path,
+    copy_ontology_files: bool,
+) -> Result<(), GfError> {
     copy_runtime_catalog(source, target)?;
     if copy_ontology_files {
         for file in [
@@ -299,14 +392,7 @@ fn materialize_graph_projection_with_options(
             copy_regular_file_if_present(&source.join(file), &target.join(file))?;
         }
     }
-    let graph_content_fingerprint = projected_graph_fingerprint(target)?;
-
-    Ok(GraphProjectionSummary {
-        node_uuids: selected_nodes.into_iter().collect(),
-        edge_uuids: selected_edges.into_iter().collect(),
-        endpoint_node_uuids,
-        graph_content_fingerprint,
-    })
+    Ok(())
 }
 
 fn resolve_projection_closure(
@@ -431,6 +517,7 @@ fn project_property_directory(
     selected: &BTreeSet<[u8; 16]>,
     exclude_properties: &BTreeSet<String>,
 ) -> Result<(), GfError> {
+    let target = fs::canonicalize(target).map_err(storage)?;
     let kind = if edge {
         crate::PropertyRouteKind::Edge
     } else {
@@ -448,20 +535,56 @@ fn project_property_directory(
             continue;
         };
         let combined = concat_batches(&schema, &batches).map_err(storage)?;
-        project_record_batch(
-            &combined,
-            &target.join(encode_transform_path(
+        let projected = select_projected_rows(&combined, key, selected, exclude_properties)?;
+        let snapshot = property_snapshot_fragment(&projected, kind, route)?;
+        let mut fragments = crate::property_overlay::split_into_fragments(&snapshot, 0)?;
+        if fragments.len() <= 1 {
+            // Decide from the complete encoding, including schema and footer.
+            // A large flat snapshot uses the canonical nested route before
+            // framing, so sidecar names cannot collide with legacy route names.
+            let path = target.join(encode_transform_path(
                 &format!("{directory}/{route}.parquet"),
                 table,
-            )?),
-            key,
-            selected,
-            exclude_properties,
-        )?;
+            )?);
+            let mut staged = crate::staging::RewriteBatch::new();
+            staged.stage_batches(&path, projected.schema(), std::iter::once(Ok(projected)))?;
+            let bytes = fs::metadata(staged.staged_temp(&path).expect("staged projection"))
+                .map_err(storage)?
+                .len();
+            if bytes <= crate::property_overlay::bounded_object::MAX_PROPERTY_OBJECT_BYTES as u64 {
+                staged.commit_at(&target)?;
+                continue;
+            }
+            drop(staged);
+            if fragments.is_empty() {
+                fragments.push(snapshot);
+            }
+        }
+        // Over the cap: capped immutable fragments, generation zero, so the
+        // projected route never carries one unbounded file (#1388).
+        for (ordinal, fragment) in fragments.iter().enumerate() {
+            let id = crate::PropertyFragmentId {
+                generation: 0,
+                ordinal: ordinal as u64,
+            };
+            let path = target.join(encode_transform_path(
+                &format!("{directory}/{route}/{}", id.file_name()),
+                table,
+            )?);
+            let mut staged = crate::staging::RewriteBatch::new();
+            staged.stage_property_batches(
+                &path,
+                fragment.schema(),
+                std::iter::once(Ok(fragment.clone())),
+            )?;
+            staged.commit_at(&target)?;
+        }
     }
     Ok(())
 }
 
+/// The selected rows of `combined` in UUID order, without excluded properties
+/// and without the source route's live-schema authority.
 fn project_record_batch(
     combined: &RecordBatch,
     target: &Path,
@@ -469,6 +592,18 @@ fn project_record_batch(
     selected: &BTreeSet<[u8; 16]>,
     exclude_properties: &BTreeSet<String>,
 ) -> Result<(), GfError> {
+    write_parquet(
+        target,
+        &select_projected_rows(combined, key, selected, exclude_properties)?,
+    )
+}
+
+fn select_projected_rows(
+    combined: &RecordBatch,
+    key: &str,
+    selected: &BTreeSet<[u8; 16]>,
+    exclude_properties: &BTreeSet<String>,
+) -> Result<RecordBatch, GfError> {
     let keys = uuid_column(combined, key)?;
     let mut rows = Vec::new();
     for row in 0..combined.num_rows() {
@@ -510,8 +645,57 @@ fn project_record_batch(
         .into_iter()
         .map(|index| take(combined.column(index).as_ref(), &indices, None).map_err(storage))
         .collect::<Result<Vec<_>, _>>()?;
-    let projected = RecordBatch::try_new(projected_schema, columns).map_err(storage)?;
-    write_parquet(target, &projected)
+    RecordBatch::try_new(projected_schema, columns).map_err(storage)
+}
+
+/// `projected` in immutable-fragment form: the tombstone column, and the
+/// format, route, kind and generation-zero identity metadata of ordinal zero.
+fn property_snapshot_fragment(
+    projected: &RecordBatch,
+    kind: crate::PropertyRouteKind,
+    route: &str,
+) -> Result<RecordBatch, GfError> {
+    use crate::property_overlay::{
+        PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
+        PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD,
+    };
+    let mut fields = projected
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    fields.insert(
+        1,
+        arrow::datatypes::Field::new(
+            PROPERTY_TOMBSTONE_FIELD,
+            arrow::datatypes::DataType::Boolean,
+            false,
+        ),
+    );
+    let mut metadata = projected.schema().metadata().clone();
+    for (key, value) in [
+        (PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_OVERLAY_FORMAT),
+        (PROPERTY_ROUTE_KEY, route),
+        (PROPERTY_KIND_KEY, kind.metadata_value()),
+        (PROPERTY_GENERATION_KEY, "0"),
+        (PROPERTY_ORDINAL_KEY, "0"),
+    ] {
+        metadata.insert(key.to_owned(), value.to_owned());
+    }
+    let mut columns = projected.columns().to_vec();
+    columns.insert(
+        1,
+        Arc::new(arrow::array::BooleanArray::from(vec![
+            false;
+            projected.num_rows()
+        ])) as ArrayRef,
+    );
+    RecordBatch::try_new(
+        Arc::new(Schema::new_with_metadata(fields, metadata)),
+        columns,
+    )
+    .map_err(storage)
 }
 
 fn copy_runtime_catalog(source: &Path, target: &Path) -> Result<(), GfError> {
@@ -639,9 +823,12 @@ fn selected_catalog_rows(target: &Path, catalog: &RecordBatch) -> Result<Vec<usi
     }
 
     let mut property_names = BTreeSet::new();
-    for directory in ["properties", "edge_properties"] {
-        for path in sorted_parquet_files(&target.join(directory))? {
-            let batches = read_parquet(&path)?;
+    for (kind, edge) in [
+        (crate::PropertyRouteKind::Node, false),
+        (crate::PropertyRouteKind::Edge, true),
+    ] {
+        for route in authority.properties.routes(kind) {
+            let batches = authority.property_batches(target, route, edge)?;
             if batches.iter().all(|batch| batch.num_rows() == 0) {
                 continue;
             }
@@ -952,7 +1139,23 @@ fn copy_regular_file_if_present(source: &Path, target: &Path) -> Result<(), GfEr
         .ok_or_else(|| validation("graph metadata target has no parent"))?;
     fs::create_dir_all(parent).map_err(storage)?;
     fs::copy(source, target).map_err(storage)?;
-    Ok(())
+    make_private_copy_writable(target)
+}
+
+/// `fs::copy` carries the source's read-only attribute along. A compact
+/// generation's files are sealed content-store objects, so a copy of one is
+/// read-only too, and Windows then refuses to remove or synchronize the private
+/// copy. Only the new destination needs write access.
+pub(crate) fn make_private_copy_writable(path: &Path) -> Result<(), GfError> {
+    let mut permissions = fs::metadata(path).map_err(storage)?.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        permissions.set_mode(permissions.mode() | 0o200);
+    }
+    #[cfg(not(unix))]
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions).map_err(storage)
 }
 
 fn validation(message: impl Into<String>) -> GfError {
@@ -965,6 +1168,27 @@ fn storage(error: impl std::fmt::Display) -> GfError {
 
 #[cfg(test)]
 mod tests {
+    /// A copy of a sealed (read-only) content-store object is a private file the
+    /// caller may remove and rewrite.
+    #[test]
+    fn a_copy_of_a_sealed_object_is_writable() {
+        let directory = tempfile::tempdir().unwrap();
+        let sealed = directory.path().join("sealed.json");
+        std::fs::write(&sealed, b"{}").unwrap();
+        let mut permissions = std::fs::metadata(&sealed).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&sealed, permissions).unwrap();
+        let copy = directory.path().join("nested").join("copy.json");
+        super::copy_regular_file_if_present(&sealed, &copy).unwrap();
+        assert!(!std::fs::metadata(&copy).unwrap().permissions().readonly());
+        assert!(
+            std::fs::metadata(&sealed).unwrap().permissions().readonly(),
+            "the sealed source is untouched"
+        );
+        std::fs::write(&copy, b"rewritten").unwrap();
+        std::fs::remove_file(&copy).unwrap();
+    }
+
     fn admitted_test_path(root: &std::path::Path, semantic: &str) -> std::path::PathBuf {
         let (inventory, _) = crate::capture_graph_files(root).unwrap();
         let authority = super::TransformRoutes::from_inventory(root, inventory.clone()).unwrap();
@@ -1083,6 +1307,88 @@ mod tests {
             2.5
         );
         assert_eq!(crate::capture_graph_files(source.path()).unwrap().0, before);
+        assert_eq!(
+            portable_graph_data_fingerprint(source.path()).unwrap(),
+            portable_graph_data_fingerprint(target.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn projection_cuts_an_oversized_route_into_capped_fragments() {
+        use crate::property_overlay::fragment_cap::tests::{assert_capped_fragments, wide_value};
+        use crate::property_overlay::{MAX_PROPERTY_FRAGMENT_BYTES, enumerate_property_fragments};
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let mut writer =
+            GraphWriter::open_at(source.path(), OntologyMode::Exploratory, TS).unwrap();
+        // 3,000 nodes with about 4 KiB each: three times the cap in one route.
+        let rows = 3_000_u128;
+        for id in 1..=rows {
+            writer
+                .create_node(Uuid::from_u128(id), EntityTypeId::decode(0).unwrap())
+                .unwrap();
+            writer
+                .set_properties(
+                    &Uuid::from_u128(id),
+                    None,
+                    HashMap::from([(
+                        "payload".into(),
+                        IrLiteral::Str(wide_value(id as u64, 4096)),
+                    )]),
+                )
+                .unwrap();
+        }
+        writer.flush().unwrap();
+        drop(writer);
+        let summary = materialize_portable_graph_tree_projection(
+            source.path(),
+            target.path(),
+            &GraphProjectionSelection {
+                node_uuids: (1..=rows)
+                    .map(|id| *Uuid::from_u128(id).as_bytes())
+                    .collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.node_uuids.len(), rows as usize);
+        let (inventory, _) = crate::capture_graph_files(target.path()).unwrap();
+        let authority = TransformRoutes::from_inventory(target.path(), inventory).unwrap();
+        let route = authority
+            .properties
+            .routes(crate::PropertyRouteKind::Node)
+            .next()
+            .unwrap()
+            .to_owned();
+        assert!(
+            !target
+                .path()
+                .join(format!(
+                    "properties/{}.parquet",
+                    crate::route_component::component(&route)
+                ))
+                .exists()
+        );
+        let fragments = enumerate_property_fragments(
+            target.path(),
+            crate::PropertyRouteKind::Node,
+            &crate::route_component::component(&route),
+        )
+        .unwrap();
+        let stats = assert_capped_fragments(&fragments, rows as usize);
+        assert!(
+            stats.iter().map(|stat| stat.logical_bytes).sum::<u64>()
+                > 2 * MAX_PROPERTY_FRAGMENT_BYTES
+        );
+        assert!(fragments.len() >= 3, "{fragments:?}");
+        // The split is invisible to readers and to the logical fingerprint.
+        let projected = authority
+            .property_batches(target.path(), &route, false)
+            .unwrap();
+        assert_eq!(
+            projected.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            rows as usize
+        );
         assert_eq!(
             portable_graph_data_fingerprint(source.path()).unwrap(),
             portable_graph_data_fingerprint(target.path()).unwrap()

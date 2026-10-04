@@ -8,8 +8,7 @@ use super::{
     GraphObjectKind, LineageRecord, LineageRole, OperationId, PageToken,
     ParquetRecordBatchReaderBuilder, ProjectParticipant, ProjectParticipantEncoding,
     ProvenanceEvent, ProvenanceLedger, ReasoningLedger, RecordBatch, ResolvedProjectGeneration,
-    Schema, SchemaRef, Sha256, SubjectKind, Uuid, fs, knowledge_error, provenance_error,
-    schema_registry,
+    Schema, SchemaRef, SubjectKind, Uuid, knowledge_error, provenance_error, schema_registry,
 };
 #[cfg(feature = "research")]
 use crate::research_claims::ledger::{encode_claims, encode_suppressions};
@@ -1018,24 +1017,58 @@ pub(crate) fn participant(
     })
 }
 
+/// Generation identity over the operation and each participant's exact-byte
+/// SHA-256. Publishers obtain `content_sha256` from
+/// [`graphforge_storage::PreparedGenerationRequest`], which staging reuses.
 pub(crate) fn knowledge_generation_uuid(
     operation: &[u8],
     operation_uuid: OperationId,
     participants: &[ProjectParticipant],
+    content_sha256: &[[u8; 32]],
 ) -> Uuid {
-    let mut hasher = Sha256::new();
+    let mut hasher = graphforge_core::hash_observation::ContractSha256::default();
     hasher.update(b"graphforge-knowledge-generation/1");
     hasher.update(operation);
     hasher.update([0]);
     hasher.update(operation_uuid.0.as_bytes());
-    for participant in participants {
+    for (participant, digest) in participants.iter().zip(content_sha256) {
         hasher.update(participant.capability_id.as_bytes());
         hasher.update([0]);
         hasher.update(participant.record_family_id.as_bytes());
         hasher.update([0]);
-        hasher.update(Sha256::digest(&participant.bytes));
+        hasher.update(digest);
     }
     graphforge_core::canonical::uuid_v8(hasher.finalize().into())
+}
+
+/// A knowledge publication whose participant identities are computed once and
+/// reused by both its generation UUID and staging.
+pub(crate) fn prepare_knowledge_request(
+    operation: &[u8],
+    operation_uuid: OperationId,
+    capabilities: Vec<graphforge_storage::ProjectCapability>,
+    participants: Vec<ProjectParticipant>,
+) -> Result<graphforge_storage::PreparedGenerationRequest, GfError> {
+    graphforge_storage::PreparedGenerationRequest::new(
+        operation_uuid.0,
+        capabilities,
+        participants,
+        |participants, content_sha256| {
+            knowledge_generation_uuid(operation, operation_uuid, participants, content_sha256)
+        },
+    )
+}
+
+/// Exact-byte SHA-256 of participants that a generation identity covers but
+/// that are not the staged request itself (a subset later merged with parent
+/// participants). Staging hashes the merged request independently.
+pub(crate) fn participant_content_sha256(participants: &[ProjectParticipant]) -> Vec<[u8; 32]> {
+    participants
+        .iter()
+        .map(|participant| {
+            graphforge_core::hash_observation::ArtifactSha256::digest(&participant.bytes).into()
+        })
+        .collect()
 }
 
 pub(crate) fn snapshot_to_participant(
@@ -1078,18 +1111,14 @@ fn write_parquet(batch: &RecordBatch, schema: &SchemaRef) -> Result<Vec<u8>, GfE
 }
 
 pub(crate) fn read_parquet(bytes: &[u8]) -> Result<Vec<RecordBatch>, GfError> {
-    let file =
-        tempfile::NamedTempFile::new().map_err(|error| GfError::Storage(error.to_string()))?;
-    fs::write(file.path(), bytes).map_err(|error| GfError::Storage(error.to_string()))?;
-    ParquetRecordBatchReaderBuilder::try_new(
-        file.reopen()
-            .map_err(|error| GfError::Storage(error.to_string()))?,
-    )
-    .map_err(|error| GfError::Validation(format!("invalid knowledge parquet: {error}")))?
-    .build()
-    .map_err(|error| GfError::Validation(format!("invalid knowledge parquet: {error}")))?
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(|error| GfError::Validation(format!("invalid knowledge parquet: {error}")))
+    // The participant bytes are already bounded in memory; reading them in
+    // place writes nothing to the system temporary directory.
+    ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::copy_from_slice(bytes))
+        .map_err(|error| GfError::Validation(format!("invalid knowledge parquet: {error}")))?
+        .build()
+        .map_err(|error| GfError::Validation(format!("invalid knowledge parquet: {error}")))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| GfError::Validation(format!("invalid knowledge parquet: {error}")))
 }
 
 fn read_or_empty(
@@ -1147,6 +1176,14 @@ fn read_evidence_or_empty(
     }
 }
 
+/// A participant's capability version is the registered one, or for research
+/// any revision this build still reads: revision 6 decisions keep their bytes.
+pub(crate) fn capability_version_supported(capability: &str, registered: u32, actual: u32) -> bool {
+    actual == registered
+        || (capability == graphforge_storage::research_versions::RESEARCH_CAPABILITY
+            && graphforge_storage::research_versions::research_revision_readable(actual))
+}
+
 pub(crate) fn require_participant_contract(
     snapshot: &graphforge_storage::ProjectParticipantSnapshot,
     family: &str,
@@ -1156,8 +1193,11 @@ pub(crate) fn require_participant_contract(
         .iter()
         .find(|entry| entry.record_family == family)
         .expect("registered knowledge family");
-    if snapshot.capability_version != expected.capability_version
-        || snapshot.record_version != expected.record_version
+    if !capability_version_supported(
+        expected.capability_id,
+        expected.capability_version,
+        snapshot.capability_version,
+    ) || snapshot.record_version != expected.record_version
         || snapshot.encoding != "parquet"
         || snapshot.schema_fingerprint != expected.schema_fingerprint
     {

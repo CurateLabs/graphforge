@@ -1045,6 +1045,7 @@ fn elapsed_ms(started: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::concurrency_attribution::ObservedSha256 as Sha256;
     use crate::project_checkpoints::{
         CheckpointCreateRequest, CheckpointDeleteRequest, create_checkpoint, delete_checkpoint,
     };
@@ -1054,7 +1055,7 @@ mod tests {
         stage_project_generation,
     };
     use crate::{open_or_initialize_project, resolve_project_generation};
-    use sha2::{Digest, Sha256};
+    use sha2::Digest;
     use std::fs;
     use std::path::PathBuf;
     use std::process::Command;

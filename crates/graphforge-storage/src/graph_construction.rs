@@ -32,7 +32,7 @@ pub(crate) struct AuthenticatedShapeSource {
     pub(crate) file: File,
     pub(crate) identity: FileIdentity,
     pub(crate) bytes: u64,
-    pub(crate) sha256: String,
+    pub(crate) xxh64: String,
 }
 
 mod shape;
@@ -42,9 +42,10 @@ use shape::{
     read_completed_shape_outputs, read_fixed, run_record_bytes, shape_receipt_name,
     validate_shape_binding, validate_sorted_run,
 };
-pub(crate) use shape::{open_authenticated_shape_source, shaped_output_sha256};
+pub(crate) use shape::{open_authenticated_shape_source, shaped_output_xxh64};
 mod encoding_publication;
 use encoding_publication::recover_publication;
+pub(crate) use encoding_publication::{CapturedEncodedArtifact, CapturedEncodedInventory};
 mod recovery;
 use recovery::{
     ReadWork, authenticate_artifact, canonical_artifact_target,
@@ -101,6 +102,7 @@ use arrow::array::{Array, FixedSizeBinaryArray, RecordBatch, StringArray, UInt32
 use arrow::compute::take;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use graphforge_core::GfError;
+use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use graphforge_filesystem::{FileIdentity, file_identity, file_link_count};
 use graphforge_ir::{CompositionBindingContext, CompositionBindingLimits, RuntimeCatalog};
 use graphforge_ontology::ActivationMode;
@@ -108,7 +110,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::{ChunkReader, Length};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::UuidIndexKind;
@@ -360,7 +362,7 @@ fn compact_parent_inventory(
     let mut io = crate::GraphObjectIoTotals::default();
     let (entries, _) =
         crate::resolve_graph_manifest(&root, crate::GraphManifestLimits::default(), |digest| {
-            crate::graph_object_store::read_graph_object_counted(
+            crate::graph_object_store::read_graph_control_object_counted(
                 parent.container_root(),
                 digest,
                 crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
@@ -368,7 +370,7 @@ fn compact_parent_inventory(
             )
         })?;
     crate::route_component::authenticate_manifest_routes(root.format_version, &entries, |entry| {
-        crate::graph_object_store::read_graph_object_counted(
+        crate::graph_object_store::read_graph_control_object_counted(
             parent.container_root(),
             &entry.content_sha256,
             64 * 1024 * 1024,
@@ -713,9 +715,7 @@ pub(crate) struct ArtifactReceipt {
     name: String,
     bytes: u64,
     allocated_bytes: u64,
-    /// The content-addressing digest. Cryptographic, and stays cryptographic.
-    sha256: String,
-    /// Inline corruption checksum over the same payload, produced by the pass
+    /// Inline corruption checksum over the payload, produced by the pass
     /// that wrote the bytes. Non-cryptographic by design; see
     /// [`crate::corruption_checksum`] for the two assumptions that permits.
     xxh64: String,
@@ -739,7 +739,7 @@ pub(crate) fn shape_authority_sha256(
     if ordered.windows(2).any(|pair| pair[0].name == pair[1].name) {
         return Err(storage("shape authority repeats an output receipt"));
     }
-    let mut digest = Sha256::new();
+    let mut digest = graphforge_core::hash_observation::ControlSha256::default();
     digest.update(b"graphforge-construction-shape-authority/v1\0");
     digest.update(
         serde_json::to_vec(&ShapeAuthorityEnvelope {
@@ -785,7 +785,7 @@ pub struct ConstructionChunkReceipt {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[allow(clippy::struct_excessive_bools)] // Independent persisted facts; retirement flags preserve v6–8 wire compatibility.
+#[allow(clippy::struct_excessive_bools)] // Independent persisted facts describe the current construction retirement state.
 struct Checkpoint {
     format_version: u32,
     operation_uuid: Uuid,
@@ -1385,9 +1385,15 @@ impl GraphConstructionSession {
             }
             _ => budgets,
         };
+        if let Some(checkpoint) = recovered_checkpoint.as_ref()
+            && DetailCodec::from_version(checkpoint.format_version).is_err()
+        {
+            return Err(storage(
+                "checkpoint format version changed; restart construction from scratch",
+            ));
+        }
         if let Some(checkpoint) = recovered_checkpoint.as_mut()
-            && (DetailCodec::from_version(checkpoint.format_version).is_err()
-                || checkpoint.operation_uuid != operation_uuid
+            && (checkpoint.operation_uuid != operation_uuid
                 || !checkpoint.project_identity.matches(project_identity)
                 || !checkpoint.session_identity.matches(session_identity))
         {

@@ -30,6 +30,43 @@ this update does not broaden the published-byte boundary below. See
 
 The context below records the defect as it stood when this ADR was accepted.
 
+## Implementation update: the published UUID order fact (#1388)
+
+The ordinal-v4 manifest gains one optional field,
+`uuid_order_matches_ordinals`, inside the SHA-256-authenticated manifest. It
+records whether UUIDs ascend strictly across every ordinal, tombstoned or not,
+so the ordered fast path decides from the record (O(ranges)) instead of
+reading every ordinal block on its first query. This changes published bytes, made under this ADR's
+rule: the value is a deterministic function of the logical data, computed by the
+publisher from the records it streamed, never assumed.
+
+**Compatibility is one-directional.** A reader of this release opens every
+manifest an earlier release wrote. The reverse does not hold: the manifest type
+rejects unknown fields (`deny_unknown_fields`) and `format_version` is not
+bumped (it stays 6), so a release before this one refuses a manifest that
+carries the field, and downgrade is unsupported while the project formats are
+pre-v1. A manifest that omits the field is byte-identical to before, so only
+projects this release has published or mutated are affected.
+
+- Absent means unknown (every manifest published before this field). Readers
+  then prove the fact by reading the ordinals, so existing projects open and
+  answer unchanged; a mutation commit then publishes what that proof derived. Omitting it is always safe; a writer that cannot derive it
+  must omit it, and an unknown parent stays unknown.
+- Fresh construction and rebuild set it from the streamed ordinals. A mutation
+  commit combines the parent's recorded fact, the parent's last UUID read from
+  its authenticated final range, and the delta's first UUID and order: an
+  inversion on either side is permanent, a boundary inversion breaks it, and
+  compaction re-packs the same sequence and keeps it. A construction delta
+  merged onto a parent keeps a known inversion and otherwise omits it.
+- A lie cannot be proven away without the scan it exists to avoid, so it is
+  contained: a reader that relies on a recorded `true` refuses any block it
+  reads whose UUIDs do not ascend, refuses adjacent held blocks that meet out of
+  order, and checks once per handle that every range ends below where the next
+  begins (two blocks per range, O(ranges), never per node). Complete admission,
+  which every writer runs before building on the artifacts, refuses a recorded
+  fact that disagrees with the ordinals. A lie confined to the interior of
+  blocks a query never reads is caught by the next writer, not by the query.
+
 ## Context
 
 The construction path's determinism contract was written as: *within a fixed set

@@ -526,7 +526,7 @@ fn synchronize_file(file: &File) -> io::Result<()> {
         }
         Ok(())
     })?;
-    file.sync_all()
+    crate::ObservedSync::observed_sync_all(file)
 }
 
 #[cfg(test)]
@@ -576,6 +576,10 @@ fn release_file_cache_inner(
 }
 
 #[cfg(not(target_os = "linux"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "signature must match the fallible Linux implementation"
+)]
 fn release_file_cache_inner(
     _file: &File,
     _offset: u64,

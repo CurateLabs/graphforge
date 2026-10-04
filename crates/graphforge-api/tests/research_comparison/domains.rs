@@ -195,6 +195,8 @@ fn annotation_challenge_and_suppression_report_upstream_modification_as_conflict
         },
     ] {
         let r = ChangeResearchBranchClaimRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             expected_generation_uuid: current(&g),
             branch_uuid: b,
@@ -203,8 +205,13 @@ fn annotation_challenge_and_suppression_report_upstream_modification_as_conflict
             created_at: 12,
             change,
         };
+        let prior = g.open_research_branch(b).unwrap().version_uuid();
         g.change_research_branch_claim(&r, &CancellationToken::new())
             .unwrap();
+        assert_eq!(
+            g.research_version(r.version_uuid).unwrap().parents,
+            vec![prior]
+        );
     }
     let q = request(
         ResearchComparisonEndpoint::Branch { branch_uuid: b },
@@ -298,6 +305,8 @@ fn ontology_changes_have_native_semantic_identity_and_local_provenance() {
     let candidate =
         graphforge_storage::WorkspaceOntologyComposition::from_compiled(&compiled, vec![]);
     let r = ChangeResearchBranchOntologyRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&g),
         branch_uuid: b,
@@ -334,6 +343,8 @@ fn unrelated_parent_branch_reference_stays_outside_child_comparison() {
     g.execute("CREATE (:Item)").unwrap();
     let parent = branch(&mut g);
     let create = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&g),
         branch_uuid: Uuid::now_v7(),
@@ -349,6 +360,8 @@ fn unrelated_parent_branch_reference_stays_outside_child_comparison() {
         .unwrap();
     let cited = capture(&mut g);
     let r = ReferenceResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&g),
         branch_uuid: parent,

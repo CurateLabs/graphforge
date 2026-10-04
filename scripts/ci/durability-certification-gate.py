@@ -134,10 +134,13 @@ def validate_config(seed: int, histories: int, ops: int) -> None:
     if contract.get("native_oracle_aggregate") != "native-durability-aggregate-${commit}.json":
         raise GateError("certification must bind the exact-SHA native oracle aggregate")
     versions = contract.get("versions")
-    if not isinstance(versions, dict) or versions.get("m6_benchmark_inventory") != "m6-storage-v1":
+    if (
+        not isinstance(versions, dict)
+        or versions.get("storage_benchmark_inventory") != "storage-benchmarks-v1"
+    ):
         raise GateError("certification must freeze the merged #782 benchmark inventory")
     benchmark = contract.get("benchmark_evidence")
-    if not isinstance(benchmark, dict) or benchmark.get("walltime_bench") != "m6_storage_io":
+    if not isinstance(benchmark, dict) or benchmark.get("walltime_bench") != "storage_io":
         raise GateError("certification must bind the #782 walltime fixture")
     if benchmark.get("walltime_host") != "codspeed-macro-arm64":
         raise GateError("certification walltime evidence must use CodSpeed Macro ARM64")
@@ -401,9 +404,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             "-p",
             "graphforge-storage",
             "--lib",
-            "graph_delta_compaction::tests::crash_oracle_before_and_after_ack_matches_frozen_contract",
+            "project_fault_oracle::primitive::",
             "--",
-            "--exact",
             "--nocapture",
         ],
     ]
@@ -475,8 +477,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             "durability_certification": CONTRACT,
             "delta_journal": "adr-0019",
             "fault_oracle": "project_fault_oracle",
-            "m6_benchmark_inventory": "m6-storage-v1",
-            "m6_storage_io_fixture": "v1",
+            "storage_benchmark_inventory": "storage-benchmarks-v1",
+            "storage_io_fixture": "v1",
         },
         "production_observation": load_cert_contract()["production_observation"],
         "finite_coverage": load_cert_contract()["finite_coverage"],
