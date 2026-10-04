@@ -49,7 +49,6 @@ const MODULE_VERSION: &str = "2026.01";
 const SOURCE_METADATA_OPERATION: u128 = 0x91f2_1a60_d89e_54e1_a000_0000_0000_0001;
 const SOURCE_ADOPTION_OPERATION: u128 = 0x91f2_1a60_d89e_54e1_a000_0000_0000_0002;
 const SOURCE_PROFILE_OPERATION: u128 = 0x91f2_1a60_d89e_54e1_a000_0000_0000_0003;
-const MODULE_EXPORT_OPERATION: u128 = 0x91f2_1a60_d89e_54e1_b000_0000_0000_0001;
 
 #[derive(Debug, Serialize)]
 struct GeneratorIdentity<'a> {
@@ -302,19 +301,7 @@ pub fn generate(source: &Path, destination: &Path, location_base: &str) -> Resul
         None,
     )
     .map_err(err)?;
-    let mut imported_project = GraphForge::new(imported.to_str()).map_err(err)?;
-    // A component-selective package records the exporting generation's manifest
-    // hash, and the manifest of a first import binds its parent: the random
-    // initial generation. Re-committing the identical research metadata under a
-    // fixed identity gives the exporting generation a deterministic parent, so
-    // module packages are reproducible byte for byte.
-    let research_metadata = imported_project.research_project_metadata().map_err(err)?;
-    imported_project
-        .update_research_metadata(UpdateResearchMetadataRequest {
-            context: write_context(MODULE_EXPORT_OPERATION),
-            metadata: research_metadata,
-        })
-        .map_err(err)?;
+    let imported_project = GraphForge::new(imported.to_str()).map_err(err)?;
     fs::create_dir_all(destination.join("objects")).map_err(err)?;
     let object_path = destination.join(OBJECT_PATH);
     let exported = repack_verified_expanded_portable_v2(
