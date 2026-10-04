@@ -26,6 +26,7 @@ import tempfile
 from typing import Any
 import xml.etree.ElementTree as ET
 
+from benchexec.util import parse_timespan_value
 from jsonschema import Draft202012Validator
 
 from graphforge_bench.benchexec_authority import Limits, normalize_run
@@ -786,9 +787,7 @@ def _parse_benchexec_xml(raw_output: Path, *, correctness: bool) -> Mapping[str,
     status = required("status")
     exit_code = 0 if status == "DONE" else None
     termination = columns.get("terminationreason")
-    if status == "TIMEOUT":
-        termination = "walltime"
-    elif status in {"OUT OF MEMORY", "MEMORY"}:
+    if status in {"OUT OF MEMORY", "MEMORY"}:
         termination = "memory"
     return {
         "wall_seconds": _scaled_number(required("walltime")),
@@ -800,6 +799,7 @@ def _parse_benchexec_xml(raw_output: Path, *, correctness: bool) -> Mapping[str,
         "pressure_io_seconds": _scaled_number(required("pressure-io-some")),
         "pressure_memory_seconds": _scaled_number(required("pressure-memory-some")),
         "termination_reason": termination,
+        "timed_out": status == "TIMEOUT",
         "exit_code": exit_code,
         "signal": None,
         "correctness": correctness,
@@ -1298,12 +1298,17 @@ def ingest_benchexec_result(
         raise ControllerError("requested profile identity contradicts the run plan")
     raw = _parse_benchexec_xml(raw_output, correctness=graphforge.get("status") == "passed")
     limits = plan["limits"]
+    try:
+        definition = ET.parse(stage / "benchmark.xml").getroot()
+        cpu_seconds = float(parse_timespan_value(definition.attrib["timelimit"]))
+    except (OSError, ET.ParseError, KeyError, ValueError) as error:
+        raise ControllerError("staged BenchExec CPU policy is missing or invalid") from error
     benchexec = normalize_run(
         benchexec=raw,
         graphforge=graphforge,
         limits=Limits(
             float(limits["wall_seconds"]),
-            float(limits["wall_seconds"]),
+            cpu_seconds,
             int(limits["memory_bytes"]),
             tuple(range(int(limits["cores"]))),
         ),

@@ -228,6 +228,10 @@ class BenchExecAuthorityTests(unittest.TestCase):
     def test_typed_termination_outcomes_remain_distinct(self):
         cases = [
             ({"termination_reason": "walltime"}, Outcome.TIMEOUT),
+            ({"termination_reason": "cputime-soft"}, Outcome.TIMEOUT),
+            ({"termination_reason": "cputime-hard"}, Outcome.TIMEOUT),
+            ({"timed_out": True, "termination_reason": None}, Outcome.TIMEOUT),
+            ({"timed_out": True, "termination_reason": "unknown-limit"}, Outcome.TIMEOUT),
             ({"termination_reason": "memory"}, Outcome.OOM),
             ({"exit_code": 7, "correctness": True}, Outcome.EXIT),
             ({"signal": 9, "exit_code": None, "correctness": True}, Outcome.SIGNAL),
