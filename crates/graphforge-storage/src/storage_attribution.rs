@@ -607,7 +607,33 @@ struct PreparedAllocationChange {
     peak: u64,
 }
 
+pub(crate) struct PreparedOwnerAllocationChange {
+    allocation: PreparedAllocationChange,
+    owner: String,
+    mutation: PreparedOwnerMutation,
+}
+
+enum PreparedOwnerMutation {
+    Replace(BTreeSet<String>),
+    Transition {
+        removed: BTreeSet<String>,
+        installed: BTreeSet<String>,
+    },
+    Remove,
+}
+
 impl StorageAllocationLifecycle {
+    #[cfg(test)]
+    pub(crate) fn owner_storage_tokens(&self, owner: &str) -> Vec<usize> {
+        let (owner, identities) = self.owners.get_key_value(owner).expect("retained owner");
+        let mut tokens = vec![owner.as_ptr() as usize];
+        for identity in identities {
+            tokens.push(identity.as_ptr() as usize);
+            tokens.push(self.active.get_key_value(identity).unwrap().0.as_ptr() as usize);
+        }
+        tokens
+    }
+
     /// Check diagnostic raw owner facts against a per-file baseline without exposing identities.
     #[doc(hidden)]
     #[must_use]
@@ -645,13 +671,25 @@ impl StorageAllocationLifecycle {
         owner: impl Into<String>,
         identities: &BTreeMap<String, u64>,
     ) -> Result<(), GfError> {
-        let owner = owner.into();
-        let removed = self.owners.get(&owner).cloned().unwrap_or_default();
-        let prepared = self.prepare_change(component, &removed, identities)?;
-        self.commit_change(prepared);
-        self.owners
-            .insert(owner, identities.keys().cloned().collect());
+        let prepared = self.prepare_owner_replacement(component, owner, identities)?;
+        self.apply_prepared_owner_change(prepared);
         Ok(())
+    }
+
+    pub(crate) fn prepare_owner_replacement(
+        &self,
+        component: TransientComponent,
+        owner: impl Into<String>,
+        identities: &BTreeMap<String, u64>,
+    ) -> Result<PreparedOwnerAllocationChange, GfError> {
+        let owner = owner.into();
+        let empty = BTreeSet::new();
+        let removed = self.owners.get(&owner).unwrap_or(&empty);
+        Ok(PreparedOwnerAllocationChange {
+            allocation: self.prepare_change(component, removed, identities)?,
+            owner,
+            mutation: PreparedOwnerMutation::Replace(identities.keys().cloned().collect()),
+        })
     }
 
     /// Replace an owner from a generation-bound storage snapshot.
@@ -732,6 +770,17 @@ impl StorageAllocationLifecycle {
         owner: impl Into<String>,
         transition: &StorageAllocationTransition,
     ) -> Result<(), GfError> {
+        let prepared = self.prepare_owner_transition(component, owner, transition)?;
+        self.apply_prepared_owner_change(prepared);
+        Ok(())
+    }
+
+    pub(crate) fn prepare_owner_transition(
+        &self,
+        component: TransientComponent,
+        owner: impl Into<String>,
+        transition: &StorageAllocationTransition,
+    ) -> Result<PreparedOwnerAllocationChange, GfError> {
         let owner = owner.into();
         if transition
             .installed
@@ -761,27 +810,65 @@ impl StorageAllocationLifecycle {
                 "allocation transition installs an owned identity",
             ));
         }
-        let prepared =
-            self.prepare_change(component, &transition.removed, &transition.installed)?;
-        self.commit_change(prepared);
-        let identities = self.owners.entry(owner).or_default();
-        for id in &transition.removed {
-            identities.remove(id);
-        }
-        identities.extend(transition.installed.keys().cloned());
-        Ok(())
+        Ok(PreparedOwnerAllocationChange {
+            allocation: self.prepare_change(
+                component,
+                &transition.removed,
+                &transition.installed,
+            )?,
+            owner,
+            mutation: PreparedOwnerMutation::Transition {
+                removed: transition.removed.clone(),
+                installed: transition.installed.keys().cloned().collect(),
+            },
+        })
     }
 
     /// Remove an owner and decrement every exact identity reference.
     pub fn remove_owner(&mut self, owner: &str) -> Result<(), GfError> {
-        let Some(removed) = self.owners.get(owner) else {
-            return Ok(());
-        };
-        let prepared =
-            self.prepare_change(TransientComponent::Unclassified, removed, &BTreeMap::new())?;
-        self.commit_change(prepared);
-        self.owners.remove(owner);
+        if let Some(prepared) = self.prepare_owner_removal(owner)? {
+            self.apply_prepared_owner_change(prepared);
+        }
         Ok(())
+    }
+
+    pub(crate) fn prepare_owner_removal(
+        &self,
+        owner: &str,
+    ) -> Result<Option<PreparedOwnerAllocationChange>, GfError> {
+        let Some(removed) = self.owners.get(owner) else {
+            return Ok(None);
+        };
+        Ok(Some(PreparedOwnerAllocationChange {
+            allocation: self.prepare_change(
+                TransientComponent::Unclassified,
+                removed,
+                &BTreeMap::new(),
+            )?,
+            owner: owner.to_owned(),
+            mutation: PreparedOwnerMutation::Remove,
+        }))
+    }
+
+    /// Apply only a validated owner/identity delta. Callers retain the same
+    /// exclusive state guard from preparation through application.
+    pub(crate) fn apply_prepared_owner_change(&mut self, prepared: PreparedOwnerAllocationChange) {
+        self.commit_change(prepared.allocation);
+        match prepared.mutation {
+            PreparedOwnerMutation::Replace(identities) => {
+                self.owners.insert(prepared.owner, identities);
+            }
+            PreparedOwnerMutation::Transition { removed, installed } => {
+                let identities = self.owners.entry(prepared.owner).or_default();
+                for id in removed {
+                    identities.remove(&id);
+                }
+                identities.extend(installed);
+            }
+            PreparedOwnerMutation::Remove => {
+                self.owners.remove(&prepared.owner);
+            }
+        }
     }
 
     // Validate only changed identities. All fallible arithmetic and consistency
