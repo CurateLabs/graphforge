@@ -2,9 +2,10 @@
 //! property route a bounded number of times, whatever the size of the
 //! expansion that finds the edge (#1388).
 //!
-//! The DELETE has no identity seek: it expands every edge, filters on endpoint
-//! identity, and its plan demands every column of `r`, the `note` property
-//! included. The expansion attaches properties to each output chunk, and a
+//! The DELETE has no identity seek: it expands every edge and filters on
+//! endpoint identity. Its read prefix previously demanded every column of `r`,
+//! the unused `note` property included. The expansion attached properties to
+//! each output chunk, and a
 //! targeted property read authenticates and decodes its whole route whatever
 //! its target count. Reading the route once per chunk therefore cost chunks x
 //! route bytes, quadratic in the edges: one DELETE took 374 s at 524,288 edges
@@ -45,9 +46,10 @@ const CHUNK_ROWS: usize = 1024;
 const SOURCE: usize = 9;
 const TARGET: usize = SOURCE + 3;
 
-/// Reads of the edge-property route one DELETE makes: the expansion's first
-/// chunk (a targeted read), one whole-route read serving every later chunk, and
-/// the tombstone staging's targeted read of the deleted edge.
+/// Route-sized reads a DELETE may make outside expansion: planning captures
+/// the property schema, the write phase counts removed properties, and the
+/// tombstone staging reads the deleted edge's properties. Expansion itself
+/// needs only the target identity and reads no unused property value.
 const ROUTE_READS: u64 = 3;
 
 /// Passes one route read makes over a fragment object, each reading at most the
@@ -284,6 +286,9 @@ fn measure(nodes: usize) -> Measured {
         .collect::<BTreeSet<_>>();
     assert_eq!(remaining_notes(&forge), expected);
     drop(forge);
+    let reopened = GraphForge::new(with_notes.to_str()).expect("reopen after DELETE");
+    assert_eq!(remaining_notes(&reopened), expected);
+    drop(reopened);
 
     let without_properties = delete_one_edge(&open(&without_notes));
     let property_read_bytes = with_properties.saturating_sub(without_properties);
@@ -298,6 +303,39 @@ fn measure(nodes: usize) -> Measured {
         bound,
         property_read_bytes,
     }
+}
+
+#[test]
+fn terminal_delete_keeps_property_predicates_and_repeated_target_semantics() {
+    let root = tempfile::tempdir().expect("project directory");
+    construct(root.path(), SMALL_NODES, true);
+    let deleted = SOURCE * FAN_OUT + (TARGET - SOURCE - 1);
+    let forge = open(root.path());
+    let result = forge
+        .execute_with_params(
+            "MATCH (:Entity)-[r:LINK]->(:Entity) WHERE r.note = $note DELETE r DELETE r",
+            &HashMap::from([("note".to_owned(), IrLiteral::Str(edge_note(deleted)))]),
+        )
+        .expect("a property predicate selects the deletion target");
+    for (column, expected) in [("edges_deleted", 1), ("properties_removed", 1)] {
+        let count = result.batches[0]
+            .column_by_name(column)
+            .expect("mutation counter")
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("counter is UInt64")
+            .value(0);
+        assert_eq!(count, expected, "{column} counts the target once");
+    }
+    drop(forge);
+    let reopened = GraphForge::new(root.path().to_str()).expect("reopen after property DELETE");
+    assert_eq!(
+        remaining_notes(&reopened),
+        (0..SMALL_NODES * FAN_OUT)
+            .filter(|edge| *edge != deleted)
+            .map(edge_note)
+            .collect()
+    );
 }
 
 #[test]

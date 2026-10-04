@@ -461,10 +461,9 @@ mod property_scan;
 pub use property_overlay::{
     AuthenticatedPropertyInventory, EdgeOwnerProbeWork, PROPERTY_OVERLAY_FORMAT,
     PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_TOMBSTONE_FIELD, PropertyFragmentId,
-    PropertyInventoryOpenMetrics, PropertyOverlayLimits, PropertyOverlayMetrics, PropertyRouteData,
-    PropertyRouteKind, PropertySnapshotRow, PropertyTargetData, PropertyTargetSnapshots,
-    enumerate_property_fragments, read_authenticated_property_presence_for_inventory,
-    read_authenticated_property_route_data_for_inventory,
+    PropertyInventoryOpenMetrics, PropertyOverlayLimits, PropertyOverlayMetrics, PropertyRouteKind,
+    PropertySnapshotRow, PropertyTargetData, PropertyTargetSnapshots, enumerate_property_fragments,
+    read_authenticated_property_presence_for_inventory,
     read_authenticated_property_snapshot_data_for_inventory,
     read_authenticated_property_snapshots_for, read_authenticated_property_snapshots_for_inventory,
     read_authenticated_property_target_data_for_inventory,
