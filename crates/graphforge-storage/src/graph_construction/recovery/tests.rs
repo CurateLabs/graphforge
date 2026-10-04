@@ -260,6 +260,54 @@ fn symlink_substitution_is_rejected_on_independent_seal() {
 }
 
 #[test]
+fn successful_artifact_hash_work_is_exact_and_failed_authentication_adds_none() {
+    let root = TempDir::new().unwrap();
+    let mut session = open(&root, 9_102);
+    let chunk = session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 4))
+        .unwrap();
+    let receipt = &chunk.parquet;
+    let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+    {
+        let _seal = diagnostics::Scope::start("seal_authentication");
+        let work = authenticate_artifact(&session.root, receipt, DetailCodec::Compact).unwrap();
+        assert_eq!(work.bytes, receipt.bytes);
+    }
+    let snapshot = capture.finish();
+    let leaf = &snapshot.regions["import_command/seal_authentication/artifact_authentication"];
+    assert_eq!(leaf.work["hashed_bytes"], receipt.bytes);
+    assert!(
+        snapshot.regions["import_command/seal_authentication"]
+            .work
+            .is_empty()
+    );
+    assert!(snapshot.regions["import_command"].work.is_empty());
+    let total: u64 = snapshot
+        .regions
+        .values()
+        .map(|row| row.work.get("hashed_bytes").copied().unwrap_or(0))
+        .sum();
+    assert_eq!(
+        total, receipt.bytes,
+        "successful work must not roll up twice"
+    );
+
+    let path = session.root.path().join(&receipt.name);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[0] ^= 0xff;
+    std::fs::write(&path, bytes).unwrap();
+    let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+    assert!(authenticate_artifact(&session.root, receipt, DetailCodec::Compact).is_err());
+    let failed = capture.finish();
+    assert!(
+        failed
+            .regions
+            .values()
+            .all(|row| !row.work.contains_key("hashed_bytes"))
+    );
+}
+
+#[test]
 fn truncated_staged_artifact_is_refused_by_checksum() {
     let root = TempDir::new().unwrap();
     let mut session = open(&root, 9_100);

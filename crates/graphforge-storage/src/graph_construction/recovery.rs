@@ -674,6 +674,7 @@ fn receipt_for_existing_retained(
     match (authenticated, released) {
         (Ok((receipt, mut work)), Ok(cache_release)) => {
             work.cache_release = cache_release;
+            super::diagnostics::hashed_bytes(receipt.bytes, 1);
             Ok((receipt, work, None))
         }
         (Ok(_), Err(release)) => Err(release),
@@ -1233,6 +1234,7 @@ fn authenticate_artifact_contents(
         }
     };
     let cache_release = reader.get_ref().tracker().evidence();
+    super::diagnostics::hashed_bytes(bytes, 1);
     Ok(ReadWork {
         detail_records,
         bytes,

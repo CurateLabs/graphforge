@@ -153,6 +153,43 @@ fn read_retained(mut file: &File) -> Vec<u8> {
     bytes
 }
 
+#[test]
+fn captured_repair_byte_work_counts_checksum_copy_and_actual_sha_authentication() {
+    let root = tempfile::tempdir().unwrap();
+    crate::open_or_initialize_project(root.path()).unwrap();
+    let parent = crate::resolve_project_generation(root.path()).unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    fs::create_dir(workspace.path().join("topology")).unwrap();
+    let payload = b"captured repair payload";
+    fs::write(workspace.path().join("topology/nodes.parquet"), payload).unwrap();
+    fs::write(workspace.path().join("topology/generation.json"), b"{}\n").unwrap();
+    let captured = crate::graph_files::capture_workspace_over_parent(
+        workspace.path(),
+        &parent,
+        &crate::TopologyFiles::discover_legacy(workspace.path()).unwrap(),
+    )
+    .unwrap();
+    let source = &captured.captured["topology/nodes.parquet"];
+    let lease = begin_graph_object_publication(root.path()).unwrap();
+    let mut corrupt = payload.to_vec();
+    corrupt[0] ^= 1;
+    plant_sealed_object(&lease, source.content_sha256(), &corrupt);
+    let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+    let evidence =
+        install_captured_workspace_file_with_lease(&lease, source, true, &mut || false).unwrap();
+    assert!(evidence.attempted_install);
+    let snapshot = capture.finish();
+    let work = &snapshot.regions["import_command"].work;
+    // Copy producer: XXH64 only. Temporary authentication: SHA + XXH64.
+    // The refused prior object's hash pass is attempted, not successful work.
+    assert_eq!(work["hashed_bytes"], 3 * payload.len() as u64);
+    assert_eq!(work["written_bytes"], payload.len() as u64);
+    assert_eq!(
+        fs::read(graph_object_path(root.path(), source.content_sha256()).unwrap()).unwrap(),
+        payload
+    );
+}
+
 /// The replacement is a new inode at the address. A reader that opened the
 /// corrupt object first keeps reading those exact bytes; nothing writes the
 /// old inode.

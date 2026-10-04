@@ -465,6 +465,7 @@ pub(crate) fn stage_graph_tree_with_allocation(
             .bytes_copied
             .checked_add(entry.byte_length)
             .ok_or_else(|| validation("graph staging copied-byte count overflows"))?;
+        crate::graph_construction::diagnostics::sealed_payload(copied.write_bytes, 1);
         // Fail after at least one graph file is durable so interrupted staging
         // can prove CURRENT remains on the prior complete generation.
         project_failpoint::hit(
@@ -1378,19 +1379,20 @@ fn hash_file_counted(path: &Path) -> Result<([u8; 32], u64), GfError> {
 #[cfg(test)]
 fn hash_reader(file: &mut File, path: &Path) -> Result<([u8; 32], u64), GfError> {
     hash_reader_with_checksum(file, path, ARTIFACT_IDENTITY)
-        .map(|(digest, _, calls)| (digest, calls))
+        .map(|(digest, _, calls, _)| (digest, calls))
 }
 
 fn hash_reader_with_checksum(
     file: &mut File,
     path: &Path,
     domain: graphforge_core::hash_observation::HashDomain,
-) -> Result<([u8; 32], u64, u64), GfError> {
+) -> Result<([u8; 32], u64, u64, u64), GfError> {
     // Published captures name artifact payload; a temporary replay view's
     // capture feeds only a contract fingerprint and is observed as that domain.
     let mut hasher = crate::payload_digest::PayloadSha256::for_domain(domain);
     let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut read_calls = 0_u64;
+    let mut bytes = 0_u64;
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
     loop {
         let read = file
@@ -1402,15 +1404,29 @@ fn hash_reader_with_checksum(
         read_calls = read_calls
             .checked_add(1)
             .ok_or_else(|| resource_limit("graph file authentication read calls overflow"))?;
+        bytes = bytes.saturating_add(read as u64);
         hasher.update(&buffer[..read]);
         checksum.update(&buffer[..read]);
     }
-    Ok((hasher.finalize().into(), checksum.finish(), read_calls))
+    Ok((
+        hasher.finalize().into(),
+        checksum.finish(),
+        read_calls,
+        bytes,
+    ))
 }
 
 pub(crate) fn checksum_reader(file: &mut impl Read, path: &Path) -> Result<(u64, u64), GfError> {
+    checksum_reader_counted(file, path).map(|(checksum, calls, _)| (checksum, calls))
+}
+
+pub(crate) fn checksum_reader_counted(
+    file: &mut impl Read,
+    path: &Path,
+) -> Result<(u64, u64, u64), GfError> {
     let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut calls = 0_u64;
+    let mut bytes = 0_u64;
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
     loop {
         let read = file
@@ -1419,12 +1435,13 @@ pub(crate) fn checksum_reader(file: &mut impl Read, path: &Path) -> Result<(u64,
         if read == 0 {
             break;
         }
+        bytes = bytes.saturating_add(read as u64);
         checksum.update(&buffer[..read]);
         calls = calls
             .checked_add(1)
             .ok_or_else(|| resource_limit("graph payload checksum read calls overflow"))?;
     }
-    Ok((checksum.finish(), calls))
+    Ok((checksum.finish(), calls, bytes))
 }
 
 fn sync_file(path: &Path) -> Result<(), GfError> {

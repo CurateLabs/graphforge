@@ -84,6 +84,8 @@ pub(super) fn copy_read_inventory_file(
     if output_checksum != entry.content_xxh64 || output_bytes != entry.byte_length {
         return Err(corrupt("private graph copy checksum or length changed"));
     }
+    crate::graph_construction::diagnostics::sealed_payload(bytes, 1);
+    crate::graph_construction::diagnostics::hashed_bytes(output_bytes, 1);
     crate::lifecycle_io::record_read(
         crate::StorageIoPhase::HydrationVerification,
         bytes + output_bytes,
