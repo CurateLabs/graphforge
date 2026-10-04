@@ -15,7 +15,7 @@ from graphforge_bench.progressive_host_run import (
     HostRunError,
     PhaseFailure,
     RungWall,
-    _benchexec_hit_wall,
+    _benchexec_timeout_failure,
     _certify_phase_failure,
     _host_swap_counters,
     _result,
@@ -383,23 +383,35 @@ class RungWallTests(unittest.TestCase):
             self.assertEqual(envelope["limits"]["wall_seconds"], MAXIMUM_WALL_SECONDS)
             self.assertIsNone(envelope["wall_policy"]["reference_wall_seconds"])
 
-    def test_benchexec_hit_wall_reads_the_staged_result(self) -> None:
+    def test_benchexec_timeout_failure_reads_the_actual_limit(self) -> None:
         with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
             stage = Path(temporary)
-            self.assertFalse(_benchexec_hit_wall(stage))
+            self.assertIsNone(_benchexec_timeout_failure(stage))
             raw = stage / "raw"
             raw.mkdir()
             document = raw / "results.xml"
             document.write_text(
                 '<result><run name="profile"><column title="status" value="TIMEOUT"/>'
-                '<column title="walltime" value="102.4s"/></run></result>'
+                '<column title="walltime" value="102.4s"/>'
+                '<column title="terminationreason" value="walltime"/></run></result>'
             )
-            self.assertTrue(_benchexec_hit_wall(stage))
+            self.assertEqual(_benchexec_timeout_failure(stage), "rung_wall_exceeded")
+            for reason in ("cputime-soft", "cputime", "cputime-hard", ""):
+                with self.subTest(reason=reason):
+                    document.write_text(
+                        '<result><run name="profile"><column title="status" value="TIMEOUT"/>'
+                        '<column title="cputime" value="799.281815s"/>'
+                        '<column title="walltime" value="742.165077934s"/>'
+                        f'<column title="terminationreason" value="{reason}"/></run></result>'
+                    )
+                    self.assertEqual(
+                        _benchexec_timeout_failure(stage), "benchexec_failed" if reason else None
+                    )
             document.write_text(
                 '<result><run name="profile"><column title="status" value="DONE"/>'
                 '<column title="walltime" value="91.0s"/></run></result>'
             )
-            self.assertFalse(_benchexec_hit_wall(stage))
+            self.assertIsNone(_benchexec_timeout_failure(stage))
 
 
 class RungPhaseFailureTests(unittest.TestCase):
@@ -427,6 +439,71 @@ class RungPhaseFailureTests(unittest.TestCase):
             ],
             "claim": "engineering_evidence_only",
         }
+
+    def test_resource_timeout_keeps_its_cause_without_a_certify_receipt(self) -> None:
+        for reason, expected in (
+            ("walltime", "rung_wall_exceeded"),
+            ("cputime-soft", "benchexec_failed"),
+            ("cputime", "benchexec_failed"),
+        ):
+            for boundary in ("receipt", "exit", "swap"):
+                with (
+                    self.subTest(reason=reason, boundary=boundary),
+                    tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary,
+                ):
+                    parent = Path(temporary)
+                    work_root = parent / "work"
+                    work_root.mkdir()
+                    output = parent / "evidence"
+                    output.mkdir()
+                    plan = self.plan(22)
+                    (output / "s22-plan.json").write_text(json.dumps(plan))
+                    stage = parent / "stage"
+                    (stage / "raw").mkdir(parents=True)
+                    raw = (
+                        '<result><run name="profile"><column title="status" value="TIMEOUT"/>'
+                        '<column title="cputime" value="799.281815s"/>'
+                        '<column title="walltime" value="742.165077934s"/>'
+                        f'<column title="terminationreason" value="{reason}"/></run></result>'
+                    )
+                    (stage / "raw/results.xml").write_text(raw)
+                    bin_dir = parent / "bin"
+                    bin_dir.mkdir()
+                    before = {"pswpin": 100, "pswpout": 200}
+                    after = before | {"pswpin": 101} if boundary == "swap" else before
+                    with (
+                        patch("graphforge_bench.progressive_host_run._native_authority"),
+                        patch(
+                            "graphforge_bench.progressive_host_run._safe_stage_host",
+                            return_value=stage,
+                        ),
+                        patch(
+                            "graphforge_bench.progressive_host_run._run_benchexec",
+                            return_value=1 if boundary == "exit" else 0,
+                        ),
+                        patch(
+                            "graphforge_bench.progressive_host_run._host_swap_counters",
+                            side_effect=[before, after],
+                        ),
+                        patch(
+                            "graphforge_bench.progressive_host_run.ingest_benchexec_result",
+                            side_effect=ControllerError("certify receipt missing"),
+                        ),
+                        self.assertRaisesRegex(HostRunError, expected),
+                    ):
+                        host_run(
+                            root=ROOT,
+                            output_dir=output,
+                            work_root=work_root,
+                            scale=22,
+                            plan=plan,
+                            executables=fixture_executables(bin_dir),
+                        )
+                    result = json.loads((output / "s22-result.json").read_text())
+                    self.assertEqual(result["failure"], expected)
+                    self.assertEqual(result["status"], "failed")
+                    self.assertEqual((output / "s22-failure-raw/results.xml").read_text(), raw)
+                    self.assertFalse((output / "s22-rung.json").exists())
 
     def test_swapping_rejects_completed_measurements_before_ingestion(self) -> None:
         for counter in ("pswpin", "pswpout"):
