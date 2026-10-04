@@ -121,3 +121,60 @@ test("saved query CRUD, parameter validation and historical aggregates survive r
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("JSON numbers follow the pinned saved parameter declaration", async () => {
+  const graph = new GraphForge();
+  try {
+    const saved = {
+      query_uuid: randomUUID(),
+      name: "Numeric declaration",
+      description: null,
+      query: "RETURN $x AS value",
+      parameters: { x: "float" },
+    };
+    graph.createSavedQuery(saved);
+    const floatResult = tableFromIPC(
+      await graph.executeSavedQuery(saved.query_uuid, { x: 1.0 }),
+    );
+    assert.equal(floatResult.getChild("value").type.toString(), "Float64");
+    assert.equal(floatResult.getChild("value").get(0), 1);
+    const version = randomUUID();
+    await graph.commitResearchVersionOperation(
+      graph.prepareResearchVersion({
+        operation_uuid: randomUUID(),
+        version_uuid: version,
+        context_uuid: randomUUID(),
+        created_at: 1,
+        required_versions: [],
+      }),
+    );
+    graph.updateSavedQuery({ ...saved, parameters: { x: "integer" } });
+    const integerResult = tableFromIPC(
+      await graph.executeSavedQuery(saved.query_uuid, { x: 4294967296 }),
+    );
+    assert.equal(integerResult.getChild("value").type.toString(), "Int64");
+    assert.equal(Number(integerResult.getChild("value").get(0)), 4294967296);
+    for (const x of [1.5, Number.MAX_SAFE_INTEGER + 1, "1", true, null]) {
+      await assert.rejects(
+        graph.executeSavedQuery(saved.query_uuid, { x }),
+        (error) => error.code === "GF_VALIDATION",
+      );
+    }
+    const historical = tableFromIPC(
+      await graph.executeSavedQuery(
+        saved.query_uuid,
+        { x: 1.5 },
+        { kind: "version", version_uuid: version },
+      ),
+    );
+    assert.equal(historical.getChild("value").type.toString(), "Float64");
+    assert.equal(historical.getChild("value").get(0), 1.5);
+    graph.close();
+    assert.throws(
+      () => graph.executeSavedQuery(saved.query_uuid, { x: 1 }),
+      (error) => error.code === "LifecycleError",
+    );
+  } finally {
+    graph.close();
+  }
+});

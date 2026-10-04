@@ -1,6 +1,6 @@
 //! Project-owned saved query metadata and explicit Arrow execution.
 use clap::Subcommand;
-use graphforge_api::{GfError, GraphForge, IrLiteral, SavedQuery, SavedQuerySource};
+use graphforge_api::{GfError, GraphForge, SavedQuery, SavedQuerySource};
 use serde_json::Value;
 use std::{collections::HashMap, io::Write, path::PathBuf};
 
@@ -55,28 +55,6 @@ fn load<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Result<T, GfE
     serde_json::from_slice(&bytes)
         .map_err(|_| GfError::Validation("invalid saved query JSON contract".into()))
 }
-fn literal(value: Value) -> Result<IrLiteral, GfError> {
-    Ok(match value {
-        Value::Bool(v) => IrLiteral::Bool(v),
-        Value::Number(v) if v.is_i64() => IrLiteral::Int(v.as_i64().unwrap()),
-        Value::Number(v) => IrLiteral::Float(
-            v.as_f64()
-                .ok_or_else(|| GfError::Validation("invalid numeric parameter".into()))?,
-        ),
-        Value::String(v) => IrLiteral::Str(v),
-        Value::Object(v) if v.len() == 1 && v.contains_key("$uuid") => {
-            let text = v["$uuid"].as_str().ok_or_else(|| {
-                GfError::Validation("UUID parameter must contain canonical text".into())
-            })?;
-            IrLiteral::Uuid(*crate::canonical_uuid(text)?.as_bytes())
-        }
-        _ => {
-            return Err(GfError::Validation(
-                "saved query parameters must be scalar values or tagged UUIDs".into(),
-            ));
-        }
-    })
-}
 pub(crate) fn run(
     graph: &mut GraphForge,
     command: SavedQueryCommand,
@@ -111,15 +89,11 @@ pub(crate) fn run(
             params,
             version_uuid,
         } => {
-            let values: HashMap<String, Value> = params
+            let params: HashMap<String, Value> = params
                 .map(|path| load(&path))
                 .transpose()?
                 .unwrap_or_default();
-            let params = values
-                .into_iter()
-                .map(|(name, value)| Ok((name, literal(value)?)))
-                .collect::<Result<HashMap<_, _>, GfError>>()?;
-            let result = graph.execute_saved_query(
+            let result = graph.execute_saved_query_json(
                 crate::canonical_uuid(&query_uuid)?,
                 &params,
                 &source(version_uuid)?,

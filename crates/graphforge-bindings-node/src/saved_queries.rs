@@ -1,6 +1,6 @@
 //! Thin native saved query metadata and cancellable Arrow execution bindings.
 use crate::{Buffer, GraphForge, Result, Task, napi};
-use graphforge_api::{CancellationToken, IrLiteral, SavedQuery, SavedQuerySource};
+use graphforge_api::{CancellationToken, SavedQuery, SavedQuerySource};
 use std::collections::HashMap;
 
 fn contract<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T> {
@@ -98,7 +98,7 @@ impl GraphForge {
         Ok(crate::AsyncTask::new(SavedQueryTask {
             engine: std::sync::Arc::clone(&self.inner),
             query_uuid: crate::canonical_operation_id(&query_uuid)?.0,
-            params: crate::params_from_map(params)?,
+            params: params.unwrap_or_default(),
             source: self::source(source)?,
             cancellation: crate::slices::cancellation(env, signal)?,
         }))
@@ -107,7 +107,7 @@ impl GraphForge {
 pub struct SavedQueryTask {
     engine: std::sync::Arc<std::sync::RwLock<graphforge_api::GraphForge>>,
     query_uuid: uuid::Uuid,
-    params: HashMap<String, IrLiteral>,
+    params: HashMap<String, serde_json::Value>,
     source: SavedQuerySource,
     cancellation: CancellationToken,
 }
@@ -119,7 +119,7 @@ impl Task for SavedQueryTask {
             let graph = self.engine.read().map_err(|_| {
                 graphforge_api::GfError::Execution("GraphForge lock poisoned".into())
             })?;
-            let result = graph.execute_saved_query(
+            let result = graph.execute_saved_query_json(
                 self.query_uuid,
                 &self.params,
                 &self.source,

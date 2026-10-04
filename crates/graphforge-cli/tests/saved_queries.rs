@@ -109,3 +109,54 @@ fn cli_saved_queries_survive_reopen_and_preserve_historical_aggregate() {
         saved
     );
 }
+
+#[test]
+fn cli_json_numbers_follow_saved_parameter_declarations_and_uuid_tags() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("project");
+    drop(GraphForge::new(root.to_str()).unwrap());
+    let id = Uuid::now_v7().to_string();
+    let file = directory.path().join("definition.json");
+    let params = directory.path().join("params.json");
+    let mut saved = serde_json::json!({"query_uuid":id,"name":"Scalar parameter","description":null,"query":"RETURN $x AS value","parameters":{"x":"float"}});
+    std::fs::write(&file, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let file = file.to_str().unwrap();
+    let params = params.to_str().unwrap();
+    success(run(&root, &["save", "--file", file], true));
+    std::fs::write(params, r#"{"x":1}"#).unwrap();
+    let result = json(run(&root, &["run", &id, "--params", params], true));
+    assert_eq!(result["columns"][0]["data_type"], "Float64");
+    assert_eq!(result["rows"], serde_json::json!([[1.0]]));
+    saved["parameters"]["x"] = serde_json::json!("integer");
+    std::fs::write(file, serde_json::to_vec(&saved).unwrap()).unwrap();
+    success(run(&root, &["update", "--file", file], true));
+    for (input, expected) in [(r#"{"x":1.0}"#, 1), (r#"{"x":4294967296}"#, 4294967296)] {
+        std::fs::write(params, input).unwrap();
+        let result = json(run(&root, &["run", &id, "--params", params], true));
+        assert_eq!(result["columns"][0]["data_type"], "Int64");
+        assert_eq!(result["rows"], serde_json::json!([[expected]]));
+    }
+    for input in [
+        r#"{"x":1.5}"#,
+        r#"{"x":9007199254740992.0}"#,
+        r#"{"x":"1"}"#,
+        r#"{"x":true}"#,
+    ] {
+        std::fs::write(params, input).unwrap();
+        let output = run(&root, &["run", &id, "--params", params], true);
+        assert!(!output.status.success());
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["error"]["code"], "GF_VALIDATION");
+    }
+    saved["parameters"]["x"] = serde_json::json!("uuid");
+    std::fs::write(file, serde_json::to_vec(&saved).unwrap()).unwrap();
+    success(run(&root, &["update", "--file", file], true));
+    let value = Uuid::now_v7().to_string();
+    std::fs::write(
+        params,
+        serde_json::to_vec(&serde_json::json!({"x":{"$uuid":value}})).unwrap(),
+    )
+    .unwrap();
+    let result = json(run(&root, &["run", &id, "--params", params], true));
+    assert_eq!(result["rows"], serde_json::json!([[value]]));
+}
