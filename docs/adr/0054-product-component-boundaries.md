@@ -11,7 +11,7 @@ revisit_when: "A component needs to own a contract assigned here to another comp
 
 **Status:** Accepted
 
-> **Shared GraphForge decision, public revision 2.** Curate Labs maintains this text in one place and publishes it unchanged to [graphforge](https://github.com/CurateLabs/graphforge/blob/main/docs/adr/0054-product-component-boundaries.md), [xyg](https://github.com/CurateLabs/xyg/blob/main/spec/design/graphforge-product-boundaries.md), [graphforge-vscode](https://github.com/CurateLabs/graphforge-vscode/blob/main/docs/engineering/PRODUCT_BOUNDARIES.md), and the Hub repository. Do not edit this copy: changes are made at the source and re-published to every repository.
+> **Shared GraphForge decision, public revision 3.** Curate Labs maintains this text in one place and publishes it unchanged to [graphforge](https://github.com/CurateLabs/graphforge/blob/main/docs/adr/0054-product-component-boundaries.md), [xyg](https://github.com/CurateLabs/xyg/blob/main/spec/design/graphforge-product-boundaries.md), [graphforge-vscode](https://github.com/CurateLabs/graphforge-vscode/blob/main/docs/engineering/PRODUCT_BOUNDARIES.md), and the Hub repository. Do not edit this copy: changes are made at the source and re-published to every repository.
 
 ## Context
 
@@ -58,13 +58,14 @@ flowchart LR
   Editor --> XYG["XYG<br/>(native host, painter)"]
   XYG -. "Arrow schema contract" .-> Core
   Hub["Hub (graphforge.sh)"] -. "discovery / publish contract" .-> Core
-  Hub -- "vscode:// open link" --> Editor
-  Core -- "gf clone / gf publish" --> Hub
+  Hub == "vscode:// open link (user click)" ==> Editor
+  Core -. "gf clone / gf publish protocol" .-> Hub
 ```
 
-Solid arrows are code dependencies; dotted arrows are contract-only. The Hub
-reaches the editor only through a link the user clicks. The editor reaches the
-Hub only through Core.
+Solid arrows are code dependencies; dotted arrows are contracts or protocol
+traffic; thick arrows are user-clicked navigation. The Hub reaches the editor
+only through a link the user clicks. The editor reaches the Hub only through
+Core.
 
 ### 3. Native GraphForge data at an exact Version is the unit of exchange
 
