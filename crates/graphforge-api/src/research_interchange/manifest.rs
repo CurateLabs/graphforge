@@ -32,13 +32,7 @@ pub(super) fn build(
     let mut genealogy = BTreeMap::new();
     let mut identities = BTreeMap::new();
     for version in versions.values() {
-        cite(registry, &mut identities, version.version_uuid)?;
-        if let Some(source) = version.content.source_version {
-            cite(registry, &mut identities, source)?;
-        }
-        if let Some(provenance) = &version.provenance {
-            cite(registry, &mut identities, provenance.version_uuid())?;
-        }
+        cite_version(registry, &mut identities, version)?;
         let mut branch = registry.historical_branch(version.context_uuid);
         while let Some(record) = branch {
             if genealogy
@@ -143,6 +137,22 @@ fn descent(
         }
     }
     Ok(ancestry)
+}
+
+/// Cite the Version and its content and operation provenance independently of ancestry.
+fn cite_version(
+    registry: &ResearchRegistry,
+    identities: &mut BTreeMap<Uuid, [u8; 32]>,
+    version: &ResearchVersionRecord,
+) -> Result<(), GfError> {
+    cite(registry, identities, version.version_uuid)?;
+    if let Some(source) = version.content.source_version {
+        cite(registry, identities, source)?;
+    }
+    if let Some(provenance) = &version.provenance {
+        cite(registry, identities, provenance.version_uuid())?;
+    }
+    Ok(())
 }
 
 fn cite(
