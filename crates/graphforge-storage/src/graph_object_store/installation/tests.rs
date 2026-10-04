@@ -59,12 +59,20 @@ fn successful_install_byte_work_counts_actual_streams_and_refuses_failed_writes(
             let (_, evidence) = result.unwrap();
             let bytes = payload.len() as u64;
             assert_eq!(work["written_bytes"], bytes);
-            // Resident SHA + XXH64 naming, plus each successful native read's
-            // actual SHA+XXH64 or checksum-only streams.
-            assert_eq!(
-                work["hashed_bytes"],
-                2 * bytes + 2 * evidence.bytes_hashed + evidence.checksum_read_bytes
-            );
+            // Resident SHA + XXH64 naming. Windows additionally authenticates
+            // the reopened sealed temporary through both streams.
+            #[cfg(unix)]
+            assert_eq!(work["hashed_bytes"], 2 * bytes);
+            #[cfg(windows)]
+            assert_eq!(work["hashed_bytes"], 4 * bytes);
+            assert!(evidence.attempted_install);
+            let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+            let (_, reused) = install_graph_object_bytes_with_lease(&lease, payload).unwrap();
+            assert!(reused.reused_existing);
+            let work = &capture.finish().regions["import_command"].work;
+            // Resident naming and one existing-object SHA/XXH64 admission.
+            assert_eq!(work["hashed_bytes"], 4 * bytes);
+            assert!(!work.contains_key("written_bytes"));
         }
     }
 }

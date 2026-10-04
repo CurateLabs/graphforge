@@ -448,7 +448,10 @@ work. A reused source that is actually checksummed still contributes that
 checksum pass. Authentication, identity, format and cache-release refusals do
 not credit the failed authentication. Completed work in a different successful
 leaf remains visible if a later enclosing operation fails. Hash work never
-adds another pass or restores removed data-path SHA authentication.
+adds another pass or restores removed data-path SHA authentication. Discarded
+unfinished digest builders remain attempted work only: a sealed private
+logical property stream contributes write work, while the bounded physical
+objects whose digests complete contribute hash work.
 
 Successful write work counts accepted bytes of an output whose writer flush
 and file sealing completed, followed by its existing successful output/receipt

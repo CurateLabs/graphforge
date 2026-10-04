@@ -1420,7 +1420,10 @@ pub(crate) fn checksum_reader(file: &mut impl Read, path: &Path) -> Result<(u64,
     checksum_reader_counted(file, path).map(|(checksum, calls, _)| (checksum, calls))
 }
 
-fn checksum_reader_counted(file: &mut impl Read, path: &Path) -> Result<(u64, u64, u64), GfError> {
+pub(crate) fn checksum_reader_counted(
+    file: &mut impl Read,
+    path: &Path,
+) -> Result<(u64, u64, u64), GfError> {
     let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut calls = 0_u64;
     let mut bytes = 0_u64;

@@ -448,9 +448,9 @@ pub(super) fn write_parquet_chunks(
                 )));
             }
         }
-        // The private logical stream was sealed too; bounded physical objects
-        // above carry their own, separate completed byte work.
-        crate::graph_construction::diagnostics::sealed_payload(written, 2);
+        // The private logical stream was sealed, but its digest builders
+        // were abandoned. Only bounded physical objects completed hashes.
+        crate::graph_construction::diagnostics::written_bytes(written);
         return Ok(artifacts);
     }
     let artifact = ConstructionEncodedArtifact {
