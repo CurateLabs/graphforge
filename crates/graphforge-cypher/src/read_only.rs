@@ -105,10 +105,6 @@ fn visit_pattern(pattern: &PathPattern, parameters: &mut BTreeSet<String>) -> Re
     Ok(())
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "exhaustive syntax admission keeps every expression's child traversal visible"
-)]
 fn visit_expr(expr: &Expr, parameters: &mut BTreeSet<String>) -> Result<(), GfError> {
     match expr {
         Expr::Literal(_) | Expr::Var(_) | Expr::LabelPredicate(_) => {}

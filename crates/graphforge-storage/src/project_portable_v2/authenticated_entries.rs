@@ -211,10 +211,11 @@ fn validate_saved_queries(
         cancelled,
     )?;
     let (_, runtime) = super::decode_runtime_map(&map_bytes)?;
-    let Some(participant) = runtime.participants.iter().find(|participant| {
+    let mut matching = runtime.participants.iter().filter(|participant| {
         participant.capability_id == crate::WORKSPACE_CAPABILITY_ID
             && participant.record_family_id == crate::WORKSPACE_SAVED_QUERIES_FAMILY
-    }) else {
+    });
+    let Some(participant) = matching.next() else {
         return Ok(());
     };
     let refuse = || {
@@ -223,7 +224,8 @@ fn validate_saved_queries(
             "invalid native saved-query definitions",
         )
     };
-    if participant.capability_version != crate::WORKSPACE_CAPABILITY_VERSION
+    if matching.next().is_some()
+        || participant.capability_version != crate::WORKSPACE_CAPABILITY_VERSION
         || participant.record_version != crate::WORKSPACE_SAVED_QUERIES_VERSION
         || participant.encoding != "json"
         || participant.schema_fingerprint
