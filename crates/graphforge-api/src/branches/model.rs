@@ -50,6 +50,12 @@ pub struct CreateResearchBranchRequest {
     pub created_at: i64,
     /// Immutable creation label.
     pub label: String,
+    /// Credited author of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<graphforge_storage::research_versions::ResearchSignature>,
+    /// Credited committer of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committer: Option<graphforge_storage::research_versions::ResearchSignature>,
 }
 
 /// Restore only one Branch's frozen research, preserving other heads and history.
@@ -68,6 +74,12 @@ pub struct RestoreResearchBranchRequest {
     pub version_uuid: Uuid,
     /// Restore time in UTC microseconds.
     pub created_at: i64,
+    /// Credited author of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<graphforge_storage::research_versions::ResearchSignature>,
+    /// Credited committer of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committer: Option<graphforge_storage::research_versions::ResearchSignature>,
 }
 
 /// Apply native Cypher only to one Branch's effective research graph.
@@ -86,6 +98,12 @@ pub struct ExecuteResearchBranchRequest {
     pub query: String,
     /// New Version time in UTC microseconds.
     pub created_at: i64,
+    /// Credited author of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<graphforge_storage::research_versions::ResearchSignature>,
+    /// Credited committer of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committer: Option<graphforge_storage::research_versions::ResearchSignature>,
 }
 
 /// Exact Branch-local ontology composition replacement.
@@ -108,6 +126,12 @@ pub struct ChangeResearchBranchOntologyRequest {
     pub data_disposition: crate::CompositionDataDisposition,
     /// Version time in UTC microseconds.
     pub created_at: i64,
+    /// Credited author of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<graphforge_storage::research_versions::ResearchSignature>,
+    /// Credited committer of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committer: Option<graphforge_storage::research_versions::ResearchSignature>,
 }
 
 /// Cite historical research without incorporating its objects or retaining its payload.
@@ -130,6 +154,12 @@ pub struct ReferenceResearchBranchRequest {
     pub label: String,
     /// Version time in UTC microseconds.
     pub created_at: i64,
+    /// Credited author of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<graphforge_storage::research_versions::ResearchSignature>,
+    /// Credited committer of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committer: Option<graphforge_storage::research_versions::ResearchSignature>,
 }
 
 /// Incorporate exact frozen membership into one Branch, preserving public UUIDs.
@@ -148,6 +178,12 @@ pub struct BringResearchBranchRequest {
     pub frozen_ipc: Vec<u8>,
     /// Version time in UTC microseconds.
     pub created_at: i64,
+    /// Credited author of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<graphforge_storage::research_versions::ResearchSignature>,
+    /// Credited committer of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committer: Option<graphforge_storage::research_versions::ResearchSignature>,
 }
 
 /// Suppress one assertion in the Branch knowledge view without deleting graph objects.
@@ -166,4 +202,10 @@ pub struct SuppressResearchBranchAssertionRequest {
     pub assertion_uuid: Uuid,
     /// Version time in UTC microseconds.
     pub created_at: i64,
+    /// Credited author of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<graphforge_storage::research_versions::ResearchSignature>,
+    /// Credited committer of the new Version; recorded, not authenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committer: Option<graphforge_storage::research_versions::ResearchSignature>,
 }

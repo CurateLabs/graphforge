@@ -33,6 +33,8 @@ fn cli_frozen_membership_survives_current_edits_and_reopen() {
     let version = Uuid::now_v7();
     let operation = graph
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid: version,
             context_uuid: Uuid::now_v7(),

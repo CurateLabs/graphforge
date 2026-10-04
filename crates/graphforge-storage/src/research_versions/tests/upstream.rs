@@ -23,6 +23,7 @@ fn generic_publication_rejects_forged_upstream_origin_and_receipt_generation() {
     version.version_uuid = Uuid::now_v7();
     version.context_uuid = Uuid::now_v7();
     version.content.source_version = Some(origin);
+    version.parents = vec![origin];
     let branch = ResearchBranchRecord {
         branch_uuid: version.context_uuid,
         project_uuid: project,
@@ -50,6 +51,8 @@ fn generic_publication_rejects_forged_upstream_origin_and_receipt_generation() {
     let parent = crate::resolve_project_generation(root).unwrap();
     let before = state(root);
     let capture = RegisterResearchVersion {
+        author: None,
+        committer: None,
         version_uuid: Uuid::now_v7(),
         context_uuid: project,
         source_generation_uuid: parent.generation_uuid(),
@@ -65,7 +68,8 @@ fn generic_publication_rejects_forged_upstream_origin_and_receipt_generation() {
     branches::stage_origin(root, &mut after, &capture).unwrap();
     let next = Uuid::now_v7();
     version.version_uuid = next;
-    branches::publish(root, &mut after, None, &version).unwrap();
+    version.parents = vec![branch.base_version_uuid, capture.version_uuid];
+    branches::publish(root, &mut after, None, &version, Some(capture.version_uuid)).unwrap();
     after.versions.remove(&capture.version_uuid);
     let operation = Uuid::now_v7();
     let generation = Uuid::now_v7();

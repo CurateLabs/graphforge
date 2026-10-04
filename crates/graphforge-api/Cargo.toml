@@ -197,6 +197,14 @@ name = "research_versions"
 required-features = ["research"]
 
 [[test]]
+name = "research_commits"
+required-features = ["research"]
+
+[[test]]
+name = "research_legacy"
+required-features = ["research"]
+
+[[test]]
 name = "branches"
 required-features = ["research"]
 

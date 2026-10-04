@@ -33,6 +33,8 @@ fn edit(graph: &mut GraphForge, branch: Uuid, query: &str) -> Uuid {
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: current(graph),
                 branch_uuid: branch,
@@ -58,6 +60,8 @@ fn frozen_submission_survives_continued_branch_edits_and_retains_only_selected_f
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: current(&graph),
                 branch_uuid,
@@ -239,6 +243,8 @@ fn frozen_submission_survives_continued_branch_edits_and_retains_only_selected_f
         super::preview::load(&graph, request.proposal_uuid, &CancellationToken::new()).unwrap();
     let item = proposal.items[0].item_uuid;
     let mut review = ReviewResearchProposalRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: preview.generation,
         proposal_uuid: request.proposal_uuid,

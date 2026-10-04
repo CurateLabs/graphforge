@@ -88,6 +88,8 @@ fn unregistered_projection_cannot_certify_project_acceptance_even_with_same_cont
     let current = |g: &GraphForge| g.generation_for_read().unwrap().generation_uuid();
     let token = CancellationToken::new();
     let b = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&g),
         branch_uuid: Uuid::now_v7(),
@@ -102,6 +104,8 @@ fn unregistered_projection_cannot_certify_project_acceptance_even_with_same_cont
     };
     g.create_research_branch(&b, &token).unwrap();
     let edit = ExecuteResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&g),
         branch_uuid: b.branch_uuid,
@@ -113,6 +117,8 @@ fn unregistered_projection_cannot_certify_project_acceptance_even_with_same_cont
     g.execute("MATCH (n:Item) SET n.x = 1").unwrap();
     let op = g
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid: Uuid::now_v7(),
             context_uuid: Uuid::now_v7(),
@@ -130,6 +136,8 @@ fn unregistered_projection_cannot_certify_project_acceptance_even_with_same_cont
     let native = g.research_version(destination).unwrap();
     let projection = Uuid::now_v7();
     let projected = RegisterResearchVersion {
+        author: None,
+        committer: None,
         version_uuid: projection,
         context_uuid: crate::research_claims::authority::project_uuid(
             &g.generation_for_read().unwrap(),

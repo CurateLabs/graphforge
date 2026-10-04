@@ -2218,6 +2218,20 @@ mod tests {
 
     #[test]
     fn future_research_capability_refuses_publication_without_creating_files() {
+        unsupported_research_capability_refuses_publication(
+            crate::research_versions::RESEARCH_VERSION + 1,
+        );
+    }
+
+    #[test]
+    fn pre_legacy_research_capability_refuses_publication_without_creating_files() {
+        // Revision 6 is the oldest readable revision; revision 5 stays refused.
+        unsupported_research_capability_refuses_publication(
+            crate::research_versions::RESEARCH_LEGACY_VERSION - 1,
+        );
+    }
+
+    fn unsupported_research_capability_refuses_publication(capability_version: u32) {
         fn inventory(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
             let mut files = std::collections::BTreeMap::new();
             for entry in fs::read_dir(root).unwrap() {
@@ -2243,7 +2257,7 @@ mod tests {
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
         manifest.capabilities.push(CapabilityDescriptor {
             capability_id: "research".into(),
-            capability_version: crate::research_versions::RESEARCH_VERSION + 1,
+            capability_version,
         });
         let bytes = canonical_line(&manifest);
         fs::write(manifest_path, &bytes).unwrap();

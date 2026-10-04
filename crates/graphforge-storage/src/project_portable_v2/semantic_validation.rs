@@ -935,9 +935,10 @@ fn validate_research_runtime(
         }
         let part = research_parts[0];
         if part.record_family_id != "registry"
-            || part.record_version != crate::research_versions::RESEARCH_VERSION
-            || part.capability_version != crate::research_versions::RESEARCH_VERSION
-            || research_caps[0].capability_version != crate::research_versions::RESEARCH_VERSION
+            // Revision 6 packages (older clients' exports) are admitted as-is.
+            || !crate::research_versions::research_revision_readable(part.capability_version)
+            || part.record_version != part.capability_version
+            || research_caps[0].capability_version != part.capability_version
             || !research_components
                 .iter()
                 .any(|c| c.participant_id == part.participant_id)

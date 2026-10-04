@@ -5,6 +5,8 @@ fn current(graph: &GraphForge) -> Uuid {
 pub(super) fn prepare(graph: &mut GraphForge) -> UpdateResearchBranchRequest {
     graph.execute("CREATE (:Item {x:0,y:0})").unwrap();
     let branch = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(graph),
         branch_uuid: Uuid::now_v7(),
@@ -32,6 +34,8 @@ pub(super) fn prepare(graph: &mut GraphForge) -> UpdateResearchBranchRequest {
         .find(|row| row.key.2 == "property:x")
         .unwrap();
     UpdateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(graph),
         version_uuid: Uuid::now_v7(),
@@ -152,6 +156,8 @@ fn both_current_boundaries_preserve_atomic_baseline_history_and_exact_replay() {
         graph
             .restore_research_branch(
                 &RestoreResearchBranchRequest {
+                    author: None,
+                    committer: None,
                     operation_uuid: Uuid::now_v7(),
                     expected_generation_uuid: current(&graph),
                     branch_uuid: request.preview.branch_uuid,

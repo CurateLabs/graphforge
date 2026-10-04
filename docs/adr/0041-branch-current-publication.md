@@ -92,3 +92,21 @@ physical bytes only after the aborted attempt has been fully recovered. While
 an attempt is live, its physical request fingerprint must still match; committed
 receipts retain the full prepared-request digest and exact public-intent digest.
 Changed public requests cannot reuse an aborted or committed operation identity.
+
+## Versions are commits amendment (#1773)
+
+A Branch head is a commit (ADR 0055). Branch creation records the origin Version
+as the base's only parent. Every later Branch Version records the prior Branch
+head as its first parent: execute, ontology, claim, suppression and reference
+record only that; restore also records the restored source and Bring the Slice
+source Version as provenance; upstream incorporation adds the upstream Version
+and whole-Proposal acceptance the Proposal's source Version as a second parent.
+A partial acceptance records only the prior head; its review keeps the accepted
+items. Storage refuses a Branch publication whose parents differ, so a head can
+no longer be replaced by an unrelated Version.
+
+Branch preparation opens the head record and clears its commit fields before an
+edit, and restoration sets them explicitly on the copied source record, so no
+parent, signature or provenance is inherited. Author and committer come from the
+operation request and are optional until #1772 supplies defaults; the Branch
+record's `creator_uuid` is unchanged in this revision.

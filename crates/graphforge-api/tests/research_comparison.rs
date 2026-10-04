@@ -10,6 +10,8 @@ fn current(g: &GraphForge) -> Uuid {
 }
 fn branch(g: &mut GraphForge) -> Uuid {
     let r = CreateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(g),
         branch_uuid: Uuid::now_v7(),
@@ -28,6 +30,8 @@ fn branch(g: &mut GraphForge) -> Uuid {
 }
 fn edit(g: &mut GraphForge, id: Uuid, query: &str) -> Uuid {
     let r = ExecuteResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(g),
         branch_uuid: id,
@@ -46,6 +50,8 @@ fn capture_context(g: &mut GraphForge, context: Uuid) -> Uuid {
     let id = Uuid::now_v7();
     let op = g
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid: id,
             context_uuid: context,
@@ -336,6 +342,8 @@ fn pinned_cursor_rejects_changed_reference_retention() {
     let cited = capture_context(&mut g, context);
     let b = branch(&mut g);
     let r = ReferenceResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&g),
         branch_uuid: b,

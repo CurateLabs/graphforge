@@ -17,6 +17,8 @@ fn historical_comparison_does_not_inherit_later_acceptance_after_reopen() {
     let project_zero = Uuid::now_v7();
     let capture = graph
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid: project_zero,
             context_uuid: Uuid::now_v7(),

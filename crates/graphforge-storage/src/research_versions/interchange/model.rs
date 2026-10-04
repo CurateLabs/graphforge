@@ -69,6 +69,9 @@ pub struct ResearchInterchangeManifest {
     pub version_projects: BTreeMap<Uuid, Uuid>,
     /// Permanent original identity commitments, including unavailable ancestors.
     pub identities: BTreeMap<Uuid, [u8; 32]>,
+    /// Recorded parents of the closure's Versions and of all their ancestors.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ancestry: BTreeMap<Uuid, Vec<Uuid>>,
     /// Historical Branch records; these are never destination live heads.
     pub genealogy: BTreeMap<Uuid, ResearchBranchRecord>,
     /// Exact selected accepted-contribution mappings, not local acceptance decisions.
@@ -82,7 +85,7 @@ impl ResearchInterchangeManifest {
     /// Validate identity, bounds, selected closure, and provenance before admission.
     pub fn validate(&self) -> Result<(), GfError> {
         if self.contract_version != 1
-            || self.research_capability_version != RESEARCH_VERSION
+            || !super::super::research_revision_readable(self.research_capability_version)
             || self.producer
                 != concat!(
                     "graphforge-storage/",
@@ -100,6 +103,18 @@ impl ResearchInterchangeManifest {
         {
             return Err(invalid(
                 "unsupported or oversized research interchange manifest",
+            ));
+        }
+        // A revision 6 export (an older client's) holds only parentless legacy roots.
+        if self.research_capability_version == super::super::RESEARCH_LEGACY_VERSION
+            && (!self.ancestry.is_empty()
+                || !self
+                    .versions
+                    .values()
+                    .all(super::super::legacy::legacy_record))
+        {
+            return Err(invalid(
+                "research revision 6 interchange carries revision 7 commit data",
             ));
         }
         if self.version_projects.keys().ne(self.versions.keys())
@@ -160,6 +175,7 @@ impl ResearchInterchangeManifest {
         let registry = ResearchRegistry {
             versions: self.versions.clone(),
             identities: self.identities.clone(),
+            ancestry: self.ancestry.clone(),
             materialized: self.versions.keys().copied().collect(),
             ..ResearchRegistry::default()
         };
@@ -204,6 +220,20 @@ impl ResearchInterchangeManifest {
         if closure != self.versions.keys().copied().collect() {
             return Err(invalid(
                 "research package includes Versions outside selected dependency closure",
+            ));
+        }
+        let mut descent = BTreeSet::new();
+        let mut pending: Vec<_> = closure.iter().copied().collect();
+        while let Some(id) = pending.pop() {
+            if let Some(parents) = self.ancestry.get(&id)
+                && descent.insert(id)
+            {
+                pending.extend(parents.iter().copied());
+            }
+        }
+        if descent != self.ancestry.keys().copied().collect() {
+            return Err(invalid(
+                "research package ancestry differs from its closure's descent",
             ));
         }
         for version in self.versions.values() {

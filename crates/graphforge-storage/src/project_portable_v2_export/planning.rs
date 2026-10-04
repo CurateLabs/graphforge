@@ -343,6 +343,23 @@ struct RuntimeCapability {
     capability_id: String,
     capability_version: u32,
 }
+/// Exports are written at the current research revision. A revision 6 Project
+/// is relabelled exactly as its first research write would relabel it: the
+/// participant bytes, and so every file digest, are unchanged.
+fn current_research_revision(participant: &mut RuntimeParticipant) {
+    use crate::research_versions::{RESEARCH_CAPABILITY, RESEARCH_REGISTRY, RESEARCH_VERSION};
+    if participant.capability_id != RESEARCH_CAPABILITY
+        || participant.capability_version == RESEARCH_VERSION
+    {
+        return;
+    }
+    participant.capability_version = RESEARCH_VERSION;
+    if participant.record_family_id == RESEARCH_REGISTRY {
+        participant.record_version = RESEARCH_VERSION;
+        participant.schema_fingerprint = hex(crate::research_versions::current_registry_schema());
+    }
+}
+
 #[derive(Serialize)]
 struct RuntimeParticipant {
     participant_id: String,
@@ -738,7 +755,7 @@ pub fn plan_selected_portable_v2(
         {
             graph_inventory_participant = Some(id.clone());
         }
-        runtime_participants.push(RuntimeParticipant {
+        let mut runtime = RuntimeParticipant {
             participant_id: id.clone(),
             capability_id: d.capability_id,
             capability_version: d.capability_version,
@@ -747,7 +764,9 @@ pub fn plan_selected_portable_v2(
             encoding: d.encoding,
             schema_fingerprint: hex(d.schema_fingerprint),
             row_count: d.row_count,
-        });
+        };
+        current_research_revision(&mut runtime);
+        runtime_participants.push(runtime);
         components.push(Component {
             kind: kind.into(),
             participant_id: id,
@@ -872,8 +891,14 @@ pub fn plan_selected_portable_v2(
                     .contains(&capability.capability_id)
             })
             .map(|capability| RuntimeCapability {
+                capability_version: if capability.capability_id
+                    == crate::research_versions::RESEARCH_CAPABILITY
+                {
+                    crate::research_versions::RESEARCH_VERSION
+                } else {
+                    capability.capability_version
+                },
                 capability_id: capability.capability_id,
-                capability_version: capability.capability_version,
             })
             .collect(),
         participants: &runtime_participants,

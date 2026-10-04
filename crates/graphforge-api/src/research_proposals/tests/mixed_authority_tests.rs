@@ -47,6 +47,8 @@ fn fork_local_branch_exports_mixed_project_acceptance_genealogy() {
     let local_version = Uuid::now_v7();
     fork.create_research_branch(
         &CreateResearchBranchRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             expected_generation_uuid: current(&fork),
             branch_uuid: local_branch,
@@ -140,6 +142,8 @@ fn reject_conflicting_citations(
     second.versions.retain(|id, _| *id == proof);
     second.version_projects.retain(|id, _| *id == proof);
     second.genealogy.clear();
+    // An acceptance proof is frozen content without parents: it has no descent.
+    second.ancestry.clear();
     let changed_project = Uuid::now_v7();
     second.source_project_uuid = changed_project;
     second.version_projects.insert(proof, changed_project);

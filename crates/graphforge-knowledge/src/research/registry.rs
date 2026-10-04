@@ -63,7 +63,8 @@ pub(crate) fn schema_registry_entries() -> Vec<SchemaRegistryEntry> {
         },
         SchemaRegistryEntry {
             capability_id: "research",
-            capability_version: 6,
+            // Must equal graphforge-storage RESEARCH_VERSION: decisions are written at it.
+            capability_version: 7,
             record_family: "canonical_decisions",
             record_version: RESEARCH_RECORD_VERSION,
             schema: Arc::clone(&RESEARCH_DECISION_SCHEMA),

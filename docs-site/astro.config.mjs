@@ -424,6 +424,10 @@ export default defineConfig({
                   label: '0054 — GraphForge component boundaries: Core, XYG, editor, and Hub',
                   slug: 'adr/0054-product-component-boundaries',
                 },
+                {
+                  label: '0055 — Research Versions are commits',
+                  slug: 'adr/0055-versions-are-commits',
+                },
                 // END generated ADR records
               ],
             },

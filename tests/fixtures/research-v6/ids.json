@@ -1,0 +1,15 @@
+{
+  "branch_base_version_uuid": "01a0ffe4-5845-7139-804a-1bafefac45c6",
+  "branch_head_version_uuid": "01a0ffe4-5931-7754-87c7-debf2881cc85",
+  "branch_uuid": "01a0ffe4-5845-7139-804a-1baedb85cb30",
+  "identities": {
+    "01a0ffe4-581d-718b-9946-228afc3032b0": "64ad7b66c8a2473556c0cbef3fa5899e29b0564201556ce528538656ec43849a",
+    "01a0ffe4-5845-7139-804a-1bafefac45c6": "a0f1e4924a191531eb3ca69ffdd61e6666621d1074a831e41633136368c59a80",
+    "01a0ffe4-5845-7139-804a-1bb0597c38c4": "62952e7a157fa84e7214224467a31cf8835eb8842317ad02c89f2266489181be",
+    "01a0ffe4-5931-7754-87c7-debf2881cc85": "23fee7140ac9db565e78f62c377cf34919ca48ff6729a0c1f038ae5e88fa2251"
+  },
+  "origin_version_uuid": "01a0ffe4-5845-7139-804a-1bb0597c38c4",
+  "producer": "graphforge-storage/0.5.2;research/6",
+  "project_context_uuid": "01a0ffe4-581d-718b-9946-2289d5d133cd",
+  "project_version_uuid": "01a0ffe4-581d-718b-9946-228afc3032b0"
+}

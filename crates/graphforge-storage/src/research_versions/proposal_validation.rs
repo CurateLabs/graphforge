@@ -204,7 +204,9 @@ pub(super) fn insert_payload(
     registry: &mut ResearchRegistry,
     version: &super::ResearchVersionRecord,
 ) -> Result<Uuid, GfError> {
+    // Frozen review content is a projection, never a commit: it has no parents.
     if version.content.source_version.is_none()
+        || !version.parents.is_empty()
         || registry.branches.contains_key(&version.context_uuid)
         || registry.heads.contains_key(&version.context_uuid)
         || registry.identities.contains_key(&version.version_uuid)

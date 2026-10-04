@@ -19,6 +19,8 @@ fn distinct_imports_reopen_with_identical_version_lineage() {
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: graph
                     .committed_generation_identity()
@@ -45,6 +47,8 @@ fn distinct_imports_reopen_with_identical_version_lineage() {
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: generation,
                 branch_uuid,

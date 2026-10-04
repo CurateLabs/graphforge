@@ -58,6 +58,8 @@ pub(super) fn prepare(
         .or(snapshot.upstream.version)
         .ok_or_else(|| invalid("exact upstream Version is unavailable"))?;
     let spec = RegisterResearchVersion {
+        author: None,
+        committer: None,
         version_uuid: preview::identity(request.operation_uuid, "selected_upstream"),
         context_uuid: preview::identity(request.operation_uuid, "selected_upstream_context"),
         source_generation_uuid: snapshot.upstream.generation,

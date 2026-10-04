@@ -56,6 +56,8 @@ fn owner_with_pending_upstream() -> (
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: current(&graph),
                 branch_uuid,
@@ -119,6 +121,8 @@ fn update(
         .collect();
     assert!(!decisions.is_empty(), "the preview offers fields to adopt");
     UpdateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(graph),
         version_uuid: Uuid::now_v7(),
@@ -224,6 +228,8 @@ fn adopting_a_source_preference_writes_the_private_view_and_no_published_tree() 
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: current(&graph),
                 branch_uuid,
@@ -266,6 +272,8 @@ fn adopting_a_source_preference_writes_the_private_view_and_no_published_tree() 
         })
         .collect();
     let request = UpdateResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         version_uuid: Uuid::now_v7(),

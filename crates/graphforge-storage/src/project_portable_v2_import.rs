@@ -946,7 +946,7 @@ fn import_materialized(
             ));
         }
     }
-    let capabilities = runtime
+    let mut capabilities: Vec<ProjectCapability> = runtime
         .capabilities
         .into_iter()
         .map(|capability| ProjectCapability {
@@ -1067,6 +1067,12 @@ fn import_materialized(
         }
         None
     };
+    // A revision 6 research package (an older client's export) imports at the
+    // current revision; its participant bytes and Versions are unchanged.
+    crate::research_versions::upgrade_research_request(
+        &mut capabilities,
+        participants.iter_mut().map(|p| &mut p.participant),
+    );
     participants.sort_by(|left, right| {
         (
             &left.participant.capability_id,

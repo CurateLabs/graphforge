@@ -41,6 +41,10 @@ fn signed_historical_saved_query_definitions_are_decoded_before_materialization(
             crate::graph_object_store::install_graph_object_bytes(source.path(), &bytes).unwrap();
         let participant = original.to_project_participant().unwrap();
         let version = ResearchVersionRecord {
+            parents: Vec::new(),
+            author: None,
+            committer: None,
+            provenance: None,
             version_uuid: Uuid::now_v7(),
             context_uuid: Uuid::now_v7(),
             label: None,

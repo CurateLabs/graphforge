@@ -131,14 +131,7 @@ pub(super) fn register(
         };
         crate::graph_object_store::install_graph_object_bytes(root, bytes)?;
     }
-    let version = ResearchVersionRecord {
-        version_uuid: spec.version_uuid,
-        context_uuid: spec.context_uuid,
-        label: spec.label.clone(),
-        description: spec.description.clone(),
-        created_at: spec.created_at,
-        content,
-    };
+    let version = record(registry, spec, content);
     retained_content::inspect(root, &version, None)?;
     let id = insert_version(registry, version)?;
     registry.materialized.insert(id);
@@ -181,14 +174,7 @@ fn register_graphless(
             .ok_or_else(|| invalid("projection participant unavailable"))?;
         crate::graph_object_store::install_graph_object_bytes(root, &snapshot.bytes)?;
     }
-    let version = ResearchVersionRecord {
-        version_uuid: spec.version_uuid,
-        context_uuid: spec.context_uuid,
-        label: spec.label.clone(),
-        description: spec.description.clone(),
-        created_at: spec.created_at,
-        content,
-    };
+    let version = record(registry, spec, content);
     retained_content::inspect(root, &version, None)?;
     let id = insert_version(registry, version)?;
     registry.materialized.insert(id);
@@ -283,4 +269,24 @@ fn source_graph(
 
 fn io(error: &std::io::Error) -> GfError {
     GfError::Storage(format!("research projection temporary workspace: {error}"))
+}
+
+/// A projection registered for a context descends from that context's head.
+fn record(
+    registry: &ResearchRegistry,
+    spec: &RegisterResearchVersion,
+    content: super::ResearchVersionContent,
+) -> ResearchVersionRecord {
+    ResearchVersionRecord {
+        version_uuid: spec.version_uuid,
+        context_uuid: spec.context_uuid,
+        label: spec.label.clone(),
+        description: spec.description.clone(),
+        created_at: spec.created_at,
+        content,
+        parents: super::ancestry::prior_head_then(registry, spec.context_uuid, None),
+        author: spec.author.clone(),
+        committer: spec.committer.clone(),
+        provenance: None,
+    }
 }

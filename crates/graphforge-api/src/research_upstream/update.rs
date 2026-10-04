@@ -52,6 +52,18 @@ impl GraphForge {
             .map(|source| source.version_uuid)
             .or(preview.upstream.version)
             .ok_or_else(|| invalid("exact upstream Version is unavailable"))?;
+        let prior_version = preview
+            .local
+            .version
+            .ok_or_else(|| invalid("local Branch Version is unavailable"))?;
+        // Incorporating upstream merges: the prior head, then the upstream Version.
+        crate::branches::publication::commit(
+            &mut prepared.version,
+            vec![prior_version, upstream_version],
+            request.author.as_ref(),
+            request.committer.as_ref(),
+            None,
+        )?;
         // Register any newly created local explanatory fields, then advance only reviewed keys.
         baseline::update(self, &graph, &mut prepared, request.operation_uuid, cancel)?;
         let prepared_graph = crate::branches::private_view::open(self, &prepared)?;
@@ -81,10 +93,7 @@ impl GraphForge {
             operation_uuid: request.operation_uuid,
             branch_uuid: request.preview.branch_uuid,
             original_base_version_uuid: preview.branch.base_version_uuid,
-            prior_version_uuid: preview
-                .local
-                .version
-                .ok_or_else(|| invalid("local Branch Version is unavailable"))?,
+            prior_version_uuid: prior_version,
             upstream_version_uuid: upstream_version,
             version_uuid: request.version_uuid,
             preview_generation_uuid: preview.current.generation_uuid(),
@@ -125,6 +134,8 @@ fn explain(
                 crate::research_claims::branch::apply(
                     graph,
                     &crate::ChangeResearchBranchClaimRequest {
+                        author: None,
+                        committer: None,
                         operation_uuid: preview::identity(
                             request.operation_uuid,
                             &claim.assertion_uuid.to_string(),
@@ -198,6 +209,8 @@ fn source_capture(
 ) -> Result<Option<Box<RegisterResearchVersion>>, GfError> {
     Ok(if preview.branch.parent_branch_uuid.is_none() {
         Some(Box::new(RegisterResearchVersion {
+            author: None,
+            committer: None,
             version_uuid: preview::identity(request.operation_uuid, "upstream_origin"),
             context_uuid: preview.branch.project_uuid,
             source_generation_uuid: preview.current.generation_uuid(),

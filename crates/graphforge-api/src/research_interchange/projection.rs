@@ -63,6 +63,8 @@ pub(super) fn prepare(
     let fingerprint: [u8; 32] = digest.finalize().into();
     let original = selection.version.clone();
     let mut spec = RegisterResearchVersion {
+        author: None,
+        committer: None,
         version_uuid: request.version_uuid,
         context_uuid: original.context_uuid,
         source_generation_uuid: original.content.generation_uuid,

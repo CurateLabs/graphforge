@@ -134,6 +134,8 @@ fn fixed_projection_reclaims_growing_parent_and_reopens_exact_content() {
             root,
             ResearchMutation::RegisterGraphProjection {
                 spec: RegisterResearchVersion {
+                    author: None,
+                    committer: None,
                     version_uuid: selected_id,
                     context_uuid: context,
                     source_generation_uuid: original_generation,
@@ -580,6 +582,8 @@ fn object_root_project_restore_and_private_materialization_do_not_attach_a_graph
     mutate(
         root,
         ResearchMutation::RestoreProject {
+            author: None,
+            committer: None,
             context_uuid: context,
             source_version: version,
             version_uuid: Uuid::now_v7(),
@@ -607,6 +611,8 @@ fn branch_selection_is_prepared_without_an_intermediate_authoritative_head() {
     let branch_uuid = Uuid::now_v7();
     let version_uuid = Uuid::now_v7();
     let spec = RegisterResearchVersion {
+        author: None,
+        committer: None,
         version_uuid,
         context_uuid: branch_uuid,
         source_generation_uuid: generation,
@@ -631,7 +637,7 @@ fn branch_selection_is_prepared_without_an_intermediate_authoritative_head() {
         induced_edges: false,
         exclude_properties: BTreeSet::new(),
     };
-    let prepared = prepare_branch_selection(
+    let mut prepared = prepare_branch_selection(
         root,
         &spec,
         None,
@@ -640,6 +646,7 @@ fn branch_selection_is_prepared_without_an_intermediate_authoritative_head() {
         &AtomicBool::new(false),
     )
     .unwrap();
+    prepared.version.parents = vec![origin_id];
     assert_eq!(current(root), before);
     assert!(!state(root).heads.contains_key(&branch_uuid));
     assert!(!state(root).versions.contains_key(&version_uuid));

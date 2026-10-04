@@ -62,6 +62,8 @@ fn branch_edit_leaves_every_published_generation_tree_byte_identical() {
 fn branch_edit_private_parent_generation_matches_its_recorded_inventory() {
     let (_temp, _root, graph, branch) = project_with_branch();
     let request = ExecuteResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: branch,
@@ -100,6 +102,8 @@ fn project_restore_then_write_publishes_without_touching_any_published_tree() {
     let owner = Uuid::now_v7();
     let capture = graph
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid: baseline,
             context_uuid: owner,
@@ -122,6 +126,8 @@ fn project_restore_then_write_publishes_without_touching_any_published_tree() {
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: current(&graph),
                 mutation: ResearchMutation::RestoreProject {
+                    author: None,
+                    committer: None,
                     context_uuid: owner,
                     source_version: baseline,
                     version_uuid: Uuid::now_v7(),
@@ -199,6 +205,8 @@ fn prepared_branch_content_never_opens_a_pinned_alias_over_a_tree_backed_owner()
     let (_temp, root, graph, branch) = project_with_branch();
     assert_tree_backed_owner(&graph);
     let request = ExecuteResearchBranchRequest {
+        author: None,
+        committer: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: branch,

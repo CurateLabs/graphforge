@@ -325,6 +325,8 @@ fn create_branch(graph: &mut GraphForge, label: &str, source: BranchSource) -> (
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: generation(graph),
                 branch_uuid,
@@ -352,6 +354,8 @@ fn edit(graph: &mut GraphForge, branch_uuid: Uuid, score: i64) -> Uuid {
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: generation(graph),
                 branch_uuid,

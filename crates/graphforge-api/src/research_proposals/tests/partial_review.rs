@@ -27,10 +27,14 @@ fn partial_review_retains_only_accepted_fields_and_deferral_can_be_reviewed_late
         "property:deferred" => Defer,
         _ => Reject,
     });
-    graph
+    let first = graph
         .review_research_proposal(&request, &CancellationToken::new())
+        .unwrap()
+        .version_uuid
         .unwrap();
     let registry = graph.research_version_retention().unwrap();
+    // A partial acceptance only advances the prior head (none yet for the Project).
+    assert!(registry.versions[&first].parents.is_empty());
     assert_eq!(registry.proposals.accepted.len(), 1);
     let mapping = registry.proposals.accepted.values().next().unwrap();
     let proof = crate::research_versions::materialize_version(
@@ -66,9 +70,15 @@ fn partial_review_retains_only_accepted_fields_and_deferral_can_be_reviewed_late
             Accept
         }
     });
-    graph
+    let accepted = graph
         .review_research_proposal(&second, &CancellationToken::new())
+        .unwrap()
+        .version_uuid
         .unwrap();
+    assert_eq!(
+        graph.research_version(accepted).unwrap().parents,
+        vec![first]
+    );
     assert_eq!(
         graph
             .research_version_retention()

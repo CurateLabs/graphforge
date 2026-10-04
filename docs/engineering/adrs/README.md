@@ -107,6 +107,7 @@ the CI Lint job (#1390).
 | 0052 | Discovery carries a digest-addressed research lineage document | Accepted | Clone or publish paths need identities this document cannot express, or Hub moderation requires cross-owner Proposal submission semantics | [`../../adr/0052-discovery-research-lineage-document.md`](../../adr/0052-discovery-research-lineage-document.md) |
 | 0053 | Hub publish wire contract | Accepted | The control-plane publish session shape, data-plane upload URL policy, or ref precondition encoding needs a breaking wire change | [`../../adr/0053-hub-publish-wire-contract.md`](../../adr/0053-hub-publish-wire-contract.md) |
 | 0054 | GraphForge component boundaries: Core, XYG, editor, and Hub | Accepted | A component needs to own a contract assigned here to another component, or the Hub needs to store data GraphForge Core does not define | [`../../adr/0054-product-component-boundaries.md`](../../adr/0054-product-component-boundaries.md) |
+| 0055 | Research Versions are commits | Proposed | A head-moving operation needs more than one merge parent, a host needs identity that free-form signatures cannot express, or revision 6 Projects no longer need to be read | [`../../adr/0055-versions-are-commits.md`](../../adr/0055-versions-are-commits.md) |
 
 ### Superseded
 

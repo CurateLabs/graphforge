@@ -1176,6 +1176,14 @@ fn read_evidence_or_empty(
     }
 }
 
+/// A participant's capability version is the registered one, or for research
+/// any revision this build still reads: revision 6 decisions keep their bytes.
+pub(crate) fn capability_version_supported(capability: &str, registered: u32, actual: u32) -> bool {
+    actual == registered
+        || (capability == graphforge_storage::research_versions::RESEARCH_CAPABILITY
+            && graphforge_storage::research_versions::research_revision_readable(actual))
+}
+
 pub(crate) fn require_participant_contract(
     snapshot: &graphforge_storage::ProjectParticipantSnapshot,
     family: &str,
@@ -1185,8 +1193,11 @@ pub(crate) fn require_participant_contract(
         .iter()
         .find(|entry| entry.record_family == family)
         .expect("registered knowledge family");
-    if snapshot.capability_version != expected.capability_version
-        || snapshot.record_version != expected.record_version
+    if !capability_version_supported(
+        expected.capability_id,
+        expected.capability_version,
+        snapshot.capability_version,
+    ) || snapshot.record_version != expected.record_version
         || snapshot.encoding != "parquet"
         || snapshot.schema_fingerprint != expected.schema_fingerprint
     {

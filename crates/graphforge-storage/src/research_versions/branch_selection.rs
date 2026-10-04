@@ -61,6 +61,11 @@ pub fn prepare_branch_selection(
             description: spec.description.clone(),
             created_at: spec.created_at,
             content,
+            // The publishing operation states the parents it commits to.
+            parents: Vec::new(),
+            author: spec.author.clone(),
+            committer: spec.committer.clone(),
+            provenance: None,
         }
     };
     replace_domains(root, &mut version, replacements, cancellation)?;

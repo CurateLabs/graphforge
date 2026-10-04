@@ -193,6 +193,8 @@ fn selected_view(
         exclude_properties: BTreeSet::new(),
     };
     let spec = RegisterResearchVersion {
+        author: None,
+        committer: None,
         version_uuid: Uuid::now_v7(),
         context_uuid: Uuid::now_v7(),
         source_generation_uuid: version.content.generation_uuid,

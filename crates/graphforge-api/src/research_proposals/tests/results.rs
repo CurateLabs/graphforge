@@ -57,6 +57,8 @@ fn selected_result_artifact_preserves_bytes_and_source_provenance_with_explicit_
     let owner = Uuid::now_v7();
     let capture = graph
         .prepare_research_version(PrepareResearchVersionRequest {
+            author: None,
+            committer: None,
             operation_uuid: Uuid::now_v7(),
             version_uuid: baseline,
             context_uuid: owner,
@@ -158,6 +160,8 @@ fn selected_result_artifact_preserves_bytes_and_source_provenance_with_explicit_
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: current(&graph),
                 mutation: ResearchMutation::RestoreProject {
+                    author: None,
+                    committer: None,
                     context_uuid: owner,
                     source_version: baseline,
                     version_uuid: Uuid::now_v7(),

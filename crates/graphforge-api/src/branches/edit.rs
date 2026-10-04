@@ -33,6 +33,11 @@ impl GraphForge {
         cancellation.checkpoint()?;
         version.version_uuid = request.version_uuid;
         version.created_at = request.created_at;
+        sign(
+            &mut version,
+            request.author.as_ref(),
+            request.committer.as_ref(),
+        )?;
         finish(
             self,
             command,
@@ -44,6 +49,18 @@ impl GraphForge {
     }
 }
 
+/// Credit an edit prepared by `prepare`, keeping its prior-head parent.
+pub(crate) fn sign(
+    version: &mut graphforge_storage::research_versions::ResearchVersionRecord,
+    author: Option<&graphforge_storage::research_versions::ResearchSignature>,
+    committer: Option<&graphforge_storage::research_versions::ResearchSignature>,
+) -> Result<(), GfError> {
+    let parents = std::mem::take(&mut version.parents);
+    publication::commit(version, parents, author, committer, None)
+}
+
+/// Open the Branch head for an edit. The returned record descends from that
+/// head; its other commit fields are cleared, never inherited.
 pub(crate) fn prepare(
     owner: &GraphForge,
     command: &publication::Command,
@@ -63,13 +80,15 @@ pub(crate) fn prepare(
         .heads
         .get(&branch_uuid)
         .ok_or_else(unavailable)?;
-    let version = command
+    let mut version = command
         .registry
         .versions
         .get(head)
         .cloned()
         .ok_or_else(unavailable)?;
     let mut graph = crate::research_versions::materialize_version_writable(owner, &version)?;
+    // After materializing the authenticated head: the edit is a new commit.
+    publication::commit(&mut version, vec![*head], None, None, None)?;
     graph.resource_policy.memory_budget_bytes = 64 * 1024 * 1024;
     graph.resource_policy.spill_enabled = false;
     Ok((graph, version))
