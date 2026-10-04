@@ -11,7 +11,7 @@ revisit_when: "A component needs to own a contract assigned here to another comp
 
 **Status:** Accepted
 
-> **Shared GraphForge decision, public revision 1.** Curate Labs maintains this text in one place and publishes it unchanged to [graphforge](https://github.com/CurateLabs/graphforge/blob/main/docs/adr/0054-product-component-boundaries.md), [xyg](https://github.com/CurateLabs/xyg/blob/main/spec/design/graphforge-product-boundaries.md), [graphforge-vscode](https://github.com/CurateLabs/graphforge-vscode/blob/main/docs/engineering/PRODUCT_BOUNDARIES.md), and the Hub repository. Do not edit this copy: changes are made at the source and re-published to every repository.
+> **Shared GraphForge decision, public revision 2.** Curate Labs maintains this text in one place and publishes it unchanged to [graphforge](https://github.com/CurateLabs/graphforge/blob/main/docs/adr/0054-product-component-boundaries.md), [xyg](https://github.com/CurateLabs/xyg/blob/main/spec/design/graphforge-product-boundaries.md), [graphforge-vscode](https://github.com/CurateLabs/graphforge-vscode/blob/main/docs/engineering/PRODUCT_BOUNDARIES.md), and the Hub repository. Do not edit this copy: changes are made at the source and re-published to every repository.
 
 ## Context
 
@@ -46,8 +46,9 @@ unclear what the Hub should store.
   surface. It never re-implements engine, visualization, or Hub-protocol
   behaviour.
 - **The Hub gives Projects identity, distribution, and discovery.** It serves
-  bytes Core produced and renders pages from summaries Core produced. It never
-  executes GraphForge queries.
+  Core-produced native Project-package bytes and renders pages from
+  Core-produced summaries. It also serves XYG-produced PNG/SVG previews through
+  Core's closed preview channel. It never executes GraphForge queries.
 
 ### 2. Dependencies point one way
 
@@ -67,10 +68,13 @@ Hub only through Core.
 
 ### 3. Native GraphForge data at an exact Version is the unit of exchange
 
-Anything that crosses a component boundary is GraphForge data, identified by
-Core's identities: package digest, Version, and generation. Only Core moves
-Projects between machines. Clients invoke Core to clone, publish, export, and
-import; no client speaks the Hub protocol itself.
+Native GraphForge data that crosses a component boundary is identified by
+Core's identities: package digest, Version, and generation. XYG-produced PNG/SVG
+previews are the single non-native exception. Core's closed channel validates
+them as previews attached to one exact immutable Version; they are not part of
+the Project package. Only Core moves Projects between machines. Clients invoke
+Core to clone, publish, export, and import; no client speaks the Hub protocol
+itself.
 
 ### 4. Every contract has exactly one owner
 
