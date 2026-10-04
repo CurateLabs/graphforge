@@ -9,30 +9,59 @@ pub(super) struct SchedulerSample {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn sample() -> SchedulerSample {
-    let enabled =
-        std::fs::read_to_string("/proc/sys/kernel/sched_schedstats").is_ok_and(|s| s.trim() == "1");
-    let stats = std::fs::read_to_string("/proc/thread-self/schedstat").ok();
-    let (running, runnable) = stats
-        .as_deref()
-        .and_then(|s| parse_schedstat(s, enabled))
-        .map_or((None, None), |(r, q)| (Some(r), q));
-    let mut result = SchedulerSample {
-        running,
-        runnable,
-        ..SchedulerSample::default()
-    };
-    if enabled && let Ok(sched) = std::fs::read_to_string("/proc/thread-self/sched") {
-        result.sleeping = field(&sched, "sum_sleep_runtime");
-        result.uninterruptible = field(&sched, "sum_block_runtime");
-        result.iowait = field(&sched, "iowait_sum");
+#[derive(Debug)]
+pub(super) struct SchedulerReader {
+    enabled: super::proc_reader::ProcReader,
+    stats: super::proc_reader::ProcReader,
+    sched: super::proc_reader::ProcReader,
+}
+
+#[cfg(target_os = "linux")]
+impl Default for SchedulerReader {
+    fn default() -> Self {
+        use super::proc_reader::ProcReader;
+        Self {
+            enabled: ProcReader::open("/proc/sys/kernel/sched_schedstats"),
+            stats: ProcReader::open("/proc/thread-self/schedstat"),
+            sched: ProcReader::open("/proc/thread-self/sched"),
+        }
     }
-    result
+}
+
+#[cfg(target_os = "linux")]
+impl SchedulerReader {
+    pub(super) fn sample(&mut self) -> SchedulerSample {
+        // Availability belongs to this capture; the operator's mutable value
+        // must still be observed at every boundary.
+        let enabled = self.enabled.read().is_some_and(|s| s.trim() == "1");
+        let (running, runnable) = self
+            .stats
+            .read()
+            .and_then(|s| parse_schedstat(s, enabled))
+            .map_or((None, None), |(r, q)| (Some(r), q));
+        let mut result = SchedulerSample {
+            running,
+            runnable,
+            ..SchedulerSample::default()
+        };
+        if enabled && let Some(sched) = self.sched.read() {
+            result.sleeping = field(sched, "sum_sleep_runtime");
+            result.uninterruptible = field(sched, "sum_block_runtime");
+            result.iowait = field(sched, "iowait_sum");
+        }
+        result
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(super) fn sample() -> SchedulerSample {
-    SchedulerSample::default()
+#[derive(Debug, Default)]
+pub(super) struct SchedulerReader;
+
+#[cfg(not(target_os = "linux"))]
+impl SchedulerReader {
+    pub(super) fn sample(&mut self) -> SchedulerSample {
+        SchedulerSample::default()
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -97,4 +126,34 @@ mod tests {
             assert_eq!(decimal_millis_to_nanos(malformed), None);
         }
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn retained_scheduler_reader_observes_mutable_enablement_and_counters() {
+    use super::proc_reader::ProcReader;
+    let temporary = tempfile::tempdir().unwrap();
+    let enabled = temporary.path().join("enabled");
+    let stats = temporary.path().join("stats");
+    let sched = temporary.path().join("sched");
+    std::fs::write(&enabled, "0\n").unwrap();
+    std::fs::write(&stats, "12 7 3\n").unwrap();
+    std::fs::write(&sched, "sum_sleep_runtime : 2.000000\n").unwrap();
+    let mut reader = SchedulerReader {
+        enabled: ProcReader::open(enabled.to_str().unwrap()),
+        stats: ProcReader::open(stats.to_str().unwrap()),
+        sched: ProcReader::open(sched.to_str().unwrap()),
+    };
+    let before = reader.sample();
+    assert_eq!(before.running, Some(12));
+    assert_eq!(before.runnable, None);
+    assert_eq!(before.sleeping, None);
+    std::fs::write(&enabled, "1\n").unwrap();
+    std::fs::write(&stats, "24 9 6\n").unwrap();
+    let after = reader.sample();
+    assert_eq!(after.running, Some(24));
+    assert_eq!(after.runnable, Some(9));
+    assert_eq!(after.sleeping, Some(2_000_000));
+    std::fs::write(&enabled, "0\n").unwrap();
+    assert_eq!(reader.sample().runnable, None);
 }

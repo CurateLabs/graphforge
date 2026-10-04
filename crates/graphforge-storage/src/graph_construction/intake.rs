@@ -520,11 +520,8 @@ fn validate_schema(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<(
             return Err(storage("required construction columns are non-null"));
         }
     }
-    if batch.schema().fields()[expected.fields().len()..]
-        .iter()
-        .any(|field| !crate::schemas::property_data_type_supported(field.data_type()))
-    {
-        return Err(storage("unsupported construction property type"));
+    for field in &batch.schema().fields()[expected.fields().len()..] {
+        validate_persisted_property_type(field)?;
     }
     let identifiers = batch
         .column(1)
@@ -539,6 +536,33 @@ fn validate_schema(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<(
         return Err(storage("invalid canonical label or relation"));
     }
     Ok(())
+}
+
+/// Refuse any property column that is not in canonical persisted form.
+/// Construction persists staged columns as given, and readers decode only
+/// canonical types, so a narrower or large Arrow type must be normalized by
+/// the caller (`graphforge-api` does so for every bulk producer) rather than
+/// written here and found unreadable later.
+fn validate_persisted_property_type(field: &arrow::datatypes::Field) -> Result<(), GfError> {
+    let data_type = field.data_type();
+    if crate::schemas::property_data_type_canonical(data_type) {
+        return Ok(());
+    }
+    let message = match crate::schemas::canonical_property_data_type(data_type) {
+        Some(canonical) => format!(
+            "construction property column {} has non-canonical Arrow type {data_type}; \
+             it must be normalized to {canonical} before construction",
+            field.name()
+        ),
+        None => format!(
+            "construction property column {} has unsupported Arrow type {data_type}",
+            field.name()
+        ),
+    };
+    Err(GfError::Api {
+        code: graphforge_core::ApiErrorCode::SchemaMismatch,
+        message,
+    })
 }
 
 fn is_construction_identifier(value: &str) -> bool {
@@ -797,6 +821,7 @@ pub(super) fn write_parquet_with_properties(
     root.acknowledge().map_err(storage)?;
     construction_failpoint(&format!("artifact.after_install.{name}"));
     persist_shape_receipt(root, &receipt)?;
+    super::diagnostics::sealed_payload(receipt.bytes, 1);
     Ok(receipt)
 }
 
@@ -856,6 +881,7 @@ pub(super) fn write_run<const N: usize>(
     root.acknowledge().map_err(storage)?;
     construction_failpoint(&format!("artifact.after_install.{name}"));
     persist_shape_receipt(root, &receipt)?;
+    super::diagnostics::sealed_payload(receipt.bytes, 1);
     Ok(receipt)
 }
 

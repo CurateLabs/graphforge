@@ -548,19 +548,24 @@ def inventory_work_root(work_root: Path, output_dir: Path | None = None) -> dict
     return collect_inventory(work_root, output_dir)
 
 
-def _benchexec_hit_wall(stage: Path) -> bool:
-    """Whether the staged BenchExec run ended by its wall limit (status TIMEOUT)."""
+def _benchexec_timeout_failure(stage: Path) -> str | None:
+    """Classify the actual resource limit; TIMEOUT alone does not identify it."""
     documents = sorted((stage / "raw").glob("*.xml")) if (stage / "raw").is_dir() else []
     if len(documents) != 1:
-        return False
+        return None
     try:
         runs = ET.parse(documents[0]).getroot().findall(".//run")
     except ET.ParseError:
-        return False
+        return None
     if len(runs) != 1:
-        return False
+        return None
     columns = {column.attrib.get("title"): column.attrib.get("value") for column in runs[0]}
-    return columns.get("status") == "TIMEOUT" or columns.get("terminationreason") == "walltime"
+    return {
+        "walltime": "rung_wall_exceeded",
+        "cputime": "benchexec_failed",
+        "cputime-soft": "benchexec_failed",
+        "cputime-hard": "benchexec_failed",
+    }.get(columns.get("terminationreason") or "")
 
 
 @dataclass(frozen=True)
@@ -701,8 +706,8 @@ def run(
                 phase_failure = _certify_phase_failure(stage)
                 if phase_failure is not None:
                     code = "rung_phase_failed"
-                elif _benchexec_hit_wall(stage):
-                    code = "rung_wall_exceeded"
+                elif timeout_failure := _benchexec_timeout_failure(stage):
+                    code = timeout_failure
                 elif status != 0:
                     code = "benchexec_failed"
                 else:
@@ -714,7 +719,11 @@ def run(
             if status != 0:
                 _preserve_failure_artifacts(stage, output_dir, scale)
                 phase_failure = _certify_phase_failure(stage)
-                code = "rung_phase_failed" if phase_failure else "benchexec_failed"
+                code = (
+                    "rung_phase_failed"
+                    if phase_failure
+                    else _benchexec_timeout_failure(stage) or "benchexec_failed"
+                )
                 failed = _result(plan, "failed", code, phase_failure=phase_failure)
                 _validate(root, "progressive-host-run-result.json", failed)
                 publish_json_no_clobber(result_path, failed)
@@ -730,14 +739,13 @@ def run(
                 )
             except (ControllerError, OSError, ValueError):
                 _preserve_failure_artifacts(stage, output_dir, scale)
-                if _benchexec_hit_wall(stage):
-                    # BenchExec stopped the rung at the staged wall. The certify
-                    # runner was killed mid-phase, so its evidence is missing by
-                    # construction; report the wall, not a missing receipt.
-                    failed = _result(plan, "failed", "rung_wall_exceeded")
+                if timeout_failure := _benchexec_timeout_failure(stage):
+                    # A resource limit killed the runner mid-phase. Its receipt
+                    # is missing by construction; preserve the actual cause.
+                    failed = _result(plan, "failed", timeout_failure)
                     _validate(root, "progressive-host-run-result.json", failed)
                     publish_json_no_clobber(result_path, failed)
-                    raise HostRunError("rung_wall_exceeded") from None
+                    raise HostRunError(timeout_failure) from None
                 phase_failure = _certify_phase_failure(stage)
                 if phase_failure is not None:
                     # The rung ran and died inside a phase. Report the phase and

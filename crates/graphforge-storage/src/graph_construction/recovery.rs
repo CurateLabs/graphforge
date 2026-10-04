@@ -7,8 +7,8 @@ use super::{
     ConstructionPublicationReceipt, CountingChunkReader, DetailCodec, DetailValidator,
     EDGE_DETAIL_WIDTH, ENDPOINT_WIDTH, FileIdentity, GfError, GraphConstructionEvidence,
     GraphConstructionSession, HashingWriter, IDENTITY_SURROGATE_OFFSET, IDENTITY_WIDTH, INTENT,
-    IoCounter, LoadedShapeProgress, MAX_SHAPE_CONTROL_BYTES, NODE_DETAIL_WIDTH, OsStr,
-    ParquetRecordBatchReaderBuilder, Read, ReceiptPointer, SHAPE_INTENT, ShapeIntent,
+    IoCounter, LoadedShapeProgress, MAX_CONTROL_BYTES, MAX_SHAPE_CONTROL_BYTES, NODE_DETAIL_WIDTH,
+    OsStr, ParquetRecordBatchReaderBuilder, Read, ReceiptPointer, SHAPE_INTENT, ShapeIntent,
     StableDirectory, Uuid, Write, account_cache_release, artifact_stem, authenticate_shaped_output,
     authenticate_shaped_output_identity, checked_category_remove, combine_cache_cleanup,
     combine_secondary_cleanup, construction_failpoint, copy_post_shape_io, decode_bounded,
@@ -21,6 +21,8 @@ use super::{
     validate_shape_binding, validate_sorted_run,
 };
 use std::collections::BTreeSet;
+use std::fs::File;
+use std::io::{Seek, SeekFrom};
 
 impl GraphConstructionSession {
     #[allow(clippy::too_many_lines)]
@@ -578,10 +580,25 @@ pub(super) fn receipt_for_existing_with_work(
     root: &StableDirectory,
     name: &str,
 ) -> Result<(ArtifactReceipt, ReadWork), GfError> {
+    receipt_for_existing_retained(root, name).map(|(receipt, work, _)| (receipt, work))
+}
+
+struct RetainedShapeArtifact {
+    artifact: File,
+    capability: File,
+    capability_body: Vec<u8>,
+    receipt: ArtifactReceipt,
+}
+
+fn receipt_for_existing_retained(
+    root: &StableDirectory,
+    name: &str,
+) -> Result<(ArtifactReceipt, ReadWork, Option<RetainedShapeArtifact>), GfError> {
     let capability_name = shape_receipt_name(name);
     if let Ok(mut capability_file) = root.open_child_file(OsStr::new(&capability_name)) {
         let control_bytes = capability_file.metadata().map_err(storage)?.len();
-        let receipt: ArtifactReceipt = decode_bounded(&mut capability_file)?;
+        let capability_body = read_bounded_limit(&mut capability_file, MAX_CONTROL_BYTES)?;
+        let receipt: ArtifactReceipt = serde_json::from_slice(&capability_body).map_err(storage)?;
         if receipt.name != name {
             return Err(storage("shaped writer capability names another artifact"));
         }
@@ -594,6 +611,7 @@ pub(super) fn receipt_for_existing_with_work(
         {
             return Err(storage("shaped writer capability identity changed"));
         }
+        let retained_receipt = receipt.clone();
         return Ok((
             receipt,
             ReadWork {
@@ -601,6 +619,12 @@ pub(super) fn receipt_for_existing_with_work(
                 operations: 1,
                 ..Default::default()
             },
+            Some(RetainedShapeArtifact {
+                artifact: file,
+                capability: capability_file,
+                capability_body,
+                receipt: retained_receipt,
+            }),
         ));
     }
     let file = root.open_child_file(OsStr::new(name)).map_err(storage)?;
@@ -650,13 +674,91 @@ pub(super) fn receipt_for_existing_with_work(
     match (authenticated, released) {
         (Ok((receipt, mut work)), Ok(cache_release)) => {
             work.cache_release = cache_release;
-            Ok((receipt, work))
+            super::diagnostics::hashed_bytes(receipt.bytes, 1);
+            Ok((receipt, work, None))
         }
         (Ok(_), Err(release)) => Err(release),
         (Err(primary), Ok(_)) => Err(primary),
         (Err(primary), Err(release)) => Err(storage(format!(
             "{primary}; shaped artifact cache release also failed: {release}"
         ))),
+    }
+}
+
+impl RetainedShapeArtifact {
+    // Contents are read again at every existing capability comparison. Only
+    // decoding is reused when those freshly read bytes are identical. Changed
+    // bytes still decode normally, preserving semantic receipt comparisons.
+    fn fresh_receipt(&mut self) -> Result<ArtifactReceipt, GfError> {
+        self.capability.seek(SeekFrom::Start(0)).map_err(storage)?;
+        let body = read_bounded_limit(&mut self.capability, MAX_CONTROL_BYTES)?;
+        if body == self.capability_body {
+            Ok(self.receipt.clone())
+        } else {
+            serde_json::from_slice(&body).map_err(storage)
+        }
+    }
+
+    fn unlink(mut self, root: &StableDirectory, expected: &ArtifactReceipt) -> Result<(), GfError> {
+        root.revalidate_child_file(OsStr::new(&expected.name), &self.artifact)
+            .map_err(storage)?;
+        let identity = file_identity(&self.artifact).map_err(storage)?;
+        if !expected.identity.matches(identity)
+            || file_link_count(&self.artifact).map_err(storage)? != 1
+        {
+            return Err(storage("orphan artifact identity changed"));
+        }
+        let capability_name = shape_receipt_name(&expected.name);
+        root.revalidate_child_file(OsStr::new(&capability_name), &self.capability)
+            .map_err(storage)?;
+        if file_link_count(&self.capability).map_err(storage)? != 1 {
+            return Err(storage("writer capability has extra links"));
+        }
+        let capability_identity = file_identity(&self.capability).map_err(storage)?;
+        let receipt = self.fresh_receipt()?;
+        if receipt.name != expected.name
+            || shape_receipt_name(&receipt.name) != capability_name
+            || receipt != *expected
+        {
+            return Err(storage("writer capability differs from artifact authority"));
+        }
+        // Same identity-only retirement authentication as the generic path,
+        // with fresh named-child observations on these retained descriptors.
+        if !is_shape_artifact_name(&expected.name)
+            && !super::canonical_artifact_target(&expected.name)
+        {
+            return Err(storage("shape manifest output name is not canonical"));
+        }
+        root.revalidate_child_file(OsStr::new(&capability_name), &self.capability)
+            .map_err(storage)?;
+        let actual = self.fresh_receipt()?;
+        if actual.name != expected.name {
+            return Err(storage("shaped writer capability names another artifact"));
+        }
+        root.revalidate_child_file(OsStr::new(&expected.name), &self.artifact)
+            .map_err(storage)?;
+        if file_link_count(&self.artifact).map_err(storage)? != 1
+            || !actual
+                .identity
+                .matches(file_identity(&self.artifact).map_err(storage)?)
+            || self.artifact.metadata().map_err(storage)?.len() != actual.bytes
+        {
+            return Err(storage("shaped writer capability identity changed"));
+        }
+        if actual.bytes != expected.bytes
+            || actual.xxh64 != expected.xxh64
+            || actual.identity != expected.identity
+        {
+            return Err(storage("shape manifest output authentication changed"));
+        }
+        drop(self.capability);
+        root.unlink_child_if_identity(OsStr::new(&capability_name), capability_identity)
+            .map_err(storage)?;
+        root.acknowledge().map_err(storage)?;
+        drop(self.artifact);
+        root.unlink_child_if_identity(OsStr::new(&expected.name), identity)
+            .map_err(storage)?;
+        root.acknowledge().map_err(storage)
     }
 }
 
@@ -708,8 +810,12 @@ pub(super) fn unlink_shape_artifact_files(
     root: &StableDirectory,
     name: &str,
 ) -> Result<ArtifactReceipt, GfError> {
-    let receipt = receipt_for_existing(root, name)?;
-    unlink_artifact(root, &receipt)?;
+    let (receipt, _, retained) = receipt_for_existing_retained(root, name)?;
+    if let Some(retained) = retained {
+        retained.unlink(root, &receipt)?;
+    } else {
+        unlink_artifact(root, &receipt)?;
+    }
     construction_failpoint("shape.after_derived_unlink");
     Ok(receipt)
 }
@@ -1128,6 +1234,7 @@ fn authenticate_artifact_contents(
         }
     };
     let cache_release = reader.get_ref().tracker().evidence();
+    super::diagnostics::hashed_bytes(bytes, 1);
     Ok(ReadWork {
         detail_records,
         bytes,

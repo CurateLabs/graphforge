@@ -595,6 +595,39 @@ fn import_operation_timings_survive_separate_cli_processes() {
     assert!(regions["import_command/stage+seal/append_nodes"].is_object());
     assert!(regions["import_command/stage+seal/source_read"].is_object());
     assert!(regions["import_command/stage+seal/manifest_persistence"].is_object());
+    assert!(
+        regions["import_command/stage+seal/append_nodes"]["work"]["hashed_bytes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(
+        regions["import_command/stage+seal/append_nodes"]["work"]["written_bytes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    // Reconcile the successful XXH64 authentication population from independent
+    // retained chunk receipts, not attempted SHA measurements or source size.
+    let mut parquet_bytes = 0_u64;
+    let mut chunks = 0_u64;
+    for operation in fs::read_dir(project.join(".graphforge-construction")).unwrap() {
+        for entry in fs::read_dir(operation.unwrap().path()).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name().to_str().unwrap().starts_with("receipt-") {
+                let receipt: serde_json::Value =
+                    serde_json::from_slice(&fs::read(entry.path()).unwrap()).unwrap();
+                parquet_bytes += receipt["parquet"]["bytes"].as_u64().unwrap();
+                chunks += 1;
+            }
+        }
+    }
+    assert!(chunks > 0);
+    let routing_auth =
+        &regions["import_command/stage+seal/seal/shaping/shape_routing/artifact_authentication"];
+    assert_eq!(routing_auth["work"]["hashed_bytes"], parquet_bytes);
+    assert_eq!(routing_auth["calls"], chunks);
+
     for field in [
         "hashed_bytes",
         "hash_elapsed_ns",

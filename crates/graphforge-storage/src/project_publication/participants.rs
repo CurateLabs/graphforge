@@ -297,6 +297,7 @@ pub(super) fn stage_participant_files(
         let parent =
             graphforge_filesystem::StableDirectory::open(parent_dir).map_err(publication_io)?;
         let primary = std::cell::RefCell::new(None);
+        let copied_hash_streams = std::cell::Cell::new(0);
         let result = crate::durable_commit::stage_private_file(
             &parent,
             destination.file_name().expect("participant has a name"),
@@ -312,7 +313,7 @@ pub(super) fn stage_participant_files(
                             copy_buffer_bytes,
                             captures,
                         ) => {
-                            copy_file_participant(
+                            copied_hash_streams.set(copy_file_participant(
                                 file,
                                 &files[index],
                                 metadata,
@@ -321,7 +322,7 @@ pub(super) fn stage_participant_files(
                                 captures
                                     .and_then(|authorities| authorities.get(&files[index].source))
                                     .copied(),
-                            )?;
+                            )?);
                         }
                     }
                     Ok(())
@@ -362,6 +363,10 @@ pub(super) fn stage_participant_files(
         )?;
         drop(file);
         verify_participant_file(&destination, metadata)?;
+        crate::graph_construction::diagnostics::sealed_payload(
+            metadata.byte_length,
+            copied_hash_streams.get(),
+        );
     }
     Ok(())
 }
@@ -375,7 +380,7 @@ fn copy_file_participant(
     cancelled: Option<&super::AtomicBool>,
     copy_buffer_bytes: usize,
     capture: Option<&crate::project_portable_v2::MaterializedCapture>,
-) -> Result<(), GfError> {
+) -> Result<u8, GfError> {
     let mut input =
         crate::project_portable::open_regular_nofollow(&source.source).map_err(publication_io)?;
     let admitted = capture.is_some_and(|capture| {
@@ -434,7 +439,7 @@ fn copy_file_participant(
             "portable participant changed during staging",
         ));
     }
-    Ok(())
+    Ok(if admitted { 1 } else { 2 })
 }
 
 #[derive(Debug, Serialize)]
@@ -559,6 +564,7 @@ pub(super) fn request_metadata_with_payloads(
         ));
     }
     let mut participants = Vec::with_capacity(request.participants.len());
+    let mut resident_hashed_bytes = 0_u64;
     for (index, participant) in request.participants.iter().enumerate() {
         let (byte_length, content_sha256, content_xxh64) = match payloads {
             ParticipantPayloads::Memory(identities) => {
@@ -569,6 +575,10 @@ pub(super) fn request_metadata_with_payloads(
                     )
                 })?;
                 let content_xxh64 = crate::corruption_checksum::checksum(&participant.bytes);
+                let streams = if identities.is_some() { 1 } else { 2 };
+                for _ in 0..streams {
+                    resident_hashed_bytes = resident_hashed_bytes.saturating_add(byte_length);
+                }
                 let content_sha256 = match identities.map(|identities| identities.0[index]) {
                     // The prepared SHA-256 describes these exact bytes: its
                     // length and checksum were computed over them in the same
@@ -692,6 +702,7 @@ pub(super) fn request_metadata_with_payloads(
     };
     let bytes = canonical_line(&fingerprint_input)?;
     let digest: [u8; 32] = graphforge_core::hash_observation::ContractSha256::digest(bytes).into();
+    crate::graph_construction::diagnostics::hashed_bytes(resident_hashed_bytes, 1);
     Ok((capabilities, participants, hex_digest(digest)))
 }
 
@@ -775,6 +786,7 @@ pub(super) fn verify_participant_file(
             "staged participant checksum changed",
         ));
     }
+    crate::graph_construction::diagnostics::hashed_bytes(count, 1);
     Ok(())
 }
 
@@ -856,5 +868,6 @@ fn checksum_participant_source(
         count,
         calls,
     );
+    crate::graph_construction::diagnostics::hashed_bytes(count, 1);
     Ok(checksum.finish())
 }

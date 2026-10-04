@@ -1209,8 +1209,15 @@ fn import_materialized(
     }
     let parent = match existing {
         Some(parent) => parent,
-        None => crate::project_generation::open_or_initialize_project_admitted_with_allocation(
+        // The publication retains its bootstrap parent as usual. Bind that
+        // parent's identities to this import so repeated fresh-root imports
+        // also retain identical manifest bytes, without changing existing roots.
+        None => crate::project_generation::open_or_initialize_project_admitted_with_bootstrap(
             admission.root(),
+            Some((
+                graphforge_core::uuid::portable_v2_bootstrap_generation(&transaction_uuid),
+                graphforge_core::uuid::portable_v2_bootstrap_transaction(&transaction_uuid),
+            )),
             allocation,
         )
         .map_err(|error| {

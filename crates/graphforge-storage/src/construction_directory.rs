@@ -158,6 +158,9 @@ impl ConstructionDirectory {
     pub(crate) fn open_child_file(&self, name: &OsStr) -> io::Result<File> {
         self.directory.open_child_file(name)
     }
+    pub(crate) fn revalidate_child_file(&self, name: &OsStr, file: &File) -> io::Result<()> {
+        self.directory.revalidate_child_file(name, file)
+    }
     pub(crate) fn create_replaceable_child_file(&self, name: &OsStr) -> io::Result<File> {
         self.directory.create_replaceable_child_file(name)
     }

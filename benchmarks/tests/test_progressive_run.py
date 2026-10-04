@@ -5,9 +5,12 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from benchexec.model import Benchmark
+from benchexec.util import read_local_time
 from graphforge_bench.progressive_run import (
     APPLICATION_IO_FIELDS,
     APPLICATION_IO_PHASES,
@@ -1005,6 +1008,8 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                     )
 
     def test_exact_benchexec_xml_and_log_are_normalized_into_passed_bundle(self) -> None:
+        from graphforge_bench.progressive_run import _stage_benchmark_xml
+
         plan = build_plan(
             root=ROOT,
             output_dir=self.output,
@@ -1015,6 +1020,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         stage = self.base / "stage-result"
         raw = stage / "raw"
         raw.mkdir(parents=True)
+        _stage_benchmark_xml(ROOT, stage)
         gf = graphforge(18, authoritative_receipts(18))
         (raw / "run.log").write_text(json.dumps(gf) + "\n")
         columns = {
@@ -1074,6 +1080,124 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                 plan=plan,
                 profile_id="graph500-s19-local",
             )
+
+    def test_normalized_cpu_policy_comes_from_the_staged_definition(self) -> None:
+        from graphforge_bench.progressive_run import _stage_benchmark_xml
+
+        for scale, wall in ((18, 51), (19, 100), (20, 200), (22, 799)):
+            with self.subTest(scale=scale):
+                stage = self.base / f"cpu-policy-{scale}"
+                raw = stage / "raw"
+                raw.mkdir(parents=True)
+                _stage_benchmark_xml(ROOT, stage, wall_seconds=wall)
+                gf = graphforge(scale, authoritative_receipts(scale))
+                (raw / "run.log").write_text(json.dumps(gf) + "\n")
+                columns = {
+                    "status": "DONE",
+                    "walltime": "1.25s",
+                    "cputime": "2.0s",
+                    "memory": "4096B",
+                    "blkio-read": "1024B",
+                    "blkio-write": "2048B",
+                    "pressure-cpu-some": "0.1s",
+                    "pressure-io-some": "0.2s",
+                    "pressure-memory-some": "0.3s",
+                }
+                (raw / "result.xml").write_text(
+                    "<result><run>"
+                    + "".join(
+                        f'<column title="{name}" value="{value}" />'
+                        for name, value in columns.items()
+                    )
+                    + "</run></result>"
+                )
+                plan = {
+                    "identities": {"profile_id": gf["profile_id"]},
+                    "limits": {
+                        "wall_seconds": wall,
+                        "memory_bytes": 96_000_000_000,
+                        "cores": 16,
+                    },
+                }
+                normalized, _, _ = ingest_benchexec_result(
+                    root=ROOT, stage=stage, scale=scale, plan=plan
+                )
+                self.assertEqual(
+                    normalized["limits"],
+                    {
+                        "wall_seconds": float(wall),
+                        "cpu_seconds": 14_400.0,
+                        "memory_bytes": 96_000_000_000,
+                        "cores": list(range(16)),
+                    },
+                )
+                # A different valid staged policy proves this is authority,
+                # rather than a second constant that could silently drift.
+                definition = stage / "benchmark.xml"
+                definition.write_text(
+                    definition.read_text().replace('timelimit="14400 s"', 'timelimit="2 h"')
+                )
+                normalized, _, _ = ingest_benchexec_result(
+                    root=ROOT, stage=stage, scale=scale, plan=plan
+                )
+                self.assertEqual(normalized["limits"]["cpu_seconds"], 7200.0)
+
+    def test_raw_timeout_retains_its_reason_without_inventing_walltime(self) -> None:
+        from graphforge_bench.benchexec_authority import Limits, normalize_run
+        from graphforge_bench.progressive_run import _parse_benchexec_xml
+
+        stage = self.base / "timeout-reasons"
+        raw = stage / "raw"
+        raw.mkdir(parents=True)
+        for status, reason, outcome in (
+            ("TIMEOUT", "cputime-soft", "timeout"),
+            ("TIMEOUT", "cputime", "timeout"),
+            ("TIMEOUT", "cputime-hard", "timeout"),
+            ("TIMEOUT", "walltime", "timeout"),
+            ("TIMEOUT", None, "timeout"),
+            ("TIMEOUT", "", "timeout"),
+            ("TIMEOUT", "unknown-limit", "timeout"),
+            ("OUT OF MEMORY", None, "oom"),
+            ("ERROR", "failed", "harness"),
+        ):
+            with self.subTest(status=status, reason=reason):
+                columns = {
+                    "status": status,
+                    "walltime": "742.165077934s",
+                    "cputime": "799.281815s",
+                    "memory": "4096B",
+                    "blkio-read": "1024B",
+                    "blkio-write": "2048B",
+                    "pressure-cpu-some": "0.1s",
+                    "pressure-io-some": "0.2s",
+                    "pressure-memory-some": "0.3s",
+                }
+                if reason is not None:
+                    columns["terminationreason"] = reason
+                (raw / "result.xml").write_text(
+                    "<result><run>"
+                    + "".join(
+                        f'<column title="{name}" value="{value}" />'
+                        for name, value in columns.items()
+                    )
+                    + "</run></result>"
+                )
+                observed = _parse_benchexec_xml(raw, correctness=False)
+                self.assertEqual(
+                    observed["termination_reason"], "memory" if outcome == "oom" else reason
+                )
+                self.assertEqual(observed["cpu_seconds"], 799.281815)
+                self.assertEqual(observed["wall_seconds"], 742.165077934)
+                normalized = normalize_run(
+                    benchexec=observed,
+                    graphforge={
+                        "status": "failed",
+                        "phases": [{"phase": "clean_import", "duration_ms": 742_165}],
+                    },
+                    limits=Limits(799, 14_400, 96_000_000_000, tuple(range(16))),
+                )
+                self.assertEqual(normalized["outcome"], outcome)
+                _validate(ROOT, "benchexec-run-evidence.json", normalized)
 
     def test_adjacent_passed_rungs_produce_schema_valid_s20_projection(self) -> None:
         for scale in (18, 19):
@@ -1296,10 +1420,9 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         stage.mkdir()
         _stage_benchmark_xml(ROOT, stage, wall_seconds=102)
         xml = (stage / "benchmark.xml").read_text(encoding="utf-8")
-        self.assertIn('timelimit="102 s"', xml)
-        self.assertIn('hardtimelimit="132 s"', xml)
-        self.assertNotIn("14400", xml)
-        self.assertNotIn("14430", xml)
+        self.assertIn('walltimelimit="102 s"', xml)
+        self.assertIn('timelimit="14400 s"', xml)
+        self.assertIn('hardtimelimit="14430 s"', xml)
         definition = (ROOT / "definitions/graphforge-progressive-qualification-v1.xml").read_text(
             encoding="utf-8"
         )
@@ -1309,6 +1432,45 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                 _rewrite_benchmark_wall(definition, wall)  # type: ignore[arg-type]
         with self.assertRaises(ControllerError):
             _rewrite_benchmark_wall(definition.replace('timelimit="14400 s"', 'timelimit="1 s"'), 5)
+
+    def test_benchexec_parser_keeps_cpu_and_elapsed_deadlines_independent(self) -> None:
+        from graphforge_bench.progressive_run import _stage_benchmark_xml
+
+        config = SimpleNamespace(
+            name=None,
+            description_file=None,
+            output_path=str(self.base / "results"),
+            container=False,
+            timelimit=None,
+            walltimelimit=None,
+            memorylimit=None,
+            corelimit=None,
+            num_of_threads=None,
+            results_per_rundefinition=False,
+            results_per_taskset=False,
+            selected_run_definitions=None,
+            selected_sourcefile_sets=None,
+        )
+        for wall in (None, 51, 100, 200, 799):
+            with self.subTest(wall=wall):
+                stage = self.base / f"parsed-wall-{wall}"
+                stage.mkdir()
+                _stage_benchmark_xml(ROOT, stage, wall_seconds=wall)
+                (stage / "profile.json").write_text("{}\n")
+                benchmark = Benchmark(str(stage / "benchmark.xml"), config, read_local_time())
+                self.assertEqual(benchmark.rlimits.cputime, 14_400)
+                self.assertEqual(benchmark.rlimits.cputime_hard, 14_430)
+                self.assertEqual(benchmark.rlimits.walltime, wall or 14_400)
+                self.assertEqual(benchmark.rlimits.memory, 4_000_000_000)
+                self.assertEqual(benchmark.rlimits.cpu_cores, 16)
+                run = benchmark.run_sets[0].runs[0]
+                # Process-tree CPU can exceed elapsed time on multiple cores.
+                run.values.update(cputime=799.281815, walltime=742.165077934)
+                self.assertEqual(run._is_timeout(), wall is not None and wall < 742.165077934)
+                run.values.update(cputime=1.0, walltime=(wall or 14_400) + 0.1)
+                self.assertTrue(run._is_timeout())
+                run.values.update(cputime=14_400.1, walltime=1.0)
+                self.assertTrue(run._is_timeout())
 
     def test_provider_volume_keeps_four_gib_benchexec_memory(self) -> None:
         stage = self.base / "stage"

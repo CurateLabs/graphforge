@@ -192,7 +192,7 @@ pub(crate) fn valid_snapshot(value: &Value) -> bool {
                 && row.as_object().is_some_and(|r| r.len() == 4)
                 && row["work"].as_object().is_some_and(|work| {
                     work.iter().all(|(k, v)| {
-                        matches!(k.as_str(), "rows" | "bytes" | "nodes" | "edges")
+                        matches!(k.as_str(), "rows" | "bytes" | "nodes" | "edges" | "hashed_bytes" | "written_bytes")
                             && v.as_u64().is_some()
                     })
                 })
@@ -235,6 +235,21 @@ mod tests {
         value["regions"]["import_command"]["inclusive"]["thread_runnable_ns"] = Value::Null;
         assert!(valid_snapshot(&value));
         value["regions"]["private/path"] = value["regions"]["import_command"].clone();
+        assert!(!valid_snapshot(&value));
+    }
+
+    #[test]
+    fn snapshot_contract_accepts_successful_byte_work_and_refuses_unknown_units() {
+        let capture =
+            graphforge_storage::concurrency_attribution::RegionCapture::start("import_command");
+        graphforge_storage::concurrency_attribution::RegionScope::record_work("hashed_bytes", 17);
+        graphforge_storage::concurrency_attribution::RegionScope::record_work("written_bytes", 11);
+        let mut value = serde_json::to_value(capture.finish()).unwrap();
+        assert!(valid_snapshot(&value));
+        value["regions"]["import_command"]["work"]["attempted_bytes"] = json!(17);
+        assert!(!valid_snapshot(&value));
+        value["regions"]["import_command"]["work"].as_object_mut().unwrap().remove("attempted_bytes");
+        value["regions"]["import_command"]["work"]["hashed_bytes"] = Value::Null;
         assert!(!valid_snapshot(&value));
     }
 
@@ -327,6 +342,22 @@ mod tests {
                 value["regions"][format!("import_command/{name}")].is_object(),
                 "{name} missing from the capture"
             );
+        }
+    }
+
+    #[test]
+    fn successful_work_units_match_each_closed_certification_schema() {
+        let schema: Value = serde_json::from_str(include_str!("../../../schemas/certification-evidence.json")).unwrap();
+        for contract in ["regionDiagnosticsV2", "regionDiagnosticsV1"] {
+            let work = &schema["$defs"][contract]["properties"]["regions"]["additionalProperties"]["properties"]["work"];
+            assert_eq!(work["additionalProperties"], false);
+            let mut names: Vec<_> = work["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+            names.sort_unstable();
+            assert_eq!(names, ["bytes", "edges", "hashed_bytes", "nodes", "rows", "written_bytes"]);
+            for unit in ["hashed_bytes", "written_bytes"] {
+                assert_eq!(work["properties"][unit]["type"], "integer");
+                assert_eq!(work["properties"][unit]["minimum"], 0);
+            }
         }
     }
 

@@ -1,6 +1,43 @@
 use super::*;
 
 #[test]
+fn bounded_property_outputs_count_completed_hashes_and_private_sealed_writes_separately() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = StableDirectory::open(temporary.path()).unwrap();
+    let logical_bytes = crate::property_overlay::bounded_object::MAX_PROPERTY_OBJECT_BYTES + 1;
+    let payload = bytes::Bytes::from(vec![0x4f; logical_bytes]);
+    let batch = RecordBatch::new_empty(Arc::new(Schema::empty()));
+    let mut evidence = GraphConstructionEncodingEvidence::default();
+    let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+    let artifacts = lanes::write_parquet_chunks(
+        &root,
+        "properties/large.parquet",
+        &batch,
+        std::num::NonZeroU64::new(1 << 20).unwrap(),
+        &mut evidence,
+        &mut || false,
+        Some(lanes::Encoded::Object(payload)),
+    )
+    .unwrap();
+    let snapshot = capture.finish();
+    assert!(artifacts.len() > 1);
+    let physical_bytes: u64 = artifacts.iter().map(|artifact| artifact.bytes).sum();
+    assert_eq!(
+        snapshot.regions["import_command"].work["hashed_bytes"],
+        2 * physical_bytes
+    );
+    assert_eq!(
+        snapshot.regions["import_command"].work["written_bytes"],
+        logical_bytes as u64 + physical_bytes
+    );
+    for artifact in artifacts {
+        let bytes = std::fs::read(temporary.path().join("graph").join(&artifact.path)).unwrap();
+        assert_eq!(artifact.sha256, hex(&Sha256::digest(&bytes)));
+        assert_eq!(artifact.xxh64, crate::corruption_checksum::checksum(&bytes));
+    }
+}
+
+#[test]
 fn runtime_label_decode_rejects_cross_batch_duplicate_identity() {
     let mut catalog = graphforge_value::RuntimeCatalogData::new();
     catalog.intern_label_at("First", 1).unwrap();
