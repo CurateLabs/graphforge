@@ -118,9 +118,7 @@ fn verify_reads(forge: &GraphForge, values: &[f64], outputs: &Path) {
     );
     let mut sorted = values.iter().enumerate().collect::<Vec<_>>();
     sorted.sort_by(|(left_index, left), (right_index, right)| {
-        left.partial_cmp(right)
-            .unwrap()
-            .then(left_index.cmp(right_index))
+        left.total_cmp(right).then(left_index.cmp(right_index))
     });
     let sorted = sorted
         .into_iter()
