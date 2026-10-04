@@ -28,7 +28,12 @@ fn version(participants: Vec<ResearchParticipantCommitment>) -> ResearchVersionR
             graph_projection: None,
             participants,
             required_versions: BTreeSet::new(),
-            producer: "native historical query fixture".into(),
+            producer: concat!(
+                "graphforge-storage/",
+                env!("CARGO_PKG_VERSION"),
+                ";research/6"
+            )
+            .into(),
             evidence: Vec::new(),
         },
     }

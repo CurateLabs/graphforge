@@ -86,6 +86,7 @@ fn signed_historical_saved_query_definitions_are_decoded_before_materialization(
         let inspection = inspect_with_registry(source.path(), &version, &registry);
         let destination = tempfile::tempdir().unwrap();
         let target = destination.path().join("historical");
+        std::fs::create_dir(&target).unwrap();
         let materialized = materialize_prepared_research_version(source.path(), &version, &target);
         if case == "valid" {
             assert_eq!(inspection.unwrap()[0].bytes, bytes);
@@ -94,9 +95,20 @@ fn signed_historical_saved_query_definitions_are_decoded_before_materialization(
                 original
             );
         } else {
-            assert!(inspection.is_err(), "{case}");
-            assert!(materialized.is_err(), "{case}");
-            assert!(!target.exists(), "{case} must fail before publication");
+            assert_eq!(
+                inspection.unwrap_err().code(),
+                "GF_PROJECT_CORRUPT",
+                "{case}"
+            );
+            assert_eq!(
+                materialized.unwrap_err().code(),
+                "GF_PROJECT_CORRUPT",
+                "{case}"
+            );
+            assert!(
+                std::fs::read_dir(&target).unwrap().next().is_none(),
+                "{case} must leave the private target empty before publication"
+            );
         }
     }
     assert_eq!(
