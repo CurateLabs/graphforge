@@ -158,7 +158,7 @@ test("JSON numbers follow the pinned saved parameter declaration", async () => {
     for (const x of [1.5, Number.MAX_SAFE_INTEGER + 1, "1", true, null]) {
       await assert.rejects(
         graph.executeSavedQuery(saved.query_uuid, { x }),
-        (error) => error.code === "GF_VALIDATION",
+        (error) => error.code === "ValidationError",
       );
     }
     const historical = tableFromIPC(

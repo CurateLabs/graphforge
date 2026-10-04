@@ -22,6 +22,7 @@ fn source(value: Option<serde_json::Value>) -> Result<SavedQuerySource> {
 }
 #[napi]
 impl GraphForge {
+    /// Save a reusable read-only definition with a project-local unique name.
     #[napi(ts_return_type = "import('./lib/saved-queries').SavedQuery")]
     pub fn create_saved_query(
         &self,
@@ -35,6 +36,7 @@ impl GraphForge {
                 .map_err(|e| crate::to_napi_err(&e))?,
         )
     }
+    /// Replace an existing saved definition while preserving its UUID.
     #[napi(ts_return_type = "import('./lib/saved-queries').SavedQuery")]
     pub fn update_saved_query(
         &self,
@@ -48,6 +50,7 @@ impl GraphForge {
                 .map_err(|e| crate::to_napi_err(&e))?,
         )
     }
+    /// Delete the current definition; retained Versions keep their revision.
     #[napi]
     pub fn delete_saved_query(&self, query_uuid: String) -> Result<()> {
         let id = crate::canonical_operation_id(&query_uuid)?.0;
@@ -55,6 +58,7 @@ impl GraphForge {
             .delete_saved_query(id)
             .map_err(|e| crate::to_napi_err(&e))
     }
+    /// Fetch a current or historical definition without executing it.
     #[napi(ts_return_type = "import('./lib/saved-queries').SavedQuery")]
     pub fn saved_query(
         &self,
@@ -69,6 +73,7 @@ impl GraphForge {
                 .map_err(|e| crate::to_napi_err(&e))?,
         )
     }
+    /// List current or historical definitions in stable UUID order.
     #[napi(ts_return_type = "Array<import('./lib/saved-queries').SavedQuery>")]
     pub fn saved_queries(
         &self,
@@ -81,6 +86,7 @@ impl GraphForge {
                 .map_err(|e| crate::to_napi_err(&e))?,
         )
     }
+    /// Execute with declared parameters and return cancellable Arrow IPC.
     #[napi]
     pub fn execute_saved_query(
         &self,
@@ -114,7 +120,7 @@ pub struct SavedQueryTask {
 impl Task for SavedQueryTask {
     type Output = std::result::Result<Vec<u8>, graphforge_api::GfError>;
     type JsValue = Buffer;
-    fn compute(&mut self) -> Result<Self::Output> {
+    fn compute(&mut self) -> napi::Result<Self::Output> {
         Ok((|| {
             let graph = self.engine.read().map_err(|_| {
                 graphforge_api::GfError::Execution("GraphForge lock poisoned".into())
@@ -128,7 +134,7 @@ impl Task for SavedQueryTask {
             crate::result_to_ipc(&result)
         })())
     }
-    fn resolve(&mut self, env: crate::Env, output: Self::Output) -> Result<Buffer> {
+    fn resolve(&mut self, env: crate::Env, output: Self::Output) -> napi::Result<Buffer> {
         output
             .map(Buffer::from)
             .map_err(|e| crate::to_napi_deferred_err(env, &e))
