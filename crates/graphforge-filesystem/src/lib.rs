@@ -559,6 +559,9 @@ impl StableDirectory {
                 io::Error::other("stable directory path is linked or special"),
             ));
         }
+        #[cfg(unix)]
+        let named_identity = platform::metadata_identity(&named);
+        #[cfg(not(unix))]
         let named_identity = path_identity(&self.path)
             .map_err(|error| DirectoryValidationError::new(Stage::NamedIdentity, error))?;
         if named_identity != self.identity {
@@ -567,6 +570,9 @@ impl StableDirectory {
                 io::Error::other("stable directory identity changed"),
             ));
         }
+        #[cfg(unix)]
+        let retained_identity = platform::metadata_identity(&retained);
+        #[cfg(not(unix))]
         let retained_identity = file_identity(&self.file)
             .map_err(|error| DirectoryValidationError::new(Stage::RetainedIdentity, error))?;
         if retained_identity != self.identity {
@@ -617,6 +623,17 @@ impl StableDirectory {
         validate_stable_child_file(&file, &path)?;
         self.revalidate_named()?;
         Ok(file)
+    }
+
+    /// Revalidate a retained regular child against its current named path.
+    ///
+    /// Performs the same fresh directory and child observations as opening
+    /// the child, without replacing the retained handle or its seek position.
+    pub fn revalidate_child_file(&self, name: &OsStr, file: &File) -> io::Result<()> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        validate_stable_child_file(file, &self.path.join(name))?;
+        self.revalidate_named()
     }
 
     /// Reopen an already-admitted private publication source with write access

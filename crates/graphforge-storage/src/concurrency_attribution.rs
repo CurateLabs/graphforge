@@ -62,6 +62,8 @@
 
 mod capture;
 pub use graphforge_core::hash_observation::ObservedSha256;
+#[cfg(target_os = "linux")]
+mod proc_reader;
 mod scheduler;
 pub use capture::{RegionCapture, RegionMeasurement, RegionRow, RegionSnapshot};
 
@@ -135,7 +137,12 @@ pub fn serial_fraction(speedup: f64, workers: u32) -> Option<f64> {
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn process_cpu_time() -> Option<Duration> {
-    parse_proc_stat_cpu(&std::fs::read_to_string("/proc/self/stat").ok()?)
+    match capture::captured_process_cpu() {
+        capture::CapturedProcessCpu::Active(cpu) => cpu,
+        capture::CapturedProcessCpu::Inactive => {
+            parse_proc_stat_cpu(&std::fs::read_to_string("/proc/self/stat").ok()?)
+        }
+    }
 }
 
 /// `utime + stime` from the body of a `/proc/<pid>/stat` line.
