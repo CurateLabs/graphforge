@@ -333,6 +333,13 @@ inside generation publication is handled by the normal project recovery and
 transaction-idempotency protocol. Portable v1 import remains a separate,
 explicit compatibility API.
 
+For a fresh destination, the imported generation and its empty bootstrap
+parent use separate versioned UUID domains derived from the import operation.
+Importing the same package under the same operation into two fresh roots
+therefore produces identical generation manifests and exact-composition export
+bytes. An already initialized pristine destination retains its existing parent
+generation and lineage; its manifest remains dependent on that parent.
+
 ## Optional OCI Distribution transport
 
 Portable-v2 packages may be published and pulled through an OCI

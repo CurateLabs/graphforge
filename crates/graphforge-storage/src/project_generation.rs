@@ -1120,6 +1120,16 @@ pub(crate) fn open_or_initialize_project_admitted_with_allocation(
     root: &Path,
     allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<ResolvedProjectGeneration, GfError> {
+    open_or_initialize_project_admitted_with_bootstrap(root, None, allocation)
+}
+
+/// Use explicit (generation, transaction) identities only when bootstrapping.
+/// Existing selected generations and resumable generation identities are retained.
+pub(crate) fn open_or_initialize_project_admitted_with_bootstrap(
+    root: &Path,
+    bootstrap: Option<(Uuid, Uuid)>,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<ResolvedProjectGeneration, GfError> {
     reject_root_link(root)?;
     let _root_lock = lock_project_root(root)?;
     let mut entries = std::fs::read_dir(root).map_err(|error| {
@@ -1134,12 +1144,19 @@ pub(crate) fn open_or_initialize_project_admitted_with_allocation(
         return match resolve_project_generation(root) {
             Err(error) if error.code() == "GF_PROJECT_UNINITIALIZED" => {
                 let generation_uuid = validate_resumable_uninitialized_layout(root)?;
-                initialize_empty_generation(root, false, Some(generation_uuid), allocation)
+                initialize_empty_generation(
+                    root,
+                    false,
+                    Some(generation_uuid),
+                    bootstrap.map(|(_, transaction)| transaction),
+                    allocation,
+                )
             }
             result => result,
         };
     }
-    initialize_empty_generation(root, true, None, allocation)
+    let (generation, transaction) = bootstrap.unzip();
+    initialize_empty_generation(root, true, generation, transaction, allocation)
 }
 
 fn validate_resumable_uninitialized_layout(root: &Path) -> Result<Uuid, GfError> {
@@ -1366,10 +1383,11 @@ fn initialize_empty_generation(
     root: &Path,
     write_format: bool,
     generation_uuid: Option<Uuid>,
+    transaction_uuid: Option<Uuid>,
     allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<ResolvedProjectGeneration, GfError> {
     let generation_uuid = generation_uuid.unwrap_or_else(Uuid::now_v7);
-    let transaction_uuid = Uuid::now_v7();
+    let transaction_uuid = transaction_uuid.unwrap_or_else(Uuid::now_v7);
     let generation_root = root
         .join("generations")
         .join(generation_uuid.hyphenated().to_string());
