@@ -316,3 +316,79 @@ fn cancellation_recovers_private_intent_without_accepting_a_chunk() {
     assert_eq!(resumed.accepted_chunks(), 0);
     assert!(resumed.root.open_child_file(OsStr::new(INTENT)).is_err());
 }
+
+#[test]
+fn non_canonical_property_columns_are_refused_before_staging() {
+    let root = TempDir::new().unwrap();
+    let mut session = open(&root, 97);
+    let item = |data_type: DataType| Arc::new(Field::new("item", data_type, true));
+    let scalars = [
+        DataType::Int8,
+        DataType::Int16,
+        DataType::Int32,
+        DataType::UInt8,
+        DataType::UInt16,
+        DataType::UInt32,
+        DataType::Float32,
+        DataType::LargeUtf8,
+    ];
+    let mut non_canonical = Vec::new();
+    for scalar in scalars {
+        non_canonical.push(DataType::List(item(scalar.clone())));
+        non_canonical.push(DataType::LargeList(item(scalar.clone())));
+        non_canonical.push(scalar);
+    }
+    non_canonical.push(DataType::LargeList(item(DataType::Int64)));
+    let mut values = arrow::array::ListBuilder::new(arrow::array::Int64Builder::new());
+    values.append_value([Some(1), None]);
+    let list: arrow::array::ArrayRef = Arc::new(values.finish());
+    let scalar: arrow::array::ArrayRef = Arc::new(Int64Array::from(vec![Some(1)]));
+    for data_type in non_canonical {
+        let source = if matches!(data_type, DataType::List(_) | DataType::LargeList(_)) {
+            &list
+        } else {
+            &scalar
+        };
+        let column = arrow::compute::cast(source, &data_type).unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new("label", DataType::Utf8, false),
+                Field::new("narrow", data_type.clone(), true),
+            ])),
+            vec![
+                Arc::new(fixed(&[1_u128.to_be_bytes()])),
+                Arc::new(StringArray::from(vec!["Person"])),
+                column,
+            ],
+        )
+        .unwrap();
+        let error = session
+            .append(ConstructionChunkKind::Node, "narrow", &batch)
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                GfError::Api {
+                    code: graphforge_core::ApiErrorCode::SchemaMismatch,
+                    message,
+                } if message.contains("narrow") && message.contains("non-canonical")
+            ),
+            "{data_type}: {error:?}"
+        );
+        assert_eq!(session.accepted_chunks(), 0, "{data_type}");
+    }
+    assert!(
+        root.path()
+            .read_dir()
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry.file_name().to_string_lossy().ends_with(".parquet")),
+        "a refused chunk must not stage a Parquet artifact"
+    );
+    let receipt = session
+        .append(ConstructionChunkKind::Node, "canonical", &node_batch(1, 1))
+        .unwrap();
+    assert_eq!(receipt.rows, 1);
+    assert_eq!(session.accepted_chunks(), 1);
+}
