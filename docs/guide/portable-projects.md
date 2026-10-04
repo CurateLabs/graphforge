@@ -53,6 +53,20 @@ An ambiguous selector or missing dependency fails. GraphForge never widens a
 selection silently. Selective packages do not imply graph merge or ontology
 adoption; they require an explicit class-specific consumer.
 
+Native saved-query definitions travel with `complete` exports and Project
+`gf publish`/`gf clone`. They are the bounded `workspace/saved_queries` metadata
+family, explicitly classified as a `settings` component. The settings profile
+also selects them; a custom profile can include or omit that family explicitly.
+Graph/data subsets exclude saved definitions rather than silently publishing
+analyses that might describe unselected data.
+
+Core validates included definitions and parameter declarations without executing
+or binding them to a graph. Imported queries run only when requested, against
+the recipient's chosen current or retained Version context. Runtime parameter
+values and prior result tables do not enter the package. Treat literal values in
+query text as shared content. See [saved queries](cypher-guide.md#saved-queries)
+for lifecycle APIs and CLI examples.
+
 Research interchange uses `GraphForge.research_reference`, `export_research`, and
 `fork_research`. Python and Node expose the same native JSON contracts; CLI
 commands are `research interchange reference|export|fork --file request.json`.

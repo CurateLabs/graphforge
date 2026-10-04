@@ -121,6 +121,36 @@ generation numbers for analyst Version identities.
 
 ## Selection and boundary closure
 
+### Saved analyses
+
+Saved queries are reusable read-only analyses owned by the Project. Rust owns
+their lifecycle and parameterized execution. The optional native
+`workspace/saved_queries@1` JSON participant is published atomically with the
+existing Project generation machinery; failed updates preserve the previous
+generation. Existing graph writes and ontology/metadata changes carry it
+forward. In-memory Projects use the same engine and native participant contract.
+
+A saved query's UUID identifies its definition through rename and update. Names
+are unique and case-sensitive within the Project. Definitions contain no
+execution values or result history. Validation parses read-only Cypher and
+checks exact scalar parameter declarations without binding to graph schema or
+executing. Explicit execution pins one context, performs ordinary native
+binding/execution, and returns Arrow under existing session resource policy and
+finite collection limits.
+
+Versions capture definition revisions as ordinary native participants. Current
+updates/deletes do not rewrite retained definitions. `SavedQuerySource::Version`
+selects both the historical definition and graph; missing retained content
+fails rather than following current state. Saved definitions establish no new
+retention root. Project packages carry them as explicit `settings` components;
+graph/data subsets exclude them. Import and clone never run them automatically.
+
+A Slice query selects canonical graph membership, while a saved analysis may
+return aggregates or arbitrary tabular projections. Reuse the existing Slice
+selector for compatible query text; do not reinterpret a frozen capsule as a
+query registry. ADR 0040's frozen membership and retention rules remain intact.
+See [the saved-query guide](../../guide/cypher-guide.md#saved-queries).
+
 ### Implemented Slice facade (#1351)
 
 `preview_slice(request, kind, page)` accepts `current` or an explicit immutable

@@ -28,6 +28,11 @@ fn refused() -> GfError {
 }
 
 fn visit_query(query: &AstQuery, parameters: &mut BTreeSet<String>) -> Result<(), GfError> {
+    if query.clauses.is_empty() {
+        return Err(GfError::Validation(
+            "saved queries require a nonempty query".into(),
+        ));
+    }
     for clause in &query.clauses {
         match clause {
             AstClause::Match(clause) | AstClause::OptionalMatch(clause) => {
@@ -185,6 +190,13 @@ fn visit_expr(expr: &Expr, parameters: &mut BTreeSet<String>) -> Result<(), GfEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_and_comment_only_queries_are_refused() {
+        for query in ["", "   ", "// no query", "/* no query */"] {
+            assert!(read_only_query_parameters(query).is_err());
+        }
+    }
 
     #[test]
     fn parameters_cover_patterns_projections_and_nested_expressions() {

@@ -47,6 +47,22 @@ dependency closure, explicit omissions and redactions, and graph subset. It
 does not imply graph merge behavior. Required omitted dependencies make the
 package incompatible.
 
+`workspace/saved_queries@1` is a native optional metadata participant,
+explicitly classified as `settings`. Its canonical bounded JSON stores stable
+query identities, unique project-local names, descriptions, read-only Cypher,
+and parameter type declarations. It MUST NOT store execution parameter values,
+compiled plans, or prior query results. Complete and settings profiles include
+the participant; custom profiles select its exact identity. Graph/data subset
+export excludes it. Including definitions does not require widening a graph
+selection or retaining an execution source.
+
+Export and full package verification MUST validate the participant's registered
+metadata, canonical record contract, read-only query syntax, and exact parameter
+declarations. Verification MUST NOT execute or schema-bind saved definitions.
+Import preserves identities and definitions; an explicit later execution binds
+against the selected recipient context. Names and literals inside the definition
+are published content, not a substitute for remote access control.
+
 The on-wire manifest MUST contain `package_digest`. Canonicalization for digest
 calculation removes only that member, without modifying any other value; the
 reader recomputes it and compares in constant time before semantic use.

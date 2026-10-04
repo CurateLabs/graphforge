@@ -257,6 +257,11 @@ pub use research_proposals::*;
 pub use research_upstream::*;
 #[cfg(feature = "research")]
 mod research_project;
+mod saved_queries;
+pub use saved_queries::{
+    MAX_SAVED_QUERY_RESULT_BYTES, MAX_SAVED_QUERY_RESULT_ROWS, SavedQuery, SavedQueryParameterType,
+    SavedQuerySource,
+};
 #[cfg(feature = "research")]
 mod research_versions;
 #[cfg(feature = "research")]

@@ -13,6 +13,24 @@ pub struct ResearchVersionView {
 }
 
 impl ResearchVersionView {
+    pub(crate) fn into_saved_query_graph(self) -> Result<GraphForge, GfError> {
+        self.require_retained("workspace", &["saved_queries"])?;
+        self.require_retained("graph", &["files", "snapshot"])?;
+        Ok(self.graph)
+    }
+
+    /// Inspect exact saved-query definitions from this retained Version.
+    pub fn saved_queries(&self) -> Result<Vec<crate::SavedQuery>, GfError> {
+        self.require_retained("workspace", &["saved_queries"])?;
+        self.graph.saved_queries()
+    }
+
+    /// Inspect one exact saved definition without executing it.
+    pub fn saved_query(&self, query_uuid: Uuid) -> Result<crate::SavedQuery, GfError> {
+        self.require_retained("workspace", &["saved_queries"])?;
+        self.graph.saved_query(query_uuid)
+    }
+
     pub(crate) fn into_slice_graph(self) -> Result<GraphForge, GfError> {
         self.require_retained("graph", &["files", "snapshot"])?;
         Ok(self.graph)
