@@ -248,6 +248,7 @@ pub(super) fn install_control<T: Serialize>(
         .map_err(storage)?;
     root.acknowledge().map_err(storage)?;
     construction_failpoint(&format!("control.install.after_install.{target}"));
+    super::diagnostics::written_bytes(body.len() as u64);
     Ok(())
 }
 
@@ -273,6 +274,7 @@ pub(super) fn install_control<T: Serialize>(
 pub(super) struct SealDirectoryBatch<'a> {
     root: &'a StableDirectory,
     pending: bool,
+    sealed_control_bytes: u64,
 }
 
 impl<'a> SealDirectoryBatch<'a> {
@@ -280,6 +282,7 @@ impl<'a> SealDirectoryBatch<'a> {
         Self {
             root,
             pending: false,
+            sealed_control_bytes: 0,
         }
     }
 
@@ -299,6 +302,9 @@ impl<'a> SealDirectoryBatch<'a> {
     /// its own batch, which the boundary's batch absorbs).
     pub(super) fn absorb(&mut self, other: &mut SealDirectoryBatch<'_>) {
         self.pending |= std::mem::take(&mut other.pending);
+        // Worker captures are not inherited. Adopt their completed control
+        // writes on the caller, exactly once, with the seal region active.
+        super::diagnostics::written_bytes(std::mem::take(&mut other.sealed_control_bytes));
     }
 
     /// Make every name linked since the last flush durable. Idempotent; the
@@ -310,6 +316,9 @@ impl<'a> SealDirectoryBatch<'a> {
         if !self.pending {
             return Ok(());
         }
+        // These bodies already passed their file barriers and install calls.
+        // Credit data work independently of this separate namespace barrier.
+        super::diagnostics::written_bytes(std::mem::take(&mut self.sealed_control_bytes));
         self.root.acknowledge().map_err(storage)?;
         self.pending = false;
         evidence.merge_directory_fsync_operations = evidence
@@ -360,6 +369,7 @@ pub(super) fn install_control_batched<T: Serialize>(
         .map_err(storage)?;
     batch.mark();
     construction_failpoint(&format!("control.install.after_install.{target}"));
+    batch.sealed_control_bytes = batch.sealed_control_bytes.saturating_add(body.len() as u64);
     Ok(())
 }
 
@@ -382,6 +392,7 @@ pub(super) fn replace_control<T: Serialize>(
         .map_err(storage)?;
     root.acknowledge().map_err(storage)?;
     construction_failpoint(&format!("control.replace.after_replace.{target}"));
+    super::diagnostics::written_bytes(body.len() as u64);
     Ok(())
 }
 

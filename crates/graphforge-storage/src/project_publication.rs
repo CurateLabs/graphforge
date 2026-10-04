@@ -179,7 +179,12 @@ impl ParticipantIdentities {
                 })
             })
             .collect::<Result<_, _>>()
-            .map(Self)
+            .map(|identities| {
+                for identity in &identities {
+                    crate::graph_construction::diagnostics::hashed_bytes(identity.byte_length, 2);
+                }
+                Self(identities)
+            })
     }
 }
 

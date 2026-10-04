@@ -821,6 +821,7 @@ pub(super) fn write_parquet_with_properties(
     root.acknowledge().map_err(storage)?;
     construction_failpoint(&format!("artifact.after_install.{name}"));
     persist_shape_receipt(root, &receipt)?;
+    super::diagnostics::sealed_payload(receipt.bytes, 1);
     Ok(receipt)
 }
 
@@ -880,6 +881,7 @@ pub(super) fn write_run<const N: usize>(
     root.acknowledge().map_err(storage)?;
     construction_failpoint(&format!("artifact.after_install.{name}"));
     persist_shape_receipt(root, &receipt)?;
+    super::diagnostics::sealed_payload(receipt.bytes, 1);
     Ok(receipt)
 }
 

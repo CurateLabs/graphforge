@@ -41,6 +41,38 @@ class RegionDiagnosticsTest(unittest.TestCase):
         self.assertAlmostEqual(result["complete_ingest"]["effective_cores"], 100 / 150)
         self.assertIsNone(result["stages_inclusive_do_not_sum"][0]["matched_worker_speedup"])
 
+    def test_successful_byte_columns_stay_distinct_from_attempted_measurements(self) -> None:
+        child = {
+            "calls": 1,
+            "work": {"hashed_bytes": 12, "written_bytes": 6},
+            "inclusive": {
+                "wall_ns": 10,
+                "process_cpu_ns": 8,
+                "thread_running_ns": 6,
+                "hashed_bytes": 25,
+                "written_bytes": 30,
+            },
+            "residual": {"wall_ns": 10},
+        }
+        parent = {**child, "work": {"rows": 1}}
+        report = {
+            "complete": True,
+            "regions": {
+                "import_command": parent,
+                "import_command/stage+seal": child,
+            },
+        }
+        rows = summarize_regions([{"region_diagnostics": report}])["region_attribution"][
+            "stages_inclusive_do_not_sum"
+        ]
+        self.assertIsNone(rows[0]["successful_hashed_bytes"])
+        self.assertIsNone(rows[0]["successful_written_bytes"])
+        self.assertEqual(rows[1]["successful_hashed_bytes"], 12)
+        self.assertEqual(rows[1]["successful_written_bytes"], 6)
+        self.assertEqual(rows[1]["inclusive"]["hashed_bytes"], 25)
+        self.assertEqual(rows[1]["inclusive"]["written_bytes"], 30)
+        self.assertEqual(rows[1]["useful_work_per_second"]["hashed_bytes"], 1_200_000_000)
+
     def test_speedup_requires_matched_work_and_single_process(self) -> None:
         baseline = dict.fromkeys(
             ("build", "input", "host", "cache", "resource_policy", "scope", "unit"), "same"

@@ -448,6 +448,9 @@ pub(super) fn write_parquet_chunks(
                 )));
             }
         }
+        // The private logical stream was sealed too; bounded physical objects
+        // above carry their own, separate completed byte work.
+        crate::graph_construction::diagnostics::sealed_payload(written, 2);
         return Ok(artifacts);
     }
     let artifact = ConstructionEncodedArtifact {
@@ -469,5 +472,6 @@ pub(super) fn write_parquet_chunks(
         1,
         "namespace fsync operations",
     )?;
+    crate::graph_construction::diagnostics::sealed_payload(written, 2);
     Ok(vec![artifact])
 }

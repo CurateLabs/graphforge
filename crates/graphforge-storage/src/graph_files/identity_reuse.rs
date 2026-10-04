@@ -96,6 +96,7 @@ pub(crate) fn capture_payload_identity(
     file.rewind()
         .map_err(|error| super::storage("rewind admitted graph file", path, error))?;
     let mut prior_calls = 0;
+    let mut prior_hashed_bytes = 0;
     if let Some(known) = reused {
         // The workspace file is the parent's own content-store object: nothing
         // was written, so there are no new bytes to name and none to read. The
@@ -109,18 +110,23 @@ pub(crate) fn capture_payload_identity(
         }
         // Reuse the authenticated identity only when these exact bytes still
         // carry its checksum. A mismatch is a change, never a stale reuse.
-        let (checksum, calls) = super::checksum_reader(&mut file, path)?;
+        let (checksum, calls, bytes) = super::checksum_reader_counted(&mut file, path)?;
         if checksum == known.content_xxh64 {
+            crate::graph_construction::diagnostics::hashed_bytes(bytes, 1);
             return Ok((known.content_sha256.clone(), checksum, calls, None));
         }
         prior_calls = calls;
+        prior_hashed_bytes = bytes;
         file =
             File::open(path).map_err(|error| super::storage("reopen graph file", path, error))?;
     }
-    let (digest, checksum, calls) = super::hash_reader_with_checksum(&mut file, path, domain)?;
+    let (digest, checksum, calls, bytes) =
+        super::hash_reader_with_checksum(&mut file, path, domain)?;
     let calls = calls
         .checked_add(prior_calls)
         .ok_or_else(|| super::resource_limit("graph file authentication read calls overflow"))?;
+    crate::graph_construction::diagnostics::hashed_bytes(bytes, 2);
+    crate::graph_construction::diagnostics::hashed_bytes(prior_hashed_bytes, 1);
     Ok((super::hex_digest(digest), checksum, calls, Some(file)))
 }
 
@@ -398,6 +404,7 @@ mod tests {
         let identity = graphforge_filesystem::path_identity(&object).unwrap();
         let known = known_for(&object, Some(identity));
 
+        let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
         let (digest, checksum, calls, hashed) =
             capture_payload_identity(&linked, Some(&known), ARTIFACT_IDENTITY).unwrap();
         assert_eq!(
@@ -407,7 +414,9 @@ mod tests {
         assert_eq!(checksum, known.content_xxh64);
         assert_eq!(calls, 0, "no byte of the object is read");
         assert!(hashed.is_none(), "nothing is retained for installation");
+        assert!(capture.finish().regions["import_command"].work.is_empty());
 
+        let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
         let (digest, checksum, calls, hashed) =
             capture_payload_identity(&copied, Some(&known), ARTIFACT_IDENTITY).unwrap();
         assert_ne!(
@@ -422,6 +431,24 @@ mod tests {
         assert!(
             hashed.is_some(),
             "a freshly hashed file is retained to install"
+        );
+        // A completed checksum pass discovers changed bytes, then the new
+        // identity pass feeds both SHA and XXH64. All three inputs count.
+        assert_eq!(
+            capture.finish().regions["import_command"].work["hashed_bytes"],
+            3 * known.byte_length
+        );
+        let checksum_known = KnownGraphFile {
+            content_xxh64: checksum,
+            ..known
+        };
+        let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
+        let (_, _, _, hashed) =
+            capture_payload_identity(&copied, Some(&checksum_known), ARTIFACT_IDENTITY).unwrap();
+        assert!(hashed.is_none());
+        assert_eq!(
+            capture.finish().regions["import_command"].work["hashed_bytes"],
+            checksum_known.byte_length
         );
     }
     /// Publishing a workspace over a compact parent installs what changed and

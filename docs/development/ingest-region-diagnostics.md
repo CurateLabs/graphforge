@@ -433,6 +433,38 @@ The `io_scope` field states their shared process scope. Sum disjoint residuals,
 not inclusive parents and children; unknown or inconsistent differences stay
 `null`. Useful-work counters remain a separate population.
 
+The closed `work` units also include `hashed_bytes` and `written_bytes` for
+successfully completed ingest byte work. These are local to the innermost
+capturing-thread region; they do not roll up automatically into parents and
+must not be substituted for the process measurements above. The region
+summary exposes them as `successful_hashed_bytes` and
+`successful_written_bytes`; historical receipts missing a unit retain an
+unknown column rather than an invented zero.
+
+Successful hash work counts actual inputs to completed SHA-256 and XXH64
+payload streams. Each stream counts separately: SHA plus XXH64 over one
+payload contributes twice its length, and a reused digest contributes no SHA
+work. A reused source that is actually checksummed still contributes that
+checksum pass. Authentication, identity, format and cache-release refusals do
+not credit the failed authentication. Completed work in a different successful
+leaf remains visible if a later enclosing operation fails. Hash work never
+adds another pass or restores removed data-path SHA authentication.
+
+Successful write work counts accepted bytes of an output whose writer flush
+and file sealing completed, followed by its existing successful output/receipt
+acceptance. It includes completed control bodies and temporary outputs, and
+counts completed concurrent CAS attempts even when another object wins.
+Failed writes, failed file barriers and cleanup-only writes are excluded.
+File sealing establishes data durability; deferred directory batches still
+establish namespace durability through their existing separate flush. The byte
+counter does not prove that a deferred namespace flush or publication completed.
+Spill workers return sealed results to their coordinator, which charges payload
+work once in its active region. Batched control byte work is transferred with
+the lane batch or charged when the local batch flush adopts the already sealed controls; best-effort drop cleanup
+is not credited. No worker region or process-counter delta is used as a work
+counter.
+
+
 `source_read` covers iterator decode/canonicalization calls; `normalization`
 covers bounded normalization windows. Appends are split into `append_nodes`
 and `append_edges`; `manifest_persistence` covers complete manifest checkpoints
@@ -454,12 +486,15 @@ For a fresh successful S22 construction, independently reconcile the leaf
 against the retained `receipt-NNNNNNNNNNNNNNNNNNNN.json` chunk receipts under
 `.graphforge-construction/`. Require contiguous accepted sequences starting at
 zero and reconcile receipt rows by kind with the input node/edge counts. That
-leaf authenticates each chunk's Parquet artifact once: its `hashed_bytes` must
-equal the sum of `parquet.bytes`, with zero-byte tolerance, and its call count
+leaf authenticates each chunk's Parquet artifact once with XXH64: its
+`work.hashed_bytes` must equal the sum of `parquet.bytes`, with zero-byte tolerance, and its call count
 must equal the number of accepted chunk receipts. Normal publication retains
 these small receipts, so collect them after measurement. Original source file
-sizes and aggregate application reads are different populations; the latter
-also includes metadata reads outside this leaf.
+sizes, attempted SHA measurement fields, and aggregate application reads are
+different populations; the latter
+also includes metadata reads outside this leaf. A prior SHA measurement receipt
+cannot establish this successful-work criterion: capture a fresh successful
+S22 workflow from the merged instrumented tree and retain its chunk receipts.
 
 To reproduce S22, use those digest-pinned inputs and the baseline host. Build an ordinary release CLI with an isolated
 `CARGO_TARGET_DIR`, record the source revision and binary/input SHA-256 digests,
@@ -472,8 +507,8 @@ A contended run cannot establish the priority decision.
 
 Keep each command's JSON receipt and the runexec output outside `docs/`; attach
 them to #1623 or its PR. The snapshot lives at `receipt.region_diagnostics`.
-Report wall/CPU, CPU divided by wall, written/hashed bytes and barrier counts
-per region, along with the parent-minus-immediate-children residual. Budget
+Report wall/CPU, CPU divided by wall, attempted measurement bytes, successful
+written/hashed work columns and barrier counts per region, along with the parent-minus-immediate-children residual. Budget
 shares use the S22 edge count divided by 1,000,000 edges/s. Compare accumulated
 hash/barrier effort with the disjoint construction regions and disclose its
 scope when recording #735's conditional priority decision. Reopen and recount

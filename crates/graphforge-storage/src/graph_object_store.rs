@@ -1264,6 +1264,7 @@ impl GraphObjectReadLease {
                 return Err(validation(format!("{primary}; {cleanup}")));
             }
         };
+        crate::graph_construction::diagnostics::hashed_bytes(totals.read_bytes, 1);
         Ok((
             AuthenticatedGraphObject {
                 file: retained,
@@ -1458,6 +1459,7 @@ pub(crate) fn open_graph_object_with_checksum(
         .map_err(|error| storage("rewind checksum object", root, error))?;
     crate::lifecycle_io::record_read(crate::StorageIoPhase::HydrationVerification, bytes, calls);
     crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
+    crate::graph_construction::diagnostics::hashed_bytes(bytes, 1);
     Ok(AuthenticatedGraphObject {
         file,
         authenticated_length: entry.byte_length,

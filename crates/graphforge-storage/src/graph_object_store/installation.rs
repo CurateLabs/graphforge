@@ -157,6 +157,10 @@ fn install_graph_object_bytes_in_domain(
                 identity,
                 evidence.content_xxh64,
             )?;
+            // Resident naming computed SHA and XXH64 even when CAS reuse
+            // avoided writing. Native read work below describes separate passes.
+            crate::graph_construction::diagnostics::hashed_bytes(expected_length, 2);
+            record_completed_install(&evidence);
             Ok((digest, evidence))
         },
     )
@@ -395,6 +399,7 @@ fn install_graph_object_file_admitted(
                 identity,
                 evidence.content_xxh64,
             )?;
+            record_completed_install(&evidence);
             Ok(evidence)
         },
     )
@@ -552,7 +557,17 @@ fn install_captured_source_with_lease(
         identity,
         evidence.content_xxh64,
     )?;
+    record_completed_install(&evidence);
     Ok(evidence)
+}
+
+/// Completed native operation evidence, never sampled process measurements.
+/// Every SHA read in these installers also fed XXH64; checksum-only admitted
+/// reads feed one stream. A reused identity itself performs no digest work.
+fn record_completed_install(evidence: &GraphObjectInstallEvidence) {
+    crate::graph_construction::diagnostics::hashed_bytes(evidence.bytes_hashed, 2);
+    crate::graph_construction::diagnostics::hashed_bytes(evidence.checksum_read_bytes, 1);
+    crate::graph_construction::diagnostics::written_bytes(evidence.write_bytes);
 }
 
 fn copy_captured_source(
