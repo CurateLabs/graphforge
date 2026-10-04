@@ -119,6 +119,13 @@ where
     };
     let schema = inventory
         .route_schema(kind, stem)
+        .and_then(|schema| {
+            schema
+                .map(|schema| {
+                    project_property_schema(schema, kind.uuid_field(), selected_properties)
+                })
+                .transpose()
+        })
         .map_err(|error| DataFusionError::External(Box::new(error)))?;
     let scratch = inventory
         .create_snapshot_scratch()
@@ -167,6 +174,31 @@ where
         let _ = visit(&batch)?;
     }
     Ok(metrics)
+}
+
+// Normalize decoded columns against their selected schema. Omitted required
+// fields must not become null placeholders before projection removes them.
+fn project_property_schema(
+    schema: SchemaRef,
+    uuid_field: &str,
+    selected_properties: Option<&std::collections::BTreeSet<String>>,
+) -> Result<SchemaRef, graphforge_core::GfError> {
+    let Some(selected_properties) = selected_properties else {
+        return Ok(schema);
+    };
+    let indices = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| {
+            field.name() == uuid_field || selected_properties.contains(field.name())
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    schema
+        .project(&indices)
+        .map(Arc::new)
+        .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))
 }
 
 fn project_property_batch(
