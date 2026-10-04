@@ -27,6 +27,63 @@ measurements.
 Ordinary deadlines, cancellation tests, and approved shared diagnostics remain
 allowed. `Instant` / `Duration` in product control paths are not banned globally.
 
+## Construction syscall comparison
+
+[`construction-syscall-comparison.py`](../../benchmarks/scripts/construction-syscall-comparison.py)
+compares a frozen baseline and candidate through the current Graph500 S18/S20
+profiles. Generate each input once with the frozen current generator, then share
+those regular files between fresh projects. Registration arguments use absolute
+input paths because the product refuses symlink sources. The five profile import
+commands run under BenchExec with CPUs 0–15 and a 4000 MB memory limit. The driver
+requests region diagnostics; optional allocation diagnostics remain disabled in
+both modes. It provides no lifecycle-storage certification claim.
+
+Build and archive both release executables before reserving the host. All input
+generation and digest reads happen outside the timed workflow. Before each run,
+input hashing verifies identical bytes and establishes the matched warm-input
+policy. Required checks and barriers remain inside the complete ingest.
+
+```bash
+task_driver="$PWD/benchmarks/scripts/construction-syscall-comparison.py"
+task_profile="$PWD/benchmarks/profiles/graph500/s18-local.json"
+python3 "$task_driver" generate --profile "$task_profile" \
+  --binary "$task_generator" --inputs "$task_inputs"
+systemd-run --user --scope --slice=benchexec -p Delegate=yes \
+  python3 "$task_driver" run --profile "$task_profile" \
+  --binary "$task_baseline_gf" --inputs "$task_inputs" --run "$task_evidence/s18-a1"
+```
+
+Use task-owned absolute paths on the admitted ext4/xfs/btrfs volume, and repeat
+with the candidate executable and `s20-provider.json`. Take three accepted pairs
+per scale in A/B, B/A, A/B order, each with a distinct run directory. The parent
+operator first records at least 60 seconds of CPU, I/O and process activity with
+`vmstat -w 5`, `mpstat -P ALL 5`, `pidstat -durh -p ALL 5` and process-name samples,
+reviews that quiet window, and keeps those observers plus a compiler-process
+watchdog running throughout measurement. Boundary process checks alone do not
+establish a quiet host. Preserve and exclude a contended or failed observation;
+do not silently retry it into the accepted set.
+
+After each workflow, the driver reopens the project and runs the profile's node
+and edge recount plus ordered one-hop and two-hop queries. Compare all four
+complete result digests and row counts across both modes; an absent digest is a
+failure, while an absent scalar observation remains unavailable. Read complete
+workflow wall/CPU/memory from `runexec.txt`. Run a separate S18 observation per
+mode with `--trace`; its `validate.strace` gives `strace -f -c` syscall counts.
+Keep traced runs out of the wall comparison.
+
+Method input SHA-256 identities:
+
+| Input | SHA-256 |
+| --- | --- |
+| Comparison driver | `dbe386ef158382b0eca4c9e8b477386b4010bf7c1ac72c91ce2492f185463ee2` |
+| S18 profile | `762fdac3d4ad790eaf1aa75348ccca692c709dcf578f91e1363f720afebc368b` |
+| S20 profile | `b8af47526cad5641bfe85c8c68e507c46edf0de106f92bffd712e6ae90c9b59d` |
+
+The generator binary and generated Parquet hashes are written in each input
+`identity.json`; record the four Parquet hashes here before accepting a new
+comparison. Raw receipts, counts, logs, per-run tables and binary provenance
+attach to the producing issue/PR outside the repository.
+
 ## Inventory and enforcement
 
 The inventory records each measurement site, its boundary, disposition, migration
