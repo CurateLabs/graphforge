@@ -243,15 +243,33 @@ pub fn read_workspace_saved_queries(
     let snapshot = generation
         .participant_snapshot(WORKSPACE_CAPABILITY_ID, WORKSPACE_SAVED_QUERIES_FAMILY)?
         .ok_or_else(|| corrupt("saved-query participant is missing"))?;
-    if snapshot.capability_version != WORKSPACE_CAPABILITY_VERSION
-        || snapshot.record_version != WORKSPACE_SAVED_QUERIES_VERSION
-        || snapshot.encoding != "json"
-        || snapshot.schema_fingerprint != schema_fingerprint()
+    decode_participant(
+        snapshot.capability_version,
+        snapshot.record_version,
+        &snapshot.encoding,
+        &snapshot.schema_fingerprint,
+        snapshot.row_count,
+        &snapshot.bytes,
+    )
+}
+
+pub(crate) fn decode_participant(
+    capability_version: u32,
+    record_version: u32,
+    encoding: &str,
+    schema: &[u8; 32],
+    row_count: u64,
+    bytes: &[u8],
+) -> Result<WorkspaceSavedQueries, GfError> {
+    if capability_version != WORKSPACE_CAPABILITY_VERSION
+        || record_version != WORKSPACE_SAVED_QUERIES_VERSION
+        || encoding != "json"
+        || *schema != schema_fingerprint()
     {
         return Err(corrupt("unsupported saved-query participant contract"));
     }
-    let record = WorkspaceSavedQueries::from_canonical_json(&snapshot.bytes)?;
-    if snapshot.row_count != record.queries.len() as u64 {
+    let record = WorkspaceSavedQueries::from_canonical_json(bytes)?;
+    if row_count != record.queries.len() as u64 {
         return Err(corrupt(
             "saved-query participant row count differs from its definitions",
         ));

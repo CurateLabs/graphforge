@@ -347,6 +347,7 @@ pub(super) fn validate_research_source(
     generation: &graphforge_storage::ResolvedProjectGeneration,
 ) -> Result<(), GfError> {
     generation.validate_complete_participant_inventory()?;
+    graphforge_storage::read_workspace_saved_queries(generation)?;
     // Run each domain owner's decoder as well as the generic checkpoint adapters.
     // These readers enforce each ledger's schema and ledger-local invariants.
     let provenance = generation

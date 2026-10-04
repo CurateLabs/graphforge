@@ -710,6 +710,7 @@ fn pre_and_post_linearization_faults_preserve_truthful_reopen_and_replay() {
 mod project_content;
 mod proposals;
 mod retention;
+mod saved_queries;
 mod upstream;
 
 #[test]

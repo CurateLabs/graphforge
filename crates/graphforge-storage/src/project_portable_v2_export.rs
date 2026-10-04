@@ -737,6 +737,7 @@ fn storage(e: impl std::fmt::Display) -> ExportError {
 
 #[cfg(test)]
 mod tests {
+    mod historical_saved_queries;
     mod participant_files;
     mod saved_queries;
     mod semantic_refusals;
