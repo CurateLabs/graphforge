@@ -37,6 +37,7 @@ pub enum SavedQuerySource {
     },
 }
 
+#[derive(Clone, Copy)]
 enum ParameterInput<'a> {
     Typed(&'a HashMap<String, IrLiteral>),
     Json(&'a HashMap<String, serde_json::Value>),
