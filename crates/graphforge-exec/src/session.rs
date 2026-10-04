@@ -1013,6 +1013,16 @@ impl ExecutionSession {
         let mut var_map = graphforge_rel::VarMap::new();
         let logical =
             lowerer.lower_prefix(&plan.ops[..split.prefix_len], &plan.exprs, &mut var_map)?;
+        let logical = if let Some(columns) =
+            write_driver::delete_identity_projection(&plan.ops, &split, logical.schema())
+        {
+            LogicalPlanBuilder::from(logical)
+                .project(columns)
+                .and_then(LogicalPlanBuilder::build)
+                .map_err(GfError::from_plan_error)?
+        } else {
+            logical
+        };
         let logical = bind_query_params(logical, params)?;
         let df_schema = logical.schema().as_ref().clone();
         let physical = self
