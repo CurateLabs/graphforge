@@ -12,9 +12,12 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    BulkInputKind, GraphForge, ImportSessionLimits, IrLiteral, OperationId, PortableSelection,
-    PortableV2ExportRequest, PortableV2ImportRequest, PortableV2Limits, PortableV2Output,
-    PortableV2SelectionProfile, ResultSinkOptions,
+    BulkInputKind, GraphForge, ImportSessionLimits, IrLiteral, OperationId, ResultSinkOptions,
+};
+#[cfg(feature = "portable")]
+use graphforge_api::{
+    PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest, PortableV2Limits,
+    PortableV2Output, PortableV2SelectionProfile,
 };
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -197,6 +200,7 @@ fn verify_reads(forge: &GraphForge, values: &[f64], outputs: &Path) {
     assert_eq!(rows(&batches), expected(values));
 }
 
+#[cfg(feature = "portable")]
 fn verify_portable_roundtrip(forge: &GraphForge, values: &[f64], root: &Path) {
     let package = root.join("graph.gfpb");
     forge
@@ -235,6 +239,7 @@ fn in_memory_float_properties_are_bit_exact() {
     let forge = GraphForge::new(None).unwrap();
     write_values(&forge, &values);
     verify_reads(&forge, &values, root.path());
+    #[cfg(feature = "portable")]
     verify_portable_roundtrip(&forge, &values, root.path());
 }
 
@@ -249,6 +254,7 @@ fn durable_float_properties_are_bit_exact_after_reopen() {
     drop(forge);
     let reopened = GraphForge::new(project.to_str()).unwrap();
     verify_reads(&reopened, &values, root.path());
+    #[cfg(feature = "portable")]
     verify_portable_roundtrip(&reopened, &values, root.path());
 }
 
