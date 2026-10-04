@@ -1059,3 +1059,33 @@ fn stable_directory_sync_uses_an_identity_checked_write_handle() {
     let stable = StableDirectory::open(root.path()).unwrap();
     stable.sync().unwrap();
 }
+
+#[test]
+fn fresh_directory_metadata_rejects_wrong_retained_identity() {
+    let named = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let stable = StableDirectory {
+        path: named.path().to_path_buf(),
+        identity: path_identity(named.path()).unwrap(),
+        file: stable_open_directory(other.path()).unwrap(),
+    };
+    assert_eq!(
+        stable.revalidate_named_detailed().unwrap_err().stage(),
+        DirectoryValidationStage::IdentityChanged
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_directory_metadata_rejects_named_identity_substitution() {
+    let parent = tempfile::tempdir().unwrap();
+    let named = parent.path().join("named");
+    std::fs::create_dir(&named).unwrap();
+    let stable = StableDirectory::open(&named).unwrap();
+    std::fs::rename(&named, parent.path().join("displaced")).unwrap();
+    std::fs::create_dir(&named).unwrap();
+    assert_eq!(
+        stable.revalidate_named_detailed().unwrap_err().stage(),
+        DirectoryValidationStage::IdentityChanged
+    );
+}

@@ -470,3 +470,105 @@ fn resumed_seal_refuses_malformed_checksum_metadata() {
         );
     }
 }
+
+fn retained_retirement_fixture() -> (
+    TempDir,
+    StableDirectory,
+    ArtifactReceipt,
+    RetainedShapeArtifact,
+) {
+    let temporary = TempDir::new().unwrap();
+    let root = StableDirectory::open(temporary.path()).unwrap();
+    let name = "shaped-identities.run";
+    std::fs::write(temporary.path().join(name), b"identity").unwrap();
+    let receipt = receipt_for_existing(&root, name).unwrap();
+    persist_shape_receipt(&root, &receipt).unwrap();
+    let (actual, _, retained) = receipt_for_existing_retained(&root, name).unwrap();
+    assert_eq!(receipt, actual);
+    (temporary, root, receipt, retained.unwrap())
+}
+
+#[test]
+fn retained_retirement_removes_exact_artifact_and_capability() {
+    let (temporary, root, receipt, retained) = retained_retirement_fixture();
+    retained.unlink(&root, &receipt).unwrap();
+    assert!(!temporary.path().join(&receipt.name).exists());
+    assert!(
+        !temporary
+            .path()
+            .join(shape_receipt_name(&receipt.name))
+            .exists()
+    );
+}
+
+#[test]
+fn retained_retirement_rereads_capability_contents() {
+    let (temporary, root, receipt, mut retained) = retained_retirement_fixture();
+    assert_eq!(retained.fresh_receipt().unwrap(), receipt);
+    let mut changed = receipt.clone();
+    changed.xxh64 = "0".repeat(16);
+    std::fs::write(
+        temporary.path().join(shape_receipt_name(&receipt.name)),
+        serde_json::to_vec(&changed).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(retained.fresh_receipt().unwrap(), changed);
+    assert!(retained.unlink(&root, &receipt).is_err());
+    assert!(temporary.path().join(&receipt.name).exists());
+    assert!(
+        temporary
+            .path()
+            .join(shape_receipt_name(&receipt.name))
+            .exists()
+    );
+}
+
+#[test]
+fn retained_retirement_preserves_equivalent_fresh_receipt_encoding() {
+    let (temporary, root, receipt, retained) = retained_retirement_fixture();
+    std::fs::write(
+        temporary.path().join(shape_receipt_name(&receipt.name)),
+        serde_json::to_vec_pretty(&receipt).unwrap(),
+    )
+    .unwrap();
+    retained.unlink(&root, &receipt).unwrap();
+}
+
+#[test]
+fn retained_retirement_refuses_changed_artifact_length() {
+    let (temporary, root, receipt, retained) = retained_retirement_fixture();
+    std::fs::write(temporary.path().join(&receipt.name), b"longer identity").unwrap();
+    assert!(retained.unlink(&root, &receipt).is_err());
+    assert!(temporary.path().join(&receipt.name).exists());
+    assert!(
+        temporary
+            .path()
+            .join(shape_receipt_name(&receipt.name))
+            .exists()
+    );
+}
+
+#[test]
+fn retained_retirement_refuses_fresh_extra_links() {
+    for capability in [false, true] {
+        let (temporary, root, receipt, retained) = retained_retirement_fixture();
+        let name = if capability {
+            shape_receipt_name(&receipt.name)
+        } else {
+            receipt.name.clone()
+        };
+        std::fs::hard_link(
+            temporary.path().join(name),
+            temporary.path().join("extra.link"),
+        )
+        .unwrap();
+        assert!(retained.unlink(&root, &receipt).is_err());
+        assert!(temporary.path().join(&receipt.name).exists());
+        assert!(
+            temporary
+                .path()
+                .join(shape_receipt_name(&receipt.name))
+                .exists()
+        );
+    }
+}

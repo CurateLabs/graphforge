@@ -41,6 +41,33 @@ use super::{
 };
 use std::io::Seek;
 
+// Sorted sample positions visit each extent once. Reusing its descriptor
+// removes opens, while revalidating the named child at every read boundary.
+fn read_identity_sample(
+    root: &StableDirectory,
+    name: &str,
+    retained: &mut Option<(String, File)>,
+    offset: u64,
+) -> Result<[u8; IDENTITY_WIDTH], GfError> {
+    if let Some((current, file)) = retained.as_ref()
+        && current == name
+    {
+        root.revalidate_child_file(OsStr::new(name), file)
+            .map_err(storage)?;
+    } else {
+        *retained = Some((
+            name.to_owned(),
+            root.open_child_file(OsStr::new(name)).map_err(storage)?,
+        ));
+    }
+    let (_, file) = retained.as_mut().expect("sample extent opened above");
+    file.seek(std::io::SeekFrom::Start(offset))
+        .map_err(storage)?;
+    let mut key = [0_u8; IDENTITY_WIDTH];
+    file.read_exact(&mut key).map_err(storage)?;
+    Ok(key)
+}
+
 /// Pre-surrogate identity domain, produced by concatenating sorted partitions.
 pub(super) const STAGED_IDENTITIES: &str = "staged-identities.run";
 /// Pre-resolution endpoint domain, produced by concatenating sorted partitions.
@@ -160,6 +187,7 @@ impl GraphConstructionSession {
         )?;
         let positions = sampler.positions().collect::<Vec<_>>();
         let mut cursor = 0_usize;
+        let mut retained = None;
         for position in positions {
             while cursor < extents.len() && position >= extents[cursor].1 + extents[cursor].2 {
                 cursor += 1;
@@ -167,18 +195,10 @@ impl GraphConstructionSession {
             let (name, base, _) = extents
                 .get(cursor)
                 .ok_or_else(|| storage("identity sample position is out of range"))?;
-            let mut file = self
-                .root
-                .open_child_file(OsStr::new(name))
-                .map_err(storage)?;
-            file.seek(std::io::SeekFrom::Start(
-                (position - base)
-                    .checked_mul(IDENTITY_WIDTH as u64)
-                    .ok_or_else(|| storage("identity sample offset overflows"))?,
-            ))
-            .map_err(storage)?;
-            let mut key = [0_u8; IDENTITY_WIDTH];
-            file.read_exact(&mut key).map_err(storage)?;
+            let offset = (position - base)
+                .checked_mul(IDENTITY_WIDTH as u64)
+                .ok_or_else(|| storage("identity sample offset overflows"))?;
+            let key = read_identity_sample(&self.root, name, &mut retained, offset)?;
             account_sequential_read(IDENTITY_WIDTH as u64, &mut self.checkpoint.evidence)?;
             sampler.admit(key)?;
         }

@@ -1121,3 +1121,13 @@ pub(super) fn path_link_count_platform(_path: &Path) -> io::Result<u64> {
         "link count unsupported",
     ))
 }
+
+// Unix metadata already contains the native identity from this observation.
+#[cfg(unix)]
+pub(super) fn metadata_identity(metadata: &std::fs::Metadata) -> FileIdentity {
+    use std::os::unix::fs::MetadataExt as _;
+    FileIdentity {
+        volume_serial: metadata.dev(),
+        file_id: u128::from(metadata.ino()).to_le_bytes(),
+    }
+}

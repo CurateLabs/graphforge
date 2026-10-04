@@ -864,3 +864,59 @@ fn segment_retirement_is_schedule_independent_including_failure() {
     assert_eq!(serial.1, 0);
     assert_eq!(serial, parallel);
 }
+
+#[test]
+fn retained_identity_sampling_seeks_and_switches_extents_exactly() {
+    let temporary = TempDir::new().unwrap();
+    let root = StableDirectory::open(temporary.path()).unwrap();
+    let first = [11_u8; IDENTITY_WIDTH];
+    let second = [22_u8; IDENTITY_WIDTH];
+    std::fs::write(temporary.path().join("first.run"), [first, second].concat()).unwrap();
+    std::fs::write(temporary.path().join("second.run"), second).unwrap();
+    let mut retained = None;
+    assert_eq!(
+        read_identity_sample(&root, "first.run", &mut retained, 0).unwrap(),
+        first
+    );
+    assert_eq!(
+        read_identity_sample(&root, "first.run", &mut retained, IDENTITY_WIDTH as u64).unwrap(),
+        second
+    );
+    assert_eq!(
+        read_identity_sample(&root, "second.run", &mut retained, 0).unwrap(),
+        second
+    );
+    assert_eq!(retained.as_ref().unwrap().0, "second.run");
+}
+
+#[cfg(unix)]
+#[test]
+fn retained_identity_sampling_refuses_fresh_child_substitution() {
+    let temporary = TempDir::new().unwrap();
+    let root = StableDirectory::open(temporary.path()).unwrap();
+    let path = temporary.path().join("sample.run");
+    std::fs::write(&path, [11_u8; IDENTITY_WIDTH]).unwrap();
+    let mut retained = None;
+    read_identity_sample(&root, "sample.run", &mut retained, 0).unwrap();
+    std::fs::rename(&path, temporary.path().join("displaced.run")).unwrap();
+    std::fs::write(&path, [22_u8; IDENTITY_WIDTH]).unwrap();
+    assert!(read_identity_sample(&root, "sample.run", &mut retained, 0).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn retained_identity_sampling_refuses_fresh_root_substitution() {
+    let parent = TempDir::new().unwrap();
+    let path = parent.path().join("session");
+    std::fs::create_dir(&path).unwrap();
+    let root = StableDirectory::open(&path).unwrap();
+    std::fs::write(path.join("sample.run"), [11_u8; IDENTITY_WIDTH]).unwrap();
+    let mut retained = None;
+    read_identity_sample(&root, "sample.run", &mut retained, 0).unwrap();
+    let displaced = parent.path().join("displaced");
+    std::fs::rename(&path, &displaced).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    // Keep the child identity identical; only directory authority can refuse.
+    std::fs::hard_link(displaced.join("sample.run"), path.join("sample.run")).unwrap();
+    assert!(read_identity_sample(&root, "sample.run", &mut retained, 0).is_err());
+}

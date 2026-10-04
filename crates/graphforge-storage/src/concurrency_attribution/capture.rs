@@ -6,10 +6,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use super::{
-    process_cpu_time,
-    scheduler::{self, SchedulerSample},
-};
+use super::scheduler::{SchedulerReader, SchedulerSample};
 
 thread_local! {
     static ACTIVE: RefCell<Vec<Rc<RefCell<State>>>> = const { RefCell::new(Vec::new()) };
@@ -158,6 +155,7 @@ pub struct RegionSnapshot {
 
 #[derive(Debug, Default)]
 struct State {
+    readers: BoundaryReaders,
     stack: Vec<(u64, String, RegionMeasurement)>,
     next_id: u64,
     invalid: bool,
@@ -283,18 +281,15 @@ impl CaptureRegion {
             let id = state.borrow().next_id;
             state.borrow_mut().next_id += 1;
             state.borrow_mut().stack.push((id, path, zero()));
-            Some(Self {
-                state,
-                sample: Sample::now(),
-                id,
-            })
+            let sample = Sample::now(&mut state.borrow_mut().readers);
+            Some(Self { state, sample, id })
         })
     }
 }
 
 impl Drop for CaptureRegion {
     fn drop(&mut self) {
-        let measured = self.sample.elapsed();
+        let measured = self.sample.elapsed(&mut self.state.borrow_mut().readers);
         let mut state = self.state.borrow_mut();
         if state.invalid || state.stack.last().is_none_or(|frame| frame.0 != self.id) {
             state.invalid = true;
@@ -365,13 +360,13 @@ struct Sample {
 }
 
 impl Sample {
-    fn now() -> Self {
+    fn now(readers: &mut BoundaryReaders) -> Self {
         #[cfg(any(test, feature = "test-support"))]
         SAMPLE_COUNT.with(|count| count.set(count.get() + 1));
         let wall = Instant::now();
-        let cpu = process_cpu_time().and_then(|d| u64::try_from(d.as_nanos()).ok());
-        let scheduler = scheduler::sample();
-        let writes = process_written_bytes();
+        let cpu = readers.cpu().and_then(|d| u64::try_from(d.as_nanos()).ok());
+        let scheduler = readers.scheduler.sample();
+        let writes = readers.writes();
         let hashes = graphforge_core::hash_observation::totals();
         let barriers = graphforge_filesystem::observation::fsync_totals();
         Self {
@@ -385,8 +380,8 @@ impl Sample {
         }
     }
 
-    fn elapsed(&self) -> RegionMeasurement {
-        let end = Self::now();
+    fn elapsed(&self, readers: &mut BoundaryReaders) -> RegionMeasurement {
+        let end = Self::now(readers);
         let wall_ns =
             u64::try_from(end.wall.duration_since(self.wall).as_nanos()).unwrap_or(u64::MAX);
         let running = subtract(end.scheduler.running, self.scheduler.running);
@@ -419,17 +414,63 @@ impl Sample {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn process_written_bytes() -> Option<u64> {
-    let io = std::fs::read_to_string("/proc/self/io").ok()?;
-    io.lines().find_map(|line| {
-        line.strip_prefix("wchar: ")
-            .and_then(|n| n.trim().parse().ok())
-    })
+#[derive(Debug, Default)]
+struct BoundaryReaders {
+    scheduler: SchedulerReader,
+    #[cfg(target_os = "linux")]
+    process: ProcessReaders,
 }
-#[cfg(not(target_os = "linux"))]
-fn process_written_bytes() -> Option<u64> {
-    None
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct ProcessReaders {
+    cpu: super::proc_reader::ProcReader,
+    writes: super::proc_reader::ProcReader,
+}
+
+#[cfg(target_os = "linux")]
+impl Default for ProcessReaders {
+    fn default() -> Self {
+        Self {
+            cpu: super::proc_reader::ProcReader::open("/proc/self/stat"),
+            writes: super::proc_reader::ProcReader::open("/proc/self/io"),
+        }
+    }
+}
+
+impl BoundaryReaders {
+    fn cpu(&mut self) -> Option<std::time::Duration> {
+        #[cfg(target_os = "linux")]
+        {
+            super::parse_proc_stat_cpu(self.process.cpu.read()?)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
+    fn writes(&mut self) -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        {
+            self.process.writes.read()?.lines().find_map(|line| {
+                line.strip_prefix("wchar: ")
+                    .and_then(|n| n.trim().parse().ok())
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn captured_process_cpu() -> Option<Option<std::time::Duration>> {
+    ACTIVE.with(|active| {
+        let state = active.borrow().last()?.clone();
+        Some(state.borrow_mut().readers.cpu())
+    })
 }
 
 #[cfg(test)]
@@ -522,4 +563,36 @@ mod tests {
         assert!(inner.finish().complete);
         assert!(RegionScope::named("after").is_none());
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn retained_boundary_readers_observe_fresh_cpu_and_write_counts() {
+    use super::proc_reader::ProcReader;
+    let temporary = tempfile::tempdir().unwrap();
+    let cpu = temporary.path().join("cpu");
+    let writes = temporary.path().join("writes");
+    let stat = "42 (name) S 1 42 42 0 -1 4194304 100 0 0 0 1500 500 0 0 20 0 1 0";
+    std::fs::write(&cpu, stat).unwrap();
+    std::fs::write(&writes, "wchar: 42\n").unwrap();
+    let mut readers = BoundaryReaders {
+        process: ProcessReaders {
+            cpu: ProcReader::open(cpu.to_str().unwrap()),
+            writes: ProcReader::open(writes.to_str().unwrap()),
+        },
+        scheduler: SchedulerReader::default(),
+    };
+    let before = Sample::now(&mut readers);
+    assert_eq!(before.cpu, Some(20_000_000_000));
+    assert_eq!(before.writes, Some(42));
+    std::fs::write(&cpu, stat.replace("1500 500", "1600 500")).unwrap();
+    std::fs::write(&writes, "wchar: 87\n").unwrap();
+    let after = Sample::now(&mut readers);
+    assert_eq!(after.cpu, Some(21_000_000_000));
+    assert_eq!(after.writes, Some(87));
+    std::fs::write(&cpu, "broken").unwrap();
+    std::fs::write(&writes, "broken").unwrap();
+    let unavailable = Sample::now(&mut readers);
+    assert_eq!(unavailable.cpu, None);
+    assert_eq!(unavailable.writes, None);
 }
