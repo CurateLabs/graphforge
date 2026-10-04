@@ -58,6 +58,7 @@ struct Identity {
     ino: u64,
     len: u64,
     modified: Option<std::time::SystemTime>,
+    allow_hardlinks: bool,
 }
 #[derive(Clone)]
 /// Immutable pinned-generation metadata plan; contains no payload buffers.
@@ -543,13 +544,20 @@ fn copy_expanded_snapshot(
 }
 
 fn identity(m: &fs::Metadata) -> Result<Identity, ExportError> {
+    identity_with_link_policy(m, false)
+}
+
+fn identity_with_link_policy(
+    m: &fs::Metadata,
+    allow_hardlinks: bool,
+) -> Result<Identity, ExportError> {
     if !m.is_file() || m.file_type().is_symlink() {
         return Err(err("GF_UNSUPPORTED_ENTRY_TYPE", "not a regular file"));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if m.nlink() != 1 {
+        if !allow_hardlinks && m.nlink() != 1 {
             return Err(err("GF_UNSUPPORTED_ENTRY_TYPE", "hard-linked source"));
         }
         Ok(Identity {
@@ -557,6 +565,7 @@ fn identity(m: &fs::Metadata) -> Result<Identity, ExportError> {
             ino: m.ino(),
             len: m.len(),
             modified: m.modified().ok(),
+            allow_hardlinks,
         })
     }
     #[cfg(not(unix))]
@@ -564,6 +573,7 @@ fn identity(m: &fs::Metadata) -> Result<Identity, ExportError> {
         Ok(Identity {
             len: m.len(),
             modified: m.modified().ok(),
+            allow_hardlinks,
         })
     }
 }

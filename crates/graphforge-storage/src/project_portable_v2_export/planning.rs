@@ -1,8 +1,8 @@
 //! Selection, authenticated source planning, and manifest assembly.
 use super::{
     BTreeSet, ExportError, Path, PlannedFile, PlannedSource, PortableV2ExportLimits,
-    PortableV2ExportPlan, PortableV2PackageClass, err, hex, identity, limit, open_source_no_follow,
-    storage, validate_limits,
+    PortableV2ExportPlan, PortableV2PackageClass, err, hex, identity, identity_with_link_policy,
+    limit, open_source_no_follow, storage, validate_limits,
 };
 use crate::project_portable_v2::{
     PortableV2ActivationOverride, PortableV2ActivationProfile, PortableV2BridgeSet,
@@ -1154,7 +1154,7 @@ fn inspect_admitted(
         return Err(limit("total too large"));
     }
     let input = open_source_no_follow(source)?;
-    let before = identity(&input.metadata().map_err(storage)?)?;
+    let before = identity_with_link_policy(&input.metadata().map_err(storage)?, true)?;
     if before.len != length {
         return Err(err("GF_SOURCE_CHANGED", "admitted source length changed"));
     }

@@ -26,6 +26,7 @@ use ledger::merged_evidence_provenance;
 use ledger::merged_provenance;
 pub(crate) use ledger::participant;
 pub(crate) use ledger::prepare_knowledge_request;
+pub(crate) use ledger::prepare_knowledge_request_reusing_parent;
 pub(crate) use ledger::read_confidence_ledger;
 pub(crate) use ledger::read_evidence_ledger;
 pub(crate) use ledger::read_ledger;

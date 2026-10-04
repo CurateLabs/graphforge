@@ -12,7 +12,7 @@ use participants::{
     prepare_generation_directory, request_metadata_with_payloads, stage_optional_graph_tree,
     stage_participant_files, sync_participant_directories, validate_request,
     verify_optional_generation_graph_tree, verify_optional_graph_tree_with_lease,
-    verify_participant_file,
+    verify_staged_participant_file,
 };
 mod control;
 pub(crate) use control::{
@@ -138,7 +138,10 @@ pub(crate) struct ProjectFileParticipant {
 
 #[derive(Clone, Copy)]
 enum ParticipantPayloads<'a> {
-    Memory(Option<&'a ParticipantIdentities>),
+    Memory(
+        Option<&'a ParticipantIdentities>,
+        &'a [ReusedParticipantPayload],
+    ),
     Files(
         &'a [ProjectFileParticipant],
         Option<&'a AtomicBool>,
@@ -158,6 +161,18 @@ struct ParticipantIdentity {
 /// Exact-byte identities of in-memory participants, computed once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParticipantIdentities(Vec<ParticipantIdentity>);
+
+/// Parent-owned immutable bytes carried into a complete next generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReusedParticipantPayload {
+    index: usize,
+    capability_id: String,
+    record_family_id: String,
+    source: PathBuf,
+    parent_generation_uuid: Uuid,
+    parent_manifest_sha256: [u8; 32],
+    identity: ParticipantIdentity,
+}
 
 impl ParticipantIdentities {
     fn compute(participants: &[ProjectParticipant]) -> Result<Self, GfError> {
@@ -198,6 +213,7 @@ impl ParticipantIdentities {
 pub struct PreparedGenerationRequest {
     request: ProjectGenerationRequest,
     identities: ParticipantIdentities,
+    reused: Vec<ReusedParticipantPayload>,
 }
 
 impl PreparedGenerationRequest {
@@ -227,6 +243,170 @@ impl PreparedGenerationRequest {
                 participants,
             },
             identities,
+            reused: Vec::new(),
+        })
+    }
+
+    /// Build a complete request by reusing every parent participant whose key
+    /// is not replaced by `participants`. Reused payload bytes remain owned by
+    /// their immutable parent files; the new manifest still lists every
+    /// participant directly.
+    pub fn new_reusing_parent(
+        transaction_uuid: Uuid,
+        capabilities: Vec<ProjectCapability>,
+        parent: &ResolvedProjectGeneration,
+        replaced: &[(String, String)],
+        participants: Vec<ProjectParticipant>,
+        generation_uuid: impl FnOnce(&[ProjectParticipant], &[[u8; 32]]) -> Uuid,
+    ) -> Result<Self, GfError> {
+        Self::new_reusing_parent_inner(
+            transaction_uuid,
+            capabilities,
+            parent,
+            replaced,
+            participants,
+            None,
+            generation_uuid,
+        )
+    }
+
+    /// Build a complete request with an externally assigned generation UUID.
+    pub fn new_reusing_parent_with_generation_uuid(
+        transaction_uuid: Uuid,
+        generation_uuid: Uuid,
+        capabilities: Vec<ProjectCapability>,
+        parent: &ResolvedProjectGeneration,
+        replaced: &[(String, String)],
+        participants: Vec<ProjectParticipant>,
+    ) -> Result<Self, GfError> {
+        Self::new_reusing_parent_inner(
+            transaction_uuid,
+            capabilities,
+            parent,
+            replaced,
+            participants,
+            Some(generation_uuid),
+            |_, _| generation_uuid,
+        )
+    }
+
+    fn new_reusing_parent_inner(
+        transaction_uuid: Uuid,
+        capabilities: Vec<ProjectCapability>,
+        parent: &ResolvedProjectGeneration,
+        replaced: &[(String, String)],
+        participants: Vec<ProjectParticipant>,
+        fixed_generation_uuid: Option<Uuid>,
+        generation_uuid: impl FnOnce(&[ProjectParticipant], &[[u8; 32]]) -> Uuid,
+    ) -> Result<Self, GfError> {
+        let replaced = replaced
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut all = participants;
+        let mut reused = Vec::new();
+        for descriptor in parent.participant_descriptors()? {
+            let key = (
+                descriptor.capability_id.clone(),
+                descriptor.record_family_id.clone(),
+            );
+            if replaced.contains(&key) {
+                continue;
+            }
+            let source = parent.participant_path(&key.0, &key.1)?;
+            let index = all.len();
+            all.push(ProjectParticipant {
+                capability_id: descriptor.capability_id,
+                capability_version: descriptor.capability_version,
+                record_family_id: descriptor.record_family_id,
+                record_version: descriptor.record_version,
+                encoding: match descriptor.encoding.as_str() {
+                    "parquet" => ProjectParticipantEncoding::Parquet,
+                    "arrow" => ProjectParticipantEncoding::Arrow,
+                    "json" => ProjectParticipantEncoding::Json,
+                    _ => {
+                        return Err(project_error(
+                            ProjectErrorCode::PublicationFailed,
+                            "unsupported parent participant encoding",
+                        ));
+                    }
+                },
+                schema_fingerprint: descriptor.schema_fingerprint,
+                row_count: descriptor.row_count,
+                bytes: Vec::new(),
+            });
+            reused.push(ReusedParticipantPayload {
+                index,
+                capability_id: key.0,
+                record_family_id: key.1,
+                source,
+                parent_generation_uuid: parent.generation_uuid(),
+                parent_manifest_sha256: parent.manifest_sha256(),
+                identity: ParticipantIdentity {
+                    byte_length: descriptor.byte_length,
+                    content_sha256: descriptor.content_sha256,
+                    content_xxh64: descriptor.content_xxh64,
+                },
+            });
+        }
+        all.sort_by(|left, right| {
+            (&left.capability_id, &left.record_family_id)
+                .cmp(&(&right.capability_id, &right.record_family_id))
+        });
+        // Sorting changes indexes, so rebuild parent references against the
+        // final canonical participant order.
+        for reference in &mut reused {
+            reference.index = all
+                .iter()
+                .position(|participant| {
+                    participant.capability_id == reference.capability_id
+                        && participant.record_family_id == reference.record_family_id
+                })
+                .expect("reused participant inserted into complete request");
+        }
+        let reused_by_index = reused
+            .iter()
+            .map(|reference| (reference.index, reference.identity))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let identities = ParticipantIdentities(
+            all.iter()
+                .enumerate()
+                .map(|(index, participant)| {
+                    if let Some(identity) = reused_by_index.get(&index) {
+                        *identity
+                    } else {
+                        let byte_length = u64::try_from(participant.bytes.len())
+                            .expect("Vec length fits u64 on supported targets");
+                        crate::graph_construction::diagnostics::hashed_bytes(byte_length, 2);
+                        ParticipantIdentity {
+                            byte_length,
+                            content_sha256:
+                                graphforge_core::hash_observation::ArtifactSha256::digest(
+                                    &participant.bytes,
+                                )
+                                .into(),
+                            content_xxh64: crate::corruption_checksum::checksum(&participant.bytes),
+                        }
+                    }
+                })
+                .collect(),
+        );
+        let digests = identities
+            .0
+            .iter()
+            .map(|identity| identity.content_sha256)
+            .collect::<Vec<_>>();
+        let generation_uuid =
+            fixed_generation_uuid.unwrap_or_else(|| generation_uuid(&all, &digests));
+        Ok(Self {
+            request: ProjectGenerationRequest {
+                transaction_uuid,
+                generation_uuid,
+                capabilities,
+                participants: all,
+            },
+            identities,
+            reused,
         })
     }
 
@@ -250,6 +430,7 @@ impl std::ops::Deref for PreparedGenerationRequest {
 pub struct StageRequest<'a> {
     request: &'a ProjectGenerationRequest,
     identities: Option<&'a ParticipantIdentities>,
+    reused: &'a [ReusedParticipantPayload],
 }
 
 impl<'a> From<&'a ProjectGenerationRequest> for StageRequest<'a> {
@@ -257,6 +438,7 @@ impl<'a> From<&'a ProjectGenerationRequest> for StageRequest<'a> {
         Self {
             request,
             identities: None,
+            reused: &[],
         }
     }
 }
@@ -266,6 +448,7 @@ impl<'a> From<&'a PreparedGenerationRequest> for StageRequest<'a> {
         Self {
             request: &prepared.request,
             identities: Some(&prepared.identities),
+            reused: &prepared.reused,
         }
     }
 }
@@ -333,6 +516,7 @@ pub struct StagedProjectGeneration {
     operation_fingerprint: String,
     capabilities: Vec<ProjectCapability>,
     participants: Vec<StagedParticipant>,
+    reused: Vec<ReusedParticipantPayload>,
     revert: Option<RevertJournalExtension>,
 }
 
@@ -641,7 +825,7 @@ pub(crate) fn stage_project_generation_from_installed_objects(
             None,
             operation_fingerprint,
             graph_tree,
-            ParticipantPayloads::Memory(None),
+            ParticipantPayloads::Memory(None, &[]),
             allocation,
             installed_objects,
         )
@@ -748,7 +932,7 @@ fn stage_project_generation_inner(
         None,
         None,
         graph_tree,
-        ParticipantPayloads::Memory(stage.identities),
+        ParticipantPayloads::Memory(stage.identities, stage.reused),
         None,
         None,
     )
@@ -782,7 +966,7 @@ fn stage_project_generation_optimistic_inner(
         None,
         Some(operation_fingerprint),
         graph_tree,
-        ParticipantPayloads::Memory(stage.identities),
+        ParticipantPayloads::Memory(stage.identities, stage.reused),
         None,
         None,
     )
@@ -812,7 +996,7 @@ pub(crate) fn stage_project_generation_with_lock(
         revert,
         None,
         graph_tree,
-        ParticipantPayloads::Memory(None),
+        ParticipantPayloads::Memory(None, &[]),
         None,
         None,
     )
@@ -848,6 +1032,10 @@ fn stage_project_generation_inner_with_locks(
     validate_request(request)?;
     let (capabilities, participants, request_fingerprint) =
         request_metadata_with_payloads(request, payloads)?;
+    let reused = match payloads {
+        ParticipantPayloads::Memory(_, reused) => reused.to_vec(),
+        ParticipantPayloads::Files(..) => Vec::new(),
+    };
     let operation_fingerprint =
         operation_fingerprint.map_or_else(|| request_fingerprint.clone(), hex_digest);
     let transactions_dir = ensure_machine_directory(&root, Path::new(TRANSACTIONS_DIR))?;
@@ -866,6 +1054,23 @@ fn stage_project_generation_inner_with_locks(
         )?
     {
         return Ok(outcome);
+    }
+
+    // Resolve a published retry before comparing its pinned parent with
+    // CURRENT. CURRENT may have advanced after this exact transaction landed.
+    if let ParticipantPayloads::Memory(_, reused) = payloads {
+        for reference in reused {
+            if reference.parent_generation_uuid != parent.generation_uuid()
+                || reference.parent_manifest_sha256 != parent.manifest_sha256()
+                || parent.participant_path(&reference.capability_id, &reference.record_family_id)?
+                    != reference.source
+            {
+                return Err(project_error(
+                    ProjectErrorCode::WriteConflict,
+                    "reused participant does not belong to the pinned parent generation",
+                ));
+            }
+        }
     }
 
     let requires_promotion = matches!(publication_lock, PublicationLock::Optimistic(_));
@@ -945,6 +1150,7 @@ fn stage_project_generation_inner_with_locks(
             operation_fingerprint,
             capabilities,
             participants,
+            reused,
             revert,
         },
     )))
@@ -1255,12 +1461,17 @@ impl StagedProjectGeneration {
     {
         self.admission.revalidate_identity()?;
         for participant in &self.participants {
-            verify_participant_file(
+            verify_staged_participant_file(
                 &self
                     .generation_root
                     .join(PARTICIPANTS_DIR)
                     .join(&participant.relative_path),
                 participant,
+                self.reused.iter().find(|reference| {
+                    reference.capability_id == participant.capability_id
+                        && reference.record_family_id == participant.record_family_id
+                }),
+                false,
             )?;
         }
         verify_optional_generation_graph_tree(&self.generation_root, &self.participants)?;
@@ -1687,12 +1898,17 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
     )?;
     let manifest_sha256: [u8; 32] = Sha256::digest(&manifest_bytes).into();
     for participant in &staged.participants {
-        verify_participant_file(
+        verify_staged_participant_file(
             &staged
                 .generation_root
                 .join(PARTICIPANTS_DIR)
                 .join(&participant.relative_path),
             participant,
+            staged.reused.iter().find(|reference| {
+                reference.capability_id == participant.capability_id
+                    && reference.record_family_id == participant.record_family_id
+            }),
+            true,
         )?;
     }
     verify_optional_generation_graph_tree(&staged.generation_root, &staged.participants)?;

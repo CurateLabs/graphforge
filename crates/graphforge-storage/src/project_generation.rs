@@ -86,8 +86,12 @@ pub struct ProjectParticipantDescriptor {
     pub schema_fingerprint: [u8; 32],
     /// Logical row count.
     pub row_count: u64,
+    /// Exact persisted byte length.
+    pub byte_length: u64,
     /// Exact persisted content digest.
     pub content_sha256: [u8; 32],
+    /// XXH64 used for corruption admission on participant reads.
+    pub content_xxh64: u64,
 }
 
 /// One payload object's memoized admission outcome.
@@ -691,7 +695,7 @@ impl ResolvedProjectGeneration {
     /// graph opens and capability inspection never call it.
     ///
     /// # Errors
-    /// Returns `GF_PROJECT_CORRUPT` when a participant is missing, linked,
+    /// Returns `GF_PROJECT_CORRUPT` when a participant is missing, non-regular,
     /// oversized relative to its manifest, or fails its exact content digest.
     pub fn participant_snapshots(&self) -> Result<Vec<ProjectParticipantSnapshot>, GfError> {
         let mut snapshots = Vec::with_capacity(self.manifest.participants.len());
@@ -718,7 +722,9 @@ impl ResolvedProjectGeneration {
                     encoding: entry.encoding.clone(),
                     schema_fingerprint: parse_sha256(&entry.schema_fingerprint)?,
                     row_count: entry.row_count,
+                    byte_length: entry.byte_length,
                     content_sha256: parse_sha256(&entry.content_sha256)?,
+                    content_xxh64: entry.content_xxh64,
                 })
             })
             .collect()
@@ -747,7 +753,7 @@ impl ResolvedProjectGeneration {
     ///
     /// # Errors
     /// Returns `GF_PROJECT_CORRUPT` when the requested participant exists but
-    /// is missing, linked, oversized, or fails its exact content digest.
+    /// is missing, non-regular, oversized, or fails its exact content digest.
     pub fn participant_snapshot(
         &self,
         capability_id: &str,
@@ -771,10 +777,11 @@ impl ResolvedProjectGeneration {
     ) -> Result<ProjectParticipantSnapshot, GfError> {
         let path =
             self.participant_path(&descriptor.capability_id, &descriptor.record_family_id)?;
-        let bytes = read_exact_participant(&path, descriptor.byte_length)?;
-        if crate::corruption_checksum::checksum(&bytes) != descriptor.content_xxh64 {
-            return Err(corrupt("participant checksum does not match manifest"));
-        }
+        let bytes = read_manifest_authenticated_participant(
+            &path,
+            descriptor.byte_length,
+            descriptor.content_xxh64,
+        )?;
         if descriptor.encoding == "json"
             && <[u8; 32]>::from(Sha256::digest(&bytes)) != parse_sha256(&descriptor.content_sha256)?
         {
@@ -802,7 +809,7 @@ impl ResolvedProjectGeneration {
     /// reads remain manifest-only.
     ///
     /// # Errors
-    /// Returns `GF_TRANSACTION_FAILED` for an untracked, missing, linked,
+    /// Returns `GF_TRANSACTION_FAILED` for an untracked, missing, symbolic-link,
     /// non-UTF-8, or excessively large inventory.
     pub fn validate_complete_participant_inventory(&self) -> Result<(), GfError> {
         let expected = self
@@ -2055,13 +2062,33 @@ fn read_stable_graph_control(
     Ok(bytes)
 }
 
-fn read_exact_participant(path: &Path, expected_length: u64) -> Result<Vec<u8>, GfError> {
-    let file = open_regular_file(path)
+/// Read one manifest-authenticated participant. A hardlink is accepted only at
+/// this narrow boundary, where the exact declared length and XXH64 checksum are
+/// verified before bytes are returned; the caller also checks the JSON
+/// SHA-256 when applicable. Publication separately validates a reused file
+/// against its pinned parent identity, length, XXH64 and SHA-256 before commit.
+fn read_manifest_authenticated_participant(
+    path: &Path,
+    expected_length: u64,
+    expected_checksum: u64,
+) -> Result<Vec<u8>, GfError> {
+    let _materialization =
+        crate::concurrency_attribution::RegionScope::named("participant_materialization");
+    let parent = path
+        .parent()
+        .ok_or_else(|| corrupt("participant has no parent directory"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| corrupt("participant has no file name"))?;
+    let directory = graphforge_filesystem::StableDirectory::open(parent)
+        .map_err(|_| corrupt("participant parent is missing or unreadable"))?;
+    let file = directory
+        .open_child_file(name)
         .map_err(|_| corrupt("participant is missing, linked, or unreadable"))?;
     let metadata = file
         .metadata()
         .map_err(|_| corrupt("participant metadata is unreadable"))?;
-    if metadata.len() != expected_length {
+    if !metadata.file_type().is_file() || metadata.len() != expected_length {
         return Err(corrupt("participant byte length does not match manifest"));
     }
     let capacity = usize::try_from(expected_length)
@@ -2070,8 +2097,15 @@ fn read_exact_participant(path: &Path, expected_length: u64) -> Result<Vec<u8>, 
     file.take(expected_length.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|_| corrupt("participant cannot be read"))?;
+    crate::concurrency_attribution::RegionScope::record_work(
+        "participant_materialized_bytes",
+        bytes.len() as u64,
+    );
     if u64::try_from(bytes.len()).ok() != Some(expected_length) {
         return Err(corrupt("participant byte length changed while reading"));
+    }
+    if crate::corruption_checksum::checksum(&bytes) != expected_checksum {
+        return Err(corrupt("participant checksum does not match manifest"));
     }
     crate::lifecycle_io::record_read(
         crate::StorageIoPhase::PublicationPreauthentication,

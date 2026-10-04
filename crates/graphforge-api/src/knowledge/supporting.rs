@@ -12,10 +12,11 @@ use super::{
     confidence_publication_participants, evidence_publication_participants, knowledge_error,
     lock_graph_visibility, match_requested_edge_uuids, match_requested_node_uuids,
     merged_assertion_evidence_provenance, merged_confidence_provenance, merged_evidence_provenance,
-    not_found_kind, prepare_knowledge_request, provenance_error, read_artifact_ledger,
-    read_confidence_ledger, read_evidence_ledger, read_ledger, read_reasoning_ledger,
-    read_source_ledger, reasoning_publication_participants, require_uuid, staged_assertion,
-    transaction_conflict, validate_graph_refs, validate_write_context, with_next_token,
+    not_found_kind, prepare_knowledge_request, prepare_knowledge_request_reusing_parent,
+    provenance_error, read_artifact_ledger, read_confidence_ledger, read_evidence_ledger,
+    read_ledger, read_reasoning_ledger, read_source_ledger, reasoning_publication_participants,
+    require_uuid, staged_assertion, transaction_conflict, validate_graph_refs,
+    validate_write_context, with_next_token,
 };
 
 fn publish_reasoning(
@@ -84,10 +85,17 @@ fn publish_confidence(
             capability_version: entry.capability_version,
         })
         .collect();
-    let publication = prepare_knowledge_request(
+    let publication = prepare_knowledge_request_reusing_parent(
         b"confidence",
         request.context.operation_uuid,
         capabilities,
+        parent,
+        &[
+            ("knowledge".into(), "confidence_assessments".into()),
+            ("knowledge".into(), "confidence_inputs".into()),
+            ("provenance".into(), "events".into()),
+            ("provenance".into(), "lineage".into()),
+        ],
         participants,
     )?;
     let graph_objects = graph.begin_graph_object_publication()?;
@@ -342,7 +350,13 @@ impl GraphForge {
                 "project generation changed before confidence publication",
             ));
         }
-        let assertions = read_ledger(&parent)?;
+        let assertions = {
+            let _domain_ledger_decode =
+                graphforge_storage::concurrency_attribution::RegionScope::named(
+                    "confidence_domain_ledger_decode",
+                );
+            read_ledger(&parent)?
+        };
         if !assertions
             .assertions
             .iter()
@@ -350,7 +364,13 @@ impl GraphForge {
         {
             return Err(not_found_kind("assertion"));
         }
-        let existing = read_confidence_ledger(&parent)?;
+        let existing = {
+            let _domain_ledger_decode =
+                graphforge_storage::concurrency_attribution::RegionScope::named(
+                    "confidence_domain_ledger_decode",
+                );
+            read_confidence_ledger(&parent)?
+        };
         let recorded_at_micros = (self.clock.lock().expect("clock lock poisoned"))()?;
         let event = ProvenanceEvent::new(
             request.context.operation_uuid.0,
@@ -403,7 +423,13 @@ impl GraphForge {
         }
 
         let knowledge = existing.merge(&staged).map_err(knowledge_error)?;
-        let provenance = merged_confidence_provenance(&parent, &request, &staged, &event)?;
+        let provenance = {
+            let _domain_ledger_decode =
+                graphforge_storage::concurrency_attribution::RegionScope::named(
+                    "confidence_domain_ledger_decode",
+                );
+            merged_confidence_provenance(&parent, &request, &staged, &event)?
+        };
         publish_confidence(
             self,
             &request,

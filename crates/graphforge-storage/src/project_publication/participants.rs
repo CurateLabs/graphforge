@@ -274,6 +274,7 @@ pub(super) fn stage_participant_files(
     payloads: ParticipantPayloads<'_>,
     allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), GfError> {
+    let _phase = crate::graph_construction::diagnostics::Scope::start("participant_carry_forward");
     for metadata in participants {
         let (index, input) = request
             .participants
@@ -296,6 +297,64 @@ pub(super) fn stage_participant_files(
         ensure_machine_directory(generation_root, relative_parent)?;
         let parent =
             graphforge_filesystem::StableDirectory::open(parent_dir).map_err(publication_io)?;
+        let reused = match payloads {
+            ParticipantPayloads::Memory(_, reused) => {
+                reused.iter().find(|reference| reference.index == index)
+            }
+            ParticipantPayloads::Files(..) => None,
+        };
+        if let Some(reference) = reused {
+            let source_parent_path = reference.source.parent().ok_or_else(|| {
+                project_error(
+                    ProjectErrorCode::PublicationFailed,
+                    "reused participant path has no parent",
+                )
+            })?;
+            let source_name = reference.source.file_name().ok_or_else(|| {
+                project_error(
+                    ProjectErrorCode::PublicationFailed,
+                    "reused participant path has no name",
+                )
+            })?;
+            let source_parent = graphforge_filesystem::StableDirectory::open(source_parent_path)
+                .map_err(publication_io)?;
+            let source_file = source_parent
+                .open_child_file(source_name)
+                .map_err(publication_io)?;
+            let source_metadata = source_file.metadata().map_err(publication_io)?;
+            if !source_metadata.file_type().is_file()
+                || source_metadata.len() != metadata.byte_length
+            {
+                return Err(project_error(
+                    ProjectErrorCode::PublicationFailed,
+                    "reused participant is missing, linked, or has an invalid length",
+                ));
+            }
+            let identity =
+                graphforge_filesystem::file_identity(&source_file).map_err(publication_io)?;
+            let (linked, _) = source_parent
+                .link_child_into(
+                    source_name,
+                    &source_file,
+                    identity,
+                    &parent,
+                    destination.file_name().expect("participant has a name"),
+                )
+                .map_err(publication_io)?;
+            drop(linked);
+            crate::concurrency_attribution::RegionScope::record_work(
+                "participant_reused_bytes",
+                metadata.byte_length,
+            );
+            project_failpoint::hit(
+                "project.after_participant_fsync",
+                Some(request.transaction_uuid),
+                Some(request.generation_uuid),
+                "STAGED",
+                false,
+            )?;
+            continue;
+        }
         let primary = std::cell::RefCell::new(None);
         let copied_hash_streams = std::cell::Cell::new(0);
         let result = crate::durable_commit::stage_private_file(
@@ -304,7 +363,7 @@ pub(super) fn stage_participant_files(
             |file| {
                 let write_result = (|| -> Result<(), GfError> {
                     match payloads {
-                        ParticipantPayloads::Memory(_) => {
+                        ParticipantPayloads::Memory(..) => {
                             file.write_all(&input.bytes).map_err(publication_io)?;
                         }
                         ParticipantPayloads::Files(
@@ -522,7 +581,7 @@ pub(super) fn validate_request(request: &ProjectGenerationRequest) -> Result<(),
 pub(super) fn request_metadata(
     request: &ProjectGenerationRequest,
 ) -> Result<(Vec<ProjectCapability>, Vec<StagedParticipant>, String), GfError> {
-    request_metadata_with_payloads(request, ParticipantPayloads::Memory(None))
+    request_metadata_with_payloads(request, ParticipantPayloads::Memory(None, &[]))
 }
 
 #[expect(
@@ -555,7 +614,7 @@ pub(super) fn request_metadata_with_payloads(
             "every generation must declare graph capability version 1",
         ));
     }
-    if let ParticipantPayloads::Memory(Some(identities)) = payloads
+    if let ParticipantPayloads::Memory(Some(identities), _) = payloads
         && identities.0.len() != request.participants.len()
     {
         return Err(project_error(
@@ -567,40 +626,61 @@ pub(super) fn request_metadata_with_payloads(
     let mut resident_hashed_bytes = 0_u64;
     for (index, participant) in request.participants.iter().enumerate() {
         let (byte_length, content_sha256, content_xxh64) = match payloads {
-            ParticipantPayloads::Memory(identities) => {
-                let byte_length = u64::try_from(participant.bytes.len()).map_err(|_| {
-                    project_error(
-                        ProjectErrorCode::PublicationFailed,
-                        "participant byte length exceeds u64",
-                    )
-                })?;
-                let content_xxh64 = crate::corruption_checksum::checksum(&participant.bytes);
-                let streams = if identities.is_some() { 1 } else { 2 };
-                for _ in 0..streams {
-                    resident_hashed_bytes = resident_hashed_bytes.saturating_add(byte_length);
-                }
-                let content_sha256 = match identities.map(|identities| identities.0[index]) {
-                    // The prepared SHA-256 describes these exact bytes: its
-                    // length and checksum were computed over them in the same
-                    // pass and still match.
-                    Some(identity)
-                        if identity.byte_length == byte_length
-                            && identity.content_xxh64 == content_xxh64 =>
+            ParticipantPayloads::Memory(identities, reused) => {
+                if let Some(reference) = reused.iter().find(|reference| reference.index == index) {
+                    if reference.capability_id != participant.capability_id
+                        || reference.record_family_id != participant.record_family_id
+                        || identities
+                            .and_then(|identities| identities.0.get(index))
+                            .copied()
+                            != Some(reference.identity)
                     {
-                        identity.content_sha256
-                    }
-                    Some(_) => {
                         return Err(project_error(
                             ProjectErrorCode::PublicationFailed,
-                            "prepared participant identity does not match its bytes",
+                            "reused participant identity mismatch",
                         ));
                     }
-                    None => graphforge_core::hash_observation::ArtifactSha256::digest(
-                        &participant.bytes,
+                    let identity = reference.identity;
+                    (
+                        identity.byte_length,
+                        identity.content_sha256,
+                        identity.content_xxh64,
                     )
-                    .into(),
-                };
-                (byte_length, content_sha256, content_xxh64)
+                } else {
+                    let byte_length = u64::try_from(participant.bytes.len()).map_err(|_| {
+                        project_error(
+                            ProjectErrorCode::PublicationFailed,
+                            "participant byte length exceeds u64",
+                        )
+                    })?;
+                    let content_xxh64 = crate::corruption_checksum::checksum(&participant.bytes);
+                    let streams = if identities.is_some() { 1 } else { 2 };
+                    for _ in 0..streams {
+                        resident_hashed_bytes = resident_hashed_bytes.saturating_add(byte_length);
+                    }
+                    let content_sha256 = match identities.map(|identities| identities.0[index]) {
+                        // The prepared SHA-256 describes these exact bytes: its
+                        // length and checksum were computed over them in the same
+                        // pass and still match.
+                        Some(identity)
+                            if identity.byte_length == byte_length
+                                && identity.content_xxh64 == content_xxh64 =>
+                        {
+                            identity.content_sha256
+                        }
+                        Some(_) => {
+                            return Err(project_error(
+                                ProjectErrorCode::PublicationFailed,
+                                "prepared participant identity does not match its bytes",
+                            ));
+                        }
+                        None => graphforge_core::hash_observation::ArtifactSha256::digest(
+                            &participant.bytes,
+                        )
+                        .into(),
+                    };
+                    (byte_length, content_sha256, content_xxh64)
+                }
             }
             ParticipantPayloads::Files(files, cancelled, _, captures) => {
                 let file = files.get(index).ok_or_else(|| {
@@ -787,6 +867,97 @@ pub(super) fn verify_participant_file(
         ));
     }
     crate::graph_construction::diagnostics::hashed_bytes(count, 1);
+    Ok(())
+}
+
+pub(super) fn verify_staged_participant_file(
+    path: &Path,
+    expected: &StagedParticipant,
+    reused: Option<&super::ReusedParticipantPayload>,
+    authenticate_reused_bytes: bool,
+) -> Result<(), GfError> {
+    let Some(reused) = reused else {
+        return verify_participant_file(path, expected);
+    };
+    let open = |path: &Path| -> Result<File, GfError> {
+        let directory_path = path.parent().ok_or_else(|| {
+            project_error(
+                ProjectErrorCode::PublicationFailed,
+                "participant path has no parent",
+            )
+        })?;
+        let name = path.file_name().ok_or_else(|| {
+            project_error(
+                ProjectErrorCode::PublicationFailed,
+                "participant path has no name",
+            )
+        })?;
+        let directory =
+            graphforge_filesystem::StableDirectory::open(directory_path).map_err(publication_io)?;
+        directory.open_child_file(name).map_err(publication_io)
+    };
+    let destination = open(path)?;
+    let source = open(&reused.source)?;
+    let destination_metadata = destination.metadata().map_err(publication_io)?;
+    let source_metadata = source.metadata().map_err(publication_io)?;
+    if !destination_metadata.file_type().is_file()
+        || !source_metadata.file_type().is_file()
+        || destination_metadata.len() != expected.byte_length
+        || source_metadata.len() != expected.byte_length
+        || graphforge_filesystem::file_identity(&destination).map_err(publication_io)?
+            != graphforge_filesystem::file_identity(&source).map_err(publication_io)?
+    {
+        return Err(project_error(
+            ProjectErrorCode::PublicationFailed,
+            "reused participant no longer matches its pinned parent file",
+        ));
+    }
+    if authenticate_reused_bytes {
+        let _phase =
+            crate::graph_construction::diagnostics::Scope::start("participant_reuse_validation");
+        let bound = expected.byte_length.checked_add(1).ok_or_else(|| {
+            project_error(
+                ProjectErrorCode::PublicationFailed,
+                "reused participant length overflow",
+            )
+        })?;
+        let mut reader = source.take(bound);
+        let mut checksum = crate::corruption_checksum::Checksum::new();
+        let mut sha256 = graphforge_core::hash_observation::ArtifactSha256::new();
+        let mut count = 0_u64;
+        let mut calls = 0_u64;
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let read = reader.read(&mut buffer).map_err(publication_io)?;
+            if read == 0 {
+                break;
+            }
+            count += read as u64;
+            calls += 1;
+            checksum.update(&buffer[..read]);
+            sha256.update(&buffer[..read]);
+        }
+        let actual_sha256: [u8; 32] = sha256.finalize().into();
+        crate::lifecycle_io::record_read(
+            crate::StorageIoPhase::PublicationPreauthentication,
+            count,
+            calls,
+        );
+        crate::concurrency_attribution::RegionScope::record_work(
+            "participant_payload_read_bytes",
+            count,
+        );
+        if count != expected.byte_length
+            || checksum.finish() != expected.content_xxh64
+            || hex_digest(actual_sha256) != expected.content_sha256
+        {
+            return Err(project_error(
+                ProjectErrorCode::PublicationFailed,
+                "reused participant checksum or digest changed",
+            ));
+        }
+        crate::graph_construction::diagnostics::hashed_bytes(count, 2);
+    }
     Ok(())
 }
 
