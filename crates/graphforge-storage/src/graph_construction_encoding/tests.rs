@@ -31,7 +31,7 @@ fn bounded_property_outputs_count_completed_hashes_and_private_sealed_writes_sep
         logical_bytes as u64 + physical_bytes
     );
     for artifact in artifacts {
-        let bytes = std::fs::read(temporary.path().join(&artifact.path)).unwrap();
+        let bytes = std::fs::read(temporary.path().join("graph").join(&artifact.path)).unwrap();
         assert_eq!(artifact.sha256, hex(&Sha256::digest(&bytes)));
         assert_eq!(artifact.xxh64, crate::corruption_checksum::checksum(&bytes));
     }

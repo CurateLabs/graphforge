@@ -483,6 +483,13 @@ The baseline S22 input identities are `nodes.parquet`
 and `edges.parquet`
 (`1c0ff75485f75e904cbd59b6f5d42da1d8b1af6ddac59ee6c495a4948a428d13`).
 They represent 4,194,304 input nodes and 67,108,864 input edges.
+The generator profile is
+[`graph500/s22-provider.json`](../../benchmarks/profiles/graph500/s22-provider.json),
+SHA-256 `bae710233f1e0e436ad3e8ef1b4a21972edb4c107db473e83a9beaeb874de895`.
+The ordinary benchmark generator at source `10913fe63` produced these inputs;
+its binary SHA-256 is
+`850e5c4e4f0cad00de4537921a285d0993d2f6c44719beae731f95800ccc11df`.
+Inputs may be reused read-only; each measured import requires a fresh project.
 
 For a fresh successful S22 construction, independently reconcile the leaf
 `import_command/stage+seal/seal/shaping/shape_routing/artifact_authentication`
@@ -497,7 +504,7 @@ sizes, attempted SHA measurement fields, and aggregate application reads are
 different populations; the latter
 also includes metadata reads outside this leaf. A prior SHA measurement receipt
 cannot establish this successful-work criterion: capture a fresh successful
-S22 workflow from the merged instrumented tree and retain its chunk receipts.
+S22 workflow from the frozen instrumented source and retain its chunk receipts.
 
 To reproduce S22, use those digest-pinned inputs and the baseline host. Build an ordinary release CLI with an isolated
 `CARGO_TARGET_DIR`, record the source revision and binary/input SHA-256 digests,
@@ -509,7 +516,16 @@ workflow under `runexec --no-container --cores 0-15` on the baseline host.
 A contended run cannot establish the priority decision.
 
 Keep each command's JSON receipt and the runexec output outside `docs/`; attach
-them to #1623 or its PR. The snapshot lives at `receipt.region_diagnostics`.
+them to the issue or PR producing the measurement. The snapshot lives at
+`receipt.region_diagnostics`. Pass all five command receipts, in workflow order,
+to `graphforge_bench.region_diagnostics.summarize_regions`; its
+`region_attribution.stages_inclusive_do_not_sum` rows retain command indexes,
+region paths and both successful-byte columns. Include any workflow timing
+receipt separately to reconcile the complete boundary. Registration byte work
+belongs to its own command; it must not be folded into the validate receipt's
+hash population. Reconcile the routing authentication leaf from the actual
+validate receipt using the accepted chunk method above, and retain every other
+leaf's successful populations separately.
 Report wall/CPU, CPU divided by wall, attempted measurement bytes, successful
 written/hashed work columns and barrier counts per region, along with the parent-minus-immediate-children residual. Budget
 shares use the S22 edge count divided by 1,000,000 edges/s. Compare accumulated

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 import unittest
 
 from graphforge_bench.region_diagnostics import (
@@ -7,9 +9,26 @@ from graphforge_bench.region_diagnostics import (
     matched_worker_speedup,
     summarize_regions,
 )
+from jsonschema import Draft202012Validator
 
 
 class RegionDiagnosticsTest(unittest.TestCase):
+    def test_both_receipt_schemas_accept_only_unsigned_known_successful_byte_units(self) -> None:
+        schema = json.loads(
+            (Path(__file__).parents[1] / "schemas" / "certification-evidence.json").read_text()
+        )
+        for contract in ("regionDiagnosticsV1", "regionDiagnosticsV2"):
+            work_schema = schema["$defs"][contract]["properties"]["regions"][
+                "additionalProperties"
+            ]["properties"]["work"]
+            validator = Draft202012Validator(work_schema)
+            validator.validate({"hashed_bytes": 12, "written_bytes": 6})
+            validator.validate({})
+            for unit in ("hashed_bytes", "written_bytes"):
+                for invalid in (-1, 1.5, True, None, "12"):
+                    self.assertFalse(validator.is_valid({unit: invalid}), (contract, unit, invalid))
+            self.assertFalse(validator.is_valid({"attempted_hashed_bytes": 12}), contract)
+
     def test_inclusive_children_are_not_added_to_command_totals(self) -> None:
         row = {
             "calls": 1,

@@ -178,7 +178,7 @@ impl ParticipantIdentities {
                     content_xxh64: crate::corruption_checksum::checksum(&participant.bytes),
                 })
             })
-            .collect::<Result<_, _>>()
+            .collect::<Result<Vec<_>, _>>()
             .map(|identities| {
                 for identity in &identities {
                     crate::graph_construction::diagnostics::hashed_bytes(identity.byte_length, 2);
