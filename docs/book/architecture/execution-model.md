@@ -103,6 +103,17 @@ comparisons are recorded in
 [the #1241 evidence](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/input-predicates-1241.json).
 Timing observations are not CI assertions; sampled peaks are not hard bounds.
 
+## Delete frontier demand
+
+For a terminal sequence of direct-variable `DELETE` clauses, the Rust write
+driver projects the matched frontier to the targets' qualified node or edge
+UUID columns before optimization. Predicate dependencies remain in the read
+prefix, so properties used to select targets are still read and verified.
+Deletion resolves labels, incident edges, property counts and tombstones from
+the session's storage authority. Unused edge properties are not materialized
+once per expansion chunk. Expression targets, mixed writes and later reads
+retain their existing frontier requirements.
+
 ## List expression execution
 
 `graphforge-rel` keeps quantifier and list-comprehension UDF execution in the
