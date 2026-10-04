@@ -47,6 +47,19 @@ pub fn portable_v2_import_generation(operation: &Uuid) -> Uuid {
     new_v5(operation, b"graphforge-portable-v2-import-generation/1")
 }
 
+/// Derive the empty parent generation used by a fresh portable-v2 import.
+/// The versioned name is a persisted compatibility contract.
+#[must_use]
+pub fn portable_v2_bootstrap_generation(operation: &Uuid) -> Uuid {
+    new_v5(operation, b"graphforge-portable-v2-bootstrap-generation/1")
+}
+
+/// Derive the empty parent's transaction in a separate versioned domain.
+#[must_use]
+pub fn portable_v2_bootstrap_transaction(operation: &Uuid) -> Uuid {
+    new_v5(operation, b"graphforge-portable-v2-bootstrap-transaction/1")
+}
+
 /// Derive one composite delta operation using its original mutation index.
 /// The slash separates the versioned domain from the unambiguous decimal index.
 #[must_use]
@@ -206,6 +219,14 @@ mod tests {
                 "167a58d3-52f2-533e-b3c4-01d743d7537d",
             ),
             (
+                portable_v2_bootstrap_generation(&operation),
+                "d633da3b-0a2e-543e-bcdd-d383b3c52794",
+            ),
+            (
+                portable_v2_bootstrap_transaction(&operation),
+                "7f6e6309-9103-5c77-837a-0efffec19b70",
+            ),
+            (
                 composite_delta_operation(&operation, 0),
                 "bf613aba-38a4-5ae7-8982-1675caa13e7c",
             ),
@@ -308,6 +329,14 @@ mod tests {
         assert_ne!(
             portable_v2_import_generation(&operation),
             portable_v2_import_generation(&other_operation)
+        );
+        assert_ne!(
+            portable_v2_bootstrap_generation(&operation),
+            portable_v2_bootstrap_generation(&other_operation)
+        );
+        assert_ne!(
+            portable_v2_bootstrap_transaction(&operation),
+            portable_v2_bootstrap_transaction(&other_operation)
         );
         assert_ne!(
             composite_delta_operation(&operation, 0),
