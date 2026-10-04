@@ -592,10 +592,8 @@ def _benchexec_tool_directory(stage: Path, *, prefer_stage: bool = False) -> Pat
     return stage / "bin"
 
 
-# The checked-in definition carries the 4 h envelope. A rung may stage a
-# tighter per-rung wall (a margin above the last accepted measurement) so a
-# regressed rung stops within minutes instead of holding the ladder for hours.
-BENCHEXEC_HARD_TIMELIMIT_GRACE_SECONDS = 30
+# A rung tightens only elapsed wall time. BenchExec's timelimit and
+# hardtimelimit constrain process-tree CPU time and retain their own envelope.
 
 
 def _stage_benchmark_xml(root: Path, stage: Path, *, wall_seconds: int | None = None) -> None:
@@ -615,13 +613,12 @@ def _rewrite_benchmark_wall(text: str, wall_seconds: int) -> str:
         raise ControllerError("BenchExec wall limit must be within 1..14400 seconds")
     soft = re.search(r'\btimelimit="14400 s"', text)
     hard = re.search(r'\bhardtimelimit="14430 s"', text)
-    if soft is None or hard is None:
-        raise ControllerError("BenchExec definition wall limits are not the expected 4 h envelope")
-    text = text[: soft.start()] + f'timelimit="{wall_seconds} s"' + text[soft.end() :]
-    hard = re.search(r'\bhardtimelimit="14430 s"', text)
-    assert hard is not None
-    grace = wall_seconds + BENCHEXEC_HARD_TIMELIMIT_GRACE_SECONDS
-    return text[: hard.start()] + f'hardtimelimit="{grace} s"' + text[hard.end() :]
+    wall = re.search(r'\bwalltimelimit="14400 s"', text)
+    if soft is None or hard is None or wall is None:
+        raise ControllerError(
+            "BenchExec definition limits are not the expected CPU and wall envelopes"
+        )
+    return text[: wall.start()] + f'walltimelimit="{wall_seconds} s"' + text[wall.end() :]
 
 
 # Host durable writes charge page cache into cgroup memory.peak. Keep the product
