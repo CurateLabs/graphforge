@@ -16,6 +16,11 @@ Project on its first research write, and imports the package (ADR 0055).
 Empty directories are not checked in; the Project recreates them. Lease and lock
 files are part of the Project and are kept.
 
+Git does not preserve the producer's read-only CAS file permissions. Test
+helpers restore those permissions on copied `graph-objects/sha256/` payloads
+before opening the Project; mutable control files stay writable. No fixture
+bytes or identity digests change.
+
 ## Regenerate
 
 The generator runs against the revision 6 code, never against this tree:

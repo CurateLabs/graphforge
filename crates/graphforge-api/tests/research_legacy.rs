@@ -37,7 +37,17 @@ fn copy_dir(from: &Path, to: &Path) {
         if entry.file_type().unwrap().is_dir() {
             copy_dir(&entry.path(), &target);
         } else {
-            std::fs::copy(entry.path(), target).unwrap();
+            std::fs::copy(entry.path(), &target).unwrap();
+            // Git does not preserve the producer's read-only CAS permissions.
+            // Restore the seal on copied payloads before opening the Project.
+            if from
+                .parent()
+                .is_some_and(|parent| parent.ends_with("graph-objects/sha256"))
+            {
+                let mut permissions = std::fs::metadata(&target).unwrap().permissions();
+                permissions.set_readonly(true);
+                std::fs::set_permissions(&target, permissions).unwrap();
+            }
         }
     }
 }
