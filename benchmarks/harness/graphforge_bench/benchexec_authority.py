@@ -126,7 +126,12 @@ def _integer(values: Mapping[str, Any], key: str) -> int:
 
 def _outcome(result: Mapping[str, Any]) -> tuple[Outcome, int | None, int | None]:
     termination = result.get("termination_reason")
-    if termination in {"cputime", "walltime"}:
+    if result.get("timed_out") is True or termination in {
+        "cputime",
+        "cputime-soft",
+        "cputime-hard",
+        "walltime",
+    }:
         return Outcome.TIMEOUT, None, None
     if termination == "memory":
         return Outcome.OOM, None, None
