@@ -435,3 +435,83 @@ fn exported_research_carries_the_walkable_descent_of_released_versions() {
         assert_eq!(imported.identities[id], registry.identities[id]);
     }
 }
+
+#[test]
+fn exported_bring_preserves_provenance_outside_its_ancestry() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut graph = GraphForge::new(directory.path().join("source").to_str()).unwrap();
+    graph.execute("CREATE (:Item {n: 1})").unwrap();
+    let cancel = CancellationToken::new();
+    let create = CreateResearchBranchRequest {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(&graph),
+        branch_uuid: Uuid::now_v7(),
+        version_uuid: Uuid::now_v7(),
+        source: BranchSource::Current {
+            origin_version_uuid: Uuid::now_v7(),
+            context_uuid: Uuid::now_v7(),
+        },
+        creator_uuid: Uuid::now_v7(),
+        created_at: 1,
+        label: "provenance".into(),
+        author: None,
+        committer: None,
+    };
+    graph.create_research_branch(&create, &cancel).unwrap();
+    // This distinct root has the same graph. Bringing existing fields changes
+    // no baseline, so its identity must be cited by provenance itself.
+    let source = capture(&mut graph, Uuid::now_v7(), None);
+    let bring = BringResearchBranchRequest {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(&graph),
+        branch_uuid: create.branch_uuid,
+        version_uuid: Uuid::now_v7(),
+        frozen_ipc: frozen(
+            &graph,
+            source,
+            "MATCH (n:Item) RETURN n.node_uuid AS node_uuid",
+        ),
+        created_at: 2,
+        author: None,
+        committer: None,
+    };
+    graph.bring_research_branch(&bring, &cancel).unwrap();
+    let before = graph.research_version_retention().unwrap();
+    assert!(!before.ancestors(bring.version_uuid).contains(&source));
+    let package = directory.path().join("package.gfpb");
+    graph
+        .export_research(
+            &ExportResearchRequest {
+                version_uuid: bring.version_uuid,
+                output: package.clone(),
+                bundled: true,
+                projection: None,
+            },
+            &cancel,
+        )
+        .unwrap();
+    let target = directory.path().join("imported");
+    GraphForge::import_portable_v2(
+        &target,
+        &PortableV2ImportRequest {
+            input: package,
+            operation_id: OperationId(Uuid::now_v7()),
+            limits: Default::default(),
+        },
+        None,
+    )
+    .unwrap();
+    let imported = GraphForge::new(target.to_str()).unwrap();
+    let after = imported.research_version_retention().unwrap();
+    assert_eq!(after.identities[&source], before.identities[&source]);
+    assert_eq!(
+        after.versions[&bring.version_uuid].provenance,
+        Some(ResearchVersionProvenance::Brought {
+            version_uuid: source
+        })
+    );
+    assert_eq!(
+        after.ancestors(bring.version_uuid),
+        before.ancestors(bring.version_uuid)
+    );
+}

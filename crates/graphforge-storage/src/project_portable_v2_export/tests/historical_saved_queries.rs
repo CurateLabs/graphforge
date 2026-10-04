@@ -16,6 +16,10 @@ fn identity(version: &ResearchVersionRecord) -> [u8; 32] {
 
 fn version(participants: Vec<ResearchParticipantCommitment>) -> ResearchVersionRecord {
     ResearchVersionRecord {
+        parents: Vec::new(),
+        author: None,
+        committer: None,
+        provenance: None,
         version_uuid: Uuid::new_v4(),
         context_uuid: Uuid::new_v4(),
         label: None,
@@ -103,6 +107,7 @@ fn archived_queries() -> (
             (selected.version_uuid, identity(&selected)),
             (historical.version_uuid, identity(&historical)),
         ]),
+        ancestry: BTreeMap::new(),
         genealogy: BTreeMap::new(),
         accepted: BTreeMap::new(),
         proof_exports: BTreeMap::new(),

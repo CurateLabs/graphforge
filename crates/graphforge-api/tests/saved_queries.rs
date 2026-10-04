@@ -174,6 +174,8 @@ fn reopen_and_retained_version_preserve_definition_and_execution_context() {
         graph.create_saved_query(original.clone()).unwrap();
         let operation = graph
             .prepare_research_version(PrepareResearchVersionRequest {
+                author: None,
+                committer: None,
                 operation_uuid: Uuid::now_v7(),
                 version_uuid,
                 context_uuid: Uuid::now_v7(),

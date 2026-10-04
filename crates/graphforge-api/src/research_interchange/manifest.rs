@@ -36,6 +36,9 @@ pub(super) fn build(
         if let Some(source) = version.content.source_version {
             cite(registry, &mut identities, source)?;
         }
+        if let Some(provenance) = &version.provenance {
+            cite(registry, &mut identities, provenance.version_uuid())?;
+        }
         let mut branch = registry.historical_branch(version.context_uuid);
         while let Some(record) = branch {
             if genealogy
