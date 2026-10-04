@@ -917,6 +917,6 @@ fn retained_identity_sampling_refuses_fresh_root_substitution() {
     std::fs::rename(&path, &displaced).unwrap();
     std::fs::create_dir(&path).unwrap();
     // Keep the child identity identical; only directory authority can refuse.
-    std::fs::hard_link(displaced.join("sample.run"), path.join("sample.run")).unwrap();
+    std::fs::rename(displaced.join("sample.run"), path.join("sample.run")).unwrap();
     assert!(read_identity_sample(&root, "sample.run", &mut retained, 0).is_err());
 }
