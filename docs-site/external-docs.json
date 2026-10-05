@@ -6,23 +6,24 @@
     {
       "issue": "#279",
       "reason": "Use the Curate Labs-owned npm scope for the v0.5.0 release.",
-      "sources": [
-        "commands.md",
-        "install.md",
-        "overview.md"
-      ]
+      "sources": ["commands.md", "install.md", "overview.md"]
+    },
+    {
+      "issue": "#1208",
+      "reason": "Clarify agent access, audience prerequisites, and manual v0.6.0 runtime selection.",
+      "sources": ["agent-interop.md", "install.md", "overview.md"]
     }
   ],
   "pages": [
     {
       "source": "overview.md",
       "destination": "guide/vscode-extension/index.md",
-      "sha256": "ca0e4559e2514d22b7f94c03f63e5074cf75df6e24cd986f008cb46eee2b69ed"
+      "sha256": "9e8f93e55a0daf00140a6b059807f86dbff103df76c59ee9ae94f156625811a1"
     },
     {
       "source": "install.md",
       "destination": "guide/vscode-extension/install.md",
-      "sha256": "285ebcd8420c21e5116086278d5ef99cd63c0d05e14a6d7d9cfea805add6e6b0"
+      "sha256": "8b1ae2eb2651dccced542cfb1a5930c6944c37db1d11901d3b0d6ea12c9f1063"
     },
     {
       "source": "commands.md",
@@ -32,7 +33,7 @@
     {
       "source": "agent-interop.md",
       "destination": "guide/vscode-extension/agent-interop.md",
-      "sha256": "5f7ec827d6c906be49a9be119b763ae8593585086b07223ad2f30bc80cea8575"
+      "sha256": "0adb1abaedf78bb7758cf78349a7161084479636c23a510c7af1147492d92cfb"
     }
   ]
 }

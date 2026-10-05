@@ -1,15 +1,15 @@
 # Project format compatibility before v1.0
 
 **Status:** Accepted  
-**Decision date:** 2026-07-24  
+**Decision date:** 2026-07-24
 
 GraphForge is pre-v1. Project storage is not backward compatible before the
 v1.0 format freeze.
 
 ## Contract
 
-- GraphForge v0.5.0 opens only a valid v0.5 project container and committed
-  generation.
+- GraphForge opens only a supported current-format project container and
+  committed generation; the product version is distinct from its format marker.
 - Any other on-disk layout is an unsupported input.
 - GraphForge does not provide an importer, migration command/API, in-place
   upgrade, read-only compatibility view, generation-zero interpretation,
@@ -17,13 +17,13 @@ v1.0 format freeze.
   promise for unsupported layouts.
 - Unsupported inputs return `GF_UNSUPPORTED_PROJECT_FORMAT` before any file is
   created, removed, renamed, rewritten, or opened as graph data.
-- Detection distinguishes only a valid supported v0.5 container, a recognized
+- Detection distinguishes only a valid supported container, a recognized
   unsupported pre-v1 container, and malformed input. It never decodes
   unrecognized graph records or guesses a format from partial files.
-- Data that is not already in a valid v0.5 project must be re-created through
-  the v0.5 public construction or ingest surface.
+- Data that is not already in a supported project must be re-created through
+  the current public construction or ingest surface.
 
-Within a supported v0.5 generation, base-only canonical Parquet remains
+Within a supported current-format generation, base-only canonical Parquet remains
 readable. A legacy single canonical property Parquet snapshot remains the
 oldest `(0, 0)` authority when later `full-snapshot-v1` immutable fragments are
 published; it is authenticated and retained rather than rewritten or silently
@@ -58,32 +58,33 @@ state.
 versioning from persisted ID/value/catalog schemas. The current container
 marker is `graphforge-project/v1\n`, distinct from the product version.
 `IrVersion` is result metadata, not a project-open compatibility gate. The
-planned extraction in #1011/#1012 preserves current integer, Arrow and serde
+shared value contract preserves current integer, Arrow and serde
 encodings; it introduces no automatic migration or mandatory new metadata for
 existing supported projects. Unknown versions and malformed values must fail
 through shared checked decoders without rewriting committed authority. The
-ADR identifies the required catalog/value admission and durable reopen tests;
-it does not claim those follow-up changes are already implemented.
+ADR identifies the catalog/value admission and durable reopen tests.
 
 ## Knowledge-layer implementation boundary
 
-The knowledge layer starts from the v0.5 graph and project contracts on `main`.
+The knowledge layer uses the current graph and project contracts. Internal
+layout descriptions below are not a promise to support projects produced by
+older engine versions.
 
 - removes obsolete graph-embedded confidence/provenance columns,
   execution options, and schemas. It does not transform unsupported project
   layouts or fabricate knowledge records from unrecognized fields.
-- resolves only versioned v0.5 committed generations. No unsupported root is a
+- resolves only versioned current-format committed generations. No unsupported root is a
   readable snapshot or generation zero.
-- initializes the v0.5 capability manifest. It does not upgrade unrecognized
+- initializes the current-format capability manifest. It does not upgrade unrecognized
   manifests.
-- guarantees atomicity and recovery for v0.5 generations only.
+- guarantees atomicity and recovery for current-format generations only.
 - exposes no migration API in Rust, Python, or Node.
 - proves deterministic creation, publication, recovery, reopen, and
-  binding parity for v0.5 projects only.
-- the v0.5.0 publication close-out requires clean v0.5 installs and project
+  binding parity for current-format projects only.
+- the current release qualification requires clean current-format installs and project
   creation/reopen. It does not require upgrade evidence from unsupported
   artifacts.
-- named checkpoints and complete-workspace revert operate only within the v0.5
+- named checkpoints and complete-workspace revert operate only within the current-format
   generation protocol. They do not recognize, migrate, or import unsupported
   layouts. The frozen contract is
   [ADR 0014](../../adr/0014-workspace-checkpoints.md).
@@ -102,7 +103,7 @@ an existing instance never follows the pointer again. Abandoned generation and
 transaction directories are neither consulted nor cleaned up by the read-side
 resolver.
 
-An explicitly empty directory may be initialized as a new v0.5 project. A
+An explicitly empty directory may be initialized as a new current-format project. A
 non-empty directory without the exact supported marker is never initialized or
 modified.
 
@@ -135,7 +136,7 @@ different inputs returns `GF_IDEMPOTENCY_CONFLICT`. A held writer lock returns
 
 The protocol is limited to one local filesystem with one writer and multiple
 snapshot readers. Distributed transactions, object-store consensus, and
-caller-managed public transactions are outside the v0.5 contract.
+caller-managed public transactions are outside the current-format contract.
 
 ## Interrupted transaction recovery
 
@@ -192,7 +193,7 @@ idempotent on the next cleanup or recovery pass.
 New-container interruption after `FORMAT` is durable leaves a supported
 uninitialized container. A later `open_or_initialize_project()` resumes that
 current-format initialization under the existing exclusive root lock. This is
-not migration or historical-format inference: only the exact v0.5 `FORMAT`
+not migration or historical-format inference: only the exact current-format `FORMAT`
 contract is resumable.
 
 The named failpoint suite terminates subprocess writers at every frozen
@@ -205,7 +206,7 @@ its committed manifest has been selected.
 
 ## Versioned capability manifest
 
-Every committed v0.5 generation manifest declares a canonical, strictly
+Every committed current-format generation manifest declares a canonical, strictly
 ID-ordered capability list. `graph@1` and `workspace@1` are mandatory from the
 first empty generation. `workspace@1` explicitly records ontology absence and
 authoritative configuration. `provenance@1` and `knowledge@1` may be added
@@ -256,13 +257,13 @@ record families may appear:
   guessing from a targeted mutation. Unsupported inventory versions
   return `GF_UNSUPPORTED_PROJECT_FORMAT`.
 
-Portable interchange does not yet encode the generation-owned `graph/` tree and
-returns a structured unsupported error for `files` generations; copy the project
-directory instead. Checkpoint open/diff follows the same GraphForge hydration
-path for either family.
+Move supported current-format projects using the
+[portable project workflow](../../guide/portable-projects.md), which verifies
+and imports the selected package. Do not copy live project storage or bypass an
+unsupported-format refusal. Checkpoint inspection is separate from interchange.
 
 There is no capability migration from unsupported layouts. A boolean manifest,
-missing v0.5 `FORMAT`, or any other pre-v1 root returns
+missing current-format `FORMAT`, or any other pre-v1 root returns
 `GF_UNSUPPORTED_PROJECT_FORMAT` before mutation.
 
 ## Security and diagnostics

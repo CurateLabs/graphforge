@@ -1,13 +1,17 @@
 # Security Policy
 
+This page covers vulnerability reporting and technical security boundaries. For
+a first learning exercise with invented data, start with
+[Your first research project](../guide/first-research-project.md).
+
 ## Supported Versions
 
 GraphForge is pre-v1.0. The API is still maturing, and only the **latest release** receives security updates. If you discover a vulnerability, please update to the latest version first.
 
-| Version | Supported |
-| ------- | --------- |
-| Latest (0.3.x) | :white_check_mark: |
-| Older releases | :x: |
+| Version                  | Supported          |
+| ------------------------ | ------------------ |
+| Latest published release | :white_check_mark: |
+| Older releases           | :x:                |
 
 We will begin supporting multiple versions once a stable v1.0 API is reached.
 
@@ -41,11 +45,9 @@ Please include as much information as possible:
 
 ### 4. What to Expect
 
-- **Acknowledgment:** We'll acknowledge your report within 48 hours
-- **Assessment:** We'll assess the vulnerability and determine severity
-- **Timeline:** We'll provide an estimated timeline for a fix
-- **Updates:** We'll keep you informed of progress
-- **Credit:** We'll credit you in the security advisory (unless you prefer to remain anonymous)
+Maintainers use the private report thread to assess the vulnerability, discuss
+a fix, and coordinate disclosure with the reporter. Include your preference
+for attribution in that thread.
 
 ## Security Update Process
 
@@ -53,7 +55,7 @@ Please include as much information as possible:
 2. **Fix developed:** A patch is developed and tested
 3. **Advisory drafted:** Security advisory prepared (GitHub Security Advisories)
 4. **Release:** Patched version released with security notes
-5. **Disclosure:** Public disclosure after users have time to update (typically 7 days)
+5. **Disclosure:** Coordinate publication of the advisory and mitigation guidance
 
 ## Security Best Practices for Users
 
@@ -76,14 +78,17 @@ db.execute(f"MATCH (n:Person {{name: '{user_input}'}}) RETURN n")
 db.execute("MATCH (n:Person) WHERE n.name = $name RETURN n", {"name": user_input})
 ```
 
-### File Permissions
+### Project files and sharing
 
-Protect your database files:
+A durable GraphForge project is a directory containing graph data and metadata.
+Protect that directory and any exported packages using the operating system's
+file permissions. A private hosted project controls who can access it; it does
+not make a downloaded copy inaccessible to its recipient. Public projects make
+participation and contributions visible.
 
-```bash
-# Set restrictive permissions on database files
-chmod 600 mydata.db
-```
+Use the [portable project workflow](../guide/portable-projects.md) to move or
+share a project. Access control for a hosted service belongs to that service;
+local research labels and governance records do not enforce access control.
 
 ### Atomic Writes
 
@@ -109,23 +114,33 @@ uv sync --upgrade
 
 ## Known Security Considerations
 
-### 1. SQLite Backend
+### Local engine and storage
 
-GraphForge uses SQLite for persistence:
+The Rust engine runs inside the calling application. Graph data uses Parquet
+and metadata uses JSON; graph results cross language boundaries as Arrow.
+GraphForge is not a hosted authentication or tenant-isolation service. An
+application exposing it to other users must enforce its own access rules.
 
-- **File-based:** Database files should have appropriate permissions
-- **No network security:** SQLite doesn't have built-in network security
-- **Single-user:** Not designed for concurrent multi-user access
+Durable project admission, publication, recovery, and supported write modes are
+defined in [concurrency and recovery](../book/architecture/concurrency-recovery.md).
+These guarantees depend on supported local filesystems and do not replace
+operating-system file permissions.
 
-### 2. Query Execution
+### Query resources
 
-- **No query timeout:** Long-running queries can cause DoS
-- **No resource limits:** No built-in limits on memory/CPU usage
-- **No access control:** No user authentication/authorization system
+The engine has per-instance execution resource controls, including worker
+counts, a DataFusion memory pool, spill policy, and query admission. Their scope
+is described in [execution resource policy](../development/execution-resource-policy.md).
+These controls are not a sandbox for arbitrary code or a universal cap on every
+allocation in the host application. Hosts remain responsible for deciding which
+queries and operations their users may run.
 
-### 3. Serialization
+### Imported data
 
-- **MessagePack:** Uses msgpack for serialization (ensure trusted data only)
+Portable project verification checks format, integrity, and compatibility.
+It does not establish that a source is trustworthy or that its research claims
+are correct. Use the documented [verify and import workflow](../guide/portable-projects.md)
+and inspect the source and selected content before reusing it.
 
 ## Security-Related Configuration
 
@@ -151,7 +166,6 @@ safety check
 ## Disclosure Policy
 
 - **Coordinated disclosure:** We follow responsible disclosure practices
-- **Public disclosure timeline:** 90 days from initial report or when patch is released
 - **CVE assignment:** We'll request CVEs for significant vulnerabilities
 - **Security advisories:** Published on GitHub Security Advisories
 

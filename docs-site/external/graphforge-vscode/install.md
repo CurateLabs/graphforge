@@ -1,5 +1,15 @@
 # Install and setup
 
+**Advanced · Assumes VS Code and basic Python or Node environment setup.**
+
+These instructions target an explicitly selected v0.6.0 engine. The pinned
+extension snapshot's automatic package-install choices target an earlier engine;
+do not use those choices to prepare a v0.6.0 environment. Install the selected
+engine manually below, then select its interpreter or package path. A successful
+runtime check does not establish that the packaged extension/engine combination
+is qualified; that remains tracked in
+[#1209](https://github.com/CurateLabs/graphforge/issues/1209).
+
 ## Requirements
 
 - VS Code `^1.96.0`
@@ -9,8 +19,8 @@
 
 1. Install **GraphForge** from the Marketplace (or Open VSX).
 2. Open a folder. Run **`GraphForge: Check Environment`** from the Command Palette.
-3. Follow the single next step it reports — it always names exactly one command to run next,
-   whether that's setting up a runtime or opening/initializing a project.
+3. Check the runtime and version it reports. Use the manual setup below for
+   v0.6.0, then rerun the check before opening a project.
 
 ## Choosing a runtime: Node vs. Python
 
@@ -44,49 +54,44 @@ active, and the next step to fix whichever is missing.
 
 ## Setting up the Node binding
 
-`@curatelabs/graphforge` is an optional peer dependency. Either:
+`@curatelabs/graphforge` is an optional peer dependency. Install it in your
+workspace using the exact version selected in the
+[engine installation guide](https://docs.graphforge.sh/guide/installation/):
 
-- Run **`GraphForge: Setup Native Binding`** — one QuickPick offering: link a detected sibling
-  build, browse to a built package folder (sets `graphforge.nativeModulePath`), or install
-  `@curatelabs/graphforge@0.5.1` from npm; or
-- Set `graphforge.nativeModulePath` yourself to an absolute path.
+```bash
+npm install @curatelabs/graphforge@0.6.0
+```
+
+This final-version command requires v0.6.0 to be published; for a candidate use
+its exact npm version. Set `graphforge.runtime` to `node`. Run
+**GraphForge: Setup Native Binding** and browse to the installed package folder,
+or set `graphforge.nativeModulePath` to its absolute path. Avoid the automatic
+registry-install choice until its configured version matches your selected engine.
 
 ## Setting up the Python binding
 
-**Package manager policy: [`uv`](https://docs.astral.sh/uv/) only — never `pip`.** If `uv`
-isn't installed, [install it first](https://docs.astral.sh/uv/getting-started/installation/);
-GraphForge will not fall back to `pip install`.
-
-Run **`GraphForge: Setup Python Binding`** — a single QuickPick with up to three choices:
-
-1. **Use detected interpreter** — checked in order: an explicit
-   `graphforge.pythonInterpreterPath`, the interpreter selected in the
-   [Python extension](https://marketplace.visualstudio.com/items?itemName=ms-python.python),
-   a workspace `.venv`/`venv`/`env` folder, then `python3`/`python` on `PATH`.
-2. **Select interpreter…** — browse for a specific interpreter; sets
-   `graphforge.pythonInterpreterPath`.
-3. **Install via uv** — runs `uv add "graphforge==0.5.1"` in a uv-managed project
-   (`pyproject.toml` / `uv.lock` present), otherwise
-   `uv pip install --python <interpreter> "graphforge==0.5.1"`, only after you explicitly
-   confirm. If `uv` isn't installed, the command stops and tells you to install it — it never
-   falls back to `pip`.
-
-Or from a terminal directly:
-
-**uv** (project with `pyproject.toml` / `uv.lock`)
+Prepare the selected environment using the
+[Python installation instructions](https://docs.graphforge.sh/guide/installation/).
+With that environment active, identify the interpreter and version:
 
 ```bash
-uv add "graphforge==0.5.1"
+python -c "import sys, graphforge; print(sys.executable); print(graphforge.__version__)"
 ```
 
-**uv pip** (arbitrary interpreter / venv)
+Set `graphforge.runtime` to `python` and `graphforge.pythonInterpreterPath` to the
+printed absolute interpreter path. Alternatively use **GraphForge: Setup Python
+Binding → Select interpreter…**. This selects an existing environment; it does
+not install another package. `pyarrow` is also required and is declared as a
+GraphForge Python dependency.
 
-```bash
-uv pip install --python /path/to/python "graphforge==0.5.1"
-```
+The extension's automatic installer uses `uv` and its own configured package
+version. That installer policy does not prevent manually preparing a Python
+environment with pip. For these v0.6.0 instructions, select the environment you
+prepared rather than using the older automatic install choice.
 
-Requires the [`pyarrow`](https://pypi.org/project/pyarrow/) package alongside `graphforge`
-(installed automatically as a `graphforge` dependency in most setups).
+Rerun **GraphForge: Check Environment**. If runtime loading fails, inspect the
+reported error and confirm the selected path and package version. Do not infer
+compatibility from the fact that the extension itself installed successfully.
 
 ## Project detection
 

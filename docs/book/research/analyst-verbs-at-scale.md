@@ -1,76 +1,41 @@
-# Research: Analyst Verbs at Notebook Scale
+# Research notes: analyst verbs at notebook scale
 
-!!! note "Research note"
-    Durable findings for **GraphForge v0.5.0**. Prefer the
-    [network analysis](../use-cases/network-analysis.md) use-case for present-tense
-    examples.
+This Advanced note describes how to evaluate native graph algorithms. Start
+with the runnable [network guide](../use-cases/network-analysis.md); a beginner
+research project does not require benchmarking.
 
-**Scope:** `forge.rank` / `forge.cluster` timings and write-back on SNAP ego-facebook
-(4,039 nodes, 88,234 edges).
+## Supported workflow
 
----
+`forge.rank()` and `forge.cluster()` return Arrow tables and support explicit
+`write_property`. `paths`, `analyze`, and `similar` provide other read-only
+algorithm results. Use the [algorithm catalog](../architecture/algorithms.md)
+for names, options, graph projections, and result schemas. Python and Node call
+the Rust engine; NetworkX and igraph are not fallback execution engines.
 
-## Executive summary
+## Measure an actual workload
 
-Compiled analyst verbs complete the usual notebook centrality and community
-algorithms in well under a second on ego-facebook. Results match direct igraph
-runs on the same projection. Opt-in `write_property` persists scores for later
-Cypher without a per-node UNWIND loop.
+Select a dataset you can reproduce and record its source, content identity,
+node and edge definitions, direction, and preprocessing. The proposed
+`graphforge.datasets` catalogue is not required or available as a built-in
+loader; use [graph construction](../../guide/graph-construction.md).
 
-| Algorithm | Verb | Typical time (s) | Notes |
-| --- | --- | --- | --- |
-| Triangle count | `forge.rank(..., by="triangles")` | ~0.07 | Full-graph triangles |
-| Betweenness | `forge.rank(..., by="betweenness")` | ~0.16 | Normalized scores |
-| Closeness | `forge.rank(..., by="closeness")` | ~0.11 | Connected graphs |
-| PageRank | `forge.rank(..., by="pagerank")` | ~0.14 | Stream or write-back |
-| Louvain | `forge.cluster(..., by="louvain")` | ~0.08 | Community labels |
-| Connected components | `forge.cluster(..., by="components")` | ~0.06 | Tree / component IDs |
-| Degree | `forge.rank(..., by="degree")` | ~0.06 | Fast baseline |
-| Clustering coefficient | `forge.rank(..., by="clustering_coefficient")` | ~0.07 | Mean high on ego-facebook |
+Measure import, project reopen, the selected algorithm, and any write-back
+separately. Record engine version, hardware, memory, storage, input size, and
+algorithm options. Distinguish first execution from reuse of prepared state.
+Report failures and resource use alongside duration. Earlier unattributed
+sub-second examples are not current performance guarantees.
 
----
+Use [scale guidance](../../reference/scale-limits.md) and the
+[measurement method](../../reference/scale-evaluation.md) for the repository's
+workload-specific evidence. Keep results on the owning issue or artifact.
 
-## Pattern
+## Check correctness and interpretation separately
 
-```python
-from graphforge import GraphForge
-from graphforge.datasets import load_dataset
+Compare an algorithm with a reference implementation only after matching
+projection, direction, parameters, and normalization. Public UUIDs or a chosen
+stable external key must identify the same nodes in both outputs.
 
-forge = GraphForge()
-load_dataset(forge, "snap-ego-facebook")
-
-# Stream Arrow results
-table = forge.rank("Node", by="pagerank")
-
-# Or persist for Cypher follow-up
-forge.rank("Node", by="pagerank", write_property="pagerank")
-forge.cluster("Node", by="louvain", write_property="community")
-
-top = forge.execute("""
-    MATCH (n:Node)
-    RETURN n.id AS id, n.pagerank AS score
-    ORDER BY score DESC
-    LIMIT 10
-""")
-```
-
-Only `rank` and `cluster` accept opt-in `write_property`. Export to NetworkX or
-igraph remains available when you need algorithms outside the shipped catalog —
-see the [use-case guide](../use-cases/network-analysis.md#integration-with-networkx).
-
----
-
-## Correctness
-
-On ego-facebook, PageRank and betweenness top-10 rankings from `forge.rank` match
-direct igraph rankings on `forge.to_igraph()` for the same undirected projection.
-Treat NetworkX/igraph as oracles when validating new notebook pipelines.
-
----
-
-## Recommendations
-
-1. Prefer analyst verbs for the eight catalog algorithms above; reserve NX/igraph
-   export for visualization and algorithms outside the catalog.
-2. Use `write_property` when you will filter or join scores in Cypher later.
-3. Restrict with `via=` / label filters when the graph is heterogeneous.
+Matching implementations support the algorithmic result. They do not validate
+sampling, establish that a community represents a real social group, or turn a
+centrality score into a quality measure. Inspect source evidence and exceptions
+before drawing a substantive conclusion.

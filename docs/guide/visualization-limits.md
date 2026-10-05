@@ -1,5 +1,10 @@
 # Visualization limits comparison
 
+**Expert reference:** for maintainers comparing renderer performance. It assumes a
+source checkout and familiarity with benchmark harnesses. For your first
+project, use [the graph lesson](quickstart.md), then the optional
+[visualization examples](visualization.md).
+
 > Status: maintainer evidence harness for issue #299. Not a product feature and
 > not a CI/release gate.
 
@@ -25,9 +30,9 @@ universal benchmarks.
 
 ## Where to look
 
-- Harness + methodology: [`examples/visualization/stress/`](../../examples/visualization/stress/)
-- Pre-run methodology freeze: [`METHODOLOGY.md`](../../examples/visualization/stress/METHODOLOGY.md)
-- Honest report template: [`REPORT.md`](../../examples/visualization/stress/REPORT.md)
+- Harness + methodology: [`examples/visualization/stress/`](https://github.com/CurateLabs/graphforge/tree/main/examples/visualization/stress)
+- Pre-run methodology freeze: [`METHODOLOGY.md`](https://github.com/CurateLabs/graphforge/blob/main/examples/visualization/stress/METHODOLOGY.md)
+- Honest report template: [`REPORT.md`](https://github.com/CurateLabs/graphforge/blob/main/examples/visualization/stress/REPORT.md)
 - Dispatch-only workflow: `.github/workflows/visualization-limits-stress.yml`
 
 ## What this is not

@@ -1,66 +1,34 @@
-# Research: Search and Entity Resolution
+# Research notes: search and entity resolution
 
-!!! note "Research note"
-    Durable findings for **GraphForge v0.5.0**. Prefer
-    [knowledge graph construction](../use-cases/knowledge-graph-construction.md)
-    and [LLM workflows](../use-cases/llm-workflows.md) for present-tense examples.
+This Advanced note supports
+[knowledge graph construction](../use-cases/knowledge-graph-construction.md)
+and [LLM workflows](../use-cases/llm-workflows.md). For a first research project,
+start with the [integrated guide](../../guide/first-research-project.md).
 
-**Scope:** `forge.find` text / vector / hybrid recall for half-remembered entities.
+## Candidate retrieval is not identity resolution
 
----
+`forge.find()` returns candidates as an Arrow table, with a public `node_uuid`,
+retrieval `score`, and `matched_on`. Use the source-specific identifier, known
+aliases, and other distinguishing evidence to decide whether a candidate is the
+same entity. A similar name can belong to a different person or organization.
 
-## Executive summary
+Text search uses BM25. It does not guarantee synonym, paraphrase, abbreviation,
+or typo recall. Store known aliases without replacing original source spelling.
+Vector or hybrid retrieval additionally depends on the embedding space and
+query representation; synthetic vectors do not demonstrate semantic quality.
 
-Exact-match Cypher fails when an LLM emits `"alice c."` instead of
-`"alice-chen"`. `forge.find` is the v0.5.0 answer for lexical, vector, and hybrid
-lookup over node properties.
+The [worked candidate lookup](../use-cases/knowledge-graph-construction.md#candidate-deduplication-with-forgefind)
+uses the supported native index and search APIs. See the
+[API reference](../../reference/api.md) for exact signatures and space options.
 
-**Key findings:**
+## Check errors before merging
 
-- Text search handles natural-language descriptions, paraphrases, stems, and case
-  variants. It does not reliably handle single-character typos or abbreviations.
-- Search latency stays low at notebook scale; index build cost dominates at 10K+
-  nodes, not query time.
-- Index **name and description** (and aliases) together — description text is what
-  makes paraphrase recall work.
-- Hybrid search needs real embeddings to beat text-only ranking; mock vectors do
-  not demonstrate semantic quality.
-- CamelCase tool names recall better when descriptions are indexed; store acronyms
-  explicitly in aliases when needed.
+Prepare representative known matches and deliberately similar nonmatches.
+Measure missed candidates and false matches separately. Leave ambiguous cases
+unresolved until a person or a documented domain rule can decide. Preserve the
+original mentions and source links even when several mentions resolve to one
+entity. Never delete an alias and its relationships just because it ranked first.
 
----
-
-## Pattern
-
-```python
-from graphforge import GraphForge
-
-forge = GraphForge("entities/")
-
-# After bulk ingest, rely on forge.find over indexed properties
-table = forge.find("software engineer acme", label="Entity", limit=5)
-
-# Hybrid when you already have query vectors
-table = forge.find(
-    "alice engineer",
-    label="Entity",
-    vector=query_vec,
-    limit=10,
-)
-```
-
-| Query style | Expectation |
-| --- | --- |
-| Exact / partial name tokens | Strong |
-| Description paraphrase | Strong if description indexed |
-| Stems (`engineering` → engineer) | Strong |
-| Typos / abbreviations | Weak — use aliases or preprocessing |
-| Meaning without keyword overlap | Needs vectors + hybrid |
-
----
-
-## Recommendations
-
-1. Always index descriptive text with names.
-2. Prefer batch indexing after bulk MERGE ingest; incremental updates for live graphs.
-3. Use `forge.find` as the primary entity-resolution entry point in LLM and agent flows.
+Measure index construction and lookup on the actual workload before making
+performance claims. Record the engine version, source scope, index properties,
+and query set. Search score is not factual confidence or coding agreement.

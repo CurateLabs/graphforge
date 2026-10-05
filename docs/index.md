@@ -1,180 +1,80 @@
 # GraphForge
 
-**Composable graph tooling for analysis, construction, and refinement**
+**Build a graph, ask a question, and keep what you learn.**
 
-[![PyPI](https://img.shields.io/pypi/v/graphforge.svg?label=PyPI&logo=pypi)](https://pypi.org/project/graphforge/)
-[![npm](https://img.shields.io/npm/v/%40curatelabs/graphforge.svg?label=npm&logo=npm)](https://www.npmjs.com/package/@curatelabs/graphforge)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](guide/installation.md)
-[![Node.js](https://img.shields.io/badge/Node.js-20%2B-5FA04E.svg?logo=nodedotjs&logoColor=white)](guide/installation.md)
-[![Rust](https://img.shields.io/badge/Rust-1.96-000000.svg?logo=rust&logoColor=white)](development/contributing.md)
-[![CI](https://img.shields.io/github/actions/workflow/status/CurateLabs/graphforge/test.yml?branch=main&label=CI&logo=github)](https://github.com/CurateLabs/graphforge/actions/workflows/test.yml)
-[![openCypher TCK](https://img.shields.io/badge/openCypher%20TCK-3897%2F3897-brightgreen.svg)](reference/tck-compliance.md)
-[![Apache License 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](../LICENSE)
+GraphForge records items and their connections: for example, which paper cites
+another, or which interview excerpt informed a finding. You can ask questions
+about those connections and keep the evidence behind an answer. It runs on your
+computer. The primary audience is a nontechnical analyst working with an agent;
+technical users can also write their own code.
 
-GraphForge is an embedded, local-first graph execution environment with a Rust core, Arrow
-results, and Parquet persistence. It brings openCypher and analyst-intent verbs to notebooks,
-scripts, repositories, and editor workflows without requiring a database server. The current
-v0.5 engine passes all **3,897 openCypher TCK scenarios**.
+These docs target **v0.6.0**. [Installation](guide/installation.md) explains
+release availability and setup. Before v1.0.0, only supported current-format
+projects can be opened; backward compatibility and migration are not guaranteed.
 
-> **Install tip:** Install GraphForge from PyPI (`pip install graphforge`) or npm
-> (`npm install @curatelabs/graphforge`) to receive the current native release.
-> Earlier pure-Python releases under the `graphforge` PyPI name predate the
-> CurateLabs engine. See [Installation](guide/installation.md).
+## Basic: understand and use a graph
 
-```python
-from graphforge import GraphForge
+Start here if you are doing your first research project. No programming knowledge
+is needed to understand the lessons. Running the examples uses a coding agent
+or a technical helper for setup.
 
-forge = GraphForge()
-alice = forge.add_node("Person", name="Alice", age=30)
-bob = forge.add_node("Person", name="Bob", age=25)
-forge.add_edge(alice, "KNOWS", bob, since=2020)
+1. [Your first graph](guide/quickstart.md): connect three papers and check a citation count.
+2. [Work with an agent](guide/work-with-an-agent.md): ask it to run the example and inspect the actual answer.
+3. [Your first mixed-methods project](guide/first-research-project.md): connect survey responses and interview excerpts, challenge an explanation, then save and retrieve a bounded conclusion.
 
-table = forge.execute("""
-    MATCH (p:Person)-[:KNOWS]->(friend)
-    RETURN p.name AS person, friend.name AS friend
-""")
+Basic graph use is a complete outcome. You do not have to learn collaboration,
+research history, or every other feature.
 
-print(table.to_pandas())
-```
+## Advanced: work directly with the tools
 
-Every query and analyst verb returns an Apache Arrow Table. Python and Node are thin bindings;
-they never replace or fall back from the Rust engine.
+The [Advanced introduction](guide/advanced.md) assumes basic Python, database,
+and terminal skills.
+It explains GraphForge-specific ideas as you need them; expert knowledge is not
+a prerequisite.
 
----
+| Your task                                       | Start here                                                                          |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------- |
+| Run code and inspect results                    | [Use a notebook](guide/use-a-notebook.md)                                           |
+| Save a graph and return later                   | [Query, analyze, and save](guide/tutorial.md)                                       |
+| Write queries or load records                   | [Cypher](guide/cypher-guide.md) · [Graph construction](guide/graph-construction.md) |
+| Retain a challenged hypothesis and its evidence | [Record and revisit an inquiry](guide/record-an-inquiry.md)                         |
+| Keep an exact research state                    | [Keep research history](guide/research-journey.md)                                  |
+| Move or share a saved project                   | [Portable projects](guide/portable-projects.md)                                     |
+| Call GraphForge from an application             | [Integrate GraphForge](guide/integrate-graphforge.md)                               |
 
-## Get started
+Choose the task you need. Advanced is a collection of optional paths, not a
+sequence you must finish before using the product.
 
-| Page | Job |
-|---|---|
-| [Installation](guide/installation.md) | Install Python or Node packages, or build from source |
-| [Quick Start](guide/quickstart.md) | Create, query, and persist your first graph |
-| [Tutorial](guide/tutorial.md) | Work through a complete citation-network example |
-| [CLI and repository integration](guide/repository-integration.md) | Initialize, validate, synchronize, checkpoint, export, and import a project |
-| [VS Code extension](guide/vscode-extension/) | Explore projects, run Cypher, and pair with coding agents in your editor |
+## When GraphForge fits
 
----
+Use it to inspect relationships in a citation network, connect observations to
+sources, analyze a dependency graph, or retain the reasoning behind an inquiry.
+Start with the data you have; an ontology is not required to create a graph.
 
-## Why GraphForge?
+For a centrally hosted, high-throughput application serving many concurrent
+users, evaluate an operational database against that workload. GraphForge's
+[scale guidance](reference/scale-limits.md) explains the difference between
+measured workloads and a general size promise.
 
-Modern research and investigation produce graph-shaped data: entity relationships extracted by
-LLMs, citation networks, dependency graphs, social connections, and evolving knowledge bases.
-GraphForge makes those graphs portable and inspectable without turning them into an application
-database or requiring a long-running service.
+Durable projects require a supported local filesystem. In-memory work ends
+when the process or notebook kernel closes. Read the
+[storage requirements](guide/installation.md#durable-storage) before saving
+work you intend to keep.
 
-<table>
-  <thead>
-    <tr>
-      <th scope="col">Aspect</th>
-      <th scope="col">NetworkX</th>
-      <th scope="col">GraphForge</th>
-      <th scope="col">Neo4j / Memgraph</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <th scope="row">Setup</th>
-      <td>Python package</td>
-      <td>Embedded package</td>
-      <td>Run a server</td>
-    </tr>
-    <tr>
-      <th scope="row">Query language</th>
-      <td>Python API</td>
-      <td><strong>Full openCypher</strong></td>
-      <td>Full Cypher</td>
-    </tr>
-    <tr>
-      <th scope="row">Persistence</th>
-      <td>Manual</td>
-      <td><strong>Parquet project directory</strong></td>
-      <td>Native</td>
-    </tr>
-    <tr>
-      <th scope="row">Results</th>
-      <td>Python objects</td>
-      <td><strong>Apache Arrow Tables</strong></td>
-      <td>Driver rows</td>
-    </tr>
-    <tr>
-      <th scope="row">Notebook-friendly</th>
-      <td>✓</td>
-      <td>✓</td>
-      <td>Requires connection</td>
-    </tr>
-    <tr>
-      <th scope="row">Primary role</th>
-      <td>In-memory graph library</td>
-      <td>Local knowledge-analysis workbench</td>
-      <td>Operational graph database</td>
-    </tr>
-  </tbody>
-</table>
+## Reference and specialist material
 
-Use GraphForge for knowledge graphs, citation networks, LLM output storage, repository-aware
-analysis, and social-network research. Use an operational database for high-throughput,
-multi-user application workloads or graphs beyond the documented
-[scale limits](reference/scale-limits.md) (typically
-[GSI](reference/graph-scale-index.md) Level 07+ / `LG`).
+- [Cypher](guide/cypher-guide.md), [graph construction](guide/graph-construction.md),
+  and [analytics](guide/analytics-integration.md)
+- [API reference](reference/api.md) and [algorithm catalog](book/architecture/algorithms.md)
+- [Architecture](book/architecture/overview.md), [language conformance](reference/tck-compliance.md),
+  and [release scope](releases/roadmap.md)
+- [Contributing](development/contributing.md) and [documentation map](README.md)
 
----
+Architecture and implementation contracts are specialist references, outside
+the Basic and Advanced learning paths.
 
-## Use every day
-
-| Page | Job |
-|---|---|
-| [Guide overview](guide/overview.md) | Navigate everyday GraphForge workflows |
-| [Cypher guide](guide/cypher-guide.md) | Query and mutate graphs with openCypher |
-| [Graph construction](guide/graph-construction.md) | Build graphs through Rust-owned APIs and Cypher |
-| [Analytics integration](guide/analytics-integration.md) | Work with Arrow, pandas, Polars, and analyst verbs |
-| [VS Code commands](guide/vscode-extension/commands.md) | Run GraphForge from VS Code or a compatible editor |
-| [Agent interop](guide/vscode-extension/agent-interop.md) | Drive structured extension commands from coding agents |
-
----
-
-## Architecture at a glance
-
-GraphForge exposes one Rust-owned engine through Cypher, analyst-intent APIs, and repository
-lifecycle commands:
-
-```text
-Python (PyO3, thin) ─┐
-Node (N-API, thin) ──┼──> graphforge-api ──> Arrow (data plane) + thin control/handle returns
-CLI (thin launcher) ─┘
-
-Cypher: graphforge-cypher ──> graphforge-ir ──> graphforge-rel ──> graphforge-exec
-                                                   └──> graphforge-storage (Parquet + JSON metadata)
-Analyst verbs bypass the Cypher parser and dispatch through Rust-owned typed handlers.
-```
-
-Python, Node, the CLI, and the VS Code extension project the same engine behavior. Swift and
-Kotlin bindings are planned rather than shipped. See the
-[architecture overview](book/architecture/overview.md) for storage, execution, ontology,
-knowledge, checkpoint, and compatibility contracts.
-
----
-
-## Understand and reference
-
-| Page | Job |
-|---|---|
-| [Book](book/README.md) | Explore architecture, research, and deeper usage narratives |
-| [API reference](reference/api.md) | Look up engine, lifecycle, and analyst surfaces |
-| [Algorithm catalog](book/architecture/algorithms.md) | Choose rank, cluster, paths, analyze, or similar algorithms |
-| [OpenCypher compatibility](reference/opencypher-compatibility.md) | Inspect supported language behavior |
-| [Graph Scale Index (GSI)](reference/graph-scale-index.md) | Profile datasets by node band and density |
-| [Scale Evaluation](reference/scale-evaluation.md) | Official Graph500 + Derived density matrix; LDBC policy; external harness contract |
-| [TCK compliance](reference/tck-compliance.md) | Review the 3,897 / 3,897 language gate |
-
----
-
-## Contribute and operate
-
-| Page | Job |
-|---|---|
-| [Documentation map](README.md) | Understand the public information architecture |
-| [Contributing](development/contributing.md) | Prerequisites, validation, and focused PRs |
-| [Testing](engineering/TESTING.md) | See how GraphForge proves behavior |
-| [Roadmap](releases/roadmap.md) | Review current and planned product surfaces |
-| [Publishing](engineering/PUBLISHING.md) | Package destinations and release sequence |
-
-GraphForge is open source under the [Apache License 2.0](legal/licensing.md).
+For help, use [GitHub Discussions](https://github.com/CurateLabs/graphforge/discussions).
+For a bug, include your package version, OS, storage mode, smallest reproducing
+query, expected result, and actual result in a
+[GitHub issue](https://github.com/CurateLabs/graphforge/issues/new/choose).
+GraphForge is available under the [Apache License 2.0](legal/licensing.md).

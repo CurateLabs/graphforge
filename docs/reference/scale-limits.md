@@ -1,283 +1,55 @@
-# GraphForge Scale Limits
+# Scale and workload limits
 
-**Last updated:** 2026-08-09
+GraphForge does not have a published universal maximum graph size or query-time
+guarantee. Measure the operations your project needs: construction, reopening,
+queries, analysis, and export can have different memory and disk requirements.
+Edge count, density, properties, result size, query shape, and hardware all matter.
 
-GraphForge is designed for research and notebook workflows on
-[GSI](graph-scale-index.md) Levels **01–06** (`XS`–`MD`, V &lt; 10M). This
-document describes practical limits on the v0.5.0 Rust core, distinguishes
-between query types, and explains why **edge count matters more than node
-count** for most operations. Profile concrete datasets with a full Graph Scale
-Index (for example `GD-06-MD-D00`) via [`profile_gsi`](api.md#profile_gsi--graphscaleindexprofile)
-or the [GSI reference](graph-scale-index.md). Do not compare wall-clock numbers
-across machines without matching hardware and graph layout.
+These docs target v0.6.0. Its [scale evidence](https://github.com/CurateLabs/graphforge/issues/735)
+and [benchmark scorecards](https://github.com/CurateLabs/graphforge/issues/952)
+are still release-readiness work. A target, a successful small test, or a
+historical measurement is not a certified capacity for this release.
 
-With DataFusion over Parquet, large-graph work is **disk-limited** (RAM for
-working sets). Escalation past Levels 01–06 (Graph500 SCALE ≥ 24 / GSI `07`+)
-is a **spec + external harness** track — see
-[Scale Evaluation](scale-evaluation.md) (Official Graph500 + Derived density
-matrix + harness contract) and the [LDBC full suite](../guide/datasets/ldbc.md)
-— not normal GraphForge CI.
+## Claims and their evidence
 
-Fresh graph construction is append-only at the Parquet-fragment level. Nodes,
-each edge relation, and node/edge property routes retain a legacy-compatible
-first fragment and immutable bounded fragments thereafter. The writer encodes
-each accepted row once; increasing total row count must increase aggregate
-input rows, rows encoded, shard bytes, and shard count linearly while prior
-rows decoded remains zero. Writer reopen uses one persisted surrogate-tail
-record. Edge endpoint resolution retains one authenticated UUID-index snapshot,
-sorts and deduplicates each request, selects bounded blocks from authenticated
-fences, and merge-scans each selected block once. It reports block reads/bytes
-and exactly zero per-record filesystem seeks; neither operation scans retained
-topology. The writer's charged retained state and flush scratch are therefore
-bounded by the configured batch/shard window. Process RSS is separate runtime
-evidence: the public construction/S20 sampler must measure it at each phase and
-show that it plateaus as retained edge count rises. Continued material RSS
-growth proportional to retained edge count is a correctness failure, not a
-reason to raise the M5 memory ceiling.
+This table separates reproducible correctness checks from performance claims.
+Results belong to the linked issue or CI run, with the source commit and run
+configuration. Missing candidate evidence is shown explicitly; it is not a pass.
 
-## Rust 0.5.0 Fixed-Hop LIMIT Contract
+| Claim or question                                                       | Version / source and workload                                                                                                                                                                                                                     | Hardware and configuration                                                                                                                           | Command and result                                                                                                                      | Limitation and reproducibility                                                                                                                                                               |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Fixed-hop queries ending in `LIMIT` have a bounded-work regression test | Candidate source: [`fixed_hop_limit.rs`](https://github.com/CurateLabs/graphforge/blob/main/crates/graphforge-api/tests/fixed_hop_limit.rs); deterministic graphs, one- and two-hop queries, indexed and fallback paths                           | Supported durable filesystem; test-defined graph sizes, cache state, and resource policy. This is a structural check, not a machine-speed comparison | `make test-rust ARGS="-p graphforge-api --test fixed_hop_limit"`; the matching candidate's CI result is required before a release claim | Checks results and I/O work. It does not establish latency for your graph. See the [execution policy](../development/execution-resource-policy.md) and test source                           |
+| Saved projects reopen with their committed graph                        | Candidate source: [`file_backed_graph_generation.rs`](https://github.com/CurateLabs/graphforge/blob/main/crates/graphforge-api/tests/file_backed_graph_generation.rs); small public-API persistence fixtures                                      | Supported durable filesystem; fixture settings are in the test. Large ignored fixtures require a separately recorded host and configuration          | `make test-rust ARGS="-p graphforge-api --test file_backed_graph_generation"`; inspect the candidate CI run for its result              | Small-fixture correctness does not establish a maximum project size. [Storage and recovery contract](../book/architecture/concurrency-recovery.md)                                           |
+| Billion-edge lifecycle certification                                    | Exact measured commit, Graph500 input identity, and source/imported counts must be in [#735](https://github.com/CurateLabs/graphforge/issues/735) through [#745](https://github.com/CurateLabs/graphforge/issues/745)                             | Designated OVHC-AGENCY host and `local-linux-cgroups-v2` profile; each accepted run records hardware, memory, disk, and phase budgets                | `make -C benchmarks progressive-host-ladder-run` with the issue's approved arguments; final lifecycle acceptance remains outstanding    | The target is not a capacity claim. Stop at the first failed rung. Commands and host admission: [benchmark runbook](https://github.com/CurateLabs/graphforge/blob/main/benchmarks/README.md) |
+| Load/query performance for the four GDC suites                          | Exact source, pinned dataset, scale factor, supported query set, and reference results belong to each [#952 scorecard](https://github.com/CurateLabs/graphforge/issues/952)                                                                       | OVHC-AGENCY, declared BenchExec profile and driver clock; per-run settings must accompany the card                                                   | Reproduce with the scorecard's exact command. Completed release scorecards are still required; no timings are asserted here             | Read-only, unaudited results must identify refused queries and the first failing rung. They are not LDBC Benchmark Results or cross-machine guarantees                                       |
+| Complete-ingest throughput and multicore scaling                        | The measured source/workload and accepted release-scope decision are recorded in [#1572](https://github.com/CurateLabs/graphforge/issues/1572); further performance work remains in [#1387](https://github.com/CurateLabs/graphforge/issues/1387) | Use the hardware, worker count, and full phase definition attached to that measurement                                                               | The complete-ingest rate target was not met and was deferred beyond v0.6.0; multicore scaling is not established by that decision       | A deferral is not a performance pass. Use the original run commands and receipts linked from the issues rather than extrapolating an isolated phase                                          |
 
-Fixed one- and multi-hop patterns use the adjacency provider in every ontology
-mode, for typed and wildcard relationships, whether the persistent index is a
-hit, miss, or still absent. `ExpandExec` streams input batches and accepts
-DataFusion's physical `fetch`. Chained hops additionally receive a query-scoped
-soft batch goal through a fail-closed physical-plan whitelist. This removes
-eager round-robin buffering below selective filters and cancels upstream reads
-when terminal demand is met. Hard limits still do not cross filters or
-relationship uniqueness; ordering, aggregation, and `DISTINCT` remain blocking
-and consume their complete semantic input.
+For a numerical claim, require **all** of: release/source commit, workload and
+input identity, hardware, configuration, exact command, result, limitation,
+and a reproducibility link. A timing without those fields is not used here.
+The [scale evaluation method](scale-evaluation.md) explains the measurement
+terms; the issue results own the host ladder rather than duplicating it here.
 
-For canonical dense node files, filtered hydration proves from Parquet
-row-group and page metadata that `node_id = row ordinal + 1`, then selects the
-exact requested rows. Scattered destination ids therefore remain
-neighborhood-proportional as the node table grows. Deleted/gapped or
-index-less files retain the conservative predicate reader with post-read key
-validation.
+## Choose a workload you can measure
 
-The CI gate executes through the public `GraphForge` facade on deterministic
-graphs whose edge count differs by 10x. It requires the larger graph to
-materialize no more than 3x as many edge or node rows for the same `LIMIT 1000`,
-with zero full edge reads on an adjacency hit. Wall-clock is reported but not
-gated. The release command is:
+- Start with a [small graph](../guide/quickstart.md) and representative questions.
+- For neighborhood questions, prefer bounded paths and a result limit. Sorting,
+  aggregation, and `DISTINCT` may still need to consume their full input.
+- Measure full scans and global algorithms separately from short traversals.
+  A graph that loads successfully may still exceed the budget for an analysis.
+- Measure construction, reopen, query, and export phases separately. Process
+  memory, application I/O counters, and allocated disk bytes are different measures.
+- Use [Graph Scale Index](graph-scale-index.md) to describe graph size and density,
+  not to infer a performance promise.
 
-| Deterministic graph | One-hop `LIMIT 1000` | Two-hop `LIMIT 1000` | Materialized edge rows |
-|---:|---:|---:|---:|
-| 1M edges | 9.76 ms | 13.08 ms | 1,000 / 1,288 |
-| 10M edges | 113.39 ms | 111.35 ms | 1,000 / 1,288 |
+## Storage and moving a project
 
-These are warmed Apple Silicon development measurements; use them to verify
-shape, not as a cross-machine service-level objective.
+Durable projects require the [supported local filesystems](../guide/installation.md#durable-storage).
+Before v1.0, GraphForge opens supported current-format projects; it does not
+promise backward compatibility or migration for earlier formats. Readability
+of base files within the current format is not a promise to open older project
+containers. See [project format compatibility](../book/architecture/project-format-compatibility.md).
 
-On LiveJournal (4.0M nodes / 34.7M edges), the release build measured
-66.3 ms for one hop and 90.3 ms for two hops at `LIMIT 1000`, with no full node
-or edge reads and no read starting after cancellation. One-hop selected and
-scanned 968 node rows, down from 3,080,458; two-hop selected and scanned 1,946,
-down from 5,964,042. No derived metadata is built or refreshed, and project
-storage size is unchanged.
-
-```bash
-make bench-fixed-hop-limit
-
-GF_LIVEJOURNAL_PROJECT=/path/to/cached/project \
-  make bench-fixed-hop-livejournal
-```
-
-See [Traversal Scaling](https://github.com/CurateLabs/graphforge/blob/main/benchmarks/traversal_scaling.md)
-for the fixed-hop and variable-length benchmark methodology.
-
-## M4 Embedded Performance Entry Gate
-
-M4 before/after performance work uses the versioned entry contract in
-[`tests/contracts/embedded-performance-matrix.json`](../../tests/contracts/embedded-performance-matrix.json)
-and the public-facade harness documented in
-[M4 Entry Baseline](../development/m4-entry-baseline.md). The short CI matrix
-gates on structural correctness under the default Explicit two-worker resource
-policy; thread configurations `1`/`2`/`4`/`8`/automatic are executed under
-[Embedded Execution Resource Policy](../development/execution-resource-policy.md)
-(#337) when the machine budget allows.
-
-### Graph persistence envelopes
-
-| Path | What it stores | Open behavior | Size guidance |
-|---|---|---|---|
-| Legacy `graph`/`snapshot` (Arrow IPC) | Whole workspace bytes in one participant | Hydrates every file into a private workspace | Historical envelope: 1 GiB/file and 2 GiB total. Still readable. Do not raise these constants. |
-| File-backed `graph`/`files` + generation `graph/` tree | Canonical inventory participant; graph files remain on disk | Validates inventory; read-only opens may pin the generation tree; writers materialize file-by-file | No universal GiB ceiling. Public reopen past the legacy 2 GiB snapshot envelope is proven by oversize file-backed evidence (#338 / #345). Densified 8M-node/128M-edge public reopen is proven by [`file-backed-128m-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/file-backed-128m-evidence.json) via `make bench-file-backed-128m` (#338). Hardware-specific; not a CI product max. CI uses a small multi-file fixture. |
-
-New publications use the file-backed path. Portable interchange currently returns a
-structured unsupported error for file-backed trees (copy the project directory
-instead); legacy snapshot generations remain portable.
-
-Public persistence past the legacy 2 GiB snapshot envelope is proven by the
-ignored oversize fixture in `file_backed_graph_generation` (sparse padding beside
-a queryable graph; checked-in evidence:
-[`file-backed-oversize-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/file-backed-oversize-evidence.json)).
-That is not a universal size ceiling and does not download 8M/128M data in CI.
-
-```bash
-cargo test -p graphforge-api --test embedded_performance_baseline
-cargo test -p graphforge-api --test file_backed_graph_generation
-make bench-embedded-performance
-# Optional large-class persistence proof (ignored; local only):
-GF_FILE_BACKED_OVERSIZE_EVIDENCE_OUT=build/file-backed-oversize-evidence.json \
-  cargo test -p graphforge-api --test file_backed_graph_generation \
-  oversize_file_backed_generation_exceeds_legacy_snapshot_envelope -- --ignored --nocapture
-```
-
-## Adjacency index build (#336)
-
-Derived CSR adjacency construction streams projected Parquet batches
-(`edge_id` / `src_id` / `dst_id`, plus `rel_type_name` for exploratory files)
-instead of concatenating each typed edge file into one Arrow `RecordBatch`.
-That removes the observed **134,217,727-edge** ceiling caused by concatenating
-`FixedSizeBinary(16)` UUID columns into a single contiguous buffer
-(2 GiB / 16 bytes).
-
-Peak build memory is governed by an explicit chunk/spill policy
-(`AdjacencyBuildOptions`: `chunk_rows`, `batch_size`, optional
-`memory_budget_bytes`, `spill_dir`, `spill_max_bytes`), not by total edge
-count. Sorted runs spill under the unpublished stage (or a configured absolute
-spill directory from the #337 resource policy) and are removed on success,
-failure, or cancellation. Manifest-last publication is unchanged: a cancelled
-or failed build cannot publish a fresh-looking partial index.
-
-Deterministic CI covers multi-row-group streaming without UUID projection,
-tiny-`chunk_rows` golden CSR equality against `csr_from_entries`, and
-cancel/spill cleanup. A full **>200M-edge** public-path index build is proven
-by checked-in scale-host evidence (not CI). Do **not** read the former 134M
-Arrow boundary as a GraphForge maximum graph size.
-
-| Claim | Status |
-|---|---|
-| No full-file UUID concat during adjacency build/validate/inspect | Covered by CI streaming seam |
-| CSR bytes match scan-build semantics under spill | Covered by tiny-chunk golden tests |
-| Cancel/failure leaves prior index or absent/stale | Covered by cancel + spill-cap tests |
-| >200M edges indexes on a supported machine | Proven — [`adjacency-200m-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/adjacency-200m-evidence.json) via `make bench-adjacency-200m` (#336). Hardware-specific; not a universal graph-size ceiling. |
-
-Manual/scheduled >200M public adjacency evidence (not CI):
-
-```bash
-CARGO_TARGET_DIR=/tmp/cargo-adjacency-evidence \
-  make bench-adjacency-200m
-```
-
-Manual/scheduled densified 8M/128M public reopen (not CI):
-
-```bash
-CARGO_TARGET_DIR=/tmp/cargo-file-backed-evidence \
-  make bench-file-backed-128m
-```
-
-Checked-in evidence: [`file-backed-128m-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/file-backed-128m-evidence.json).
-
-## CSR-native execution (#340)
-
-Persisted-index **hits** no longer expand the validated base CSR into
-`HashMap<u64, Vec<(edge_id, neighbor_id)>>` for traversal or analyst
-projection. Execution keeps:
-
-- directed CSR with checked O(1) row lookup over offsets + parallel
-  edge/neighbor columns;
-- undirected views as an out+in CSR pair merged **per accessed row**
-  (out-before-in on equal `edge_id`), without a full merged hash map;
-- delta overlays as a bounded replacement map over only keys touched by the
-  delta chain — the complete valid base CSR is retained, not recopied.
-
-Scan-build / missing / stale / corrupt index paths still use the historical
-hash-map oracle (or rebuild then serve CSR-native). Structural counters on
-`Adjacency` (`backing()`, `base_csr_entries_expanded()`, `overlay_row_count()`)
-assert zero base-CSR expansion on a fresh hit. Analyst export builds a
-selection-bounded flat CSR of `AlgorithmEdge` entries rather than per-node
-heap vectors for every graph edge.
-
-| Claim | Status |
-|---|---|
-| Fresh index hit: no O(E) HashMap / per-node Vec expansion | Covered by unit structural counter + parity vs scan |
-| Out / in / undirected / typed / wildcard semantics preserved | Covered by adjacency + persistent provider tests |
-| Bounded delta overlay without full base copy | Covered by storage overlay parity tests |
-| Selected-subgraph projection bounded by selection | Covered by export path iterating selected node ids |
-| Peak RSS / cold-warm first-use on #334 fixtures | Hardware-specific observation only; recorded in [`m4-exit-evidence.json`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/m4-exit-evidence.json). Never a CI pass/fail gate. |
-## Construction integrity I/O
-
-The facade's immediate seal-and-publish path commits the receipt journal, then
-authenticates fixed-width staged artifacts while canonical shaping consumes
-them. Parquet keeps one whole-file digest pass because its bounded range
-decoder does not necessarily visit every file byte in digest order; metadata
-and row decoding are separately counted rather than mislabeled as
-authentication. Final shaped writers durably record their exact digest, length,
-and inode identity; inventory construction reads those small capabilities
-instead of reopening payloads. Incomplete/crash-resumed writers do not receive
-that authority and must regenerate or reauthenticate. A
-crash after that checkpoint does not trust unfinished work: resume performs the
-same full authentication before consumption. Ordinary standalone `seal` keeps
-its independent authentication contract.
-
-Encoding computes output digests over the bytes accepted by its writers and
-retains file and directory durability barriers. Construction publication binds
-the in-memory encoding to the durable inventory control record, then carries
-that authenticated inventory into the graph object store. The object store does
-not trust the recorded digest as a substitute for reading bytes. It creates a
-fresh CAS-owned inode and copies and hashes the source into that inode in one
-pass. It then fsyncs and seals the inode, checks its identity, length, and
-readonly state, links its final digest name, and durably syncs that destination
-directory before removing and syncing the temporary name. A pre-existing
-writable source descriptor therefore has no authority over the CAS inode.
-Reopening a compact workspace links the stable named CAS descriptor and
-performs one full verification on the installed hard link.
-These constant-factor bounds preserve corruption detection while keeping
-seal/publication I/O proportional to canonical output.
-
-`GraphConstructionEvidence` reconciles application-observed bytes read by
-owner: seal, shape, encode, publication control, CAS install/reuse, and
-hydration. The reported total is exactly the saturating sum of those six
-fields. These counters are logical application I/O, not filesystem-device
-physical reads or allocated/peak disk measurements. CAS evidence includes
-source-copy reads and mandatory authentication of reused or concurrently
-installed objects; it never reports a cache hit as zero application work.
-Actual allocated/peak disk and S20/S22 evidence remain harness-owned work in
-#951; #901 remains open until those measurements confirm the repaired path.
-
----
-
-## Why Edge Count, Not Node Count
-
-Framing scale as “N million nodes” is misleading: the real ceiling depends on
-what you are doing and how many **edges** you have. Full-scan aggregations and
-global sorts are edge- or cardinality-bound; LIMIT-respecting traversal is not.
-
-Prefer the fixed-hop LIMIT contract above for interactive notebook work. Treat
-full-scan aggregations and unconstrained `ORDER BY` as separate, tighter
-ceilings.
-
----
-
-## Structural Approach (v0.5.0)
-
-| Concern | v0.5.0 approach |
-|---|---|
-| Edge counting | Columnar `COUNT(*)` on edge facts / Parquet |
-| Top-N ordering | DataFusion top-N physical node |
-| Bulk ingest | Parquet write via Arrow RecordBatch |
-| Neighborhood expansion | Derived CSR adjacency index under `indexes/adjacency/` |
-| Memory layout | Compact columnar Parquet, not per-edge Python objects |
-
----
-
-## Practical Size Guidance
-
-| Use case | Guidance |
-|----------|----------|
-| Interactive traversal (`LIMIT`) | Prefer fixed-hop patterns; measured through tens of millions of edges on the release benches above |
-| Full-scan aggregation | Expect edge-count binding; validate on your hardware |
-| Global `ORDER BY` | Prefer top-N / `LIMIT` forms |
-| Project sharing | Parquet project directory — reopen through `GraphForge(path)` |
-
----
-
-## Further Reading
-
-- [Graph Scale Index (GSI)](graph-scale-index.md) — size axis (node band + density)
-- [Scale Evaluation](scale-evaluation.md) — Official Graph500 + Derived density matrix; harness contract
-- [LDBC full suite](../guide/datasets/ldbc.md) — SNB / Graphalytics / FinBench / SPB (spec; execution external)
-- [Install footprint](../guide/installation.md#install-footprint) — download and on-disk package sizes for Python/Node (not query scale)
-- [GitHub Releases](https://github.com/CurateLabs/graphforge/releases) — release notes
-- [Architecture Overview](../book/architecture/overview.md) — Rust core design and DataFusion execution model
+Move a saved project through [portable export, verification, and import](../guide/portable-projects.md).
+Do not copy live storage. Verification checks the package and its supported
+format; it does not certify your workload's speed or the truth of its contents.

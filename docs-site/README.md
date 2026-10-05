@@ -22,20 +22,23 @@ Or: `make docs-serve` / `make docs-build` / `make docs-clean`.
 
 ## Layout
 
-| Path | Role |
-| --- | --- |
-| `astro.config.mjs` | Starlight config and **reader-journey** sidebar |
-| `scripts/sync-content.mjs` | Allowlist sync from `docs/` → content collection; rewrites `.md` links to site paths |
-| `external-docs.json` | Pinned `graphforge-vscode` allowlist, destinations, checksums, and explicit local patch ledger |
-| `external/graphforge-vscode/` | Build-verifiable public extension snapshot plus ledgered release corrections |
-| `scripts/update-extension-docs.mjs` | Authenticated refresh command; rejects changes to the published-file contract |
-| `scripts/test-extension-docs.mjs` | Offline allowlist, checksum, destination, and private-marker contract test |
-| `scripts/check-links.mjs` | Post-build internal link + stale-base checker |
-| `src/content/docs/` | Generated — do not edit by hand |
+| Path                                | Role                                                                                           |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `astro.config.mjs`                  | Starlight config and **reader-journey** sidebar                                                |
+| `scripts/sync-content.mjs`          | Allowlist sync from `docs/` → content collection; rewrites `.md` links to site paths           |
+| `external-docs.json`                | Pinned `graphforge-vscode` allowlist, destinations, checksums, and explicit local patch ledger |
+| `external/graphforge-vscode/`       | Build-verifiable public extension snapshot plus ledgered release corrections                   |
+| `scripts/update-extension-docs.mjs` | Authenticated refresh command; rejects changes to the published-file contract                  |
+| `scripts/test-extension-docs.mjs`   | Offline allowlist, checksum, destination, and private-marker contract test                     |
+| `scripts/check-links.mjs`           | Post-build internal link + stale-base checker                                                  |
+| `src/content/docs/`                 | Generated — do not edit by hand                                                                |
 
-Published sidebar order (reader experience): **Get started**, **Use every day**,
-**Understand**, **Reference**, then collapsed **Contribute & operate**,
-**Engineering** (includes ADRs), and **Community**.
+The primary audience is a nontechnical analyst working with an agent. Published
+learning paths are **Basic** (no programming prerequisite) and **Advanced**
+(basic Python, database, and terminal skills).
+Advanced is collapsed initially. Both teach without expert prerequisites.
+**Internals (specialist)**, **API and feature reference**, **Contribute & operate**,
+**Engineering**, and **Community** remain separate, collapsed lookup areas.
 
 On-disk authoring trees remain Guide / Book / Reference / `engineering/`
 (+ `adr/`, `development/`). Only explicitly allowlisted public sources are published.

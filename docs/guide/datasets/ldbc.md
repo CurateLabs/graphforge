@@ -1,5 +1,10 @@
 # LDBC Full Suite (spec)
 
+**Expert reference:** for engineers evaluating an engine against
+benchmark workloads. It assumes familiarity with workload generators, drivers,
+and benchmark validation. For your first research project, start with
+[choosing data](overview.md) and the [basic graph lesson](../quickstart.md).
+
 **Last updated:** 2026-08-05
 
 > **Status:** Specification in GraphForge docs. Generators, drivers, and audited
@@ -26,12 +31,12 @@ and defines how GraphForge treats it at **spec level**.
 
 Per GDC’s published benchmarks page (verified 2026-08-05):
 
-| Benchmark | Focus | Workloads (current) | Primary data |
-|---|---|---|---|
-| **SNB** — Social Network Benchmark | Property-graph DBMS (OLTP + OLAP-style) | **Interactive** (v1 / v2) and **Business Intelligence (BI)** | Synthetic social network (Datagen) |
-| **Graphalytics** | Graph analysis platforms | Six core algorithms + reference outputs | Standard graph datasets (+ optional Graph500-class graphs) |
-| **FinBench** — Financial Benchmark | Distributed transactional graph DBMS | **Transaction** workload (Analytics workload: future work) | Synthetic financial graph |
-| **SPB** — Semantic Publishing Benchmark | RDF / SPARQL stores | Media-publishing ontology workload | RDF datasets |
+| Benchmark                               | Focus                                   | Workloads (current)                                          | Primary data                                               |
+| --------------------------------------- | --------------------------------------- | ------------------------------------------------------------ | ---------------------------------------------------------- |
+| **SNB** — Social Network Benchmark      | Property-graph DBMS (OLTP + OLAP-style) | **Interactive** (v1 / v2) and **Business Intelligence (BI)** | Synthetic social network (Datagen)                         |
+| **Graphalytics**                        | Graph analysis platforms                | Six core algorithms + reference outputs                      | Standard graph datasets (+ optional Graph500-class graphs) |
+| **FinBench** — Financial Benchmark      | Distributed transactional graph DBMS    | **Transaction** workload (Analytics workload: future work)   | Synthetic financial graph                                  |
+| **SPB** — Semantic Publishing Benchmark | RDF / SPARQL stores                     | Media-publishing ontology workload                           | RDF datasets                                               |
 
 GraphForge’s product surface is **property-graph + Cypher / analyst verbs**. For
 harness planning:
@@ -68,25 +73,25 @@ SF is defined by **serialized CSV size in GiB** (not GSI Size Tags). Authoritati
 SF lists live in the current SNB specification PDF — disclose the **spec version**
 used in evidence ([pinned identity](../../reference/scale-evaluation.md#pinned-generator--driver-identity)).
 
-| Run class | Typical SF set | Notes |
-|---|---|---|
-| **Engineering / harness smoke** | `0.003`, `0.1`, `0.3` | Laptop-feasible; non-audited; preferred developer default |
-| **Engineering / dedicated harness** | `1`, `3`, `10` | Common published comparison class (esp. SF1); still not GDC-audited unless commissioned |
-| **Large harness-only** | `30`, `100`, `300`, `1000`, `3000`, … | Spec-published production factors; dedicated runners only |
-| **GDC audited certification** | Per current auditing rules / auditor | Member-commissioned; full disclosure report — **distinct** from engineering green |
+| Run class                           | Typical SF set                        | Notes                                                                                   |
+| ----------------------------------- | ------------------------------------- | --------------------------------------------------------------------------------------- |
+| **Engineering / harness smoke**     | `0.003`, `0.1`, `0.3`                 | Laptop-feasible; non-audited; preferred developer default                               |
+| **Engineering / dedicated harness** | `1`, `3`, `10`                        | Common published comparison class (esp. SF1); still not GDC-audited unless commissioned |
+| **Large harness-only**              | `30`, `100`, `300`, `1000`, `3000`, … | Spec-published production factors; dedicated runners only                               |
+| **GDC audited certification**       | Per current auditing rules / auditor  | Member-commissioned; full disclosure report — **distinct** from engineering green       |
 
-| Concern | Rule |
-|---|---|
-| Reproducibility | Same SF + generator version + serializer → same data |
-| Initial vs updates | Interactive splits ~90% bulk load vs update streams (see spec) |
-| GSI labeling | Count loaded entities → full GSI; see [SF → GSI crosswalk](../../reference/graph-scale-index.md#best-effort-snb-sf--gsi-total-entities--v) |
-| Disclosure | Evidence must record SF, Datagen commit/release, driver commit/release, serializer, and whether the run is engineering vs audited |
+| Concern            | Rule                                                                                                                                       |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Reproducibility    | Same SF + generator version + serializer → same data                                                                                       |
+| Initial vs updates | Interactive splits ~90% bulk load vs update streams (see spec)                                                                             |
+| GSI labeling       | Count loaded entities → full GSI; see [SF → GSI crosswalk](../../reference/graph-scale-index.md#best-effort-snb-sf--gsi-total-entities--v) |
+| Disclosure         | Evidence must record SF, Datagen commit/release, driver commit/release, serializer, and whether the run is engineering vs audited          |
 
 ### Workloads
 
-| Workload | Intent | Query / op classes (spec-level) |
-|---|---|---|
-| **Interactive** | Transactional neighborhood + updates | Complex reads, short reads, inserts/deletes; v1 and v2 driver workflows |
+| Workload                       | Intent                                | Query / op classes (spec-level)                                                      |
+| ------------------------------ | ------------------------------------- | ------------------------------------------------------------------------------------ |
+| **Interactive**                | Transactional neighborhood + updates  | Complex reads, short reads, inserts/deletes; v1 and v2 driver workflows              |
 | **Business Intelligence (BI)** | Aggregation- and join-heavy analytics | Complex analytical queries over large graph fractions; microbatches of insert/delete |
 
 ### Generators and drivers (external)
@@ -99,7 +104,7 @@ used in evidence ([pinned identity](../../reference/scale-evaluation.md#pinned-g
 - **Identity:** every engineering or audited claim **must disclose** Datagen and
   driver commit/release plus SNB **spec version** — see
   [Pinned generator / driver identity](../../reference/scale-evaluation.md#pinned-generator--driver-identity)
-  and the [evidence schema](../../reference/scale-evaluation.md#evidence-artifact-schema).
+  and the [historical evidence schema](../../reference/scale-evaluation.md#historical-evidence-artifact-schema).
 
 ### Pass criteria / validation (spec-level)
 
@@ -144,15 +149,15 @@ full Graphalytics standard-benchmark job composition is explicitly claimed.
 Sizes are approximate from the Graphalytics specification; **re-profile → GSI**
 after load. Full catalog remains authoritative at the GDC/Graphalytics homes.
 
-| Order | Dataset id | Class | ≈ n | ≈ m | Typical GSI band | Role |
-|---:|---|---|---:|---:|---|---|
-| 1 | `wiki-Talk` | Real R1 (2XS) | 2.39M | 5.02M | `GU-06-MD-…` | First engineering dataset |
-| 2 | `kgs` | Real R2 (XS) | 0.83M | 17.9M | `GU-05-SM-…` | Gaming / denser |
-| 3 | `cit-Patents` | Real R3 (XS) | 3.77M | 16.5M | `GU-06-MD-…` | Knowledge / citation |
-| 4 | `dota-league` | Real R4 (S) | 0.06M | 50.9M | `GU-04-XS-…` (n) / high E | Dense gaming |
-| 5 | `Graph500-22` | Synthetic G22 (S) | 2.4M | 64.2M | `GU-06-MD-D00` | Bridge to Official Graph500 SCALE 22 |
-| 6 | `Datagen-7.9-fb` (or nearest Datagen-S) | Synthetic D7.9 (S) | ~1.4M | ~85.7M | `GU-06-MD-…` | Datagen family smoke |
-| 7+ | `com-Friendster`, `Graph500-24`+, larger Datagen | XL+ | — | — | `07`+ | Harness-only; not default laptop |
+| Order | Dataset id                                       | Class              |   ≈ n |    ≈ m | Typical GSI band          | Role                                 |
+| ----: | ------------------------------------------------ | ------------------ | ----: | -----: | ------------------------- | ------------------------------------ |
+|     1 | `wiki-Talk`                                      | Real R1 (2XS)      | 2.39M |  5.02M | `GU-06-MD-…`              | First engineering dataset            |
+|     2 | `kgs`                                            | Real R2 (XS)       | 0.83M |  17.9M | `GU-05-SM-…`              | Gaming / denser                      |
+|     3 | `cit-Patents`                                    | Real R3 (XS)       | 3.77M |  16.5M | `GU-06-MD-…`              | Knowledge / citation                 |
+|     4 | `dota-league`                                    | Real R4 (S)        | 0.06M |  50.9M | `GU-04-XS-…` (n) / high E | Dense gaming                         |
+|     5 | `Graph500-22`                                    | Synthetic G22 (S)  |  2.4M |  64.2M | `GU-06-MD-D00`            | Bridge to Official Graph500 SCALE 22 |
+|     6 | `Datagen-7.9-fb` (or nearest Datagen-S)          | Synthetic D7.9 (S) | ~1.4M | ~85.7M | `GU-06-MD-…`              | Datagen family smoke                 |
+|    7+ | `com-Friendster`, `Graph500-24`+, larger Datagen | XL+                |     — |      — | `07`+                     | Harness-only; not default laptop     |
 
 For a **“full Graphalytics at dataset X”** claim: run all six core algorithms on
 X with reference-output validation. For **engineering green** on the shortlist:
@@ -170,7 +175,7 @@ ran).
    Graphalytics **spec version** exactly.
 
 **Relation to GraphForge:** analyst verbs (PageRank, components, paths, …) may
-implement kernels that *overlap* Graphalytics algorithms, but a Graphalytics
+implement kernels that _overlap_ Graphalytics algorithms, but a Graphalytics
 result claim requires the official driver/validation path in the external
 harness — not a one-off Python script.
 
@@ -191,10 +196,10 @@ Targets financial scenarios (anti-fraud, risk control): high-degree hubs, edge
 multiplicity, asymmetric directed graphs, time-window and recursive path
 patterns.
 
-| Workload | Status (per GDC / spec) |
-|---|---|
+| Workload        | Status (per GDC / spec)                                       |
+| --------------- | ------------------------------------------------------------- |
 | **Transaction** | Defined — OLTP-style complex reads + continuous insert/delete |
-| **Analytics** | Future work (not yet a required GraphForge harness lane) |
+| **Analytics**   | Future work (not yet a required GraphForge harness lane)      |
 
 ### Scale factors (Transaction)
 
@@ -203,14 +208,14 @@ version** used). SF ≈ serialized CSV GiB; default temporal window three years
 from 2020; default split **97%** initial bulk / **3%** incremental. Published SF
 set:
 
-| SF | ≈ CSV size (published datasets page) | Engineering default? | Notes |
-|---|---|---|---|
-| `0.01` | ~6 MB | Yes — smoke | Smallest published factor |
-| `0.1` | ~66 MB | Yes — laptop/harness | |
-| `0.3` | ~202 MB | Yes — harness | |
-| `1` | ~679 MB | Dedicated harness | Spec validation-class scale |
-| `3` | ~2 GB | Dedicated harness | |
-| `10` | ~6 GB | Large harness | Spec notes audited Transaction runs at SF10 |
+| SF     | ≈ CSV size (published datasets page) | Engineering default? | Notes                                       |
+| ------ | ------------------------------------ | -------------------- | ------------------------------------------- |
+| `0.01` | ~6 MB                                | Yes — smoke          | Smallest published factor                   |
+| `0.1`  | ~66 MB                               | Yes — laptop/harness |                                             |
+| `0.3`  | ~202 MB                              | Yes — harness        |                                             |
+| `1`    | ~679 MB                              | Dedicated harness    | Spec validation-class scale                 |
+| `3`    | ~2 GB                                | Dedicated harness    |                                             |
+| `10`   | ~6 GB                                | Large harness        | Spec notes audited Transaction runs at SF10 |
 
 Entity counts per SF (accounts, companies, transfers, …) are in FinBench
 Appendix B — re-count after load and emit `GD-…` GSI. Pre-built dataset tarballs:
@@ -234,29 +239,22 @@ Profile loaded graphs with `GD-…` GSI (directed).
 **Home:** listed under [GDC Benchmarks](https://ldbcouncil.org/benchmarks/)  
 RDF/SPARQL workload based on a media-publishing ontology.
 
-| GraphForge posture | Detail |
-|---|---|
-| Suite inventory | **Included** — part of the official LDBC portfolio (name it; do not omit silently) |
-| Product path | **Out of scope** for Cypher/property-graph GraphForge — RDF/SPARQL only |
-| Harness / SUT | **Inventory-only** — omit SPB from GraphForge SUT execution; no pass/fail lane |
-| Evidence | When listing suite coverage, record `spb: "inventory_only"` (or equivalent) rather than green/red |
+| GraphForge posture | Detail                                                                                            |
+| ------------------ | ------------------------------------------------------------------------------------------------- |
+| Suite inventory    | **Included** — part of the official LDBC portfolio (name it; do not omit silently)                |
+| Product path       | **Out of scope** for Cypher/property-graph GraphForge — RDF/SPARQL only                           |
+| Harness / SUT      | **Inventory-only** — omit SPB from GraphForge SUT execution; no pass/fail lane                    |
+| Evidence           | When listing suite coverage, record `spb: "inventory_only"` (or equivalent) rather than green/red |
 
 ---
 
-## Planned convenience API (not the suite)
+## Loading and qualification
 
-Future `graphforge.datasets` helpers may load small SNB slices for tutorials.
-That is **not** an LDBC-compliant run. Example shape only:
-
-```python
-from graphforge import GraphForge
-from graphforge.datasets import load_dataset  # planned — not shipped in v0.5.x
-
-gf = GraphForge()
-load_dataset(gf, "ldbc-snb-sf0003")  # illustrative name
-```
-
-Official compliance requires the external harness + LDBC drivers.
+GraphForge v0.6.0 does not ship a dataset catalog or LDBC convenience loader.
+An integration must map the generator's actual output through supported
+[construction APIs](../graph-construction.md) and verify that mapping against
+the workload specification. A small loaded sample is not an LDBC-compliant run.
+Official compliance requires the external harness and LDBC drivers.
 
 ---
 
