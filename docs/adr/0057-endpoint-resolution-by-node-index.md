@@ -163,6 +163,30 @@ everywhere.
    *Go only if* laned probe cost is at most a third of the endpoint work it
    replaces (an estimated ≈24 s at S20, from region attribution and bytes) and equality holds
    everywhere.
+   **Result (2026-10-05): go.** The method and receipts are on #1387, from
+   tracer source at `628faab8` plus a 118-line patch, run against a frame-pointer
+   release build.
+   - **Equality held.** Index resolution matched the sort join for every one of
+     33.5M lookups, at 1 and 8 lanes. Inputs were Graph500 S20 with its
+     sequential UUIDs, and the same graph remapped to random UUIDv7 keys
+     (GraphForge requires v7; a v4 remap is refused at intake). Every run
+     reopened 16,777,216 edges.
+   - **Cost:**
+
+     | | 1 lane | 8 lanes |
+     | --- | ---: | ---: |
+     | probe wall, sequential UUIDs | 17.30 s | 2.33 s |
+     | probe wall, random v7 UUIDs | 15.95 s | 2.42 s |
+     | index build | 0.45–0.47 s | 0.45–0.47 s |
+
+   - **Against the go criterion.** Two laned passes (validation and
+     resolution) plus two builds total about 5.7 s. The ceiling is ≈8.9 s, a
+     third of the estimated endpoint work.
+   - **Caveats.** All four runs were on a contended host, load 1.0–3.8,
+     because no quiet window opened in two hours. Serial binary search costs
+     about 500 ns per lookup, so the lanes, or a cache-friendlier layout
+     (Eytzinger, or the splitters as a first level), are required, not
+     optional.
 2. **Slice A: index path.** Recorded `endpoint_resolution` choice and
    `max_node_index_bytes`; the laned validation pass in shaping; resolution in
    `encode_edges`; path-conditional stages; format bump. Proven by
@@ -181,8 +205,11 @@ everywhere.
 
 ## Open questions
 
-- **Production UUID version.** Callers supply entity UUIDs; their distribution
-  decides whether a splitter-indexed first level is worth having.
+- **Probe layout.** Entity UUIDs must be v7 (`GF_BULK_VALIDATION(invalid_uuid)`
+  refuses others), so keys cluster by creation time. Binary search cost was
+  the same for sequential and random v7 keys in the tracer. Whether a
+  splitter-indexed first level or an Eytzinger layout earns its code is a
+  Slice A measurement.
 - **Default for `max_node_index_bytes`.** It must fit the 4 GiB ladder envelope
   at S26 (1 GiB) with the construction's existing peak, about 0.5 GB at S20.
 - **A base-append index.** A design that sweeps the base index in edge order
