@@ -267,8 +267,9 @@ pub struct Execution {
     pub peak_rss_bytes: Option<u64>,
     pub failure: Option<FailureKind>,
     pub cleanup_failure: Option<String>,
-    /// Bounded, sanitized tail of the child's standard error, kept only when
-    /// the phase failed. Carries the child's own error text and nothing else.
+    /// Bounded, sanitized failure detail, kept only when the phase failed.
+    /// This is usually the child's standard error; runner-side validation
+    /// failures may instead carry fixed-format diagnostics with numeric facts.
     pub error_tail: Option<String>,
     pub receipts: Vec<serde_json::Value>,
 }
@@ -531,43 +532,119 @@ impl PublicProcessExecutor {
                     == Some("graphforge-allocation-operation/1")
             })
             .collect::<Vec<_>>();
-        let validation = (|| -> Result<bool, String> {
-            let valid = if let [report] = reports.as_slice() {
-                let current = report
+        let report_count = reports.len();
+        let (current, peak) = match reports.as_slice() {
+            [report] => (
+                report
                     .get("current_allocated_bytes")
-                    .and_then(serde_json::Value::as_u64);
-                let peak = report
+                    .and_then(serde_json::Value::as_u64),
+                report
                     .get("peak_allocated_bytes")
-                    .and_then(serde_json::Value::as_u64);
-                let final_state =
-                    graphforge_storage::StorageAllocationOperation::from_paths(&paths)
-                        .map_err(|error| error.to_string())?;
-                let (actual, _) = final_state.totals().map_err(|error| error.to_string())?;
-                match (current, peak) {
-                    (Some(current), Some(peak))
-                        if current == actual && peak >= current && peak >= baseline_current =>
-                    {
-                        self.lifecycle.transient_peak_storage_bytes =
-                            self.lifecycle.transient_peak_storage_bytes.max(peak);
-                        self.lifecycle.allocation =
-                            final_state.snapshot().map_err(|error| error.to_string())?;
-                        true
+                    .and_then(serde_json::Value::as_u64),
+            ),
+            _ => (None, None),
+        };
+        let mut actual_final = None;
+        let mut final_scan_error = false;
+        let validation = (|| -> Result<bool, String> {
+            if report_count != 1 {
+                return Ok(false);
+            }
+            let final_state =
+                match graphforge_storage::StorageAllocationOperation::from_paths(&paths) {
+                    Ok(state) => state,
+                    Err(error) => {
+                        final_scan_error = true;
+                        return Err(error.to_string());
                     }
-                    _ => false,
+                };
+            let (actual, _) = match final_state.totals() {
+                Ok(totals) => totals,
+                Err(error) => {
+                    final_scan_error = true;
+                    return Err(error.to_string());
                 }
-            } else {
-                false
             };
+            actual_final = Some(actual);
+            let valid = matches!((current, peak),
+                (Some(current), Some(peak))
+                    if current == actual && peak >= current && peak >= baseline_current
+            );
+            if valid {
+                let snapshot = match final_state.snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        final_scan_error = true;
+                        return Err(error.to_string());
+                    }
+                };
+                let Some(peak) = peak else {
+                    return Ok(false);
+                };
+                self.lifecycle.transient_peak_storage_bytes =
+                    self.lifecycle.transient_peak_storage_bytes.max(peak);
+                self.lifecycle.allocation = snapshot;
+            }
             Ok(valid)
         })();
         if !matches!(validation, Ok(true)) {
             result.failure = Some(FailureKind::EvidenceInvalid);
+            result.error_tail = Some(allocation_validation_detail(
+                report_count,
+                baseline_current,
+                current,
+                peak,
+                actual_final,
+                final_scan_error,
+            ));
         }
         result.receipts.retain(|receipt| {
             receipt.get("contract").and_then(serde_json::Value::as_str)
                 != Some("graphforge-allocation-operation/1")
         });
         Ok(result)
+    }
+}
+
+fn allocation_validation_detail(
+    report_count: usize,
+    baseline_current: u64,
+    reported_current: Option<u64>,
+    reported_peak: Option<u64>,
+    actual_final: Option<u64>,
+    final_scan_error: bool,
+) -> String {
+    let current_matches_final = reported_current
+        .zip(actual_final)
+        .map(|(reported, actual)| reported == actual);
+    let peak_covers_current = reported_peak
+        .zip(reported_current)
+        .map(|(peak, current)| peak >= current);
+    let peak_covers_baseline = reported_peak.map(|peak| peak >= baseline_current);
+    let detail = format!(
+        "allocation evidence invalid: report_count={report_count}, baseline_current={baseline_current}, reported_current_parsed={}, reported_peak_parsed={}, reported_current={}, reported_peak={}, actual_final={}, current_matches_final={}, peak_covers_current={}, peak_covers_baseline={}, final_scan_error={final_scan_error}",
+        reported_current.is_some(),
+        reported_peak.is_some(),
+        optional_u64(reported_current),
+        optional_u64(reported_peak),
+        optional_u64(actual_final),
+        optional_bool(current_matches_final),
+        optional_bool(peak_covers_current),
+        optional_bool(peak_covers_baseline),
+    );
+    debug_assert!(detail.chars().count() <= ERROR_TAIL_LIMIT_CHARS);
+    detail
+}
+
+fn optional_u64(value: Option<u64>) -> String {
+    value.map_or_else(|| "null".to_owned(), |value| value.to_string())
+}
+
+fn optional_bool(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "null",
     }
 }
 
@@ -1919,8 +1996,9 @@ pub struct PhaseOutcome {
     pub failure: Option<FailureKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cleanup_failure: Option<CleanupFailureKind>,
-    /// Bounded tail of the failing child's standard error. Present only on a
-    /// failed phase; carries the child's error text, never its arguments.
+    /// Bounded, sanitized failure detail. Present only on a failed phase;
+    /// contains child error text or fixed-format runner diagnostics, never
+    /// command arguments or raw receipt/path data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_tail: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3623,6 +3701,54 @@ fi
         .unwrap();
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.failure, Some(FailureKind::EvidenceInvalid));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_executor_reports_numeric_allocation_validation_operands() {
+        let root = std::env::temp_dir().join(format!(
+            "gf-certify-allocation-detail-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("input.bin");
+        fs::write(&input, vec![1_u8; 8192]).unwrap();
+        let executable = root.join("gf");
+        write_executable_script(
+            &executable,
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"contract\":\"graphforge-allocation-operation/1\",\"current_allocated_bytes\":0,\"peak_allocated_bytes\":0}'\n",
+        );
+
+        let mut executor = PublicProcessExecutor::default();
+        let result = executor
+            .execute_cli_observed(
+                executable.to_str().unwrap(),
+                &[
+                    "--json".to_owned(),
+                    "--input".to_owned(),
+                    input.to_string_lossy().into_owned(),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.failure, Some(FailureKind::EvidenceInvalid));
+        let baseline = graphforge_storage::StorageAllocationOperation::from_paths(&[input.clone()])
+            .unwrap()
+            .totals()
+            .unwrap()
+            .0;
+        assert!(baseline > 0);
+        let expected =
+            allocation_validation_detail(1, baseline, Some(0), Some(0), Some(baseline), false);
+        assert_eq!(result.error_tail.as_deref(), Some(expected.as_str()));
+        assert!(!result.error_tail.unwrap().contains(root.to_str().unwrap()));
+        assert!(result.receipts.iter().all(|receipt| {
+            receipt.get("contract").and_then(serde_json::Value::as_str)
+                != Some("graphforge-allocation-operation/1")
+        }));
         fs::remove_dir_all(root).unwrap();
     }
 
