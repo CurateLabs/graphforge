@@ -15,6 +15,9 @@ execution.
 - `graphforge-api` is the only public orchestration boundary.
 - `graphforge-provenance` and `graphforge-knowledge` own records, validation, schemas, ordering,
   and canonical bytes. They are not binding dependencies.
+- Rust `EvidenceLedger` values expose validated links through `links()` and
+  `into_links()`; the collection is private so callers cannot invalidate rows
+  after construction and bypass incremental merge validation.
 - `graphforge-storage` receives opaque participants and owns generation publication.
 - Graph reads, openCypher reads, and analyst-verb/find compute never open provenance or
   knowledge participants.

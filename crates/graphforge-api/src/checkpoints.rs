@@ -458,7 +458,11 @@ fn validate_composite_references(ledgers: CompositeLedgers<'_>) -> Result<(), Gf
         )?;
         provenance(row.provenance_uuid)?;
     }
-    for row in ledgers.evidence.into_iter().flat_map(|value| &value.links) {
+    for row in ledgers
+        .evidence
+        .into_iter()
+        .flat_map(graphforge_knowledge::EvidenceLedger::links)
+    {
         require(
             assertion_ids.contains(&row.assertion_uuid),
             "evidence assertion",

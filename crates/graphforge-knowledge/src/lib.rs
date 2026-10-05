@@ -735,10 +735,25 @@ impl EvidenceLink {
 }
 
 /// Validated immutable evidence participant content.
+///
+/// The link collection is private: validated rows can be borrowed with
+/// [`EvidenceLedger::links`] or moved out with [`EvidenceLedger::into_links`].
+/// Direct mutation is rejected by the compiler:
+///
+/// ```compile_fail
+/// use graphforge_knowledge::EvidenceLedger;
+/// let mut ledger = EvidenceLedger::default();
+/// ledger.links.clear();
+/// ```
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EvidenceLedger {
     /// Links ordered by `(recorded_at, evidence_uuid)`.
-    pub links: Vec<EvidenceLink>,
+    links: Vec<EvidenceLink>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static EVIDENCE_ROW_VALIDATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl EvidenceLedger {
@@ -753,6 +768,8 @@ impl EvidenceLedger {
         }
         let mut ids = HashSet::new();
         for link in &links {
+            #[cfg(test)]
+            EVIDENCE_ROW_VALIDATION_COUNT.with(|count| count.set(count.get() + 1));
             require_v7(link.evidence_uuid, "evidence_uuid")?;
             require_v7(link.assertion_uuid, "assertion_uuid")?;
             require_uuid(link.source_uuid, "source_uuid")?;
@@ -771,6 +788,18 @@ impl EvidenceLedger {
         Ok(Self { links })
     }
 
+    /// Borrow the validated evidence links in canonical order.
+    #[must_use]
+    pub fn links(&self) -> &[EvidenceLink] {
+        &self.links
+    }
+
+    /// Consume the ledger and return its validated evidence links in canonical order.
+    #[must_use]
+    pub fn into_links(self) -> Vec<EvidenceLink> {
+        self.links
+    }
+
     /// Merge staged links idempotently.
     pub fn merge(&self, staged: &Self) -> Result<Self, KnowledgeError> {
         let mut links = self.links.clone();
@@ -786,7 +815,9 @@ impl EvidenceLedger {
                 links.push(row.clone());
             }
         }
-        Self::new(links)
+        check_limit("evidence", links.len())?;
+        links.sort_by_key(|row| (row.recorded_at_micros, row.evidence_uuid));
+        Ok(Self { links })
     }
 
     /// Canonical fingerprint over normalized immutable content.
@@ -1814,8 +1845,11 @@ mod tests {
         )
         .unwrap();
         let ledger = EvidenceLedger::new(vec![later, earlier]).unwrap();
-        assert_eq!(ledger.links[0].evidence_uuid, uuid7(30));
-        assert_eq!(ledger.links[0].weight.unwrap().to_bits(), 0.0f64.to_bits());
+        assert_eq!(ledger.links()[0].evidence_uuid, uuid7(30));
+        assert_eq!(
+            ledger.links()[0].weight.unwrap().to_bits(),
+            0.0f64.to_bits()
+        );
         assert_eq!(
             EvidenceLedger::from_batches(&[ledger.batch().unwrap()]).unwrap(),
             ledger
@@ -1885,6 +1919,224 @@ mod tests {
             first.merge(&conflict),
             Err(KnowledgeError::Conflict("evidence_uuid"))
         ));
+    }
+
+    #[test]
+    fn evidence_ledger_rejects_each_invalid_record_invariant() {
+        let valid = EvidenceLink::new(
+            uuid7(30),
+            uuid7(1),
+            uuid7(40),
+            EvidenceSourceKind::Document,
+            EvidenceRole::Supports,
+            Some(0.5),
+            uuid7(50),
+            10,
+        )
+        .unwrap();
+
+        let mut invalid = valid.clone();
+        invalid.evidence_uuid = Uuid::from_u128(1);
+        assert!(matches!(
+            EvidenceLedger::new(vec![invalid]),
+            Err(KnowledgeError::Invalid {
+                field: "evidence_uuid",
+                ..
+            })
+        ));
+
+        let mut invalid = valid.clone();
+        invalid.assertion_uuid = Uuid::nil();
+        assert!(matches!(
+            EvidenceLedger::new(vec![invalid]),
+            Err(KnowledgeError::Invalid {
+                field: "assertion_uuid",
+                ..
+            })
+        ));
+
+        let mut invalid = valid.clone();
+        invalid.source_uuid = Uuid::nil();
+        assert!(matches!(
+            EvidenceLedger::new(vec![invalid]),
+            Err(KnowledgeError::Invalid {
+                field: "source_uuid",
+                ..
+            })
+        ));
+
+        let mut invalid = valid.clone();
+        invalid.provenance_uuid = Uuid::nil();
+        assert!(matches!(
+            EvidenceLedger::new(vec![invalid]),
+            Err(KnowledgeError::Invalid {
+                field: "provenance_uuid",
+                ..
+            })
+        ));
+
+        let mut invalid = valid.clone();
+        invalid.contract_version += 1;
+        assert!(matches!(
+            EvidenceLedger::new(vec![invalid]),
+            Err(KnowledgeError::Invalid {
+                field: "contract_version",
+                ..
+            })
+        ));
+
+        for weight in [f64::NAN, f64::INFINITY, -0.01, 1.01] {
+            let mut invalid = valid.clone();
+            invalid.weight = Some(weight);
+            assert!(matches!(
+                EvidenceLedger::new(vec![invalid]),
+                Err(KnowledgeError::Invalid {
+                    field: "weight",
+                    ..
+                })
+            ));
+        }
+
+        assert!(matches!(
+            EvidenceLedger::new(vec![valid.clone(), valid]),
+            Err(KnowledgeError::Duplicate("evidence_uuid"))
+        ));
+    }
+
+    #[test]
+    fn evidence_ledger_enforces_row_limit() {
+        let link = EvidenceLink::new(
+            uuid7(30),
+            uuid7(1),
+            uuid7(40),
+            EvidenceSourceKind::Document,
+            EvidenceRole::Supports,
+            None,
+            uuid7(50),
+            10,
+        )
+        .unwrap();
+        let links = vec![link; MAX_KNOWLEDGE_ROWS + 1];
+        assert!(matches!(
+            EvidenceLedger::new(links),
+            Err(KnowledgeError::Limit {
+                participant: "evidence",
+                observed,
+                limit: MAX_KNOWLEDGE_ROWS,
+            }) if observed == MAX_KNOWLEDGE_ROWS + 1
+        ));
+    }
+
+    #[test]
+    fn evidence_merge_keeps_canonical_order_and_conflict_semantics() {
+        let make_link = |evidence_id, time| {
+            EvidenceLink::new(
+                uuid7(evidence_id),
+                uuid7(1),
+                uuid7(40),
+                EvidenceSourceKind::Document,
+                EvidenceRole::Supports,
+                None,
+                uuid7(50),
+                time,
+            )
+            .unwrap()
+        };
+        let current = EvidenceLedger::new(vec![make_link(32, 20), make_link(30, 10)]).unwrap();
+        let staged = EvidenceLedger::new(vec![make_link(33, 20), make_link(31, 10)]).unwrap();
+
+        let merged = current.merge(&staged).unwrap();
+        assert_eq!(
+            merged
+                .links()
+                .iter()
+                .map(|row| row.evidence_uuid)
+                .collect::<Vec<_>>(),
+            [uuid7(30), uuid7(31), uuid7(32), uuid7(33)]
+        );
+        assert_eq!(merged.merge(&current).unwrap(), merged);
+        assert_eq!(merged.clone().into_links(), merged.links().to_vec());
+    }
+
+    #[test]
+    fn evidence_merge_does_not_revalidate_existing_rows() {
+        let make_link = |evidence_id| {
+            EvidenceLink::new(
+                uuid7(evidence_id),
+                uuid7(1),
+                uuid7(40),
+                EvidenceSourceKind::Document,
+                EvidenceRole::Supports,
+                None,
+                uuid7(50),
+                evidence_id as i64,
+            )
+            .unwrap()
+        };
+        let current = EvidenceLedger::new(vec![make_link(30), make_link(31)]).unwrap();
+        let staged = EvidenceLedger::new(vec![make_link(32)]).unwrap();
+        EVIDENCE_ROW_VALIDATION_COUNT.with(|count| count.set(0));
+
+        let merged = current.merge(&staged).unwrap();
+
+        EVIDENCE_ROW_VALIDATION_COUNT.with(|count| assert_eq!(count.get(), 0));
+        assert_eq!(merged.links().len(), 3);
+    }
+
+    #[test]
+    #[ignore = "manual quiet-host merge cost measurement; run with --ignored --nocapture"]
+    fn evidence_merge_cost_per_existing_row() {
+        use std::time::Instant;
+
+        fn uuid7_from_counter(counter: u128) -> Uuid {
+            let mut bytes = counter.to_be_bytes();
+            bytes[6] = (bytes[6] & 0x0f) | 0x70;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            Uuid::from_bytes(bytes)
+        }
+
+        for row_count in [10_000usize, 100_000] {
+            let links = (0..row_count)
+                .map(|index| {
+                    EvidenceLink::new(
+                        uuid7_from_counter(index as u128 + 1),
+                        uuid7(1),
+                        uuid7(40),
+                        EvidenceSourceKind::Document,
+                        EvidenceRole::Supports,
+                        None,
+                        uuid7(50),
+                        index as i64,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let ledger = EvidenceLedger::new(links).unwrap();
+            let staged = EvidenceLedger::new(vec![
+                EvidenceLink::new(
+                    uuid7_from_counter(row_count as u128 + 1),
+                    uuid7(1),
+                    uuid7(40),
+                    EvidenceSourceKind::Document,
+                    EvidenceRole::Supports,
+                    None,
+                    uuid7(50),
+                    row_count as i64,
+                )
+                .unwrap(),
+            ])
+            .unwrap();
+            let iterations = 10;
+            let started = Instant::now();
+            for _ in 0..iterations {
+                std::hint::black_box(ledger.merge(&staged).unwrap());
+            }
+            let per_existing_row =
+                started.elapsed().as_nanos() as f64 / (iterations * row_count) as f64;
+            eprintln!(
+                "existing_rows={row_count} iterations={iterations} ns_per_existing_row={per_existing_row:.3}"
+            );
+        }
     }
 
     #[test]

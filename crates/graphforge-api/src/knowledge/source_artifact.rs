@@ -880,7 +880,7 @@ fn validate_derivation_inputs(
                 .iter()
                 .any(|row| row.assertion_uuid == input.input_uuid),
             DerivationSubjectKind::EvidenceLink => read_evidence_ledger(parent)?
-                .links
+                .links()
                 .iter()
                 .any(|row| row.evidence_uuid == input.input_uuid),
             DerivationSubjectKind::AlgorithmRun => read_algorithm_run_ledger(parent)?

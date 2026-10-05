@@ -180,7 +180,7 @@ fn publish_evidence(
         .expect("generation UUID lock poisoned") = receipt.generation_uuid;
     let ledger = read_evidence_ledger(&graphforge_storage::resolve_project_generation(root)?)?;
     let index = ledger
-        .links
+        .links()
         .iter()
         .position(|row| row.evidence_uuid == request.evidence_uuid)
         .ok_or_else(|| GfError::Validation("committed evidence is absent".into()))?;
@@ -619,7 +619,7 @@ impl GraphForge {
                 == staged_assertions
                     .assertion_fingerprint(request.assertion.assertion_uuid)
                     .map_err(knowledge_error)?;
-            let evidence_same = staged_evidence.links.iter().all(|row| {
+            let evidence_same = staged_evidence.links().iter().all(|row| {
                 evidence
                     .evidence_fingerprint(row.evidence_uuid)
                     .and_then(|existing| {
@@ -718,7 +718,7 @@ impl GraphForge {
         ])
         .map_err(knowledge_error)?;
         if let Some(index) = existing
-            .links
+            .links()
             .iter()
             .position(|row| row.evidence_uuid == request.evidence_uuid)
         {
@@ -766,7 +766,7 @@ impl GraphForge {
         let generation = self.generation_for_read()?;
         let ledger = read_evidence_ledger(&generation)?;
         let index = ledger
-            .links
+            .links()
             .iter()
             .position(|row| row.evidence_uuid == evidence_uuid)
             .ok_or_else(|| not_found_kind("evidence link"))?;
@@ -796,7 +796,7 @@ impl GraphForge {
         let generation = self.generation_for_read()?;
         let ledger = read_evidence_ledger(&generation)?;
         let selected = ledger
-            .links
+            .links()
             .iter()
             .enumerate()
             .filter(|(_, row)| {
