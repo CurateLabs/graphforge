@@ -436,7 +436,12 @@ pub use vector_store::{
 pub mod io_stats;
 pub use io_stats::{IoSnapshot, snapshot as io_snapshot};
 
+pub mod label_membership_counts;
 pub mod lifecycle_io;
+pub use label_membership_counts::{
+    establish_label_membership_counts, read_label_membership_counts, read_node_labels_for_uuids,
+    stage_label_membership_counts,
+};
 pub use lifecycle_io::{
     LifecyclePhaseAttribution, PhaseScope as LifecycleIoPhaseScope,
     snapshot as lifecycle_io_snapshot,

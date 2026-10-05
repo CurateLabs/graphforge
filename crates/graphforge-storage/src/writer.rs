@@ -1408,6 +1408,18 @@ impl GraphWriter {
             .collect()
     }
 
+    /// Return every label membership on buffered nodes selected by UUID.
+    /// Unlike [`pending_node_labels`](Self::pending_node_labels), duplicates
+    /// across nodes are retained for aggregate membership accounting.
+    #[must_use]
+    pub fn pending_node_label_memberships(&self, targets: &HashSet<[u8; 16]>) -> Vec<EntityTypeId> {
+        self.nodes
+            .iter()
+            .filter(|row| targets.contains(&row.node_uuid))
+            .flat_map(|row| row.type_ids.iter().copied())
+            .collect()
+    }
+
     /// Materialize the currently buffered node topology without consuming it.
     /// Statement-local reads use this as an in-memory overlay before commit.
     ///

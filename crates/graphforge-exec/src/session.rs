@@ -864,6 +864,7 @@ impl ExecutionSession {
             stats: ExecutionStats {
                 rows_produced,
                 execution_time_ms: 0,
+                ..ExecutionStats::default()
             },
             side_effects,
             mutation_receipt: None,
@@ -1110,6 +1111,7 @@ impl ExecutionSession {
             None => None,
         };
         let c = wctx.mutation.counters;
+        let initialization_work = wctx.initialization_work;
         let mutation_receipt = Some(wctx.mutation_receipt());
         transaction.prepare_statement(wctx, &resource, property_inventory.as_deref())?;
         let side_effects = Some(SideEffects {
@@ -1129,6 +1131,7 @@ impl ExecutionSession {
                 stats: ExecutionStats {
                     rows_produced,
                     execution_time_ms: 0,
+                    write_initialization: initialization_work,
                 },
                 side_effects,
                 mutation_receipt,
@@ -1142,6 +1145,7 @@ impl ExecutionSession {
             stats: ExecutionStats {
                 rows_produced: 1,
                 execution_time_ms: 0,
+                write_initialization: initialization_work,
             },
             side_effects,
             mutation_receipt,
@@ -1343,6 +1347,7 @@ impl ExecutionSession {
             stats: ExecutionStats {
                 rows_produced,
                 execution_time_ms: 0,
+                ..ExecutionStats::default()
             },
             side_effects: None,
             mutation_receipt: None,

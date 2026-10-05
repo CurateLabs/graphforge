@@ -133,6 +133,8 @@ pub(super) fn run_create_phase(
     }
     // Fold the CREATE phase tallies into the statement's write ledger.
     if tally.nodes_created > 0 {
+        let memberships = recorder.label_memberships().collect::<Vec<_>>();
+        ctx.adjust_label_memberships(memberships, true)?;
         ctx.record_label_tokens(
             cfg.nodes
                 .iter()
@@ -285,6 +287,7 @@ fn create_single_merge_node(
     )?;
     ctx.mutation.counters.nodes_created += 1;
     ctx.mutation.counters.properties_set += spec.properties.len() as u64;
+    ctx.adjust_label_memberships(spec.label_ids.iter().copied(), true)?;
     ctx.record_label_tokens(spec.label_ids.iter().copied());
     let type_id = spec.label_ids.first().copied().map_or_else(
         graphforge_value::PrimaryEntityTypeId::absent,
@@ -825,6 +828,8 @@ fn run_merge_actions_masked(
                     .iter()
                     .copied()
                     .filter(|label| !existing.values().contains(&label.encode()))
+                    .collect::<HashSet<_>>()
+                    .into_iter()
                     .collect::<Vec<_>>();
                 let added = if ctx.writer.contains_pending_node(&uuid) {
                     ctx.writer.add_pending_node_labels(&uuid, &missing)
@@ -835,6 +840,7 @@ fn run_merge_actions_masked(
                     (entry.len() - before) as u64
                 };
                 if added > 0 {
+                    ctx.adjust_label_memberships(missing.iter().copied(), true)?;
                     ctx.record_label_tokens(missing.iter().copied());
                 }
             }

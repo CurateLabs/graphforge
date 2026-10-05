@@ -982,6 +982,15 @@ cannot orphan or relocate properties.
 Unlabelled nodes route to `_untyped`. A v0.5 node participant must contain both
 fields with the frozen schema; an earlier development schema is unsupported.
 
+`topology/label_membership_counts.json` stores the positive per-label node
+membership counts used by write-context initialization and last-use DELETE
+accounting. The versioned control file is included in the generation's
+authenticated graph-files inventory and is replaced in the same atomic rewrite
+as label and node changes. A generation without the summary establishes it once
+from node topology during its next successful write; the write result reports
+that establishment's decoded rows and opened fragments separately from steady
+state initialization work.
+
 #### Filtered node lookup
 
 Canonical node files assign `node_id` densely and monotonically, so physical
