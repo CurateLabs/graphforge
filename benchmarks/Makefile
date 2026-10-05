@@ -72,10 +72,9 @@ progressive-qualification-run: install progressive-qualification-binaries
 		--generator "$(CURDIR)/target/release/graphforge-benchmark-graph500-generator"
 
 progressive-qualification-project-s20: install
-	test -n "$(OUTPUT_DIR)" && test -n "$(PROVIDER_CAPACITY)"
+	test -n "$(OUTPUT_DIR)"
 	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_run \
-		--project-s20 --output-dir "$(OUTPUT_DIR)" \
-		--provider-capacity "$(PROVIDER_CAPACITY)"
+		--project-s20 --output-dir "$(OUTPUT_DIR)"
 
 # Native host evidence is the release path. The module retains its explicit
 # image/result-anchor flags for optional historical provider bundles.
@@ -92,7 +91,7 @@ progressive-provider-plan: install
 	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.qualification_operator \
 		plan-progressive -- \
 		--root "$(CURDIR)" --output-dir "$(OUTPUT_DIR)" --commit "$(COMMIT)" \
-		--maximum-scale "$(MAXIMUM_SCALE)" $(if $(PROVIDER_CAPACITY),--provider-capacity "$(PROVIDER_CAPACITY)",) \
+		--maximum-scale "$(MAXIMUM_SCALE)" \
 		$(if $(IMAGE_DIGEST),--image-digest "$(IMAGE_DIGEST)",) \
 		--plan-out "$(PLAN_OUT)"
 
@@ -138,6 +137,7 @@ HOST_LADDER_ARGS = --output-dir "$(OUTPUT_DIR)" --work-root "$(WORK_ROOT)" \
 	--benchexec-python "$(BENCHEXEC_PYTHON)" \
 	--reserved-headroom-bytes "$(RESERVED_HEADROOM_BYTES)" \
 	--wall-margin "$(WALL_MARGIN)" \
+	$(if $(QUIET_HOST_WAIT_SECONDS),--quiet-host-wait-seconds "$(QUIET_HOST_WAIT_SECONDS)",) \
 	$(if $(REFERENCE_EVIDENCE_DIR),--reference-evidence-dir "$(REFERENCE_EVIDENCE_DIR)",)
 
 progressive-host-ladder-binaries:

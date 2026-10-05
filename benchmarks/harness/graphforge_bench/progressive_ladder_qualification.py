@@ -94,27 +94,12 @@ def _refused_result(failure: str, *, commit: str = REFUSED_COMMIT) -> dict[str, 
     }
 
 
-def _load_provider_capacity(path: Path | None) -> Mapping[str, Any] | None:
-    if path is None:
-        return None
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise QualificationError(
-            "authorization_refused", "provider capacity is malformed"
-        ) from error
-    if not isinstance(value, Mapping):
-        raise QualificationError("authorization_refused", "provider capacity is malformed")
-    return value
-
-
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     result.add_argument("--expected-sha", required=True)
     result.add_argument("--output-dir", type=Path, required=True)
     result.add_argument("--ledger", type=Path, required=True)
     result.add_argument("--result-out", type=Path, required=True)
-    result.add_argument("--provider-capacity", type=Path)
     mode = result.add_mutually_exclusive_group(required=True)
     mode.add_argument("--execute", action="store_true")
     mode.add_argument("--cleanup-only", action="store_true")
@@ -129,12 +114,6 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if COMMIT.fullmatch(args.expected_sha) is None:
         _atomic_json(args.result_out, _refused_result("authorization_refused"))
-        return 1
-
-    try:
-        provider_capacity = _load_provider_capacity(args.provider_capacity)
-    except QualificationError as error:
-        _atomic_json(args.result_out, _refused_result(error.failure, commit=args.expected_sha))
         return 1
 
     try:
@@ -160,7 +139,6 @@ def main(argv: list[str] | None = None) -> int:
                 image_digest=authorization.image_digest,
                 maximum_scale=authorization.maximum_scale,
                 spend_authorization=_authorization_document(authorization),
-                provider_capacity=provider_capacity,
             )
             if args.cleanup_only:
                 outcome = cleanup_only(args.ledger, args.result_out, transport=transport)

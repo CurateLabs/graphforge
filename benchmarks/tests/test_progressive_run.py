@@ -1094,10 +1094,10 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                 profile_id="graph500-s19-local",
             )
 
-    def test_normalized_cpu_policy_comes_from_the_staged_definition(self) -> None:
+    def test_normalized_limits_record_the_staged_wall_and_no_cpu_limit(self) -> None:
         from graphforge_bench.progressive_run import _stage_benchmark_xml
 
-        for scale, wall in ((18, 51), (19, 100), (20, 200), (22, 799)):
+        for scale, wall in ((18, 51), (19, 100), (20, 200), (22, 799), (24, None)):
             with self.subTest(scale=scale):
                 stage = self.base / f"cpu-policy-{scale}"
                 raw = stage / "raw"
@@ -1138,22 +1138,12 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                 self.assertEqual(
                     normalized["limits"],
                     {
-                        "wall_seconds": float(wall),
-                        "cpu_seconds": 14_400.0,
+                        "wall_seconds": None if wall is None else float(wall),
+                        "cpu_seconds": None,
                         "memory_bytes": 96_000_000_000,
                         "cores": list(range(16)),
                     },
                 )
-                # A different valid staged policy proves this is authority,
-                # rather than a second constant that could silently drift.
-                definition = stage / "benchmark.xml"
-                definition.write_text(
-                    definition.read_text().replace('timelimit="14400 s"', 'timelimit="2 h"')
-                )
-                normalized, _, _ = ingest_benchexec_result(
-                    root=ROOT, stage=stage, scale=scale, plan=plan
-                )
-                self.assertEqual(normalized["limits"]["cpu_seconds"], 7200.0)
 
     def test_raw_timeout_retains_its_reason_without_inventing_walltime(self) -> None:
         from graphforge_bench.benchexec_authority import Limits, normalize_run
@@ -1215,22 +1205,10 @@ class ProgressiveRunControllerTests(unittest.TestCase):
     def test_adjacent_passed_rungs_produce_schema_valid_s20_projection(self) -> None:
         for scale in (18, 19):
             (self.output / f"s{scale}-rung.json").write_text(json.dumps(passed_rung(scale)))
-        capacity = self.base / "capacity.json"
-        capacity.write_text(
-            json.dumps(
-                {
-                    "physical_read_bytes_per_second": 1_000_000,
-                    "physical_write_bytes_per_second": 1_000_000,
-                    "reader_calls_per_second": 1_000_000,
-                    "publication_work_per_second": 1_000_000,
-                    "secret": "discarded",
-                }
-            )
-        )
-        path = write_s20_projection(ROOT, self.output, capacity)
+        path = write_s20_projection(ROOT, self.output)
         evidence = json.loads(path.read_text())
         self.assertEqual(evidence["source_scales"], [18, 19])
-        self.assertNotIn("secret", path.read_text())
+        self.assertEqual(evidence["decision"], "admitted")
 
     def test_fly_s18_s19_ladder_bundle_refuses_s20_until_rss_plateaus(self) -> None:
         """Real #900 Fly evidence must not authorize S20 while RSS grows across rungs."""
@@ -1238,18 +1216,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         for scale in (18, 19):
             source = bundle / f"s{scale}-rung.json"
             (self.output / source.name).write_text(source.read_text(encoding="utf-8"))
-        capacity = self.base / "capacity.json"
-        capacity.write_text(
-            json.dumps(
-                {
-                    "physical_read_bytes_per_second": 1_000_000_000,
-                    "physical_write_bytes_per_second": 500_000_000,
-                    "reader_calls_per_second": 1_000_000,
-                    "publication_work_per_second": 500_000,
-                }
-            )
-        )
-        path = write_s20_projection(ROOT, self.output, capacity)
+        path = write_s20_projection(ROOT, self.output)
         evidence = json.loads(path.read_text())
         self.assertEqual(evidence["decision"], "refused")
         self.assertFalse(evidence["checks"]["rss_headroom"])
@@ -1434,17 +1401,21 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         _stage_benchmark_xml(ROOT, stage, wall_seconds=102)
         xml = (stage / "benchmark.xml").read_text(encoding="utf-8")
         self.assertIn('walltimelimit="102 s"', xml)
-        self.assertIn('timelimit="14400 s"', xml)
-        self.assertIn('hardtimelimit="14430 s"', xml)
+        self.assertNotRegex(xml, r"\b(?:hard)?timelimit=")
         definition = (ROOT / "definitions/graphforge-progressive-qualification-v1.xml").read_text(
             encoding="utf-8"
         )
         self.assertEqual(_rewrite_benchmark_wall(definition, 14_400), definition)
+        unbounded = _rewrite_benchmark_wall(definition, None)
+        self.assertNotIn("timelimit", unbounded)
+        self.assertIn('memlimit="4 GB" cpuCores="16"', unbounded)
         for wall in (0, -1, 14_401, True):
             with self.assertRaises(ControllerError):
                 _rewrite_benchmark_wall(definition, wall)  # type: ignore[arg-type]
+        # A CPU-time limit would kill a parallel rung before its wall limit.
+        cpu_limited = definition.replace("<benchmark ", '<benchmark timelimit="14400 s" ')
         with self.assertRaises(ControllerError):
-            _rewrite_benchmark_wall(definition.replace('timelimit="14400 s"', 'timelimit="1 s"'), 5)
+            _rewrite_benchmark_wall(cpu_limited, 5)
 
     def test_benchexec_parser_keeps_cpu_and_elapsed_deadlines_independent(self) -> None:
         from graphforge_bench.progressive_run import _stage_benchmark_xml
@@ -1471,19 +1442,20 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                 _stage_benchmark_xml(ROOT, stage, wall_seconds=wall)
                 (stage / "profile.json").write_text("{}\n")
                 benchmark = Benchmark(str(stage / "benchmark.xml"), config, read_local_time())
-                self.assertEqual(benchmark.rlimits.cputime, 14_400)
-                self.assertEqual(benchmark.rlimits.cputime_hard, 14_430)
-                self.assertEqual(benchmark.rlimits.walltime, wall or 14_400)
+                self.assertIsNone(benchmark.rlimits.cputime)
+                self.assertIsNone(benchmark.rlimits.cputime_hard)
+                self.assertEqual(benchmark.rlimits.walltime, wall)
                 self.assertEqual(benchmark.rlimits.memory, 4_000_000_000)
                 self.assertEqual(benchmark.rlimits.cpu_cores, 16)
                 run = benchmark.run_sets[0].runs[0]
                 # Process-tree CPU can exceed elapsed time on multiple cores.
                 run.values.update(cputime=799.281815, walltime=742.165077934)
-                self.assertEqual(run._is_timeout(), wall is not None and wall < 742.165077934)
-                run.values.update(cputime=1.0, walltime=(wall or 14_400) + 0.1)
-                self.assertTrue(run._is_timeout())
-                run.values.update(cputime=14_400.1, walltime=1.0)
-                self.assertTrue(run._is_timeout())
+                self.assertEqual(bool(run._is_timeout()), wall is not None and wall < 742.165077934)
+                run.values.update(cputime=1.0, walltime=(wall or 10**6) + 0.1)
+                self.assertEqual(bool(run._is_timeout()), wall is not None)
+                # Sixteen cores for the whole envelope never stop a rung on CPU time.
+                run.values.update(cputime=16 * 14_400.0, walltime=1.0)
+                self.assertFalse(run._is_timeout())
 
     def test_provider_volume_keeps_four_gib_benchexec_memory(self) -> None:
         stage = self.base / "stage"

@@ -7,8 +7,6 @@ import unittest
 from unittest.mock import patch
 
 from graphforge_bench.progressive_ladder_qualification import (
-    QualificationError,
-    _load_provider_capacity,
     main,
     parser,
 )
@@ -91,13 +89,6 @@ class ProgressiveLadderQualificationTests(unittest.TestCase):
             self.assertEqual(code, 1)
             document = json.loads(result_path.read_text())
             self.assertEqual(document["failure"], "authorization_refused")
-
-    def test_malformed_provider_capacity_is_refused(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            capacity_path = Path(temporary) / "capacity.json"
-            capacity_path.write_text("{", encoding="utf-8")
-            with self.assertRaisesRegex(QualificationError, "malformed"):
-                _load_provider_capacity(capacity_path)
 
 
 if __name__ == "__main__":

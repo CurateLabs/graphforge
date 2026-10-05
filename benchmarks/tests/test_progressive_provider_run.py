@@ -50,12 +50,6 @@ PROJECTED_FIELDS = (
     "publication_work_units",
     "storage_peak_bytes",
 )
-RATE_FIELDS = (
-    "physical_read_bytes_per_second",
-    "physical_write_bytes_per_second",
-    "reader_calls_per_second",
-    "publication_work_per_second",
-)
 SLOPE_FIELDS = (
     "logical_read_bytes",
     "logical_write_bytes",
@@ -70,8 +64,6 @@ CHECK_FIELDS = (
     "retained_storage_headroom",
     "transient_storage_headroom",
     "storage_headroom",
-    "io_reader_publication_capacity_measured",
-    "io_reader_publication_headroom",
     "correctness",
 )
 
@@ -108,11 +100,14 @@ def admitted_plan(scale: int = 20) -> dict:
                 "storage_fraction": 0.15,
             },
             "projected": dict.fromkeys(PROJECTED_FIELDS, 1),
-            "required_rates": dict.fromkeys(RATE_FIELDS, 1),
-            "provider_capacity": dict.fromkeys(RATE_FIELDS, 100),
             "slopes_observed": dict.fromkeys(SLOPE_FIELDS, 1),
             "rss_growth_fraction": 0,
             "checks": dict.fromkeys(CHECK_FIELDS, True),
+            "enforced_checks": [
+                check
+                for check in CHECK_FIELDS
+                if scale < 24 or check not in {"time_headroom", "rss_headroom"}
+            ],
             "claim": "engineering_evidence_only",
         },
         "execution_authorized": True,

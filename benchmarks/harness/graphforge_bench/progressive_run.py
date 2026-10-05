@@ -26,7 +26,6 @@ import tempfile
 from typing import Any
 import xml.etree.ElementTree as ET
 
-from benchexec.util import parse_timespan_value
 from jsonschema import Draft202012Validator
 
 from graphforge_bench.benchexec_authority import Limits, normalize_run
@@ -598,33 +597,39 @@ def _benchexec_tool_directory(stage: Path, *, prefer_stage: bool = False) -> Pat
     return stage / "bin"
 
 
-# A rung tightens only elapsed wall time. BenchExec's timelimit and
-# hardtimelimit constrain process-tree CPU time and retain their own envelope.
+# BenchExec stops a rung on elapsed wall time only. The definition carries no
+# CPU-time limit: process-tree CPU time is measured and reported, and a parallel
+# rung must not be killed for using more than one core.
+WALL_ENVELOPE_SECONDS = 14_400
 
 
-def _stage_benchmark_xml(root: Path, stage: Path, *, wall_seconds: int | None = None) -> None:
+def _stage_benchmark_xml(
+    root: Path, stage: Path, *, wall_seconds: int | None = WALL_ENVELOPE_SECONDS
+) -> None:
+    """Stage the definition; `wall_seconds=None` stages a rung with no wall limit."""
     text = (root / "definitions/graphforge-progressive-qualification-v1.xml").read_text(
         encoding="utf-8"
     )
-    if wall_seconds is not None:
-        text = _rewrite_benchmark_wall(text, wall_seconds)
-    (stage / "benchmark.xml").write_text(text, encoding="utf-8")
+    (stage / "benchmark.xml").write_text(
+        _rewrite_benchmark_wall(text, wall_seconds), encoding="utf-8"
+    )
 
 
-def _rewrite_benchmark_wall(text: str, wall_seconds: int) -> str:
-    """Bind the staged BenchExec wall limit to `wall_seconds` (never above 4 h)."""
-    if not isinstance(wall_seconds, int) or isinstance(wall_seconds, bool):
+def _rewrite_benchmark_wall(text: str, wall_seconds: int | None) -> str:
+    """Bind the staged wall limit to `wall_seconds` (never above 4 h), or remove it."""
+    if wall_seconds is not None and (
+        not isinstance(wall_seconds, int) or isinstance(wall_seconds, bool)
+    ):
         raise ControllerError("BenchExec wall limit must be an integer")
-    if wall_seconds <= 0 or wall_seconds > 14_400:
+    if wall_seconds is not None and not 0 < wall_seconds <= WALL_ENVELOPE_SECONDS:
         raise ControllerError("BenchExec wall limit must be within 1..14400 seconds")
-    soft = re.search(r'\btimelimit="14400 s"', text)
-    hard = re.search(r'\bhardtimelimit="14430 s"', text)
-    wall = re.search(r'\bwalltimelimit="14400 s"', text)
-    if soft is None or hard is None or wall is None:
+    wall = re.search(r' walltimelimit="14400 s"', text)
+    if wall is None or re.search(r"\b(?:hard)?timelimit=", text):
         raise ControllerError(
-            "BenchExec definition limits are not the expected CPU and wall envelopes"
+            "BenchExec definition must carry only the 4 h wall envelope, with no CPU limit"
         )
-    return text[: wall.start()] + f'walltimelimit="{wall_seconds} s"' + text[wall.end() :]
+    replacement = "" if wall_seconds is None else f' walltimelimit="{wall_seconds} s"'
+    return text[: wall.start()] + replacement + text[wall.end() :]
 
 
 # Host durable writes charge page cache into cgroup memory.peak. Keep the product
@@ -1303,17 +1308,12 @@ def ingest_benchexec_result(
         raise ControllerError("requested profile identity contradicts the run plan")
     raw = _parse_benchexec_xml(raw_output, correctness=graphforge.get("status") == "passed")
     limits = plan["limits"]
-    try:
-        definition = ET.parse(stage / "benchmark.xml").getroot()
-        cpu_seconds = float(parse_timespan_value(definition.attrib["timelimit"]))
-    except (OSError, ET.ParseError, KeyError, ValueError) as error:
-        raise ControllerError("staged BenchExec CPU policy is missing or invalid") from error
     benchexec = normalize_run(
         benchexec=raw,
         graphforge=graphforge,
         limits=Limits(
-            float(limits["wall_seconds"]),
-            cpu_seconds,
+            None if limits["wall_seconds"] is None else float(limits["wall_seconds"]),
+            None,
             int(limits["memory_bytes"]),
             tuple(range(int(limits["cores"]))),
         ),
@@ -1433,18 +1433,15 @@ def run(
         _write_json(output_dir / f"s{scale}-result.json", result)
 
 
-def write_s20_projection(root: Path, output_dir: Path, capacity_path: Path) -> Path:
+def write_s20_projection(root: Path, output_dir: Path) -> Path:
     s18 = _passed_rung(root, output_dir, 18)
     s19 = _passed_rung(root, output_dir, 19)
     if s18 is None or s19 is None:
         raise ControllerError("S20 projection requires passed adjacent S18 and S19 rungs")
-    capacity = _json(capacity_path)
-    if not isinstance(capacity, Mapping):
-        raise ControllerError("provider capacity evidence must be an object")
     s20 = next(
         profile for profile in load_profiles(root / "profiles" / "graph500") if profile.scale == 20
     )
-    evidence = project(s20, [s18, s19], capacity)
+    evidence = project(s20, [s18, s19])
     _validate(root, "progressive-qualification-evidence.json", evidence)
     path = output_dir / "s20-projection.json"
     _write_json(path, evidence)
@@ -1463,14 +1460,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--benchexec-python", default=sys.executable)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--fixture-bundle", type=Path)
-    parser.add_argument("--provider-capacity", type=Path)
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[2]
     try:
         if args.project_s20:
-            if args.provider_capacity is None:
-                raise ControllerError("--project-s20 requires --provider-capacity")
-            write_s20_projection(root, args.output_dir, args.provider_capacity)
+            write_s20_projection(root, args.output_dir)
             return 0
         if not all((args.gf, args.certify, args.generator)):
             raise ControllerError("rung execution requires gf, certify, and generator")
