@@ -330,6 +330,50 @@ def _cfg_test_analysis(source: str, path: str) -> tuple[set[int], set[str]]:
             )
             position = end + 1
             continue
+        container = enclosing.get(position)
+        if container is not None and tokens[container][0] in {"(", "["}:
+            limit = delimiter_close[container]
+            angle_depth = 0
+            cursor = position + 7
+            while cursor < limit:
+                token = tokens[cursor][0]
+                if token in {"(", "[", "{"}:
+                    cursor = delimiter_close[cursor] + 1
+                    continue
+                if token == "<" and (
+                    angle_depth > 0
+                    or (
+                        cursor >= 2
+                        and tokens[cursor - 1][0] == ":"
+                        and tokens[cursor - 2][0] == ":"
+                    )
+                ):
+                    angle_depth += 1
+                elif token == ">" and angle_depth:
+                    angle_depth -= 1
+                elif token == "," and angle_depth == 0:
+                    break
+                cursor += 1
+            if angle_depth:
+                raise LedgerError(f"ambiguous cfg(test) expression in {path}:{attribute_line}")
+            end = cursor - 1
+            if end < position + 7:
+                raise LedgerError(f"ambiguous cfg(test) expression in {path}:{attribute_line}")
+            # The comma or enclosing close is punctuation, but may share the
+            # attributed expression's source line. Include it when deciding
+            # whether that whole physical line belongs to the expression.
+            line_end = cursor if cursor < limit else limit
+            end_line = tokens[line_end][1]
+            excluded.update(
+                line
+                for line in range(attribute_line, end_line + 1)
+                if line not in line_tokens
+                or (line_tokens[line][0] >= position and line_tokens[line][1] <= line_end)
+            )
+            # Consume the comma when present, or the rest of the enclosing
+            # argument/element list when this is its last item.
+            position = cursor + 1 if cursor < limit else limit + 1
+            continue
         paren_depth = bracket_depth = 0
         boundary: int | None = None
         while cursor < len(tokens):
