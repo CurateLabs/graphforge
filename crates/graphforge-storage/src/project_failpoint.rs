@@ -7,6 +7,8 @@
 use graphforge_core::GfError;
 #[cfg(any(test, feature = "test-failpoints"))]
 use graphforge_core::ProjectErrorCode;
+#[cfg(any(test, feature = "test-failpoints"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
 #[cfg(any(test, feature = "test-failpoints"))]
@@ -14,9 +16,13 @@ const ENABLE_ENV: &str = "GRAPHFORGE_PROJECT_FAILPOINTS";
 #[cfg(any(test, feature = "test-failpoints"))]
 const ACTIVE_ENV: &str = "GRAPHFORGE_PROJECT_FAILPOINT";
 #[cfg(any(test, feature = "test-failpoints"))]
+const ONCE_ENV: &str = "GRAPHFORGE_PROJECT_FAILPOINT_ONCE";
+#[cfg(any(test, feature = "test-failpoints"))]
 const ENABLE_COOKIE: &str = "graphforge-internal-subprocess-v1";
 #[cfg(any(test, feature = "test-failpoints"))]
 const EXIT_CODE: i32 = 86;
+#[cfg(any(test, feature = "test-failpoints"))]
+static FAILPOINT_ONCE_CONSUMED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(any(test, feature = "test-failpoints"))]
 pub(crate) fn hit(
@@ -39,10 +45,13 @@ pub(crate) fn hit(
     {
         return Ok(());
     }
-    if active == name {
+    let one_shot = std::env::var(ONCE_ENV).as_deref() == Ok("1");
+    if active == name && (!one_shot || !FAILPOINT_ONCE_CONSUMED.swap(true, Ordering::Relaxed)) {
         std::process::exit(EXIT_CODE);
     }
-    if active == format!("{name}.error") {
+    if active == format!("{name}.error")
+        && (!one_shot || !FAILPOINT_ONCE_CONSUMED.swap(true, Ordering::Relaxed))
+    {
         let transaction =
             transaction_uuid.map_or_else(|| "none".into(), |uuid| uuid.hyphenated().to_string());
         let generation =
