@@ -92,6 +92,39 @@ This is an in-process merge measurement, not public API latency. The incremental
 path still clones and sorts records and checks staged identities; it skips the
 full revalidation of the existing rows.
 
+## AlgorithmRunLedger merge comparison
+
+The ignored test
+`graphforge-knowledge::algorithm_run::tests::quiet_host_algorithm_run_merge_cost_measurement`
+compares the prior full-validation merge (identity merge followed by
+`AlgorithmRunLedger::new`) with trusted `AlgorithmRunLedger::merge`. It checks
+exact output equality before timing, then alternates baseline-first and
+incremental-first order over nine pairs at each size. Each pair appends one run
+and its start event to an existing ledger with 1,000 or 10,000 runs and start
+events. The test reports canonical input digests, every sample, medians, and
+median cost per existing row. Its row-validation counter tests also assert that
+merge makes zero old or staged row-validator calls after both operands have
+been constructed.
+
+Build to a dedicated target, then run the quiet-host guard immediately before
+the measurement:
+
+```bash
+CARGO_TARGET_DIR=/home/ubuntu/.cache/graphforge-target-1826-measurement \
+  cargo test --release --locked -p graphforge-knowledge --lib \
+  algorithm_run::tests::quiet_host_algorithm_run_merge_cost_measurement --no-run
+source /home/ubuntu/.claude/gf-quiet-host.sh && require_quiet_host && \
+  CARGO_TARGET_DIR=/home/ubuntu/.cache/graphforge-target-1826-measurement \
+  cargo test --release --locked -p graphforge-knowledge --lib \
+  algorithm_run::tests::quiet_host_algorithm_run_merge_cost_measurement -- \
+  --ignored --nocapture --test-threads=1
+```
+
+This measures in-process ledger merge work, not end-to-end API latency. The
+incremental path still clones and sorts combined rows and rechecks cross-row
+relationships; it removes repeated validation of immutable run and event row
+contents. Raw observations and executable digest belong on the issue or PR.
+
 ## Construction syscall comparison
 
 [`construction-syscall-comparison.py`](../../benchmarks/scripts/construction-syscall-comparison.py)

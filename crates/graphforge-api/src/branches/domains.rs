@@ -138,24 +138,23 @@ fn knowledge_rows(
         ids.insert(("algorithm_run".into(), id));
     }
     let original = crate::algorithm_runs::read_ledger(generation)?;
+    let (original_runs, original_events) = original.into_parts();
     let runs = AlgorithmRunLedger::new(
-        original
-            .runs
+        original_runs
             .into_iter()
             .filter(|r| has(ids, "algorithm_run", r.run_uuid))
             .collect(),
-        original
-            .events
+        original_events
             .into_iter()
             .filter(|r| has(ids, "algorithm_run", r.run_uuid))
             .collect(),
     )
     .map_err(error)?;
     for id in runs
-        .runs
+        .runs()
         .iter()
         .map(|r| r.provenance_uuid)
-        .chain(runs.events.iter().map(|r| r.provenance_uuid))
+        .chain(runs.events().iter().map(|r| r.provenance_uuid))
     {
         ids.insert(("provenance".into(), id));
     }

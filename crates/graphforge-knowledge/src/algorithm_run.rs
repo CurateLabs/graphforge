@@ -6,7 +6,6 @@ use super::ALGORITHM_RUN_EVENT_SCHEMA;
 use super::ALGORITHM_RUN_SCHEMA;
 use super::KnowledgeError;
 use super::binary_column;
-use super::check_limit;
 use super::fixed_32_at;
 use super::fixed_column;
 use super::invalid;
@@ -33,6 +32,12 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
+
+#[cfg(test)]
+std::thread_local! {
+    static RUN_ROW_VALIDATIONS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static EVENT_ROW_VALIDATIONS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
 
 /// Closed append-only algorithm-run lifecycle state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -182,28 +187,101 @@ impl AlgorithmRunEvent {
 }
 
 /// Validated immutable run identities and append-only lifecycle events.
+///
+/// The validated row collections cannot be mutated after construction:
+///
+/// ```compile_fail
+/// use graphforge_knowledge::AlgorithmRunLedger;
+/// let mut ledger = AlgorithmRunLedger::default();
+/// ledger.runs.clear();
+/// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AlgorithmRunLedger {
     /// Run identities ordered by `(started_at, run_uuid)`.
-    pub runs: Vec<AlgorithmRun>,
+    runs: Vec<AlgorithmRun>,
     /// Events ordered by `(recorded_at, event_uuid)`.
-    pub events: Vec<AlgorithmRunEvent>,
+    events: Vec<AlgorithmRunEvent>,
 }
 
 impl AlgorithmRunLedger {
     /// Validate and normalize complete run tables.
     pub fn new(
+        runs: Vec<AlgorithmRun>,
+        events: Vec<AlgorithmRunEvent>,
+    ) -> Result<Self, KnowledgeError> {
+        Self::new_with_limits(
+            runs,
+            events,
+            crate::MAX_KNOWLEDGE_ROWS,
+            crate::MAX_KNOWLEDGE_ROWS,
+        )
+    }
+
+    fn new_with_limits(
         mut runs: Vec<AlgorithmRun>,
         mut events: Vec<AlgorithmRunEvent>,
+        run_limit: usize,
+        event_limit: usize,
     ) -> Result<Self, KnowledgeError> {
         runs.sort_by_key(|row| (row.started_at_micros, row.run_uuid));
         events.sort_by_key(|row| (row.recorded_at_micros, row.event_uuid));
-        validate_algorithm_run_rows(&runs, &events)?;
+        validate_algorithm_run_rows_with_limits(&runs, &events, run_limit, event_limit)?;
         Ok(Self { runs, events })
     }
 
     /// Merge immutable identities and events, rejecting conflicting reuse.
     pub fn merge(&self, staged: &Self) -> Result<Self, KnowledgeError> {
+        self.merge_with_limits(staged, crate::MAX_KNOWLEDGE_ROWS, crate::MAX_KNOWLEDGE_ROWS)
+    }
+
+    /// Append validated terminal events to this trusted ledger.
+    ///
+    /// Public event fields are checked once on input. Existing run and event
+    /// rows are immutable after construction, so the combined identity,
+    /// ownership, time, start/terminal-count, ordering, and row-limit
+    /// invariants are checked without repeating their row validators.
+    pub fn append_events(&self, appended: Vec<AlgorithmRunEvent>) -> Result<Self, KnowledgeError> {
+        self.append_events_with_limits(
+            appended,
+            crate::MAX_KNOWLEDGE_ROWS,
+            crate::MAX_KNOWLEDGE_ROWS,
+        )
+    }
+
+    fn append_events_with_limits(
+        &self,
+        appended: Vec<AlgorithmRunEvent>,
+        run_limit: usize,
+        event_limit: usize,
+    ) -> Result<Self, KnowledgeError> {
+        check_limit_with_limit("algorithm_runs", self.runs.len(), run_limit)?;
+        check_limit_with_limit(
+            "algorithm_run_events",
+            self.events.len().saturating_add(appended.len()),
+            event_limit,
+        )?;
+        for event in &appended {
+            validate_algorithm_run_event(event)?;
+        }
+
+        let mut events = self.events.clone();
+        for event in appended {
+            events.push(event);
+        }
+        events.sort_by_key(|row| (row.recorded_at_micros, row.event_uuid));
+        validate_algorithm_run_relationships(&self.runs, &events, run_limit, event_limit)?;
+        Ok(Self {
+            runs: self.runs.clone(),
+            events,
+        })
+    }
+
+    fn merge_with_limits(
+        &self,
+        staged: &Self,
+        run_limit: usize,
+        event_limit: usize,
+    ) -> Result<Self, KnowledgeError> {
         let mut runs = self.runs.clone();
         for row in &staged.runs {
             match runs.iter().find(|current| current.run_uuid == row.run_uuid) {
@@ -223,7 +301,40 @@ impl AlgorithmRunLedger {
                 None => events.push(row.clone()),
             }
         }
-        Self::new(runs, events)
+        runs.sort_by_key(|row| (row.started_at_micros, row.run_uuid));
+        events.sort_by_key(|row| (row.recorded_at_micros, row.event_uuid));
+        validate_algorithm_run_relationships(&runs, &events, run_limit, event_limit)?;
+        Ok(Self { runs, events })
+    }
+
+    /// Run identities in canonical order.
+    #[must_use]
+    pub fn runs(&self) -> &[AlgorithmRun] {
+        &self.runs
+    }
+
+    /// Lifecycle events in canonical order.
+    #[must_use]
+    pub fn events(&self) -> &[AlgorithmRunEvent] {
+        &self.events
+    }
+
+    /// Consume the ledger and return its run identities.
+    #[must_use]
+    pub fn into_runs(self) -> Vec<AlgorithmRun> {
+        self.runs
+    }
+
+    /// Consume the ledger and return its lifecycle events.
+    #[must_use]
+    pub fn into_events(self) -> Vec<AlgorithmRunEvent> {
+        self.events
+    }
+
+    /// Consume the ledger and return both canonical row collections.
+    #[must_use]
+    pub fn into_parts(self) -> (Vec<AlgorithmRun>, Vec<AlgorithmRunEvent>) {
+        (self.runs, self.events)
     }
 
     /// Locate one run.
@@ -328,6 +439,12 @@ impl AlgorithmRunLedger {
 }
 
 fn validate_algorithm_run(row: &AlgorithmRun) -> Result<(), KnowledgeError> {
+    #[cfg(test)]
+    RUN_ROW_VALIDATIONS.with(|count| {
+        if let Some(value) = count.get() {
+            count.set(Some(value + 1));
+        }
+    });
     require_v7(row.run_uuid, "run_uuid")?;
     require_uuid(row.provenance_uuid, "provenance_uuid")?;
     if row.algorithm.is_empty()
@@ -356,6 +473,12 @@ fn validate_algorithm_run(row: &AlgorithmRun) -> Result<(), KnowledgeError> {
 }
 
 fn validate_algorithm_run_event(row: &AlgorithmRunEvent) -> Result<(), KnowledgeError> {
+    #[cfg(test)]
+    EVENT_ROW_VALIDATIONS.with(|count| {
+        if let Some(value) = count.get() {
+            count.set(Some(value + 1));
+        }
+    });
     require_uuid(row.event_uuid, "event_uuid")?;
     require_v7(row.run_uuid, "run_uuid")?;
     require_uuid(row.provenance_uuid, "provenance_uuid")?;
@@ -400,16 +523,34 @@ fn validate_algorithm_run_event(row: &AlgorithmRunEvent) -> Result<(), Knowledge
     Ok(())
 }
 
-fn validate_algorithm_run_rows(
+fn validate_algorithm_run_rows_with_limits(
     runs: &[AlgorithmRun],
     events: &[AlgorithmRunEvent],
+    run_limit: usize,
+    event_limit: usize,
 ) -> Result<(), KnowledgeError> {
-    check_limit("algorithm_runs", runs.len())?;
-    check_limit("algorithm_run_events", events.len())?;
+    check_limit_with_limit("algorithm_runs", runs.len(), run_limit)?;
+    check_limit_with_limit("algorithm_run_events", events.len(), event_limit)?;
+    for row in runs {
+        validate_algorithm_run(row)?;
+    }
+    for row in events {
+        validate_algorithm_run_event(row)?;
+    }
+    validate_algorithm_run_relationships(runs, events, run_limit, event_limit)
+}
+
+fn validate_algorithm_run_relationships(
+    runs: &[AlgorithmRun],
+    events: &[AlgorithmRunEvent],
+    run_limit: usize,
+    event_limit: usize,
+) -> Result<(), KnowledgeError> {
+    check_limit_with_limit("algorithm_runs", runs.len(), run_limit)?;
+    check_limit_with_limit("algorithm_run_events", events.len(), event_limit)?;
     let mut run_ids = HashSet::with_capacity(runs.len());
     let mut run_index = HashMap::with_capacity(runs.len());
     for row in runs {
-        validate_algorithm_run(row)?;
         if !run_ids.insert(row.run_uuid) {
             return Err(KnowledgeError::Duplicate("run_uuid"));
         }
@@ -418,7 +559,6 @@ fn validate_algorithm_run_rows(
     let mut event_ids = HashSet::with_capacity(events.len());
     let mut per_run: HashMap<Uuid, (usize, usize)> = HashMap::new();
     for row in events {
-        validate_algorithm_run_event(row)?;
         if !event_ids.insert(row.event_uuid) {
             return Err(KnowledgeError::Duplicate("event_uuid"));
         }
@@ -454,6 +594,21 @@ fn validate_algorithm_run_rows(
                 "run permits at most one terminal event",
             ));
         }
+    }
+    Ok(())
+}
+
+fn check_limit_with_limit(
+    family: &'static str,
+    observed: usize,
+    limit: usize,
+) -> Result<(), KnowledgeError> {
+    if observed > limit {
+        return Err(KnowledgeError::Limit {
+            participant: family,
+            observed,
+            limit,
+        });
     }
     Ok(())
 }
