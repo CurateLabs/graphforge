@@ -366,18 +366,15 @@ impl HypothesisLedger {
             .iter()
             .find(|row| row.group_uuid == group_uuid)
             .ok_or(KnowledgeError::Dangling("group_uuid"))?;
-        let mut writer = CanonicalWriter::new();
-        writer.raw(row.group_uuid.as_bytes())?;
-        writer.text(&row.question_key)?;
-        writer.raw(row.provenance_uuid.as_bytes())?;
-        writer.i64(row.recorded_at_micros)?;
-        writer.u32(row.contract_version)?;
-        fingerprint(
-            CanonicalDomain::HypothesisGroup,
-            CANONICAL_CONTRACT_VERSION,
-            &writer.finish(),
-        )
-        .map_err(Into::into)
+        group_fingerprint_for_row(row)
+    }
+
+    /// Compute canonical group fingerprints in one pass without UUID searches.
+    pub fn group_fingerprints(&self) -> Result<Vec<(Uuid, [u8; 32])>, KnowledgeError> {
+        self.groups
+            .iter()
+            .map(|row| Ok((row.group_uuid, group_fingerprint_for_row(row)?)))
+            .collect()
     }
 
     /// Canonical fingerprint over one exact membership event.
@@ -390,26 +387,20 @@ impl HypothesisLedger {
             .iter()
             .find(|row| row.membership_event_uuid == membership_event_uuid)
             .ok_or(KnowledgeError::Dangling("membership_event_uuid"))?;
-        let mut writer = CanonicalWriter::new();
-        for value in [
-            row.membership_event_uuid,
-            row.operation_uuid,
-            row.group_uuid,
-            row.assertion_uuid,
-        ] {
-            writer.raw(value.as_bytes())?;
-        }
-        writer.text(row.action.as_str())?;
-        writer.raw(row.reasoning_uuid.as_bytes())?;
-        writer.raw(row.provenance_uuid.as_bytes())?;
-        writer.i64(row.recorded_at_micros)?;
-        writer.u32(row.contract_version)?;
-        fingerprint(
-            CanonicalDomain::HypothesisMembership,
-            CANONICAL_CONTRACT_VERSION,
-            &writer.finish(),
-        )
-        .map_err(Into::into)
+        membership_fingerprint_for_row(row)
+    }
+
+    /// Compute canonical membership fingerprints in one pass without UUID searches.
+    pub fn membership_fingerprints(&self) -> Result<Vec<(Uuid, [u8; 32])>, KnowledgeError> {
+        self.membership_events
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.membership_event_uuid,
+                    membership_fingerprint_for_row(row)?,
+                ))
+            })
+            .collect()
     }
 
     /// Canonical fingerprint over one exact selection event.
@@ -422,27 +413,20 @@ impl HypothesisLedger {
             .iter()
             .find(|row| row.selection_event_uuid == selection_event_uuid)
             .ok_or(KnowledgeError::Dangling("selection_event_uuid"))?;
-        let mut writer = CanonicalWriter::new();
-        for value in [row.selection_event_uuid, row.operation_uuid, row.group_uuid] {
-            writer.raw(value.as_bytes())?;
-        }
-        match row.selected_assertion_uuid {
-            Some(value) => {
-                writer.u8(1)?;
-                writer.raw(value.as_bytes())?;
-            }
-            None => writer.u8(0)?,
-        }
-        writer.raw(row.reasoning_uuid.as_bytes())?;
-        writer.raw(row.provenance_uuid.as_bytes())?;
-        writer.i64(row.recorded_at_micros)?;
-        writer.u32(row.contract_version)?;
-        fingerprint(
-            CanonicalDomain::HypothesisSelection,
-            CANONICAL_CONTRACT_VERSION,
-            &writer.finish(),
-        )
-        .map_err(Into::into)
+        selection_fingerprint_for_row(row)
+    }
+
+    /// Compute canonical selection fingerprints in one pass without UUID searches.
+    pub fn selection_fingerprints(&self) -> Result<Vec<(Uuid, [u8; 32])>, KnowledgeError> {
+        self.selection_events
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.selection_event_uuid,
+                    selection_fingerprint_for_row(row)?,
+                ))
+            })
+            .collect()
     }
 
     /// Merge append-only participants with exact replay semantics.
@@ -719,6 +703,72 @@ impl HypothesisLedger {
             .rfind(|row| row.group_uuid == group_uuid)
             .and_then(|row| row.selected_assertion_uuid)
     }
+}
+
+fn group_fingerprint_for_row(row: &HypothesisGroup) -> Result<[u8; 32], KnowledgeError> {
+    let mut writer = CanonicalWriter::new();
+    writer.raw(row.group_uuid.as_bytes())?;
+    writer.text(&row.question_key)?;
+    writer.raw(row.provenance_uuid.as_bytes())?;
+    writer.i64(row.recorded_at_micros)?;
+    writer.u32(row.contract_version)?;
+    fingerprint(
+        CanonicalDomain::HypothesisGroup,
+        CANONICAL_CONTRACT_VERSION,
+        &writer.finish(),
+    )
+    .map_err(Into::into)
+}
+
+fn membership_fingerprint_for_row(
+    row: &HypothesisMembershipEvent,
+) -> Result<[u8; 32], KnowledgeError> {
+    let mut writer = CanonicalWriter::new();
+    for value in [
+        row.membership_event_uuid,
+        row.operation_uuid,
+        row.group_uuid,
+        row.assertion_uuid,
+    ] {
+        writer.raw(value.as_bytes())?;
+    }
+    writer.text(row.action.as_str())?;
+    writer.raw(row.reasoning_uuid.as_bytes())?;
+    writer.raw(row.provenance_uuid.as_bytes())?;
+    writer.i64(row.recorded_at_micros)?;
+    writer.u32(row.contract_version)?;
+    fingerprint(
+        CanonicalDomain::HypothesisMembership,
+        CANONICAL_CONTRACT_VERSION,
+        &writer.finish(),
+    )
+    .map_err(Into::into)
+}
+
+fn selection_fingerprint_for_row(
+    row: &HypothesisSelectionEvent,
+) -> Result<[u8; 32], KnowledgeError> {
+    let mut writer = CanonicalWriter::new();
+    for value in [row.selection_event_uuid, row.operation_uuid, row.group_uuid] {
+        writer.raw(value.as_bytes())?;
+    }
+    match row.selected_assertion_uuid {
+        Some(value) => {
+            writer.u8(1)?;
+            writer.raw(value.as_bytes())?;
+        }
+        None => writer.u8(0)?,
+    }
+    writer.raw(row.reasoning_uuid.as_bytes())?;
+    writer.raw(row.provenance_uuid.as_bytes())?;
+    writer.i64(row.recorded_at_micros)?;
+    writer.u32(row.contract_version)?;
+    fingerprint(
+        CanonicalDomain::HypothesisSelection,
+        CANONICAL_CONTRACT_VERSION,
+        &writer.finish(),
+    )
+    .map_err(Into::into)
 }
 
 fn validate_question_key(value: &str) -> Result<(), KnowledgeError> {

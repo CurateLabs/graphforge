@@ -19,9 +19,28 @@ use graphforge_provenance::{
 use std::collections::{HashMap, HashSet};
 use uuid::{Uuid, Version};
 
+#[cfg(test)]
+thread_local! {
+    static FINGERPRINT_INDEX_BUILD_COUNTS: std::cell::Cell<[usize; FINGERPRINT_FAMILY_COUNT]> = const { std::cell::Cell::new([0; FINGERPRINT_FAMILY_COUNT]) };
+    static FINGERPRINT_INDEX_LOOKUP_COUNTS: std::cell::Cell<[usize; FINGERPRINT_FAMILY_COUNT]> = const { std::cell::Cell::new([0; FINGERPRINT_FAMILY_COUNT]) };
+}
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum FingerprintFamily {
+    Assertion,
+    Confidence,
+    Evidence,
+    Status,
+    Supersession,
+    HypothesisGroup,
+    HypothesisMembership,
+    HypothesisSelection,
+    Validity,
+}
+#[cfg(test)]
+const FINGERPRINT_FAMILY_COUNT: usize = 9;
 mod prepared;
 pub(crate) use prepared::PreparedCompositeOperation;
-
 /// Version of the composite request vocabulary and counting contract.
 pub const COMPOSITE_TRANSACTION_CONTRACT_VERSION: u32 = 1;
 /// Maximum graph mutations plus explicit participant rows in one request.
@@ -499,6 +518,46 @@ fn encode_knowledge(
     .map_err(domain_error)?;
     let validity =
         AssertionValidityLedger::new(value.assertion_validity.clone()).map_err(domain_error)?;
+    // Build each owned-row fingerprint once, then reuse by UUID in the canonical
+    // participant loops below. Ledger serializers remain the source of identity.
+    let assertion_fingerprints = fingerprint_index(
+        assertions.assertion_fingerprints().map_err(domain_error)?,
+        FingerprintFamily::Assertion,
+    );
+    let confidence_fingerprints = fingerprint_index(
+        confidence.assessment_fingerprints().map_err(domain_error)?,
+        FingerprintFamily::Confidence,
+    );
+    let evidence_fingerprints = fingerprint_index(
+        evidence.evidence_fingerprints().map_err(domain_error)?,
+        FingerprintFamily::Evidence,
+    );
+    let status_fingerprints = fingerprint_index(
+        status.event_fingerprints().map_err(domain_error)?,
+        FingerprintFamily::Status,
+    );
+    let supersession_fingerprints = fingerprint_index(
+        supersessions
+            .relation_fingerprints()
+            .map_err(domain_error)?,
+        FingerprintFamily::Supersession,
+    );
+    let hypothesis_group_fingerprints = fingerprint_index(
+        hypotheses.group_fingerprints().map_err(domain_error)?,
+        FingerprintFamily::HypothesisGroup,
+    );
+    let hypothesis_membership_fingerprints = fingerprint_index(
+        hypotheses.membership_fingerprints().map_err(domain_error)?,
+        FingerprintFamily::HypothesisMembership,
+    );
+    let hypothesis_selection_fingerprints = fingerprint_index(
+        hypotheses.selection_fingerprints().map_err(domain_error)?,
+        FingerprintFamily::HypothesisSelection,
+    );
+    let validity_fingerprints = fingerprint_index(
+        validity.event_fingerprints().map_err(domain_error)?,
+        FingerprintFamily::Validity,
+    );
     let counts = [
         value.provenance_events.len(),
         value.lineage.len(),
@@ -556,9 +615,11 @@ fn encode_knowledge(
             writer,
             row.assertion_uuid,
             row.contract_version,
-            assertions
-                .assertion_fingerprint(row.assertion_uuid)
-                .map_err(domain_error)?,
+            required_fingerprint(
+                &assertion_fingerprints,
+                row.assertion_uuid,
+                FingerprintFamily::Assertion,
+            )?,
         )?;
     }
     external_graph_refs.sort_by_key(|row| {
@@ -584,9 +645,11 @@ fn encode_knowledge(
             writer,
             row.confidence_uuid,
             row.contract_version,
-            confidence
-                .assessment_fingerprint(row.confidence_uuid)
-                .map_err(domain_error)?,
+            required_fingerprint(
+                &confidence_fingerprints,
+                row.confidence_uuid,
+                FingerprintFamily::Confidence,
+            )?,
         )?;
     }
     external_confidence_inputs
@@ -605,9 +668,11 @@ fn encode_knowledge(
             writer,
             row.evidence_uuid,
             row.contract_version,
-            evidence
-                .evidence_fingerprint(row.evidence_uuid)
-                .map_err(domain_error)?,
+            required_fingerprint(
+                &evidence_fingerprints,
+                row.evidence_uuid,
+                FingerprintFamily::Evidence,
+            )?,
         )?;
     }
     for row in &reasoning {
@@ -623,9 +688,11 @@ fn encode_knowledge(
             writer,
             row.status_event_uuid,
             row.contract_version,
-            status
-                .event_fingerprint(row.status_event_uuid)
-                .map_err(domain_error)?,
+            required_fingerprint(
+                &status_fingerprints,
+                row.status_event_uuid,
+                FingerprintFamily::Status,
+            )?,
         )?;
     }
     for row in supersessions.relations() {
@@ -633,9 +700,11 @@ fn encode_knowledge(
             writer,
             row.supersession_uuid,
             row.contract_version,
-            supersessions
-                .relation_fingerprint(row.supersession_uuid)
-                .map_err(domain_error)?,
+            required_fingerprint(
+                &supersession_fingerprints,
+                row.supersession_uuid,
+                FingerprintFamily::Supersession,
+            )?,
         )?;
     }
     for row in hypotheses.groups() {
@@ -643,9 +712,11 @@ fn encode_knowledge(
             writer,
             row.group_uuid,
             row.contract_version,
-            hypotheses
-                .group_fingerprint(row.group_uuid)
-                .map_err(domain_error)?,
+            required_fingerprint(
+                &hypothesis_group_fingerprints,
+                row.group_uuid,
+                FingerprintFamily::HypothesisGroup,
+            )?,
         )?;
     }
     for row in hypotheses.membership_events() {
@@ -653,9 +724,11 @@ fn encode_knowledge(
             writer,
             row.membership_event_uuid,
             row.contract_version,
-            hypotheses
-                .membership_fingerprint(row.membership_event_uuid)
-                .map_err(domain_error)?,
+            required_fingerprint(
+                &hypothesis_membership_fingerprints,
+                row.membership_event_uuid,
+                FingerprintFamily::HypothesisMembership,
+            )?,
         )?;
     }
     external_membership.sort_by_key(|row| (row.recorded_at_micros, row.membership_event_uuid));
@@ -673,9 +746,11 @@ fn encode_knowledge(
             writer,
             row.selection_event_uuid,
             row.contract_version,
-            hypotheses
-                .selection_fingerprint(row.selection_event_uuid)
-                .map_err(domain_error)?,
+            required_fingerprint(
+                &hypothesis_selection_fingerprints,
+                row.selection_event_uuid,
+                FingerprintFamily::HypothesisSelection,
+            )?,
         )?;
     }
     external_selection.sort_by_key(|row| (row.recorded_at_micros, row.selection_event_uuid));
@@ -693,14 +768,44 @@ fn encode_knowledge(
             writer,
             row.validity_event_uuid,
             row.contract_version,
-            validity
-                .event_fingerprint(row.validity_event_uuid)
-                .map_err(domain_error)?,
+            required_fingerprint(
+                &validity_fingerprints,
+                row.validity_event_uuid,
+                FingerprintFamily::Validity,
+            )?,
         )?;
     }
     Ok(())
 }
 
+fn fingerprint_index(
+    entries: Vec<(Uuid, [u8; 32])>,
+    _family: FingerprintFamily,
+) -> HashMap<Uuid, [u8; 32]> {
+    #[cfg(test)]
+    FINGERPRINT_INDEX_BUILD_COUNTS.with(|counts| {
+        let mut values = counts.get();
+        values[_family as usize] += entries.len();
+        counts.set(values);
+    });
+    entries.into_iter().collect()
+}
+fn required_fingerprint(
+    index: &HashMap<Uuid, [u8; 32]>,
+    uuid: Uuid,
+    _family: FingerprintFamily,
+) -> Result<[u8; 32], GfError> {
+    #[cfg(test)]
+    FINGERPRINT_INDEX_LOOKUP_COUNTS.with(|counts| {
+        let mut values = counts.get();
+        values[_family as usize] += 1;
+        counts.set(values);
+    });
+    index
+        .get(&uuid)
+        .copied()
+        .ok_or_else(|| domain_error(format!("validated fingerprint missing for {uuid}")))
+}
 fn composite_lineage(
     rows: &[LineageRecord],
     local_provenance: &HashSet<Uuid>,
@@ -2784,5 +2889,112 @@ pub(crate) mod tests {
         assert_eq!(bounded_entry_count(MAX_COMPOSITE_TRANSACTION_ENTRIES, [0; 14]).unwrap(), MAX_COMPOSITE_TRANSACTION_ENTRIES);
         let error = bounded_entry_count(MAX_COMPOSITE_TRANSACTION_ENTRIES, [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap_err();
         assert_eq!(error.to_string(), "validation error: composite transaction entry limit exceeded: 100001 > 100000");
+    }
+
+    #[test]
+    fn ledger_batch_fingerprints_equal_scalar_fingerprints() {
+        let value = full_knowledge_fixture();
+        let assertions =
+            AssertionLedger::new(value.assertions.clone(), value.assertion_graph_refs.clone())
+                .unwrap();
+        let confidence = ConfidenceLedger::new(
+            value.confidence_assessments.clone(),
+            value.confidence_inputs.clone(),
+        )
+        .unwrap();
+        let evidence = EvidenceLedger::new(value.evidence.clone()).unwrap();
+        let status = AssertionStatusLedger::new(value.assertion_status.clone()).unwrap();
+        let supersessions =
+            AssertionSupersessionLedger::new(value.assertion_supersessions.clone()).unwrap();
+        let hypotheses = HypothesisLedger::new(
+            value.hypothesis_groups.clone(),
+            value.hypothesis_membership.clone(),
+            value.hypothesis_selection.clone(),
+        )
+        .unwrap();
+        let validity = AssertionValidityLedger::new(value.assertion_validity.clone()).unwrap();
+
+        for (id, fp) in assertions.assertion_fingerprints().unwrap() {
+            assert_eq!(
+                Some(&fp),
+                assertions.assertion_fingerprint(id).ok().as_ref()
+            );
+        }
+        for (id, fp) in confidence.assessment_fingerprints().unwrap() {
+            assert_eq!(
+                Some(&fp),
+                confidence.assessment_fingerprint(id).ok().as_ref()
+            );
+        }
+        for (id, fp) in evidence.evidence_fingerprints().unwrap() {
+            assert_eq!(Some(&fp), evidence.evidence_fingerprint(id).ok().as_ref());
+        }
+        for (id, fp) in status.event_fingerprints().unwrap() {
+            assert_eq!(Some(&fp), status.event_fingerprint(id).ok().as_ref());
+        }
+        for (id, fp) in supersessions.relation_fingerprints().unwrap() {
+            assert_eq!(
+                Some(&fp),
+                supersessions.relation_fingerprint(id).ok().as_ref()
+            );
+        }
+        for (id, fp) in hypotheses.group_fingerprints().unwrap() {
+            assert_eq!(Some(&fp), hypotheses.group_fingerprint(id).ok().as_ref());
+        }
+        for (id, fp) in hypotheses.membership_fingerprints().unwrap() {
+            assert_eq!(
+                Some(&fp),
+                hypotheses.membership_fingerprint(id).ok().as_ref()
+            );
+        }
+        for (id, fp) in hypotheses.selection_fingerprints().unwrap() {
+            assert_eq!(
+                Some(&fp),
+                hypotheses.selection_fingerprint(id).ok().as_ref()
+            );
+        }
+        for (id, fp) in validity.event_fingerprints().unwrap() {
+            assert_eq!(Some(&fp), validity.event_fingerprint(id).ok().as_ref());
+        }
+    }
+
+    #[test]
+    fn encode_knowledge_fingerprint_work_is_linear_at_two_sizes() {
+        for row_count in [8, 128] {
+            let evidence = (0..row_count)
+                .map(|index| {
+                    EvidenceLink::new(
+                        uuid7((index as u8).wrapping_add(129)),
+                        if index % 2 == 0 { uuid7(20) } else { uuid7(21) },
+                        uuid7(220),
+                        EvidenceSourceKind::Document,
+                        EvidenceRole::Supports,
+                        None,
+                        if index % 2 == 0 { uuid7(1) } else { uuid7(2) },
+                        30 + index as i64,
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let mut value = full_knowledge_fixture();
+            value.evidence = evidence;
+            FINGERPRINT_INDEX_BUILD_COUNTS.with(|counts| counts.set([0; FINGERPRINT_FAMILY_COUNT]));
+            FINGERPRINT_INDEX_LOOKUP_COUNTS
+                .with(|counts| counts.set([0; FINGERPRINT_FAMILY_COUNT]));
+            let mut writer = CanonicalWriter::new();
+            encode_knowledge(&mut writer, &value).unwrap();
+            let expected = [2, 2, row_count, 2, 2, 2, 2, 2, 2];
+            assert_eq!(
+                FINGERPRINT_INDEX_BUILD_COUNTS.with(std::cell::Cell::get),
+                expected,
+                "one fingerprint is built for every row in each nonempty family at N={row_count}"
+            );
+            assert_eq!(
+                FINGERPRINT_INDEX_LOOKUP_COUNTS.with(std::cell::Cell::get),
+                expected,
+                "one indexed lookup is performed for every owned row in each family at N={row_count}"
+            );
+            assert!(!writer.finish().is_empty());
+        }
     }
 }

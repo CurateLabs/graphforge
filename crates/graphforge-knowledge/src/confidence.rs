@@ -339,25 +339,27 @@ impl ConfidenceLedger {
             .iter()
             .find(|row| row.confidence_uuid == confidence_uuid)
             .ok_or(KnowledgeError::Dangling("confidence_uuid"))?;
-        let inputs = inputs_for(&self.inputs, confidence_uuid);
-        let mut writer = CanonicalWriter::new();
-        writer.raw(b"GFCA")?;
-        writer.u32(CONFIDENCE_ASSESSMENT_CONTRACT_VERSION)?;
-        writer.raw(row.assertion_uuid.as_bytes())?;
-        writer.text(row.policy.as_str())?;
-        writer.u32(row.policy_version)?;
-        canonical_optional_f64(&mut writer, row.value)?;
-        writer.u64(inputs.len() as u64)?;
-        for input in inputs {
-            writer.raw(input.input_confidence_uuid.as_bytes())?;
-            canonical_optional_f64(&mut writer, input.input_value)?;
-            writer.u32(input.ordinal)?;
+        assessment_fingerprint_for_row(row, &inputs_for(&self.inputs, confidence_uuid))
+    }
+
+    /// Compute assessment fingerprints in one pass over assessments and grouped inputs.
+    pub fn assessment_fingerprints(&self) -> Result<Vec<(Uuid, [u8; 32])>, KnowledgeError> {
+        let mut inputs = HashMap::<Uuid, Vec<&ConfidenceInput>>::new();
+        for input in &self.inputs {
+            inputs.entry(input.confidence_uuid).or_default().push(input);
         }
-        Ok(fingerprint(
-            CanonicalDomain::ConfidenceAssessment,
-            CANONICAL_CONTRACT_VERSION,
-            &writer.finish(),
-        )?)
+        self.assessments
+            .iter()
+            .map(|row| {
+                let row_inputs = inputs
+                    .get(&row.confidence_uuid)
+                    .map_or(&[][..], Vec::as_slice);
+                Ok((
+                    row.confidence_uuid,
+                    assessment_fingerprint_for_row(row, row_inputs)?,
+                ))
+            })
+            .collect()
     }
 
     /// Build the authoritative assessment Arrow batch.
@@ -668,11 +670,34 @@ fn validate_policy_snapshot(
     Ok(())
 }
 
-fn inputs_for(rows: &[ConfidenceInput], confidence_uuid: Uuid) -> Vec<ConfidenceInput> {
+fn assessment_fingerprint_for_row(
+    row: &ConfidenceAssessment,
+    inputs: &[&ConfidenceInput],
+) -> Result<[u8; 32], KnowledgeError> {
+    let mut writer = CanonicalWriter::new();
+    writer.raw(b"GFCA")?;
+    writer.u32(CONFIDENCE_ASSESSMENT_CONTRACT_VERSION)?;
+    writer.raw(row.assertion_uuid.as_bytes())?;
+    writer.text(row.policy.as_str())?;
+    writer.u32(row.policy_version)?;
+    canonical_optional_f64(&mut writer, row.value)?;
+    writer.u64(inputs.len() as u64)?;
+    for input in inputs {
+        writer.raw(input.input_confidence_uuid.as_bytes())?;
+        canonical_optional_f64(&mut writer, input.input_value)?;
+        writer.u32(input.ordinal)?;
+    }
+    Ok(fingerprint(
+        CanonicalDomain::ConfidenceAssessment,
+        CANONICAL_CONTRACT_VERSION,
+        &writer.finish(),
+    )?)
+}
+
+fn inputs_for(rows: &[ConfidenceInput], confidence_uuid: Uuid) -> Vec<&ConfidenceInput> {
     let mut inputs = rows
         .iter()
         .filter(|row| row.confidence_uuid == confidence_uuid)
-        .cloned()
         .collect::<Vec<_>>();
     inputs.sort_by_key(|row| (row.ordinal, row.input_confidence_uuid));
     inputs

@@ -251,21 +251,15 @@ impl AssertionValidityLedger {
             .iter()
             .find(|row| row.validity_event_uuid == validity_event_uuid)
             .ok_or(KnowledgeError::Dangling("validity_event_uuid"))?;
-        let mut writer = CanonicalWriter::new();
-        writer.raw(row.validity_event_uuid.as_bytes())?;
-        writer.raw(row.assertion_uuid.as_bytes())?;
-        optional_i64(&mut writer, row.valid_from_micros)?;
-        optional_i64(&mut writer, row.valid_to_micros)?;
-        optional_uuid(&mut writer, row.reasoning_uuid)?;
-        writer.raw(row.provenance_uuid.as_bytes())?;
-        writer.i64(row.recorded_at_micros)?;
-        writer.u32(row.contract_version)?;
-        fingerprint(
-            CanonicalDomain::AssertionValidity,
-            CANONICAL_CONTRACT_VERSION,
-            &writer.finish(),
-        )
-        .map_err(Into::into)
+        validity_fingerprint_for_row(row)
+    }
+
+    /// Compute canonical validity fingerprints in one pass without UUID searches.
+    pub fn event_fingerprints(&self) -> Result<Vec<(Uuid, [u8; 32])>, KnowledgeError> {
+        self.events
+            .iter()
+            .map(|row| Ok((row.validity_event_uuid, validity_fingerprint_for_row(row)?)))
+            .collect()
     }
 
     /// Build the authoritative Arrow batch.
@@ -334,6 +328,24 @@ impl AssertionValidityLedger {
         }
         Self::new(events)
     }
+}
+
+fn validity_fingerprint_for_row(row: &AssertionValidityEvent) -> Result<[u8; 32], KnowledgeError> {
+    let mut writer = CanonicalWriter::new();
+    writer.raw(row.validity_event_uuid.as_bytes())?;
+    writer.raw(row.assertion_uuid.as_bytes())?;
+    optional_i64(&mut writer, row.valid_from_micros)?;
+    optional_i64(&mut writer, row.valid_to_micros)?;
+    optional_uuid(&mut writer, row.reasoning_uuid)?;
+    writer.raw(row.provenance_uuid.as_bytes())?;
+    writer.i64(row.recorded_at_micros)?;
+    writer.u32(row.contract_version)?;
+    fingerprint(
+        CanonicalDomain::AssertionValidity,
+        CANONICAL_CONTRACT_VERSION,
+        &writer.finish(),
+    )
+    .map_err(Into::into)
 }
 
 pub(crate) fn schema_registry_entry() -> SchemaRegistryEntry {

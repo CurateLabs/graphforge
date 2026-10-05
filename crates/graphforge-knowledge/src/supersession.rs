@@ -181,25 +181,15 @@ impl AssertionSupersessionLedger {
             .iter()
             .find(|row| row.supersession_uuid == supersession_uuid)
             .ok_or(KnowledgeError::Dangling("supersession_uuid"))?;
-        let mut writer = CanonicalWriter::new();
-        for value in [
-            row.supersession_uuid,
-            row.prior_assertion_uuid,
-            row.replacement_assertion_uuid,
-            row.status_event_uuid,
-            row.reasoning_uuid,
-            row.provenance_uuid,
-        ] {
-            writer.raw(value.as_bytes())?;
-        }
-        writer.i64(row.recorded_at_micros)?;
-        writer.u32(row.contract_version)?;
-        fingerprint(
-            CanonicalDomain::AssertionSupersession,
-            CANONICAL_CONTRACT_VERSION,
-            &writer.finish(),
-        )
-        .map_err(Into::into)
+        relation_fingerprint_for_row(row)
+    }
+
+    /// Compute canonical relation fingerprints in one pass without UUID searches.
+    pub fn relation_fingerprints(&self) -> Result<Vec<(Uuid, [u8; 32])>, KnowledgeError> {
+        self.relations
+            .iter()
+            .map(|row| Ok((row.supersession_uuid, relation_fingerprint_for_row(row)?)))
+            .collect()
     }
 
     /// Build the authoritative Arrow batch.
@@ -291,6 +281,28 @@ impl AssertionSupersessionLedger {
         }
         Self::new(relations)
     }
+}
+
+fn relation_fingerprint_for_row(row: &AssertionSupersession) -> Result<[u8; 32], KnowledgeError> {
+    let mut writer = CanonicalWriter::new();
+    for value in [
+        row.supersession_uuid,
+        row.prior_assertion_uuid,
+        row.replacement_assertion_uuid,
+        row.status_event_uuid,
+        row.reasoning_uuid,
+        row.provenance_uuid,
+    ] {
+        writer.raw(value.as_bytes())?;
+    }
+    writer.i64(row.recorded_at_micros)?;
+    writer.u32(row.contract_version)?;
+    fingerprint(
+        CanonicalDomain::AssertionSupersession,
+        CANONICAL_CONTRACT_VERSION,
+        &writer.finish(),
+    )
+    .map_err(Into::into)
 }
 
 pub(crate) fn schema_registry_entry() -> SchemaRegistryEntry {
