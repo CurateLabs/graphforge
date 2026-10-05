@@ -162,7 +162,7 @@ fn epistemic(
     ids: &mut Ids,
 ) -> Result<Vec<ProjectParticipant>, GfError> {
     let reasoning = k::read_reasoning_ledger(g)?
-        .records
+        .into_records()
         .into_iter()
         .filter(|r| has(ids, "assertion", r.assertion_uuid))
         .collect::<Vec<_>>();

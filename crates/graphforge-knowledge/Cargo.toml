@@ -7,6 +7,9 @@ license.workspace = true
 license-file.workspace = true
 repository.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 arrow = { workspace = true }
 graphforge-core = { version = "0.6.0-dev", path = "../graphforge-core" }

@@ -1955,7 +1955,7 @@ pub(crate) mod tests {
 
         let strict_reasoning = ReasoningLedger::new(knowledge.reasoning.clone()).unwrap();
         let composite = composite_reasoning(knowledge.reasoning).unwrap();
-        assert_eq!(composite, strict_reasoning.records);
+        assert_eq!(composite.as_slice(), strict_reasoning.records());
         for row in &composite {
             assert_eq!(
                 composite_reasoning_fingerprint(row).unwrap(),

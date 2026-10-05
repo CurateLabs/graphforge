@@ -42,6 +42,7 @@ fn reasoning_is_append_only_exact_idempotent_and_reopenable() {
 
     graph.set_clock_for_test(|| Ok(20));
     let amendment_uuid = uuid7(8);
+    graphforge_knowledge::reasoning_test_support::start_record_validation_count();
     graph
         .record_reasoning(RecordReasoningRequest {
             context: WriteContext {
@@ -57,6 +58,11 @@ fn reasoning_is_append_only_exact_idempotent_and_reopenable() {
             provenance_uuid,
         })
         .unwrap();
+    assert_eq!(
+        graphforge_knowledge::reasoning_test_support::finish_record_validation_count(),
+        4,
+        "one existing-row decode + one incoming-row validation + the post-publication decode of both rows; append must not validate the prior row again"
+    );
     let history = graph
         .list_reasoning(ListReasoningRequest {
             assertion_uuid: Some(assertion_uuid),

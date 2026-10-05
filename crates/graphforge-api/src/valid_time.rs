@@ -434,7 +434,7 @@ fn validate_references(
     }
     if let Some(reasoning_uuid) = reasoning_uuid
         && !crate::knowledge::read_reasoning_ledger(generation)?
-            .records
+            .records()
             .iter()
             .any(|row| row.reasoning_uuid == reasoning_uuid && row.assertion_uuid == assertion_uuid)
     {
