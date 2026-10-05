@@ -128,6 +128,7 @@ mod find_execution;
 mod generation_diff;
 mod graph_inspection;
 mod graph_publication;
+#[cfg(test)]
 mod graph_snapshot;
 #[cfg(test)]
 use graph_publication::participant_encoding;
