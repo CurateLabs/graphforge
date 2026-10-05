@@ -344,10 +344,14 @@ def lifecycle_application_io(**rows: dict) -> dict:
         "fsync_synchronization",
         "recovery_reauthentication",
         "read_path_scan",
+        "property_mutation_inventory",
+        "property_mutation_route_authority",
     )
     phases = {name: dict.fromkeys(fields, 0) for name in names}
     phases["hydration_verification"].update(read_bytes=2_048, read_calls=4)
     phases["read_path_scan"].update(read_bytes=512, read_calls=2)
+    phases["property_mutation_inventory"].update(read_bytes=1_777, read_calls=1)
+    phases["property_mutation_route_authority"].update(read_bytes=346, read_calls=2)
     for name, values in rows.items():
         phases[name].update(values)
     return {
@@ -811,6 +815,15 @@ class ProgressiveRunControllerTests(unittest.TestCase):
             APPLICATION_IO_FIELDS, 0
         )
         changed_gf = graphforge(18, invented)
+        with self.assertRaisesRegex(ControllerError, "inventory is incomplete"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+        missing_phase = authoritative_receipts(18)
+        del missing_phase["query"][0]["application_io"]["phases"][
+            "property_mutation_route_authority"
+        ]
+        changed_gf = graphforge(18, missing_phase)
         with self.assertRaisesRegex(ControllerError, "inventory is incomplete"):
             assemble_rung_evidence(
                 root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)

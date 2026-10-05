@@ -157,6 +157,8 @@ mod permanent_parquet_test_support;
 #[cfg(test)]
 mod pinned_workspace_tests;
 #[cfg(test)]
+mod property_mutation_inventory_tests;
+#[cfg(test)]
 mod workspace_flip_policy_tests;
 #[cfg(feature = "research")]
 pub use multi_ontology::{

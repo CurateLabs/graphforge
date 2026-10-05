@@ -365,14 +365,16 @@ fn the_lifecycle_inventory_extends_the_construction_inventory_without_changing_i
     // this instrumentation existed.
     assert_eq!(StorageIoPhase::ALL.len(), 9);
     assert!(!StorageIoPhase::ALL.contains(&StorageIoPhase::ReadPathScan));
-    assert_eq!(StorageIoPhase::LIFECYCLE.len(), 10);
+    assert_eq!(StorageIoPhase::LIFECYCLE.len(), 12);
 
     let _capture = LifecycleIoCapture::install();
     let encoded =
         serde_json::to_value(lifecycle_io_snapshot().unwrap()).expect("attribution serializes");
     let phases = encoded["phases"].as_object().expect("phase map");
-    assert_eq!(phases.len(), 10);
+    assert_eq!(phases.len(), 12);
     assert!(phases.contains_key("read_path_scan"));
+    assert!(phases.contains_key("property_mutation_inventory"));
+    assert!(phases.contains_key("property_mutation_route_authority"));
     // The document is the shape construction already emits.
     assert_eq!(encoded.as_object().expect("document").len(), 2);
     assert!(encoded.get("totals").is_some());

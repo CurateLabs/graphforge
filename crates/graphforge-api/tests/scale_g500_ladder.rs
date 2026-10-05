@@ -4509,6 +4509,8 @@ const fn phase_name(phase: graphforge_storage::StorageIoPhase) -> &'static str {
         StorageIoPhase::FsyncSynchronization => "fsync_synchronization",
         StorageIoPhase::RecoveryReauthentication => "recovery_reauthentication",
         StorageIoPhase::ReadPathScan => "read_path_scan",
+        StorageIoPhase::PropertyMutationInventory => "property_mutation_inventory",
+        StorageIoPhase::PropertyMutationRouteAuthority => "property_mutation_route_authority",
     }
 }
 

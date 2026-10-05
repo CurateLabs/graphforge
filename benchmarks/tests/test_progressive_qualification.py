@@ -380,6 +380,51 @@ class ProgressiveQualificationTests(unittest.TestCase):
                 invalid["storage_components"]["source_project_current_allocated_bytes"] = malformed
                 self.assertFalse(self.rung_schema.is_valid(invalid))
 
+    def test_lifecycle_application_io_schema_accepts_new_closed_phase_inventory(self) -> None:
+        phase_names = (
+            "append_merge",
+            "seal_authentication",
+            "shape_consume_reauthentication",
+            "encode_write_postwrite_authentication",
+            "publication_preauthentication",
+            "cas_install_read_write",
+            "hydration_verification",
+            "fsync_synchronization",
+            "recovery_reauthentication",
+            "read_path_scan",
+            "property_mutation_inventory",
+            "property_mutation_route_authority",
+        )
+        totals = {
+            "read_bytes": 0,
+            "write_bytes": 0,
+            "read_calls": 0,
+            "write_calls": 0,
+            "object_count": 0,
+            "block_count": 0,
+            "fsync_calls": 0,
+        }
+        phases = {name: dict(totals) for name in phase_names}
+        lifecycle = {"phases": phases, "totals": totals}
+        current = rung(18)
+        current["storage_attribution"]["lifecycle_application_io"] = {
+            name: copy.deepcopy(lifecycle)
+            for name in ("reopen", "recount", "query", "export", "clean_import", "reopen_proof")
+        }
+        self.rung_schema.validate(current)
+
+        unknown = copy.deepcopy(current)
+        unknown["storage_attribution"]["lifecycle_application_io"]["query"]["phases"][
+            "future_phase"
+        ] = dict(totals)
+        self.assertFalse(self.rung_schema.is_valid(unknown))
+
+        missing = copy.deepcopy(current)
+        del missing["storage_attribution"]["lifecycle_application_io"]["query"]["phases"][
+            "property_mutation_inventory"
+        ]
+        self.assertFalse(self.rung_schema.is_valid(missing))
+
     def test_profile_schema_rejects_non_string_generator_identity(self) -> None:
         profile = json.loads((ROOT / "profiles/graph500/s18-local.json").read_text())
         profile["generator"]["identity"] = 42

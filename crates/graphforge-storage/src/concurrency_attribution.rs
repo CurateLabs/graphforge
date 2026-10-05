@@ -217,6 +217,8 @@ fn phase_name(phase: StorageIoPhase) -> &'static str {
         StorageIoPhase::FsyncSynchronization => "fsync",
         StorageIoPhase::RecoveryReauthentication => "recovery",
         StorageIoPhase::ReadPathScan => "read_path",
+        StorageIoPhase::PropertyMutationInventory => "property_mutation_inventory",
+        StorageIoPhase::PropertyMutationRouteAuthority => "property_mutation_route_authority",
     }
 }
 

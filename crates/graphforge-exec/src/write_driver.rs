@@ -1735,11 +1735,15 @@ pub(crate) fn stage_statement(
     let workspace_inventory = if ctx.set_acc.is_empty() && ctx.remove_acc.is_empty() {
         None
     } else {
+        let mut property_routes = std::collections::BTreeSet::new();
+        ctx.set_acc.add_property_routes(&mut property_routes);
+        ctx.remove_acc.add_property_routes(&mut property_routes);
         Some(
-            graphforge_storage::AuthenticatedPropertyInventory::capture_workspace_with_topology(
+            graphforge_storage::AuthenticatedPropertyInventory::capture_workspace_property_routes(
                 dir,
                 inventory,
                 &ctx.writer.topology_files()?,
+                &property_routes,
             )?,
         )
     };

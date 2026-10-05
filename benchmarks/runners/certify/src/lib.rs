@@ -1520,15 +1520,17 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
 }
 
 /// Closed full-lifecycle phase inventory emitted by `application_io` on every
-/// non-ingest receipt (#1389). This is the construction inventory plus the
-/// read-path row construction never performs.
-const LIFECYCLE_IO_PHASES: [&str; 10] = [
+/// non-ingest receipt (#1389), including property mutation's authenticated
+/// inventory and route authority phases.
+const LIFECYCLE_IO_PHASES: [&str; 12] = [
     "append_merge",
     "cas_install_read_write",
     "encode_write_postwrite_authentication",
     "fsync_synchronization",
     "hydration_verification",
     "publication_preauthentication",
+    "property_mutation_inventory",
+    "property_mutation_route_authority",
     "read_path_scan",
     "recovery_reauthentication",
     "seal_authentication",
@@ -2564,11 +2566,25 @@ mod tests {
                 "object_count": 1, "block_count": 0, "fsync_calls": 0
             }),
         );
+        phases.insert(
+            "property_mutation_inventory".to_owned(),
+            serde_json::json!({
+                "read_bytes": 1_777, "write_bytes": 0, "read_calls": 1, "write_calls": 0,
+                "object_count": 1, "block_count": 0, "fsync_calls": 0
+            }),
+        );
+        phases.insert(
+            "property_mutation_route_authority".to_owned(),
+            serde_json::json!({
+                "read_bytes": 346, "write_bytes": 0, "read_calls": 2, "write_calls": 0,
+                "object_count": 2, "block_count": 0, "fsync_calls": 0
+            }),
+        );
         serde_json::json!({
             "phases": phases,
             "totals": {
-                "read_bytes": 4_096, "write_bytes": 0, "read_calls": 2, "write_calls": 0,
-                "object_count": 1, "block_count": 0, "fsync_calls": 0
+                "read_bytes": 6_219, "write_bytes": 0, "read_calls": 5, "write_calls": 0,
+                "object_count": 4, "block_count": 0, "fsync_calls": 0
             }
         })
     }
@@ -2588,6 +2604,7 @@ mod tests {
 
     #[test]
     fn lifecycle_application_io_is_closed_and_must_reconcile() {
+        assert_eq!(super::LIFECYCLE_IO_PHASES.len(), 12);
         assert!(super::sanitized_lifecycle_application_io(
             &lifecycle_application_io()
         ));
@@ -2597,12 +2614,18 @@ mod tests {
             "object_count": 0, "block_count": 0, "fsync_calls": 0
         });
         assert!(!super::sanitized_lifecycle_application_io(&unknown_phase));
-        let mut missing_phase = lifecycle_application_io();
-        missing_phase["phases"]
-            .as_object_mut()
-            .unwrap()
-            .remove("read_path_scan");
-        assert!(!super::sanitized_lifecycle_application_io(&missing_phase));
+        for phase in [
+            "property_mutation_inventory",
+            "property_mutation_route_authority",
+            "read_path_scan",
+        ] {
+            let mut missing_phase = lifecycle_application_io();
+            missing_phase["phases"].as_object_mut().unwrap().remove(phase);
+            assert!(
+                !super::sanitized_lifecycle_application_io(&missing_phase),
+                "missing phase {phase} must be refused"
+            );
+        }
         let mut unreconciled = lifecycle_application_io();
         unreconciled["totals"]["read_bytes"] = serde_json::json!(4_097);
         assert!(!super::sanitized_lifecycle_application_io(&unreconciled));

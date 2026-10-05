@@ -37,6 +37,7 @@ use graphforge_plan::GraphSetNode;
 use graphforge_plan::RemoveTarget;
 use graphforge_plan::SetTarget;
 use graphforge_rel::scalar_to_ir_literal;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
@@ -448,6 +449,22 @@ impl SetAccumulator {
         self.nodes.is_empty() && self.edges.is_empty()
     }
 
+    pub(super) fn add_property_routes(
+        &self,
+        routes: &mut BTreeSet<(graphforge_storage::PropertyRouteKind, String)>,
+    ) {
+        routes.extend(
+            self.nodes
+                .keys()
+                .map(|route| (graphforge_storage::PropertyRouteKind::Node, route.clone())),
+        );
+        routes.extend(
+            self.edges
+                .keys()
+                .map(|route| (graphforge_storage::PropertyRouteKind::Edge, route.clone())),
+        );
+    }
+
     pub(super) fn record(
         &mut self,
         is_edge: bool,
@@ -552,6 +569,22 @@ pub(crate) struct RemoveAccumulator {
 impl RemoveAccumulator {
     pub(super) fn is_empty(&self) -> bool {
         self.nodes.is_empty() && self.edges.is_empty()
+    }
+
+    pub(super) fn add_property_routes(
+        &self,
+        routes: &mut BTreeSet<(graphforge_storage::PropertyRouteKind, String)>,
+    ) {
+        routes.extend(
+            self.nodes
+                .keys()
+                .map(|route| (graphforge_storage::PropertyRouteKind::Node, route.clone())),
+        );
+        routes.extend(
+            self.edges
+                .keys()
+                .map(|route| (graphforge_storage::PropertyRouteKind::Edge, route.clone())),
+        );
     }
 
     pub(super) fn record(&mut self, is_edge: bool, stem: String, uuid: [u8; 16], prop: String) {

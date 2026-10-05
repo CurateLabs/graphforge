@@ -348,8 +348,9 @@ pub fn reset() {
 ///
 /// Serializes to the same `{phases, totals}` document
 /// [`ConstructionPhaseAttribution`](crate::ConstructionPhaseAttribution) emits,
-/// with one extra row: `read_path_scan`. Construction never records into that
-/// row: the publish-side, import-side and explicit (`index("adjacency")`)
+/// with three extra rows: `read_path_scan`, `property_mutation_inventory` and
+/// `property_mutation_route_authority`.
+/// Construction never records into those rows: the publish-side, import-side and explicit (`index("adjacency")`)
 /// adjacency builds are scoped to the encoding row (#1449). A nonzero
 /// `read_path_scan` therefore means committed read-path work, including a
 /// query process's lazy adjacency rebuild with its writes and barriers.
@@ -727,15 +728,21 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_inventory_is_the_construction_inventory_plus_the_read_path() {
+    fn lifecycle_inventory_includes_mutation_and_read_path_phases() {
         assert_eq!(
             StorageIoPhase::LIFECYCLE.len(),
-            StorageIoPhase::ALL.len() + 1
+            StorageIoPhase::ALL.len() + 3
         );
         for phase in StorageIoPhase::ALL {
             assert!(StorageIoPhase::LIFECYCLE.contains(&phase));
         }
         assert!(!StorageIoPhase::ALL.contains(&StorageIoPhase::ReadPathScan));
+        assert!(StorageIoPhase::LIFECYCLE.contains(&StorageIoPhase::PropertyMutationInventory));
+        assert!(
+            StorageIoPhase::LIFECYCLE.contains(&StorageIoPhase::PropertyMutationRouteAuthority)
+        );
+        assert!(!StorageIoPhase::ALL.contains(&StorageIoPhase::PropertyMutationInventory));
+        assert!(!StorageIoPhase::ALL.contains(&StorageIoPhase::PropertyMutationRouteAuthority));
         for (index, phase) in StorageIoPhase::LIFECYCLE.into_iter().enumerate() {
             assert_eq!(phase.lifecycle_index(), index);
         }
