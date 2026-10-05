@@ -356,3 +356,25 @@ The scaling studies under `benchmarks/` (`make bench-traversal`,
 `make bench-merge-scaling`, `make bench-embedded-performance`, and the fixed-hop LIMIT
 matrices) remain hardware-specific manual evidence. They are unrelated to the
 continuous CodSpeed lane.
+
+## Confidence ledger merge measurement
+
+The ignored `confidence::tests::quiet_host_confidence_merge_cost_measurement` test compares
+the previous full-constructor merge with the incremental trusted-base merge. Fixture
+construction, validation, sorting, and canonical input fingerprinting are outside the
+timed interval. The test checks output equality before timing, alternates the order of
+seven paired repetitions, and measures a staged assessment/input against bases of 10,000
+and 100,000 assessments, each with one input per assessment. Report elapsed median time
+and nanoseconds per existing assessment. Run on the guarded quiet host:
+
+```bash
+CARGO_TARGET_DIR=/home/ubuntu/.cache/graphforge-target-1825-measurement \
+  cargo test --release --no-run --locked -p graphforge-knowledge
+source /home/ubuntu/.claude/gf-quiet-host.sh && require_quiet_host && \
+CARGO_TARGET_DIR=/home/ubuntu/.cache/graphforge-target-1825-measurement \
+  cargo test --release --locked -p graphforge-knowledge \
+  confidence::tests::quiet_host_confidence_merge_cost_measurement -- \
+  --ignored --nocapture --test-threads=1
+```
+
+Canonical input digests (base rows followed by staged rows) are `da8bfd70ed1122f60fa9d9ad73112345244680c01c83fb34a495891a21323c3c` (10,000 assessments) and `a11eceb8f5cfa6a2f9c8bdfed3eda6374c6ae4faa7c46ae137e2f578aaf50d64` (100,000 assessments). The raw measured outputs and executable SHA-256 are on [issue #1825](https://github.com/CurateLabs/graphforge/issues/1825#issuecomment-5988658705).

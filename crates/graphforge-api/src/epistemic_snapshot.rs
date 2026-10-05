@@ -304,7 +304,7 @@ fn compose_rows(
         .map(|row| row.status_event_uuid)
         .collect::<HashSet<_>>();
     let visible_confidence = confidence
-        .assessments
+        .assessments()
         .iter()
         .filter(|row| row.recorded_at_micros <= cutoff)
         .map(|row| row.confidence_uuid)

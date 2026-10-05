@@ -6,7 +6,6 @@ use super::CONFIDENCE_INPUT_CONTRACT_VERSION;
 use super::CONFIDENCE_INPUT_SCHEMA;
 use super::KnowledgeError;
 use super::canonical_optional_f64;
-use super::check_limit;
 use super::f64_column;
 use super::fixed_column;
 use super::invalid;
@@ -37,6 +36,11 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
+
+#[cfg(test)]
+thread_local! {
+    static CONFIDENCE_ROW_VALIDATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Closed confidence policy registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -152,15 +156,43 @@ impl ConfidenceInput {
 }
 
 /// Validated append-only confidence participant content.
+///
+/// The validated rows are private so callers cannot invalidate them after
+/// construction. Borrow them through [`Self::assessments`] and [`Self::inputs`],
+/// or consume both collections with [`Self::into_parts`].
+///
+/// ```compile_fail
+/// use graphforge_knowledge::ConfidenceLedger;
+/// let mut ledger = ConfidenceLedger::default();
+/// ledger.assessments.clear();
+/// ```
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ConfidenceLedger {
     /// Assessments ordered by `(recorded_at, confidence_uuid)`.
-    pub assessments: Vec<ConfidenceAssessment>,
+    assessments: Vec<ConfidenceAssessment>,
     /// Inputs ordered by assessment then `(ordinal, input_confidence_uuid)`.
-    pub inputs: Vec<ConfidenceInput>,
+    inputs: Vec<ConfidenceInput>,
 }
 
 impl ConfidenceLedger {
+    /// Borrow assessments in deterministic order.
+    #[must_use]
+    pub fn assessments(&self) -> &[ConfidenceAssessment] {
+        &self.assessments
+    }
+
+    /// Borrow normalized inputs in deterministic order.
+    #[must_use]
+    pub fn inputs(&self) -> &[ConfidenceInput] {
+        &self.inputs
+    }
+
+    /// Consume the ledger and return its assessment and input rows.
+    #[must_use]
+    pub fn into_parts(self) -> (Vec<ConfidenceAssessment>, Vec<ConfidenceInput>) {
+        (self.assessments, self.inputs)
+    }
+
     /// Validate, sort, and construct confidence content.
     pub fn new(
         mut assessments: Vec<ConfidenceAssessment>,
@@ -168,19 +200,7 @@ impl ConfidenceLedger {
     ) -> Result<Self, KnowledgeError> {
         inputs.sort_by_key(|row| (row.confidence_uuid, row.ordinal, row.input_confidence_uuid));
         validate_confidence_rows(&assessments, &inputs)?;
-        let times = assessments
-            .iter()
-            .map(|row| (row.confidence_uuid, row.recorded_at_micros))
-            .collect::<HashMap<_, _>>();
-        assessments.sort_by_key(|row| (row.recorded_at_micros, row.confidence_uuid));
-        inputs.sort_by_key(|row| {
-            (
-                times[&row.confidence_uuid],
-                row.confidence_uuid,
-                row.ordinal,
-                row.input_confidence_uuid,
-            )
-        });
+        sort_confidence_rows(&mut assessments, &mut inputs);
         Ok(Self {
             assessments,
             inputs,
@@ -263,6 +283,15 @@ impl ConfidenceLedger {
 
     /// Merge staged content idempotently.
     pub fn merge(&self, staged: &Self) -> Result<Self, KnowledgeError> {
+        self.merge_with_limits(staged, super::MAX_KNOWLEDGE_ROWS, super::MAX_KNOWLEDGE_ROWS)
+    }
+
+    fn merge_with_limits(
+        &self,
+        staged: &Self,
+        assessment_limit: usize,
+        input_limit: usize,
+    ) -> Result<Self, KnowledgeError> {
         let mut assessments = self.assessments.clone();
         let mut inputs = self.inputs.clone();
         for row in &staged.assessments {
@@ -287,7 +316,17 @@ impl ConfidenceLedger {
                 );
             }
         }
-        Self::new(assessments, inputs)
+        check_confidence_row_limit(
+            "confidence_assessments",
+            assessments.len(),
+            assessment_limit,
+        )?;
+        check_confidence_row_limit("confidence_inputs", inputs.len(), input_limit)?;
+        sort_confidence_rows(&mut assessments, &mut inputs);
+        Ok(Self {
+            assessments,
+            inputs,
+        })
     }
 
     /// Canonical assessment fingerprint over policy, normalized value, and input snapshot.
@@ -452,11 +491,31 @@ fn validate_confidence_rows(
     assessments: &[ConfidenceAssessment],
     inputs: &[ConfidenceInput],
 ) -> Result<(), KnowledgeError> {
-    check_limit("confidence_assessments", assessments.len())?;
-    check_limit("confidence_inputs", inputs.len())?;
+    validate_confidence_rows_with_limits(
+        assessments,
+        inputs,
+        super::MAX_KNOWLEDGE_ROWS,
+        super::MAX_KNOWLEDGE_ROWS,
+    )
+}
+
+fn validate_confidence_rows_with_limits(
+    assessments: &[ConfidenceAssessment],
+    inputs: &[ConfidenceInput],
+    assessment_limit: usize,
+    input_limit: usize,
+) -> Result<(), KnowledgeError> {
+    check_confidence_row_limit(
+        "confidence_assessments",
+        assessments.len(),
+        assessment_limit,
+    )?;
+    check_confidence_row_limit("confidence_inputs", inputs.len(), input_limit)?;
     let mut ids = HashSet::with_capacity(assessments.len());
     let mut policies = HashMap::with_capacity(assessments.len());
     for row in assessments {
+        #[cfg(test)]
+        CONFIDENCE_ROW_VALIDATION_COUNT.with(|count| count.set(count.get() + 1));
         require_v7(row.confidence_uuid, "confidence_uuid")?;
         require_v7(row.assertion_uuid, "assertion_uuid")?;
         require_uuid(row.provenance_uuid, "provenance_uuid")?;
@@ -478,6 +537,8 @@ fn validate_confidence_rows(
     let mut input_ids = HashSet::with_capacity(inputs.len());
     let mut normalized_inputs: HashMap<Uuid, Vec<(u32, Uuid, Option<f64>)>> = HashMap::new();
     for input in inputs {
+        #[cfg(test)]
+        CONFIDENCE_ROW_VALIDATION_COUNT.with(|count| count.set(count.get() + 1));
         require_v7(input.confidence_uuid, "confidence_uuid")?;
         require_v7(input.input_confidence_uuid, "input_confidence_uuid")?;
         validate_confidence(input.input_value, "input_value")?;
@@ -525,6 +586,48 @@ fn validate_confidence_rows(
         validate_policy_snapshot(assessment, policy, values)?;
     }
     Ok(())
+}
+
+fn check_confidence_row_limit(
+    participant: &'static str,
+    observed: usize,
+    limit: usize,
+) -> Result<(), KnowledgeError> {
+    if observed > limit {
+        Err(KnowledgeError::Limit {
+            participant,
+            observed,
+            limit,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn sort_confidence_rows(assessments: &mut [ConfidenceAssessment], inputs: &mut [ConfidenceInput]) {
+    let times = assessments
+        .iter()
+        .map(|row| (row.confidence_uuid, row.recorded_at_micros))
+        .collect::<HashMap<_, _>>();
+    assessments.sort_by_key(|row| (row.recorded_at_micros, row.confidence_uuid));
+    inputs.sort_by_key(|row| {
+        (
+            times[&row.confidence_uuid],
+            row.confidence_uuid,
+            row.ordinal,
+            row.input_confidence_uuid,
+        )
+    });
+}
+
+#[cfg(test)]
+fn reset_confidence_row_validation_count() {
+    CONFIDENCE_ROW_VALIDATION_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn confidence_row_validation_count() -> usize {
+    CONFIDENCE_ROW_VALIDATION_COUNT.with(std::cell::Cell::get)
 }
 
 fn validate_policy_snapshot(

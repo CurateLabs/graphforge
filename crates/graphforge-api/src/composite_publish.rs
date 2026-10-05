@@ -663,7 +663,7 @@ fn build_validation_snapshot(
             .collect();
         let confidence = crate::knowledge::read_confidence_ledger(parent)?;
         snapshot.confidence = confidence
-            .assessments
+            .assessments()
             .iter()
             .map(|row| row.confidence_uuid)
             .collect();
@@ -1332,13 +1332,13 @@ fn merge_confidence(
     if external_inputs.is_empty() {
         return Ok(merged);
     }
-    let mut inputs = merged.inputs;
+    let (assessments, mut inputs) = merged.into_parts();
     for row in external_inputs {
         if !inputs.iter().any(|existing| existing == &row) {
             inputs.push(row);
         }
     }
-    ConfidenceLedger::new(merged.assessments, inputs).map_err(crate::knowledge::knowledge_error)
+    ConfidenceLedger::new(assessments, inputs).map_err(crate::knowledge::knowledge_error)
 }
 
 fn merge_evidence(
@@ -1575,7 +1575,7 @@ mod tests {
         assert!(
             merge_confidence(&parent, &knowledge)
                 .unwrap()
-                .assessments
+                .assessments()
                 .is_empty()
         );
         assert!(
@@ -1921,7 +1921,7 @@ mod tests {
         assert_eq!(
             crate::knowledge::read_confidence_ledger(&parent)
                 .unwrap()
-                .inputs,
+                .inputs(),
             expected_inputs
         );
     }

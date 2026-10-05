@@ -331,7 +331,7 @@ pub(super) fn merged_confidence_provenance(
     event: &ProvenanceEvent,
 ) -> Result<ProvenanceLedger, GfError> {
     let existing = crate::provenance::read_ledger(parent)?;
-    let mut lineage = Vec::with_capacity(staged.inputs.len() + 2);
+    let mut lineage = Vec::with_capacity(staged.inputs().len() + 2);
     lineage.push(
         LineageRecord::new(
             event.provenance_uuid,
@@ -342,7 +342,7 @@ pub(super) fn merged_confidence_provenance(
         )
         .map_err(provenance_error)?,
     );
-    for (ordinal, input) in staged.inputs.iter().enumerate() {
+    for (ordinal, input) in staged.inputs().iter().enumerate() {
         lineage.push(
             LineageRecord::new(
                 event.provenance_uuid,

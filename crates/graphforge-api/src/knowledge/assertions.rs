@@ -236,7 +236,7 @@ fn validate_status_references(
     }
     if let Some(confidence_uuid) = confidence_uuid
         && !read_confidence_ledger(generation)?
-            .assessments
+            .assessments()
             .iter()
             .any(|row| {
                 row.confidence_uuid == confidence_uuid && row.assertion_uuid == assertion_uuid

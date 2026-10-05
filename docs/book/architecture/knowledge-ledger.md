@@ -194,6 +194,24 @@ Opening an unsupported pre-v1 project root returns `GF_UNSUPPORTED_PROJECT_FORMA
 before mutation, in every binding. There is no migration, import, or
 backward-compatibility path for unsupported layouts.
 
+## Validated Rust ledgers
+
+`ConfidenceLedger` owns private assessment and input vectors. The constructor validates
+row fields, confidence-value rules, duplicate identities, canonical input order, input
+ownership and ordinal continuity, and per-vector limits. Callers can borrow rows with
+`assessments()` and `inputs()`, or consume both vectors with `into_parts()`. Making the
+fields private is a pre-v1 Rust source compatibility change; persisted Arrow schemas and
+public API results do not change.
+
+`merge()` trusts both inputs as already validated immutable ledgers. It validates newly
+staged rows and cross-ledger identity conflicts, checks combined row limits, and restores
+canonical ordering without repeating full-row checks over the existing base. Conflict
+lookup and output sorting still scale with ledger size, and this optimization does not
+remove confidence fingerprint recomputation elsewhere in publication. The ignored
+quiet-host comparison procedure and canonical input digests are recorded in
+[benchmarking guidance](../../development/benchmarking.md#confidence-ledger-merge-measurement);
+raw timing results belong on [issue #1825](https://github.com/CurateLabs/graphforge/issues/1825).
+
 ## Public API behavior
 
 Rust is authoritative. Python returns `pyarrow.Table`; Node returns Arrow IPC
