@@ -3,6 +3,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use arrow::array::{
     Array, FixedSizeBinaryArray, FixedSizeBinaryBuilder, StringArray, StringBuilder,
     TimestampMicrosecondArray, TimestampMicrosecondBuilder, UInt32Array, UInt32Builder,
@@ -98,6 +101,11 @@ static SELECTION_SCHEMA_FINGERPRINT: LazyLock<[u8; 32]> = LazyLock::new(|| {
     )
     .expect("registered hypothesis-selection schema is within canonical bounds")
 });
+
+#[cfg(test)]
+thread_local! {
+    static ROW_VALIDATION_CALLS: Cell<Option<usize>> = const { Cell::new(None) };
+}
 
 /// Closed membership action.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -295,22 +303,30 @@ pub struct HypothesisLedger {
 impl HypothesisLedger {
     /// Validate, order, and construct all three record families together.
     pub fn new(
+        groups: Vec<HypothesisGroup>,
+        membership_events: Vec<HypothesisMembershipEvent>,
+        selection_events: Vec<HypothesisSelectionEvent>,
+    ) -> Result<Self, KnowledgeError> {
+        Self::new_with_limit(
+            groups,
+            membership_events,
+            selection_events,
+            MAX_KNOWLEDGE_ROWS,
+        )
+    }
+
+    fn new_with_limit(
         mut groups: Vec<HypothesisGroup>,
         mut membership_events: Vec<HypothesisMembershipEvent>,
         mut selection_events: Vec<HypothesisSelectionEvent>,
+        row_limit: usize,
     ) -> Result<Self, KnowledgeError> {
         for (participant, observed) in [
             ("hypothesis_groups", groups.len()),
             ("hypothesis_membership_events", membership_events.len()),
             ("hypothesis_selection_events", selection_events.len()),
         ] {
-            if observed > MAX_KNOWLEDGE_ROWS {
-                return Err(KnowledgeError::Limit {
-                    participant,
-                    observed,
-                    limit: MAX_KNOWLEDGE_ROWS,
-                });
-            }
+            validate_row_count(participant, observed, row_limit)?;
         }
         validate_groups(&groups)?;
         validate_event_ids(&membership_events, &selection_events)?;
@@ -431,26 +447,49 @@ impl HypothesisLedger {
 
     /// Merge append-only participants with exact replay semantics.
     pub fn merge(&self, staged: &Self) -> Result<Self, KnowledgeError> {
-        Self::new(
-            merge_rows(
-                &self.groups,
-                &staged.groups,
-                |row| row.group_uuid,
-                "group_uuid",
-            )?,
-            merge_rows(
-                &self.membership_events,
-                &staged.membership_events,
-                |row| row.membership_event_uuid,
-                "membership_event_uuid",
-            )?,
-            merge_rows(
-                &self.selection_events,
-                &staged.selection_events,
-                |row| row.selection_event_uuid,
-                "selection_event_uuid",
-            )?,
-        )
+        self.merge_with_limit(staged, MAX_KNOWLEDGE_ROWS)
+    }
+
+    fn merge_with_limit(&self, staged: &Self, row_limit: usize) -> Result<Self, KnowledgeError> {
+        let mut groups = merge_rows(
+            &self.groups,
+            &staged.groups,
+            |row| row.group_uuid,
+            "group_uuid",
+            "hypothesis_groups",
+            row_limit,
+        )?;
+        let mut membership_events = merge_rows(
+            &self.membership_events,
+            &staged.membership_events,
+            |row| row.membership_event_uuid,
+            "membership_event_uuid",
+            "hypothesis_membership_events",
+            row_limit,
+        )?;
+        let mut selection_events = merge_rows(
+            &self.selection_events,
+            &staged.selection_events,
+            |row| row.selection_event_uuid,
+            "selection_event_uuid",
+            "hypothesis_selection_events",
+            row_limit,
+        )?;
+
+        validate_question_key_uniqueness(&groups)?;
+        groups.sort_by_key(|row| (row.recorded_at_micros, row.group_uuid));
+        membership_events.sort_by_key(|row| (row.recorded_at_micros, row.membership_event_uuid));
+        selection_events.sort_by_key(|row| (row.recorded_at_micros, row.selection_event_uuid));
+
+        // The two immutable operands were validated at construction. Merging
+        // can only add rows or replay exact identities, but it can change the
+        // combined operation history, so replay all state transitions.
+        validate_state(&groups, &membership_events, &selection_events)?;
+        Ok(Self {
+            groups,
+            membership_events,
+            selection_events,
+        })
     }
 
     /// Build the authoritative group batch.
@@ -700,6 +739,7 @@ fn validate_groups(groups: &[HypothesisGroup]) -> Result<(), KnowledgeError> {
     let mut ids = HashSet::new();
     let mut keys = HashSet::new();
     for row in groups {
+        count_row_validation();
         HypothesisGroup::new(
             row.group_uuid,
             row.question_key.clone(),
@@ -728,6 +768,7 @@ fn validate_event_ids(
 ) -> Result<(), KnowledgeError> {
     let mut ids = HashSet::new();
     for row in membership {
+        count_row_validation();
         HypothesisMembershipEvent::new(
             row.membership_event_uuid,
             row.operation_uuid,
@@ -750,6 +791,7 @@ fn validate_event_ids(
     }
     ids.clear();
     for row in selection {
+        count_row_validation();
         HypothesisSelectionEvent::new(
             row.selection_event_uuid,
             row.operation_uuid,
@@ -770,6 +812,41 @@ fn validate_event_ids(
         }
     }
     Ok(())
+}
+
+fn validate_question_key_uniqueness(groups: &[HypothesisGroup]) -> Result<(), KnowledgeError> {
+    let mut keys = HashSet::with_capacity(groups.len());
+    for row in groups {
+        if !keys.insert(row.question_key.as_str()) {
+            return Err(KnowledgeError::Duplicate("question_key"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_row_count(
+    participant: &'static str,
+    observed: usize,
+    limit: usize,
+) -> Result<(), KnowledgeError> {
+    if observed > limit {
+        return Err(KnowledgeError::Limit {
+            participant,
+            observed,
+            limit,
+        });
+    }
+    Ok(())
+}
+
+#[inline]
+fn count_row_validation() {
+    #[cfg(test)]
+    ROW_VALIDATION_CALLS.with(|calls| {
+        if let Some(count) = calls.get() {
+            calls.set(Some(count + 1));
+        }
+    });
 }
 
 fn validate_state(
@@ -909,11 +986,14 @@ fn merge_rows<T, F>(
     staged: &[T],
     id: F,
     field: &'static str,
+    participant: &'static str,
+    row_limit: usize,
 ) -> Result<Vec<T>, KnowledgeError>
 where
     T: Clone + Eq,
     F: Fn(&T) -> Uuid,
 {
+    validate_row_count(participant, existing.len(), row_limit)?;
     let mut rows = existing.to_vec();
     let mut by_id = rows
         .iter()
@@ -926,6 +1006,7 @@ where
                 return Err(KnowledgeError::Conflict(field));
             }
         } else {
+            validate_row_count(participant, rows.len().saturating_add(1), row_limit)?;
             rows.push(row.clone());
             by_id.insert(id(row), row.clone());
         }
@@ -1102,6 +1183,7 @@ const fn invalid(field: &'static str, message: &'static str) -> KnowledgeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     fn invalid_code(error: &KnowledgeError) -> &'static str {
         match error {
@@ -1113,11 +1195,135 @@ mod tests {
         }
     }
 
+    fn invalid_field(error: &KnowledgeError) -> Option<&'static str> {
+        match error {
+            KnowledgeError::Invalid { field, .. } => Some(field),
+            _ => None,
+        }
+    }
+
     fn uuid7(seed: u8) -> Uuid {
         let mut bytes = [seed; 16];
         bytes[6] = (bytes[6] & 0x0f) | 0x70;
         bytes[8] = (bytes[8] & 0x3f) | 0x80;
         Uuid::from_bytes(bytes)
+    }
+
+    fn measurement_uuid(seed: u64) -> Uuid {
+        let mut bytes = [0; 16];
+        bytes[8..].copy_from_slice(&seed.to_be_bytes());
+        bytes[6] = 0x70;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
+    fn measurement_group(seed: u64) -> HypothesisGroup {
+        HypothesisGroup {
+            group_uuid: measurement_uuid(seed + 1),
+            question_key: format!("question.{seed:06}"),
+            provenance_uuid: measurement_uuid(seed + 1_000_000),
+            recorded_at_micros: i64::try_from(seed).unwrap(),
+            contract_version: HYPOTHESIS_GROUP_CONTRACT_VERSION,
+        }
+    }
+
+    fn merge_with_full_revalidation(
+        existing: &HypothesisLedger,
+        staged: &HypothesisLedger,
+    ) -> Result<HypothesisLedger, KnowledgeError> {
+        HypothesisLedger::new(
+            merge_rows(
+                &existing.groups,
+                &staged.groups,
+                |row| row.group_uuid,
+                "group_uuid",
+                "hypothesis_groups",
+                MAX_KNOWLEDGE_ROWS,
+            )?,
+            merge_rows(
+                &existing.membership_events,
+                &staged.membership_events,
+                |row| row.membership_event_uuid,
+                "membership_event_uuid",
+                "hypothesis_membership_events",
+                MAX_KNOWLEDGE_ROWS,
+            )?,
+            merge_rows(
+                &existing.selection_events,
+                &staged.selection_events,
+                |row| row.selection_event_uuid,
+                "selection_event_uuid",
+                "hypothesis_selection_events",
+                MAX_KNOWLEDGE_ROWS,
+            )?,
+        )
+    }
+
+    fn measurement_input_digest(existing: &HypothesisLedger, staged: &HypothesisLedger) -> String {
+        let mut writer = CanonicalWriter::new();
+        for ledger in [existing, staged] {
+            writer.u64(ledger.groups.len() as u64).unwrap();
+            for row in &ledger.groups {
+                writer.raw(row.group_uuid.as_bytes()).unwrap();
+                writer.text(&row.question_key).unwrap();
+                writer.raw(row.provenance_uuid.as_bytes()).unwrap();
+                writer.i64(row.recorded_at_micros).unwrap();
+                writer.u32(row.contract_version).unwrap();
+            }
+        }
+        fingerprint(
+            CanonicalDomain::HypothesisGroup,
+            CANONICAL_CONTRACT_VERSION,
+            &writer.finish(),
+        )
+        .unwrap()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+    }
+
+    fn median(mut values: Vec<Duration>) -> Duration {
+        values.sort_unstable();
+        values[values.len() / 2]
+    }
+
+    #[test]
+    #[ignore = "manual quiet-host before/after merge-cost measurement"]
+    fn quiet_host_merge_cost_measurement() {
+        for existing_count in [10_000_u64, 100_000] {
+            let existing = HypothesisLedger::new(
+                (0..existing_count).map(measurement_group).collect(),
+                vec![],
+                vec![],
+            )
+            .unwrap();
+            let staged =
+                HypothesisLedger::new(vec![measurement_group(existing_count)], vec![], vec![])
+                    .unwrap();
+            let repetitions = 9;
+            let mut before = Vec::with_capacity(repetitions);
+            let mut after = Vec::with_capacity(repetitions);
+            for _ in 0..repetitions {
+                let start = Instant::now();
+                std::hint::black_box(merge_with_full_revalidation(&existing, &staged).unwrap());
+                before.push(start.elapsed());
+
+                let start = Instant::now();
+                std::hint::black_box(existing.merge(&staged).unwrap());
+                after.push(start.elapsed());
+            }
+            let before_median = median(before);
+            let after_median = median(after);
+            let divisor = existing_count as f64;
+            println!(
+                "existing_rows={existing_count} staged_rows=1 repetitions={repetitions} input_sha256={} before_ns={} before_ns_per_existing_row={:.3} after_ns={} after_ns_per_existing_row={:.3}",
+                measurement_input_digest(&existing, &staged),
+                before_median.as_nanos(),
+                before_median.as_nanos() as f64 / divisor,
+                after_median.as_nanos(),
+                after_median.as_nanos() as f64 / divisor,
+            );
+        }
     }
 
     fn group() -> HypothesisGroup {
@@ -1166,7 +1372,17 @@ mod tests {
     fn keys_are_exact_nfc_bounded_and_unique() {
         assert!(HypothesisGroup::new(uuid7(1), String::new(), uuid7(2), 1).is_err());
         assert!(HypothesisGroup::new(uuid7(1), " key".into(), uuid7(2), 1).is_err());
+        assert!(HypothesisGroup::new(uuid7(1), "key ".into(), uuid7(2), 1).is_err());
         assert!(HypothesisGroup::new(uuid7(1), "e\u{301}".into(), uuid7(2), 1).is_err());
+        assert!(
+            HypothesisGroup::new(
+                uuid7(1),
+                "k".repeat(MAX_HYPOTHESIS_QUESTION_KEY_BYTES + 1),
+                uuid7(2),
+                1,
+            )
+            .is_err()
+        );
         let upper = HypothesisGroup::new(uuid7(3), "Cause".into(), uuid7(4), 1).unwrap();
         let lower = HypothesisGroup::new(uuid7(5), "cause".into(), uuid7(6), 1).unwrap();
         assert!(HypothesisLedger::new(vec![upper, lower], vec![], vec![]).is_ok());
@@ -1415,6 +1631,109 @@ mod tests {
     }
 
     #[test]
+    fn ledger_rejects_invalid_uuid_fields_in_all_record_families() {
+        let invalid_uuid = Uuid::from_u128(1);
+        let mut bad_group_uuid = group();
+        bad_group_uuid.group_uuid = invalid_uuid;
+        let mut bad_group_provenance = group();
+        bad_group_provenance.provenance_uuid = Uuid::nil();
+        assert_eq!(
+            invalid_field(
+                &HypothesisLedger::new(vec![bad_group_uuid], vec![], vec![]).unwrap_err()
+            ),
+            Some("group_uuid")
+        );
+        assert_eq!(
+            invalid_field(
+                &HypothesisLedger::new(vec![bad_group_provenance], vec![], vec![]).unwrap_err()
+            ),
+            Some("provenance_uuid")
+        );
+
+        let membership_cases = [
+            ("membership_event_uuid", {
+                let mut row = member(10, 20, 30, HypothesisMembershipAction::Added, 2);
+                row.membership_event_uuid = invalid_uuid;
+                row
+            }),
+            ("operation_uuid", {
+                let mut row = member(10, 20, 30, HypothesisMembershipAction::Added, 2);
+                row.operation_uuid = invalid_uuid;
+                row
+            }),
+            ("group_uuid", {
+                let mut row = member(10, 20, 30, HypothesisMembershipAction::Added, 2);
+                row.group_uuid = invalid_uuid;
+                row
+            }),
+            ("assertion_uuid", {
+                let mut row = member(10, 20, 30, HypothesisMembershipAction::Added, 2);
+                row.assertion_uuid = invalid_uuid;
+                row
+            }),
+            ("reasoning_uuid", {
+                let mut row = member(10, 20, 30, HypothesisMembershipAction::Added, 2);
+                row.reasoning_uuid = invalid_uuid;
+                row
+            }),
+            ("provenance_uuid", {
+                let mut row = member(10, 20, 30, HypothesisMembershipAction::Added, 2);
+                row.provenance_uuid = Uuid::nil();
+                row
+            }),
+        ];
+        for (expected_field, row) in membership_cases {
+            assert_eq!(
+                invalid_field(
+                    &HypothesisLedger::new(vec![group()], vec![row], vec![]).unwrap_err()
+                ),
+                Some(expected_field)
+            );
+        }
+
+        let selection_cases = [
+            ("selection_event_uuid", {
+                let mut row = selection(10, 20, None, 2);
+                row.selection_event_uuid = invalid_uuid;
+                row
+            }),
+            ("operation_uuid", {
+                let mut row = selection(10, 20, None, 2);
+                row.operation_uuid = invalid_uuid;
+                row
+            }),
+            ("group_uuid", {
+                let mut row = selection(10, 20, None, 2);
+                row.group_uuid = invalid_uuid;
+                row
+            }),
+            ("selected_assertion_uuid", {
+                let mut row = selection(10, 20, None, 2);
+                row.selected_assertion_uuid = Some(invalid_uuid);
+                row
+            }),
+            ("reasoning_uuid", {
+                let mut row = selection(10, 20, None, 2);
+                row.reasoning_uuid = invalid_uuid;
+                row
+            }),
+            ("provenance_uuid", {
+                let mut row = selection(10, 20, None, 2);
+                row.provenance_uuid = Uuid::nil();
+                row
+            }),
+        ];
+        for (expected_field, row) in selection_cases {
+            assert_eq!(
+                invalid_field(
+                    &HypothesisLedger::new(vec![group()], vec![], vec![row]).unwrap_err()
+                ),
+                Some(expected_field)
+            );
+        }
+    }
+
+    #[test]
     fn wave12_dangling_and_temporally_invalid_events_are_rejected() {
         let dangling_member = HypothesisMembershipEvent::new(
             uuid7(10),
@@ -1502,5 +1821,328 @@ mod tests {
             ),
             "invalid"
         );
+    }
+
+    #[test]
+    fn merge_skips_row_validation_and_replays_coalesced_operation_history() {
+        let added = member(10, 20, 30, HypothesisMembershipAction::Added, 2);
+        let base = HypothesisLedger::new(vec![group()], vec![added.clone()], vec![]).unwrap();
+        let staged = HypothesisLedger::new(
+            vec![group()],
+            vec![added],
+            vec![selection(9, 20, Some(30), 2)],
+        )
+        .unwrap();
+
+        ROW_VALIDATION_CALLS.with(|calls| calls.set(Some(0)));
+        let merged = base.merge(&staged).unwrap();
+        ROW_VALIDATION_CALLS.with(|calls| {
+            assert_eq!(calls.get(), Some(0));
+            calls.set(None);
+        });
+
+        assert_eq!(merged.groups(), base.groups());
+        assert_eq!(merged.membership_events(), base.membership_events());
+        assert_eq!(merged.current_members(uuid7(1)), vec![uuid7(30)]);
+        assert_eq!(merged.current_selection(uuid7(1)), Some(uuid7(30)));
+        assert_eq!(merged.selection_events().len(), 1);
+    }
+
+    #[test]
+    fn same_time_distinct_operations_retain_their_event_order() {
+        let added = member(40, 22, 30, HypothesisMembershipAction::Added, 2);
+        let selected = selection(10, 21, Some(30), 2);
+        assert!(HypothesisLedger::new(vec![group()], vec![added], vec![selected]).is_err());
+
+        let ordered_operations = HypothesisLedger::new(
+            vec![group()],
+            vec![
+                member(40, 22, 30, HypothesisMembershipAction::Added, 2),
+                member(70, 22, 31, HypothesisMembershipAction::Added, 2),
+                member(50, 23, 30, HypothesisMembershipAction::Removed, 2),
+            ],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(
+            ordered_operations.current_members(uuid7(1)),
+            vec![uuid7(31)]
+        );
+    }
+
+    #[test]
+    fn merge_sorts_all_appended_families_before_state_replay() {
+        let original_group =
+            HypothesisGroup::new(uuid7(1), "cause.primary".into(), uuid7(2), 50).unwrap();
+        let existing_member = member(20, 30, 40, HypothesisMembershipAction::Added, 70);
+        let existing_selection = selection(31, 41, None, 90);
+        let base = HypothesisLedger::new(
+            vec![original_group.clone()],
+            vec![existing_member.clone()],
+            vec![existing_selection.clone()],
+        )
+        .unwrap();
+        let staged = HypothesisLedger::new(
+            vec![
+                original_group,
+                HypothesisGroup::new(uuid7(3), "cause.other".into(), uuid7(4), 30).unwrap(),
+            ],
+            vec![
+                existing_member,
+                member(21, 31, 41, HypothesisMembershipAction::Added, 60),
+            ],
+            vec![existing_selection, selection(32, 42, None, 80)],
+        )
+        .unwrap();
+
+        let merged = base.merge(&staged).unwrap();
+        assert_eq!(
+            merged
+                .groups()
+                .iter()
+                .map(|row| row.recorded_at_micros)
+                .collect::<Vec<_>>(),
+            vec![30, 50]
+        );
+        assert_eq!(
+            merged
+                .membership_events()
+                .iter()
+                .map(|row| row.recorded_at_micros)
+                .collect::<Vec<_>>(),
+            vec![60, 70]
+        );
+        assert_eq!(
+            merged
+                .selection_events()
+                .iter()
+                .map(|row| row.recorded_at_micros)
+                .collect::<Vec<_>>(),
+            vec![80, 90]
+        );
+    }
+
+    #[test]
+    fn merge_replays_membership_transitions_and_selected_removal_pairing() {
+        let added = member(10, 20, 30, HypothesisMembershipAction::Added, 2);
+        let selected = selection(11, 21, Some(30), 3);
+        let base =
+            HypothesisLedger::new(vec![group()], vec![added.clone()], vec![selected.clone()])
+                .unwrap();
+        let removed = member(12, 22, 30, HypothesisMembershipAction::Removed, 4);
+        let cleared = selection(13, 22, None, 4);
+        let staged =
+            HypothesisLedger::new(vec![group()], vec![added, removed], vec![selected, cleared])
+                .unwrap();
+
+        let merged = base.merge(&staged).unwrap();
+        assert!(merged.current_members(uuid7(1)).is_empty());
+        assert_eq!(merged.current_selection(uuid7(1)), None);
+        assert_eq!(merged.membership_events().len(), 2);
+        assert_eq!(merged.selection_events().len(), 2);
+    }
+
+    #[test]
+    fn merge_preserves_conflicts_and_canonical_order_for_each_family() {
+        let group_base = HypothesisLedger::new(vec![group()], vec![], vec![]).unwrap();
+        let mut changed_group = group();
+        changed_group.question_key = "cause.changed".into();
+        let group_staged = HypothesisLedger::new(vec![changed_group], vec![], vec![]).unwrap();
+        assert!(matches!(
+            group_base.merge(&group_staged),
+            Err(KnowledgeError::Conflict("group_uuid"))
+        ));
+
+        let member_base = HypothesisLedger::new(
+            vec![group()],
+            vec![member(10, 20, 30, HypothesisMembershipAction::Added, 2)],
+            vec![],
+        )
+        .unwrap();
+        let member_staged = HypothesisLedger::new(
+            vec![group()],
+            vec![member(10, 21, 30, HypothesisMembershipAction::Added, 2)],
+            vec![],
+        )
+        .unwrap();
+        assert!(matches!(
+            member_base.merge(&member_staged),
+            Err(KnowledgeError::Conflict("membership_event_uuid"))
+        ));
+
+        let selection_base =
+            HypothesisLedger::new(vec![group()], vec![], vec![selection(10, 20, None, 2)]).unwrap();
+        let selection_staged =
+            HypothesisLedger::new(vec![group()], vec![], vec![selection(10, 21, None, 2)]).unwrap();
+        assert!(matches!(
+            selection_base.merge(&selection_staged),
+            Err(KnowledgeError::Conflict("selection_event_uuid"))
+        ));
+
+        let groups = HypothesisLedger::new(
+            vec![
+                HypothesisGroup::new(uuid7(3), "cause.other".into(), uuid7(4), 30).unwrap(),
+                group(),
+            ],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        let staged = HypothesisLedger::new(
+            vec![
+                HypothesisGroup::new(uuid7(5), "cause.third".into(), uuid7(6), 20).unwrap(),
+                HypothesisGroup::new(uuid7(7), "cause.fourth".into(), uuid7(8), 10).unwrap(),
+            ],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        let merged = groups.merge(&staged).unwrap();
+        assert_eq!(
+            merged
+                .groups()
+                .iter()
+                .map(|row| row.recorded_at_micros)
+                .collect::<Vec<_>>(),
+            vec![1, 10, 20, 30]
+        );
+    }
+
+    #[test]
+    fn merge_enforces_cross_ledger_question_key_uniqueness_and_family_caps() {
+        let base = HypothesisLedger::new(vec![group()], vec![], vec![]).unwrap();
+        let duplicate_key =
+            HypothesisGroup::new(uuid7(3), "cause.primary".into(), uuid7(4), 1).unwrap();
+        let staged = HypothesisLedger::new(vec![duplicate_key], vec![], vec![]).unwrap();
+        assert_eq!(invalid_code(&base.merge(&staged).unwrap_err()), "duplicate");
+
+        assert!(matches!(
+            base.merge_with_limit(&base, 0),
+            Err(KnowledgeError::Limit {
+                participant: "hypothesis_groups",
+                observed: 1,
+                limit: 0,
+            })
+        ));
+        assert_eq!(base.merge_with_limit(&base, 1).unwrap(), base);
+
+        let membership = vec![
+            member(10, 20, 30, HypothesisMembershipAction::Added, 2),
+            member(11, 21, 31, HypothesisMembershipAction::Added, 3),
+        ];
+        let member_ledger = HypothesisLedger::new(vec![group()], membership, vec![]).unwrap();
+        assert!(matches!(
+            member_ledger.merge_with_limit(&member_ledger, 1),
+            Err(KnowledgeError::Limit {
+                participant: "hypothesis_membership_events",
+                observed: 2,
+                limit: 1,
+            })
+        ));
+
+        let selection_ledger = HypothesisLedger::new(
+            vec![group()],
+            vec![],
+            vec![selection(10, 20, None, 2), selection(11, 21, None, 3)],
+        )
+        .unwrap();
+        assert!(matches!(
+            selection_ledger.merge_with_limit(&selection_ledger, 1),
+            Err(KnowledgeError::Limit {
+                participant: "hypothesis_selection_events",
+                observed: 2,
+                limit: 1,
+            })
+        ));
+
+        let added_member = HypothesisLedger::new(
+            vec![group()],
+            vec![member(20, 30, 40, HypothesisMembershipAction::Added, 2)],
+            vec![],
+        )
+        .unwrap();
+        let another_member = HypothesisLedger::new(
+            vec![group()],
+            vec![member(21, 31, 41, HypothesisMembershipAction::Added, 3)],
+            vec![],
+        )
+        .unwrap();
+        assert!(matches!(
+            added_member.merge_with_limit(&another_member, 1),
+            Err(KnowledgeError::Limit {
+                participant: "hypothesis_membership_events",
+                observed: 2,
+                limit: 1,
+            })
+        ));
+
+        let first_selection =
+            HypothesisLedger::new(vec![group()], vec![], vec![selection(20, 30, None, 2)]).unwrap();
+        let second_selection =
+            HypothesisLedger::new(vec![group()], vec![], vec![selection(21, 31, None, 3)]).unwrap();
+        assert!(matches!(
+            first_selection.merge_with_limit(&second_selection, 1),
+            Err(KnowledgeError::Limit {
+                participant: "hypothesis_selection_events",
+                observed: 2,
+                limit: 1,
+            })
+        ));
+
+        let second_group = HypothesisLedger::new(
+            vec![HypothesisGroup::new(uuid7(3), "cause.other".into(), uuid7(4), 2).unwrap()],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        assert!(matches!(
+            base.merge_with_limit(&second_group, 1),
+            Err(KnowledgeError::Limit {
+                participant: "hypothesis_groups",
+                observed: 2,
+                limit: 1,
+            })
+        ));
+    }
+
+    #[test]
+    fn small_constructor_cap_checks_each_record_family() {
+        assert!(matches!(
+            HypothesisLedger::new_with_limit(vec![group()], vec![], vec![], 0),
+            Err(KnowledgeError::Limit {
+                participant: "hypothesis_groups",
+                observed: 1,
+                limit: 0,
+            })
+        ));
+        assert!(matches!(
+            HypothesisLedger::new_with_limit(
+                vec![group()],
+                vec![
+                    member(10, 20, 30, HypothesisMembershipAction::Added, 2),
+                    member(11, 21, 31, HypothesisMembershipAction::Added, 3),
+                ],
+                vec![],
+                1,
+            ),
+            Err(KnowledgeError::Limit {
+                participant: "hypothesis_membership_events",
+                observed: 2,
+                limit: 1,
+            })
+        ));
+        assert!(matches!(
+            HypothesisLedger::new_with_limit(
+                vec![group()],
+                vec![],
+                vec![selection(10, 20, None, 2), selection(11, 21, None, 3)],
+                1,
+            ),
+            Err(KnowledgeError::Limit {
+                participant: "hypothesis_selection_events",
+                observed: 2,
+                limit: 1,
+            })
+        ));
     }
 }
