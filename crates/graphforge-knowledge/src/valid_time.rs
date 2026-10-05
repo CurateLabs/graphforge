@@ -181,28 +181,38 @@ impl AssertionValidityLedger {
     }
 
     fn merge_with_limit(&self, staged: &Self, row_limit: usize) -> Result<Self, KnowledgeError> {
-        let mut events = self.events.clone();
-        let mut by_id = events
+        let by_id = self
+            .events
             .iter()
-            .cloned()
             .map(|row| (row.validity_event_uuid, row))
             .collect::<HashMap<_, _>>();
-        let mut appended = false;
+        let mut appended_count = 0_usize;
         for event in &staged.events {
             if let Some(existing) = by_id.get(&event.validity_event_uuid) {
-                if existing != event {
+                if *existing != event {
                     return Err(KnowledgeError::Conflict("validity_event_uuid"));
                 }
             } else {
-                validate_event_count(events.len().saturating_add(1), row_limit)?;
-                events.push(event.clone());
-                by_id.insert(event.validity_event_uuid, event.clone());
-                appended = true;
+                appended_count = appended_count.saturating_add(1);
             }
         }
-        if appended {
-            events.sort_by_key(|row| (row.recorded_at_micros, row.validity_event_uuid));
+        validate_event_count(self.events.len().saturating_add(appended_count), row_limit)?;
+        if appended_count == 0 {
+            return Ok(Self {
+                events: self.events.clone(),
+            });
         }
+
+        let mut events = self.events.clone();
+        events.reserve(appended_count);
+        events.extend(
+            staged
+                .events
+                .iter()
+                .filter(|event| !by_id.contains_key(&event.validity_event_uuid))
+                .cloned(),
+        );
+        events.sort_by_key(|row| (row.recorded_at_micros, row.validity_event_uuid));
         Ok(Self { events })
     }
 
@@ -728,6 +738,10 @@ mod tests {
                 contract_version: ASSERTION_VALIDITY_CONTRACT_VERSION,
             }])
             .unwrap();
+            assert_eq!(
+                merge_with_full_revalidation(&existing, &staged).unwrap(),
+                existing.merge(&staged).unwrap()
+            );
             let repetitions = 9;
             let mut before = Vec::with_capacity(repetitions);
             let mut after = Vec::with_capacity(repetitions);
@@ -793,6 +807,7 @@ mod tests {
         let staged = AssertionValidityLedger::new(vec![
             event(3, 22, None, None, 3),
             event(4, 23, None, None, 4),
+            event(5, 24, None, None, 5),
         ])
         .unwrap();
 
@@ -800,7 +815,7 @@ mod tests {
             base.merge_with_limit(&staged, 3),
             Err(KnowledgeError::Limit {
                 participant: "assertion_validity_events",
-                observed: 4,
+                observed: 5,
                 limit: 3,
             })
         ));
@@ -812,6 +827,26 @@ mod tests {
             )
             .unwrap();
         assert_eq!(replayed, base);
+    }
+
+    #[test]
+    fn merge_reports_conflict_before_combined_limit() {
+        let base = AssertionValidityLedger::new(vec![
+            event(1, 20, None, None, 1),
+            event(2, 21, None, None, 2),
+        ])
+        .unwrap();
+        let staged = AssertionValidityLedger::new(vec![
+            event(3, 22, None, None, 3),
+            event(4, 23, None, None, 4),
+            event(1, 25, None, None, 5),
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            base.merge_with_limit(&staged, 3),
+            Err(KnowledgeError::Conflict("validity_event_uuid"))
+        ));
     }
 
     #[test]
