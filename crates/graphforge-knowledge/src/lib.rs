@@ -1183,7 +1183,15 @@ fn validate_rows(
     assertions: &[Assertion],
     refs: &[AssertionGraphRef],
 ) -> Result<(), KnowledgeError> {
-    validate_assertion_row_limits(assertions.len(), refs.len(), MAX_KNOWLEDGE_ROWS)?;
+    validate_rows_with_limit(assertions, refs, MAX_KNOWLEDGE_ROWS)
+}
+
+fn validate_rows_with_limit(
+    assertions: &[Assertion],
+    refs: &[AssertionGraphRef],
+    row_limit: usize,
+) -> Result<(), KnowledgeError> {
+    validate_assertion_row_limits(assertions.len(), refs.len(), row_limit)?;
     let mut assertion_ids = HashSet::with_capacity(assertions.len());
     for assertion in assertions {
         #[cfg(test)]
@@ -1721,6 +1729,9 @@ fn required_u32(
 
 #[cfg(test)]
 mod tests {
+    #[path = "assertion_mutation_tests.rs"]
+    mod assertion_mutation_tests;
+
     use super::*;
 
     pub(super) fn uuid7(seed: u8) -> Uuid {
