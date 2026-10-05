@@ -59,96 +59,196 @@ where
     RS1: BuildHasher,
     RS2: BuildHasher,
 {
-    if additions.is_empty() && removals.is_empty() {
+    stage_mutate_node_labels_routed(staged, dir, additions, removals, &HashMap::new())
+}
+
+/// Stage persisted node label changes using known immutable node-surrogate
+/// routes to avoid opening unrelated construction fragments.
+///
+/// UUIDs without a supplied route conservatively retain the legacy full-scan
+/// behavior. This keeps the lower-level UUID-only API safe for callers that do
+/// not hold authenticated node identity columns.
+pub fn stage_mutate_node_labels_routed<AS1, AS2, RS1, RS2, TS>(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    additions: &HashMap<[u8; 16], HashSet<EntityTypeId, AS2>, AS1>,
+    removals: &HashMap<[u8; 16], HashSet<EntityTypeId, RS2>, RS1>,
+    target_node_ids: &HashMap<[u8; 16], u64, TS>,
+) -> Result<(u64, u64), GfError>
+where
+    AS1: BuildHasher,
+    AS2: BuildHasher,
+    RS1: BuildHasher,
+    RS2: BuildHasher,
+    TS: BuildHasher,
+{
+    if additions.values().all(HashSet::is_empty) && removals.values().all(HashSet::is_empty) {
         return Ok((0, 0));
     }
+    let targets: HashSet<[u8; 16]> = additions
+        .iter()
+        .filter(|(_, labels)| !labels.is_empty())
+        .map(|(uuid, _)| uuid)
+        .chain(
+            removals
+                .iter()
+                .filter(|(_, labels)| !labels.is_empty())
+                .map(|(uuid, _)| uuid),
+        )
+        .copied()
+        .collect();
+    let all_routed = targets
+        .iter()
+        .all(|uuid| target_node_ids.contains_key(uuid));
+    let mut candidate_ids = target_node_ids
+        .iter()
+        .filter_map(|(uuid, node_id)| targets.contains(uuid).then_some(*node_id))
+        .collect::<Vec<_>>();
+    if all_routed && candidate_ids.contains(&0) {
+        return Err(GfError::Storage(
+            "node label mutation route contains zero node_id".into(),
+        ));
+    }
+    candidate_ids.sort_unstable();
+    candidate_ids.dedup();
+    let mut found_targets = HashSet::with_capacity(targets.len());
     let mut changed = 0u64;
     let mut removed = 0u64;
-    for (path, _) in node_files_for_rewrite(staged, dir)?.nodes {
-        let read_path = staged
-            .staged_temp(&path)
-            .map_or_else(|| path.clone(), Path::to_path_buf);
-        let batches = normalize_topology_nodes(
-            crate::catalog::read_parquet_required(&read_path).map_err(pq_err)?,
-        )
-        .map_err(pq_err)?;
-        let mut file_changed = 0u64;
-        let mut file_removed = 0u64;
-        let mut rebuilt = Vec::with_capacity(batches.len());
-        for batch in batches {
-            let uuids = batch
-                .column_by_name("node_uuid")
-                .and_then(|a| a.as_any().downcast_ref::<FixedSizeBinaryArray>())
-                .ok_or_else(|| GfError::Storage("node topology missing node_uuid".into()))?;
-            let labels = batch
-                .column_by_name("type_ids")
-                .and_then(|a| a.as_any().downcast_ref::<ListArray>())
-                .ok_or_else(|| GfError::Storage("node topology missing type_ids".into()))?;
-            let mut rows = Vec::with_capacity(batch.num_rows());
-            for row in 0..batch.num_rows() {
-                if labels.is_null(row) {
-                    return Err(GfError::Storage("node type_ids contains null list".into()));
-                }
-                let values = labels.value(row);
-                let values = values
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .ok_or_else(|| GfError::Storage("node type_ids are not UInt32".into()))?;
-                let mut merged = (0..values.len())
-                    .map(|index| {
-                        if values.is_null(index) {
-                            return Err(GfError::Storage(
-                                "node type_ids contains null item".into(),
-                            ));
-                        }
-                        EntityTypeId::decode(values.value(index)).map_err(pq_err)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                if let Some(drop) = removals.get(&uuid_at(uuids, row)) {
-                    let before = merged.len();
-                    merged.retain(|label| !drop.contains(label));
-                    file_removed += before.saturating_sub(merged.len()) as u64;
-                }
-                if let Some(extra) = additions.get(&uuid_at(uuids, row)) {
-                    let before = merged.len();
-                    merged.extend(extra.iter().copied());
-                    merged.sort_unstable_by_key(|id| id.encode());
-                    merged.dedup();
-                    file_changed += merged.len().saturating_sub(before) as u64;
-                }
-                rows.push(Some(
-                    merged
-                        .into_iter()
-                        .map(|id| Some(id.encode()))
-                        .collect::<Vec<_>>(),
-                ));
+    for (path, relative) in node_files_for_rewrite(staged, dir)?.nodes {
+        if all_routed && relative != "topology/nodes.parquet" {
+            let (first, last) = canonical_topology_shard_range(Path::new(&relative), "node")?;
+            if !candidate_ids
+                .iter()
+                .any(|node_id| (*node_id >= first) && (*node_id <= last))
+            {
+                continue;
             }
-            let nullable =
-                ListArray::from_iter_primitive::<arrow::datatypes::UInt32Type, _, _>(rows);
-            let new_labels = ListArray::new(
-                std::sync::Arc::new(arrow::datatypes::Field::new(
-                    "item",
-                    arrow::datatypes::DataType::UInt32,
-                    false,
-                )),
-                nullable.offsets().clone(),
-                nullable.values().clone(),
-                nullable.nulls().cloned(),
-            );
-            let index = batch.schema().index_of("type_ids").map_err(pq_err)?;
-            let mut columns = batch.columns().to_vec();
-            columns[index] = std::sync::Arc::new(new_labels);
-            rebuilt.push(RecordBatch::try_new(batch.schema(), columns).map_err(pq_err)?);
         }
-        if file_changed > 0 || file_removed > 0 {
-            let merged =
-                arrow::compute::concat_batches(&TOPOLOGY_NODES_SCHEMA, &rebuilt).map_err(pq_err)?;
-            staged.restage(&path, TOPOLOGY_NODES_SCHEMA.clone(), &merged)?;
-        }
+        let (file_changed, file_removed) = stage_mutate_node_labels_in_file(
+            staged,
+            &path,
+            additions,
+            removals,
+            all_routed,
+            &targets,
+            &mut found_targets,
+        )?;
         changed = changed.saturating_add(file_changed);
         removed = removed.saturating_add(file_removed);
     }
+    if all_routed && found_targets.len() != targets.len() {
+        return Err(GfError::Storage(
+            "routed node label mutation target was not found".into(),
+        ));
+    }
     Ok((changed, removed))
+}
+
+fn stage_mutate_node_labels_in_file<AS1, AS2, RS1, RS2>(
+    staged: &mut RewriteBatch,
+    path: &Path,
+    additions: &HashMap<[u8; 16], HashSet<EntityTypeId, AS2>, AS1>,
+    removals: &HashMap<[u8; 16], HashSet<EntityTypeId, RS2>, RS1>,
+    all_routed: bool,
+    targets: &HashSet<[u8; 16]>,
+    found_targets: &mut HashSet<[u8; 16]>,
+) -> Result<(u64, u64), GfError>
+where
+    AS1: BuildHasher,
+    AS2: BuildHasher,
+    RS1: BuildHasher,
+    RS2: BuildHasher,
+{
+    let _region = crate::concurrency_attribution::RegionScope::named("node_label_mutation");
+    let read_path = staged
+        .staged_temp(path)
+        .map_or_else(|| path.to_path_buf(), Path::to_path_buf);
+    let parquet = crate::catalog::read_parquet_required(&read_path).map_err(pq_err)?;
+    crate::concurrency_attribution::RegionScope::record_work("fragments_read", 1);
+    let batches = normalize_topology_nodes(parquet).map_err(pq_err)?;
+    let mut file_changed = 0u64;
+    let mut file_removed = 0u64;
+    let mut rebuilt = Vec::with_capacity(batches.len());
+    for batch in batches {
+        crate::concurrency_attribution::RegionScope::record_work(
+            "rows_decoded",
+            batch.num_rows() as u64,
+        );
+        let uuids = batch
+            .column_by_name("node_uuid")
+            .and_then(|a| a.as_any().downcast_ref::<FixedSizeBinaryArray>())
+            .ok_or_else(|| GfError::Storage("node topology missing node_uuid".into()))?;
+        let labels = batch
+            .column_by_name("type_ids")
+            .and_then(|a| a.as_any().downcast_ref::<ListArray>())
+            .ok_or_else(|| GfError::Storage("node topology missing type_ids".into()))?;
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            let uuid = uuid_at(uuids, row);
+            if all_routed && targets.contains(&uuid) {
+                found_targets.insert(uuid);
+            }
+            if labels.is_null(row) {
+                return Err(GfError::Storage("node type_ids contains null list".into()));
+            }
+            let values = labels.value(row);
+            let values = values
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .ok_or_else(|| GfError::Storage("node type_ids are not UInt32".into()))?;
+            let mut merged = (0..values.len())
+                .map(|index| {
+                    if values.is_null(index) {
+                        return Err(GfError::Storage("node type_ids contains null item".into()));
+                    }
+                    EntityTypeId::decode(values.value(index)).map_err(pq_err)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            crate::concurrency_attribution::RegionScope::record_work(
+                "label_memberships_rebuilt",
+                merged.len() as u64,
+            );
+            if let Some(drop) = removals.get(&uuid) {
+                let before = merged.len();
+                merged.retain(|label| !drop.contains(label));
+                file_removed += before.saturating_sub(merged.len()) as u64;
+            }
+            if let Some(extra) = additions.get(&uuid) {
+                let before = merged.len();
+                merged.extend(extra.iter().copied());
+                merged.sort_unstable_by_key(|id| id.encode());
+                merged.dedup();
+                file_changed += merged.len().saturating_sub(before) as u64;
+            }
+            rows.push(Some(
+                merged
+                    .into_iter()
+                    .map(|id| Some(id.encode()))
+                    .collect::<Vec<_>>(),
+            ));
+        }
+        let nullable = ListArray::from_iter_primitive::<arrow::datatypes::UInt32Type, _, _>(rows);
+        let new_labels = ListArray::new(
+            std::sync::Arc::new(arrow::datatypes::Field::new(
+                "item",
+                arrow::datatypes::DataType::UInt32,
+                false,
+            )),
+            nullable.offsets().clone(),
+            nullable.values().clone(),
+            nullable.nulls().cloned(),
+        );
+        let index = batch.schema().index_of("type_ids").map_err(pq_err)?;
+        let mut columns = batch.columns().to_vec();
+        columns[index] = std::sync::Arc::new(new_labels);
+        rebuilt.push(RecordBatch::try_new(batch.schema(), columns).map_err(pq_err)?);
+    }
+    if file_changed > 0 || file_removed > 0 {
+        let merged =
+            arrow::compute::concat_batches(&TOPOLOGY_NODES_SCHEMA, &rebuilt).map_err(pq_err)?;
+        staged.restage(path, TOPOLOGY_NODES_SCHEMA.clone(), &merged)?;
+    }
+    Ok((file_changed, file_removed))
 }
 
 fn pq_err(e: impl std::fmt::Display) -> GfError {
@@ -1158,6 +1258,104 @@ mod tests {
         }
         assert_eq!(observed[&to_bytes(&legacy)], [1]);
         assert_eq!(observed[&to_bytes(&sharded)], [1, 2]);
+    }
+
+    #[test]
+    fn routed_label_mutation_refuses_a_missing_target_without_staging() {
+        let dir = TempDir::new().unwrap();
+        let existing = new_v7();
+        let missing = new_v7();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        writer
+            .create_node(existing, EntityTypeId::ontology(TypeId(1)).unwrap())
+            .unwrap();
+        writer.flush().unwrap();
+        let path = node_parquet_files(dir.path()).unwrap().remove(0);
+        let original = std::fs::read(&path).unwrap();
+        let additions = HashMap::from([(
+            to_bytes(&missing),
+            HashSet::from([EntityTypeId::ontology(TypeId(2)).unwrap()]),
+        )]);
+        let removals: HashMap<[u8; 16], HashSet<EntityTypeId>> = HashMap::new();
+        let routes = HashMap::from([(to_bytes(&missing), 1)]);
+        let mut staged = RewriteBatch::new();
+
+        let error = stage_mutate_node_labels_routed(
+            &mut staged,
+            dir.path(),
+            &additions,
+            &removals,
+            &routes,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("routed node label mutation target was not found")
+        );
+        assert_eq!(staged.staged_paths().count(), 0);
+        drop(staged);
+        assert_eq!(std::fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn routed_label_mutation_refuses_a_corrupt_candidate_without_staging() {
+        let dir = TempDir::new().unwrap();
+        let node = new_v7();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        writer
+            .create_node(node, EntityTypeId::ontology(TypeId(1)).unwrap())
+            .unwrap();
+        writer.flush().unwrap();
+
+        let node_files = node_parquet_files(dir.path()).unwrap();
+        let nodes = crate::read_nodes(dir.path()).unwrap();
+        let node_id = nodes[0]
+            .column_by_name("node_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(0);
+        assert_ne!(node_id, 0);
+        let legacy = dir.path().join("topology/nodes.parquet");
+        let shard_candidate = node_files.iter().find(|path| {
+            if **path == legacy {
+                return false;
+            }
+            let relative = path.strip_prefix(dir.path()).unwrap();
+            let (first, last) = canonical_topology_shard_range(relative, "node").unwrap();
+            (first..=last).contains(&node_id)
+        });
+        let path = shard_candidate
+            .or_else(|| node_files.iter().find(|path| **path == legacy))
+            .expect("the correct surrogate route selects a node fragment");
+
+        let original = std::fs::read(path).unwrap();
+        let mut corrupt = original.clone();
+        let final_byte = corrupt.last_mut().unwrap();
+        *final_byte ^= 1;
+        std::fs::write(path, &corrupt).unwrap();
+
+        let additions = HashMap::from([(
+            to_bytes(&node),
+            HashSet::from([EntityTypeId::ontology(TypeId(2)).unwrap()]),
+        )]);
+        let removals: HashMap<[u8; 16], HashSet<EntityTypeId>> = HashMap::new();
+        let routes = HashMap::from([(to_bytes(&node), node_id)]);
+        let mut staged = RewriteBatch::new();
+        let result = stage_mutate_node_labels_routed(
+            &mut staged,
+            dir.path(),
+            &additions,
+            &removals,
+            &routes,
+        );
+        assert!(result.is_err());
+        assert_eq!(staged.staged_paths().count(), 0);
+        drop(staged);
+        std::fs::write(path, &original).unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), original);
     }
 
     #[test]

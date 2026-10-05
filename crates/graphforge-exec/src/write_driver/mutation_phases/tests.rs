@@ -1,5 +1,7 @@
 use crate::mutation::WriteCounters;
-use arrow::array::{Array, FixedSizeBinaryBuilder, Int64Array, StringArray, UInt32Array};
+use arrow::array::{
+    Array, FixedSizeBinaryBuilder, Int64Array, StringArray, UInt32Array, UInt64Array,
+};
 use arrow::datatypes::Field;
 use arrow::datatypes::Schema;
 use arrow::datatypes::UInt32Type;
@@ -587,6 +589,7 @@ fn label_phase_routes_pending_cancellation_and_deleted_entities() {
     let make_frontier = || {
         let fields = vec![
             Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("node_id", DataType::UInt64, false),
             Field::new(
                 "type_ids",
                 DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
@@ -619,6 +622,7 @@ fn label_phase_routes_pending_cancellation_and_deleted_entities() {
                     schema,
                     vec![
                         nullable_uuids(&[Some([7; 16]), Some([7; 16])]),
+                        Arc::new(UInt64Array::from(vec![1, 1])),
                         Arc::new(labels),
                     ],
                 )
