@@ -226,6 +226,7 @@ fn create_identity_and_emit_helpers_reject_every_incomplete_shape() {
         [1; 16],
         1,
         graphforge_value::PrimaryEntityTypeId::decode(1).unwrap(),
+        &[],
     );
     assert!(
         append_created_node_output_cols(&spec, 2, &CreateComputed::new(), &recorder, &mut out,)

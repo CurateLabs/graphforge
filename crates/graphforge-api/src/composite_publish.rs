@@ -830,6 +830,12 @@ fn apply_graph_mutations(
     if request.graph_mutations.is_empty() {
         return Ok(());
     }
+    let topology_files = graph.dir().topology_files()?;
+    let mut label_membership_counts =
+        match graphforge_storage::read_label_membership_counts(&graph.dir())? {
+            Some((counts, _)) => counts,
+            None => graphforge_storage::establish_label_membership_counts(&topology_files)?.0,
+        };
     let mut writer = graphforge_storage::GraphWriter::open_at_with_topology(
         &graph.dir(),
         graph.ontology_mode,
@@ -874,6 +880,7 @@ fn apply_graph_mutations(
 
     // Allocate every same-request node first so edge endpoints are independent
     // of mutation ordering, as guaranteed by composite validation.
+    let mut created_node_labels = HashMap::new();
     for mutation in &request.graph_mutations {
         if let CompositeGraphMutation::CreateNode {
             node_uuid, label, ..
@@ -884,6 +891,11 @@ fn apply_graph_mutations(
                 None => graphforge_value::EntityTypeId::runtime(catalog.intern_label(label)?),
             };
             writer.create_node(*node_uuid, type_id)?;
+            let count = label_membership_counts.entry(type_id).or_default();
+            *count = count
+                .checked_add(1)
+                .ok_or_else(|| GfError::Storage("label membership count overflow".into()))?;
+            created_node_labels.insert(node_uuid.into_bytes(), type_id);
         }
     }
 
@@ -1045,6 +1057,39 @@ fn apply_graph_mutations(
         &graph.dir(),
         inventory,
         &delete_nodes,
+    )?;
+    let new_deleted = delete_nodes
+        .iter()
+        .filter_map(|uuid| created_node_labels.get(uuid).copied())
+        .collect::<Vec<_>>();
+    let created_node_uuids = created_node_labels.keys().copied().collect::<HashSet<_>>();
+    let existing_deleted = delete_nodes
+        .difference(&created_node_uuids)
+        .copied()
+        .collect::<Vec<_>>();
+    let deleted_labels = graphforge_storage::read_node_labels_for_uuids(
+        &graph.dir(),
+        &topology_files,
+        &existing_deleted,
+    )?;
+    for label in new_deleted
+        .into_iter()
+        .chain(deleted_labels.into_values().flatten())
+    {
+        let count = label_membership_counts.get_mut(&label).ok_or_else(|| {
+            GfError::Storage("label membership summary underflow during composite delete".into())
+        })?;
+        *count = count.checked_sub(1).ok_or_else(|| {
+            GfError::Storage("label membership summary underflow during composite delete".into())
+        })?;
+        if *count == 0 {
+            label_membership_counts.remove(&label);
+        }
+    }
+    graphforge_storage::stage_label_membership_counts(
+        &mut staged,
+        &graph.dir(),
+        &label_membership_counts,
     )?;
     let node_uuid_removals = delete_nodes
         .iter()

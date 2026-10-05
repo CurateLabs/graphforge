@@ -73,12 +73,14 @@ fn create_recorder_exposes_node_identity_slices() {
         [1; 16],
         9,
         graphforge_value::PrimaryEntityTypeId::decode(10).unwrap(),
+        &[],
     );
     recorder.record_node(
         8,
         [2; 16],
         11,
         graphforge_value::PrimaryEntityTypeId::decode(12).unwrap(),
+        &[],
     );
     let (uuids, node_ids, type_ids) = recorder.node_identities(8).unwrap();
     assert_eq!(uuids, &[[1; 16], [2; 16]]);
