@@ -108,6 +108,7 @@ the CI Lint job (#1390).
 | 0053 | Hub publish wire contract | Accepted | The control-plane publish session shape, data-plane upload URL policy, or ref precondition encoding needs a breaking wire change | [`../../adr/0053-hub-publish-wire-contract.md`](../../adr/0053-hub-publish-wire-contract.md) |
 | 0054 | GraphForge component boundaries: Core, XYG, editor, and Hub | Accepted | A component needs to own a contract assigned here to another component, or the Hub needs to store data GraphForge Core does not define | [`../../adr/0054-product-component-boundaries.md`](../../adr/0054-product-component-boundaries.md) |
 | 0055 | Research Versions are commits | Proposed | A head-moving operation needs more than one merge parent, a host needs identity that free-form signatures cannot express, or revision 6 Projects no longer need to be read | [`../../adr/0055-versions-are-commits.md`](../../adr/0055-versions-are-commits.md) |
+| 0056 | Shaping stays serial within stages until one sub-phase dominates | Accepted | A stock region capture at S20 or S22 shows one shaping sub-phase above half of shaping wall, or shape_routing's calling-thread CPU above 20% of complete-ingest wall | [`../../adr/0056-stage-internal-parallelism.md`](../../adr/0056-stage-internal-parallelism.md) |
 
 ### Superseded
 

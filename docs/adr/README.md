@@ -61,6 +61,7 @@ Roadmap-only ADRs are not retained in this tree.
 | 0053 | [Hub publish wire contract](0053-hub-publish-wire-contract.md) | `0053-hub-publish-wire-contract.md` |
 | 0054 | [GraphForge component boundaries: Core, XYG, editor, and Hub](0054-product-component-boundaries.md) | `0054-product-component-boundaries.md` |
 | 0055 | [Research Versions are commits](0055-versions-are-commits.md) | `0055-versions-are-commits.md` |
+| 0056 | [Shaping stays serial within stages until one sub-phase dominates](0056-stage-internal-parallelism.md) | `0056-stage-internal-parallelism.md` |
 
 ## Superseded records
 

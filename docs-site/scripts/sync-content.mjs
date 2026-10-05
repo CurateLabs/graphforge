@@ -178,6 +178,7 @@ const PAGES = [
   'adr/0053-hub-publish-wire-contract.md',
   'adr/0054-product-component-boundaries.md',
   'adr/0055-versions-are-commits.md',
+  'adr/0056-stage-internal-parallelism.md',
   // END generated ADR records
   "releases/roadmap.md",
   "legal/licensing.md",
