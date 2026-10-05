@@ -83,7 +83,7 @@ const MEASUREMENTS: [&str; 14] = [
     "fsync_calls",
     "fsync_elapsed_ns",
 ];
-const REGIONS: [&str; 54] = [
+const REGIONS: [&str; 55] = [
     "import_command",
     "begin_import",
     "resume_import",
@@ -138,6 +138,7 @@ const REGIONS: [&str; 54] = [
     "shape_row_finish",
     "runtime_catalog",
     "shape_completion",
+    "participant_materialization",
 ];
 
 pub(crate) fn valid_snapshot(value: &Value) -> bool {
@@ -343,6 +344,21 @@ mod tests {
                 "{name} missing from the capture"
             );
         }
+    }
+
+    #[test]
+    fn snapshot_contract_accepts_participant_materialization_region() {
+        let capture =
+            graphforge_storage::concurrency_attribution::RegionCapture::start("import_command");
+        {
+            let _materialization =
+                graphforge_storage::concurrency_attribution::RegionScope::named(
+                    "participant_materialization",
+                );
+        }
+        let value = serde_json::to_value(capture.finish()).unwrap();
+        assert!(valid_snapshot(&value));
+        assert!(value["regions"]["import_command/participant_materialization"].is_object());
     }
 
     #[test]
