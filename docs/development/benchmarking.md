@@ -27,6 +27,40 @@ measurements.
 Ordinary deadlines, cancellation tests, and approved shared diagnostics remain
 allowed. `Instant` / `Duration` in product control paths are not banned globally.
 
+## AssertionLedger merge comparison
+
+The ignored test
+`graphforge-knowledge::tests::quiet_host_assertion_merge_cost_measurement`
+compares rebuilding the concatenated ledgers through `AssertionLedger::new`
+with trusted `AssertionLedger::merge`. It checks exact output equality before
+timing, then alternates baseline-first and candidate-first order over nine pairs
+at each scale. The canonical input digests are pinned by the test:
+
+| Existing assertions / references | Staged assertions / references | Canonical input SHA-256 |
+| ---: | ---: | --- |
+| 1,000 / 1,000 | 1 / 1 | `eac191d14d0f1088c9cf1b6f8e87df5e353b31dfa48de6490123cf177b2a0496` |
+| 10,000 / 10,000 | 1 / 1 | `5553b15b4fc68dd53ddf0b071daa392bc7e04cb74d78b39178c5a7a102df1a03` |
+
+Build into a dedicated target, then run `require_quiet_host` immediately before
+measurement. The output reports every paired observation, medians, paired delta
+range, and cost per existing row (assertion plus graph-reference rows):
+
+```bash
+CARGO_TARGET_DIR=/home/ubuntu/.cache/graphforge-target-1823-measurement \
+  cargo test --release --locked -p graphforge-knowledge --lib \
+  tests::quiet_host_assertion_merge_cost_measurement --no-run
+source /home/ubuntu/.claude/gf-quiet-host.sh && require_quiet_host && \
+  CARGO_TARGET_DIR=/home/ubuntu/.cache/graphforge-target-1823-measurement \
+  cargo test --release --locked -p graphforge-knowledge --lib \
+  tests::quiet_host_assertion_merge_cost_measurement -- \
+  --ignored --nocapture --test-threads=1
+```
+
+This measures in-process merge work, not end-to-end workflow latency. The
+trusted path still clones and sorts the merged rows and compares staged records;
+it avoids the complete existing-row validation pass. Raw observations and the
+executable digest belong on the issue or PR that produced them.
+
 ## Construction syscall comparison
 
 [`construction-syscall-comparison.py`](../../benchmarks/scripts/construction-syscall-comparison.py)

@@ -440,36 +440,56 @@ impl AssertionGraphRef {
 }
 
 /// Validated immutable assertion participant content.
+///
+/// The validated row collections are private so callers cannot invalidate the
+/// cross-vector graph-reference constraints after construction. Borrow them
+/// through [`Self::assertions`] and [`Self::graph_refs`], or consume both with
+/// [`Self::into_parts`].
+///
+/// ```compile_fail
+/// use graphforge_knowledge::AssertionLedger;
+/// let mut ledger = AssertionLedger::default();
+/// ledger.assertions.clear();
+/// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AssertionLedger {
     /// Assertions ordered by `(recorded_at, assertion_uuid)`.
-    pub assertions: Vec<Assertion>,
+    assertions: Vec<Assertion>,
     /// References ordered by assertion and the public reference sort key.
-    pub graph_refs: Vec<AssertionGraphRef>,
+    graph_refs: Vec<AssertionGraphRef>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static ASSERTION_ROW_VALIDATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl AssertionLedger {
+    /// Borrow assertions in deterministic order.
+    #[must_use]
+    pub fn assertions(&self) -> &[Assertion] {
+        &self.assertions
+    }
+
+    /// Borrow graph references in deterministic order.
+    #[must_use]
+    pub fn graph_refs(&self) -> &[AssertionGraphRef] {
+        &self.graph_refs
+    }
+
+    /// Consume the ledger and return its assertions and graph references.
+    #[must_use]
+    pub fn into_parts(self) -> (Vec<Assertion>, Vec<AssertionGraphRef>) {
+        (self.assertions, self.graph_refs)
+    }
+
     /// Validate, sort, and construct assertion content.
     pub fn new(
         mut assertions: Vec<Assertion>,
         mut graph_refs: Vec<AssertionGraphRef>,
     ) -> Result<Self, KnowledgeError> {
         validate_rows(&assertions, &graph_refs)?;
-        let times = assertions
-            .iter()
-            .map(|row| (row.assertion_uuid, row.recorded_at_micros))
-            .collect::<HashMap<_, _>>();
-        assertions.sort_by_key(|row| (row.recorded_at_micros, row.assertion_uuid));
-        graph_refs.sort_by_key(|row| {
-            (
-                times[&row.assertion_uuid],
-                row.assertion_uuid,
-                role_order(row.role),
-                row.ordinal,
-                kind_order(row.graph_kind),
-                row.graph_uuid,
-            )
-        });
+        sort_assertion_rows(&mut assertions, &mut graph_refs);
         Ok(Self {
             assertions,
             graph_refs,
@@ -478,6 +498,15 @@ impl AssertionLedger {
 
     /// Merge a staged assertion set idempotently.
     pub fn merge(&self, staged: &Self) -> Result<Self, KnowledgeError> {
+        self.merge_with_limits(staged, MAX_KNOWLEDGE_ROWS, MAX_KNOWLEDGE_ROWS)
+    }
+
+    fn merge_with_limits(
+        &self,
+        staged: &Self,
+        assertion_limit: usize,
+        graph_ref_limit: usize,
+    ) -> Result<Self, KnowledgeError> {
         let mut assertions = self.assertions.clone();
         let mut refs = self.graph_refs.clone();
         let mut by_id = assertions
@@ -504,7 +533,13 @@ impl AssertionLedger {
                 );
             }
         }
-        Self::new(assertions, refs)
+        check_assertion_row_limit("assertions", assertions.len(), assertion_limit)?;
+        check_assertion_row_limit("assertion_graph_refs", refs.len(), graph_ref_limit)?;
+        sort_assertion_rows(&mut assertions, &mut refs);
+        Ok(Self {
+            assertions,
+            graph_refs: refs,
+        })
     }
 
     /// Canonical assertion fingerprint over exact claim bytes and sorted refs.
@@ -1152,10 +1187,11 @@ fn validate_rows(
     assertions: &[Assertion],
     refs: &[AssertionGraphRef],
 ) -> Result<(), KnowledgeError> {
-    check_limit("assertions", assertions.len())?;
-    check_limit("assertion_graph_refs", refs.len())?;
+    validate_assertion_row_limits(assertions.len(), refs.len(), MAX_KNOWLEDGE_ROWS)?;
     let mut assertion_ids = HashSet::with_capacity(assertions.len());
     for assertion in assertions {
+        #[cfg(test)]
+        ASSERTION_ROW_VALIDATION_COUNT.with(|count| count.set(count.get() + 1));
         if assertion.contract_version != ASSERTION_CONTRACT_VERSION {
             return Err(invalid("assertion.contract_version", "unsupported version"));
         }
@@ -1170,6 +1206,8 @@ fn validate_rows(
     let mut role_ordinals: HashMap<(Uuid, AssertionGraphRole), Vec<u32>> = HashMap::new();
     let mut covered_assertions = HashSet::with_capacity(assertions.len());
     for reference in refs {
+        #[cfg(test)]
+        ASSERTION_ROW_VALIDATION_COUNT.with(|count| count.set(count.get() + 1));
         if reference.contract_version != ASSERTION_GRAPH_REF_CONTRACT_VERSION {
             return Err(invalid(
                 "assertion_graph_ref.contract_version",
@@ -1213,6 +1251,59 @@ fn validate_rows(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn reset_assertion_row_validation_count() {
+    ASSERTION_ROW_VALIDATION_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn assertion_row_validation_count() -> usize {
+    ASSERTION_ROW_VALIDATION_COUNT.with(std::cell::Cell::get)
+}
+
+fn check_assertion_row_limit(
+    participant: &'static str,
+    observed: usize,
+    limit: usize,
+) -> Result<(), KnowledgeError> {
+    if observed > limit {
+        Err(KnowledgeError::Limit {
+            participant,
+            observed,
+            limit,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_assertion_row_limits(
+    assertion_count: usize,
+    graph_ref_count: usize,
+    limit: usize,
+) -> Result<(), KnowledgeError> {
+    check_assertion_row_limit("assertions", assertion_count, limit)?;
+    check_assertion_row_limit("assertion_graph_refs", graph_ref_count, limit)
+}
+
+fn sort_assertion_rows(assertions: &mut [Assertion], refs: &mut [AssertionGraphRef]) {
+    let times = assertions
+        .iter()
+        .map(|row| (row.assertion_uuid, row.recorded_at_micros))
+        .collect::<HashMap<_, _>>();
+    assertions.sort_by_key(|row| (row.recorded_at_micros, row.assertion_uuid));
+    refs.sort_by_key(|row| {
+        (
+            times[&row.assertion_uuid],
+            row.assertion_uuid,
+            role_order(row.role),
+            row.ordinal,
+            kind_order(row.graph_kind),
+            row.graph_uuid,
+        )
+    });
 }
 
 fn assertion_batch(rows: &[Assertion]) -> Result<RecordBatch, KnowledgeError> {
@@ -1600,6 +1691,13 @@ mod tests {
         Uuid::from_bytes(bytes)
     }
 
+    fn non_v7_uuid(seed: u8) -> Uuid {
+        let mut bytes = [seed; 16];
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
     fn fixture() -> AssertionLedger {
         let assertion_uuid = uuid7(1);
         AssertionLedger::new(
@@ -1624,6 +1722,184 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    fn measurement_uuid(seed: u64) -> Uuid {
+        let mut bytes = u128::from(seed).to_be_bytes();
+        bytes[6] = (bytes[6] & 0x0f) | 0x70;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
+    fn assertion_measurement_digest(
+        existing: &AssertionLedger,
+        staged: &AssertionLedger,
+    ) -> String {
+        let mut writer = CanonicalWriter::new();
+        writer.raw(b"GF_ASSERTION_MERGE_MEASUREMENT_V1").unwrap();
+        for ledger in [existing, staged] {
+            writer.u64(ledger.assertions.len() as u64).unwrap();
+            for row in &ledger.assertions {
+                writer.raw(row.assertion_uuid.as_bytes()).unwrap();
+                writer.text(&row.claim).unwrap();
+                writer.raw(row.provenance_uuid.as_bytes()).unwrap();
+                writer.i64(row.recorded_at_micros).unwrap();
+                writer.u32(row.contract_version).unwrap();
+            }
+            writer.u64(ledger.graph_refs.len() as u64).unwrap();
+            for row in &ledger.graph_refs {
+                writer.raw(row.assertion_uuid.as_bytes()).unwrap();
+                writer.raw(row.graph_uuid.as_bytes()).unwrap();
+                writer.text(row.graph_kind.as_str()).unwrap();
+                writer.text(row.role.as_str()).unwrap();
+                writer.u32(row.ordinal).unwrap();
+                writer.u32(row.contract_version).unwrap();
+            }
+        }
+        fingerprint(
+            CanonicalDomain::Assertion,
+            CANONICAL_CONTRACT_VERSION,
+            &writer.finish(),
+        )
+        .unwrap()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+    }
+
+    fn median_nanos(values: &[u128]) -> u128 {
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        sorted[sorted.len() / 2]
+    }
+
+    #[test]
+    // Reproduce on an otherwise idle host:
+    // source /home/ubuntu/.claude/gf-quiet-host.sh && require_quiet_host && \
+    // CARGO_TARGET_DIR=/home/ubuntu/.cache/graphforge-target-1823-measurement cargo test --release --locked -p graphforge-knowledge --lib tests::quiet_host_assertion_merge_cost_measurement -- --ignored --nocapture --test-threads=1
+    #[ignore = "manual quiet-host assertion merge cost measurement"]
+    fn quiet_host_assertion_merge_cost_measurement() {
+        use std::time::Instant;
+
+        let repetitions = 9;
+        for existing_count in [1_000_u64, 10_000] {
+            let existing = AssertionLedger::new(
+                (0..existing_count)
+                    .map(|seed| {
+                        Assertion::new(
+                            measurement_uuid(seed + 1),
+                            format!("assertion claim {seed}"),
+                            measurement_uuid(seed + 2_000_000),
+                            i64::try_from(seed).unwrap(),
+                        )
+                        .unwrap()
+                    })
+                    .collect(),
+                (0..existing_count)
+                    .map(|seed| {
+                        AssertionGraphRef::new(
+                            measurement_uuid(seed + 1),
+                            measurement_uuid(seed + 4_000_000),
+                            GraphObjectKind::Node,
+                            AssertionGraphRole::Subject,
+                            0,
+                        )
+                        .unwrap()
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            let staged = AssertionLedger::new(
+                vec![
+                    Assertion::new(
+                        measurement_uuid(existing_count + 1),
+                        "staged assertion claim".into(),
+                        measurement_uuid(6_000_000),
+                        i64::try_from(existing_count).unwrap(),
+                    )
+                    .unwrap(),
+                ],
+                vec![
+                    AssertionGraphRef::new(
+                        measurement_uuid(existing_count + 1),
+                        measurement_uuid(8_000_000),
+                        GraphObjectKind::Node,
+                        AssertionGraphRole::Subject,
+                        0,
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+
+            let baseline_merge = || {
+                AssertionLedger::new(
+                    [existing.assertions.clone(), staged.assertions.clone()].concat(),
+                    [existing.graph_refs.clone(), staged.graph_refs.clone()].concat(),
+                )
+                .unwrap()
+            };
+            let trusted_merge = || existing.merge(&staged).unwrap();
+            assert_eq!(baseline_merge(), trusted_merge());
+            let input_digest = assertion_measurement_digest(&existing, &staged);
+            let expected_input_digest = match existing_count {
+                1_000 => "eac191d14d0f1088c9cf1b6f8e87df5e353b31dfa48de6490123cf177b2a0496",
+                10_000 => "5553b15b4fc68dd53ddf0b071daa392bc7e04cb74d78b39178c5a7a102df1a03",
+                _ => unreachable!("measurement uses two pinned input sizes"),
+            };
+            assert_eq!(input_digest, expected_input_digest);
+            let mut baseline = Vec::with_capacity(repetitions);
+            let mut optimized = Vec::with_capacity(repetitions);
+            let mut deltas = Vec::with_capacity(repetitions);
+            for repetition in 0..repetitions {
+                let (baseline_ns, optimized_ns) = if repetition % 2 == 0 {
+                    let start = Instant::now();
+                    std::hint::black_box(baseline_merge());
+                    let baseline_ns = start.elapsed().as_nanos();
+
+                    let start = Instant::now();
+                    std::hint::black_box(trusted_merge());
+                    (baseline_ns, start.elapsed().as_nanos())
+                } else {
+                    let start = Instant::now();
+                    std::hint::black_box(trusted_merge());
+                    let optimized_ns = start.elapsed().as_nanos();
+
+                    let start = Instant::now();
+                    std::hint::black_box(baseline_merge());
+                    (start.elapsed().as_nanos(), optimized_ns)
+                };
+                baseline.push(baseline_ns);
+                optimized.push(optimized_ns);
+                deltas.push(
+                    i128::try_from(optimized_ns).unwrap() - i128::try_from(baseline_ns).unwrap(),
+                );
+                eprintln!(
+                    "existing_assertions={existing_count} existing_refs={existing_count} staged_assertions=1 staged_refs=1 rep={} order={} baseline_ns={baseline_ns} trusted_merge_ns={optimized_ns} delta_ns={}",
+                    repetition + 1,
+                    if repetition % 2 == 0 {
+                        "baseline-first"
+                    } else {
+                        "trusted-first"
+                    },
+                    optimized_ns as i128 - baseline_ns as i128,
+                );
+            }
+            let baseline_median = median_nanos(&baseline);
+            let optimized_median = median_nanos(&optimized);
+            let mut sorted_deltas = deltas.clone();
+            sorted_deltas.sort_unstable();
+            let existing_rows = (existing.assertions.len() + existing.graph_refs.len()) as f64;
+            eprintln!(
+                "summary existing_assertions={existing_count} existing_refs={existing_count} existing_rows={} staged_assertions=1 staged_refs=1 repetitions={repetitions} input_digest_sha256={input_digest} baseline_median_ns={baseline_median} baseline_ns_per_existing_row={:.3} trusted_merge_median_ns={optimized_median} trusted_merge_ns_per_existing_row={:.3} median_delta_ns={} delta_range_ns={}..{}",
+                existing_rows as usize,
+                baseline_median as f64 / existing_rows,
+                optimized_median as f64 / existing_rows,
+                optimized_median as i128 - baseline_median as i128,
+                sorted_deltas[0],
+                sorted_deltas[sorted_deltas.len() - 1],
+            );
+        }
     }
 
     #[test]
@@ -1707,6 +1983,264 @@ mod tests {
                 "assertion_uuid/graph_uuid/role/ordinal"
             ))
         ));
+    }
+
+    #[test]
+    fn assertion_row_validation_rejects_bad_identity_version_and_duplicate() {
+        let valid = fixture().assertions[0].clone();
+        let mut invalid = valid.clone();
+        invalid.contract_version += 1;
+        assert!(matches!(
+            AssertionLedger::new(vec![invalid], vec![]),
+            Err(KnowledgeError::Invalid {
+                field: "assertion.contract_version",
+                ..
+            })
+        ));
+
+        invalid = valid.clone();
+        invalid.assertion_uuid = Uuid::nil();
+        assert!(matches!(
+            AssertionLedger::new(vec![invalid], vec![]),
+            Err(KnowledgeError::Invalid {
+                field: "assertion_uuid",
+                ..
+            })
+        ));
+
+        invalid = valid.clone();
+        invalid.assertion_uuid = non_v7_uuid(5);
+        assert!(matches!(
+            AssertionLedger::new(vec![invalid], vec![]),
+            Err(KnowledgeError::Invalid {
+                field: "assertion_uuid",
+                message: "must be UUIDv7",
+            })
+        ));
+
+        invalid = valid.clone();
+        invalid.provenance_uuid = Uuid::nil();
+        assert!(matches!(
+            AssertionLedger::new(vec![invalid], vec![]),
+            Err(KnowledgeError::Invalid {
+                field: "provenance_uuid",
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            AssertionLedger::new(vec![valid.clone(), valid], vec![]),
+            Err(KnowledgeError::Duplicate("assertion_uuid"))
+        ));
+    }
+
+    #[test]
+    fn assertion_ledger_rejects_an_empty_claim_after_row_construction() {
+        let valid = fixture();
+        let mut assertion = valid.assertions[0].clone();
+        assertion.claim.clear();
+        assert!(matches!(
+            AssertionLedger::new(vec![assertion], valid.graph_refs.clone()),
+            Err(KnowledgeError::Invalid {
+                field: "claim",
+                message: "must not be empty",
+            })
+        ));
+    }
+
+    #[test]
+    fn assertion_ledger_enforces_claim_byte_limit_after_row_construction() {
+        let valid = fixture();
+        let mut assertion = valid.assertions[0].clone();
+        assertion.claim =
+            "x".repeat(graphforge_core::canonical::MAX_CANONICAL_TEXT_BYTES as usize + 1);
+        assert!(matches!(
+            AssertionLedger::new(vec![assertion], valid.graph_refs.clone()),
+            Err(KnowledgeError::Invalid {
+                field: "claim",
+                message: "exceeds canonical UTF-8 limit",
+            })
+        ));
+    }
+
+    #[test]
+    fn graph_reference_row_validation_rejects_bad_identity_and_version() {
+        let assertion = fixture().assertions[0].clone();
+        let valid = AssertionGraphRef::new(
+            assertion.assertion_uuid,
+            uuid7(90),
+            GraphObjectKind::Node,
+            AssertionGraphRole::Subject,
+            0,
+        )
+        .unwrap();
+        let mut invalid = valid.clone();
+        invalid.contract_version += 1;
+        assert!(matches!(
+            AssertionLedger::new(vec![assertion.clone()], vec![invalid]),
+            Err(KnowledgeError::Invalid {
+                field: "assertion_graph_ref.contract_version",
+                ..
+            })
+        ));
+
+        invalid = valid.clone();
+        invalid.assertion_uuid = Uuid::nil();
+        assert!(matches!(
+            AssertionLedger::new(vec![assertion.clone()], vec![invalid]),
+            Err(KnowledgeError::Invalid {
+                field: "assertion_uuid",
+                ..
+            })
+        ));
+
+        invalid = valid.clone();
+        invalid.assertion_uuid = non_v7_uuid(6);
+        assert!(matches!(
+            AssertionLedger::new(vec![assertion.clone()], vec![invalid]),
+            Err(KnowledgeError::Invalid {
+                field: "assertion_uuid",
+                message: "must be UUIDv7",
+            })
+        ));
+
+        invalid = valid.clone();
+        invalid.graph_uuid = Uuid::nil();
+        assert!(matches!(
+            AssertionLedger::new(vec![assertion], vec![invalid]),
+            Err(KnowledgeError::Invalid {
+                field: "graph_uuid",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn graph_reference_validation_requires_an_existing_assertion_owner() {
+        let assertion = fixture().assertions[0].clone();
+        let reference = AssertionGraphRef::new(
+            uuid7(99),
+            uuid7(90),
+            GraphObjectKind::Node,
+            AssertionGraphRole::Subject,
+            0,
+        )
+        .unwrap();
+        assert!(matches!(
+            AssertionLedger::new(vec![assertion], vec![reference]),
+            Err(KnowledgeError::Dangling("assertion_uuid"))
+        ));
+    }
+
+    #[test]
+    fn assertion_row_limits_reject_the_first_excess_count() {
+        assert!(validate_assertion_row_limits(2, 2, 2).is_ok());
+        assert!(matches!(
+            validate_assertion_row_limits(3, 2, 2),
+            Err(KnowledgeError::Limit {
+                participant: "assertions",
+                observed: 3,
+                limit: 2,
+            })
+        ));
+        assert!(matches!(
+            validate_assertion_row_limits(2, 3, 2),
+            Err(KnowledgeError::Limit {
+                participant: "assertion_graph_refs",
+                observed: 3,
+                limit: 2,
+            })
+        ));
+    }
+
+    #[test]
+    fn assertion_merge_skips_validation_and_preserves_order_and_limits() {
+        let base = fixture();
+        let second_id = uuid7(20);
+        let staged = AssertionLedger::new(
+            vec![Assertion::new(second_id, "second".into(), uuid7(21), 20).unwrap()],
+            vec![
+                AssertionGraphRef::new(
+                    second_id,
+                    uuid7(22),
+                    GraphObjectKind::Node,
+                    AssertionGraphRole::Subject,
+                    0,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        reset_assertion_row_validation_count();
+        let merged = base.merge(&staged).unwrap();
+        assert_eq!(assertion_row_validation_count(), 0);
+        assert_eq!(merged.assertions()[0].assertion_uuid, uuid7(1));
+        assert_eq!(merged.assertions()[1].assertion_uuid, second_id);
+        assert_eq!(
+            merged,
+            AssertionLedger::new(
+                [base.assertions.clone(), staged.assertions.clone()].concat(),
+                [base.graph_refs.clone(), staged.graph_refs.clone()].concat(),
+            )
+            .unwrap()
+        );
+
+        assert!(matches!(
+            base.merge_with_limits(&staged, 1, MAX_KNOWLEDGE_ROWS),
+            Err(KnowledgeError::Limit {
+                participant: "assertions",
+                observed: 2,
+                limit: 1,
+            })
+        ));
+        assert!(matches!(
+            base.merge_with_limits(&staged, MAX_KNOWLEDGE_ROWS, 2),
+            Err(KnowledgeError::Limit {
+                participant: "assertion_graph_refs",
+                observed: 3,
+                limit: 2,
+            })
+        ));
+    }
+
+    #[test]
+    fn assertion_merge_sorts_backdated_new_assertions_and_references() {
+        let base = fixture();
+        let earlier_uuid = uuid7(20);
+        let staged = AssertionLedger::new(
+            vec![Assertion::new(earlier_uuid, "earlier".into(), uuid7(21), 5).unwrap()],
+            vec![
+                AssertionGraphRef::new(
+                    earlier_uuid,
+                    uuid7(22),
+                    GraphObjectKind::Node,
+                    AssertionGraphRole::Subject,
+                    0,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let merged = base.merge(&staged).unwrap();
+
+        assert_eq!(
+            merged
+                .assertions()
+                .iter()
+                .map(|row| row.assertion_uuid)
+                .collect::<Vec<_>>(),
+            vec![earlier_uuid, uuid7(1)]
+        );
+        assert_eq!(
+            merged
+                .graph_refs()
+                .iter()
+                .map(|row| row.assertion_uuid)
+                .collect::<Vec<_>>(),
+            vec![earlier_uuid, uuid7(1), uuid7(1)]
+        );
     }
 
     #[test]

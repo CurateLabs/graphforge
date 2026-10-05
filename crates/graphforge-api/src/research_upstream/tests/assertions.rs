@@ -132,7 +132,7 @@ fn individual_assertion_adoption_preserves_unselected_claims_and_graph_values() 
         .unwrap();
     let provenance = crate::knowledge::ledger::read_ledger(&graph.generation_for_read().unwrap())
         .unwrap()
-        .assertions
+        .assertions()
         .into_iter()
         .find(|assertion| assertion.assertion_uuid == selected)
         .unwrap()

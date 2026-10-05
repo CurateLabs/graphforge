@@ -293,7 +293,7 @@ pub(crate) fn merged_provenance(
     )
     .map_err(provenance_error)?;
     let mut lineage = Vec::with_capacity(request.graph_refs.len() + 1);
-    for (ordinal, reference) in staged.graph_refs.iter().enumerate() {
+    for (ordinal, reference) in staged.graph_refs().iter().enumerate() {
         lineage.push(
             LineageRecord::new(
                 event.provenance_uuid,
@@ -422,7 +422,7 @@ pub(super) fn merged_assertion_evidence_provenance(
 ) -> Result<ProvenanceLedger, GfError> {
     let existing = crate::provenance::read_ledger(parent)?;
     let mut lineage = Vec::new();
-    for (ordinal, reference) in staged.graph_refs.iter().enumerate() {
+    for (ordinal, reference) in staged.graph_refs().iter().enumerate() {
         lineage.push(
             LineageRecord::new(
                 event.provenance_uuid,
@@ -438,7 +438,7 @@ pub(super) fn merged_assertion_evidence_provenance(
             .map_err(provenance_error)?,
         );
     }
-    let evidence_offset = staged.graph_refs.len();
+    let evidence_offset = staged.graph_refs().len();
     for (ordinal, input) in request.evidence.iter().enumerate() {
         lineage.push(
             LineageRecord::new(

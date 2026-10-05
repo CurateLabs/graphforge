@@ -88,14 +88,13 @@ fn knowledge_rows(
         .collect();
     let artifacts = ArtifactLedger::new(artifacts).map_err(error)?;
     let original = knowledge::read_ledger(generation)?;
+    let (original_assertions, original_refs) = original.into_parts();
     let assertions = AssertionLedger::new(
-        original
-            .assertions
+        original_assertions
             .into_iter()
             .filter(|r| has(ids, "assertion", r.assertion_uuid))
             .collect(),
-        original
-            .graph_refs
+        original_refs
             .into_iter()
             .filter(|r| has(ids, "assertion", r.assertion_uuid))
             .collect(),
@@ -130,7 +129,7 @@ fn knowledge_rows(
         .iter()
         .map(|r| r.provenance_uuid)
         .chain(artifacts.artifacts.iter().map(|r| r.provenance_uuid))
-        .chain(assertions.assertions.iter().map(|r| r.provenance_uuid))
+        .chain(assertions.assertions().iter().map(|r| r.provenance_uuid))
         .chain(evidence.links().iter().map(|r| r.provenance_uuid))
     {
         ids.insert(("provenance".into(), id));

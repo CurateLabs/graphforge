@@ -166,6 +166,28 @@ The test compares generated and checked bytes exactly. A new record family,
 field, type, nullability, metadata entry, version, enum registry, sort key, or
 fingerprint therefore fails CI until its reviewed inventory is committed.
 
+### Rust assertion ledger values
+
+`graphforge_knowledge::AssertionLedger` keeps its assertion and graph-reference
+vectors private. Use `assertions()` and `graph_refs()` for immutable access, or
+consume both vectors with `into_parts()` when rebuilding a filtered ledger.
+Construct filtered or decoded values through `AssertionLedger::new` or
+`from_batches` so row identity, graph-reference ownership and coverage,
+per-role ordinals, duplicate tuples, and row limits are validated together.
+
+`merge()` uses the validated ledger values as its trusted base. It preserves
+replay/conflict behavior, validates the combined row caps and canonical order,
+and avoids a second full pass over established rows. It still clones and sorts
+the merged vectors and compares staged records and their references; fingerprint
+recomputation is unaffected. Making these fields private is a pre-v1 Rust source
+compatibility break: callers that previously read or mutated the vectors should
+migrate to the accessors or `into_parts()` and rebuild through the constructor.
+
+The reproducible comparison method and pinned input digests are in the
+[benchmarking development guide](../../development/benchmarking.md#assertionledger-merge-comparison).
+The issue comment records the accepted run's raw pairs, timings, and executable
+digest. Per-row cost is normalized by both existing vectors combined.
+
 ## Unsupported pre-v1 project roots
 
 Opening an unsupported pre-v1 project root returns `GF_UNSUPPORTED_PROJECT_FORMAT`

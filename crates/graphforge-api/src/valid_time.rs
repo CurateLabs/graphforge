@@ -426,7 +426,7 @@ fn validate_references(
     provenance_uuid: Uuid,
 ) -> Result<(), GfError> {
     if !crate::knowledge::read_ledger(generation)?
-        .assertions
+        .assertions()
         .iter()
         .any(|row| row.assertion_uuid == assertion_uuid)
     {

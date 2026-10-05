@@ -414,7 +414,7 @@ fn validate_composite_references(ledgers: CompositeLedgers<'_>) -> Result<(), Gf
     let assertion_ids = ledgers
         .knowledge
         .into_iter()
-        .flat_map(|ledger| ledger.assertions.iter().map(|row| row.assertion_uuid))
+        .flat_map(|ledger| ledger.assertions().iter().map(|row| row.assertion_uuid))
         .collect::<HashSet<_>>();
     let confidence_ids = ledgers
         .confidence

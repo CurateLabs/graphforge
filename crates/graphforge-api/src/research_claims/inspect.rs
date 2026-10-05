@@ -89,7 +89,7 @@ fn inspect(
         evidence_count,
     } = knowledge_state(generation)?;
     let base = assertions.assertion_batch().map_err(knowledge_error)?;
-    let rows = &assertions.assertions;
+    let rows = assertions.assertions();
     let mut fields = base
         .schema()
         .fields()
@@ -321,7 +321,7 @@ fn bounded_assertions(
 ) -> Result<graphforge_knowledge::AssertionLedger, GfError> {
     crate::branches::domain_bounds::preflight(generation)?;
     let assertions = k::read_ledger(generation)?;
-    if assertions.assertions.len() > graphforge_knowledge::research::MAX_RESEARCH_ROWS {
+    if assertions.assertions().len() > graphforge_knowledge::research::MAX_RESEARCH_ROWS {
         return Err(GfError::Project {
             code: graphforge_core::ProjectErrorCode::ResourceLimit,
             message: "research claim inspection exceeds row limit".into(),

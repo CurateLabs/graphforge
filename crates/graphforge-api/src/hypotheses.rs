@@ -808,7 +808,7 @@ fn validate_references(
     let generation = resolve(graph)?;
     if let Some(assertion_uuid) = assertion_uuid
         && !crate::knowledge::read_ledger(&generation)?
-            .assertions
+            .assertions()
             .iter()
             .any(|row| row.assertion_uuid == assertion_uuid)
     {

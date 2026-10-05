@@ -224,26 +224,25 @@ fn compose_rows(
     confidence: &ConfidenceLedger,
 ) -> Result<Vec<SnapshotRow>, GfError> {
     let assertion_ids_at_cutoff = assertions
-        .assertions
+        .assertions()
         .iter()
         .filter(|row| row.recorded_at_micros <= cutoff)
         .map(|row| row.assertion_uuid)
         .collect::<HashSet<_>>();
+    let (assertion_rows, graph_refs) = assertions.into_parts();
     let assertions = AssertionLedger::new(
-        assertions
-            .assertions
+        assertion_rows
             .into_iter()
             .filter(|row| row.recorded_at_micros <= cutoff)
             .collect(),
-        assertions
-            .graph_refs
+        graph_refs
             .into_iter()
             .filter(|row| assertion_ids_at_cutoff.contains(&row.assertion_uuid))
             .collect(),
     )
     .map_err(crate::knowledge::knowledge_error)?;
     let visible_assertions = assertions
-        .assertions
+        .assertions()
         .iter()
         .map(|row| row.assertion_uuid)
         .collect::<HashSet<_>>();
@@ -470,8 +469,8 @@ fn compose_rows(
         current_selection_by_group.insert(event.group_uuid, event.selected_assertion_uuid);
     }
 
-    let mut rows = Vec::with_capacity(assertions.assertions.len() + hypotheses.groups().len());
-    for assertion in &assertions.assertions {
+    let mut rows = Vec::with_capacity(assertions.assertions().len() + hypotheses.groups().len());
+    for assertion in assertions.assertions() {
         let status = current_status_by_assertion.get(&assertion.assertion_uuid);
         let history = history_by_assertion
             .get(&assertion.assertion_uuid)

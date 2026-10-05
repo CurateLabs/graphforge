@@ -238,7 +238,7 @@ fn publish_assertion_evidence(
         .expect("generation UUID lock poisoned") = receipt.generation_uuid;
     let ledger = read_ledger(&graphforge_storage::resolve_project_generation(root)?)?;
     let index = ledger
-        .assertions
+        .assertions()
         .iter()
         .position(|row| row.assertion_uuid == request.assertion.assertion_uuid)
         .ok_or_else(|| GfError::Validation("committed assertion is absent".into()))?;
@@ -333,7 +333,7 @@ fn read_confidence_domain_ledgers(
         read_ledger(parent)?
     };
     if !assertions
-        .assertions
+        .assertions()
         .iter()
         .any(|row| row.assertion_uuid == assertion_uuid)
     {
@@ -609,7 +609,7 @@ impl GraphForge {
         let staged_evidence =
             staged_evidence_bundle(&request, event.provenance_uuid, recorded_at_micros)?;
         if let Some(index) = assertions
-            .assertions
+            .assertions()
             .iter()
             .position(|row| row.assertion_uuid == request.assertion.assertion_uuid)
         {
@@ -688,7 +688,7 @@ impl GraphForge {
             ));
         }
         if !read_ledger(&parent)?
-            .assertions
+            .assertions()
             .iter()
             .any(|row| row.assertion_uuid == request.assertion_uuid)
         {
@@ -854,7 +854,7 @@ impl GraphForge {
             ));
         }
         if !read_ledger(&parent)?
-            .assertions
+            .assertions()
             .iter()
             .any(|row| row.assertion_uuid == request.assertion_uuid)
         {

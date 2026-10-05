@@ -400,7 +400,7 @@ impl GraphForge {
             .transpose()?;
         let assertion_ledger = crate::knowledge::read_ledger(&source_generation)?;
         let graph_refs = assertion_ledger
-            .graph_refs
+            .graph_refs()
             .iter()
             .map(|row| (row.assertion_uuid, row.graph_uuid, row.graph_kind))
             .collect::<Vec<_>>();
@@ -1922,7 +1922,7 @@ mod tests {
         .unwrap();
         let current_refs = crate::knowledge::read_ledger(&current_generation)
             .unwrap()
-            .graph_refs
+            .graph_refs()
             .into_iter()
             .map(|row| (row.assertion_uuid, row.graph_uuid, row.graph_kind))
             .collect::<Vec<_>>();
