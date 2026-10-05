@@ -99,6 +99,35 @@ impl GraphForge {
     /// private view because in-memory projects intentionally do not persist it;
     /// the catalog supplies names only, while logical rows determine presence.
     pub(crate) fn inspect_graph(&self) -> Result<GraphInspection, GfError> {
+        let view = self.inspection_view()?;
+
+        let node_stream = view.execute_stream(NODE_LABELS_QUERY)?;
+        let inspection = view.block_on(inspection_from_node_stream(node_stream))?;
+        let relationship_stream = view.execute_stream(RELATIONSHIP_TYPES_QUERY)?;
+        view.block_on(inspection_from_relationship_stream(
+            relationship_stream,
+            inspection,
+        ))
+    }
+
+    /// Inspect only committed node rows for label and node-count helpers.
+    pub(crate) fn inspect_nodes(&self) -> Result<GraphInspection, GfError> {
+        let view = self.inspection_view()?;
+        let node_stream = view.execute_stream(NODE_LABELS_QUERY)?;
+        view.block_on(inspection_from_node_stream(node_stream))
+    }
+
+    /// Inspect only committed relationship rows for relationship-type helpers.
+    pub(crate) fn inspect_relationships(&self) -> Result<GraphInspection, GfError> {
+        let view = self.inspection_view()?;
+        let relationship_stream = view.execute_stream(RELATIONSHIP_TYPES_QUERY)?;
+        view.block_on(inspection_from_relationship_stream(
+            relationship_stream,
+            GraphInspection::default(),
+        ))
+    }
+
+    fn inspection_view(&self) -> Result<Self, GfError> {
         let generation = self.generation_for_read()?;
         let mut view = Self::open_resolved_with_lifecycle_mode(
             generation.container_root().to_path_buf(),
@@ -112,14 +141,7 @@ impl GraphForge {
             .map_err(|_| GfError::Storage("runtime catalog lock poisoned".into()))?
             .clone();
         view.runtime_catalog = Arc::new(Mutex::new(catalog));
-
-        let node_stream = view.execute_stream(NODE_LABELS_QUERY)?;
-        let inspection = view.block_on(inspection_from_node_stream(node_stream))?;
-        let relationship_stream = view.execute_stream(RELATIONSHIP_TYPES_QUERY)?;
-        view.block_on(inspection_from_relationship_stream(
-            relationship_stream,
-            inspection,
-        ))
+        Ok(view)
     }
 }
 
@@ -128,10 +150,16 @@ async fn inspection_from_node_stream(
 ) -> Result<GraphInspection, GfError> {
     let mut inspection = GraphInspection::default();
     while let Some(batch) = stream.next().await {
-        accumulate_node_batch(
-            &mut inspection,
-            &batch.map_err(GfError::from_execution_error)?,
-        )?;
+        let batch = batch.map_err(GfError::from_execution_error)?;
+        let _region = graphforge_storage::concurrency_attribution::RegionScope::named(
+            "graph_inspection/nodes",
+        );
+        accumulate_node_batch(&mut inspection, &batch)?;
+        graphforge_storage::concurrency_attribution::RegionScope::record_work(
+            "rows",
+            u64::try_from(batch.num_rows())
+                .map_err(|_| resource_limit("graph inspection node batch exceeds UInt64"))?,
+        );
     }
     Ok(inspection)
 }
@@ -141,10 +169,17 @@ async fn inspection_from_relationship_stream(
     mut inspection: GraphInspection,
 ) -> Result<GraphInspection, GfError> {
     while let Some(batch) = stream.next().await {
-        accumulate_relationship_batch(
-            &mut inspection,
-            &batch.map_err(GfError::from_execution_error)?,
-        )?;
+        let batch = batch.map_err(GfError::from_execution_error)?;
+        let _region = graphforge_storage::concurrency_attribution::RegionScope::named(
+            "graph_inspection/relationships",
+        );
+        accumulate_relationship_batch(&mut inspection, &batch)?;
+        graphforge_storage::concurrency_attribution::RegionScope::record_work(
+            "rows",
+            u64::try_from(batch.num_rows()).map_err(|_| {
+                resource_limit("graph inspection relationship batch exceeds UInt64")
+            })?,
+        );
     }
     Ok(inspection)
 }
