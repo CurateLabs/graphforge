@@ -40,17 +40,19 @@ class Outcome(StrEnum):
 
 @dataclass(frozen=True)
 class Limits:
-    wall_seconds: float
-    cpu_seconds: float
+    """BenchExec kill limits; a `None` time limit means the run had none."""
+
+    wall_seconds: float | None
+    cpu_seconds: float | None
     memory_bytes: int
     cores: tuple[int, ...]
 
     def validate(self) -> None:
         if (
-            not _finite_number(self.wall_seconds)
-            or self.wall_seconds <= 0
-            or not _finite_number(self.cpu_seconds)
-            or self.cpu_seconds <= 0
+            any(
+                value is not None and (not _finite_number(value) or value <= 0)
+                for value in (self.wall_seconds, self.cpu_seconds)
+            )
             or self.memory_bytes <= 0
             or not self.cores
             or any(core < 0 for core in self.cores)

@@ -28,8 +28,8 @@
       "type": "object", "additionalProperties": false,
       "required": ["wall_seconds", "cpu_seconds", "memory_bytes", "cores"],
       "properties": {
-        "wall_seconds": {"type": "number", "exclusiveMinimum": 0},
-        "cpu_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "wall_seconds": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "cpu_seconds": {"type": ["number", "null"], "exclusiveMinimum": 0},
         "memory_bytes": {"type": "integer", "exclusiveMinimum": 0},
         "cores": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "integer", "minimum": 0}}
       }

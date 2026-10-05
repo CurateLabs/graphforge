@@ -63,7 +63,7 @@
       "additionalProperties": false,
       "required": ["wall_seconds", "memory_bytes", "cores"],
       "properties": {
-        "wall_seconds": {"type": "integer", "minimum": 1, "maximum": 14400},
+        "wall_seconds": {"type": ["integer", "null"], "minimum": 1, "maximum": 14400},
         "memory_bytes": {"const": 4294967296},
         "cores": {"const": 16}
       }
@@ -73,9 +73,20 @@
       "additionalProperties": false,
       "required": ["maximum_wall_seconds", "reference_wall_seconds", "margin"],
       "properties": {
-        "maximum_wall_seconds": {"const": 14400},
+        "maximum_wall_seconds": {"enum": [14400, null]},
         "reference_wall_seconds": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 1}]},
-        "margin": {"type": "number", "minimum": 0}
+        "margin": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
+    "launch_host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["window_seconds", "waited_seconds", "mean_busy_cores", "peak_busy_cores"],
+      "properties": {
+        "window_seconds": {"type": "integer", "minimum": 1},
+        "waited_seconds": {"type": "integer", "minimum": 0},
+        "mean_busy_cores": {"type": "number", "minimum": 0},
+        "peak_busy_cores": {"type": "number", "minimum": 0}
       }
     },
     "outputs": {
@@ -91,6 +102,21 @@
     "claim": {"const": "engineering_evidence_only"}
   },
   "allOf": [
+    {
+      "if": {"properties": {"rung": {"enum": ["S24", "S25", "S26"]}}, "required": ["rung"]},
+      "then": {
+        "properties": {
+          "limits": {"properties": {"wall_seconds": {"const": null}}},
+          "wall_policy": {"const": {"maximum_wall_seconds": null, "reference_wall_seconds": null, "margin": null}}
+        }
+      },
+      "else": {
+        "properties": {
+          "limits": {"properties": {"wall_seconds": {"type": "integer"}}},
+          "wall_policy": {"properties": {"maximum_wall_seconds": {"const": 14400}, "margin": {"type": "number"}}}
+        }
+      }
+    },
     {
       "if": {"properties": {"rung": {"enum": ["S20", "S22", "S24", "S25", "S26"]}}, "required": ["rung"]},
       "then": {

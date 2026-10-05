@@ -22,7 +22,7 @@ def write_host_bundle(output: Path, scale: int, plan: dict | None = None) -> Non
     from graphforge_bench.progressive_host_run import producer_digest
     from graphforge_bench.progressive_qualification import load_profiles, project
 
-    from tests.test_progressive_host_run import host_capacity, host_result, passed_rung, sha256
+    from tests.test_progressive_host_run import host_result, passed_rung, sha256
 
     output.mkdir(parents=True, exist_ok=True)
     result = host_result(scale)
@@ -60,9 +60,7 @@ def write_host_bundle(output: Path, scale: int, plan: dict | None = None) -> Non
     }
     if scale >= 20 and not (output / f"s{scale}-projection.json").exists():
         profile = next(p for p in load_profiles() if p.scale == scale)
-        projection = project(
-            profile, [passed_rung(s) for s in profile.projection_sources], host_capacity()
-        )
+        projection = project(profile, [passed_rung(s) for s in profile.projection_sources])
         path = output / f"s{scale}-projection.json"
         path.write_text(json.dumps(projection) + "\n")
         plan["identities"]["admitted_projection_sha256"] = sha256(path)

@@ -210,7 +210,6 @@ def plan_provider_ladder(
     output_dir: Path,
     commit: str,
     maximum_scale: int,
-    provider_capacity: Mapping[str, Any] | None = None,
     image_digest: str | None = None,
 ) -> dict[str, Any]:
     """Return one immutable, sanitized next-rung plan without provider calls."""
@@ -225,7 +224,7 @@ def plan_provider_ladder(
     if any(int(item["scale"]) > maximum_scale for item in completed):
         raise ProviderPlanError("completed rung exceeds the authorized maximum scale")
     try:
-        selected = select_next(profiles, completed, provider_capacity)
+        selected = select_next(profiles, completed)
     except QualificationError as error:
         raise ProviderPlanError("progressive admission policy refused the next rung") from error
     if selected is None or selected.scale > maximum_scale:
@@ -236,7 +235,7 @@ def plan_provider_ladder(
         if image_digest is None or IMAGE_DIGEST.fullmatch(image_digest) is None:
             raise ProviderPlanError("immutable provider image digest is required")
         try:
-            projection = project(selected, completed, provider_capacity)
+            projection = project(selected, completed)
         except QualificationError as error:
             raise ProviderPlanError("provider projection is not admitted") from error
         if projection["decision"] != "admitted":
@@ -286,23 +285,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--maximum-scale", type=int, required=True)
-    parser.add_argument("--provider-capacity", type=Path)
     parser.add_argument("--image-digest")
     parser.add_argument("--plan-out", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        capacity = None
-        if args.provider_capacity is not None:
-            value = _read_json(args.provider_capacity, "provider capacity evidence is malformed")
-            if not isinstance(value, Mapping):
-                raise ProviderPlanError("provider capacity evidence is malformed")
-            capacity = value
         plan = plan_provider_ladder(
             root=args.root,
             output_dir=args.output_dir,
             commit=args.commit,
             maximum_scale=args.maximum_scale,
-            provider_capacity=capacity,
             image_digest=args.image_digest,
         )
         args.plan_out.parent.mkdir(parents=True, exist_ok=True)

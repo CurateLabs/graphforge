@@ -49,6 +49,17 @@ _DEFAULT_SCRATCH_ROOT = Path(tempfile.gettempdir()) / "graphforge-ladder-test"
 WORK_PARENT = Path(os.environ.get("GF_LADDER_TEST_ROOT") or _DEFAULT_SCRATCH_ROOT)
 COMMIT = "f013587f0123456789abcdef0123456789abcdef"
 _SCRATCH_TOP_LEVEL: list[set[str]] = []
+QUIET_WINDOW = {
+    "window_seconds": 60,
+    "waited_seconds": 0,
+    "mean_busy_cores": 0.1,
+    "peak_busy_cores": 0.4,
+}
+# Ladder tests launch fixture rungs; the real 60 s host sampling is covered by
+# test_quiet_host and the launch contract by the explicit tests below.
+_QUIET_HOST = patch(
+    "graphforge_bench.progressive_host_run.wait_for_quiet_host", return_value=QUIET_WINDOW
+)
 
 
 def scratch_top_level() -> set[str]:
@@ -58,9 +69,11 @@ def scratch_top_level() -> set[str]:
 def setUpModule() -> None:
     WORK_PARENT.mkdir(parents=True, exist_ok=True)
     _SCRATCH_TOP_LEVEL[:] = [scratch_top_level()]
+    _QUIET_HOST.start()
 
 
 def tearDownModule() -> None:
+    _QUIET_HOST.stop()
     if not _SCRATCH_TOP_LEVEL:
         raise AssertionError("scratch root top level was not recorded")
     before = _SCRATCH_TOP_LEVEL[0]
@@ -307,15 +320,25 @@ class RungWallTests(unittest.TestCase):
         self.assertEqual(RungWall.from_reference(100, 0.0).wall_seconds, 100)
         self.assertEqual(RungWall.from_reference(14_000, 0.10).wall_seconds, MAXIMUM_WALL_SECONDS)
         self.assertEqual(RungWall.from_reference(None, 0.10).wall_seconds, MAXIMUM_WALL_SECONDS)
-        self.assertEqual(RungWall.envelope().wall_seconds, MAXIMUM_WALL_SECONDS)
         self.assertEqual(
             RungWall.from_reference(92, 0.10).policy(),
             {"maximum_wall_seconds": 14_400, "reference_wall_seconds": 92, "margin": 0.10},
         )
         self.assertEqual(
-            RungWall.envelope().policy(),
+            RungWall.from_reference(None, 0.10).policy(),
             {"maximum_wall_seconds": 14_400, "reference_wall_seconds": None, "margin": 0.10},
         )
+
+    def test_upper_rungs_have_no_wall_limit_even_with_a_reference(self) -> None:
+        for scale in (24, 25, 26):
+            wall = RungWall.for_scale(scale, 5_000, 0.10)
+            self.assertIsNone(wall.wall_seconds)
+            self.assertEqual(
+                wall.policy(),
+                {"maximum_wall_seconds": None, "reference_wall_seconds": None, "margin": None},
+            )
+        self.assertEqual(RungWall.for_scale(22, 92, 0.10).wall_seconds, 102)
+        self.assertEqual(RungWall.for_scale(22, None, 0.10).wall_seconds, MAXIMUM_WALL_SECONDS)
 
     def test_refuses_malformed_reference_or_margin(self) -> None:
         for reference in (0, -5, True, 12.5):
@@ -382,6 +405,11 @@ class RungWallTests(unittest.TestCase):
             self.assertEqual(plan["wall_policy"]["reference_wall_seconds"], 92)
             self.assertEqual(envelope["limits"]["wall_seconds"], MAXIMUM_WALL_SECONDS)
             self.assertIsNone(envelope["wall_policy"]["reference_wall_seconds"])
+            unbounded = json.loads(json.dumps(envelope))
+            unbounded["limits"]["wall_seconds"] = None
+            unbounded["wall_policy"] = RungWall.unbounded().policy()
+            with self.assertRaisesRegex(HostRunError, "plan.json validation failed"):
+                _validate(ROOT, "progressive-host-run-plan.json", unbounded)
 
     def test_benchexec_timeout_failure_reads_the_actual_limit(self) -> None:
         with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
