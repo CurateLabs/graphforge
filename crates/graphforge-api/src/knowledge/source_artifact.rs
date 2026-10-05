@@ -14,16 +14,17 @@ use graphforge_knowledge::{
 use sha2::Digest;
 
 use super::ledger::{
-    merged_artifact_provenance, merged_preference_provenance, merged_source_provenance,
-    read_preference_ledger, read_retention_ledger, source_artifact_publication_participants,
+    encode_source_ledger, merged_artifact_provenance, merged_preference_provenance,
+    merged_source_provenance, read_preference_ledger, read_retention_ledger,
+    source_artifact_publication_participants,
 };
 use super::{
     EventKind, GfError, GraphForge, PageRequest, ProjectCapability, ProjectStageOutcome,
     ProvenanceEvent, ResolvedProjectGeneration, Uuid, WriteContext, assertion_result,
     concat_or_empty, knowledge_error, lock_graph_visibility, not_found_kind,
-    prepare_knowledge_request, provenance_error, read_artifact_ledger, read_derivation_ledger,
-    read_source_ledger, require_uuid, transaction_conflict, validate_write_context,
-    with_next_token,
+    prepare_knowledge_request, prepare_knowledge_request_reusing_parent, provenance_error,
+    read_artifact_ledger, read_derivation_ledger, read_source_ledger, require_uuid,
+    transaction_conflict, validate_write_context, with_next_token,
 };
 use crate::PageToken;
 
@@ -147,6 +148,8 @@ impl GraphForge {
         &self,
         request: RegisterSourceRequest,
     ) -> Result<graphforge_exec::ExecutionResult, GfError> {
+        let _registration =
+            graphforge_storage::concurrency_attribution::RegionScope::named("source_publication");
         validate_write_context(&request.context)?;
         require_uuid(request.source_uuid, "source_uuid")?;
         let _graph_visibility = lock_graph_visibility(self)?;
@@ -206,24 +209,15 @@ impl GraphForge {
             ));
         }
         let sources = existing.merge(&staged).map_err(knowledge_error)?;
-        let artifacts = read_artifact_ledger(&parent)?;
-        let derivations = read_derivation_ledger(&parent)?;
-        let preferences = read_preference_ledger(&parent)?;
-        let retention = read_retention_ledger(&parent)?;
         let provenance = merged_source_provenance(&parent, request.source_uuid, &event)?;
-        publish_source_artifact(
+        publish_source_registration(
             self,
             &request.context,
             &parent,
             expected_parent,
             &sources,
-            &artifacts,
-            &derivations,
-            &preferences,
-            &retention,
             &provenance,
             request.source_uuid,
-            None,
         )
     }
 
@@ -759,7 +753,6 @@ fn publish_source_artifact(
     result_uuid: Uuid,
     local_bytes: Option<&[u8]>,
 ) -> Result<graphforge_exec::ExecutionResult, GfError> {
-    let root = graph.resolved_generation.container_root();
     let participants = source_artifact_publication_participants(
         parent,
         sources,
@@ -769,6 +762,71 @@ fn publish_source_artifact(
         retention,
         provenance,
     )?;
+    publish_source_artifact_participants(
+        graph,
+        context,
+        parent,
+        expected_parent,
+        participants,
+        sources,
+        result_uuid,
+        local_bytes,
+    )
+}
+
+fn publish_source_registration(
+    graph: &GraphForge,
+    context: &WriteContext,
+    parent: &ResolvedProjectGeneration,
+    expected_parent: Uuid,
+    sources: &SourceLedger,
+    provenance: &graphforge_provenance::ProvenanceLedger,
+    result_uuid: Uuid,
+) -> Result<graphforge_exec::ExecutionResult, GfError> {
+    let mut participants = encode_source_ledger(sources)?;
+    participants.extend(crate::provenance::encode_ledger(provenance)?);
+    let capabilities = parent
+        .capabilities()
+        .into_iter()
+        .map(|entry| ProjectCapability {
+            capability_id: entry.capability_id,
+            capability_version: entry.capability_version,
+        })
+        .collect();
+    let replaced = [
+        ("knowledge".into(), "sources".into()),
+        ("provenance".into(), "events".into()),
+        ("provenance".into(), "lineage".into()),
+    ];
+    let publication = prepare_knowledge_request_reusing_parent(
+        b"source_artifact",
+        context.operation_uuid,
+        capabilities,
+        parent,
+        &replaced,
+        participants,
+    )?;
+    publish_source_artifact_publication(
+        graph,
+        expected_parent,
+        &publication,
+        sources,
+        result_uuid,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_source_artifact_participants(
+    graph: &GraphForge,
+    context: &WriteContext,
+    parent: &ResolvedProjectGeneration,
+    expected_parent: Uuid,
+    participants: Vec<graphforge_storage::ProjectParticipant>,
+    sources: &SourceLedger,
+    result_uuid: Uuid,
+    local_bytes: Option<&[u8]>,
+) -> Result<graphforge_exec::ExecutionResult, GfError> {
     let capabilities = parent
         .capabilities()
         .into_iter()
@@ -783,8 +841,28 @@ fn publish_source_artifact(
         capabilities,
         participants,
     )?;
+    publish_source_artifact_publication(
+        graph,
+        expected_parent,
+        &publication,
+        sources,
+        result_uuid,
+        local_bytes,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_source_artifact_publication(
+    graph: &GraphForge,
+    expected_parent: Uuid,
+    publication: &graphforge_storage::PreparedGenerationRequest,
+    sources: &SourceLedger,
+    result_uuid: Uuid,
+    local_bytes: Option<&[u8]>,
+) -> Result<graphforge_exec::ExecutionResult, GfError> {
+    let root = graph.resolved_generation.container_root();
     let graph_objects = graph.begin_graph_object_publication()?;
-    let receipt = match graph.stage_project_generation(&publication)? {
+    let receipt = match graph.stage_project_generation(publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => {
             let mut prepare = |_: &ResolvedProjectGeneration| -> Result<(), GfError> {

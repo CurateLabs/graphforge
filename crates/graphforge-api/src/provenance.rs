@@ -289,9 +289,18 @@ fn write_parquet(batch: &RecordBatch, schema: &SchemaRef) -> Result<Vec<u8>, GfE
     writer
         .write(batch)
         .map_err(|error| GfError::Storage(error.to_string()))?;
-    writer
+    let bytes = writer
         .into_inner()
-        .map_err(|error| GfError::Storage(error.to_string()))
+        .map_err(|error| GfError::Storage(error.to_string()))?;
+    graphforge_storage::concurrency_attribution::RegionScope::record_work(
+        "rows",
+        u64::try_from(batch.num_rows()).unwrap_or(u64::MAX),
+    );
+    graphforge_storage::concurrency_attribution::RegionScope::record_work(
+        "bytes",
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+    );
+    Ok(bytes)
 }
 
 fn read_parquet(bytes: &[u8]) -> Result<Vec<RecordBatch>, GfError> {
@@ -301,9 +310,20 @@ fn read_parquet(bytes: &[u8]) -> Result<Vec<RecordBatch>, GfError> {
         .map_err(|error| GfError::Validation(format!("invalid provenance parquet: {error}")))?
         .build()
         .map_err(|error| GfError::Validation(format!("invalid provenance parquet: {error}")))?;
-    reader
+    let batches = reader
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| GfError::Validation(format!("invalid provenance parquet: {error}")))
+        .map_err(|error| GfError::Validation(format!("invalid provenance parquet: {error}")))?;
+    graphforge_storage::concurrency_attribution::RegionScope::record_work(
+        "rows",
+        batches.iter().fold(0_u64, |total, batch| {
+            total.saturating_add(u64::try_from(batch.num_rows()).unwrap_or(u64::MAX))
+        }),
+    );
+    graphforge_storage::concurrency_attribution::RegionScope::record_work(
+        "bytes",
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+    );
+    Ok(batches)
 }
 
 fn require_participant_contract(
