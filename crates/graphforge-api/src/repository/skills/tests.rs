@@ -17,7 +17,7 @@ fn test_skill_manifest() -> (Vec<u8>, [SkillBundleFile<'static>; 2]) {
     let manifest = serde_json::to_vec(&json!({
         "schema_version": 1,
         "bundle_version": 1,
-        "graphforge_compatibility": ">=0.5.0 <0.6.0",
+        "graphforge_compatibility": ">=0.6.0-dev <0.7.0",
         "skills": MANAGED_SKILL_NAMES,
         "files": files.iter().map(|file| json!({
             "path": file.path,
@@ -116,6 +116,12 @@ fn packaged_skill_manifest_rejects_each_contract_mismatch() {
         "validation error: project skill bundle is incompatible with this GraphForge release"
     );
     let mut changed = manifest.clone();
+    changed["graphforge_compatibility"] = json!(">=0.5.0 <0.6.0");
+    assert_eq!(
+        error_for(changed, &files),
+        "validation error: project skill bundle is incompatible with this GraphForge release"
+    );
+    let mut changed = manifest.clone();
     changed["skills"] = json!(["graphforge-bootstrap"]);
     assert_eq!(
         error_for(changed, &files),
@@ -189,7 +195,7 @@ fn installed_skill_manifest_rejects_invalid_versions_provenance_and_files() {
     let valid = json!({
         "schema_version": 1,
         "bundle_version": 1,
-        "graphforge_compatibility": ">=0.5.0 <0.6.0",
+        "graphforge_compatibility": ">=0.6.0-dev <0.7.0",
         "source": "graphforge-packaged-bundle",
         "files": [{
             "path": "graphforge-bootstrap/SKILL.md",

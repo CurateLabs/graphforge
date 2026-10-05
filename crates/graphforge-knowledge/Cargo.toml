@@ -9,7 +9,7 @@ repository.workspace = true
 
 [dependencies]
 arrow = { workspace = true }
-graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
+graphforge-core = { version = "0.6.0-dev", path = "../graphforge-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

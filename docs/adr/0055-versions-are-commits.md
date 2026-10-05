@@ -106,10 +106,17 @@ package, lineage or summary formats.
 ### Format and compatibility
 
 Research capability and registry revision 7 (`graphforge-research-registry/7`,
-producer `research/7`). Revision 6 Projects and packages keep working; revisions
+producer `research/7`). Revision 6 research layouts remain readable; revisions
 before 6 are refused with `GF_UNSUPPORTED_CAPABILITY_VERSION`, as before.
+This layout compatibility does not override the separate interchange producer
+check: an archive's outer `graphforge-storage/<version>;research-interchange/1`
+producer must match the reader's exact package version. Pre-v1 package-version
+changes can therefore reject an older package, or reject research-history access
+to a Project containing such an archive, even when its revision 6 layout is
+readable. Opening the Project alone does not establish that its archived
+research history is admissible.
 
-Compatibility needs no translation because every field revision 7 adds is
+Layout compatibility needs no translation because every field revision 7 adds is
 omitted when empty: revision 6 registry bytes are valid revision 7 bytes and
 decode, validate and digest identically.
 
@@ -126,11 +133,13 @@ decode, validate and digest identically.
   rewritten. The new Version's first parent is the prior head even when that
   head is a revision 6 Version. Once a Project is revision 7, no publication may
   label it revision 6 again.
-- **Packages.** Revision 6 research packages (an older client's export) are
-  admitted and import at revision 7 by the same relabelling; their imported
-  Versions and archive stay legacy roots and keep `research_capability_version`
+- **Packages.** Revision 6 research packages that satisfy the current producer
+  contract are admitted and import at revision 7 by the same relabelling; their
+  imported Versions and archive stay legacy roots and keep `research_capability_version`
   6 in the archive. Every export is written at revision 7, including a
-  whole-Project export of a Project imported by the revision 6 code.
+  whole-Project export of an admissible Project imported at revision 6. This
+  does not promise import or re-export of archives from a different pre-v1
+  package version.
 - **Readers of research participants.** Canonical decisions written at
   revision 6 read unchanged. Checkpoint summary diffs span the upgrade;
   record-level checkpoint diff still has no research registry adapter at any

@@ -21,12 +21,12 @@ test-failpoints = []
 test-support = ["graphforge-core/test-support"]
 
 [dependencies]
-graphforge-cypher = { version = "0.5.2", path = "../graphforge-cypher" }
-graphforge-value = { version = "0.5.2", path = "../graphforge-value" }
-graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
-graphforge-filesystem = { version = "0.5.2", path = "../graphforge-filesystem" }
-graphforge-ir = { version = "0.5.2", path = "../graphforge-ir" }
-graphforge-ontology = { version = "0.5.2", path = "../graphforge-ontology" }
+graphforge-cypher = { version = "0.6.0-dev", path = "../graphforge-cypher" }
+graphforge-value = { version = "0.6.0-dev", path = "../graphforge-value" }
+graphforge-core = { version = "0.6.0-dev", path = "../graphforge-core" }
+graphforge-filesystem = { version = "0.6.0-dev", path = "../graphforge-filesystem" }
+graphforge-ir = { version = "0.6.0-dev", path = "../graphforge-ir" }
+graphforge-ontology = { version = "0.6.0-dev", path = "../graphforge-ontology" }
 arrow = { workspace = true }
 async-trait = "0.1"
 atomicwrites = "0.4.4"
@@ -56,7 +56,7 @@ rustix = { version = "1.1", features = ["fs"] }
 named-lock = "0.4.1"
 
 [dev-dependencies]
-graphforge-core = { version = "0.5.2", path = "../graphforge-core", features = ["test-support"] }
+graphforge-core = { version = "0.6.0-dev", path = "../graphforge-core", features = ["test-support"] }
 divan = { workspace = true }
 wait-timeout = "0.2"
 

@@ -12,11 +12,11 @@ repository.workspace = true
 differential-testing = []
 
 [dependencies]
-graphforge-value = { version = "0.5.2", path = "../graphforge-value" }
-graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
-graphforge-ir = { version = "0.5.2", path = "../graphforge-ir" }
-graphforge-ontology = { version = "0.5.2", path = "../graphforge-ontology" }
-graphforge-plan = { version = "0.5.2", path = "../graphforge-plan" }
+graphforge-value = { version = "0.6.0-dev", path = "../graphforge-value" }
+graphforge-core = { version = "0.6.0-dev", path = "../graphforge-core" }
+graphforge-ir = { version = "0.6.0-dev", path = "../graphforge-ir" }
+graphforge-ontology = { version = "0.6.0-dev", path = "../graphforge-ontology" }
+graphforge-plan = { version = "0.6.0-dev", path = "../graphforge-plan" }
 datafusion = { workspace = true }
 arrow-data = { workspace = true }
 datafusion-functions-aggregate = "54"
@@ -26,7 +26,7 @@ thiserror = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-graphforge-storage = { version = "0.5.2", path = "../graphforge-storage" }
+graphforge-storage = { version = "0.6.0-dev", path = "../graphforge-storage" }
 tempfile = "3"
 insta = { workspace = true }
 graphforge-cypher = { path = "../graphforge-cypher" }

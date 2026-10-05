@@ -1,5 +1,6 @@
 """Tests for multi-surface release version alignment."""
 
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -197,10 +198,23 @@ def test_dry_run_does_not_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert cargo.read_text(encoding="utf-8") == before
 
 
-def test_apply_prerelease_rewrites_every_surface(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("target", ["0.6.0-rc.1", "0.6.0-dev", "0.6.0"])
+@pytest.mark.parametrize(
+    ("workspace", "relative_manifest", "runner"),
+    [
+        ("benchmarks", "runners/gdc-snb-bi/Cargo.toml", "graphforge-benchmark-gdc-snb-bi"),
+        ("fuzz", "Cargo.toml", "graphforge-fuzz"),
+    ],
+)
+def test_apply_version_rewrites_every_surface(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    workspace: str,
+    relative_manifest: str,
+    runner: str,
 ) -> None:
-    """A prerelease reaches every surface in that surface's canonical spelling."""
+    """Release libraries align without changing runners or registry resolution."""
     cargo = tmp_path / "Cargo.toml"
     cargo.write_text('[workspace.package]\nversion = "0.5.0"\n', encoding="utf-8")
     lock = tmp_path / "Cargo.lock"
@@ -215,6 +229,48 @@ def test_apply_prerelease_rewrites_every_surface(
         encoding="utf-8",
     )
     native = tmp_path / "npm" / "graphforge-linux-x64-gnu" / "package.json"
+    harness_manifest = tmp_path / workspace / relative_manifest
+    harness_manifest.parent.mkdir(parents=True)
+    harness_manifest.write_text(
+        f'[package]\nname = "{runner}"\nversion = "0.0.0"\n'
+        '[dependencies]\ngraphforge-core = { version = "0.4.0", '
+        'path = "../../../crates/graphforge-core" }\n',
+        encoding="utf-8",
+    )
+    harness_lock = tmp_path / workspace / "Cargo.lock"
+    harness_before = (
+        'version = 4\n\n[[package]]\nname = "graphforge-core"\nversion = "0.4.0"\n\n'
+        f'[[package]]\nname = "{runner}"\nversion = "0.0.0"\n\n'
+        '[[package]]\nname = "serde"\nversion = "1.0.0"\n'
+        'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+        'checksum = "retained"\n\n'
+        '[[package]]\nname = "graphforge-core"\nversion = "0.3.0"\n'
+        'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+        'checksum = "also-retained"\n'
+    )
+    harness_lock.write_text(harness_before, encoding="utf-8")
+    identity_documents = []
+    if workspace == "benchmarks":
+        sources = harness_manifest.parent / "src"
+        sources.mkdir()
+        (sources / "lib.rs").write_text("// library\n", encoding="utf-8")
+        (sources / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+        identity_documents.append(
+            (tmp_path / "benchmarks/profiles/gdc/snb-bi-identity.json", "driver")
+        )
+        for fixture in ("compatible", "reference-mismatch", "semantic-incompat"):
+            identity_documents.append(
+                (
+                    tmp_path / "benchmarks/fixtures/gdc/snb-bi-tiny" / fixture / "acquisition.json",
+                    "recorded_driver",
+                )
+            )
+        for path, key in identity_documents:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({key: {"content_sha256": "stale", "name": runner}, "assets": []}),
+                encoding="utf-8",
+            )
     native.parent.mkdir(parents=True)
     native.write_text('{"version":"0.5.0"}\n', encoding="utf-8")
     for path, content in (
@@ -247,30 +303,51 @@ def test_apply_prerelease_rewrites_every_surface(
         set_release_version, "crate_manifests", lambda: sorted(crates.glob("*/Cargo.toml"))
     )
 
-    base, dev, pre = set_release_version.parse_base("0.6.0-rc.1")
+    assert set_release_version.check_aligned() == [
+        f"{workspace}/Cargo.lock graphforge-core: got '0.4.0', expected '0.5.0'",
+        f"{workspace}/{relative_manifest} dependency graphforge-core: "
+        "got '0.4.0', expected '0.5.0'",
+    ]
+    base, dev, pre = set_release_version.parse_base(target)
     mapping = set_release_version.apply_version(base, dev=dev, pre=pre, dry_run=False)
-    assert mapping["cargo"] == "0.6.0-rc.1"
-    assert mapping["python"] == "0.6.0rc1"
-
-    assert 'version = "0.6.0-rc.1"' in cargo.read_text(encoding="utf-8")
-    assert 'version = "0.6.0-rc.1"' in lock.read_text(encoding="utf-8")
-    assert 'version = "0.6.0rc1"' in pyproject.read_text(encoding="utf-8")
-    assert 'graphforge-core = { version = "0.6.0-rc.1"' in manifest.read_text(encoding="utf-8")
-    assert json.loads(native.read_text(encoding="utf-8"))["version"] == "0.6.0-rc.1"
+    assert mapping["cargo"] == target
+    assert f'version = "{target}"' in cargo.read_text(encoding="utf-8")
+    assert f'version = "{target}"' in lock.read_text(encoding="utf-8")
+    assert f'version = "{mapping["python"]}"' in pyproject.read_text(encoding="utf-8")
+    assert f'graphforge-core = {{ version = "{target}"' in manifest.read_text(encoding="utf-8")
+    harness_text = harness_manifest.read_text(encoding="utf-8")
+    assert f'graphforge-core = {{ version = "{target}"' in harness_text
+    assert 'version = "0.0.0"' in harness_text
+    assert harness_lock.read_text(encoding="utf-8") == harness_before.replace(
+        'version = "0.4.0"', f'version = "{target}"'
+    )
+    if identity_documents:
+        digest = hashlib.sha256()
+        for relative in ("Cargo.toml", "src/lib.rs", "src/main.rs"):
+            digest.update(relative.encode())
+            digest.update(b"\0")
+            digest.update((harness_manifest.parent / relative).read_bytes())
+            digest.update(b"\0")
+        for path, key in identity_documents:
+            assert json.loads(path.read_text(encoding="utf-8")) == {
+                key: {"content_sha256": digest.hexdigest(), "name": runner},
+                "assets": [],
+            }
+    assert json.loads(native.read_text(encoding="utf-8"))["version"] == mapping["node"]
     for path in (
         tmp_path / "node" / "package.json",
         tmp_path / "cli" / "package.json",
         tmp_path / "skills" / "package.json",
     ):
-        assert json.loads(path.read_text(encoding="utf-8"))["version"] == "0.6.0-rc.1"
+        assert json.loads(path.read_text(encoding="utf-8"))["version"] == mapping["node"]
     skills = json.loads((tmp_path / "skills" / "package.json").read_text(encoding="utf-8"))
-    assert skills["graphforgeCompatibility"]["release"] == "0.6.0-rc.1"
+    assert skills["graphforgeCompatibility"]["release"] == mapping["skills"]
     compatibility = json.loads(
         (tmp_path / "skills" / "compatibility.json").read_text(encoding="utf-8")
     )
     assert compatibility == {
-        "package_version": "0.6.0-rc.1",
-        "graphforge_release": "0.6.0-rc.1",
+        "package_version": mapping["skills"],
+        "graphforge_release": mapping["skills"],
     }
 
     # The tree it just wrote must satisfy --check without further edits.
