@@ -7,10 +7,10 @@ release. GraphForge ships one version across 20 crates (crates.io), the
 
 ## What the workflow does
 
-| Trigger | Result |
-| --- | --- |
-| Push of a `v*` tag | Builds everything, smoke-tests it, waits for approval of the `release` environment, publishes, creates the GitHub Release, then installs from PyPI and npm and runs a smoke test. |
-| Manual run (`workflow_dispatch`) or a pull request touching the release path | Dry run: builds, packs, and smoke-tests everything. Nothing is uploaded. |
+| Trigger                                                                      | Result                                                                                                                                                                            |
+| ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Push of a `v*` tag                                                           | Builds everything, smoke-tests it, waits for approval of the `release` environment, publishes, creates the GitHub Release, then installs from PyPI and npm and runs a smoke test. |
+| Manual run (`workflow_dispatch`) or a pull request touching the release path | Dry run: builds, packs, and smoke-tests everything. Nothing is uploaded.                                                                                                          |
 
 Build jobs: 3 wheels (Linux x86_64 manylinux 2_17, macOS arm64, Windows
 amd64), the sdist, 5 Node addons, the 8 npm tarballs, and a dry-run package of
@@ -41,6 +41,23 @@ requires them but nothing here proves they are set.
   `graphforge-portable-oci`, and `graphforge-value`. `graphforge-hub-publish` was
   added later and is also new to crates.io. New crates are rate limited to one per ten minutes;
   the script sleeps until the time crates.io names (at most two hours in total).
+
+## Development version
+
+Keep `main` on the next release's development version between releases. For the
+v0.6.0 development cycle, use `python3 scripts/set_release_version.py 0.6.0-dev`
+and `make release-version-check`. This sets Cargo to `0.6.0-dev`, Python to
+`0.6.0.dev0`, and npm packages to `0.6.0-dev.0`.
+
+Subsequent commits keep that development version until the release preparation
+change sets an explicit candidate such as `0.6.0-rc.1`. The development version
+does not identify a unique build; record the source commit when reporting local
+results. Do not create or push a release tag for a development version.
+After a final release, advance `main` to the next planned development version
+before further feature work. When starting a new release series, review the skills
+compatibility ranges in the agent-skills package and native project-skill validator,
+and regenerate packaged project skills with `python3 scripts/sync_project_skills.py --write`.
+The version setter updates package identities, not supported API compatibility.
 
 ## Cut a release
 

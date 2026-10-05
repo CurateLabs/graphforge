@@ -95,7 +95,7 @@ npx --offline --no-install graphforge-agent-skills compatibility --json
 ```
 
 The compatibility response is machine-readable and currently declares support
-for GraphForge `>=0.5.0 <0.6.0`.
+for GraphForge `>=0.6.0-dev <0.7.0`.
 
 ## Bootstrap, build knowledge, and resolve belief
 

@@ -8,10 +8,10 @@ license-file.workspace = true
 repository.workspace = true
 
 [dependencies]
-graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
-graphforge-value = { version = "0.5.2", path = "../graphforge-value" }
+graphforge-core = { version = "0.6.0-dev", path = "../graphforge-core" }
+graphforge-value = { version = "0.6.0-dev", path = "../graphforge-value" }
 arrow = { workspace = true }
-graphforge-storage = { version = "0.5.2", path = "../graphforge-storage" }
+graphforge-storage = { version = "0.6.0-dev", path = "../graphforge-storage" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tantivy = { workspace = true }

@@ -44,7 +44,7 @@ fn validate_skill_bundle(bundle: &SkillBundle<'_>) -> Result<CanonicalSkillManif
     if manifest.schema_version != 1 || manifest.bundle_version == 0 {
         return Err(validation("unsupported project skill manifest version"));
     }
-    if manifest.graphforge_compatibility != ">=0.5.0 <0.6.0" {
+    if manifest.graphforge_compatibility != ">=0.6.0-dev <0.7.0" {
         return Err(validation(
             "project skill bundle is incompatible with this GraphForge release",
         ));
@@ -131,7 +131,7 @@ fn read_installed_manifest(path: &Path) -> Result<InstalledSkillManifest, GfErro
     if manifest.schema_version != 1 || manifest.bundle_version == 0 {
         return Err(validation("unsupported managed skill manifest version"));
     }
-    if manifest.graphforge_compatibility != ">=0.5.0 <0.6.0"
+    if manifest.graphforge_compatibility != ">=0.6.0-dev <0.7.0"
         || manifest.source != "graphforge-packaged-bundle"
     {
         return Err(validation("invalid managed skill provenance"));

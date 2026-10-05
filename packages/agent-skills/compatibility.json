@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "package": "@curatelabs/graphforge-agent-skills",
-  "package_version": "0.5.2",
-  "graphforge_release": "0.5.2",
-  "graphforge_version_range": ">=0.5.0 <0.6.0",
+  "package_version": "0.6.0-dev.0",
+  "graphforge_release": "0.6.0-dev.0",
+  "graphforge_version_range": ">=0.6.0-dev <0.7.0",
   "security_contract": {
     "subprocess": "unsupported",
     "project_symlinks": "rejected",

@@ -41,7 +41,7 @@ def expected_manifest() -> dict[str, object]:
     return {
         "schema_version": 1,
         "bundle_version": 1,
-        "graphforge_compatibility": ">=0.5.0 <0.6.0",
+        "graphforge_compatibility": ">=0.6.0-dev <0.7.0",
         "skills": list(SKILL_NAMES),
         "files": files,
     }

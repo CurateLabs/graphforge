@@ -4,6 +4,7 @@
 Surfaces:
 - Cargo workspace ``[workspace.package].version``
 - Cargo lockfile entries for workspace packages
+- Benchmark/fuzz path dependency pins and local library lockfile entries
 - Python ``crates/graphforge-bindings-py/pyproject.toml`` (PEP 440)
 - Node ``crates/graphforge-bindings-node/package.json``
 - NPX lifecycle CLI ``packages/cli/package.json``
@@ -76,10 +77,27 @@ def crate_manifests() -> list[Path]:
     return sorted((ROOT / "crates").glob("*/Cargo.toml"))
 
 
+def dependency_manifests() -> list[Path]:
+    """Include independent workspaces when updating library pins."""
+    return [
+        *crate_manifests(),
+        *sorted(
+            path
+            for workspace in independent_workspaces()
+            for path in workspace.glob("**/Cargo.toml")
+        ),
+    ]
+
+
+def independent_workspaces() -> list[Path]:
+    """Return workspaces whose unpublished harnesses depend on release libraries."""
+    return [ROOT / "benchmarks", ROOT / "fuzz"]
+
+
 def path_version_pins() -> list[tuple[Path, str, str]]:
     """Return (manifest, dependency, version) for path+version graphforge deps."""
     pins: list[tuple[Path, str, str]] = []
-    for path in crate_manifests():
+    for path in dependency_manifests():
         text = path.read_text(encoding="utf-8")
         for match in PATH_VERSION_DEP.finditer(text):
             dependency = match.group(1).split("=", 1)[0].strip()
@@ -91,6 +109,23 @@ def cargo_lock_versions() -> dict[str, str]:
     """Return versions for local graphforge-* packages recorded in Cargo.lock."""
     text = CARGO_LOCK.read_text(encoding="utf-8")
     return dict(re.findall(r'(?m)^name = "(graphforge-[^"]+)"\nversion = "([^"]+)"$', text))
+
+
+def local_library_entries(path: Path) -> list[tuple[str, str, str]]:
+    """Return (name, version, block) for local release libraries in a lockfile.
+
+    Runner packages have independent versions; registry packages retain their
+    existing resolution, even if they share a release library's name.
+    """
+    if not path.is_file():
+        return []
+    release_names = cargo_lock_versions()
+    entries = []
+    for block in re.split(r"(?m)(?=^\[\[package\]\])", path.read_text(encoding="utf-8")):
+        match = re.search(r'(?m)^name = "([^"]+)"\nversion = "([^"]+)"$', block)
+        if match and match.group(1) in release_names and not re.search(r"(?m)^source\s*=", block):
+            entries.append((match.group(1), match.group(2), block))
+    return entries
 
 
 RELEASE_RE = re.compile(r"\d+\.\d+\.\d+")
@@ -241,6 +276,14 @@ def check_aligned() -> list[str]:
     for package, got in sorted(lock_versions.items()):
         if got != expected["cargo"]:
             errors.append(f"Cargo.lock {package}: got {got!r}, expected {expected['cargo']!r}")
+    for workspace in independent_workspaces():
+        path = workspace / "Cargo.lock"
+        for package, got, _ in local_library_entries(path):
+            if got != expected["cargo"]:
+                errors.append(
+                    f"{path.relative_to(ROOT)} {package}: "
+                    f"got {got!r}, expected {expected['cargo']!r}"
+                )
     compatibility = json.loads(SKILLS_COMPATIBILITY.read_text(encoding="utf-8"))
     if compatibility.get("package_version") != expected["skills"]:
         errors.append(
@@ -292,7 +335,7 @@ def apply_version(base: str, *, dev: bool, dry_run: bool, pre: str | None = None
 
     staged_manifests: list[tuple[Path, str]] = []
     pin_updates = 0
-    for path in crate_manifests():
+    for path in dependency_manifests():
         text = path.read_text(encoding="utf-8")
         updated, count = PATH_VERSION_DEP.subn(
             rf"\g<1>{expected['cargo']}\3",
@@ -316,6 +359,17 @@ def apply_version(base: str, *, dev: bool, dry_run: bool, pre: str | None = None
     )
     if lock_count == 0:
         raise ValueError("failed to update Cargo.lock workspace package versions")
+
+    staged_locks: list[tuple[Path, str]] = []
+    for workspace in independent_workspaces():
+        path = workspace / "Cargo.lock"
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for _, version, block in local_library_entries(path):
+            updated = block.replace(f'version = "{version}"', f'version = "{expected["cargo"]}"', 1)
+            text = text.replace(block, updated, 1)
+        staged_locks.append((path, text))
 
     py_text = PYPROJECT.read_text(encoding="utf-8")
     py_text, n = re.subn(
@@ -354,6 +408,8 @@ def apply_version(base: str, *, dev: bool, dry_run: bool, pre: str | None = None
     for path, updated in staged_manifests:
         path.write_text(updated, encoding="utf-8")
     CARGO_LOCK.write_text(lock_text, encoding="utf-8")
+    for path, updated in staged_locks:
+        path.write_text(updated, encoding="utf-8")
     PYPROJECT.write_text(py_text, encoding="utf-8")
     for path, meta in staged_packages:
         path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
