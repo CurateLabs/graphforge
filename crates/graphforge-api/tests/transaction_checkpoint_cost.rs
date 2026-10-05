@@ -122,7 +122,9 @@ fn transaction_checkpoint_work_is_once_per_transaction_and_tracks_workspace_size
         ("split_4", &split_baseline),
     ] {
         eprintln!(
-            "transaction checkpoint evidence {label}: bytes={} files={} flushes={}",
+            "transaction checkpoint evidence {label}: captures={} source_bytes={} copied_bytes={} files={} flushes={}",
+            work.workspace_checkpoints,
+            work.workspace_checkpoint_source_bytes,
             work.workspace_checkpoint_bytes,
             work.workspace_checkpoint_files,
             work.workspace_checkpoint_flushes
@@ -133,18 +135,17 @@ fn transaction_checkpoint_work_is_once_per_transaction_and_tracks_workspace_size
         assert!(work.workspace_checkpoint_files > 0, "{work:?}");
         assert!(work.workspace_checkpoint_bytes > 0, "{work:?}");
         assert!(work.workspace_checkpoint_flushes > 0, "{work:?}");
+        assert_eq!(
+            work.workspace_checkpoint_source_bytes, work.workspace_checkpoint_bytes,
+            "copied bytes must reconcile with the source inventory: {work:?}"
+        );
     }
     assert_eq!(
         small_one.workspace_checkpoint_files,
         small_many.workspace_checkpoint_files
     );
-    assert!(
-        small_one
-            .workspace_checkpoint_bytes
-            .abs_diff(small_many.workspace_checkpoint_bytes)
-            <= 64,
-        "small fixture checkpoint-byte variance exceeded 64 bytes: {small_one:?} {small_many:?}"
-    );
+    assert_eq!(small_one.workspace_checkpoints, 1, "{small_one:?}");
+    assert_eq!(small_many.workspace_checkpoints, 1, "{small_many:?}");
     assert_eq!(
         small_one.workspace_checkpoint_flushes,
         small_many.workspace_checkpoint_flushes
@@ -153,13 +154,8 @@ fn transaction_checkpoint_work_is_once_per_transaction_and_tracks_workspace_size
         large_one.workspace_checkpoint_files,
         large_many.workspace_checkpoint_files
     );
-    assert!(
-        large_one
-            .workspace_checkpoint_bytes
-            .abs_diff(large_many.workspace_checkpoint_bytes)
-            <= 64,
-        "large fixture checkpoint-byte variance exceeded 64 bytes: {large_one:?} {large_many:?}"
-    );
+    assert_eq!(large_one.workspace_checkpoints, 1, "{large_one:?}");
+    assert_eq!(large_many.workspace_checkpoints, 1, "{large_many:?}");
     assert_eq!(
         large_one.workspace_checkpoint_flushes,
         large_many.workspace_checkpoint_flushes
@@ -171,6 +167,10 @@ fn transaction_checkpoint_work_is_once_per_transaction_and_tracks_workspace_size
     assert!(
         split_baseline.workspace_checkpoint_flushes > small_many.workspace_checkpoint_flushes,
         "one-statement transaction baseline should flush more files: {split_baseline:?} {small_many:?}"
+    );
+    assert_eq!(
+        split_baseline.workspace_checkpoints, 4,
+        "one-statement transaction baseline should capture four checkpoints: {split_baseline:?}"
     );
     assert!(
         split_baseline.workspace_checkpoint_bytes > small_many.workspace_checkpoint_bytes,

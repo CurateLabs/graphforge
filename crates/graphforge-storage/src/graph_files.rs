@@ -1840,6 +1840,7 @@ impl GraphWorkspaceCheckpoint {
                 let (inventory, _) = capture_graph_files(source)?;
                 // A rollback snapshot preserves the admitted layout exactly;
                 // ordinary hydration may instead upgrade legacy route names.
+                crate::io_stats::record_workspace_checkpoint_capture(inventory.total_byte_length);
                 for entry in &inventory.files {
                     let input = resolve_v1_inventory_entry(source, entry)?;
                     let relative = input

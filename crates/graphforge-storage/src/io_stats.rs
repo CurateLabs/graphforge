@@ -151,6 +151,8 @@ pub(crate) struct Counters {
     workspace_checkpoint_bytes: AtomicU64,
     workspace_checkpoint_files: AtomicU64,
     workspace_checkpoint_flushes: AtomicU64,
+    workspace_checkpoints: AtomicU64,
+    workspace_checkpoint_source_bytes: AtomicU64,
 }
 
 /// A point-in-time copy of requested I/O counters. Difference two
@@ -226,6 +228,10 @@ pub struct IoSnapshot {
     pub workspace_checkpoint_files: u64,
     /// File durability barriers issued while creating rollback checkpoints.
     pub workspace_checkpoint_flushes: u64,
+    /// Rollback checkpoint captures that copied an existing workspace.
+    pub workspace_checkpoints: u64,
+    /// Bytes declared by source inventories for those checkpoint captures.
+    pub workspace_checkpoint_source_bytes: u64,
 }
 
 /// Capture requested counters, or report an unavailable observation.
@@ -281,6 +287,10 @@ pub fn snapshot() -> Option<IoSnapshot> {
         workspace_checkpoint_files: counters.workspace_checkpoint_files.load(Ordering::Relaxed),
         workspace_checkpoint_flushes: counters
             .workspace_checkpoint_flushes
+            .load(Ordering::Relaxed),
+        workspace_checkpoints: counters.workspace_checkpoints.load(Ordering::Relaxed),
+        workspace_checkpoint_source_bytes: counters
+            .workspace_checkpoint_source_bytes
             .load(Ordering::Relaxed),
     })
 }
@@ -352,6 +362,10 @@ pub fn reset() {
         counters
             .workspace_checkpoint_flushes
             .store(0, Ordering::Relaxed);
+        counters.workspace_checkpoints.store(0, Ordering::Relaxed);
+        counters
+            .workspace_checkpoint_source_bytes
+            .store(0, Ordering::Relaxed);
     });
 }
 
@@ -383,6 +397,17 @@ pub(crate) fn record_workspace_checkpoint_copy(bytes: u64, flushes: u64) {
         counters
             .workspace_checkpoint_flushes
             .fetch_add(flushes, Ordering::Relaxed);
+    });
+}
+
+pub(crate) fn record_workspace_checkpoint_capture(source_bytes: u64) {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .workspace_checkpoints
+            .fetch_add(1, Ordering::Relaxed);
+        counters
+            .workspace_checkpoint_source_bytes
+            .fetch_add(source_bytes, Ordering::Relaxed);
     });
 }
 
