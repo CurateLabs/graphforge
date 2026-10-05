@@ -1,5 +1,6 @@
 use super::*;
 use crate::ProcedureDefinition;
+#[cfg(all(feature = "knowledge", feature = "portable"))]
 use crate::{
     AssertionGraphRefInput, AssertionGraphRole, CapabilityId, CreateAssertionRequest,
     EnableCapabilityRequest, GraphObjectKind, OperationId, WriteContext,
@@ -133,6 +134,7 @@ fn private_wire_boundary_matches_public_error_domain() {
     );
 }
 
+#[cfg(all(feature = "knowledge", feature = "portable"))]
 #[test]
 fn graph_mutation_reuses_large_unchanged_knowledge_participant() {
     let mut work = Vec::new();
