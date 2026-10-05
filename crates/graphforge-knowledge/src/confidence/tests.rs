@@ -147,6 +147,47 @@ fn confidence_merge_does_not_revalidate_validated_rows() {
 }
 
 #[test]
+fn confidence_merge_sorts_out_of_order_appended_assessments() {
+    let later = ConfidenceLedger::explicit(uuid7(10), uuid7(1), 0.8, uuid7(2), 20).unwrap();
+    let earlier = ConfidenceLedger::explicit(uuid7(11), uuid7(1), 0.3, uuid7(3), 19).unwrap();
+
+    let merged = later.merge(&earlier).unwrap();
+
+    assert_eq!(merged.assessments()[0].confidence_uuid, uuid7(11));
+    assert_eq!(merged.assessments()[1].confidence_uuid, uuid7(10));
+}
+
+#[test]
+fn confidence_merge_conflicts_when_only_input_snapshot_differs() {
+    let assessment = conservative_assessment(10, Some(0.5));
+    let existing = ConfidenceLedger::new(
+        vec![assessment.clone()],
+        vec![confidence_input(
+            assessment.confidence_uuid,
+            30,
+            Some(0.5),
+            0,
+        )],
+    )
+    .unwrap();
+    let staged = ConfidenceLedger::new(
+        vec![assessment.clone()],
+        vec![confidence_input(
+            assessment.confidence_uuid,
+            31,
+            Some(0.5),
+            0,
+        )],
+    )
+    .unwrap();
+
+    assert!(matches!(
+        existing.merge(&staged),
+        Err(KnowledgeError::Conflict("confidence_uuid"))
+    ));
+}
+
+#[test]
 fn confidence_merge_enforces_combined_row_limits_without_full_validation() {
     let existing = ConfidenceLedger::new(
         vec![
