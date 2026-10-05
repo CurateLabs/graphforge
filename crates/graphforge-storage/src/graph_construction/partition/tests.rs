@@ -104,6 +104,78 @@ fn sampled_splitters_balance_a_uuid_v7_ingest() {
     }
 }
 
+/// A content-derived identity, as the GDC converter mints them: a SHA-256
+/// prefix with the UUIDv7 version and variant bits set, uniform over the key
+/// space rather than clustered on a timestamp prefix.
+fn content_key(index: u64) -> [u8; 16] {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(index.to_be_bytes());
+    let mut key = [0_u8; 16];
+    key.copy_from_slice(&digest[..16]);
+    key[6] = (key[6] & 0x0f) | 0x70;
+    key[8] = (key[8] & 0x3f) | 0x80;
+    key
+}
+
+/// Content-derived identities in staged order: chunks of `chunk_rows`, each
+/// sorted on its own as intake writes it, concatenated in receipt order. Every
+/// chunk spans the whole key space, unlike [`ingest_keys`], which is globally
+/// sorted the way the Graph500 generator's input arrives.
+fn staged_content_keys(count: u64, chunk_rows: usize) -> Vec<[u8; 16]> {
+    let mut keys = (0..count).map(content_key).collect::<Vec<_>>();
+    for chunk in keys.chunks_mut(chunk_rows) {
+        chunk.sort_unstable();
+    }
+    keys
+}
+
+/// #1731: graph500-22's content-derived identities, staged in 1,016 sorted
+/// chunks, were cut into a partition holding 12x the mean. A sample position at
+/// a fixed offset in every stride window is a fixed rank inside every sorted
+/// chunk, so the sample clumped at a few chunk quantiles instead of following
+/// the keys. 16 partitions over 65,536 keys sample at a stride of 64; chunks of
+/// half, one and two strides make that alias at test scale, and each one was
+/// refused (14.6x, 6.7x and 4.9x the mean) before window offsets were hashed.
+#[test]
+fn sampled_splitters_balance_content_keys_staged_in_sorted_chunks() {
+    for chunk_rows in [32_usize, 64, 128] {
+        let keys = staged_content_keys(65_536, chunk_rows);
+        let plan = plan_for(&keys, 16);
+        assert_eq!(plan.partitions(), 16, "chunk_rows={chunk_rows}");
+        let balance = balance_for(&keys, &plan);
+        assert_eq!(balance.total(), keys.len() as u64);
+        balance
+            .assert_balanced("staged content keys")
+            .unwrap_or_else(|error| panic!("chunk_rows={chunk_rows}: {error}"));
+        let mean = balance.total() / balance.rows().len() as u64;
+        assert!(
+            balance.max_rows() <= mean * 2,
+            "chunk_rows={chunk_rows} max={} mean={mean}",
+            balance.max_rows()
+        );
+    }
+}
+
+/// Every sample position lies inside its own stride window, so the positions
+/// are strictly increasing, one per window, and inside the staged domain.
+#[test]
+fn sample_positions_take_one_record_from_each_stride_window() {
+    for records in [1_u64, 63, 64, 65, 65_536, 66_552_392] {
+        let sampler = IdentitySampler::new(4_096, records).unwrap();
+        let stride = records.div_ceil(u64::from(sampler.cut()) * 64).max(1);
+        let positions = sampler.positions().collect::<Vec<_>>();
+        assert!(!positions.is_empty(), "records={records}");
+        for (window, position) in positions.iter().enumerate() {
+            let start = window as u64 * stride;
+            assert!(
+                (start..start + stride).contains(position) && *position < records,
+                "records={records} window={window} position={position}"
+            );
+        }
+        assert!(positions.len() as u64 >= records.div_ceil(stride) - 1);
+    }
+}
+
 #[test]
 fn balance_assertion_refuses_formula_splitters_over_a_uuid_v7_ingest() {
     let keys = ingest_keys(80_000);
