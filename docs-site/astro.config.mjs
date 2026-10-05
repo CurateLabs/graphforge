@@ -536,6 +536,10 @@ export default defineConfig({
                   label: '0056 — Shaping stays serial within stages until one sub-phase dominates',
                   slug: 'adr/0056-stage-internal-parallelism',
                 },
+                {
+                  label: '0057 — Initial builds resolve edge endpoints by a node-surrogate index instead of two endpoint sorts',
+                  slug: 'adr/0057-endpoint-resolution-by-node-index',
+                },
                 // END generated ADR records
               ],
             },
