@@ -109,6 +109,10 @@ name = "artifact_derivation_validation"
 required-features = ["knowledge", "provenance", "search", "research"]
 
 [[test]]
+name = "transaction_checkpoint_cost"
+required-features = ["knowledge", "provenance"]
+
+[[test]]
 name = "discovery_project_summary"
 required-features = ["discovery", "portable", "research"]
 
