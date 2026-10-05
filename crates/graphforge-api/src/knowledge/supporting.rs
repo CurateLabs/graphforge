@@ -121,7 +121,7 @@ fn publish_confidence(
         .expect("generation UUID lock poisoned") = receipt.generation_uuid;
     let ledger = read_confidence_ledger(&graphforge_storage::resolve_project_generation(root)?)?;
     let index = ledger
-        .assessments
+        .assessments()
         .iter()
         .position(|row| row.confidence_uuid == request.confidence_uuid)
         .ok_or_else(|| GfError::Validation("committed confidence is absent".into()))?;
@@ -405,7 +405,7 @@ impl GraphForge {
         }
         .map_err(knowledge_error)?;
         if let Some(index) = existing
-            .assessments
+            .assessments()
             .iter()
             .position(|row| row.confidence_uuid == request.confidence_uuid)
         {
@@ -463,7 +463,7 @@ impl GraphForge {
         let generation = self.generation_for_read()?;
         let ledger = read_confidence_ledger(&generation)?;
         let index = ledger
-            .assessments
+            .assessments()
             .iter()
             .position(|row| row.confidence_uuid == confidence_uuid)
             .ok_or_else(|| not_found_kind("confidence assessment"))?;
@@ -493,7 +493,7 @@ impl GraphForge {
         let generation = self.generation_for_read()?;
         let ledger = read_confidence_ledger(&generation)?;
         let selected = ledger
-            .assessments
+            .assessments()
             .iter()
             .enumerate()
             .filter(|(_, row)| {
@@ -533,7 +533,7 @@ impl GraphForge {
         let generation = self.generation_for_read()?;
         let ledger = read_confidence_ledger(&generation)?;
         if !ledger
-            .assessments
+            .assessments()
             .iter()
             .any(|row| row.confidence_uuid == confidence_uuid)
         {
@@ -541,7 +541,7 @@ impl GraphForge {
         }
         let source = ledger.input_batch().map_err(knowledge_error)?;
         let selected = ledger
-            .inputs
+            .inputs()
             .iter()
             .enumerate()
             .filter(|(_, row)| row.confidence_uuid == confidence_uuid)

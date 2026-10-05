@@ -106,8 +106,8 @@ fn confidence(
     ids: &mut Ids,
 ) -> Result<Vec<ProjectParticipant>, GfError> {
     let original = k::read_confidence_ledger(g)?;
-    let rows = original
-        .assessments
+    let (assessments, inputs) = original.into_parts();
+    let rows = assessments
         .into_iter()
         .filter(|r| has(ids, "assertion", r.assertion_uuid))
         .collect::<Vec<_>>();
@@ -115,8 +115,7 @@ fn confidence(
         ids.insert(("confidence".into(), row.confidence_uuid));
         ids.insert(("provenance".into(), row.provenance_uuid));
     }
-    let inputs = original
-        .inputs
+    let inputs = inputs
         .into_iter()
         .filter(|r| has(ids, "confidence", r.confidence_uuid))
         .collect::<Vec<_>>();

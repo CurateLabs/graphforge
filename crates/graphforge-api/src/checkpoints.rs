@@ -419,7 +419,7 @@ fn validate_composite_references(ledgers: CompositeLedgers<'_>) -> Result<(), Gf
     let confidence_ids = ledgers
         .confidence
         .into_iter()
-        .flat_map(|ledger| ledger.assessments.iter().map(|row| row.confidence_uuid))
+        .flat_map(|ledger| ledger.assessments().iter().map(|row| row.confidence_uuid))
         .collect::<HashSet<_>>();
     let reasoning_ids = ledgers
         .reasoning
@@ -450,7 +450,7 @@ fn validate_composite_references(ledgers: CompositeLedgers<'_>) -> Result<(), Gf
     for row in ledgers
         .confidence
         .into_iter()
-        .flat_map(|value| &value.assessments)
+        .flat_map(graphforge_knowledge::ConfidenceLedger::assessments)
     {
         require(
             assertion_ids.contains(&row.assertion_uuid),

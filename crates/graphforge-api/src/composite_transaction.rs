@@ -579,7 +579,7 @@ fn encode_knowledge(
             external_graph_ref_fingerprint(row)?,
         )?;
     }
-    for row in &confidence.assessments {
+    for row in confidence.assessments() {
         encode_owned(
             writer,
             row.confidence_uuid,
