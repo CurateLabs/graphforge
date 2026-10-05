@@ -1,5 +1,7 @@
 //! Optional append-only epistemic assertion valid-time events.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
@@ -36,6 +38,11 @@ pub static ASSERTION_VALIDITY_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
         Field::new("contract_version", DataType::UInt32, false),
     ]))
 });
+
+#[cfg(test)]
+std::thread_local! {
+    static EVENT_VALIDATION_CALLS: Cell<usize> = const { Cell::new(0) };
+}
 
 static ASSERTION_VALIDITY_SCHEMA_FINGERPRINT: LazyLock<[u8; 32]> = LazyLock::new(|| {
     fingerprint(
@@ -108,19 +115,49 @@ impl AssertionValidityEvent {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AssertionValidityLedger {
     /// Events ordered by `(recorded_at, validity_event_uuid)`.
-    pub events: Vec<AssertionValidityEvent>,
+    events: Vec<AssertionValidityEvent>,
 }
 
 impl AssertionValidityLedger {
+    /// The event rows are private so the ledger can trust every row it has
+    /// already accepted when another validated ledger is merged.
+    ///
+    /// ```compile_fail
+    /// use graphforge_knowledge::AssertionValidityLedger;
+    /// let mut ledger = AssertionValidityLedger::default();
+    /// ledger.events.clear();
+    /// ```
+    ///
+    /// The read-only accessor also does not allow callers to alter a row:
+    ///
+    /// ```compile_fail
+    /// use graphforge_knowledge::AssertionValidityLedger;
+    /// let ledger = AssertionValidityLedger::default();
+    /// ledger.events()[0].contract_version = 2;
+    /// ```
+    ///
+    /// Return validated events in canonical order.
+    #[must_use]
+    pub fn events(&self) -> &[AssertionValidityEvent] {
+        &self.events
+    }
+
+    /// Consume this ledger and return its validated events in canonical order.
+    #[must_use]
+    pub fn into_events(self) -> Vec<AssertionValidityEvent> {
+        self.events
+    }
+
     /// Validate, sort, and construct one complete participant.
-    pub fn new(mut events: Vec<AssertionValidityEvent>) -> Result<Self, KnowledgeError> {
-        if events.len() > MAX_KNOWLEDGE_ROWS {
-            return Err(KnowledgeError::Limit {
-                participant: "assertion_validity_events",
-                observed: events.len(),
-                limit: MAX_KNOWLEDGE_ROWS,
-            });
-        }
+    pub fn new(events: Vec<AssertionValidityEvent>) -> Result<Self, KnowledgeError> {
+        Self::new_with_limit(events, MAX_KNOWLEDGE_ROWS)
+    }
+
+    fn new_with_limit(
+        mut events: Vec<AssertionValidityEvent>,
+        row_limit: usize,
+    ) -> Result<Self, KnowledgeError> {
+        validate_event_count(events.len(), row_limit)?;
         let mut ids = HashSet::with_capacity(events.len());
         for event in &events {
             validate_event(event)?;
@@ -133,24 +170,40 @@ impl AssertionValidityLedger {
     }
 
     /// Merge staged append-only events with exact replay semantics.
+    ///
+    /// Both ledgers can only contain rows accepted by [`Self::new`] or
+    /// [`Self::from_batches`]. Since the row vector is private, previously
+    /// accepted events cannot be changed through the public API. This merge
+    /// checks identity reuse and the combined row limit, and sorts only when
+    /// it appends rows; it does not re-run row validation on either ledger.
     pub fn merge(&self, staged: &Self) -> Result<Self, KnowledgeError> {
+        self.merge_with_limit(staged, MAX_KNOWLEDGE_ROWS)
+    }
+
+    fn merge_with_limit(&self, staged: &Self, row_limit: usize) -> Result<Self, KnowledgeError> {
         let mut events = self.events.clone();
         let mut by_id = events
             .iter()
             .cloned()
             .map(|row| (row.validity_event_uuid, row))
             .collect::<HashMap<_, _>>();
+        let mut appended = false;
         for event in &staged.events {
             if let Some(existing) = by_id.get(&event.validity_event_uuid) {
                 if existing != event {
                     return Err(KnowledgeError::Conflict("validity_event_uuid"));
                 }
             } else {
+                validate_event_count(events.len().saturating_add(1), row_limit)?;
                 events.push(event.clone());
                 by_id.insert(event.validity_event_uuid, event.clone());
+                appended = true;
             }
         }
-        Self::new(events)
+        if appended {
+            events.sort_by_key(|row| (row.recorded_at_micros, row.validity_event_uuid));
+        }
+        Ok(Self { events })
     }
 
     /// Select the validity interpretation visible at transaction cutoff.
@@ -296,6 +349,9 @@ pub(crate) fn schema_registry_entry() -> SchemaRegistryEntry {
 }
 
 fn validate_event(row: &AssertionValidityEvent) -> Result<(), KnowledgeError> {
+    #[cfg(test)]
+    EVENT_VALIDATION_CALLS.with(|calls| calls.set(calls.get() + 1));
+
     if row.contract_version != ASSERTION_VALIDITY_CONTRACT_VERSION {
         return Err(invalid(
             "assertion_validity.contract_version",
@@ -316,6 +372,17 @@ fn validate_event(row: &AssertionValidityEvent) -> Result<(), KnowledgeError> {
             "assertion_validity.interval",
             "valid_from must not exceed valid_to",
         ));
+    }
+    Ok(())
+}
+
+fn validate_event_count(count: usize, limit: usize) -> Result<(), KnowledgeError> {
+    if count > limit {
+        return Err(KnowledgeError::Limit {
+            participant: "assertion_validity_events",
+            observed: count,
+            limit,
+        });
     }
     Ok(())
 }
@@ -449,6 +516,7 @@ fn uuid_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     fn uuid7(seed: u8) -> Uuid {
         let mut bytes = [seed; 16];
@@ -536,7 +604,7 @@ mod tests {
         let ledger = AssertionValidityLedger::new(vec![first.clone(), second]).unwrap();
         let decoded = AssertionValidityLedger::from_batches(&[ledger.batch().unwrap()]).unwrap();
         assert_eq!(decoded, ledger);
-        assert_eq!(decoded.events[0].validity_event_uuid, uuid7(1));
+        assert_eq!(decoded.events()[0].validity_event_uuid, uuid7(1));
         assert_eq!(
             decoded.event_fingerprint(uuid7(2)).unwrap(),
             ledger.event_fingerprint(uuid7(2)).unwrap()
@@ -550,13 +618,328 @@ mod tests {
 
         let mut conflicting = first;
         conflicting.valid_to_micros = Some(30);
-        assert!(
-            ledger
-                .merge(&AssertionValidityLedger {
-                    events: vec![conflicting]
-                })
-                .is_err()
+        let conflicting = AssertionValidityLedger::new(vec![conflicting]).unwrap();
+        assert!(matches!(
+            ledger.merge(&conflicting),
+            Err(KnowledgeError::Conflict("validity_event_uuid"))
+        ));
+    }
+
+    fn unvalidated_event(seed: u8) -> AssertionValidityEvent {
+        AssertionValidityEvent {
+            validity_event_uuid: uuid7(seed),
+            assertion_uuid: uuid7(seed.wrapping_add(20)),
+            valid_from_micros: None,
+            valid_to_micros: None,
+            reasoning_uuid: None,
+            provenance_uuid: uuid7(seed.wrapping_add(40)),
+            recorded_at_micros: i64::from(seed),
+            contract_version: ASSERTION_VALIDITY_CONTRACT_VERSION,
+        }
+    }
+
+    fn benchmark_uuid(seed: u64) -> Uuid {
+        let mut bytes = [0; 16];
+        bytes[8..].copy_from_slice(&seed.to_be_bytes());
+        bytes[6] = 0x70;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
+    fn merge_with_full_revalidation(
+        existing: &AssertionValidityLedger,
+        staged: &AssertionValidityLedger,
+    ) -> Result<AssertionValidityLedger, KnowledgeError> {
+        let mut events = existing.events.clone();
+        let mut by_id = events
+            .iter()
+            .cloned()
+            .map(|row| (row.validity_event_uuid, row))
+            .collect::<HashMap<_, _>>();
+        for row in staged.events() {
+            if let Some(previous) = by_id.get(&row.validity_event_uuid) {
+                if previous != row {
+                    return Err(KnowledgeError::Conflict("validity_event_uuid"));
+                }
+            } else {
+                events.push(row.clone());
+                by_id.insert(row.validity_event_uuid, row.clone());
+            }
+        }
+        AssertionValidityLedger::new(events)
+    }
+
+    fn median(mut values: Vec<Duration>) -> Duration {
+        values.sort_unstable();
+        values[values.len() / 2]
+    }
+
+    fn digest(existing: &AssertionValidityLedger, staged: &AssertionValidityLedger) -> String {
+        let mut writer = CanonicalWriter::new();
+        for ledger in [existing, staged] {
+            writer.u64(ledger.events().len() as u64).unwrap();
+            for row in ledger.events() {
+                writer.raw(row.validity_event_uuid.as_bytes()).unwrap();
+                writer.raw(row.assertion_uuid.as_bytes()).unwrap();
+                optional_i64(&mut writer, row.valid_from_micros).unwrap();
+                optional_i64(&mut writer, row.valid_to_micros).unwrap();
+                optional_uuid(&mut writer, row.reasoning_uuid).unwrap();
+                writer.raw(row.provenance_uuid.as_bytes()).unwrap();
+                writer.i64(row.recorded_at_micros).unwrap();
+                writer.u32(row.contract_version).unwrap();
+            }
+        }
+        let bytes = fingerprint(
+            CanonicalDomain::AssertionValidity,
+            CANONICAL_CONTRACT_VERSION,
+            &writer.finish(),
+        )
+        .unwrap();
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    #[ignore = "manual quiet-host before/after merge-cost measurement"]
+    fn quiet_host_merge_cost_measurement() {
+        for existing_count in [1_000_u64, 10_000] {
+            let existing = AssertionValidityLedger::new(
+                (0..existing_count)
+                    .map(|seed| AssertionValidityEvent {
+                        validity_event_uuid: benchmark_uuid(seed + 1),
+                        assertion_uuid: benchmark_uuid(seed + 20_000),
+                        valid_from_micros: None,
+                        valid_to_micros: None,
+                        reasoning_uuid: None,
+                        provenance_uuid: benchmark_uuid(seed + 40_000),
+                        recorded_at_micros: i64::try_from(seed).unwrap(),
+                        contract_version: ASSERTION_VALIDITY_CONTRACT_VERSION,
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            let staged = AssertionValidityLedger::new(vec![AssertionValidityEvent {
+                validity_event_uuid: benchmark_uuid(existing_count + 1),
+                assertion_uuid: benchmark_uuid(existing_count + 20_001),
+                valid_from_micros: None,
+                valid_to_micros: None,
+                reasoning_uuid: None,
+                provenance_uuid: benchmark_uuid(existing_count + 40_001),
+                recorded_at_micros: i64::try_from(existing_count).unwrap(),
+                contract_version: ASSERTION_VALIDITY_CONTRACT_VERSION,
+            }])
+            .unwrap();
+            let repetitions = 9;
+            let mut before = Vec::with_capacity(repetitions);
+            let mut after = Vec::with_capacity(repetitions);
+            for _ in 0..repetitions {
+                let start = Instant::now();
+                std::hint::black_box(merge_with_full_revalidation(&existing, &staged).unwrap());
+                before.push(start.elapsed());
+
+                let start = Instant::now();
+                std::hint::black_box(existing.merge(&staged).unwrap());
+                after.push(start.elapsed());
+            }
+            let before_median = median(before);
+            let after_median = median(after);
+            let divisor = existing_count as f64;
+            println!(
+                "existing_rows={existing_count} staged_rows=1 repetitions={repetitions} input_sha256={} before_ns={} before_ns_per_existing_row={:.3} after_ns={} after_ns_per_existing_row={:.3}",
+                digest(&existing, &staged),
+                before_median.as_nanos(),
+                before_median.as_nanos() as f64 / divisor,
+                after_median.as_nanos(),
+                after_median.as_nanos() as f64 / divisor,
+            );
+        }
+    }
+
+    #[test]
+    fn merge_validates_staged_rows_once_and_never_revalidates_existing_rows() {
+        let base = AssertionValidityLedger::new(vec![
+            event(1, 20, None, None, 1),
+            event(2, 21, None, None, 3),
+            event(3, 22, None, None, 5),
+        ])
+        .unwrap();
+        let staged_event = event(4, 23, None, None, 2);
+
+        EVENT_VALIDATION_CALLS.with(|calls| calls.set(0));
+        let staged = AssertionValidityLedger::new(vec![staged_event]).unwrap();
+        EVENT_VALIDATION_CALLS.with(|calls| assert_eq!(calls.get(), 1));
+
+        EVENT_VALIDATION_CALLS.with(|calls| calls.set(0));
+        let merged = base.merge(&staged).unwrap();
+
+        EVENT_VALIDATION_CALLS.with(|calls| assert_eq!(calls.get(), 0));
+        assert_eq!(merged.events().len(), 4);
+        assert_eq!(
+            merged
+                .events()
+                .iter()
+                .map(|row| row.validity_event_uuid)
+                .collect::<Vec<_>>(),
+            vec![uuid7(1), uuid7(4), uuid7(2), uuid7(3)]
         );
+    }
+
+    #[test]
+    fn merge_enforces_combined_row_limit_after_exact_replays_are_removed() {
+        let base = AssertionValidityLedger::new(vec![
+            event(1, 20, None, None, 1),
+            event(2, 21, None, None, 2),
+        ])
+        .unwrap();
+        let staged = AssertionValidityLedger::new(vec![
+            event(3, 22, None, None, 3),
+            event(4, 23, None, None, 4),
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            base.merge_with_limit(&staged, 3),
+            Err(KnowledgeError::Limit {
+                participant: "assertion_validity_events",
+                observed: 4,
+                limit: 3,
+            })
+        ));
+
+        let replayed = base
+            .merge_with_limit(
+                &AssertionValidityLedger::new(vec![event(1, 20, None, None, 1)]).unwrap(),
+                2,
+            )
+            .unwrap();
+        assert_eq!(replayed, base);
+    }
+
+    #[test]
+    fn event_count_limit_accepts_the_limit_and_rejects_the_first_excess() {
+        assert!(validate_event_count(MAX_KNOWLEDGE_ROWS, MAX_KNOWLEDGE_ROWS).is_ok());
+        assert!(matches!(
+            validate_event_count(MAX_KNOWLEDGE_ROWS + 1, MAX_KNOWLEDGE_ROWS),
+            Err(KnowledgeError::Limit {
+                participant: "assertion_validity_events",
+                observed,
+                limit: MAX_KNOWLEDGE_ROWS,
+            }) if observed == MAX_KNOWLEDGE_ROWS + 1
+        ));
+    }
+
+    #[test]
+    fn constructor_enforces_the_configured_row_limit() {
+        assert!(
+            AssertionValidityLedger::new_with_limit(
+                vec![unvalidated_event(1), unvalidated_event(2)],
+                2,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            AssertionValidityLedger::new_with_limit(
+                vec![
+                    unvalidated_event(1),
+                    unvalidated_event(2),
+                    unvalidated_event(3)
+                ],
+                2,
+            ),
+            Err(KnowledgeError::Limit {
+                participant: "assertion_validity_events",
+                observed: 3,
+                limit: 2,
+            })
+        ));
+    }
+
+    #[test]
+    fn duplicate_validity_event_uuid_is_rejected() {
+        let first = event(1, 20, None, None, 1);
+        let duplicate = event(1, 21, None, None, 2);
+        assert!(matches!(
+            AssertionValidityLedger::new(vec![first, duplicate]),
+            Err(KnowledgeError::Duplicate("validity_event_uuid"))
+        ));
+    }
+
+    #[test]
+    fn assertion_validity_contract_version_must_be_supported() {
+        let mut row = unvalidated_event(1);
+        row.contract_version = ASSERTION_VALIDITY_CONTRACT_VERSION + 1;
+        assert!(matches!(
+            AssertionValidityLedger::new(vec![row]),
+            Err(KnowledgeError::Invalid {
+                field: "assertion_validity.contract_version",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn validity_event_uuid_must_be_uuidv7() {
+        let mut row = unvalidated_event(1);
+        row.validity_event_uuid = Uuid::from_u128(1);
+        assert!(matches!(
+            AssertionValidityLedger::new(vec![row]),
+            Err(KnowledgeError::Invalid {
+                field: "validity_event_uuid",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn assertion_uuid_must_be_uuidv7() {
+        let mut row = unvalidated_event(1);
+        row.assertion_uuid = Uuid::from_u128(1);
+        assert!(matches!(
+            AssertionValidityLedger::new(vec![row]),
+            Err(KnowledgeError::Invalid {
+                field: "assertion_uuid",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn optional_reasoning_uuid_must_be_uuidv7() {
+        let mut row = unvalidated_event(1);
+        row.reasoning_uuid = Some(Uuid::from_u128(1));
+        assert!(matches!(
+            AssertionValidityLedger::new(vec![row]),
+            Err(KnowledgeError::Invalid {
+                field: "reasoning_uuid",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn provenance_uuid_must_not_be_nil() {
+        let mut row = unvalidated_event(1);
+        row.provenance_uuid = Uuid::nil();
+        assert!(matches!(
+            AssertionValidityLedger::new(vec![row]),
+            Err(KnowledgeError::Invalid {
+                field: "provenance_uuid",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn valid_time_interval_must_not_run_backwards() {
+        let mut row = unvalidated_event(1);
+        row.valid_from_micros = Some(2);
+        row.valid_to_micros = Some(1);
+        assert!(matches!(
+            AssertionValidityLedger::new(vec![row]),
+            Err(KnowledgeError::Invalid {
+                field: "assertion_validity.interval",
+                ..
+            })
+        ));
     }
 
     #[test]

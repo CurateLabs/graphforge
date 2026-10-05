@@ -28,7 +28,7 @@ pub(super) fn selected(
     }
     if g.capability("valid_time")?.is_some() {
         let rows = crate::valid_time::read_ledger(g)?
-            .events
+            .into_events()
             .into_iter()
             .filter(|r| has(ids, "assertion", r.assertion_uuid))
             .collect::<Vec<_>>();

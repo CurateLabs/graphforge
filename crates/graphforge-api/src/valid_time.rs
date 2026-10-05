@@ -101,11 +101,11 @@ impl GraphForge {
         }
         let existing = read_ledger(&parent)?;
         if let Some(index) = existing
-            .events
+            .events()
             .iter()
             .position(|row| row.validity_event_uuid == request.validity_event_uuid)
         {
-            let row = &existing.events[index];
+            let row = &existing.events()[index];
             if row.assertion_uuid == request.assertion_uuid
                 && row.valid_from_micros == request.valid_from_micros
                 && row.valid_to_micros == request.valid_to_micros
@@ -138,7 +138,7 @@ impl GraphForge {
         publish(self, &request.context, &parent, expected_parent, &merged)?;
         let committed = read_ledger(&resolve(self)?)?;
         let index = committed
-            .events
+            .events()
             .iter()
             .position(|row| row.validity_event_uuid == request.validity_event_uuid)
             .ok_or_else(|| GfError::Validation("committed validity event is absent".into()))?;
@@ -160,7 +160,7 @@ impl GraphForge {
         let generation = resolve(self)?;
         let ledger = read_ledger(&generation)?;
         let selected = ledger
-            .events
+            .events()
             .iter()
             .enumerate()
             .filter(|(_, row)| {
