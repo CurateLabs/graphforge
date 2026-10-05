@@ -12,7 +12,7 @@
   <a href="https://github.com/CurateLabs/graphforge/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/CurateLabs/graphforge/test.yml?branch=main&label=CI%20Gate&logo=github" alt="CI Gate status" /></a>
   <a href="https://app.codspeed.io/CurateLabs/graphforge?utm_source=badge"><img src="https://img.shields.io/endpoint?url=https://codspeed.io/badge.json" alt="CodSpeed" /></a>
   <a href="https://docs.graphforge.sh/"><img src="https://img.shields.io/badge/docs-online-0A66C2.svg" alt="Documentation" /></a>
-  <a href="https://docs.graphforge.sh/reference/tck-compliance/"><img src="https://img.shields.io/badge/openCypher%20TCK-3897%2F3897-brightgreen.svg" alt="openCypher TCK" /></a>
+  <a href="https://docs.graphforge.sh/reference/tck-compliance/"><img src="https://img.shields.io/badge/openCypher%20TCK-regression%20baseline-blue.svg" alt="openCypher TCK" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache License 2.0" /></a>
 </p>
 
