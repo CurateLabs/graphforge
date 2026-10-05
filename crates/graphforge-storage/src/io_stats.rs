@@ -145,6 +145,9 @@ pub(crate) struct Counters {
     topology_rewrite_peak_batch_rows: AtomicU64,
     uuid_files_opened: AtomicU64,
     uuid_files_synced: AtomicU64,
+    relationship_merge_topology_rows: AtomicU64,
+    relationship_merge_candidate_rows: AtomicU64,
+    relationship_merge_property_rows: AtomicU64,
 }
 
 /// A point-in-time copy of requested I/O counters. Difference two
@@ -208,6 +211,12 @@ pub struct IoSnapshot {
     pub uuid_files_opened: u64,
     /// Successful physical file durability syncs on the UUID publication path.
     pub uuid_files_synced: u64,
+    /// Relationship topology rows inspected while building MERGE's clause-local endpoint index.
+    pub relationship_merge_topology_rows: u64,
+    /// Indexed endpoint candidates inspected while resolving MERGE input rows.
+    pub relationship_merge_candidate_rows: u64,
+    /// Authenticated property rows decoded for relationship MERGE candidates.
+    pub relationship_merge_property_rows: u64,
 }
 
 /// Capture requested counters, or report an unavailable observation.
@@ -250,6 +259,15 @@ pub fn snapshot() -> Option<IoSnapshot> {
             .load(Ordering::Relaxed),
         uuid_files_opened: counters.uuid_files_opened.load(Ordering::Relaxed),
         uuid_files_synced: counters.uuid_files_synced.load(Ordering::Relaxed),
+        relationship_merge_topology_rows: counters
+            .relationship_merge_topology_rows
+            .load(Ordering::Relaxed),
+        relationship_merge_candidate_rows: counters
+            .relationship_merge_candidate_rows
+            .load(Ordering::Relaxed),
+        relationship_merge_property_rows: counters
+            .relationship_merge_property_rows
+            .load(Ordering::Relaxed),
     })
 }
 
@@ -302,6 +320,31 @@ pub fn reset() {
             .store(0, Ordering::Relaxed);
         counters.uuid_files_opened.store(0, Ordering::Relaxed);
         counters.uuid_files_synced.store(0, Ordering::Relaxed);
+        counters
+            .relationship_merge_topology_rows
+            .store(0, Ordering::Relaxed);
+        counters
+            .relationship_merge_candidate_rows
+            .store(0, Ordering::Relaxed);
+        counters
+            .relationship_merge_property_rows
+            .store(0, Ordering::Relaxed);
+    });
+}
+
+/// Record actual clause-local relationship MERGE work without graph identities.
+#[doc(hidden)]
+pub fn record_relationship_merge_work(topology_rows: u64, candidate_rows: u64, property_rows: u64) {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .relationship_merge_topology_rows
+            .fetch_add(topology_rows, Ordering::Relaxed);
+        counters
+            .relationship_merge_candidate_rows
+            .fetch_add(candidate_rows, Ordering::Relaxed);
+        counters
+            .relationship_merge_property_rows
+            .fetch_add(property_rows, Ordering::Relaxed);
     });
 }
 
