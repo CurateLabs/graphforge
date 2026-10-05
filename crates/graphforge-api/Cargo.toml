@@ -58,6 +58,7 @@ divan = { workspace = true }
 tokio = { workspace = true }
 graphforge-cypher = { path = "../graphforge-cypher" }
 graphforge-storage = { path = "../graphforge-storage", features = ["test-failpoints", "test-support"] }
+graphforge-knowledge = { path = "../graphforge-knowledge", features = ["test-support"] }
 
 [[bin]]
 name = "graphforge-fly-filesystem-smoke"

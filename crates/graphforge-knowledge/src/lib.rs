@@ -45,6 +45,8 @@ pub use hypothesis::{
     HYPOTHESIS_STATE_POLICY_VERSION, HypothesisGroup, HypothesisLedger, HypothesisMembershipAction,
     HypothesisMembershipEvent, HypothesisSelectionEvent, MAX_HYPOTHESIS_QUESTION_KEY_BYTES,
 };
+#[cfg(feature = "test-support")]
+pub use reasoning::test_support as reasoning_test_support;
 pub use reasoning::{
     EPISTEMIC_CAPABILITY_VERSION, MAX_REASONING_CONTENT_BYTES,
     REASONING_CONTENT_FORMAT_REGISTRY_VERSION, REASONING_CONTRACT_VERSION,

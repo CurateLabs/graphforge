@@ -1,6 +1,6 @@
 //! Immutable epistemic reasoning records and explicit amendment chains.
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
@@ -58,7 +58,7 @@ static REASONING_SCHEMA_FINGERPRINT: LazyLock<[u8; 32]> = LazyLock::new(|| {
     .expect("registered reasoning schema is within canonical bounds")
 });
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
     static RECORD_VALIDATION_CALLS: Cell<Option<usize>> = const { Cell::new(None) };
 }
@@ -277,6 +277,60 @@ impl ReasoningLedger {
         self.merge_with_limit(staged, MAX_KNOWLEDGE_ROWS)
     }
 
+    /// Append one record to this validated ledger without revalidating stored rows.
+    ///
+    /// The incoming record is validated because its fields are public. The
+    /// existing ledger is immutable and already validated, so only combined
+    /// identity, predecessor, assertion, cycle, and row-limit conditions are
+    /// checked against its trusted records.
+    pub fn append(&self, record: ReasoningRecord) -> Result<Self, KnowledgeError> {
+        self.append_with_limit(record, MAX_KNOWLEDGE_ROWS)
+    }
+
+    fn append_with_limit(
+        &self,
+        record: ReasoningRecord,
+        row_limit: usize,
+    ) -> Result<Self, KnowledgeError> {
+        validate_record(&record)?;
+        let existing = self
+            .records
+            .iter()
+            .find(|row| row.reasoning_uuid == record.reasoning_uuid);
+        if let Some(existing) = existing {
+            return if existing == &record {
+                Ok(self.clone())
+            } else {
+                Err(KnowledgeError::Conflict("reasoning_uuid"))
+            };
+        }
+
+        validate_record_count(self.records.len().saturating_add(1), row_limit)?;
+        let mut by_id = self
+            .records
+            .iter()
+            .map(|row| (row.reasoning_uuid, row))
+            .collect::<HashMap<_, _>>();
+        if let Some(previous_uuid) = record.supersedes_reasoning_uuid {
+            let previous = by_id
+                .get(&previous_uuid)
+                .ok_or(KnowledgeError::Dangling("supersedes_reasoning_uuid"))?;
+            if previous.assertion_uuid != record.assertion_uuid {
+                return Err(invalid(
+                    "reasoning.supersedes_reasoning_uuid",
+                    "cross-assertion amendment is forbidden",
+                ));
+            }
+        }
+        by_id.insert(record.reasoning_uuid, &record);
+        reject_cycle(record.reasoning_uuid, &by_id, &mut HashSet::new())?;
+
+        let mut records = self.records.clone();
+        records.push(record);
+        records.sort_by_key(|row| (row.recorded_at_micros, row.reasoning_uuid));
+        Ok(Self { records })
+    }
+
     fn merge_with_limit(&self, staged: &Self, row_limit: usize) -> Result<Self, KnowledgeError> {
         let mut records = self.records.clone();
         let mut by_id = records
@@ -458,7 +512,7 @@ pub(crate) fn schema_registry_entry() -> SchemaRegistryEntry {
 }
 
 fn validate_record(row: &ReasoningRecord) -> Result<(), KnowledgeError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     RECORD_VALIDATION_CALLS.with(|calls| {
         if let Some(count) = calls.get() {
             calls.set(Some(count + 1));
@@ -481,6 +535,21 @@ fn validate_record(row: &ReasoningRecord) -> Result<(), KnowledgeError> {
         require_v7(previous, "supersedes_reasoning_uuid")?;
     }
     validate_content(row.content_format, &row.content)
+}
+
+#[cfg(feature = "test-support")]
+/// Test-only instrumentation for validating incremental API append paths.
+pub mod test_support {
+    /// Start counting reasoning record validator calls on the current thread.
+    pub fn start_record_validation_count() {
+        super::RECORD_VALIDATION_CALLS.with(|calls| calls.set(Some(0)));
+    }
+
+    /// Stop counting and return reasoning record validator calls on this thread.
+    #[must_use]
+    pub fn finish_record_validation_count() -> usize {
+        super::RECORD_VALIDATION_CALLS.with(|calls| calls.take().unwrap_or_default())
+    }
 }
 
 fn validate_record_count(count: usize, limit: usize) -> Result<(), KnowledgeError> {
@@ -891,6 +960,55 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![uuid7(1), uuid7(2), uuid7(3), uuid7(4)]
         );
+    }
+
+    #[test]
+    fn incremental_append_accepts_base_predecessor_without_revalidating_base() {
+        let base = ReasoningLedger::new(vec![row(1, 20, None, 10)]).unwrap();
+        let amendment = row(2, 20, Some(1), 20);
+        RECORD_VALIDATION_CALLS.with(|calls| calls.set(Some(0)));
+        let appended = base.append(amendment.clone()).unwrap();
+        RECORD_VALIDATION_CALLS.with(|calls| {
+            assert_eq!(calls.get(), Some(1));
+            calls.set(None);
+        });
+
+        assert_eq!(appended.records().len(), 2);
+        assert_eq!(appended.records()[1], amendment);
+        assert_eq!(base.records().len(), 1);
+        assert_eq!(base.append(amendment).unwrap(), appended);
+    }
+
+    #[test]
+    fn incremental_append_rechecks_combined_identity_reference_and_cap_invariants() {
+        let base = ReasoningLedger::new(vec![row(1, 20, None, 10)]).unwrap();
+        assert!(matches!(
+            base.append(row(1, 20, None, 10)),
+            Ok(ref ledger) if ledger == &base
+        ));
+        assert!(matches!(
+            base.append(row(1, 20, None, 11)),
+            Err(KnowledgeError::Conflict("reasoning_uuid"))
+        ));
+        assert!(matches!(
+            base.append(row(2, 20, Some(9), 20)),
+            Err(KnowledgeError::Dangling("supersedes_reasoning_uuid"))
+        ));
+        assert!(matches!(
+            base.append(row(2, 21, Some(1), 20)),
+            Err(KnowledgeError::Invalid {
+                field: "reasoning.supersedes_reasoning_uuid",
+                ..
+            })
+        ));
+        assert!(matches!(
+            base.append_with_limit(row(2, 20, Some(1), 20), 1),
+            Err(KnowledgeError::Limit {
+                participant: "reasoning",
+                observed: 2,
+                limit: 1,
+            })
+        ));
     }
 
     #[test]

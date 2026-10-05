@@ -901,9 +901,10 @@ impl GraphForge {
             recorded_at_micros,
         )
         .map_err(knowledge_error)?;
-        let mut records = existing.into_records();
-        records.push(record);
-        let merged = ReasoningLedger::new(records).map_err(knowledge_error)?;
+        // A one-row staged ledger cannot validate an amendment that points to
+        // a predecessor in `existing`; append validates that row against the
+        // trusted base without revalidating every stored record.
+        let merged = existing.append(record).map_err(knowledge_error)?;
         publish_reasoning(self, &request, &parent, expected_parent, &merged)
     }
 
