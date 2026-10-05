@@ -100,6 +100,7 @@ pub use graph_files::{
     stage_graph_tree, verify_graph_tree,
 };
 pub(crate) use graph_files::{GraphFilesParticipant, decode_versioned_graph_files_participant};
+pub(crate) use graph_read_inventory::capture_graph_read_inventory_for_property_routes;
 pub use graph_read_inventory::{
     GraphReadFileEntry, GraphReadInventory, capture_graph_read_inventory,
     capture_graph_read_inventory_with_topology,

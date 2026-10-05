@@ -86,6 +86,11 @@ pub enum StorageIoPhase {
     /// effects, and read-ahead or buffering the kernel performs beyond the
     /// application-requested bytes.
     ReadPathScan,
+    /// Targeted authentication of property payloads for SET/REMOVE mutation admission.
+    /// This row is lifecycle-only and does not alter construction attribution.
+    PropertyMutationInventory,
+    /// Authentication of the semantic route table required by property mutations.
+    PropertyMutationRouteAuthority,
 }
 
 impl StorageIoPhase {
@@ -104,9 +109,9 @@ impl StorageIoPhase {
         Self::RecoveryReauthentication,
     ];
 
-    /// Closed full-lifecycle inventory: [`Self::ALL`] plus the read path.
+    /// Closed full-lifecycle inventory: [`Self::ALL`] plus read and mutation paths.
     /// [`crate::lifecycle_io`] emits exactly these rows.
-    pub const LIFECYCLE: [Self; 10] = [
+    pub const LIFECYCLE: [Self; 12] = [
         Self::AppendMerge,
         Self::SealAuthentication,
         Self::ShapeConsumeReauthentication,
@@ -117,6 +122,8 @@ impl StorageIoPhase {
         Self::FsyncSynchronization,
         Self::RecoveryReauthentication,
         Self::ReadPathScan,
+        Self::PropertyMutationInventory,
+        Self::PropertyMutationRouteAuthority,
     ];
 
     /// Dense index of this phase within [`Self::LIFECYCLE`].
@@ -133,6 +140,8 @@ impl StorageIoPhase {
             Self::FsyncSynchronization => 7,
             Self::RecoveryReauthentication => 8,
             Self::ReadPathScan => 9,
+            Self::PropertyMutationInventory => 10,
+            Self::PropertyMutationRouteAuthority => 11,
         }
     }
 }

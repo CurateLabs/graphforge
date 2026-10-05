@@ -348,8 +348,9 @@ pub fn reset() {
 ///
 /// Serializes to the same `{phases, totals}` document
 /// [`ConstructionPhaseAttribution`](crate::ConstructionPhaseAttribution) emits,
-/// with one extra row: `read_path_scan`. Construction never records into that
-/// row: the publish-side, import-side and explicit (`index("adjacency")`)
+/// with three extra rows: `read_path_scan`, `property_mutation_inventory` and
+/// `property_mutation_route_authority`.
+/// Construction never records into those rows: the publish-side, import-side and explicit (`index("adjacency")`)
 /// adjacency builds are scoped to the encoding row (#1449). A nonzero
 /// `read_path_scan` therefore means committed read-path work, including a
 /// query process's lazy adjacency rebuild with its writes and barriers.

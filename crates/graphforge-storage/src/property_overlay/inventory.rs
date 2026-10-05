@@ -516,7 +516,29 @@ impl AuthenticatedPropertyInventory {
         inventory: crate::GraphReadInventory,
         requested_route: Option<(PropertyRouteKind, &str)>,
     ) -> Result<Self, GfError> {
+        let requested_routes = requested_route
+            .map(|(kind, route)| std::collections::BTreeSet::from([(kind, route.to_owned())]));
+        Self::from_read_inventory_at_root_for_routes(root, inventory, requested_routes.as_ref())
+    }
+
+    fn from_read_inventory_at_root_for_routes(
+        root: &Path,
+        inventory: crate::GraphReadInventory,
+        requested_routes: Option<&std::collections::BTreeSet<(PropertyRouteKind, String)>>,
+    ) -> Result<Self, GfError> {
         let table = inventory.authenticate_routes(root)?;
+        for relative in &inventory.path_names {
+            crate::graph_files::wire_relative_path(relative)?;
+            let semantic = match table.as_ref() {
+                Some(table) => table.semantic_relative_path(relative)?,
+                None => relative.clone(),
+            };
+            inventory_entry_reaches_routes(
+                crate::graph_files::infer_role(Path::new(relative)),
+                &semantic,
+                requested_routes,
+            )?;
+        }
         let retained_root = graphforge_filesystem::StableDirectory::open(root).map_err(io_error)?;
         let mut entries = Vec::new();
         let mut edge_routes = BTreeMap::<String, Vec<AdmittedEdgeFile>>::new();
@@ -527,13 +549,13 @@ impl AuthenticatedPropertyInventory {
                 Some(table) => table.semantic_relative_path(&entry.relative_path)?,
                 None => entry.relative_path.clone(),
             };
-            if !inventory_entry_reaches_route(entry.role, &semantic, requested_route)? {
+            if !inventory_entry_reaches_routes(entry.role, &semantic, requested_routes)? {
                 continue;
             }
             let relative = PathBuf::from(&entry.relative_path);
             let retained = open_retained_under(&retained_root, &relative)?;
             authenticate_inventory_file(&retained, &entry)?;
-            if requested_route.is_none() && entry.relative_path.starts_with("topology/edges/") {
+            if requested_routes.is_none() && entry.relative_path.starts_with("topology/edges/") {
                 if entry.role != crate::GraphFileRole::Topology {
                     return Err(corrupt("edge topology entry has the wrong role"));
                 }
@@ -547,7 +569,7 @@ impl AuthenticatedPropertyInventory {
                         relative_path: entry.relative_path.clone(),
                     });
             }
-            if requested_route.is_none() && is_node_topology_path(&entry.relative_path) {
+            if requested_routes.is_none() && is_node_topology_path(&entry.relative_path) {
                 if entry.role != crate::GraphFileRole::Topology {
                     return Err(corrupt("node topology entry has the wrong role"));
                 }
@@ -559,18 +581,23 @@ impl AuthenticatedPropertyInventory {
             entries.push((entry, relative));
         }
         validate_declared_node_files(&mut declared_nodes)?;
-        let node_files = requested_route.is_none().then_some(declared_nodes);
+        let node_files = requested_routes.is_none().then_some(declared_nodes);
         let mut admitted = Self::admit_read_entries(
             root,
             entries,
-            requested_route,
+            None,
             table.as_ref(),
             false,
             None,
             FragmentAdmission::Eager,
         )?;
         admitted.edge_routes = edge_routes;
-        admitted.node_files = node_files;
+        if requested_routes.is_some() {
+            admitted.node_files = None;
+            admitted.node_topology_files = None;
+        } else {
+            admitted.node_files = node_files;
+        }
         Ok(admitted)
     }
 
@@ -1004,6 +1031,34 @@ impl AuthenticatedPropertyInventory {
         Ok(inventory)
     }
 
+    /// Refresh only workspace property routes used by this mutation while
+    /// retaining strict path and semantic-route-table admission for the tree.
+    pub fn capture_workspace_property_routes(
+        project: &Path,
+        pinned: Option<&Self>,
+        topology: &crate::TopologyFiles,
+        routes: &std::collections::BTreeSet<(PropertyRouteKind, String)>,
+    ) -> Result<Self, GfError> {
+        let captured =
+            crate::capture_graph_read_inventory_for_property_routes(project, topology, routes)?;
+        let authority_read_calls = captured
+            .authority_read_calls()
+            .saturating_add(captured.route_table_byte_length().div_ceil(64 * 1024));
+        let authority_bytes = captured
+            .authority_read_bytes()
+            .saturating_add(captured.route_table_byte_length());
+        let authority_block_equivalents = authority_bytes.div_ceil(64 * 1024);
+        let mut inventory =
+            Self::from_read_inventory_at_root_for_routes(project, captured, Some(routes))?;
+        inventory.authority_read_calls = authority_read_calls;
+        inventory.authority_bytes = authority_bytes;
+        inventory.authority_block_equivalents = authority_block_equivalents;
+        if let Some(generation) = pinned.and_then(|pinned| pinned.generation_lease.as_ref()) {
+            inventory.seed_semantic_property_schemas(generation)?;
+        }
+        Ok(inventory)
+    }
+
     // A declared owner may not have a property payload yet. Its authenticated
     // binding still owns the metadata of the first fragment we publish.
     fn seed_semantic_property_schemas(
@@ -1347,10 +1402,10 @@ fn parse_inventory_property_path(
     }
 }
 
-fn inventory_entry_reaches_route(
+fn inventory_entry_reaches_routes(
     role: crate::GraphFileRole,
     canonical_relative: &str,
-    requested_route: Option<(PropertyRouteKind, &str)>,
+    requested_routes: Option<&std::collections::BTreeSet<(PropertyRouteKind, String)>>,
 ) -> Result<bool, GfError> {
     let parsed = parse_inventory_property_path(canonical_relative)?;
     if role != crate::GraphFileRole::Properties {
@@ -1359,12 +1414,22 @@ fn inventory_entry_reaches_route(
         }
         // Preserve full-inventory admission: only the explicitly targeted
         // route path may avoid resolving unrelated graph payloads.
-        return Ok(requested_route.is_none());
+        return Ok(requested_routes.is_none());
     }
     let Some((kind, route, _, _)) = parsed else {
         return Err(corrupt("properties role names a non-property path"));
     };
-    Ok(requested_route.is_none_or(|requested| (kind, route.as_str()) == requested))
+    Ok(requested_routes.is_none_or(|requested| requested.contains(&(kind, route))))
+}
+
+fn inventory_entry_reaches_route(
+    role: crate::GraphFileRole,
+    canonical_relative: &str,
+    requested_route: Option<(PropertyRouteKind, &str)>,
+) -> Result<bool, GfError> {
+    let routes = requested_route
+        .map(|(kind, route)| std::collections::BTreeSet::from([(kind, route.to_owned())]));
+    inventory_entry_reaches_routes(role, canonical_relative, routes.as_ref())
 }
 
 /// The topology files an inventory declares: edge routes and node files.
