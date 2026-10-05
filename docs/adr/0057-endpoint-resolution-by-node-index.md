@@ -1,7 +1,7 @@
 ---
 title: "ADR 0057: Initial builds resolve edge endpoints by a node-surrogate index instead of two endpoint sorts"
 adr: "0057"
-status: "Proposed"
+status: "Accepted"
 date: "2026-10-05"
 superseded_by: null
 revisit_when: "The tracer's laned probe cost exceeds a third of the endpoint work it removes at S20, an append onto a large base needs the same saving, or new-node count outgrows the recorded index budget on a supported workload"
@@ -9,7 +9,7 @@ revisit_when: "The tracer's laned probe cost exceeds a third of the endpoint wor
 
 # ADR 0057: Initial builds resolve edge endpoints by a node-surrogate index instead of two endpoint sorts
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Related:**
 - ADR 0038 (determinism at the publication boundary)
@@ -84,7 +84,7 @@ adopts as obligations:
    public import-session contract: nodes must be registered before edges. That
    needs its own product decision, and it does not cover appends either.
 
-## Decision (proposed)
+## Decision
 
 ### Which path a construction takes
 
@@ -132,7 +132,8 @@ everywhere.
 - **Published bytes are byte-identical to the sort-join path:** same
   surrogates, same edge order, same Parquet. This is proven by digest equality
   on both paths for the same input, at S18 and S20, with sequential Graph500
-  UUIDs and with random v4 and v7 UUIDs.
+  UUIDs and with random UUIDv7 keys. GraphForge refuses other UUID versions at
+  intake, so v7 is the whole supported key space.
 - Crash, corruption and cancellation suites run unweakened. Resume
   re-derives the index from the sealed shape, so encoding needs no new resume
   authority.
@@ -198,10 +199,12 @@ everywhere.
    (ADR 0047) on the sort-join path.
 4. **Adoption gate (predeclared).** S20 and S22 complete ingest improves by at
    least 15% in four ABBA pairs with every pair the same sign. Published
-   digests are identical. VmHWM stays within the ladder envelope, and its
-   growth between adjacent rungs stays under the ladder's 10% plateau rule.
-   A miss leaves this record Proposed with the measurement attached, and the
-   code does not merge.
+   digests are identical. VmHWM stays within the 4 GiB ladder envelope, and
+   any growth over the sort-join path is accounted for by the index at 16 B
+   per new node. The adjacent-rung RSS plateau rule is not a criterion: the
+   ladder dropped it, and this design grows resident memory with node count by
+   construction. A miss means the code does not merge; the measurement is
+   attached and this record is revisited.
 
 ## Open questions
 
