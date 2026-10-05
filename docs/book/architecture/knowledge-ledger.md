@@ -178,6 +178,27 @@ Rust is authoritative. Python returns `pyarrow.Table`; Node returns Arrow IPC
 decoded as an Arrow table. The frozen request, output, pagination, and error
 contracts are specified in [Immutable knowledge public API v1](knowledge-public-api-v1.md).
 
+Artifact derivation validation uses one pinned operation view. It builds UUID
+membership once per requested subject kind, on that kind's first input, and
+checks inputs in caller order. The mandatory Source precheck supplies its loaded
+ledger; an Artifact ledger loaded during validation is retained for publication.
+Node and edge requests are matched in batches through the existing operation's
+graph authority. Membership does not outlive the operation. Duplicate inputs
+retain their original derivation ordinals.
+
+Run `make test-rust ARGS="-p graphforge-api --test artifact_derivation_validation"`
+to reproduce the bounded facade regression. It grows ledger sizes from two to
+eight rows and requested inputs from one to sixteen, covering single and mixed
+subject kinds, errors and reopen. Within `derivation_input_validation`, `bytes`
+counts verified participant bytes actually passed to Parquet decoding and `rows`
+counts decoded batch rows. Source prechecks, result reads and publication remain
+outside that phase; these counters do not represent total registration I/O.
+The child `participant_materialization` region's `participant_materialized_bytes`
+counter independently checks actual snapshot reads for the nonempty fixture ledgers.
+The existing `nodes` and `edges` units count topology rows returned by decoding,
+including batches beyond the final requested match.
+Results belong on the issue or PR.
+
 A typical persistent flow is:
 
 ```python

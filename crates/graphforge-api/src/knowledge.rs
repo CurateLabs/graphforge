@@ -425,6 +425,16 @@ fn match_requested_uuids(
     name: &'static str,
     pending: &mut HashSet<Uuid>,
 ) -> Result<(), GfError> {
+    // These are rows returned by the storage decoder, including batches after
+    // the last requested match. Membership probes must not masquerade as I/O.
+    graphforge_storage::concurrency_attribution::RegionScope::record_work(
+        if name == "node_uuid" {
+            "nodes"
+        } else {
+            "edges"
+        },
+        batches.iter().map(|batch| batch.num_rows() as u64).sum(),
+    );
     for batch in batches {
         match_requested_uuid_column(&batch, name, pending)?;
         if pending.is_empty() {
