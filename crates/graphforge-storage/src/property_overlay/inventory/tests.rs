@@ -819,6 +819,63 @@ fn targeted_workspace_capture_authenticates_only_selected_routes_and_detects_lat
 }
 
 #[test]
+fn targeted_mapped_workspace_metrics_count_both_route_table_reads() {
+    let dir = TempDir::new().unwrap();
+    let mut table = crate::route_component::RouteTable::default();
+    let selected_component = table.insert("CON", 64 * 1024 * 1024, 100_000).unwrap();
+    let selected_relative = format!("properties/{selected_component}.parquet");
+    fs::create_dir_all(dir.path().join("properties")).unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "node_uuid",
+        DataType::FixedSizeBinary(16),
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(
+            FixedSizeBinaryArray::try_from_iter(vec![vec![7; 16]].into_iter()).unwrap(),
+        )],
+    )
+    .unwrap();
+    let selected_path = dir.path().join(&selected_relative);
+    let mut writer =
+        ArrowWriter::try_new(File::create(&selected_path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let table_path = dir.path().join(crate::route_component::TABLE_FILE);
+    fs::write(&table_path, table.encode(64 * 1024 * 1024).unwrap()).unwrap();
+    let selected_bytes = fs::metadata(selected_path).unwrap().len();
+    let table_bytes = fs::metadata(table_path).unwrap().len();
+    let routes = BTreeSet::from([(PropertyRouteKind::Node, "CON".to_owned())]);
+
+    let inventory = AuthenticatedPropertyInventory::capture_workspace_property_routes(
+        dir.path(),
+        None,
+        &crate::TopologyFiles::default(),
+        &routes,
+    )
+    .unwrap();
+    let metrics = inventory.open_metrics();
+    let table_calls = table_bytes.div_ceil(64 * 1024);
+    let selected_calls = selected_bytes.div_ceil(64 * 1024);
+    assert_eq!(
+        metrics.authority_authentication_bytes,
+        selected_bytes + 2 * table_bytes,
+        "count selected payload capture plus initial and repeat route-table authentication"
+    );
+    assert_eq!(
+        metrics.authority_authentication_read_calls,
+        selected_calls + 2 * table_calls,
+        "count reads in 64 KiB chunks, including the repeated route-table read"
+    );
+    assert_eq!(metrics.property_authentication_bytes, selected_bytes);
+    assert_eq!(
+        metrics.property_authentication_read_calls, selected_calls,
+        "retain the selected payload's separate property authentication counters"
+    );
+}
+
+#[test]
 fn targeted_workspace_capture_still_rejects_noncanonical_unrelated_routes() {
     let dir = TempDir::new().unwrap();
     fs::create_dir_all(dir.path().join("properties/Target")).unwrap();
