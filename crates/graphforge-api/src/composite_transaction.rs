@@ -551,7 +551,7 @@ fn encode_knowledge(
             row.fingerprint().map_err(domain_error)?,
         )?;
     }
-    for row in &assertions.assertions {
+    for row in assertions.assertions() {
         encode_owned(
             writer,
             row.assertion_uuid,

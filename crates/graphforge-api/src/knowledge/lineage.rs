@@ -110,7 +110,7 @@ fn validate_subject_exists(
             pending.is_empty()
         }
         DerivationSubjectKind::Assertion => read_ledger(generation)?
-            .assertions
+            .assertions()
             .iter()
             .any(|row| row.assertion_uuid == subject_uuid),
         DerivationSubjectKind::EvidenceLink => read_evidence_ledger(generation)?

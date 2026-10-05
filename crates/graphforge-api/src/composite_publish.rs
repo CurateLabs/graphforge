@@ -657,7 +657,7 @@ fn build_validation_snapshot(
     if parent.capability("knowledge")?.is_some() {
         let assertions = crate::knowledge::read_ledger(parent)?;
         snapshot.assertions = assertions
-            .assertions
+            .assertions()
             .iter()
             .map(|row| row.assertion_uuid)
             .collect();
@@ -1296,13 +1296,13 @@ fn merge_assertions(
     if external_refs.is_empty() {
         return Ok(merged);
     }
-    let mut refs = merged.graph_refs;
+    let (assertion_rows, mut refs) = merged.into_parts();
     for row in external_refs {
         if !refs.iter().any(|existing| existing == &row) {
             refs.push(row);
         }
     }
-    AssertionLedger::new(merged.assertions, refs).map_err(crate::knowledge::knowledge_error)
+    AssertionLedger::new(assertion_rows, refs).map_err(crate::knowledge::knowledge_error)
 }
 
 fn merge_confidence(
@@ -1569,7 +1569,7 @@ mod tests {
         assert!(
             merge_assertions(&parent, &knowledge)
                 .unwrap()
-                .assertions
+                .assertions()
                 .is_empty()
         );
         assert!(
@@ -1915,7 +1915,7 @@ mod tests {
         assert_eq!(capture.snapshot().composite_request_fingerprints, 1);
         let parent = graphforge_storage::resolve_project_generation(directory.path()).unwrap();
         assert_eq!(
-            crate::knowledge::read_ledger(&parent).unwrap().graph_refs,
+            crate::knowledge::read_ledger(&parent).unwrap().graph_refs(),
             expected_refs
         );
         assert_eq!(

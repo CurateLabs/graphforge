@@ -84,8 +84,8 @@ fn subject_membership(
             ids
         }
         DerivationSubjectKind::Assertion => read_ledger(parent)?
-            .assertions
-            .into_iter()
+            .assertions()
+            .iter()
             .map(|row| row.assertion_uuid)
             .filter(|id| requested.contains(id))
             .collect(),

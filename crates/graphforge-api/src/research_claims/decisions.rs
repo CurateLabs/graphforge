@@ -178,7 +178,7 @@ pub(crate) fn validate_subject(
         ResearchSubjectKind::Assertion => {
             let assertions = crate::knowledge::read_ledger(&graph.generation_for_read()?)?;
             if !assertions
-                .assertions
+                .assertions()
                 .iter()
                 .any(|row| row.assertion_uuid == input.subject_uuid)
             {

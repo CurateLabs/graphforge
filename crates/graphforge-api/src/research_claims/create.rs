@@ -149,7 +149,7 @@ fn stage(
         run_uuid: request.run_uuid,
         origin_branch_uuid: origin.map(|value| value.0),
         origin_version_uuid: origin.map(|value| value.1),
-        provenance_uuid: staged.assertions[0].provenance_uuid,
+        provenance_uuid: staged.assertions()[0].provenance_uuid,
         recorded_at: request.created_at,
     };
     let classifications =

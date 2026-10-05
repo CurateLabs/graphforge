@@ -179,7 +179,8 @@ fn assertion_dependencies(
     exists: &mut BTreeSet<Object>,
     adjacency: &mut BTreeMap<Object, BTreeSet<Object>>,
 ) {
-    for assertion in assertions.assertions {
+    let (assertion_rows, graph_refs) = assertions.into_parts();
+    for assertion in assertion_rows {
         let object = Object::new("assertion", assertion.assertion_uuid);
         exists.insert(object.clone());
         adjacency
@@ -187,7 +188,7 @@ fn assertion_dependencies(
             .or_default()
             .insert(Object::new("provenance", assertion.provenance_uuid));
     }
-    for reference in assertions.graph_refs {
+    for reference in graph_refs {
         adjacency
             .entry(Object::new("assertion", reference.assertion_uuid))
             .or_default()

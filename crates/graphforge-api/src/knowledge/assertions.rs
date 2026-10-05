@@ -205,7 +205,7 @@ fn validate_status_request(request: &RecordAssertionStatusRequest) -> Result<(),
 
 fn assertion_refs_match(ledger: &AssertionLedger, request: &CreateAssertionRequest) -> bool {
     let mut existing = ledger
-        .graph_refs
+        .graph_refs()
         .iter()
         .filter(|row| row.assertion_uuid == request.assertion_uuid)
         .map(|row| (row.graph_uuid, row.graph_kind, row.role, row.ordinal))
@@ -228,7 +228,7 @@ fn validate_status_references(
     provenance_uuid: Uuid,
 ) -> Result<(), GfError> {
     if !read_ledger(generation)?
-        .assertions
+        .assertions()
         .iter()
         .any(|row| row.assertion_uuid == assertion_uuid)
     {
@@ -331,7 +331,7 @@ impl GraphForge {
         let recorded_at_micros = (self.clock.lock().expect("clock lock poisoned"))()?;
         let staged = staged_assertion(&request, recorded_at_micros)?;
         if let Some(index) = existing
-            .assertions
+            .assertions()
             .iter()
             .position(|row| row.assertion_uuid == request.assertion_uuid)
         {
@@ -394,7 +394,7 @@ impl GraphForge {
         let committed = graphforge_storage::resolve_project_generation(root)?;
         let ledger = read_ledger(&committed)?;
         let index = ledger
-            .assertions
+            .assertions()
             .iter()
             .position(|row| row.assertion_uuid == request.assertion_uuid)
             .ok_or_else(|| GfError::Validation("committed assertion is absent".into()))?;
@@ -442,7 +442,7 @@ impl GraphForge {
         let assertions = read_ledger(&parent)?;
         let statuses = read_status_ledger(&parent)?;
         let existing_assertion = assertions
-            .assertions
+            .assertions()
             .iter()
             .find(|row| row.assertion_uuid == request.assertion.assertion_uuid);
         let existing_status = statuses
@@ -477,7 +477,7 @@ impl GraphForge {
         }
         let recorded_at_micros = (self.clock.lock().expect("clock lock poisoned"))()?;
         let staged_assertions = staged_assertion(&request.assertion, recorded_at_micros)?;
-        let provenance_uuid = staged_assertions.assertions[0].provenance_uuid;
+        let provenance_uuid = staged_assertions.assertions()[0].provenance_uuid;
         let staged_status = AssertionStatusLedger::new(vec![
             AssertionStatusEvent::new(
                 request.first_status.status_event_uuid,
@@ -529,7 +529,7 @@ impl GraphForge {
         let generation = self.generation_for_read()?;
         let ledger = read_ledger(&generation)?;
         let index = ledger
-            .assertions
+            .assertions()
             .iter()
             .position(|row| row.assertion_uuid == assertion_uuid)
             .ok_or_else(not_found)?;
@@ -559,12 +559,12 @@ impl GraphForge {
         let generation = self.generation_for_read()?;
         let ledger = read_ledger(&generation)?;
         let selected = ledger
-            .assertions
+            .assertions()
             .iter()
             .enumerate()
             .filter(|(_, assertion)| {
                 request.graph_uuid.is_none_or(|graph_uuid| {
-                    ledger.graph_refs.iter().any(|reference| {
+                    ledger.graph_refs().iter().any(|reference| {
                         reference.assertion_uuid == assertion.assertion_uuid
                             && reference.graph_uuid == graph_uuid
                     })
@@ -602,7 +602,7 @@ impl GraphForge {
         let generation = self.generation_for_read()?;
         let ledger = read_ledger(&generation)?;
         if !ledger
-            .assertions
+            .assertions()
             .iter()
             .any(|row| row.assertion_uuid == assertion_uuid)
         {
@@ -610,7 +610,7 @@ impl GraphForge {
         }
         let source = ledger.graph_ref_batch().map_err(knowledge_error)?;
         let selected = ledger
-            .graph_refs
+            .graph_refs()
             .iter()
             .enumerate()
             .filter(|(_, row)| row.assertion_uuid == assertion_uuid)
@@ -712,7 +712,7 @@ impl GraphForge {
         require_uuid(assertion_uuid, "assertion_uuid")?;
         let generation = self.generation_for_read()?;
         if !read_ledger(&generation)?
-            .assertions
+            .assertions()
             .iter()
             .any(|row| row.assertion_uuid == assertion_uuid)
         {
@@ -822,7 +822,7 @@ impl GraphForge {
             request.replacement_assertion_uuid,
         ] {
             if !assertions
-                .assertions
+                .assertions()
                 .iter()
                 .any(|row| row.assertion_uuid == assertion_uuid)
             {

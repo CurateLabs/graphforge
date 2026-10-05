@@ -195,7 +195,7 @@ fn suppress(
     let parent = graph.generation_for_read()?;
     parent.require_capability("epistemic", 1)?;
     if !k::read_ledger(&parent)?
-        .assertions
+        .assertions()
         .iter()
         .any(|row| row.assertion_uuid == assertion_uuid)
         || !crate::provenance::read_ledger(&parent)?
