@@ -13,6 +13,19 @@ from jsonschema import Draft202012Validator
 
 
 class RegionDiagnosticsTest(unittest.TestCase):
+    def test_derivation_validation_region_is_v2_only(self) -> None:
+        schema = json.loads(
+            (Path(__file__).parents[1] / "schemas" / "certification-evidence.json").read_text()
+        )
+        for contract in ("regionDiagnosticsV1", "regionDiagnosticsV2"):
+            regions = schema["$defs"][contract]["properties"]["regions"]
+            validator = Draft202012Validator(regions["propertyNames"])
+            self.assertEqual(
+                validator.is_valid("import_command/derivation_input_validation"),
+                contract == "regionDiagnosticsV2",
+            )
+            self.assertFalse(validator.is_valid("import_command/private_derivation_subject"))
+
     def test_both_receipt_schemas_accept_only_unsigned_known_successful_byte_units(self) -> None:
         schema = json.loads(
             (Path(__file__).parents[1] / "schemas" / "certification-evidence.json").read_text()

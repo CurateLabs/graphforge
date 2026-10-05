@@ -105,6 +105,10 @@ name = "discovery_portable_v2"
 required-features = ["discovery", "portable"]
 
 [[test]]
+name = "artifact_derivation_validation"
+required-features = ["knowledge", "provenance", "search", "research"]
+
+[[test]]
 name = "discovery_project_summary"
 required-features = ["discovery", "portable", "research"]
 

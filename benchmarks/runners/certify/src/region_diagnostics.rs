@@ -83,7 +83,14 @@ const MEASUREMENTS: [&str; 14] = [
     "fsync_calls",
     "fsync_elapsed_ns",
 ];
-const WORK_UNITS_V1: [&str; 6] = ["rows", "bytes", "nodes", "edges", "hashed_bytes", "written_bytes"];
+const WORK_UNITS_V1: [&str; 6] = [
+    "rows",
+    "bytes",
+    "nodes",
+    "edges",
+    "hashed_bytes",
+    "written_bytes",
+];
 const WORK_UNITS_V2: [&str; 9] = [
     "rows",
     "bytes",
@@ -95,7 +102,7 @@ const WORK_UNITS_V2: [&str; 9] = [
     "participant_reused_bytes",
     "participant_payload_read_bytes",
 ];
-const REGIONS: [&str; 57] = [
+const REGIONS: [&str; 58] = [
     "import_command",
     "begin_import",
     "resume_import",
@@ -150,6 +157,7 @@ const REGIONS: [&str; 57] = [
     "shape_row_finish",
     "runtime_catalog",
     "shape_completion",
+    "derivation_input_validation",
     "participant_materialization",
     "participant_carry_forward",
     "participant_reuse_validation",
@@ -207,6 +215,7 @@ pub(crate) fn valid_snapshot(value: &Value) -> bool {
                                     | "journal_namespace_publication"
                                     | "source_publication"
                                     | "source_cleanup"
+                                    | "derivation_input_validation"
                             )
                         } else {
                             part != "validate"
@@ -214,10 +223,8 @@ pub(crate) fn valid_snapshot(value: &Value) -> bool {
                 })
                 && row.as_object().is_some_and(|r| r.len() == 4)
                 && row["work"].as_object().is_some_and(|work| {
-                    work.iter().all(|(k, v)| {
-                        work_units.contains(&k.as_str())
-                            && v.as_u64().is_some()
-                    })
+                    work.iter()
+                        .all(|(k, v)| work_units.contains(&k.as_str()) && v.as_u64().is_some())
                 })
                 && row["calls"].as_u64().is_some_and(|n| n > 0)
                 && ["inclusive", "residual"].iter().all(|key| {
@@ -283,9 +290,47 @@ mod tests {
         assert!(valid_snapshot(&value));
         value["regions"]["import_command"]["work"]["attempted_bytes"] = json!(17);
         assert!(!valid_snapshot(&value));
-        value["regions"]["import_command"]["work"].as_object_mut().unwrap().remove("attempted_bytes");
+        value["regions"]["import_command"]["work"]
+            .as_object_mut()
+            .unwrap()
+            .remove("attempted_bytes");
         value["regions"]["import_command"]["work"]["hashed_bytes"] = Value::Null;
         assert!(!valid_snapshot(&value));
+    }
+
+    #[test]
+    fn derivation_validation_region_is_v2_only() {
+        use graphforge_storage::concurrency_attribution::{RegionCapture, RegionScope};
+
+        let capture = RegionCapture::start("import_command");
+        {
+            let _scope = RegionScope::named("derivation_input_validation");
+            RegionScope::record_work("bytes", 100);
+            RegionScope::record_work("rows", 2);
+        }
+        let value = serde_json::to_value(capture.finish()).unwrap();
+        assert!(valid_snapshot(&value));
+        let mut unknown = value.clone();
+        unknown["regions"]["import_command/private_derivation_subject"] =
+            unknown["regions"]["import_command/derivation_input_validation"].clone();
+        assert!(!valid_snapshot(&unknown));
+        let mut legacy = value;
+        legacy["contract"] = json!("graphforge-region-diagnostics/1");
+        legacy.as_object_mut().unwrap().remove("io_scope");
+        for row in legacy["regions"].as_object_mut().unwrap().values_mut() {
+            for scope in ["inclusive", "residual"] {
+                row[scope]
+                    .as_object_mut()
+                    .unwrap()
+                    .retain(|key, _| MEASUREMENTS[..9].contains(&key.as_str()));
+            }
+        }
+        assert!(!valid_snapshot(&legacy));
+        legacy["regions"]
+            .as_object_mut()
+            .unwrap()
+            .remove("import_command/derivation_input_validation");
+        assert!(valid_snapshot(&legacy));
     }
 
     #[test]
@@ -365,10 +410,9 @@ mod tests {
     fn snapshot_contract_accepts_captured_encoding_lane_receipt() {
         // A `receipt-3-validate.json` captured by the #1600 encoding-lane
         // candidate run `curve-s18-c8-r1`; retained here as a contract fixture.
-        let receipt: Value = serde_json::from_str(include_str!(
-            "../fixtures/region-diagnostics-receipt.json"
-        ))
-        .unwrap();
+        let receipt: Value =
+            serde_json::from_str(include_str!("../fixtures/region-diagnostics-receipt.json"))
+                .unwrap();
         assert!(valid_snapshot(&receipt["region_diagnostics"]));
     }
 
@@ -413,16 +457,24 @@ mod tests {
 
     #[test]
     fn successful_work_units_match_each_closed_certification_schema() {
-        let schema: Value = serde_json::from_str(include_str!("../../../schemas/certification-evidence.json")).unwrap();
+        let schema: Value =
+            serde_json::from_str(include_str!("../../../schemas/certification-evidence.json"))
+                .unwrap();
         for contract in ["regionDiagnosticsV2", "regionDiagnosticsV1"] {
-            let work = &schema["$defs"][contract]["properties"]["regions"]["additionalProperties"]["properties"]["work"];
+            let work = &schema["$defs"][contract]["properties"]["regions"]["additionalProperties"]
+                ["properties"]["work"];
             assert_eq!(work["additionalProperties"], false);
             let expected = if contract == "regionDiagnosticsV1" {
                 &WORK_UNITS_V1[..]
             } else {
                 &WORK_UNITS_V2[..]
             };
-            let mut names: Vec<_> = work["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+            let mut names: Vec<_> = work["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
             names.sort_unstable();
             let mut expected = expected.to_vec();
             expected.sort_unstable();

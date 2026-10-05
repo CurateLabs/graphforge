@@ -1119,12 +1119,21 @@ fn write_parquet(batch: &RecordBatch, schema: &SchemaRef) -> Result<Vec<u8>, GfE
 pub(crate) fn read_parquet(bytes: &[u8]) -> Result<Vec<RecordBatch>, GfError> {
     // The participant bytes are already bounded in memory; reading them in
     // place writes nothing to the system temporary directory.
-    ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::copy_from_slice(bytes))
+    let batches = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::copy_from_slice(bytes))
         .map_err(|error| GfError::Validation(format!("invalid knowledge parquet: {error}")))?
         .build()
         .map_err(|error| GfError::Validation(format!("invalid knowledge parquet: {error}")))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| GfError::Validation(format!("invalid knowledge parquet: {error}")))
+        .map_err(|error| GfError::Validation(format!("invalid knowledge parquet: {error}")))?;
+    graphforge_storage::concurrency_attribution::RegionScope::record_work(
+        "bytes",
+        bytes.len() as u64,
+    );
+    graphforge_storage::concurrency_attribution::RegionScope::record_work(
+        "rows",
+        batches.iter().map(|batch| batch.num_rows() as u64).sum(),
+    );
+    Ok(batches)
 }
 
 fn read_or_empty(
