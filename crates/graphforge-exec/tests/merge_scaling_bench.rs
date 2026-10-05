@@ -70,6 +70,10 @@ async fn node_merge_topology_read_count_is_bounded_not_per_row() {
     let dir = TempDir::new().unwrap();
     seed_filler_nodes(dir.path(), 500);
 
+    // Exclude the explicit one-time label summary establishment from the
+    // measured MERGEs so this gate compares steady-state work by input size.
+    execute_merge_range(dir.path(), &rt, -1, 0).await;
+
     let _io_capture = io_stats::CaptureScope::install();
 
     io_stats::reset();

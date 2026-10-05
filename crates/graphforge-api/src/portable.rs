@@ -746,7 +746,6 @@ mod tests {
         let source_path = source.path().join("source");
         std::fs::create_dir(&source_path).unwrap();
         let graph = GraphForge::new(source_path.to_str()).unwrap();
-        graph.execute("CREATE (:ImportedLabel)").unwrap();
         let envelope = source.path().join("portable.gfportable");
 
         let exported = graph
@@ -774,8 +773,10 @@ mod tests {
         assert_eq!(imported.envelope_sha256, exported.envelope_sha256);
 
         let reopened = GraphForge::new(target.to_str()).expect("imported CURRENT must reopen");
-        let known = reopened.execute("CREATE (:ImportedLabel)").unwrap();
-        assert_eq!(known.side_effects.unwrap().labels_added, 0);
+        let first_label = reopened.execute("CREATE (:ImportedLabel)").unwrap();
+        assert_eq!(first_label.side_effects.unwrap().labels_added, 1);
+        let existing_label = reopened.execute("CREATE (:ImportedLabel)").unwrap();
+        assert_eq!(existing_label.side_effects.unwrap().labels_added, 0);
     }
 
     #[test]
