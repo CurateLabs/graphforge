@@ -341,7 +341,7 @@
     },
     "lifecyclePhaseMap": {
       "type": "object", "additionalProperties": false,
-      "required": ["append_merge", "seal_authentication", "shape_consume_reauthentication", "encode_write_postwrite_authentication", "publication_preauthentication", "cas_install_read_write", "hydration_verification", "fsync_synchronization", "recovery_reauthentication", "read_path_scan"],
+      "required": ["append_merge", "seal_authentication", "shape_consume_reauthentication", "encode_write_postwrite_authentication", "publication_preauthentication", "cas_install_read_write", "hydration_verification", "fsync_synchronization", "recovery_reauthentication", "read_path_scan", "property_mutation_inventory", "property_mutation_route_authority"],
       "properties": {
         "append_merge": {"$ref": "#/$defs/phaseTotals"},
         "seal_authentication": {"$ref": "#/$defs/phaseTotals"},
@@ -352,7 +352,9 @@
         "hydration_verification": {"$ref": "#/$defs/phaseTotals"},
         "fsync_synchronization": {"$ref": "#/$defs/phaseTotals"},
         "recovery_reauthentication": {"$ref": "#/$defs/phaseTotals"},
-        "read_path_scan": {"$ref": "#/$defs/phaseTotals"}
+        "read_path_scan": {"$ref": "#/$defs/phaseTotals"},
+        "property_mutation_inventory": {"$ref": "#/$defs/phaseTotals"},
+        "property_mutation_route_authority": {"$ref": "#/$defs/phaseTotals"}
       }
     },
     "lifecycleApplicationIo": {

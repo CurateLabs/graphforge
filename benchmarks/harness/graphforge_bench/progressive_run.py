@@ -86,9 +86,14 @@ APPLICATION_IO_PHASES = (
     "fsync_synchronization",
     "recovery_reauthentication",
 )
-# The construction inventory plus the read-path row construction never performs
-# (#1389). Every non-ingest lifecycle receipt carries this closed inventory.
-LIFECYCLE_APPLICATION_IO_PHASES = (*APPLICATION_IO_PHASES, "read_path_scan")
+# Every non-ingest lifecycle receipt carries the construction phases, the
+# read-path scan and property mutation's authenticated inventory phases.
+LIFECYCLE_APPLICATION_IO_PHASES = (
+    *APPLICATION_IO_PHASES,
+    "read_path_scan",
+    "property_mutation_inventory",
+    "property_mutation_route_authority",
+)
 # Ladder phases whose receipts carry per-phase lifecycle I/O attribution.
 LIFECYCLE_APPLICATION_IO_LADDER_PHASES = (
     "reopen",
